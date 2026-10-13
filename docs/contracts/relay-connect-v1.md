@@ -64,10 +64,10 @@ The Worker bindings fail open and count only over 10 or 60 seconds. So every lim
 | Calls per network prefix | 3 per minute per IPv4 /24 or IPv6 /48 | Worker: `429 rate_limited` |
 | Calls per network prefix, per day | 5 per UTC day per /24 or /48, and never more than a tenth of the daily cap | relay: `429 rate_limited` |
 | Connect teams per public key | 1, ever | relay: `409 connect_key_used` |
-| Connect teams per day on the whole relay | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY`, 200 by default; 0 turns Connect off | relay: `503 busy` |
-| Live Connect teams on the whole relay | `APASSY_RELAY_CONNECT_TEAMS_MAX`, 1000 by default | relay: `503 busy` |
+| Connect teams per day on the whole relay | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY`, 50 by default; 0 turns Connect off | relay: `503 busy` |
+| Live Connect teams on the whole relay | `APASSY_RELAY_CONNECT_TEAMS_MAX`, 100 by default | relay: `503 busy` |
 
-The Worker passes the network prefix to the relay in `X-Apassy-Client-Prefix`, on `POST /v1/connect` only, and drops any copy that a client sends. The relay counts per prefix in memory only, keyed by an HMAC under a random salt that changes each UTC day. Nothing about an IP address is written to disk. A restart resets the counts. A request without the header counts as one shared prefix.
+The Worker passes the network prefix to the relay in `X-Apassy-Client-Prefix`, on `POST /v1/connect` only, and drops any copy that a client sends. The relay takes the prefix only with the Worker's proof of it, an HMAC under the edge secret in a second header; without the proof the request counts as the one shared prefix. The relay counts per prefix in memory only, keyed by an HMAC under a random salt that changes each UTC day. Nothing about an IP address is written to disk. A restart resets the counts. A request without the header counts as one shared prefix.
 
 ## 4. One team per public key
 
@@ -92,7 +92,8 @@ A Connect team answers differently from an operator team on these routes:
 - `GET /v1/sync/head?wait=…` and `GET /v1/host/requests?wait=…` answer at once. The app must not loop on them.
 - Invites, collections, policies, and grants: `403 team_limit`.
 - Any route: `429 rate_limited` above 300 requests per minute per member.
-- A team file that is full (its page cap, about `question_bytes` plus 8 MiB): `403 team_limit`. Near the cap, the relay deletes the oldest quarter of the team's audit rows and writes an `audit_trimmed` row.
+- A team file that is full (its page cap, about `question_bytes` plus 8 MiB): `403 team_limit` on every write that needs room, including a sign-in when it writes its hourly row, until the operator raises the team's limits (owner decision, 2026-10-13). The relay never deletes audit rows. Refusals that someone outside the team can cause (a forged or expired token, a failed sign-in) are not written into the team's file, so they cannot fill it. Old questions are still deleted on time.
+- `GET /v1/questions?wait=…` and `GET /v1/questions/{qid}/answers?wait=…` can answer early with nothing new: a Connect team holds at most 2 waiting question polls (list and answer polls together), and all Connect teams share a bound. After an early empty answer the app waits before it polls again (for example 5 s, doubling to 60 s, with jitter), and keeps one question poll per device.
 - Its pushes share a budget: at most 2 queued push jobs per Connect team, and half the queue for all Connect teams together.
 
 Questions, answers, device links, sign-in, and push tokens work as in a personal team.
@@ -197,5 +198,6 @@ The vectors go to `tests/contracts.rs` and to the iPhone parser's tests.
 
 - The relay sees that a Connect team exists, its device count, and the sizes and times of its questions. It cannot read a question or an answer (relay-questions-v1 section 18).
 - The per-key and per-prefix limits make mass creation costly. A determined person with many keys and many networks can still use up the daily cap; then new Free connections get `503 busy` until the window moves. Teams that exist keep working.
+- A Connect team that uses its file fully stops taking writes until the operator raises its cap; nothing of its audit is deleted.
 - A link with `r=connect` gives a join, not an approval. The new device still needs the safety words and an owner check on an existing device (ADR 0027 section 8).
 - A link that the owner did not make. Anyone can make a Connect team, its link, and any `n`. A device that joins such a link joins the team of whoever made it, and that person confirms it on their own Mac with the same safety words. The words prove that the code reached this device, not whose Mac made it. So: a device that holds a vault refuses a link whose team is not the questions team that the vault names (`questions-team-v1`), before any relay call; `n` is shown only as "Code from “n”", never as the owner's Mac; and an iPhone can leave its team at any time ("Disconnect from Apassy Connect", no Face ID). A vault that names no team yet takes any link. A device in the wrong team gets no question of the owner's vault: the questions are sealed with the vault's question key (relay-questions-v1 section 5.1) and go to the vault's own team.
