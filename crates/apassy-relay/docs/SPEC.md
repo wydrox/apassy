@@ -130,6 +130,7 @@ From `src/config.rs` (`RelayConfig::from_env`):
 | `APASSY_RELAY_KEY` / `_FILE` | the master key: it opens `relay.db`, which holds the random key of each team file; at least 16 bytes | required |
 | `APASSY_RELAY_SESSION_TTL` | session lifetime, 60 to 3600 s | 900 |
 | `APASSY_RELAY_APPROVAL_TIMEOUT` | wait for the owner's host to decide a run, 30 to 86400 s | 600 |
+| `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams of the whole relay in 24 hours (section 26), 0 to 100000; `0` turns `POST /v1/connect` off | 200 |
 
 `UpstreamOptions` (extra roots, fixed addresses) is not read from the environment. Tests set it in code.
 
@@ -513,7 +514,7 @@ The Worker, about 40 lines:
 - `fetch(target, {method, headers, body: request.body for methods other than GET and HEAD, redirect: "manual"})`. The body streams; nothing is buffered. Return the response as is. For GET and HEAD, no body is forwarded, so `Content-Length` and `Transfer-Encoding` are removed from the forwarded headers.
 - No logging of URLs (the path holds session keys). `observability.enabled: false`.
 - `/internal` and every path under `/internal/` are handled by the Worker itself (`apns.ts`, section 25.6) and never forwarded.
-- Per-IP limits (Workers Rate Limiting, keyed by `cf-connecting-ip`, fail open when the binding is missing or fails; over the limit: 429 `rate_limited` with `Retry-After: 60`, and the relay never sees the request): `CREATE_LIMITER` (10 a minute) for `POST /v1/join`, `/v1/teams`, `/v1/devices/link`, and `/v1/devices/link/cancel`; `AUTH_LIMITER` (60 a minute) for `POST /v1/auth/challenge` and `/v1/auth/token`; `SYNC_LIMITER` (60 a minute) for `PUT /v1/sync/snapshot`.
+- Per-IP limits (Workers Rate Limiting, keyed by `cf-connecting-ip`, fail open when the binding is missing or fails; over the limit: 429 `rate_limited` with `Retry-After: 60`, and the relay never sees the request): `CREATE_LIMITER` (10 a minute) for `POST /v1/join`, `/v1/teams`, `/v1/devices/link`, and `/v1/devices/link/cancel`; `AUTH_LIMITER` (60 a minute) for `POST /v1/auth/challenge` and `/v1/auth/token`; `SYNC_LIMITER` (60 a minute) for `PUT /v1/sync/snapshot`; `CONNECT_LIMITER` (1 a minute, keyed by the IPv4 address or the IPv6 /64) for `POST /v1/connect` (section 26.4).
 - Body length (24.5, 24.10): tiny_http reads the rest of a declared body after any early answer, on any path. So before the limiter and the relay, the Worker checks the `Content-Length` of every request other than GET and HEAD, by its exact method and path: `PUT /v1/sync/snapshot` up to 64 MiB plus 64 KiB (`MAX_SNAPSHOT_LENGTH`); a path under `/p/` up to 8 MiB plus 64 KiB (`MAX_PROXY_LENGTH`, the proxy's `MAX_REQUEST_BODY` plus the margin); every other path, including `PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and paths the relay does not route, up to 64 KiB plus 64 KiB (`MAX_JSON_LENGTH`). Above it: 413 `payload_too_large`. A `Content-Length` that is not 1 to 20 digits: 400 `invalid_request`. The push must also have a `Content-Length` and no `Transfer-Encoding` (else 400). Another request without `Content-Length` passes: it has no body or a chunked one, and tiny_http does not read the rest of a chunked body after an early answer, so the relay reads at most its own cap. The relay keeps its own checks (24.3, 12).
 
 `wrangler.jsonc`:
@@ -671,7 +672,7 @@ ADR 0019 of the core, stages 1 and 4. One relay holds several teams. Separation 
 
 | File | What | Key |
 | --- | --- | --- |
-| `relay.db` | the directory: each team's id, name, state (`active` or `suspended`), file key, `legacy` flag, and limits; team codes; relay audit. No people, items, or runs. `user_version` 1002 | the master key (`APASSY_RELAY_KEY`) |
+| `relay.db` | the directory: each team's id, name, kind (`operator` or `connect`, section 26), state (`active` or `suspended`) and suspension reason, file key, `legacy` flag, and limits; team codes; the key hashes of Connect teams; relay audit. No people, items, or runs. `user_version` 1003 (section 26.2) | the master key (`APASSY_RELAY_KEY`) |
 | `teams/<team id>.db` | one team: the schema of section 8, unchanged (`user_version` 2) | its own random 256-bit key, kept in `relay.db` |
 | `admin.sock` | the operator socket, mode 0600 | none; file mode only |
 | `relay.lock` | an exclusive lock: `serve`, `init`, and `migrate` hold it, so one relay process at a time uses the data directory. `admin` does not take it | none |
@@ -705,7 +706,7 @@ The relay uses new limits immediately. A lower limit does not revoke members or 
 **Routing.** For each request, after the edge check:
 
 1. `/p/<session key>/...`: the team id in the session key picks the team; that team's session table looks the key up. A key with another team's id finds nothing (`session_invalid`).
-2. `POST /v1/teams`: no team yet (below).
+2. `POST /v1/teams` and `POST /v1/connect` (section 26): no team yet (below).
 3. `POST /v1/join`: the team id in the invite code picks the team.
 4. Every other endpoint: the team id in the bearer token picks the team, then the token hash is looked up in that team's file only. A token of an unknown or suspended team, and a token moved to another team, get the same 401 `unauthenticated` as an unknown token.
 
@@ -726,7 +727,7 @@ No endpoint takes a team id in the path.
 
 The socket command is `{"command":"limits","team":"t_7k2m5q4x3c","set":{"members":25}}`. An absent or null `set` reads the limits. The result contains the six effective fields. Each change writes `limits_changed` with actor `operator` in the team audit and relay audit.
 
-At start, directory version 1001 becomes 1002. The relay adds `limits TEXT` and changes `PRAGMA user_version` in one transaction. Existing teams use the defaults. New directories use version 1002. The relay refuses unknown versions.
+At start, directory version 1001 becomes 1002. The relay adds `limits TEXT` and changes `PRAGMA user_version` in one transaction. Existing teams use the defaults. Since section 26 the relay goes on to 1003 in the same transaction (26.2); new directories use version 1003. The relay refuses unknown versions.
 
 **Proxy addresses.** The proxy connects only to public addresses: after DNS it drops loopback, private, link-local, CGNAT, unique-local, site-local, multicast, documentation, benchmark, reserved, and unspecified addresses, 6to4 (`2002::/16`), local-use NAT64 (`64:ff9b:1::/48`), and IPv6 forms that carry such an IPv4 address. `APASSY_RELAY_BLOCKED_ADDRESSES` adds public addresses or networks, for the relay's own machine. It connects to the addresses it checked and does not resolve again. A name that does not resolve, an address that is not allowed, and a port that does not answer get the same 502 `upstream_failed` message.
 
@@ -857,7 +858,7 @@ Member tokens still work, until the team's `member_tokens_until`, for a member t
 
 ### 23.5 Endpoints
 
-The six edge endpoints (`/v1/auth/challenge`, `/v1/auth/token`, `/v1/join`, `/v1/devices/link`, `/v1/devices/link/cancel`, and `/v1/teams`) reject a nonempty bearer token with 401 `unauthenticated`. These endpoints use only the body or code for team selection. Every authenticated endpoint selects its team from the bearer token, never from a body field.
+The seven edge endpoints (`/v1/auth/challenge`, `/v1/auth/token`, `/v1/join`, `/v1/devices/link`, `/v1/devices/link/cancel`, `/v1/teams`, and `/v1/connect` of section 26) reject a nonempty bearer token with 401 `unauthenticated`. These endpoints use only the body or code for team selection. Every authenticated endpoint selects its team from the bearer token, never from a body field.
 
 | Method and path | Auth | Body | Result |
 | --- | --- | --- | --- |
@@ -1291,3 +1292,130 @@ New actions, with device ids and counts only: no `qid`, no `key_id`, no nonce, n
 - Apple sees each push: the device token, the bundle id, and the time.
 - With the fallback of 25.7, the APNs key is on the VPS, and root on the VPS can send notifications as Apassy.
 - A full question lane makes question polls return at once (the app asks again); it does not stop other requests.
+
+## 26. Connect teams
+
+**Status: built (stream S4, branch `feat/connect`), not deployed.** Contract (a) "Codeless Connect team" of the core's plan (`docs/product/sync-plans/build-plan.md`, ADR 0027, `docs/contracts/relay-connect-v1.md`). On the Free plan there is no account and no team code: the Mac app makes its own team on the first "Add a device…", so every device of the vault gets the questions of section 25 through the relay. A Connect team is an ordinary team of sections 22 and 23 (one file, the member `owner`, device keys, confirmed links with safety words) made without the operator's code of section 22. Only the Mac calls the endpoint; the iPhone never makes a team. Code: `Hub::create_connect_team` and `Hub::connect_sweep` (`src/server/hub.rs`), the directory functions in `src/server/directory.rs`, `ConnectCreate` and `TeamKind` in `src/api.rs`, `CONNECT_LIMITER` in `deploy/worker/src/index.ts`.
+
+### 26.1 Words and limits
+
+| Thing | Rule |
+| --- | --- |
+| Kind | `team.kind` in `relay.db`: `operator` (made with a team code, `apassy-relay init`, or `migrate`) or `connect` (made by `POST /v1/connect`). Fixed for the life of the team. The sign-in answer and `GET /v1/me` carry it as `team_kind` (26.6) |
+| Owner | the member `owner` (role `owner`, kind `person`), with no member token; its device is the key holder, as in `POST /v1/teams` with a device key |
+| Connect key | `sha256` of the 65 bytes of the device public key, in `connect_key`. One key makes at most one Connect team, ever: the row stays when its team is suspended or deleted. A key of an operator team is not a Connect key |
+| Daily cap | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` (section 6), default 200, 0 to 100000: the `connect_key` rows with `created_at` in the last 86400 seconds, for the whole relay. At the cap: 503 `busy` with `Retry-After: 3600`. `0` turns `POST /v1/connect` off (every call is 503) |
+| Limits | the preset `connect` of `TeamLimits` (26.4), written into the `limits` column when the team is made |
+| Devices | 10 live devices per member, as in every team (section 23.1) |
+| Edge limit | `CONNECT_LIMITER` of the Worker (26.4) |
+
+### 26.2 Directory version 1003
+
+`Directory::open` moves a version 1002 file to 1003, and a 1001 file through 1002 to 1003, in one transaction; a failure leaves the file at its version and stops the start. The change is additive: no table is rebuilt, and every existing team becomes `operator`. New directories are made at 1003. Versions above 1003 are refused.
+
+```sql
+ALTER TABLE team ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','connect'));
+ALTER TABLE team ADD COLUMN suspend_reason TEXT;   -- 'idle' when the sweep of 26.5 suspended the team
+CREATE TABLE connect_key (
+  key_hash BLOB PRIMARY KEY, team_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX connect_key_created ON connect_key(created_at);
+PRAGMA user_version = 1003;
+```
+
+- `suspend_reason` is set by the sweep only. `admin suspend` sets it to NULL; `admin resume` clears it.
+- `connect_key.team_id` names the team the key made. No route reads it; it is for the operator.
+- The image before this section (directory 1002) refuses a 1003 file, and a Connect team's `limits` (`sync_bytes` 0, `items` 0, `agents` 0) are out of its ranges. A rollback to it restores `relay.db` from the backup made before the deploy (docs/OPERATIONS.md section 20.3). Team files do not change (schema 5).
+
+### 26.3 `POST /v1/connect`
+
+Edge only, like `POST /v1/teams`: a nonempty bearer token is 401 `unauthenticated` (section 23.5). The body is `ConnectCreate`:
+
+```json
+{"v": 1, "team": "Rafal", "device_name": "Rafal's MacBook Pro", "public_key": "<base64url of 65 bytes>"}
+```
+
+Checks, in this order; the first failure answers and nothing is stored:
+
+1. The body: at most 64 KiB (413), JSON with exactly these four fields (400 `invalid_request`; an unknown field, such as a `code`, is 400 too).
+2. `v` is 1; `team` is a team name (`checked_team_name`: 1 to 64 bytes after trimming, no control character); `device_name` is a device name (`checked_label`); `public_key` decodes to 65 bytes with the first byte 0x04 (`device::decode_public_key`). Each: 400 `invalid_request`.
+3. In one transaction of `relay.db`: the key hash is not in `connect_key` (409 `connect_key_used`, "This device key made a team before. Make a new device key."); fewer than `connect_teams_per_day` rows of `connect_key` are younger than 86400 seconds (503 `busy`, `Retry-After: 3600`, and a relay audit row `connect_refused {reason: "busy"}`, actor `edge`, at most one per ten seconds); the team file is made (section 22) with its team row, the member `owner`, its device (the key holder), and the team audit rows `host_bootstrap_ended`, `device_added`, and `team_created`; the team row is added with `kind = 'connect'` and the `connect` limits; the `connect_key` row is added; the relay audit gets `team_created {team_id, kind: "connect"}`. A failure removes the file, so a refused or failed call uses no key and counts for no cap.
+4. The team is opened and served.
+
+The answer is `TeamCreated` with `kind`:
+
+```json
+{"ok": true, "result": {"team_id": "t_7k2m5q4x3c", "member_id": 1, "device_id": 1, "kind": "connect"}}
+```
+
+There is no secret in it: the device signs in (section 23.3) with its key and the `team_id`. `POST /v1/teams` is unchanged: its answer has no `kind`.
+
+**A lost answer.** A call whose answer does not arrive may have made the team. The same key then gets 409, and the relay never tells which team a key made. The app makes a new device key and calls again; the first team stays with one device and no sign-in, and the sweep of 26.5 removes it.
+
+**Enumeration.** No route lists, reads, or names Connect teams (`GET /v1/connect` and `GET /v1/teams` are 405). The only answer that depends on stored state before the team exists is the 409 for a key that made a team, which is the same for every such key and names no team. A team id of a Connect team behaves as any team id (section 22: public, 401 for an unknown or suspended team).
+
+### 26.4 Limits
+
+**The Worker.** `POST /v1/connect` (exact method and path) uses `CONNECT_LIMITER`, a Workers Rate Limiting binding of its own, with 1 request a minute per key. The key is the `cf-connecting-ip` address for IPv4, and the /64 prefix of an IPv6 address (`2001:db8:1:2::/64`), because one client usually holds a whole /64. The binding counts only per 10 or 60 seconds, so the 3 an hour and 20 a day of the plan cannot be set at the edge; 1 a minute is the strictest the binding allows. Over it: 429 `rate_limited`, `Retry-After: 60`, and the relay never sees the call. Like the other limiters it fails open when the binding is missing or fails. The Worker stores no address: the key goes to the binding only. The body is bounded at 128 KiB before the limiter, as every JSON route (section 17).
+
+**The relay.** Because the Worker's limiters fail open and count per Cloudflare location, the relay's own checks are the real bound: one team per key (26.3) and the relay-wide daily cap (26.1). The relay sees no address and stores none.
+
+**The team.** `TeamLimits::connect()`:
+
+| Field | Connect | Default |
+| --- | --- | --- |
+| `members` | 1 | 50 |
+| `items` | 0 | 500 |
+| `agents` | 0 | 100 |
+| `sync_bytes` | 0 | 67108864 |
+| `question_bytes` | 2097152 (2 MiB) | 8388608 |
+| every other field | the default | |
+
+- `members` 1: an invite can be made, but a join with it is refused (403 `team_limit`). Devices of the owner come by device links with safety words (section 23.5), up to 10.
+- `items` 0 and `agents` 0: no item, no agent, so no run, no session, and no use of the proxy of section 12 (403 `team_limit`). Without them a free team would be an open HTTP proxy with the relay's address.
+- `sync_bytes` 0: no vault sync on the relay. `PUT /v1/sync/snapshot` answers 403 `plan_required` ("Vault sync through the relay is not in this team's plan.") after the headers (400) and the token (401), before the size checks of 24.3, with a refusal row `sync_refused {reason: "plan_required"}`. `GET /v1/sync/head` answers version 0; there is nothing to download.
+- `question_bytes` 2 MiB: about 60 full cards at once; the other question limits are the defaults of section 25.1.
+- The ranges of section 22 change for three fields: `items` and `agents` are 0 to 1000000 (0: none), and `sync_bytes` is 0 or 1048576 to 67108864. Every other range is unchanged. The operator can set the limits of any team, Connect or operator, with `admin limits` (for example `--sync-bytes 67108864` lifts the sync limit of one team). A later entitlement (contract (c)) changes the same fields.
+
+New error codes in `src/error.rs`: `plan_required` 403, `connect_key_used` 409.
+
+### 26.5 Idle Connect teams
+
+`apassy-relay admin connect-sweep [--idle-days N] [--delete-days N] [--dry-run]` (socket command `{"command":"connect_sweep","idle_days":30,"delete_days":30,"dry_run":false}`; both 1 to 3650, default 30). The relay does not run it by itself; the operator runs it, or schedules it (docs/OPERATIONS.md section 20.4).
+
+1. Each active, open Connect team with at most one live device, whose newest `last_seen_at` of its live devices (or the device's `created_at` when it never signed in) is at least `idle_days` old, is suspended as `admin suspend` does, with `suspend_reason = 'idle'` and the audit rows `team_suspended {reason: "idle"}` in the team and the relay audit (actor `operator`).
+2. Each suspended Connect team with `suspend_reason = 'idle'` and `suspended_at` at least `delete_days` old is deleted as `admin delete` does (file, snapshots, key in `relay.db`). Its `connect_key` row stays.
+3. A team with two or more live devices, an operator team, a team the operator suspended, and a team that did not open are never touched. A team suspended by this run is deleted by a later run. `--dry-run` changes nothing and names the same teams.
+
+The answer is `{"dry_run": false, "suspended": [ids], "deleted": [ids], "failed": [{"team": id, "error": "..."}]}`. A suspended team's device gets 401 at sign-in (section 22); the app treats that as a team that is gone and connects again with a new key. The operator can `admin resume` an idle team during its suspension; that clears the reason.
+
+### 26.6 The kind in answers
+
+`AccessGranted` (`POST /v1/auth/token`) gains `team_kind` (`"operator"` or `"connect"`), and `GET /v1/me` gains `team_kind` for every token. The app uses it to tell a grandfathered operator vault from a Connect team (plan risk 8). Clients that do not know the field ignore it; the CLI reads it as optional.
+
+### 26.7 Audit
+
+Relay audit: `team_created {team_id, kind: "connect"}` (no key, no key hash, no device name), `connect_refused {reason: "busy"}` (actor `edge`, rate-limited), and `team_suspended {team_id, reason: "idle"}` from the sweep. Team audit: the rows of a new team (section 23), `team_suspended {reason: "idle"}`, and `sync_refused {reason: "plan_required"}`. No row holds a public key or an address.
+
+### 26.8 Tests
+
+`tests/server_connect.rs`, unit tests in `src/server/directory.rs`, `src/config.rs`, `src/server/http.rs`, `src/server/operator.rs`, `src/bin/apassy-relay.rs`, and `deploy/worker/test/index.test.ts`:
+
+- Creation: the answer has `team_id`, `member_id`, `device_id`, `kind: "connect"`, and nothing else; the device signs in as `owner`, key holder, `team_kind: "connect"`; `admin teams` shows `kind` and the `connect` limits; the relay audit names the team and kind, never the key. Bad bodies (each field, an unknown field, a missing `v`) are 400 and make nothing; a bearer is 401; `GET /v1/connect`, `GET /v1/teams`, and `DELETE /v1/connect` are 405.
+- One team per key: the same key, also with other names, and also after its team is deleted, is 409 `connect_key_used` with one body for every used key that names no team.
+- The daily cap: with a cap of 2, the third call is 503 `busy` with one `Retry-After: 3600`, no file is made, one `connect_refused` row; a used key still gets 409; operator teams are not capped; a row older than 24 hours no longer counts; a cap of 0 refuses every call.
+- `plan_required`: a valid first push of a Connect team's device is 403 `plan_required`, nothing is stored, the refusal row names it; without a token it is 401; after `admin limits --sync-bytes 67108864` the same push passes; `--sync-bytes 0` is accepted.
+- The preset: a join is refused (403 `team_limit`); an item and an agent are 403 `team_limit`.
+- Devices: a link with wrong words is 409 and the key gets `join_pending`; the right words add a device that signs in as `owner`, not the key holder; the 11th device's link is 409.
+- Questions: the Mac posts, the linked iPhone lists, answers, and the Mac reads the answer stamped `owner` and settles; the 2 MiB budget refuses a card with `too_many_questions` naming `question_bytes` after about 60 full cards.
+- Operator teams: `POST /v1/teams` answers without `kind`, default limits, `team_kind: "operator"`, a snapshot push passes, a used team code is still refused; the same key can still make a Connect team.
+- Migration: a 1002 directory with an active team, a team with changed limits, and a suspended team opens as 1003 with every team `operator`, the same states and limits, working tokens and sign-ins; Connect works after it. Unit tests: 1001 and 1002 to 1003; a failed migration keeps the version; 1004 is refused.
+- The sweep: a lone idle Connect team is suspended (and `--dry-run` only names it); a team with two devices, a fresh one, an operator team, and one the operator suspended are untouched; 30 days after the suspension the idle team is deleted and its key stays used; a resumed idle team loses its reason.
+- The Worker: `POST /v1/connect` uses `CONNECT_LIMITER` and no other limiter, keyed by the IPv4 address or the IPv6 /64 (several forms of one /64 give one key; malformed IPv6 text and IPv4-mapped forms stay as they are); 429 with `Retry-After: 60` before the relay; a missing or failing binding passes; other methods and paths do not use it; `/v1/teams` keeps the full address with `CREATE_LIMITER`; a body above 128 KiB is 413 before the limiter.
+
+### 26.9 What this does not protect
+
+- Anyone can make a Connect team. The bounds are one team per key, the relay-wide cap of a day, and the Worker's per-address limit, which fails open and counts per location. A caller with many keys and addresses can use the whole cap of a day, and then no one else can connect until the window moves (503 for everyone). The operator sees it as `connect_refused` rows and lowers or raises `APASSY_RELAY_CONNECT_TEAMS_PER_DAY`, or sets it to 0.
+- Each Connect team costs a team file, its rows, and up to 2 MiB of sealed questions; collections, invites, and audit rows of a team have no count limit, as in operator teams. The idle sweep removes abandoned one-device teams only when the operator runs it.
+- A Connect team is as separate from other teams as any team (section 22). The relay sees the same metadata as for any team; the questions stay sealed (section 25.12).
+- The 409 tells a caller who knows a public key that it made a Connect team. A public key is not a secret, and the answer names no team.
+- An account or an entitlement never adds a device: a device of a Connect team is the one that made it or one confirmed with safety words by a device of the owner (section 23).
