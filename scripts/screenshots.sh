@@ -28,8 +28,8 @@
 #   ui-narrow-float.png ui-settings-vault.png ui-settings-security.png
 #   ui-settings-devices.png ui-settings-bouncer.png ui-settings-tools.png
 #   ui-settings-updates.png ui-first-steps.png
-#   app-vault.png app-credential.png app-agent.png app-requests.png app-activity.png
-#   app-learning.png (copies of ui-* images, for the README and the site)
+#   app-vault.png app-credential.png app-decisions.png app-agent.png app-settings.png
+#   (copies of ui-* images, for the README and the site)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -176,8 +176,8 @@ tour seed-empty APASSY_TOUR_FIRST_STEPS=1
 [ "$COUNT" -gt 0 ] || fail "no screenshot"
 
 # The names of the README and the site.
-for pair in vault:all-credentials credential:credential agent:agents \
-  requests:decisions-question activity:decisions-request learning:decisions-suggestion; do
+for pair in vault:all-credentials credential:credential decisions:decisions-request \
+  agent:agents settings:settings-vault; do
   cp "$OUT/ui-${pair#*:}.png" "$OUT/app-${pair%%:*}.png"
 done
 echo "Done: $COUNT screenshots in $OUT"

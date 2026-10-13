@@ -2,15 +2,17 @@
 import { Image } from "astro:assets";
 import vault from "../../../docs/images/app-vault.png";
 import credential from "../../../docs/images/app-credential.png";
-import requests from "../../../docs/images/app-requests.png";
+import decisions from "../../../docs/images/app-decisions.png";
+import agent from "../../../docs/images/app-agent.png";
+import settings from "../../../docs/images/app-settings.png";
 
-// Screenshots of the real app with synthetic data (scripts/screenshots.sh). The views of
-// agent access, Activity, and Learning left with 0.5.0; new screenshots of the 0.5.0 window
-// are still to be made.
+// Screenshots of the real app with synthetic data (scripts/screenshots.sh).
 const views = [
-  { id: "credentials", tab: "Credentials", text: "API keys, logins, SSH keys, and databases in encrypted vaults on your Mac.", image: vault, alt: "The list of credentials, grouped by kind, with the environment variable of each." },
-  { id: "credential", tab: "A credential", text: "Each credential says what it is for: its project, its environment, and its risk.", image: credential, alt: "A production database credential with a masked password, its details, and its declaration." },
-  { id: "requests", tab: "Requests", text: "Every request of the agent, with the command and the reason for the decision.", image: requests, alt: "Recent requests of an agent: allowed and denied runs with their reasons." },
+  { id: "credentials", tab: "Credentials", text: "API keys, logins, SSH keys, and databases in folders, in an encrypted vault on your Mac.", image: vault, alt: "All credentials in folders, and a question of Claude Code that waits for your answer." },
+  { id: "credential", tab: "A credential", text: "Each credential shows its variable, its host, how agents used it, and the rules from your answers.", image: credential, alt: "The production Stripe key with a masked secret, its agent use, and the rules from your answers." },
+  { id: "decisions", tab: "Decisions", text: "What waits for you: questions of the bouncer, requests of agents, and suggestions.", image: decisions, alt: "Decisions: Codex asks for a Resend API key; a question and a suggestion wait in the list." },
+  { id: "agents", tab: "Agents", text: "Each agent, with its projects and the actions it took this week.", image: agent, alt: "Claude Code with its uses this week by kind of action, and its recent uses." },
+  { id: "settings", tab: "Settings", text: "Settings is a view of the window: vault, security, devices, bouncer, tools, and updates.", image: settings, alt: "Settings on Vault: sync, backup, and import from 1Password." },
 ];
 ---
 <section class="section" id="tour">
