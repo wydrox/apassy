@@ -290,7 +290,12 @@ fn this_mac_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     egui::Label::new(
                         kit::text(
                             format!(
-                                "{failed} notification(s) failed. Questions still wait in Decisions."
+                                "{failed} {} failed. Questions still wait in Decisions.",
+                                if failed == 1 {
+                                    "notification"
+                                } else {
+                                    "notifications"
+                                }
                             ),
                             Font::Callout,
                         )

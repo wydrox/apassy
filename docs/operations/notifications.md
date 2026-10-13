@@ -69,7 +69,7 @@ After a restart, the vault starts locked (V3). The log is readable again after t
 A delivery fails when the notifier answers `notifications_denied`, `notifications_unavailable`, or `caller_not_allowed`, when `delivered` is false, when the notifier is missing, or when the notifier does not answer in 40 s.
 Then:
 
-- Settings > Devices > This Mac shows the number of failed notifications ("1 notification(s) failed.") and the channel state,
+- Settings > Devices > This Mac shows the number of failed notifications ("1 notification failed.") and the channel state,
 - Decisions shows "macOS notifications are off" when the channel cannot deliver,
 - nothing changes in the approval queue. The question still waits in Decisions until the owner decides or the 5 minutes end.
 
@@ -158,5 +158,5 @@ Use a vault with synthetic values. Record the results here.
 2. N1, N2 waiting: connect an agent ("Connect an Agent" in Agents), turn on "Always ask me" on a credential, and send a run with that credential from the agent. Expect a banner "Approval waiting" within 5 seconds, with the agent name and no command. Measure with a stopwatch from the agent request to the banner.
 3. N1, N2 blocked: answer the question with "Never for AGENT" in its "⋯" menu. Send the same run again. Expect a banner "Request blocked" within 5 seconds.
 4. N4: remove the exception (Agents > the agent > Exceptions > "Remove", with the owner check), and send the run again. Click the banner. Expect that Apassy opens and the question still waits in Decisions. Allow it only with "Allow Once" and Touch ID or the passphrase.
-5. N3 failure: turn off notifications for Apassy in System Settings > Notifications. Send the run again. Expect "1 notification(s) failed." in Settings > Devices > This Mac, and the question still waits in Decisions.
+5. N3 failure: turn off notifications for Apassy in System Settings > Notifications. Send the run again. Expect "1 notification failed." in Settings > Devices > This Mac, and the question still waits in Decisions.
 6. N3 restart: while a question waits, quit Apassy. Start it, open and unlock the vault. Expect in `apassy activity` the entry "Apassy stopped before the owner decided. The run did not start.", and the earlier refusal.

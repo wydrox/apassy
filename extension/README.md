@@ -13,7 +13,7 @@ For passkeys and codes, Apassy checks that the browser is the signed Helium or G
 
 ## Load it
 
-1. In Apassy, open Settings > General > Browser extension and click Connect next to the browser. (`apassy setup browser` in Terminal connects every browser at once.)
+1. In Apassy, open Settings > Tools > Browser extension and click Connect next to the browser. (`apassy setup browser` in Terminal connects every browser at once.)
 2. Apassy opens the extension in the Chrome Web Store: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. Click Add to Chrome.
 
 Without the store: turn on Developer mode on the extensions page of the browser, and drag this folder (`/Applications/Apassy.app/Contents/Resources/browser-extension`) onto the page. An update of Apassy updates the folder. The browser loads the new version at its next start. Logins work this way; passkeys and codes need Helium or Chrome (see above).

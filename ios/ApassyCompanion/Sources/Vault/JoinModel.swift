@@ -88,7 +88,7 @@ final class JoinModel {
         default: return
         }
         guard let link = VaultText.joinLink(from: text) else {
-            scanNote = "This is not the code of “Add a device…”. On your Mac, open Apassy > Settings > General > Sync."
+            scanNote = "This is not the code of “Add a device…”. On your Mac, open Apassy > Settings > Vault > Sync."
             return
         }
         scanNote = nil

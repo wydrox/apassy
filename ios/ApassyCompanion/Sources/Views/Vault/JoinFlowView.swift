@@ -37,7 +37,7 @@ struct JoinFlowView: View {
                 PairingHero(
                     symbol: "macbook.and.iphone", title: "Join a team",
                     message:
-                        "On your Mac, open Apassy > Settings > General > Sync, and select “Add a device…”. The Mac shows a QR code.")
+                        "On your Mac, open Apassy > Settings > Vault > Sync, and select “Add a device…”. The Mac shows a QR code.")
                 if let note = model.scanNote {
                     CalloutView(symbol: "exclamationmark.triangle.fill", text: note)
                 }

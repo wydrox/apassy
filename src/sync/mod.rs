@@ -394,10 +394,10 @@ impl fmt::Display for SyncError {
                 "removed from the relay. This Mac keeps its vault. Turn relay sync off, then join again with a link from another Mac",
             ),
             Self::StaleCopy => f.write_str(
-                "the relay has an older copy than this Mac saw. To go on, select “Use the relay copy…” in Settings > General > Sync",
+                "the relay has an older copy than this Mac saw. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
             ),
             Self::ForkedCopy => f.write_str(
-                "the relay served a copy that does not include this Mac's last change. To go on, select “Use the relay copy…” in Settings > General > Sync",
+                "the relay served a copy that does not include this Mac's last change. To go on, select “Use the relay copy…” in Settings > Vault > Sync",
             ),
             Self::Running => f.write_str("another sync of this vault runs now. Apassy tries again"),
             Self::TooLarge => f.write_str("the vault is too large for the relay (64 MiB)"),
