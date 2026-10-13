@@ -93,6 +93,9 @@ struct Team {
     receipts: BTreeMap<u64, u64>,
     questions: Vec<FakeQuestion>,
     question_seq: u64,
+    /// The push token of each device (`PUT /v1/push/token`, relay-questions-v1 section
+    /// 10.8): one per device, the body as it came.
+    push_tokens: BTreeMap<u64, Value>,
 }
 
 /// One answer to a question: the envelope as the text that came.
@@ -434,6 +437,19 @@ impl FakeRelay {
             .values()
             .map(|team| team.questions.len())
             .sum()
+    }
+
+    /// The push tokens of every team: team id, device id, and the body of the `PUT`.
+    pub fn push_tokens(&self) -> Vec<(String, u64, Value)> {
+        lock(&self.shared.0)
+            .teams
+            .iter()
+            .flat_map(|(team_id, team)| {
+                team.push_tokens
+                    .iter()
+                    .map(move |(device, body)| (team_id.clone(), *device, body.clone()))
+            })
+            .collect()
     }
 
     /// The live device ids of the only team.
@@ -1091,6 +1107,32 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 }
                 ("POST", ["questions", qid, "settle"]) => {
                     settle_question(&mut relay, &team_id, device_id, qid, request, changed)
+                }
+                // One token per device, replaced on each call (section 10.8).
+                ("PUT", ["push", "token"]) => {
+                    let body = request.json();
+                    let token_ok = body["token"].as_str().is_some_and(|token| {
+                        (32..=200).contains(&token.len())
+                            && token
+                                .bytes()
+                                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    });
+                    if !token_ok
+                        || !matches!(
+                            body["environment"].as_str(),
+                            Some("development" | "production")
+                        )
+                    {
+                        return fail(400, "invalid_request");
+                    }
+                    let team = relay.teams.get_mut(&team_id).expect("team");
+                    team.push_tokens.insert(device_id, body);
+                    ok(json!({"device_id": device_id, "updated_at": now()}))
+                }
+                ("DELETE", ["push", "token"]) => {
+                    let team = relay.teams.get_mut(&team_id).expect("team");
+                    team.push_tokens.remove(&device_id);
+                    ok(json!({"device_id": device_id}))
                 }
                 _ => fail(404, "not_found"),
             }
