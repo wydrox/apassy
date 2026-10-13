@@ -19,6 +19,7 @@ Planned for 0.6.0 (Mac, iPhone, and browser extension carry version 0.6.0 on thi
 - Vault > Sync is one choice: iCloud Drive, Apassy, or Off. Other folders and self-hosted relays are in its menu.
 - Switching a vault to Apassy asks for Touch ID or the passphrase and lists the devices that will start to sync. Turning it off again keeps this Mac in the vault's Apassy Connect team, so approvals stay on every device.
 - Pairing on the local network moves to "Pair on this network".
+- Questions through the relay: after a long poll that comes back early with nothing new, the Mac and the iPhone wait before they ask again (5 s, doubling to 60 s, with jitter). In an Apassy Connect team the Mac keeps one waiting question poll.
 
 ### Security
 
