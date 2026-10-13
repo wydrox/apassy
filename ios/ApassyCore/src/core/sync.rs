@@ -327,7 +327,14 @@ impl Core {
             }
         }
         if selected {
-            self.close(true);
+            self.close(super::Closing::Lock);
+        } else {
+            // A removal drops the questions of every vault, as a lock does (section 5.10).
+            let ended = {
+                let _slot = guard(&self.vault);
+                self.questions_drop_all()
+            };
+            ended.finish();
         }
         let file = self.paths.vault_file(id);
         let _ = fs::remove_file(&file);

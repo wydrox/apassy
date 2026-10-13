@@ -6,6 +6,10 @@
 //! ends a suspended app that holds a file lock in an App Group container. So the core
 //! opens the vault only while it is unlocked: `lock` and `suspend` close it, and the
 //! AutoFill extension can open it while the app is in the background.
+//!
+//! The questions through the relay keep a context for each vault unlocked in this
+//! session (section 5.10, `questions.rs`): a selection keeps them, a `lock`, a
+//! `suspend`, and `remove_vault` drop them all.
 
 mod autofill;
 mod config;
@@ -81,8 +85,24 @@ pub struct Core {
     status: Mutex<sync::Memory>,
     /// A private snapshot that still needs confirmation from coordinated file I/O.
     icloud_pending: Mutex<Option<icloud::Pending>>,
-    /// Questions through the relay of the selected vault (section 5.10).
+    /// Questions through the relay: a context for each vault unlocked in this session
+    /// (section 5.10).
     questions: Mutex<questions::State>,
+}
+
+/// What a close of the vault ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closing {
+    /// `lock`, `remove_vault`, the end of the process: the kept passphrase and the
+    /// questions of every vault go.
+    Lock,
+    /// `suspend`: the questions of every vault go, as the vault does: the app in the
+    /// background holds no relay key and no question key. The kept passphrase stays for
+    /// `resume`.
+    Suspend,
+    /// Another vault is selected or opens (`select`, `unlock`, a new vault): the kept
+    /// passphrase goes; the questions of each vault stay.
+    Switch,
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -198,6 +218,7 @@ impl Core {
         // The name of this iPhone in the sync record and in a conflict copy.
         apassy::sync::set_device_name(&device_name);
         let list = PhoneList::load(&paths.data_dir)?;
+        let questions = questions::State::load(&paths.data_dir);
         let core = Self {
             paths,
             device_name,
@@ -211,7 +232,7 @@ impl Core {
             joins: AtomicU64::new(0),
             status: Mutex::new(sync::Memory::default()),
             icloud_pending: Mutex::new(None),
-            questions: Mutex::new(questions::State::default()),
+            questions: Mutex::new(questions),
         };
         if core.role == Role::App {
             core.clear_unfinished_joins();
@@ -231,7 +252,7 @@ impl Core {
 
     /// Lock, end the relay calls, and cancel a join: the process ends.
     pub fn shutdown(&self) {
-        self.close(true);
+        self.close(Closing::Lock);
         let joining = guard(&self.join).take();
         if let Some(joining) = joining {
             joining.abandon();
@@ -262,12 +283,12 @@ impl Core {
                 Ok(ok(&Empty {}))
             }
             "lock" => {
-                self.close(true);
+                self.close(Closing::Lock);
                 Ok(ok(&Empty {}))
             }
             "suspend" => {
                 self.require_app()?;
-                self.close(false);
+                self.close(Closing::Suspend);
                 Ok(ok(&Empty {}))
             }
             "resume" => {
@@ -512,6 +533,7 @@ impl Core {
             // 5.10 Questions through the relay: the app only.
             "questions_list"
             | "questions_wait"
+            | "questions_unlock"
             | "question_open"
             | "question_answer_string"
             | "question_answer"
@@ -620,7 +642,7 @@ impl Core {
                 ));
             }
         }
-        self.close(true);
+        self.close(Closing::Switch);
         {
             let mut list = guard(&self.list);
             list.selected = Some(id.to_owned());
@@ -634,7 +656,7 @@ impl Core {
 
     fn unlock(&self, passphrase: &str, keep: bool) -> CoreResult<()> {
         let entry = self.selected()?;
-        self.close(true);
+        self.close(Closing::Switch);
         let closes = self.closes.load(Ordering::SeqCst);
         let mut vault = Vault::open(&self.paths.vault_file(&entry.id))?;
         vault.unlock(passphrase)?;
@@ -645,30 +667,43 @@ impl Core {
             let _ = vault.lock();
             return Err(CoreError::locked());
         }
-        *slot = Some(vault);
+        // The questions of this vault stay until a lock, even when another is selected.
+        let _ = self.questions_capture(slot.insert(vault));
         if keep {
             *guard(&self.kept) = Some(Zeroizing::new(passphrase.to_owned()));
         }
         Ok(())
     }
 
-    /// Close the vault and end the relay calls. `forget` also erases the kept
-    /// passphrase (a lock); without it the app can `resume` (a suspend).
-    fn close(&self, forget: bool) {
+    /// Close the vault and end its relay sync calls (see [`Closing`]).
+    fn close(&self, closing: Closing) {
         if let Some(relay) = guard(&self.relay).as_ref() {
             relay.forget();
         }
-        self.questions_close();
-        // Lock order: the vault, then the kept passphrase, as in `unlock`.
+        // Lock order: the vault, then the questions, then the kept passphrase, as in
+        // `unlock`. The questions change under the vault mutex, so no context of the
+        // vault that closes comes back after a lock.
         let mut slot = guard(&self.vault);
         self.closes.fetch_add(1, Ordering::SeqCst);
+        let ended = match closing {
+            Closing::Switch => {
+                // The last state of the vault stays in its context.
+                if let Some(vault) = slot.as_ref().filter(|vault| !vault.is_locked()) {
+                    let _ = self.questions_capture(vault);
+                }
+                self.questions_switch()
+            }
+            Closing::Lock | Closing::Suspend => self.questions_drop_all(),
+        };
         *guard(&self.icloud_pending) = None;
         if let Some(mut vault) = slot.take() {
             let _ = vault.lock();
         }
-        if forget {
+        if closing != Closing::Suspend {
             *guard(&self.kept) = None;
         }
+        drop(slot);
+        ended.finish();
     }
 
     /// Open the vault again with the kept passphrase after `suspend`.
@@ -720,7 +755,7 @@ impl Core {
                 apassy::vault::MIN_PASSPHRASE_BYTES
             )));
         }
-        self.close(true);
+        self.close(Closing::Switch);
         let temp = self.paths.new_vault_file(&format!("{}", now()));
         let vault = Vault::create(&temp, passphrase)?;
         let mut vault = vault;
