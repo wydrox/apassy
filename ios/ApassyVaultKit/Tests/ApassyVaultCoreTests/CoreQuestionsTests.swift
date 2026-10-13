@@ -31,6 +31,15 @@ import Testing
         } catch let error as VaultError {
             #expect(error.code == .noQuestions)
         }
+        // The vault of the question goes as `vault_id`; a core without it still reads the call.
+        do {
+            _ = try await core.questionAnswerString(
+                qid: "oKGio6SlpqeoqaqrrK2urw", answer: RemoteAnswer(kind: .deny),
+                vaultID: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c")
+            Issue.record("an answer string was made without a team")
+        } catch let error as VaultError {
+            #expect(error.code == .noQuestions)
+        }
         do {
             _ = try await core.joinAttach(link: "not a link", deviceName: "Test iPhone", answerKey: key)
             Issue.record("a text that is not a link started a connection")

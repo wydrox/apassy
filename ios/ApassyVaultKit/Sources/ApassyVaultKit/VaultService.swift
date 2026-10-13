@@ -163,10 +163,18 @@ public protocol VaultService: Sendable {
     /// Seal and post an answer. `signature` (DER, by the answer key) for an answer that needs Face
     /// ID; nil for the others, which the core signs with the relay key of this iPhone.
     func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws -> SentAnswer
+    /// The two calls above for the question of `vaultID` (`RemoteQuestion.vaultID`). Nil: the core
+    /// uses the vault that owns the qid.
+    func questionAnswerString(qid: String, answer: RemoteAnswer, vaultID: String?) async throws -> PreparedAnswer
+    func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?, vaultID: String?)
+        async throws -> SentAnswer
     /// Check that the vault row of this iPhone has this Secure Enclave answer key (X9.63). It writes
     /// nothing: the Mac that confirmed the join writes the row.
     func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration
+    /// Send the APNs token to the questions team of the selected vault; a core that keeps the
+    /// questions of every unlocked vault sends it to the team of each.
     func pushTokenSet(token: Data, environment: PushEnvironment) async throws
+    /// Remove the token from the relay, as `pushTokenSet` reaches it.
     func pushTokenClear() async throws
     /// Join the notifications-only team of the selected vault with the device link of the Mac.
     /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
