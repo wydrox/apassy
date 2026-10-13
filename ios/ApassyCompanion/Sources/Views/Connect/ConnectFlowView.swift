@@ -253,7 +253,7 @@ struct ConnectFlowView: View {
                     VStack(spacing: 8) {
                         HStack(spacing: 10) {
                             ProgressView()
-                            Text("Waiting for your Mac")
+                            Text("Waiting for the Mac")
                                 .foregroundStyle(.secondary)
                         }
                         TimelineView(.periodic(from: .now, by: 1)) { context in

@@ -137,6 +137,11 @@ struct DevicesSettingsView: View {
             else { return }
             await service.setQuestions(enabled: true, questions: [])
             await questions.refresh()
+            // `-ApassyOpen settings:devices:disconnect` asks "Disconnect this iPhone…?" at once.
+            if UserDefaults.standard.string(forKey: "ApassyOpen") == "settings:devices:disconnect" {
+                try? await Task.sleep(for: .milliseconds(500))
+                confirmsDisconnect = true
+            }
         }
     #endif
 }
