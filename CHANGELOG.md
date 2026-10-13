@@ -4,6 +4,29 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+Plans and Apassy Connect ([ADR 0027](docs/adr/0027-plans-and-connect.md)): Free syncs through iCloud Drive and approves on every device; Personal and Team (paid) sync through Apassy and get shared vaults. Not released: the relay part (`POST /v1/connect`) and the account service are not deployed, and no plan is on sale yet.
+
+### Added
+
+- Settings > Devices lists every device of the vault (Macs, iPhones, and iPhones on this Wi-Fi) with what each does and when it was last seen, with "Remove…" and "Stop approvals here".
+- One "Add a device…" for an iPhone or a Mac: scan or paste one code, compare two words, confirm with Touch ID. The first "Add a device…" connects the vault to Apassy Connect with no team code. Self-hosted relays move to "Use another relay…".
+- iPhone: one door, "Connect to your Mac". The code decides what happens: a paid plan syncs the vault through Apassy; Free opens the vault from iCloud Drive, so the iPhone approves away from the Wi-Fi; "Only on this Wi-Fi" pairs on the local network. Settings > Devices on the iPhone has "Disconnect from Apassy Connect".
+- First steps offer "Approve on your iPhone".
+- Settings > Plan, the upgrade sheet, and Compare plans. They show only when a plan is offered, which no build does yet.
+
+### Changed
+
+- Vault > Sync is one choice: iCloud Drive, Apassy, or Off. Other folders and self-hosted relays are in its menu.
+- Switching a vault to Apassy asks for Touch ID or the passphrase and lists the devices that will start to sync. Turning it off again keeps this Mac in the vault's Apassy Connect team, so approvals stay on every device.
+- Pairing on the local network moves to "Pair on this network".
+
+### Security
+
+- A device confirmation is bound to its purpose: a proof for approvals only cannot add a device that syncs.
+- An iPhone that holds a vault refuses a code of another vault's team, and the words screen no longer names the Mac from the code ("The Mac that made this code shows the same two words").
+- A relay that answers "unknown device" no longer makes the Mac drop its Apassy Connect team: the Mac asks first, and connects again with a new team before it drops the old one.
+- `POST /v1/connect` carries a proof that the caller holds the new device key.
+
 ## [0.5.0] - 2026-10-12
 
 One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. Agents need no setup for each credential: a connected agent sees the names of your credentials, and the bouncer decides each use from the first one or asks you ([ADR 0025](docs/adr/0025-low-friction-access.md)). The Mac app has a new window with folders, Decisions, and Agents, you add a credential by pasting it, and the iPhone app follows the same model ([ADR 0026](docs/adr/0026-simple-app.md)).
