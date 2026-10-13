@@ -1,0 +1,36 @@
+# Build the relay image for the VPS (x86_64) on a GitHub runner, never on the VPS
+# itself: push a tag image-<anything> on the commit to build. The image comes back as
+# an artifact (docker save, gzip) with its SHA-256; OPERATIONS 20.2 loads it on the VPS.
+name: Image
+
+on:
+  push:
+    tags: ["image-*"]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: |
+          short="$(git rev-parse --short=7 HEAD)"
+          echo "TAG=apassy-relay:connect-$short" >> "$GITHUB_ENV"
+          docker build -t "apassy-relay:connect-$short" .
+      - name: Save the image
+        run: |
+          docker save "$TAG" | gzip -9 > relay-image.tar.gz
+          sha256sum relay-image.tar.gz | tee relay-image.tar.gz.sha256
+          docker image inspect "$TAG" --format '{{.Id}} {{.Architecture}}' | tee relay-image.id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-image
+          path: |
+            relay-image.tar.gz
+            relay-image.tar.gz.sha256
+            relay-image.id
+          retention-days: 3
