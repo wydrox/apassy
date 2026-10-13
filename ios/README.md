@@ -91,7 +91,7 @@ The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Sear
 What the app does with the vault:
 
 - The vault, its sync state, and the list of vaults are in the App Group container, so the AutoFill extension reads them. The core opens the vault only while it is unlocked, and the app closes it when it leaves the screen (contract ios-core-v1, section 1).
-- It syncs at unlock, after each change, and when the relay has a new version (a long poll while the app is active). It never syncs in the background.
+- It syncs at unlock, at a return to the app, after each change, and when the relay or the iCloud file has a new version: a long poll of the relay, or a check every 5 s that asks iCloud for the latest version of the file, while the app is active. A failed sync is tried again. It never syncs in the background.
 - A copy stays on this iPhone (no Universal Clipboard) and expires after the time in Settings (60 s by default).
 - It drops a revealed value after 30 s and in the background, and covers its content whenever it is not active.
 - It refuses keyboards of other apps (a third-party keyboard would see a pasted secret or a passphrase). The system keyboard stays.
