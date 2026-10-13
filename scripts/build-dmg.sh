@@ -235,6 +235,23 @@ notarize() {
   fi
 }
 
+# Staple the ticket of $1. The stapler asks Apple's CloudKit for the ticket, which
+# can drop the connection for a while right after the notary accepts. Try again,
+# with longer waits, before the build fails.
+staple() {
+  local file="$1" attempt wait=15
+  for attempt in 1 2 3 4 5 6; do
+    if xcrun stapler staple "$file"; then
+      xcrun stapler validate "$file"
+      return
+    fi
+    [ "$attempt" != "6" ] || fail "could not staple the ticket to $file"
+    echo "Staple: attempt $attempt failed; trying again in ${wait}s" >&2
+    sleep "$wait"
+    wait=$((wait * 2))
+  done
+}
+
 # ---------------------------------------------------------------- app
 STAGE="$TMP/stage"
 mkdir -p "$STAGE"
@@ -245,8 +262,7 @@ if [ "$NOTARIZE" = "1" ]; then
   notarize "$TMP/Apassy.zip" "Apassy.app"
   # A stapled app opens offline on the first start, also after a copy out of
   # the disk image.
-  xcrun stapler staple "$STAGE/Apassy.app"
-  xcrun stapler validate "$STAGE/Apassy.app"
+  staple "$STAGE/Apassy.app"
   spctl --assess --type exec --verbose=2 "$STAGE/Apassy.app"
 fi
 
@@ -300,8 +316,7 @@ codesign --verify --strict --verbose=2 "$DMG"
 if [ "$NOTARIZE" = "1" ]; then
   step "Notarize the disk image"
   notarize "$DMG" "$IMAGE_NAME"
-  xcrun stapler staple "$DMG"
-  xcrun stapler validate "$DMG"
+  staple "$DMG"
   spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 fi
 
