@@ -268,6 +268,27 @@ pub fn new_questions_team(
     })
 }
 
+/// The relay part of the first "Add a device…" of a vault with no team, with no vault
+/// and no team code (contract relay-connect-v1, build plan §2a): a new device key and
+/// `POST /v1/connect` (`{v: 1, team, device_name, public_key}`). The relay makes a
+/// Connect team (`kind: "connect"`) with this key as its first device. The membership
+/// has the purpose `questions` only; the app keeps it with [`adopt_questions_team`].
+/// Only a Mac calls it.
+///
+/// Not built yet: it fails with `Relay(NotFound)`, as a relay without the endpoint
+/// answers, and makes no key.
+pub fn create_connect_team(
+    relay_url: &str,
+    vault_name: &str,
+    device_name: &str,
+) -> Result<RelayMembership, SyncError> {
+    // S1: as `new_questions_team` without the team code, with a `create_connect_on_relay`
+    // next to `create_team_on_relay` for the call. S4 builds the endpoint.
+    let _url = RelayUrl::parse(relay_url)?;
+    let _ = (vault_name, device_name);
+    Err(SyncError::Relay(RelayRefusal::NotFound))
+}
+
 /// The vault part of [`create_questions_team`], with no relay call: keep `membership`
 /// (from [`new_questions_team`]), name its team as the questions team of the vault, make
 /// the question key when the vault has none, and register this Mac. `AlreadyEnabled` when

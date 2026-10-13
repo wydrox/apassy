@@ -2117,6 +2117,51 @@ impl RelaySync {
         self.finish_enable(vault, session, &local.vault_id, team, None)
     }
 
+    /// Turn relay sync on in the team that the vault is already in (build plan §2b): the
+    /// Connect team `team_id` of the questions gets the purpose `sync`, with the key of
+    /// its membership, and pushes version 1. It never makes a second team, so a vault
+    /// keeps one team and one device list. The relay must have lifted the team's preset
+    /// (`POST /v1/teams/entitlement`) first. `vault_name` names the team in the report.
+    ///
+    /// Not built yet: it fails with `Relay(NotFound)` and changes nothing.
+    pub fn enable_on_membership(
+        &self,
+        vault: &mut Vault,
+        team_id: &str,
+        vault_name: &str,
+    ) -> Result<RelayEnableReport, SyncError> {
+        let _run = self.try_run()?;
+        self.enable_on_membership_in(vault, team_id, vault_name)
+    }
+
+    /// [`Self::enable_on_membership`] with the shared vault slot of the app, as
+    /// [`Self::sync_shared`]: the relay calls and the upload of version 1 run without
+    /// the slot's mutex.
+    pub fn enable_on_membership_shared(
+        &self,
+        slot: &Mutex<Option<Vault>>,
+        accept: impl Fn(&Vault) -> bool,
+        team_id: &str,
+        vault_name: &str,
+    ) -> Result<RelayEnableReport, SyncError> {
+        let _run = self.run_shared()?;
+        self.enable_on_membership_in(&mut SharedSlot { slot, accept }, team_id, vault_name)
+    }
+
+    fn enable_on_membership_in<A: VaultAccess + ?Sized>(
+        &self,
+        vault: &mut A,
+        team_id: &str,
+        vault_name: &str,
+    ) -> Result<RelayEnableReport, SyncError> {
+        // S1: read the membership of `team_id` (`Vault::relay_membership`), build a
+        // session with its key and device number, call `finish_enable` (which reuses
+        // `finish_enable_with`), then add the purpose `sync`
+        // (`Vault::set_membership_purposes`). Never `create_team_in`.
+        let _ = (vault, team_id, vault_name);
+        Err(SyncError::Relay(RelayRefusal::NotFound))
+    }
+
     /// Turn relay sync on for a vault that is already on the relay, with a device that
     /// a link added (contract section 6, last paragraph): the copy must hold this vault
     /// ("The relay copy holds another vault."); the vault merges it and pushes.
@@ -2434,20 +2479,20 @@ struct LinkBody<'a> {
 
 impl PendingJoin {
     /// Parse the pasted text: `<relay URL>/link#<code>`, or a bare code with the relay
-    /// address `relay_url` from the field above it.
+    /// address `relay_url` from the field above it. The link of "Add a device…" has
+    /// parameters after the code (`&r=…`, [`super::RelayLinkPayload`]): only the code
+    /// before the first `&` counts here.
     pub fn parse_link(
         text: &str,
         relay_url: &str,
     ) -> Result<(RelayUrl, Zeroizing<String>), SyncError> {
         let text = text.trim();
-        let (url, code) = match text.split_once("/link#") {
-            Some((url, code)) => (RelayUrl::parse(url)?, code),
-            None => (RelayUrl::parse(relay_url)?, text),
-        };
-        if link_code_team(code).is_none() {
-            return Err(SyncError::Relay(RelayRefusal::Forbidden));
-        }
-        Ok((url, Zeroizing::new(code.to_owned())))
+        let relay = text
+            .split_once("/link#")
+            .map_or(relay_url, |(relay, _)| relay);
+        let url = RelayUrl::parse(relay)?;
+        let parts = super::relay_link::split_link(text)?;
+        Ok((url, Zeroizing::new(parts.code.to_owned())))
     }
 
     /// Make a device key and send the link (`POST /v1/devices/link`). The relay's
@@ -2811,6 +2856,32 @@ mod tests {
             SyncError::InvalidRelayAddress
         );
         assert!(PendingJoin::parse_link("apassy_lnk_bad", "https://r.example.test").is_err());
+    }
+
+    #[test]
+    fn a_link_of_add_a_device_gives_the_code_before_its_parameters() {
+        let code = format!("apassy_lnk_t_7k2m5q4x3c_{}", "ab".repeat(32));
+        for text in [
+            format!("https://relay.example.test/link#{code}&r=connect&n=Mac%20mini&e=1790000600"),
+            format!("https://relay.example.test/link#{code}&r=share&future=1"),
+            format!("https://relay.example.test/link#{code}&"),
+        ] {
+            let (url, parsed) = PendingJoin::parse_link(&text, "").unwrap();
+            assert_eq!(url.as_str(), "https://relay.example.test");
+            assert_eq!(parsed.as_str(), code, "{text}");
+        }
+        let (url, parsed) =
+            PendingJoin::parse_link(&format!("{code}&r=sync"), "https://r.example.test").unwrap();
+        assert_eq!(url.as_str(), "https://r.example.test");
+        assert_eq!(parsed.as_str(), code);
+        assert_eq!(
+            PendingJoin::parse_link(
+                &format!("https://relay.example.test/link#&r=sync&{code}"),
+                ""
+            )
+            .unwrap_err(),
+            SyncError::Relay(RelayRefusal::Forbidden)
+        );
     }
 
     #[test]

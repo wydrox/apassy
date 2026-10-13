@@ -215,7 +215,7 @@ fn settings_show_the_groups_of_the_selected_section_only() {
     create(&mut app, "Personal", PASS_A);
     super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
-    for section in SettingsSection::ALL {
+    for section in SettingsSection::listed_all(&app) {
         assert!(text.contains(section.label()), "{section:?}: {text}");
     }
     let cases = [
@@ -265,6 +265,60 @@ fn settings_show_the_groups_of_the_selected_section_only() {
                 "{section:?} hides {unexpected}: {text}"
             );
         }
+    }
+}
+
+/// Settings > Plan shows only when the plan provider has an offer. The app has none
+/// (`NoPlanProvider`), so a real build lists six sections and nothing about plans; a
+/// fake provider with an offer (tests, the screenshot tour) lists Plan before Updates.
+#[test]
+fn settings_list_plan_only_with_an_offer() {
+    use crate::plan::{FakePlanProvider, UpgradeFrom};
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    super::open_settings(&mut app, SettingsSection::Vault);
+    assert!(!app.plans_offered());
+    assert!(app.plan.offer(UpgradeFrom::Sync).is_none());
+    assert!(!SettingsSection::listed_all(&app).contains(&SettingsSection::Plan));
+    let text = frames(&mut app);
+    assert!(!text.contains("Plan\n"), "{text}");
+
+    // A section that is no longer listed falls back to the first one.
+    app.ui.settings_section = SettingsSection::Plan;
+    let _ = frames(&mut app);
+    assert_eq!(app.ui.settings_section, SettingsSection::Vault);
+
+    let fake = FakePlanProvider::for_screenshots("free", 1_790_000_000).expect("fake plan");
+    app.set_plan_provider(Arc::new(fake));
+    let listed = SettingsSection::listed_all(&app);
+    assert_eq!(listed.len(), 7);
+    assert_eq!(listed[5], SettingsSection::Plan);
+    super::open_settings(&mut app, SettingsSection::Plan);
+    let text = frames(&mut app);
+    assert!(text.contains("Plan\n"), "{text}");
+    assert!(text.contains("Free\n"), "{text}");
+    assert_eq!(app.ui.settings_section, SettingsSection::Plan);
+}
+
+/// The sheets of the plan and of the Devices hub are not built yet: each closes as
+/// soon as it opens, so nothing shows.
+#[test]
+fn sheets_that_are_not_built_yet_close_at_once() {
+    use crate::plan::UpgradeFrom;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    for sheet in [
+        Sheet::Devices(super::devices::DevicesSheet::AddDevice),
+        Sheet::Upgrade(UpgradeFrom::Sync),
+        Sheet::PlanEnded,
+    ] {
+        app.ui.sheet = Some(sheet.clone());
+        let _ = frames(&mut app);
+        assert_eq!(app.ui.sheet, None, "{sheet:?}");
     }
 }
 

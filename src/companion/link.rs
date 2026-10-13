@@ -125,7 +125,7 @@ fn valid_host(host: &str, allow_loopback: bool) -> bool {
 }
 
 /// Percent-encode every byte except the unreserved characters of RFC 3986.
-fn percent_encode(text: &str) -> String {
+pub(crate) fn percent_encode(text: &str) -> String {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {

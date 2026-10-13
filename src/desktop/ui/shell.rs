@@ -368,6 +368,12 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::DeleteFolder { uuid } => super::folders::delete_sheet(app, ctx, &uuid),
         #[cfg(feature = "vault")]
         Sheet::Share { item_id } => super::items::share_sheet(app, ctx, item_id),
+        #[cfg(feature = "vault")]
+        Sheet::Devices(sheet) => super::devices::sheet(app, ctx, &sheet),
+        #[cfg(feature = "vault")]
+        Sheet::Upgrade(from) => super::plan::upgrade_sheet(app, ctx, from),
+        #[cfg(feature = "vault")]
+        Sheet::PlanEnded => super::plan::ended_sheet(app, ctx),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
         #[cfg(not(feature = "vault"))]

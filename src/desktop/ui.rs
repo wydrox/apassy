@@ -34,6 +34,9 @@ mod decisions_tests;
 mod demo;
 #[cfg(feature = "vault")]
 mod detail_rows;
+/// Settings > Devices, the hub, and "Add a device…" (flow spec M1, M2).
+#[cfg(feature = "vault")]
+pub(crate) mod devices;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
 /// The two first steps of a new vault (ADR 0026 §7).
@@ -63,6 +66,10 @@ mod otp_tests;
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
+/// The plan: Settings > Plan, the Upgrade sheet, and the end of a paid plan (flow spec
+/// M4, M5, E).
+#[cfg(feature = "vault")]
+mod plan;
 #[cfg(feature = "vault")]
 mod settings;
 /// Settings as a view of the window (ADR 0026 §3).
@@ -448,6 +455,21 @@ pub(crate) enum Sheet {
     Share {
         item_id: u64,
     },
+    /// A sheet of Settings > Devices, as "Add a device…" (flow spec M2).
+    // S1 opens it; until then only the tests do.
+    #[cfg(feature = "vault")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    Devices(devices::DevicesSheet),
+    /// The Upgrade sheet at a paid pick (flow spec M4). Only with an offer.
+    // S2 opens it; until then only the tests do.
+    #[cfg(feature = "vault")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    Upgrade(crate::plan::UpgradeFrom),
+    /// A paid plan ended: move sync to iCloud Drive or turn it off (flow spec E).
+    // S2 opens it; until then only the tests do.
+    #[cfg(feature = "vault")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    PlanEnded,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {

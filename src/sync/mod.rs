@@ -34,6 +34,7 @@ mod folder;
 pub(crate) mod relay;
 pub(crate) mod relay_crypto;
 pub(crate) mod relay_http;
+pub mod relay_link;
 mod state;
 mod transport;
 
@@ -60,6 +61,7 @@ pub use relay_crypto::{
     valid_team_code, verify_signature,
 };
 pub use relay_http::{DEFAULT_RELAY_URL, RelayUrl};
+pub use relay_link::{LinkPayloadError, LinkRoute, MAX_LINK_BYTES, RelayLinkPayload};
 pub use state::{SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};
 
