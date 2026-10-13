@@ -27,7 +27,7 @@ struct PairingFlowView: View {
                 PairingResultView(
                     symbol: "clock.badge.exclamationmark.fill", tint: .orange, title: "The code has expired",
                     message:
-                        "The pairing window of your Mac ended. Select \"Pair an iPhone\" in Apassy on your Mac to make a new code. Nothing is paired.",
+                        "The pairing window of your Mac ended. On your Mac, open Apassy > Settings > Devices > Add a device to make a new code. Nothing is paired.",
                     model: model)
             case .failed(let title, let message):
                 PairingResultView(

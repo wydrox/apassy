@@ -96,9 +96,14 @@ final class PairingModel {
         step = .scan
     }
 
-    /// A code came from the scanner. A code that is not a usable pairing link only sets a note.
+    /// A code came from the scanner. A code that is not a usable pairing link only sets a note. The
+    /// code of "Add a device" carries the pairing link in `p` (contract relay-connect-v1, 7.1).
     func handleScan(_ payload: String) {
         guard case .scan = step else { return }
+        var payload = payload
+        if case .relay(let relay)? = try? ConnectLink.parse(payload), let pairing = relay.pairingLink {
+            payload = pairing
+        }
         let link: PairingLink
         do {
             link = try PairingLink.parse(payload)
@@ -236,7 +241,7 @@ final class PairingModel {
             step = .failed(
                 title: "The pairing could not be saved",
                 message:
-                    "The Mac paired with this iPhone, but the keychain refused to save it. \(error.localizedDescription) Remove this iPhone in Settings > iPhone companion in Apassy on your Mac, then pair again."
+                    "The Mac paired with this iPhone, but the keychain refused to save it. \(error.localizedDescription) Remove this iPhone in Settings > Devices in Apassy on your Mac, then pair again."
             )
             return
         }

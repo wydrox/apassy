@@ -1,9 +1,16 @@
+import AVFoundation
 import ApassyVaultKit
 import SwiftUI
 
-/// No vault and no pairing yet: add the vault of the Mac, or only approve agent runs.
+/// No vault and no pairing yet (flow spec I1): one door, "Connect to your Mac". The code of the
+/// Mac decides what comes next (`ConnectModel`).
 struct AppWelcomeView: View {
     @Environment(RootModel.self) private var root
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var cameraDenied = false
+
+    static let siteURL = URL(string: "https://apassy.wyderka.cc")!
 
     var body: some View {
         PairingScreen {
@@ -15,66 +22,67 @@ struct AppWelcomeView: View {
                     .clipShape(.rect(cornerRadius: 22, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(spacing: 12) {
-                    Text("Apassy on your iPhone")
+                    Text("Approve your agents from anywhere")
                         .font(.largeTitle.bold())
                         .multilineTextAlignment(.center)
-                    Text(
-                        "Your vault holds logins, API keys, SSH keys, and one-time passwords. Use free iCloud sync for yourself. Use the relay for teams."
-                    )
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
+                    Text("On your Mac, open Apassy > Settings > Devices > Add a device. Then scan the code.")
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 14) {
-                    WelcomePoint(
-                        symbol: "lock.iphone", text: "The vault is encrypted on this iPhone with your passphrase.")
-                    WelcomePoint(symbol: "key.fill", text: "Fill passwords in Safari and in apps with AutoFill.")
-                    WelcomePoint(
-                        symbol: "checkmark.seal.fill", text: "Approve the runs that wait for you on your Mac.")
+                if cameraDenied {
+                    VStack(spacing: 10) {
+                        CalloutView(
+                            symbol: "camera.fill", text: "Apassy needs the camera to scan the code. Or paste the link.")
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         } actions: {
             Button {
-                root.addVault()
-                root.addICloudVault()
+                root.connect(.scan)
             } label: {
-                Label("iCloud · Personal · Free", systemImage: "icloud").frame(maxWidth: .infinity)
+                Label("Connect to your Mac", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             Button {
-                root.addVault()
-                root.joinTeam()
+                root.connect(.paste)
             } label: {
-                Label("Join a team · Apassy relay", systemImage: "person.2").frame(maxWidth: .infinity)
+                Text("Paste a link instead").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
-            Button {
-                root.approveOnly()
-            } label: {
-                Text("Only approve agent runs").frame(maxWidth: .infinity)
+            Link(destination: Self.siteURL) {
+                Text("No Mac yet? Learn about Apassy")
+                    .font(.footnote)
             }
-            .buttonStyle(.glass)
+            .padding(.top, 2)
         }
+        .task(id: scenePhase) { cameraDenied = Self.cameraIsDenied() }
         #if targetEnvironment(simulator)
-            // A development aid: `-ApassyJoinLink <link>` goes on into the join flow.
+            // Development aids: `-ApassyJoinLink <link>` or `-ApassyConnectLink <link>` goes on into
+            // the connect flow as if the code had been scanned; `-ApassyOpen connect|connect:paste`
+            // opens it.
             .task {
-                if UserDefaults.standard.string(forKey: "ApassyJoinLink") != nil { root.addVault(); root.joinTeam() }
+                let defaults = UserDefaults.standard
+                if defaults.string(forKey: "ApassyConnectLink") != nil || defaults.string(forKey: "ApassyJoinLink") != nil
+                {
+                    root.connect(.scan)
+                } else if let route = defaults.string(forKey: "ApassyOpen"), route.hasPrefix("connect") {
+                    root.connect(route == "connect:paste" ? .paste : .scan)
+                }
             }
         #endif
     }
-}
 
-private struct WelcomePoint: View {
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        Label {
-            Text(text)
-                .font(.callout)
-        } icon: {
-            Image(systemName: symbol)
-                .foregroundStyle(.tint)
-        }
+    /// The owner said no to the camera, or a profile forbids it.
+    static func cameraIsDenied() -> Bool {
+        #if targetEnvironment(simulator)
+            // A development aid: `-ApassyPreviewCamera denied` shows the state of a refused camera.
+            if UserDefaults.standard.string(forKey: "ApassyPreviewCamera") == "denied" { return true }
+        #endif
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        return status == .denied || status == .restricted
     }
 }

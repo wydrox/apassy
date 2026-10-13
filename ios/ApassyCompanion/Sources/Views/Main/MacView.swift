@@ -86,7 +86,7 @@ struct MacView: View {
                     "The Mac stops listing this iPhone and this iPhone deletes its keys. If the Mac is not reachable, the keys are deleted anyway.")
             }
         } footer: {
-            Text("You can also remove this iPhone in Settings > iPhone companion in Apassy on your Mac.")
+            Text("You can also remove this iPhone in Settings > Devices in Apassy on your Mac.")
         }
     }
 

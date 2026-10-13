@@ -44,7 +44,7 @@ public enum CompanionError: Error, Equatable, LocalizedError {
         case .linkRejected:
             return "This link does not work. Another device may have used it. Select Cancel on your Mac and make a new code."
         case .linkExpired:
-            return "This pairing code has expired. Select \"Pair an iPhone\" on your Mac to make a new one."
+            return "This pairing code has expired. On your Mac, open Apassy > Settings > Devices > Add a device to make a new one."
         case .approvalUnconfirmed:
             return "The Mac may have approved this run. Check Activity."
         case .invalidResponse:

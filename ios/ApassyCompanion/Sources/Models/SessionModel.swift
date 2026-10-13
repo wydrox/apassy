@@ -211,7 +211,7 @@ final class SessionModel {
             try await mac.unpair()
         } catch {
             notice =
-                "This iPhone is unpaired here. The Mac did not answer, so it may still list this iPhone. Remove it in Settings > iPhone companion in Apassy on your Mac."
+                "This iPhone is unpaired here. The Mac did not answer, so it may still list this iPhone. Remove it in Settings > Devices in Apassy on your Mac."
         }
         finishEnding(notice: notice)
     }

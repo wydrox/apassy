@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		31937E7708CFEA5909B0924D /* ConnectFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7F013246C7BC8870509460E /* ConnectFlowView.swift */; };
+		DCCA1F32CAB3D7CC86A6CA47 /* ConnectModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 951B1205D35652C916DAA8EC /* ConnectModel.swift */; };
 		00DA596667674069A3E69886 /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEF0032D16E75A0003ECAA5C /* InboxView.swift */; };
 		0506ED95D4D2BD5CFC0B9311 /* PushRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47ED2073D0F7DC0E0A74B8F /* PushRegistrar.swift */; };
 		08FEE1E0E93044E3ECA287D2 /* VaultPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4C217EDB49F26B587027C8 /* VaultPrompts.swift */; };
@@ -117,6 +119,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B7F013246C7BC8870509460E /* ConnectFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectFlowView.swift; sourceTree = "<group>"; };
+		951B1205D35652C916DAA8EC /* ConnectModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectModel.swift; sourceTree = "<group>"; };
 		09431E87D7B3F006155FFB5D /* RunSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunSnapshot.swift; sourceTree = "<group>"; };
 		0BC42EE11D63D65DD187A2A1 /* AutoFillViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillViews.swift; sourceTree = "<group>"; };
 		0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExchangeView.swift; sourceTree = "<group>"; };
@@ -226,6 +230,14 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		47B403F12DC8A563A4886D21 /* Connect */ = {
+			isa = PBXGroup;
+			children = (
+				B7F013246C7BC8870509460E /* ConnectFlowView.swift */,
+			);
+			path = Connect;
+			sourceTree = "<group>";
+		};
 		05D858EF97BE4665D43E00AB /* Main */ = {
 			isa = PBXGroup;
 			children = (
@@ -254,6 +266,7 @@
 			isa = PBXGroup;
 			children = (
 				65A7B524CC9FECFC4FCBC194 /* Agents */,
+				47B403F12DC8A563A4886D21 /* Connect */,
 				512C9EAC0FAEA4B4D44455D8 /* Decisions */,
 				05D858EF97BE4665D43E00AB /* Main */,
 				B72D362659562DDE78441551 /* Pairing */,
@@ -418,6 +431,7 @@
 		C6D4DCAB8F9AAEA2E851694F /* Vault */ = {
 			isa = PBXGroup;
 			children = (
+				951B1205D35652C916DAA8EC /* ConnectModel.swift */,
 				7EFF914663017A172F14134C /* CredentialExchangeModel.swift */,
 				FA344DB5652B1982DBA3DA0C /* CredentialLooks.swift */,
 				27FCED0F2F37B942B42179FA /* FolderTree.swift */,
@@ -581,6 +595,8 @@
 				3EB151FA4F3F4C95FDA98FE8 /* ApassyCompanionApp.swift in Sources */,
 				674F78210B56608BDFDE6D0D /* AppModel.swift in Sources */,
 				57F6005A3BA458D149AD653A /* AppWelcomeView.swift in Sources */,
+				31937E7708CFEA5909B0924D /* ConnectFlowView.swift in Sources */,
+				DCCA1F32CAB3D7CC86A6CA47 /* ConnectModel.swift in Sources */,
 				0F8B4851F0A8E3832FF629A5 /* ApprovalsView.swift in Sources */,
 				6B2670298B8143D54CCD9E3E /* CodeScannerPanel.swift in Sources */,
 				609072B00CF0B945807B0E6A /* CodeViews.swift in Sources */,

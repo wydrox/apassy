@@ -3,28 +3,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
-struct AddVaultChoiceView: View {
-    @Environment(RootModel.self) private var root
-
-    var body: some View {
-        PairingScreen {
-            PairingHero(symbol: "externaldrive.badge.plus", title: "Add a vault",
-                        message: "Use iCloud for your personal vault. Use the Apassy relay for a team vault.")
-        } actions: {
-            Button { root.addICloudVault() } label: {
-                Label("iCloud · Personal · Free", systemImage: "icloud").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.glassProminent)
-            Button { root.joinTeam() } label: {
-                Label("Join a team · Apassy relay", systemImage: "person.2").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.glass)
-            Button("Cancel") { root.cancelAddVault() }
-                .buttonStyle(.glass)
-        }
-    }
-}
-
+/// The iCloud file of a vault: the passphrase, Face ID, and done (`ICloudVaultModel`). The connect
+/// flow shows it after the file picker.
 struct ICloudVaultFlowView: View {
     @Bindable var model: ICloudVaultModel
     @Environment(\.scenePhase) private var scenePhase

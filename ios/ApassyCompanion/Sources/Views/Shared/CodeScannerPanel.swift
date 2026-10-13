@@ -84,6 +84,13 @@ struct CodeScannerPanel: View {
     }
 
     private func check() async {
+        #if targetEnvironment(simulator)
+            // A development aid: `-ApassyPreviewCamera denied` shows the state of a refused camera.
+            if UserDefaults.standard.string(forKey: "ApassyPreviewCamera") == "denied" {
+                availability = .denied
+                return
+            }
+        #endif
         guard DataScannerViewController.isSupported else {
             availability = .unsupported
             return

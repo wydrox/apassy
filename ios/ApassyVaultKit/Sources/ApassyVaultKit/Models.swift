@@ -671,3 +671,23 @@ public struct PassphraseChange: Codable, Sendable, Equatable {
         self.rekeyed = rekeyed
     }
 }
+
+/// The plan of a vault, as the Mac writes it into the vault (`vault_secret` `plan-v1`, ADR 0027
+/// §2): the name of the plan and when it renews. No price, no account, no token: the iPhone shows
+/// the plan and sells nothing. The core has no call that reads it yet, so no screen shows a plan.
+public struct PlanSummary: Codable, Sendable, Equatable {
+    /// "Free", "Personal", or "Team".
+    public var plan: String
+    /// Unix seconds; nil for Free.
+    public var renewsAt: Int64?
+
+    public init(plan: String, renewsAt: Int64? = nil) {
+        self.plan = plan
+        self.renewsAt = renewsAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case plan
+        case renewsAt = "renews_at"
+    }
+}
