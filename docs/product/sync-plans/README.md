@@ -11,7 +11,7 @@ Mode: **Improve** (the flow exists). Owner's target, 2026-10-13: the flow in the
 | Gate A: spec approval | done (2026-10-13) | no account on Free; buy on the Mac in the browser; shared vaults in both paid plans; other folders free under "Other folder…" |
 | 2. Component map | done | [component-map.md](component-map.md), [build-plan.md](build-plan.md) |
 | 3. Visual direction | done (established theme; hero, peak, ending, upgrade sheet) | [visual-direction.md](visual-direction.md) |
-| 4. Build | todo | |
+| 4. Build | in progress | F0 foundation done (7ab2e99); S4 relay Connect done in ~/Dev/apassy-relay-connect feat/connect (not deployed); S5 ADR 0027 + contract done; S1 Mac devices and S3 iPhone running; S2 sync picker + plan next |
 | 5. Verify | todo | verify-report.md |
 
 ## Preflight (Stage 0)
