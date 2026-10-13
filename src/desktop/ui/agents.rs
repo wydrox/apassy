@@ -1,8 +1,9 @@
 //! Agents (ADR 0026 §2, ADR 0025 §3f): the connected agents, read-only.
 //!
 //! The list shows each agent, where it runs, and its uses this week. The page of an agent
-//! shows, it does not configure: its uses and projects, an optional note for the bouncer,
-//! its exceptions, and "Disconnect…". An exception comes from an answer in Decisions;
+//! shows, it does not configure: its uses and projects, the kinds of action it used this
+//! week, its newest uses, an optional note for the bouncer, its exceptions, and
+//! "Disconnect…". An exception comes from an answer in Decisions;
 //! removing one gives authority back, so it needs the owner check. Saving the note and
 //! disconnecting take no authority, so they need none. "+" opens "Connect an Agent"
 //! ([`super::agent_onboarding`]), the only setup, with one owner check.
@@ -10,10 +11,12 @@
 use eframe::egui::{self, Align, Label, Layout};
 
 use super::agent_onboarding::{self, ConnectHost};
+use super::decisions::action_label;
+use super::detail_rows as rows;
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, close_sheet};
 use crate::desktop::owner_check::OwnerRequest;
-use crate::desktop::owner_store::{AgentOverview, ExceptionRow, format_utc};
+use crate::desktop::owner_store::{ActionUse, AgentOverview, ExceptionRow, RecentUse, format_utc};
 use crate::desktop::{DesktopApp, Place};
 use crate::vault::AgentSummary;
 use crate::vault::exceptions::{ExceptionKind, MAX_AGENT_NOTE_BYTES};
@@ -467,6 +470,8 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
             |visible| visible.map(|items| items.len()),
         );
     let reconnect = stats_group(ui, agent, &overview, visible, now);
+    actions_group(ui, &overview);
+    recent_group(ui, &overview.recent, now);
     note_group(app, ui, agent_id, &overview);
     exceptions_group(app, ui, agent, &overview.exceptions);
     let mut disconnect = false;
@@ -592,6 +597,136 @@ fn stats_group(
         });
     });
     reconnect
+}
+
+/// At most this many projects follow the count of an action.
+const ACTION_PROJECTS: usize = 3;
+
+/// The value of an action row: the allowed uses and the projects in gray, then the uses
+/// that were not allowed, for red. "3 · acme-billing, apassy", "1 not allowed".
+fn action_value(action: &ActionUse) -> (String, Option<String>) {
+    let mut parts = Vec::new();
+    if action.allowed > 0 {
+        parts.push(action.allowed.to_string());
+    }
+    if !action.projects.is_empty() {
+        let shown = action.projects[..action.projects.len().min(ACTION_PROJECTS)].join(", ");
+        let more = action.projects.len().saturating_sub(ACTION_PROJECTS);
+        parts.push(if more > 0 {
+            format!("{shown}, and {more} more")
+        } else {
+            shown
+        });
+    }
+    let refused = (action.not_allowed > 0).then(|| format!("{} not allowed", action.not_allowed));
+    (parts.join(" · "), refused)
+}
+
+/// "Actions this week": one row per kind of action, the most used first, with the
+/// words of Decisions ("Read", "Change", "Deploy", "Delete"). Uses that were denied,
+/// refused, or not answered in time show apart, in red.
+fn actions_group(ui: &mut egui::Ui, overview: &AgentOverview) {
+    group_label(ui, "Actions this week");
+    let rows: Vec<(&str, egui::text::LayoutJob)> = overview
+        .actions
+        .iter()
+        .map(|action| {
+            let (used, refused) = action_value(action);
+            let mut job = egui::text::LayoutJob::default();
+            let mut add = |text: String, color| {
+                kit::text(text, Font::Body).color(color).append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::Default,
+                    Align::Center,
+                );
+            };
+            match refused {
+                Some(refused) if used.is_empty() => add(refused, Tone::Critical.text()),
+                Some(refused) => {
+                    add(format!("{used} · "), kit::SECONDARY);
+                    add(refused, Tone::Critical.text());
+                }
+                None => add(used, kit::SECONDARY),
+            }
+            (action_label(action.action), job)
+        })
+        .collect();
+    kit::section(ui, None, None, |s| {
+        if rows.is_empty() {
+            s.row(|ui| {
+                kit::note(
+                    ui,
+                    if overview.recent.is_empty() {
+                        "No actions yet."
+                    } else {
+                        "No actions this week."
+                    },
+                );
+            });
+        }
+        for (label, job) in rows {
+            s.labeled(label, job);
+        }
+    });
+}
+
+/// The second line of a recent use: "Deploy in apassy · Allowed automatically".
+fn recent_words(recent: &RecentUse, outcome: &str) -> String {
+    let item_use = &recent.item_use;
+    let action = action_label(item_use.action);
+    if item_use.project_label.is_empty() {
+        format!("{action} · {outcome}")
+    } else {
+        format!("{action} in {} · {outcome}", item_use.project_label)
+    }
+}
+
+/// "Recent": the newest uses, as the "Agent use" group of a credential: the round mark,
+/// the credential, the action, the project, and its result, with the time at the right.
+/// The command shows on hover, as on the credential page. With no use, no group.
+fn recent_group(ui: &mut egui::Ui, recent: &[RecentUse], now: u64) {
+    if recent.is_empty() {
+        return;
+    }
+    group_label(ui, "Recent");
+    kit::section(ui, None, None, |s| {
+        for entry in recent {
+            let (mark, outcome) = super::items::use_outcome(&entry.item_use);
+            let words = recent_words(entry, &outcome);
+            let when = kit::relative_time(entry.item_use.at, now);
+            let command = &entry.item_use.command_summary;
+            s.row(|ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.vertical(|ui| {
+                        ui.add_space(1.0);
+                        rows::status_mark(ui, mark);
+                    });
+                    let when_width =
+                        kit::galley(ui, kit::text(&when, Font::Callout)).size().x + 10.0;
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - when_width).max(80.0));
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        // The second line sits right under the first: no minimum
+                        // control height.
+                        ui.spacing_mut().interact_size.y = 0.0;
+                        ui.add(
+                            Label::new(kit::text(&entry.item_name, Font::Body).color(kit::LABEL))
+                                .truncate(),
+                        );
+                        let line = ui.add(Label::new(rows::small(words)).truncate());
+                        if !command.is_empty() {
+                            line.on_hover_text(kit::text(command, Font::Mono));
+                        }
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        ui.label(kit::text(&when, Font::Callout).color(kit::TERTIARY));
+                    });
+                });
+            });
+        }
+    });
 }
 
 /// The title of a group of the agent page, as in the mockup: small, semibold, and
@@ -1056,6 +1191,64 @@ mod tests {
         assert_eq!(sees_words(Some(0)), "No credentials yet");
         assert_eq!(sees_words(Some(1)), "Only 1 credential, never values");
         assert_eq!(sees_words(Some(3)), "Only 3 credentials, never values");
+    }
+
+    #[test]
+    fn an_action_row_shows_the_allowed_uses_the_projects_and_the_rest_apart() {
+        use crate::broker::action_kind::ActionKind;
+        let action = |allowed, not_allowed, projects: &[&str]| ActionUse {
+            action: ActionKind::Deploy,
+            allowed,
+            not_allowed,
+            projects: projects.iter().map(|p| (*p).to_owned()).collect(),
+        };
+        assert_eq!(
+            action_value(&action(3, 0, &["acme-billing", "apassy"])),
+            ("3 · acme-billing, apassy".to_owned(), None)
+        );
+        assert_eq!(
+            action_value(&action(2, 1, &["apassy"])),
+            ("2 · apassy".to_owned(), Some("1 not allowed".to_owned()))
+        );
+        assert_eq!(
+            action_value(&action(0, 2, &[])),
+            (String::new(), Some("2 not allowed".to_owned()))
+        );
+        assert_eq!(
+            action_value(&action(5, 0, &["a", "b", "c", "d", "e"])).0,
+            "5 · a, b, c, and 2 more"
+        );
+    }
+
+    #[test]
+    fn a_recent_use_names_its_action_and_project() {
+        use crate::broker::action_kind::ActionKind;
+        use crate::vault::usage::{ItemUse, UseDecidedBy, UseOutcome};
+        let mut recent = RecentUse {
+            item_use: ItemUse {
+                id: 1,
+                at: 0,
+                item_id: 1,
+                agent_id: Some(1),
+                agent_name: "Claude Code".to_owned(),
+                project_key: "/code/apassy".to_owned(),
+                project_label: "apassy".to_owned(),
+                action: ActionKind::Delete,
+                command_summary: String::new(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Denied,
+                decided_by: UseDecidedBy::Owner,
+                answered_on: String::new(),
+                decision_log_id: None,
+            },
+            item_name: "Billing database".to_owned(),
+        };
+        assert_eq!(
+            recent_words(&recent, "You denied it"),
+            "Delete in apassy · You denied it"
+        );
+        recent.item_use.project_label.clear();
+        assert_eq!(recent_words(&recent, "Denied"), "Delete · Denied");
     }
 
     #[test]
