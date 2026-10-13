@@ -1,6 +1,7 @@
 # ADR 0022: Vault sync through the Apassy relay
 
 Date: 2026-10-06. Status: accepted for stage 1 on 2026-10-06.
+Updated by ADR 0027 (2026-10-13): [ADR 0027](0027-plans-and-connect.md) replaces the operator team code as the way to make a personal team (open question 1). Operators keep the code for self-hosted relays.
 
 ## Context
 

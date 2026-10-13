@@ -2,6 +2,7 @@
 
 Date: 2026-10-01.
 Status: ACCEPTED by the owner on 2026-10-01: several teams on one relay, with proper separation, simple onboarding, and the defaults below (identity per team, device keys, a confirmed join, one key holder, team codes from the operator). Implemented in `apassy-relay` on 2026-10-01 (stages 1 to 4; the details and the rules that two reviews added are in its `docs/SPEC.md` sections 22 and 23) and live. Not done yet: one host process for all teams of a machine (section 9; a host serves one team), the Secure Enclave key in the app (stage 5), and notifications beyond the audit.
+Updated by ADR 0027 (2026-10-13): [ADR 0027](0027-plans-and-connect.md) replaces open decision 1 (open sign-up instead of operator team codes, and billing) with plans and Apassy Connect.
 
 ## Context
 
