@@ -22,6 +22,9 @@ use crate::server::store::{db, team_name, to_i, to_u};
 
 const JOIN_SECS: u64 = 72 * 3600;
 const LINK_SECS: u64 = 600;
+/// How long an expired or refused device link stays, and how many such links stay.
+const LINK_KEEP_SECS: u64 = 7 * 86_400;
+const LINK_KEEP_ROWS: i64 = 100;
 const MAX_DEVICES: i64 = 10;
 
 fn json_value<T: Serialize>(value: &T) -> RelayResult<Value> {
@@ -574,11 +577,21 @@ pub fn links_refuse(core: &Core, by: &MemberAuth, id: u64, now: u64) -> RelayRes
     })
 }
 
-/// Called by the team's five-second maintenance pass.
+/// Called by the team's five-second maintenance pass. A device link that expired or was
+/// refused stays `LINK_KEEP_SECS` for the record (a sign-in of its key reads
+/// `join_refused`), and at most `LINK_KEEP_ROWS` of them stay at all; then the row goes.
+/// A link makes no audit row, so these rows are the only trace, and they stay bounded.
 pub fn expire(core: &Core, now: u64) -> RelayResult<()> {
     core.store.tx(|tx| {
         tx.execute("UPDATE join_request SET state = 'expired', decided_at = ?1 WHERE state = 'pending' AND expires_at <= ?1", params![to_i(now)]).map_err(db)?;
         tx.execute("UPDATE device_link SET state = 'expired', decided_at = ?1 WHERE state IN ('open', 'pending') AND expires_at <= ?1", params![to_i(now)]).map_err(db)?;
+        tx.execute(
+            "DELETE FROM device_link WHERE state IN ('expired', 'refused') AND (decided_at <= ?1 \
+             OR id NOT IN (SELECT id FROM device_link WHERE state IN ('expired', 'refused') \
+             ORDER BY id DESC LIMIT ?2))",
+            params![to_i(now.saturating_sub(LINK_KEEP_SECS)), LINK_KEEP_ROWS],
+        )
+        .map_err(db)?;
         Ok(())
     })
 }

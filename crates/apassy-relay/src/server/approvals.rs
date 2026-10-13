@@ -606,7 +606,8 @@ pub fn get_run(
     } else {
         None
     };
-    let wait_secs = if poll.is_some() { wait_secs } else { 0 };
+    let seat = poll.as_ref().and_then(|_| core.poll_seat());
+    let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
         let seen = core.notify.current();

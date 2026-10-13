@@ -33,6 +33,12 @@ pub const COLLAPSE_ID: &str = "apassy-question";
 pub const MAX_BATCH: usize = 50;
 /// Jobs that wait for the push thread. A full queue drops the new job.
 const QUEUE: usize = 256;
+/// The jobs of all Connect teams in the queue at once: half of it, so the pushes of
+/// operator teams always find room (docs/SPEC.md section 26).
+const CONNECT_JOBS: usize = QUEUE / 2;
+/// The jobs of one Connect team in the queue at once.
+const CONNECT_TEAM_JOBS: usize = 2;
+const _: () = assert!(CONNECT_JOBS < QUEUE && CONNECT_TEAM_JOBS < CONNECT_JOBS);
 /// One call to the Worker, from the connection to the last byte of the answer.
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest answer of the Worker that is read.
@@ -54,10 +60,44 @@ pub struct PushTarget {
 /// The pushes of one question.
 struct Job {
     team: TeamId,
+    /// The job of a Connect team: it holds a seat of the `Budget` until it is sent.
+    connect: bool,
     store: Arc<Store>,
     audit: Arc<Audit>,
     expires_at: u64,
     targets: Vec<PushTarget>,
+}
+
+/// The queued jobs of Connect teams: of each team, and of all of them.
+#[derive(Default)]
+struct Budget {
+    teams: HashMap<TeamId, usize>,
+    all: usize,
+}
+
+impl Budget {
+    /// A seat for one more job of the Connect team `team`, or false when the team has
+    /// `CONNECT_TEAM_JOBS` queued or all Connect teams have `CONNECT_JOBS`.
+    fn admit(&mut self, team: &TeamId) -> bool {
+        let held = self.teams.get(team).copied().unwrap_or(0);
+        if held >= CONNECT_TEAM_JOBS || self.all >= CONNECT_JOBS {
+            return false;
+        }
+        self.teams.insert(team.clone(), held + 1);
+        self.all += 1;
+        true
+    }
+
+    /// Gives a seat back: its job was sent, or never queued.
+    fn release(&mut self, team: &TeamId) {
+        if let Some(held) = self.teams.get_mut(team) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                self.teams.remove(team);
+            }
+            self.all = self.all.saturating_sub(1);
+        }
+    }
 }
 
 /// The push trigger of the relay, shared by every team.
@@ -65,6 +105,8 @@ pub struct Push {
     topic: Option<String>,
     queue: Option<SyncSender<Job>>,
     last_dropped: Mutex<HashMap<TeamId, u64>>,
+    /// The Connect teams' share of the queue, shared with the push thread.
+    budget: Arc<Mutex<Budget>>,
 }
 
 impl Push {
@@ -74,6 +116,7 @@ impl Push {
             topic: None,
             queue: None,
             last_dropped: Mutex::new(HashMap::new()),
+            budget: Arc::new(Mutex::new(Budget::default())),
         })
     }
 
@@ -84,14 +127,17 @@ impl Push {
         };
         let (sender, receiver) = sync_channel(QUEUE);
         let topic = config.topic.clone();
+        let budget = Arc::new(Mutex::new(Budget::default()));
+        let seats = budget.clone();
         std::thread::Builder::new()
             .name("relay-push".to_string())
-            .spawn(move || run(&config, &receiver, &stop))
+            .spawn(move || run(&config, &receiver, &seats, &stop))
             .map_err(|_| RelayError::internal("The push thread cannot start."))?;
         Ok(Arc::new(Self {
             topic: Some(topic),
             queue: Some(sender),
             last_dropped: Mutex::new(HashMap::new()),
+            budget,
         }))
     }
 
@@ -101,7 +147,10 @@ impl Push {
     }
 
     /// Hands the pushes of one question to the push thread. Never blocks. A full queue
-    /// drops them, with a `push_dropped` row at most once per ten seconds per team.
+    /// drops them, with a `push_dropped` row at most once per ten seconds per team. A
+    /// Connect team has at most `CONNECT_TEAM_JOBS` jobs queued, and all Connect teams
+    /// together at most `CONNECT_JOBS`: more are dropped the same way, so anonymous
+    /// teams cannot take the queue from the pushes of operator teams.
     pub fn trigger(&self, core: &Core, targets: Vec<PushTarget>, expires_at: u64, now: u64) {
         let Some(queue) = &self.queue else {
             return;
@@ -109,16 +158,37 @@ impl Push {
         if targets.is_empty() {
             return;
         }
+        let connect = core.kind == crate::api::TeamKind::Connect;
+        let admitted = !connect
+            || self
+                .budget
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .admit(&core.team);
         let job = Job {
             team: core.team.clone(),
+            connect,
             store: core.store.clone(),
             audit: core.audit.clone(),
             expires_at,
             targets,
         };
-        match queue.try_send(job) {
+        let sent = if admitted {
+            queue.try_send(job).map_err(|error| match error {
+                TrySendError::Full(job) | TrySendError::Disconnected(job) => job,
+            })
+        } else {
+            Err(job)
+        };
+        match sent {
             Ok(()) => {}
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+            Err(job) => {
+                if admitted && job.connect {
+                    self.budget
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .release(&job.team);
+                }
                 let mut last = self
                     .last_dropped
                     .lock()
@@ -176,8 +246,9 @@ fn reason_word(reason: Option<&str>) -> String {
     }
 }
 
-/// The push thread: one job at a time, until `stop` is set or every sender is gone.
-fn run(config: &PushConfig, jobs: &Receiver<Job>, stop: &AtomicBool) {
+/// The push thread: one job at a time, until `stop` is set or every sender is gone. A
+/// Connect team's job gives its seat of the budget back once it is sent.
+fn run(config: &PushConfig, jobs: &Receiver<Job>, budget: &Mutex<Budget>, stop: &AtomicBool) {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
@@ -187,7 +258,15 @@ fn run(config: &PushConfig, jobs: &Receiver<Job>, stop: &AtomicBool) {
     let mut last_failed: HashMap<(TeamId, u64), u64> = HashMap::new();
     loop {
         match jobs.recv_timeout(Duration::from_millis(500)) {
-            Ok(job) => send_job(config, &agent, &job, &mut last_failed),
+            Ok(job) => {
+                send_job(config, &agent, &job, &mut last_failed);
+                if job.connect {
+                    budget
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .release(&job.team);
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
                     return;
@@ -355,6 +434,36 @@ mod tests {
         assert_eq!(reason_word(Some("<script>")), "Unknown");
         assert_eq!(reason_word(Some(&"A".repeat(65))), "Unknown");
         assert_eq!(reason_word(None), "Unknown");
+    }
+
+    #[test]
+    fn connect_teams_have_a_share_of_the_queue() {
+        let one = TeamId::parse("t_7k2m5q4x3c").unwrap();
+        let two = TeamId::parse("t_abcdefgh23").unwrap();
+        let three = TeamId::parse("t_cdefgh2345").unwrap();
+        let mut budget = Budget::default();
+        // One team: two jobs at once, then one more after one was sent.
+        assert!(budget.admit(&one));
+        assert!(budget.admit(&one));
+        assert!(!budget.admit(&one));
+        budget.release(&one);
+        assert!(budget.admit(&one));
+        budget.release(&one);
+        budget.release(&one);
+        assert_eq!((budget.all, budget.teams.len()), (0, 0));
+        // All Connect teams together: half the queue.
+        let mut budget = Budget {
+            teams: HashMap::new(),
+            all: CONNECT_JOBS - 1,
+        };
+        assert!(budget.admit(&one));
+        assert!(!budget.admit(&two));
+        budget.release(&one);
+        assert!(budget.admit(&three));
+        // A release of a team with no seat changes nothing.
+        let before = budget.all;
+        budget.release(&TeamId::parse("t_bcdefgh234").unwrap());
+        assert_eq!(budget.all, before);
     }
 
     #[test]

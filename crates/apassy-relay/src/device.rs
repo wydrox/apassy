@@ -27,6 +27,8 @@ pub const MAX_SIGNATURE_BYTES: usize = 72;
 pub const SIGN_IN_DOMAIN: &str = "apassy-relay sign-in v1";
 /// The domain of the safety words.
 pub const SAFETY_DOMAIN: &str = "apassy-relay safety v1";
+/// The domain of the proof of key of `POST /v1/connect` (docs/SPEC.md section 26).
+pub const CONNECT_DOMAIN: &str = "apassy-relay connect v1";
 
 /// A device key failed: a bad key, a bad encoding, or no random source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,15 +101,27 @@ impl DeviceKey {
     }
 }
 
-/// Decodes a public key from the wire: base64url, 65 bytes, starting with 0x04. The
-/// point itself is checked when a signature is verified.
+/// Decodes a public key from the wire: base64url, 65 bytes, starting with 0x04, and a
+/// point on P-256 (`on_curve`). 64 random bytes after 0x04 are refused.
 pub fn decode_public_key(text: &str) -> Result<[u8; PUBLIC_KEY_BYTES], DeviceKeyError> {
     let bytes = decode_b64(text, PUBLIC_KEY_BYTES).map_err(|_| DeviceKeyError)?;
     let key: [u8; PUBLIC_KEY_BYTES] = bytes.try_into().map_err(|_| DeviceKeyError)?;
-    if key[0] != 0x04 {
+    if key[0] != 0x04 || !on_curve(&key) {
         return Err(DeviceKeyError);
     }
     Ok(key)
+}
+
+/// True when `key` (uncompressed SEC1) is a point on P-256. ring has no call that only
+/// checks a public key, but its ECDH validates the peer's point before anything else
+/// (on the curve, coordinates below the field prime): one agreement with a throwaway key
+/// answers the question. No random source: false.
+fn on_curve(key: &[u8]) -> bool {
+    use ring::agreement::{ECDH_P256, EphemeralPrivateKey, UnparsedPublicKey, agree_ephemeral};
+    let Ok(own) = EphemeralPrivateKey::generate(&ECDH_P256, &SystemRandom::new()) else {
+        return false;
+    };
+    agree_ephemeral(own, &UnparsedPublicKey::new(&ECDH_P256, key), |_| ()).is_ok()
 }
 
 /// True when `signature` (DER) is a valid signature of `message` by `public_key`.
@@ -150,6 +164,23 @@ pub fn sign_in_message(
         }
         message.extend_from_slice(part.as_bytes());
     }
+    message
+}
+
+/// The message that the app signs to make a Connect team (`POST /v1/connect`):
+/// `"apassy-relay connect v1" 0x00 origin 0x00 public_key_b64`, the same form as the
+/// sign-in message. `origin` is the relay URL without a trailing slash; the relay checks
+/// it against its own public URL. It proves that the caller holds the private key of
+/// the public key it names.
+pub fn connect_message(origin: &str, public_key_b64: &str) -> Vec<u8> {
+    let origin = origin.trim_end_matches('/');
+    let mut message =
+        Vec::with_capacity(CONNECT_DOMAIN.len() + origin.len() + public_key_b64.len() + 2);
+    message.extend_from_slice(CONNECT_DOMAIN.as_bytes());
+    message.push(0);
+    message.extend_from_slice(origin.as_bytes());
+    message.push(0);
+    message.extend_from_slice(public_key_b64.as_bytes());
     message
 }
 
@@ -306,6 +337,23 @@ mod tests {
     }
 
     #[test]
+    fn the_connect_message_has_one_form() {
+        assert_eq!(
+            connect_message("https://r.test/", "PK"),
+            b"apassy-relay connect v1\0https://r.test\0PK".to_vec()
+        );
+        let key = DeviceKey::generate().unwrap();
+        let message = connect_message("https://r.test", &key.public_key_b64());
+        let signature = key.sign(&message).unwrap();
+        assert!(verify(&key.public_key(), &message, &signature));
+        assert!(!verify(
+            &key.public_key(),
+            &connect_message("https://other.test", &key.public_key_b64()),
+            &signature
+        ));
+    }
+
+    #[test]
     fn the_sign_in_message_has_one_form() {
         let message = sign_in_message("https://r.test/", &team(), "PK", "NONCE");
         assert_eq!(
@@ -320,7 +368,20 @@ mod tests {
         assert!(decode_public_key(&encode_b64(&[4u8; 64])).is_err());
         assert!(decode_public_key(&encode_b64(&[2u8; 65])).is_err());
         assert!(decode_public_key(&encode_b64(&[4u8; 66])).is_err());
-        assert!(decode_public_key(&encode_b64(&[4u8; 65])).is_ok());
+        // 0x04 and 64 bytes that are not a point on P-256.
+        assert!(decode_public_key(&encode_b64(&[4u8; 65])).is_err());
+        let mut zero = [0u8; 65];
+        zero[0] = 4;
+        assert!(decode_public_key(&encode_b64(&zero)).is_err());
+        // A real key passes; one bit flipped in Y does not.
+        let key = DeviceKey::generate().unwrap();
+        assert_eq!(
+            decode_public_key(&key.public_key_b64()).unwrap(),
+            key.public_key()
+        );
+        let mut flipped = key.public_key();
+        flipped[64] ^= 1;
+        assert!(decode_public_key(&encode_b64(&flipped)).is_err());
         assert!(!new_nonce().unwrap().is_empty());
         assert_ne!(new_nonce().unwrap(), new_nonce().unwrap());
     }

@@ -18,9 +18,9 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Request, Response};
 
 use crate::api::{
-    self, ChallengeRequest, ConnectCreate, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest,
-    LinkCancel, LinkRequest, NewItem, Policy, ReleaseRequest, RunRequest, TeamCreate,
-    TeamCreatedRef, TeamKind, TokenRequest, paths,
+    self, CLIENT_PREFIX_HEADER, ChallengeRequest, ConnectCreate, DecisionRequest, EDGE_HEADER,
+    Envelope, JoinRequest, LinkCancel, LinkRequest, NewItem, Policy, ReleaseRequest, RunRequest,
+    TeamCreate, TeamCreatedRef, TeamKind, TokenRequest, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
@@ -32,7 +32,7 @@ use crate::server::auth::{self, Need, Principal};
 use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
-use crate::server::{Core, admin, approvals, decide, devices, host, joins, mcp, sync};
+use crate::server::{Core, admin, approvals, connect, decide, devices, host, joins, mcp, sync};
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
@@ -40,6 +40,8 @@ pub const BUSY_RETRY_AFTER: &str = "2";
 pub const CONNECT_RETRY_AFTER: &str = "3600";
 /// Seconds between two sweeps of timed out runs and expired sessions.
 const MAINTENANCE_SECS: u64 = 5;
+/// Seconds between two sweeps of a Connect team that had no request since its last one.
+const IDLE_MAINTENANCE_SECS: u64 = 60;
 
 /// The endpoints of the API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,7 +405,26 @@ pub fn serve(serving: Serving) {
         agent: AtomicUsize::new(0),
         questions: AtomicUsize::new(0),
     });
-    let mut last_maintenance = Instant::now();
+    // The maintenance of every team runs on its own thread, so many teams never slow the
+    // accept loop.
+    let maintenance = {
+        let (hub, stop) = (hub.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("relay-maintenance".to_string())
+            .spawn(move || {
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if last.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
+                        last = Instant::now();
+                        maintain(&hub, now_unix());
+                    }
+                }
+            })
+    };
+    if maintenance.is_err() {
+        eprintln!("apassy-relay: the maintenance thread cannot start");
+    }
     while !stop.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
@@ -459,22 +480,38 @@ pub fn serve(serving: Serving) {
             Ok(None) => {}
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
-        if last_maintenance.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
-            last_maintenance = Instant::now();
-            for core in hub.all() {
-                if approvals::maintenance(&core, now_unix())
-                    .and_then(|()| devices::maintenance(&core, now_unix()))
-                    .and_then(|()| joins::expire(&core, now_unix()))
-                    .and_then(|()| sync::maintenance(&core, now_unix()))
-                    .and_then(|()| questions::maintenance(&core, now_unix()))
-                    .is_err()
-                {
-                    eprintln!(
-                        "apassy-relay: the maintenance sweep of team {} failed",
-                        core.team
-                    );
-                }
-            }
+    }
+    if let Ok(handle) = maintenance {
+        let _ = handle.join();
+    }
+}
+
+/// One maintenance pass over every team: timed out runs, expired sessions, joins,
+/// links, and questions, old sync heads, and the audit of a Connect team near its file
+/// cap. A Connect team with no request since its last pass is passed over until
+/// `IDLE_MAINTENANCE_SECS` went by: its expiries are read at request time too, so the
+/// pass only writes them down.
+pub fn maintain(hub: &Hub, now: u64) {
+    for core in hub.all() {
+        let last_pass = core.maintained_at.load(Ordering::Relaxed);
+        let idle = core.last_request.load(Ordering::Relaxed) < last_pass
+            && now < last_pass.saturating_add(IDLE_MAINTENANCE_SECS);
+        if core.kind == TeamKind::Connect && idle {
+            continue;
+        }
+        core.maintained_at.store(now, Ordering::Relaxed);
+        if approvals::maintenance(&core, now)
+            .and_then(|()| devices::maintenance(&core, now))
+            .and_then(|()| joins::expire(&core, now))
+            .and_then(|()| sync::maintenance(&core, now))
+            .and_then(|()| questions::maintenance(&core, now))
+            .and_then(|()| crate::server::audit::bound(&core, now))
+            .is_err()
+        {
+            eprintln!(
+                "apassy-relay: the maintenance sweep of team {} failed",
+                core.team
+            );
         }
     }
 }
@@ -643,17 +680,31 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
                 return;
             }
         };
-        let result = dispatch_edge(hub, endpoint, &body, now);
+        // Only the Worker sets the client prefix, and only on `POST /v1/connect`; the
+        // edge secret above proves the request came through it.
+        let prefix = (endpoint == Endpoint::Connect)
+            .then(|| header_value(&request, CLIENT_PREFIX_HEADER))
+            .flatten();
+        let result = dispatch_edge(hub, endpoint, &body, prefix.as_deref(), now);
         match result {
             Ok(result) => respond_ok(request, result),
-            // The daily cap of Connect teams lasts longer than a busy moment.
-            Err(error) if endpoint == Endpoint::Connect && error.code == codes::BUSY => {
+            // The caps of Connect teams last longer than a busy moment: the daily caps an
+            // hour, the count of a client prefix until the next UTC day.
+            Err(error)
+                if endpoint == Endpoint::Connect
+                    && (error.code == codes::BUSY || error.code == codes::RATE_LIMITED) =>
+            {
+                let wait = if error.code == codes::BUSY {
+                    CONNECT_RETRY_AFTER.to_string()
+                } else {
+                    connect::until_tomorrow(now).to_string()
+                };
                 respond_json_with(
                     request,
                     error.status(),
                     &error.to_envelope(),
                     false,
-                    Header::from_bytes(&b"Retry-After"[..], CONNECT_RETRY_AFTER.as_bytes())
+                    Header::from_bytes(&b"Retry-After"[..], wait.as_bytes())
                         .ok()
                         .into_iter()
                         .collect(),
@@ -707,6 +758,20 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             return;
         }
     };
+    // A Connect team has a request rate (section 26); an operator team has none.
+    if let Err((error, wait)) = core.take_request(now) {
+        respond_json_with(
+            request,
+            error.status(),
+            &error.to_envelope(),
+            false,
+            Header::from_bytes(&b"Retry-After"[..], wait.to_string().as_bytes())
+                .ok()
+                .into_iter()
+                .collect(),
+        );
+        return;
+    }
     let _guard = if is_agent_path(&path) {
         match TeamSlotGuard::take(&core, now) {
             Some(guard) => Some(guard),
@@ -902,10 +967,16 @@ fn respond_snapshot(request: Request, snapshot: sync::Snapshot<'_>) -> bool {
     sent
 }
 
-fn dispatch_edge(hub: &Hub, endpoint: Endpoint, body: &[u8], now: u64) -> RelayResult<Value> {
+fn dispatch_edge(
+    hub: &Hub,
+    endpoint: Endpoint,
+    body: &[u8],
+    prefix: Option<&str>,
+    now: u64,
+) -> RelayResult<Value> {
     match endpoint {
         Endpoint::TeamCreate => team_create(hub, body, now),
-        Endpoint::Connect => connect_create(hub, body, now),
+        Endpoint::Connect => connect_create(hub, body, prefix, now),
         Endpoint::Join => {
             let request: JoinRequest = parse_body(body)?;
             let code = request.code.expose();
@@ -964,10 +1035,12 @@ fn team_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
     })
 }
 
-/// `POST /v1/connect` (docs/SPEC.md section 26).
-fn connect_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
+/// `POST /v1/connect` (docs/SPEC.md section 26). Without the Worker's prefix header
+/// the request counts as the prefix `unknown`.
+fn connect_create(hub: &Hub, body: &[u8], prefix: Option<&str>, now: u64) -> RelayResult<Value> {
     let request: ConnectCreate = parse_body(body)?;
-    let (team_id, member_id, device_id) = hub.create_connect_team(&request, now)?;
+    let prefix = prefix.unwrap_or(connect::UNKNOWN_PREFIX);
+    let (team_id, member_id, device_id) = hub.create_connect_team(&request, prefix, now)?;
     to_value(&TeamCreatedRef {
         team_id: &team_id,
         member_id,

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use apassy::broker::packs::RuleSet;
@@ -30,7 +30,7 @@ use crate::server::directory::{
 use crate::server::runkeys::RunKeys;
 use crate::server::sessions::SessionTable;
 use crate::server::store::{Store, db, to_i, to_u};
-use crate::server::{Core, admin, auth};
+use crate::server::{Core, admin, auth, connect};
 use crate::session::{LiveSession, ProxyEvent, SessionSource};
 
 /// A team that was just made, with its owner.
@@ -228,6 +228,9 @@ fn finish_migration(config: &RelayConfig, rows: &[TeamRow]) {
     }
 }
 
+/// The threads that open the team files at start, at most.
+const OPEN_THREADS: usize = 8;
+
 /// The member name of the owner of a Connect team.
 pub const CONNECT_OWNER: &str = "owner";
 
@@ -294,6 +297,10 @@ pub struct Hub {
     sync_transfers: Arc<AtomicUsize>,
     /// The push trigger, shared by every team.
     push: Arc<crate::server::push::Push>,
+    /// The Connect teams of each client prefix today, in memory only (section 26).
+    connect_prefixes: connect::PrefixLimiter,
+    /// The long polls that Connect teams hold, all of them together.
+    connect_polls: Arc<AtomicUsize>,
 }
 
 impl Hub {
@@ -327,24 +334,43 @@ impl Hub {
             lock: Mutex::new(Some(lock)),
             sync_transfers: Arc::new(AtomicUsize::new(0)),
             push,
+            connect_prefixes: connect::PrefixLimiter::default(),
+            connect_polls: Arc::new(AtomicUsize::new(0)),
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
-        for row in rows {
+        for row in &rows {
             if row.legacy {
                 *hub.legacy.write().unwrap_or_else(PoisonError::into_inner) = Some(row.id.clone());
             }
-            // One team that cannot be opened does not stop the others. It stays out of
-            // service until the operator suspends or deletes it.
-            if row.state == TeamState::Active
-                && let Err(error) = hub.open_team(&row)
-            {
-                eprintln!(
-                    "apassy-relay: team {} cannot be opened and is out of service: {} Suspend or delete it with `apassy-relay admin`.",
-                    row.id, error.message
-                );
-            }
         }
+        // Each open derives the key of its file (PBKDF2, 256 000 rounds, about 0.1 s of
+        // one core): with many Connect teams, open them on several threads.
+        let active: Vec<&TeamRow> = rows
+            .iter()
+            .filter(|row| row.state == TeamState::Active)
+            .collect();
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .clamp(1, OPEN_THREADS);
+        let chunk = active.len().div_ceil(threads).max(1);
+        std::thread::scope(|scope| {
+            for part in active.chunks(chunk) {
+                let hub = &hub;
+                scope.spawn(move || {
+                    for row in part {
+                        // One team that cannot be opened does not stop the others. It
+                        // stays out of service until the operator suspends or deletes it.
+                        if let Err(error) = hub.open_team(row) {
+                            eprintln!(
+                                "apassy-relay: team {} cannot be opened and is out of service: {} Suspend or delete it with `apassy-relay admin`.",
+                                row.id, error.message
+                            );
+                        }
+                    }
+                });
+            }
+        });
         Ok(hub)
     }
 
@@ -363,6 +389,11 @@ impl Hub {
         kind: TeamKind,
     ) -> Arc<Core> {
         let store = Arc::new(store);
+        // A Connect team's file has a cap (`TeamLimits::file_bytes`), so one anonymous
+        // team cannot fill the disk.
+        if store.set_max_bytes(team_limits.file_bytes(kind)).is_err() {
+            eprintln!("apassy-relay: the file cap of team {id} could not be set");
+        }
         let audit = Audit::new();
         if end_ready_runs(&store, &audit, crate::now_unix()).is_err() {
             eprintln!(
@@ -392,6 +423,10 @@ impl Hub {
             answer_polls: LongPolls::new(1),
             question_lane: AtomicUsize::new(0),
             push: self.push.clone(),
+            connect_polls: self.connect_polls.clone(),
+            request_rate: connect::RequestRate::default(),
+            last_request: AtomicU64::new(0),
+            maintained_at: AtomicU64::new(0),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
             team_limits: RwLock::new(team_limits),
@@ -530,11 +565,19 @@ impl Hub {
 
     /// `POST /v1/connect` (docs/SPEC.md section 26): a Connect team without a code. An
     /// ordinary team (one file, the member `owner`, its device as the key holder) with
-    /// the `connect` limits. One public key makes at most one Connect team, ever, and the
-    /// relay makes at most `connect_teams_per_day` of them in 24 hours.
+    /// the `connect` limits. The request proves its key with a signature. One public key
+    /// makes at most one Connect team, ever; one client `prefix` (the Worker's
+    /// `X-Apassy-Client-Prefix`) makes at most `connect::per_prefix` of them in a UTC
+    /// day; the relay makes at most `connect_teams_per_day` of them in 24 hours and
+    /// holds at most `connect_teams_max`.
+    ///
+    /// The team file and its key (PBKDF2) are made outside the lock of `relay.db`: the
+    /// checks run once before and again in the transaction that adds the team, and a
+    /// team that loses the race has its file removed.
     pub fn create_connect_team(
         &self,
         request: &ConnectCreate,
+        prefix: &str,
         now: u64,
     ) -> RelayResult<(TeamId, MemberId, DeviceId)> {
         if request.v != 1 {
@@ -544,52 +587,69 @@ impl Hub {
         let device_name = admin::checked_label(&request.device_name, "device name")?;
         let public_key = crate::device::decode_public_key(&request.public_key)
             .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
+        let signature =
+            crate::hostkeys::decode_b64(&request.signature, crate::device::MAX_SIGNATURE_BYTES)
+                .map_err(|_| RelayError::invalid("The signature is not valid."))?;
+        let message = crate::device::connect_message(&self.config.public_url, &request.public_key);
+        if !crate::device::verify(&public_key, &message, &signature) {
+            return Err(RelayError::invalid(
+                "The signature is not one of the device key over the connect message.",
+            ));
+        }
         let key_hash = directory::connect_key_hash(&public_key);
         let per_day = self.config.connect_teams_per_day;
-        let mut made: Option<TeamId> = None;
-        let new = self.directory.store.tx(|tx| {
-            // The key and the cap are checked before any work for the team.
-            directory::check_connect_key(tx, &key_hash, per_day, now)?;
-            let new = make_team_file_with_device(
-                &self.config,
-                &name,
-                CONNECT_OWNER,
-                now,
-                Some((&device_name, &public_key)),
-            )?;
-            made = Some(new.id.clone());
-            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, now)
-                .and_then(|()| directory::insert_connect_key(tx, &key_hash, &new.id, now))
-                .and_then(|()| {
-                    self.directory.audit.write_on(
-                        tx,
-                        now,
-                        RELAY_ACTOR,
-                        "team_created",
-                        None,
-                        &json!({"team_id": new.id, "kind": TeamKind::Connect}),
-                    )
-                })?;
-            Ok(new)
-        });
-        let new = match new {
-            Ok(new) => new,
-            Err(error) => {
-                // The team row did not commit: its file, if made, has no key anywhere.
-                if let Some(id) = made {
-                    let _ = remove_team_file(&self.config, &id);
-                }
-                if error.code == codes::BUSY {
-                    self.refusal(
-                        now,
-                        "connect",
-                        "connect_refused",
-                        &json!({"reason": "busy"}),
-                    );
-                }
-                return Err(error);
-            }
+        let max = self.config.connect_teams_max;
+        // In memory only: the count of this client prefix today.
+        let ticket = self
+            .connect_prefixes
+            .reserve(prefix, per_day, now)
+            .inspect_err(|error| self.connect_refused(now, error, "prefix"))?;
+        let check = |conn: &rusqlite::Connection| -> Result<(), (RelayError, &'static str)> {
+            directory::check_connect_key(conn, &key_hash, per_day, now).map_err(|e| (e, "busy"))?;
+            directory::check_connect_room(conn, max).map_err(|e| (e, "full"))
         };
+        // Before any work for the team.
+        if let Err((error, reason)) = self.directory.store.with(|conn| Ok(check(conn)))? {
+            self.connect_refused(now, &error, reason);
+            return Err(error);
+        }
+        let new = make_team_file_with_device(
+            &self.config,
+            &name,
+            CONNECT_OWNER,
+            now,
+            Some((&device_name, &public_key)),
+        )?;
+        let mut refused: Option<&'static str> = None;
+        let added = self.directory.store.tx(|tx| {
+            // Again, under the lock: another request may have used the key or the room.
+            check(tx).map_err(|(error, reason)| {
+                refused = Some(reason);
+                error
+            })?;
+            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, now)?;
+            directory::insert_connect_key(tx, &key_hash, &new.id, now)?;
+            self.directory.audit.write_on(
+                tx,
+                now,
+                RELAY_ACTOR,
+                "team_created",
+                None,
+                &json!({"team_id": new.id, "kind": TeamKind::Connect}),
+            )?;
+            Ok(())
+        });
+        if let Err(error) = added {
+            // The team row did not commit: its file has no key anywhere.
+            let id = new.id.clone();
+            drop(new);
+            let _ = remove_team_file(&self.config, &id);
+            if let Some(reason) = refused {
+                self.connect_refused(now, &error, reason);
+            }
+            return Err(error);
+        }
+        ticket.keep();
         let NewTeam {
             id,
             owner_id,
@@ -607,6 +667,26 @@ impl Hub {
         })?;
         self.register(id.clone(), store, TeamLimits::connect(), TeamKind::Connect);
         Ok((id, owner_id, device_id))
+    }
+
+    /// A `connect_refused` row in the relay audit for a refusal of the relay's own caps
+    /// (503 `busy`, 429 `rate_limited`), at most one per reason and ten seconds. It names
+    /// no key, no team, and nothing of the client.
+    fn connect_refused(&self, now: u64, error: &RelayError, reason: &'static str) {
+        let reason = match (error.code, reason) {
+            (codes::RATE_LIMITED, _) => "rate_limited",
+            (codes::BUSY, "prefix") => "prefixes_full",
+            (codes::BUSY, "full") => "full",
+            (codes::BUSY, _) => "busy",
+            _ => return,
+        };
+        let kind = match reason {
+            "rate_limited" => "connect_rate_limited",
+            "prefixes_full" => "connect_prefixes_full",
+            "full" => "connect_full",
+            _ => "connect_busy",
+        };
+        self.refusal(now, kind, "connect_refused", &json!({"reason": reason}));
     }
 
     /// Suspends a team: its tokens stop at the next request, its sessions and waiting
@@ -807,12 +887,14 @@ impl Hub {
     }
 
     /// `admin connect-sweep` (docs/SPEC.md section 26.5): suspends each active Connect
-    /// team with at most one live device whose newest sign-in (or, without one, the
-    /// device's creation) is `idle_days` old, with the reason `idle`; deletes each Connect
-    /// team that a sweep suspended `delete_days` ago or earlier. A team that the operator
-    /// suspended, or that a sweep suspended and the operator resumed, is never deleted
-    /// here. A team suspended in this run is deleted in a later one. `dry_run` changes
-    /// nothing and names the same teams.
+    /// team whose newest sign-in of any live device (or, without one, the newest device's
+    /// creation) is `idle_days` old, with the reason `idle`, however many devices it has;
+    /// deletes each Connect team that a sweep suspended `delete_days` ago or earlier. A
+    /// team whose limits are not `TeamLimits::connect()` (a plan lifted them) or that
+    /// has a vault sync head is never swept. A team that the operator suspended, or that
+    /// a sweep suspended and the operator resumed, is never deleted here. A team
+    /// suspended in this run is deleted in a later one. `dry_run` changes nothing and
+    /// names the same teams.
     pub fn connect_sweep(
         &self,
         idle_days: u64,
@@ -836,7 +918,8 @@ impl Hub {
             failed: Vec::new(),
         };
         for row in self.directory.teams()? {
-            if row.kind != TeamKind::Connect {
+            // A plan's team (lifted limits) is the operator's, not the sweep's.
+            if row.kind != TeamKind::Connect || row.limits != TeamLimits::connect() {
                 continue;
             }
             let done = match row.state {
@@ -859,16 +942,17 @@ impl Hub {
                         continue;
                     };
                     let idle = core.store.with(|conn| {
-                        let (devices, last): (i64, Option<i64>) = conn
+                        let (last, heads): (Option<i64>, i64) = conn
                             .query_row(
-                                "SELECT count(*), max(coalesce(d.last_seen_at, d.created_at)) \
+                                "SELECT (SELECT max(coalesce(d.last_seen_at, d.created_at)) \
                                  FROM device d JOIN member m ON m.id = d.member_id \
-                                 WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL",
+                                 WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL), \
+                                 (SELECT count(*) FROM sync_head)",
                                 [],
                                 |r| Ok((r.get(0)?, r.get(1)?)),
                             )
                             .map_err(db)?;
-                        Ok(devices <= 1 && last.map_or(row.created_at, to_u) <= idle_before)
+                        Ok(heads == 0 && last.map_or(row.created_at, to_u) <= idle_before)
                     });
                     match idle {
                         Ok(false) => continue,
@@ -949,6 +1033,8 @@ impl Hub {
                 .team_limits
                 .write()
                 .unwrap_or_else(PoisonError::into_inner) = limits;
+            // The file cap follows the limits (a plan that lifts them lifts it).
+            core.store.set_max_bytes(limits.file_bytes(core.kind))?;
         }
         Ok(limits)
     }

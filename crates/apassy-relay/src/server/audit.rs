@@ -4,7 +4,8 @@
 //! that live sessions hold and every placeholder become `[apassy:<ENV_NAME>]`, and
 //! every token form becomes `[apassy:token]`. The relay holds an item value only
 //! while a session lives, so it masks the value only for that time. No endpoint
-//! changes or deletes a row.
+//! changes or deletes a row. The one exception is `bound`: a Connect team's file has a
+//! cap, and near it the oldest quarter of its audit goes (docs/SPEC.md section 26).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -232,6 +233,53 @@ impl Audit {
         }
         let _ = self.write(store, now, EDGE_ACTOR, action, None, detail);
     }
+}
+
+/// The share of a capped file in use above which `bound` drops old audit rows: 3/4.
+const BOUND_NUMERATOR: u64 = 3;
+const BOUND_DENOMINATOR: u64 = 4;
+/// `bound` leaves an audit of fewer rows alone.
+const BOUND_MIN_ROWS: u64 = 100;
+
+/// Keeps the audit of a team whose file has a cap (a Connect team,
+/// `TeamLimits::file_bytes`) from filling it: when more than 3/4 of the cap is in use,
+/// the oldest quarter of the audit rows goes, and one `audit_trimmed` row says how many.
+/// The freed pages are reused. A team without a cap is never touched.
+pub fn bound(core: &crate::server::Core, now: u64) -> RelayResult<()> {
+    if core.limits().file_bytes(core.kind).is_none() {
+        return Ok(());
+    }
+    let (used, max) = core.store.pages()?;
+    if used.saturating_mul(BOUND_DENOMINATOR) <= max.saturating_mul(BOUND_NUMERATOR) {
+        return Ok(());
+    }
+    core.store.tx(|tx| {
+        let rows: i64 = tx
+            .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+            .map_err(db)?;
+        let drop = to_u(rows) / 4;
+        if to_u(rows) < BOUND_MIN_ROWS {
+            return Ok(());
+        }
+        let last: i64 = tx
+            .query_row(
+                "SELECT id FROM audit ORDER BY id LIMIT 1 OFFSET ?1",
+                params![to_i(drop - 1)],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        tx.execute("DELETE FROM audit WHERE id <= ?1", params![last])
+            .map_err(db)?;
+        core.audit.write_on(
+            tx,
+            now,
+            RELAY_ACTOR,
+            "audit_trimmed",
+            None,
+            &serde_json::json!({"rows": drop, "through_id": last}),
+        )?;
+        Ok(())
+    })
 }
 
 /// `GET /v1/audit`: rows with an id above `after`, ascending.

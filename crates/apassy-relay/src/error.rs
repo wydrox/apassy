@@ -84,6 +84,9 @@ pub mod codes {
     pub const PLAN_REQUIRED: &str = "plan_required";
     /// `POST /v1/connect` with a public key that made a Connect team before.
     pub const CONNECT_KEY_USED: &str = "connect_key_used";
+    /// Too many requests: `POST /v1/connect` from one client prefix in a day, or a
+    /// Connect team over its requests per minute. `Retry-After` says when to try again.
+    pub const RATE_LIMITED: &str = "rate_limited";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -125,6 +128,7 @@ pub fn status_of(code: &str) -> u16 {
         | CONNECT_KEY_USED => 409,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
+        RATE_LIMITED => 429,
         NOT_SUPPORTED => 501,
         UPSTREAM_FAILED | ENCODED_RESPONSE => 502,
         BUSY => 503,
@@ -228,6 +232,7 @@ mod tests {
             RelayError::new(codes::PRECONDITION_FAILED, "x").status(),
             412
         );
+        assert_eq!(RelayError::new(codes::RATE_LIMITED, "x").status(), 429);
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

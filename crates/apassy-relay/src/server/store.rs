@@ -28,6 +28,8 @@ use crate::secret::SecretString;
 /// questions, their answers, and the push tokens (docs/SPEC.md section 25).
 pub const SCHEMA_VERSION: i64 = 5;
 
+/// `max_page_count` without a cap: SQLite clamps it to its own largest value.
+const NO_PAGE_CAP: u64 = 4_294_967_294;
 const KDF_ITER: i64 = 256_000;
 const PAGE_SIZE: i64 = 4096;
 const HMAC: &str = "HMAC_SHA512";
@@ -215,8 +217,17 @@ CREATE TABLE audit (
 PRAGMA user_version = 2;
 ";
 
-/// The one storage error. No SQL text, no value.
-pub fn db(_error: rusqlite::Error) -> RelayError {
+/// The one storage error. No SQL text, no value. A file at its page cap
+/// (`Store::set_max_bytes`, a Connect team) is 403 `team_limit`: the team's storage is
+/// full, and nothing was written.
+pub fn db(error: rusqlite::Error) -> RelayError {
+    if matches!(
+        &error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::DiskFull
+    ) {
+        return RelayError::new(codes::TEAM_LIMIT, "The team's storage limit is reached.");
+    }
     RelayError::internal("The team vault failed.")
 }
 
@@ -423,6 +434,35 @@ impl Store {
     pub fn copy_to(&self, source: &Path, dest: &Path) -> RelayResult<u64> {
         let _conn = self.lock();
         copy_private(source, dest)
+    }
+
+    /// Caps the file at `bytes` (`PRAGMA max_page_count`, rounded up to whole pages);
+    /// `None` lifts the cap. A write past it fails with `SQLITE_FULL`, which `db` turns
+    /// into 403 `team_limit`. SQLite never sets the cap below the pages the file has.
+    /// The cap lives on the connection, so it is set again after each open.
+    pub fn set_max_bytes(&self, bytes: Option<u64>) -> RelayResult<()> {
+        let pages = bytes.map_or(NO_PAGE_CAP, |bytes| {
+            bytes.div_ceil(PAGE_SIZE as u64).clamp(1, NO_PAGE_CAP)
+        });
+        self.with(|conn| {
+            // The pragma answers the cap it set.
+            conn.pragma_update_and_check(None, "max_page_count", to_i(pages), |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(drop)
+            .map_err(db)
+        })
+    }
+
+    /// The pages in use (`page_count` without `freelist_count`) and the cap
+    /// (`max_page_count`).
+    pub fn pages(&self) -> RelayResult<(u64, u64)> {
+        self.with(|conn| {
+            let count = pragma_i64(conn, "page_count")?;
+            let free = pragma_i64(conn, "freelist_count")?;
+            let max = pragma_i64(conn, "max_page_count")?;
+            Ok((to_u(count.saturating_sub(free)), to_u(max)))
+        })
     }
 
     /// `PRAGMA user_version` of the file.

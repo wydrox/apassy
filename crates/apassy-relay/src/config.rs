@@ -16,6 +16,7 @@
 //! | `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` | The secret the relay sends to the push route as `X-Apassy-Push` (the Worker's `PUSH_SECRET`); at least 32 bytes | none: push is off |
 //! | `APASSY_RELAY_QUESTIONS_TO_APPROVERS` | `1`: take questions with `to: "approvers"`; `0`: refuse them with 403 `not_routed` (until shared vaults) | `0` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `200` |
+//! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `1000` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -39,6 +40,11 @@ pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 /// Connect teams of the whole relay in 24 hours (docs/SPEC.md section 26).
 pub const DEFAULT_CONNECT_TEAMS_PER_DAY: u64 = 200;
 pub const MAX_CONNECT_TEAMS_PER_DAY: u64 = 100_000;
+/// Connect teams the relay holds at once, active or suspended (docs/SPEC.md section 26).
+/// Each costs one open file and its connection, and up to `TeamLimits::file_bytes` of
+/// disk, so this bounds both.
+pub const DEFAULT_CONNECT_TEAMS_MAX: u64 = 1000;
+pub const MAX_CONNECT_TEAMS_MAX: u64 = 1_000_000;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
 /// The folder of the team files in the data directory.
@@ -151,6 +157,10 @@ pub struct Limits {
     /// The question long polls of one team at once, out of `question_long_polls`, so
     /// one team cannot fill the lane. A poll over this is answered at once.
     pub question_long_polls_per_team: usize,
+    /// The long polls that Connect teams hold at once, all of them together, in any lane
+    /// (docs/SPEC.md section 26), so anonymous teams cannot fill the member lane or the
+    /// question lane. A poll over this is answered at once, as with `wait=0`.
+    pub connect_long_polls: usize,
 }
 
 impl Default for Limits {
@@ -163,6 +173,7 @@ impl Default for Limits {
             sync_transfers_total: 16,
             question_long_polls: 128,
             question_long_polls_per_team: 32,
+            connect_long_polls: 64,
         }
     }
 }
@@ -192,6 +203,9 @@ pub struct RelayConfig {
     /// Connect teams the relay makes in any 24 hours (`APASSY_RELAY_CONNECT_TEAMS_PER_DAY`).
     /// Over it, `POST /v1/connect` is 503 `busy`; `0` turns Connect off.
     pub connect_teams_per_day: u64,
+    /// Connect teams the relay holds at once, active or suspended
+    /// (`APASSY_RELAY_CONNECT_TEAMS_MAX`). At it, `POST /v1/connect` is 503 `busy`.
+    pub connect_teams_max: u64,
 }
 
 /// Where and how the relay asks the Worker to send pushes.
@@ -283,6 +297,13 @@ impl RelayConfig {
             0,
             MAX_CONNECT_TEAMS_PER_DAY,
         )?;
+        let connect_teams_max = number(
+            &lookup,
+            "APASSY_RELAY_CONNECT_TEAMS_MAX",
+            DEFAULT_CONNECT_TEAMS_MAX,
+            0,
+            MAX_CONNECT_TEAMS_MAX,
+        )?;
         let mut upstream = UpstreamOptions::default();
         if let Some(text) = lookup("APASSY_RELAY_BLOCKED_ADDRESSES") {
             for part in text.split(',').filter(|part| !part.trim().is_empty()) {
@@ -317,6 +338,7 @@ impl RelayConfig {
                 }
             },
             connect_teams_per_day,
+            connect_teams_max,
         })
     }
 }
@@ -481,6 +503,7 @@ mod tests {
         assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert_eq!(config.edge_secret.expose(), EDGE);
         assert_eq!(config.connect_teams_per_day, DEFAULT_CONNECT_TEAMS_PER_DAY);
+        assert_eq!(config.connect_teams_max, DEFAULT_CONNECT_TEAMS_MAX);
     }
 
     #[test]
@@ -499,6 +522,24 @@ mod tests {
         assert!(with("100001").is_err());
         assert!(with("-1").is_err());
         assert!(with("many").is_err());
+    }
+
+    #[test]
+    fn connect_teams_max_is_0_to_1000000() {
+        let with = |value: &str| {
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                ("APASSY_RELAY_CONNECT_TEAMS_MAX", value),
+            ]))
+            .map(|config| config.connect_teams_max)
+        };
+        assert_eq!(with("0").unwrap(), 0);
+        assert_eq!(with("1000000").unwrap(), 1_000_000);
+        assert!(with("1000001").is_err());
+        assert!(with("-1").is_err());
+        assert!(with("lots").is_err());
     }
 
     #[test]

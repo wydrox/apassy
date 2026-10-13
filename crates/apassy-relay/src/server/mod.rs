@@ -13,6 +13,7 @@ pub mod admin;
 pub mod approvals;
 pub mod audit;
 pub mod auth;
+pub mod connect;
 pub mod decide;
 pub mod devices;
 pub mod directory;
@@ -33,7 +34,7 @@ pub mod sync;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
@@ -101,6 +102,15 @@ pub struct Core {
     pub question_lane: AtomicUsize,
     /// The push trigger of the relay, shared by every `Core`.
     pub push: Arc<push::Push>,
+    /// The long polls that all Connect teams hold (`Limits::connect_long_polls`). One
+    /// counter for the relay, shared by every `Core`.
+    pub connect_polls: Arc<AtomicUsize>,
+    /// The requests of this team in the current minute (a Connect team only).
+    pub request_rate: connect::RequestRate,
+    /// The time of the last request that named this team, and of its last maintenance
+    /// pass: an idle Connect team is maintained less often (`http::maintain`).
+    pub last_request: AtomicU64,
+    pub maintained_at: AtomicU64,
     stop: Arc<AtomicBool>,
     /// Set when the team is suspended or the relay stops.
     closed: AtomicBool,
@@ -141,6 +151,34 @@ impl Core {
             codes::TEAM_LIMIT,
             format!("The team's {kind} limit is reached."),
         ))
+    }
+
+    /// A seat for one long poll: always for an operator team; for a Connect team one of
+    /// `Limits::connect_long_polls`, or `None` when they are all held (the poll then
+    /// answers at once).
+    pub fn poll_seat(&self) -> Option<connect::PollSeat<'_>> {
+        if self.kind != crate::api::TeamKind::Connect {
+            return Some(connect::PollSeat::free());
+        }
+        connect::PollSeat::take(&self.connect_polls, self.config.limits.connect_long_polls)
+    }
+
+    /// Counts one authenticated request of a Connect team: 429 `rate_limited` over
+    /// `connect::REQUESTS_PER_MINUTE` for each member its limits allow, with the seconds
+    /// to wait, and a `limit_reached` row at most once per ten seconds. An operator team
+    /// is not counted.
+    pub fn take_request(&self, now: u64) -> Result<(), (RelayError, u64)> {
+        self.last_request.store(now, Ordering::Relaxed);
+        if self.kind != crate::api::TeamKind::Connect {
+            return Ok(());
+        }
+        let per_minute = connect::REQUESTS_PER_MINUTE.saturating_mul(self.limits().members.max(1));
+        self.request_rate.take(per_minute, now).map_err(|wait| {
+            let _ = self
+                .store
+                .with(|conn| self.limit_error_on(conn, now, "requests_per_minute"));
+            (connect::requests_limited(), wait)
+        })
     }
 
     /// True after `RunningRelay::stop`, or once the team is suspended.

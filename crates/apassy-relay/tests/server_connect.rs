@@ -6,7 +6,8 @@
 #[path = "common/relay.rs"]
 mod relay;
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use apassy_relay::config::{RelayConfig, UpstreamOptions};
 use apassy_relay::device::{self, DeviceKey};
@@ -98,31 +99,58 @@ fn send(
     }
 }
 
-fn connect_body(team: &str, device_name: &str, key: &DeviceKey) -> Value {
-    json!({"v": 1, "team": team, "device_name": device_name, "public_key": key.public_key_b64()})
+/// The body of `POST /v1/connect`, signed by `key` for this relay.
+fn connect_body(relay: &TestRelay, team: &str, device_name: &str, key: &DeviceKey) -> Value {
+    let public_key = key.public_key_b64();
+    let signature = key
+        .sign(&device::connect_message(
+            &relay.config.public_url,
+            &public_key,
+        ))
+        .unwrap();
+    json!({"v": 1, "team": team, "device_name": device_name, "public_key": public_key,
+        "signature": encode_b64(&signature)})
 }
 
-/// `POST /v1/connect` with a body, as the Worker forwards it.
+/// A new client prefix for each call, so the per-prefix count of the relay does not
+/// stop tests that make many teams.
+fn next_prefix() -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    format!("2001:db8:{:x}::/48", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// `POST /v1/connect` with a body, as the Worker forwards it: from a new client prefix.
 fn post_connect(relay: &TestRelay, body: &Value) -> Answer {
+    post_connect_from(relay, body, Some(&next_prefix()))
+}
+
+/// `POST /v1/connect` from `prefix` (`X-Apassy-Client-Prefix`), or without the header.
+fn post_connect_from(relay: &TestRelay, body: &Value, prefix: Option<&str>) -> Answer {
+    let mut headers = vec![("Content-Type", "application/json".to_string())];
+    if let Some(prefix) = prefix {
+        headers.push(("X-Apassy-Client-Prefix", prefix.to_string()));
+    }
     send(
         &relay.url,
         "POST",
         "/v1/connect",
         None,
-        &[("Content-Type", "application/json".to_string())],
+        &headers,
         serde_json::to_vec(body).unwrap(),
     )
+}
+
+/// `POST /v1/connect` that must answer 200. Returns `result`.
+fn connect_ok(relay: &TestRelay, body: &Value) -> Value {
+    let answer = post_connect(relay, body);
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    answer.body["result"].clone()
 }
 
 /// A new Connect team of a fresh key. Returns its id and its signed-in Mac.
 fn connect(relay: &TestRelay, name: &str) -> (TeamId, Device) {
     let key = DeviceKey::generate().unwrap();
-    let made = relay.ok(
-        "POST",
-        "/v1/connect",
-        "",
-        Some(&connect_body(name, "Rafal's Mac", &key)),
-    );
+    let made = connect_ok(relay, &connect_body(relay, name, "Rafal's Mac", &key));
     let team: TeamId = serde_json::from_value(made["team_id"].clone()).unwrap();
     let token = relay.sign_in(&team, &key);
     let id = made["device_id"].as_u64().unwrap();
@@ -171,6 +199,18 @@ fn team_info(relay: &TestRelay, team: &TeamId) -> Value {
         .expect("team listed")
 }
 
+/// The team ids of a sweep report list, sorted.
+fn sorted(list: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
 fn sweep(relay: &TestRelay, dry_run: bool) -> Value {
     relay
         .operator(Command::ConnectSweep {
@@ -178,6 +218,20 @@ fn sweep(relay: &TestRelay, dry_run: bool) -> Value {
             delete_days: 30,
             dry_run,
         })
+        .unwrap()
+}
+
+/// The first column of each row of a query on `relay.db`, as text. The relay must be
+/// stopped.
+fn read_directory(config: &RelayConfig, sql: &str) -> Vec<String> {
+    let conn = rusqlite::Connection::open(config.directory_path()).unwrap();
+    conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+        .unwrap();
+    conn.prepare(sql)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap()
 }
 
@@ -193,7 +247,10 @@ fn edit_directory(config: &RelayConfig, sql: &str) {
 fn connect_makes_a_codeless_team_with_its_device_as_owner() {
     let relay = start(UpstreamOptions::default());
     let key = DeviceKey::generate().unwrap();
-    let answer = post_connect(&relay, &connect_body(" Rafal ", "Rafal's Mac", &key));
+    let answer = post_connect(
+        &relay,
+        &connect_body(&relay, " Rafal ", "Rafal's Mac", &key),
+    );
     assert_eq!(answer.status, 200, "{}", answer.body);
     let made = &answer.body["result"];
     let mut fields: Vec<&str> = made
@@ -294,7 +351,7 @@ fn connect_makes_a_codeless_team_with_its_device_as_owner() {
 fn connect_refuses_bad_bodies_and_bearers_and_lists_nothing() {
     let relay = start(UpstreamOptions::default());
     let key = DeviceKey::generate().unwrap();
-    let good = connect_body("Rafal", "Mac", &key);
+    let good = connect_body(&relay, "Rafal", "Mac", &key);
     let mut cases = Vec::new();
     for (field, value) in [
         ("v", json!(2)),
@@ -304,6 +361,11 @@ fn connect_refuses_bad_bodies_and_bearers_and_lists_nothing() {
         ("device_name", json!("bad\nname")),
         ("public_key", json!("not a key")),
         ("public_key", json!(encode_b64(&[3; 65]))),
+        // 0x04 and 64 bytes that are not a point on P-256.
+        ("public_key", json!(encode_b64(&[4; 65]))),
+        ("signature", json!("")),
+        ("signature", json!("not base64!")),
+        ("signature", json!(encode_b64(&[0x30; 70]))),
     ] {
         let mut body = good.clone();
         body[field] = value;
@@ -312,9 +374,11 @@ fn connect_refuses_bad_bodies_and_bearers_and_lists_nothing() {
     let mut unknown = good.clone();
     unknown["code"] = json!("apassy_tcd_0000");
     cases.push(unknown);
-    let mut missing = good.clone();
-    missing.as_object_mut().unwrap().remove("v");
-    cases.push(missing);
+    for field in ["v", "signature"] {
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        cases.push(missing);
+    }
     for body in cases {
         let answer = post_connect(&relay, &body);
         assert_eq!(answer.status, 400, "{body}: {}", answer.body);
@@ -328,7 +392,7 @@ fn connect_refuses_bad_bodies_and_bearers_and_lists_nothing() {
     );
     // The refused bodies used the key up nowhere, and made no team.
     assert_eq!(teams(&relay).len(), 1);
-    relay.ok("POST", "/v1/connect", "", Some(&good));
+    connect_ok(&relay, &good);
     // No route lists or reads teams.
     for (method, path) in [
         ("GET", "/v1/connect"),
@@ -346,25 +410,20 @@ fn connect_refuses_bad_bodies_and_bearers_and_lists_nothing() {
 fn one_public_key_makes_one_connect_team_ever() {
     let relay = start(UpstreamOptions::default());
     let key = DeviceKey::generate().unwrap();
-    let body = connect_body("Rafal", "Mac", &key);
-    let made = relay.ok("POST", "/v1/connect", "", Some(&body));
+    let body = connect_body(&relay, "Rafal", "Mac", &key);
+    let made = connect_ok(&relay, &body);
     let team = made["team_id"].as_str().unwrap().to_string();
     let again = post_connect(&relay, &body);
     assert_eq!(again.status, 409);
     assert_eq!(again.code(), "connect_key_used");
     assert!(!again.body.to_string().contains(&team));
     // Another name or device name does not help.
-    let renamed = post_connect(&relay, &connect_body("Other", "Other Mac", &key));
+    let renamed = post_connect(&relay, &connect_body(&relay, "Other", "Other Mac", &key));
     assert_eq!((renamed.status, renamed.code()), (409, "connect_key_used"));
     // The answer is the same for every used key: it names no team.
     let other = DeviceKey::generate().unwrap();
-    relay.ok(
-        "POST",
-        "/v1/connect",
-        "",
-        Some(&connect_body("B", "Mac", &other)),
-    );
-    let again_other = post_connect(&relay, &connect_body("B", "Mac", &other));
+    connect_ok(&relay, &connect_body(&relay, "B", "Mac", &other));
+    let again_other = post_connect(&relay, &connect_body(&relay, "B", "Mac", &other));
     assert_eq!(again_other.body, again.body);
     // A key of an operator team is not a Connect key; but once used here it stays used,
     // even after its team is suspended and deleted.
@@ -378,6 +437,17 @@ fn one_public_key_makes_one_connect_team_ever() {
     assert!(teams(&relay).iter().all(|info| info["id"] != team.as_str()));
     let after = post_connect(&relay, &body);
     assert_eq!((after.status, after.code()), (409, "connect_key_used"));
+    // The used key no longer names its deleted team; the live team's key still does.
+    let mut relay = relay;
+    relay.edit_offline(|config| {
+        let links = read_directory(
+            config,
+            "SELECT coalesce(team_id, '-') FROM connect_key ORDER BY rowid",
+        );
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0], "-");
+        assert!(links[1].starts_with("t_"));
+    });
     let (status, _) = relay.call(
         "POST",
         "/v1/auth/challenge",
@@ -394,21 +464,11 @@ fn the_relay_makes_at_most_connect_teams_per_day() {
         UpstreamOptions::default(),
     );
     let first = DeviceKey::generate().unwrap();
-    relay.ok(
-        "POST",
-        "/v1/connect",
-        "",
-        Some(&connect_body("A", "Mac", &first)),
-    );
+    connect_ok(&relay, &connect_body(&relay, "A", "Mac", &first));
     let second = DeviceKey::generate().unwrap();
-    relay.ok(
-        "POST",
-        "/v1/connect",
-        "",
-        Some(&connect_body("B", "Mac", &second)),
-    );
+    connect_ok(&relay, &connect_body(&relay, "B", "Mac", &second));
     let third = DeviceKey::generate().unwrap();
-    let busy = post_connect(&relay, &connect_body("C", "Mac", &third));
+    let busy = post_connect(&relay, &connect_body(&relay, "C", "Mac", &third));
     assert_eq!((busy.status, busy.code()), (503, "busy"));
     assert_eq!(busy.header("Retry-After"), Some("3600"));
     assert_eq!(
@@ -419,7 +479,7 @@ fn the_relay_makes_at_most_connect_teams_per_day() {
         1
     );
     // A used key still gets its 409, and no file was made for the refused team.
-    let used = post_connect(&relay, &connect_body("A", "Mac", &first));
+    let used = post_connect(&relay, &connect_body(&relay, "A", "Mac", &first));
     assert_eq!((used.status, used.code()), (409, "connect_key_used"));
     assert_eq!(teams(&relay).len(), 3);
     let files = std::fs::read_dir(relay.config.teams_dir())
@@ -455,14 +515,9 @@ fn the_relay_makes_at_most_connect_teams_per_day() {
             ),
         );
     });
-    relay.ok(
-        "POST",
-        "/v1/connect",
-        "",
-        Some(&connect_body("C", "Mac", &third)),
-    );
+    connect_ok(&relay, &connect_body(&relay, "C", "Mac", &third));
     let fourth = DeviceKey::generate().unwrap();
-    let busy = post_connect(&relay, &connect_body("D", "Mac", &fourth));
+    let busy = post_connect(&relay, &connect_body(&relay, "D", "Mac", &fourth));
     assert_eq!((busy.status, busy.code()), (503, "busy"));
 }
 
@@ -473,7 +528,7 @@ fn connect_off_when_the_cap_is_zero() {
         UpstreamOptions::default(),
     );
     let key = DeviceKey::generate().unwrap();
-    let answer = post_connect(&relay, &connect_body("A", "Mac", &key));
+    let answer = post_connect(&relay, &connect_body(&relay, "A", "Mac", &key));
     assert_eq!((answer.status, answer.code()), (503, "busy"));
     assert_eq!(teams(&relay).len(), 1);
     // Operator teams still work.
@@ -575,62 +630,84 @@ fn a_snapshot_push_to_a_connect_team_is_plan_required() {
 #[test]
 fn connect_limits_one_member_no_items_no_agents() {
     let relay = start(UpstreamOptions::default());
-    let (_, mac) = connect(&relay, "Rafal");
-    // An invite can be made, but a join is refused: one member.
-    let invite = relay.ok(
-        "POST",
-        "/v1/invites",
-        &mac.token,
-        Some(&json!({"role": "member"})),
-    );
-    let key = DeviceKey::generate().unwrap();
-    let (status, value) = relay.call(
-        "POST",
-        "/v1/join",
-        None,
-        Some(
-            &json!({"code": invite["secret"], "name": "guest", "device_name": "Phone",
-            "public_key": key.public_key_b64()}),
+    let (team, mac) = connect(&relay, "Rafal");
+    // One member: no invite. No items: no collection, policy, or grant. No agents.
+    for (method, path, body, limit) in [
+        ("POST", "/v1/invites", json!({"role": "member"}), "members"),
+        ("POST", "/v1/collections", json!({"name": "Work"}), "items"),
+        (
+            "PUT",
+            "/v1/collections/1/policy",
+            json!({"mode": "ask"}),
+            "items",
         ),
-    );
+        (
+            "POST",
+            "/v1/grants",
+            json!({"collection_id": 1, "member_id": 1}),
+            "items",
+        ),
+        ("POST", "/v1/agents", json!({"name": "claude"}), "agents"),
+    ] {
+        for _ in 0..3 {
+            let (status, value) = relay.call(method, path, Some(&mac.token), Some(&body));
+            assert_eq!(
+                (status, value["error"]["code"].as_str()),
+                (403, Some("team_limit")),
+                "{method} {path}: {value}"
+            );
+            assert!(
+                value["error"]["message"].as_str().unwrap().contains(limit),
+                "{value}"
+            );
+        }
+    }
+    // Nothing was written but one `limit_reached` row per limit (ten seconds apart).
+    let conn = open_team_file(&relay.config, &team);
+    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT count(*) FROM invite"), 0);
+    assert_eq!(count("SELECT count(*) FROM collection"), 0);
+    assert_eq!(count("SELECT count(*) FROM access_grant"), 0);
+    assert_eq!(count("SELECT count(*) FROM agent"), 0);
     assert_eq!(
-        (status, value["error"]["code"].as_str()),
-        (403, Some("team_limit"))
+        count("SELECT count(*) FROM audit WHERE action = 'limit_reached'"),
+        3
     );
-    // No items and no agents: no runs and no proxy session.
-    let collection = relay.ok(
+    let others: Vec<String> = conn
+        .prepare(
+            "SELECT action FROM audit WHERE action NOT IN \
+             ('limit_reached', 'team_created', 'device_added', 'device_signed_in', \
+             'host_bootstrap_ended')",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(others, Vec::<String>::new());
+    drop(conn);
+    // A plan that gives the team items and members lifts the refusals.
+    relay
+        .operator(Command::Limits {
+            team: team.clone(),
+            set: Some(TeamLimitsUpdate {
+                items: Some(10),
+                members: Some(3),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    relay.ok(
         "POST",
         "/v1/collections",
         &mac.token,
         Some(&json!({"name": "Work"})),
     );
-    let sealed = relay::seal("sk_test_value");
-    let (status, value) = relay.call(
+    relay.ok(
         "POST",
-        "/v1/items",
-        Some(&mac.token),
-        Some(&relay::item_request(
-            collection["id"].as_u64().unwrap(),
-            "OPS_TOKEN",
-            &sealed,
-            json!({"hosts": ["api.example.com"], "environment": "staging"}),
-        )),
-    );
-    assert_eq!(
-        (status, value["error"]["code"].as_str()),
-        (403, Some("team_limit")),
-        "{value}"
-    );
-    let (status, value) = relay.call(
-        "POST",
-        "/v1/agents",
-        Some(&mac.token),
-        Some(&json!({"name": "claude"})),
-    );
-    assert_eq!(
-        (status, value["error"]["code"].as_str()),
-        (403, Some("team_limit")),
-        "{value}"
+        "/v1/invites",
+        &mac.token,
+        Some(&json!({"role": "member"})),
     );
 }
 
@@ -817,12 +894,7 @@ fn operator_teams_are_unchanged() {
         "operator"
     );
     // The same key can still make a Connect team: operator keys are not Connect keys.
-    relay.ok(
-        "POST",
-        "/v1/connect",
-        "",
-        Some(&connect_body("Mine", "Mac", &key)),
-    );
+    connect_ok(&relay, &connect_body(&relay, "Mine", "Mac", &key));
     // A snapshot push of an operator team still passes.
     let mac = Device {
         id: made["device_id"].as_u64().unwrap(),
@@ -923,9 +995,10 @@ fn the_directory_moves_from_1002_to_1003_and_keeps_its_teams() {
 }
 
 #[test]
-fn the_idle_sweep_suspends_then_deletes_lone_idle_connect_teams() {
+fn the_idle_sweep_suspends_then_deletes_idle_connect_teams() {
     let mut relay = start(UpstreamOptions::default());
     let (lone, lone_mac) = connect(&relay, "Lone");
+    // Two devices do not keep an idle team: only a sign-in does.
     let (pair, pair_mac) = connect(&relay, "Pair");
     add_device(&relay, &pair_mac, "iPhone");
     let (fresh, _) = connect(&relay, "Fresh");
@@ -952,10 +1025,10 @@ fn the_idle_sweep_suspends_then_deletes_lone_idle_connect_teams() {
     });
     let dry = sweep(&relay, true);
     assert_eq!(dry["dry_run"], true);
-    assert_eq!(dry["suspended"], json!([lone]));
+    assert_eq!(sorted(&dry["suspended"]), sorted(&json!([lone, pair])));
     assert_eq!(team_info(&relay, &lone)["state"], "active");
     let report = sweep(&relay, false);
-    assert_eq!(report["suspended"], json!([lone]));
+    assert_eq!(sorted(&report["suspended"]), sorted(&json!([lone, pair])));
     assert_eq!(report["deleted"], json!([]));
     assert_eq!(report["failed"], json!([]));
     let info = team_info(&relay, &lone);
@@ -969,7 +1042,8 @@ fn the_idle_sweep_suspends_then_deletes_lone_idle_connect_teams() {
         Some(&json!({"team_id": lone, "public_key": lone_mac.key.public_key_b64()})),
     );
     assert_eq!(status, 401);
-    for team in [&pair, &fresh, &family] {
+    assert_eq!(team_info(&relay, &pair)["state"], "suspended");
+    for team in [&fresh, &family] {
         assert_eq!(team_info(&relay, team)["state"], "active");
     }
     // A second sweep the same day deletes nothing.
@@ -983,16 +1057,17 @@ fn the_idle_sweep_suspends_then_deletes_lone_idle_connect_teams() {
         );
     });
     let dry = sweep(&relay, true);
-    assert_eq!(dry["deleted"], json!([lone]));
+    assert_eq!(sorted(&dry["deleted"]), sorted(&json!([lone, pair])));
     assert!(relay.config.team_path(&lone).exists());
     let report = sweep(&relay, false);
-    assert_eq!(report["deleted"], json!([lone]));
+    assert_eq!(sorted(&report["deleted"]), sorted(&json!([lone, pair])));
     assert!(!relay.config.team_path(&lone).exists());
+    assert!(!relay.config.team_path(&pair).exists());
     assert!(teams(&relay).iter().all(|info| info["id"] != lone.as_str()));
     assert_eq!(team_info(&relay, &held)["state"], "suspended");
     assert!(team_info(&relay, &held)["suspend_reason"].is_null());
     // The deleted team's key stays used.
-    let again = post_connect(&relay, &connect_body("Lone", "Mac", &lone_mac.key));
+    let again = post_connect(&relay, &connect_body(&relay, "Lone", "Mac", &lone_mac.key));
     assert_eq!((again.status, again.code()), (409, "connect_key_used"));
     // A resumed idle team is active again and loses its reason.
     let (late, _) = connect(&relay, "Late");
@@ -1010,4 +1085,603 @@ fn the_idle_sweep_suspends_then_deletes_lone_idle_connect_teams() {
     let info = team_info(&relay, &late);
     assert_eq!(info["state"], "active");
     assert!(info["suspend_reason"].is_null());
+}
+
+#[test]
+fn connect_needs_a_signature_of_its_own_key_for_this_relay() {
+    let relay = start(UpstreamOptions::default());
+    let key = DeviceKey::generate().unwrap();
+    let other = DeviceKey::generate().unwrap();
+    let public_key = key.public_key_b64();
+    let signed = |signer: &DeviceKey, message: &[u8]| -> Value {
+        let mut body = connect_body(&relay, "Rafal", "Mac", &key);
+        body["signature"] = json!(encode_b64(&signer.sign(message).unwrap()));
+        body
+    };
+    for body in [
+        // Another key signed the right message.
+        signed(
+            &other,
+            &device::connect_message(&relay.config.public_url, &public_key),
+        ),
+        // The right key signed for another relay.
+        signed(
+            &key,
+            &device::connect_message("https://other-relay.example", &public_key),
+        ),
+        // The right key signed another key's message.
+        signed(
+            &key,
+            &device::connect_message(&relay.config.public_url, &other.public_key_b64()),
+        ),
+        // A sign-in message is not a connect message.
+        signed(
+            &key,
+            &device::sign_in_message(&relay.config.public_url, &relay.team_id, &public_key, "N"),
+        ),
+    ] {
+        let answer = post_connect(&relay, &body);
+        assert_eq!(
+            (answer.status, answer.code()),
+            (400, "invalid_request"),
+            "{}",
+            answer.body
+        );
+    }
+    // No refusal used the key or made a team.
+    assert_eq!(teams(&relay).len(), 1);
+    // A trailing slash on the origin signs the same message.
+    let mut body = connect_body(&relay, "Rafal", "Mac", &key);
+    body["signature"] = json!(encode_b64(
+        &key.sign(&device::connect_message(
+            &format!("{}/", relay.config.public_url),
+            &public_key
+        ))
+        .unwrap()
+    ));
+    connect_ok(&relay, &body);
+}
+
+#[test]
+fn a_public_key_off_the_curve_is_refused_on_every_route() {
+    let relay = start(UpstreamOptions::default());
+    let mut point = [7u8; 65];
+    point[0] = 4;
+    let bogus = encode_b64(&point);
+    let mut body = connect_body(&relay, "Rafal", "Mac", &DeviceKey::generate().unwrap());
+    body["public_key"] = json!(bogus);
+    let answer = post_connect(&relay, &body);
+    assert_eq!((answer.status, answer.code()), (400, "invalid_request"));
+    let code = relay.operator(Command::TeamCode { hours: 1 }).unwrap();
+    let (status, value) = relay.call(
+        "POST",
+        "/v1/teams",
+        None,
+        Some(
+            &json!({"code": code["code"], "team": "Family", "owner": "rafal",
+            "device_name": "Owner device", "public_key": bogus}),
+        ),
+    );
+    assert_eq!(
+        (status, value["error"]["code"].as_str()),
+        (400, Some("invalid_request"))
+    );
+    // The team code was not used up by the refused key.
+    relay.ok(
+        "POST",
+        "/v1/teams",
+        "",
+        Some(&json!({"code": code["code"], "team": "Family", "owner": "rafal",
+            "device_name": "Owner device", "public_key": DeviceKey::generate().unwrap().public_key_b64()})),
+    );
+    let (_, mac) = connect(&relay, "Rafal");
+    let link = relay.ok("POST", "/v1/devices/links", &mac.token, None);
+    let (status, value) = relay.call(
+        "POST",
+        "/v1/devices/link",
+        None,
+        Some(&json!({"code": link["secret"], "device_name": "iPhone", "public_key": bogus})),
+    );
+    assert_eq!(
+        (status, value["error"]["code"].as_str()),
+        (400, Some("invalid_request"))
+    );
+    let (status, _) = relay.call(
+        "POST",
+        "/v1/auth/challenge",
+        None,
+        Some(&json!({"team_id": relay.team_id, "public_key": bogus})),
+    );
+    assert_eq!(status, 401);
+}
+
+#[test]
+fn one_client_prefix_makes_few_connect_teams_a_day_and_is_kept_in_memory_only() {
+    let relay = start(UpstreamOptions::default());
+    let prefix = "2001:db8:aaaa::/48";
+    for n in 0..5 {
+        let key = DeviceKey::generate().unwrap();
+        let answer = post_connect_from(
+            &relay,
+            &connect_body(&relay, &format!("T{n}"), "Mac", &key),
+            Some(prefix),
+        );
+        assert_eq!(answer.status, 200, "{}", answer.body);
+    }
+    let key = DeviceKey::generate().unwrap();
+    let body = connect_body(&relay, "Six", "Mac", &key);
+    let limited = post_connect_from(&relay, &body, Some(prefix));
+    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
+    let wait: u64 = limited.header("Retry-After").unwrap().parse().unwrap();
+    assert!((1..=86_400).contains(&wait), "{wait}");
+    // The refusal did not use the key: another prefix makes the team with it.
+    let other = post_connect_from(&relay, &body, Some("198.51.100.0/24"));
+    assert_eq!(other.status, 200, "{}", other.body);
+    // Requests without the Worker's header share one count.
+    for n in 0..5 {
+        let key = DeviceKey::generate().unwrap();
+        let answer = post_connect_from(
+            &relay,
+            &connect_body(&relay, &format!("U{n}"), "Mac", &key),
+            None,
+        );
+        assert_eq!(answer.status, 200, "{}", answer.body);
+    }
+    let key = DeviceKey::generate().unwrap();
+    let limited = post_connect_from(&relay, &connect_body(&relay, "U5", "Mac", &key), None);
+    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
+    // A refused bad body costs the prefix nothing.
+    let fresh = "2001:db8:bbbb::/48";
+    for _ in 0..10 {
+        let mut bad = connect_body(&relay, "Bad", "Mac", &DeviceKey::generate().unwrap());
+        bad["signature"] = json!("AAAA");
+        assert_eq!(post_connect_from(&relay, &bad, Some(fresh)).status, 400);
+    }
+    let key = DeviceKey::generate().unwrap();
+    assert_eq!(
+        post_connect_from(&relay, &connect_body(&relay, "F", "Mac", &key), Some(fresh)).status,
+        200
+    );
+    // The relay audit has the refusal, and nothing of the prefixes.
+    let audit = relay.relay_audit();
+    let refused: Vec<_> = audit
+        .iter()
+        .filter(|(_, action, _)| action == "connect_refused")
+        .map(|(_, _, detail)| detail.as_str())
+        .collect();
+    assert_eq!(refused, [r#"{"reason":"rate_limited"}"#]);
+    for (_, _, detail) in &audit {
+        for text in ["2001:db8", "198.51.100", "unknown"] {
+            assert!(!detail.contains(text), "{detail}");
+        }
+    }
+}
+
+#[test]
+fn a_prefix_takes_at_most_a_tenth_of_the_daily_cap() {
+    let relay = start_with(
+        |config| config.connect_teams_per_day = 20,
+        UpstreamOptions::default(),
+    );
+    let prefix = Some("203.0.113.0/24");
+    for name in ["A", "B"] {
+        let key = DeviceKey::generate().unwrap();
+        let answer = post_connect_from(&relay, &connect_body(&relay, name, "Mac", &key), prefix);
+        assert_eq!(answer.status, 200, "{}", answer.body);
+    }
+    let key = DeviceKey::generate().unwrap();
+    let limited = post_connect_from(&relay, &connect_body(&relay, "C", "Mac", &key), prefix);
+    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
+}
+
+#[test]
+fn the_relay_holds_at_most_connect_teams_max() {
+    let relay = start_with(
+        |config| config.connect_teams_max = 2,
+        UpstreamOptions::default(),
+    );
+    let (first, _) = connect(&relay, "A");
+    connect(&relay, "B");
+    let key = DeviceKey::generate().unwrap();
+    let body = connect_body(&relay, "C", "Mac", &key);
+    let full = post_connect(&relay, &body);
+    assert_eq!((full.status, full.code()), (503, "busy"));
+    assert_eq!(full.header("Retry-After"), Some("3600"));
+    assert!(
+        full.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no room"),
+        "{}",
+        full.body
+    );
+    // Operator teams do not count.
+    relay.new_team("Family", "rafal");
+    // A suspended Connect team still holds its place; a deleted one does not.
+    relay
+        .operator(Command::Suspend {
+            team: first.clone(),
+        })
+        .unwrap();
+    assert_eq!(post_connect(&relay, &body).status, 503);
+    relay.operator(Command::Delete { team: first }).unwrap();
+    connect_ok(&relay, &body);
+    let refused: Vec<_> = relay
+        .relay_audit()
+        .into_iter()
+        .filter(|(_, action, _)| action == "connect_refused")
+        .map(|(_, _, detail)| detail)
+        .collect();
+    assert_eq!(refused, [r#"{"reason":"full"}"#]);
+    // No file was left by the refusals.
+    let files = std::fs::read_dir(relay.config.teams_dir())
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".db")
+        })
+        .count();
+    assert_eq!(files, 4);
+}
+
+#[test]
+fn concurrent_connects_with_one_key_make_one_team_and_one_file() {
+    let relay = start(UpstreamOptions::default());
+    let key = DeviceKey::generate().unwrap();
+    let body = connect_body(&relay, "Race", "Mac", &key);
+    let answers: Vec<(u16, String)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let answer = post_connect(&relay, &body);
+                    (answer.status, answer.code().to_string())
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(
+        answers.iter().filter(|(status, _)| *status == 200).count(),
+        1,
+        "{answers:?}"
+    );
+    assert!(
+        answers
+            .iter()
+            .all(|(status, code)| *status == 200 || (*status == 409 && code == "connect_key_used")),
+        "{answers:?}"
+    );
+    assert_eq!(teams(&relay).len(), 2);
+    let files = std::fs::read_dir(relay.config.teams_dir())
+        .unwrap()
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.ends_with(".db") || name.ends_with("-journal")
+        })
+        .count();
+    assert_eq!(files, 2);
+}
+
+/// Rows of one action in a team's audit.
+fn audit_rows(relay: &TestRelay, team: &TeamId, action: &str) -> Vec<String> {
+    open_team_file(&relay.config, team)
+        .prepare("SELECT detail FROM audit WHERE action = ?1 ORDER BY id")
+        .unwrap()
+        .query_map([action], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn receipts_and_push_tokens_write_audit_rows_only_when_they_change() {
+    let relay = start_with(
+        |config| {
+            config.push = Some(apassy_relay::config::PushConfig {
+                url: "http://127.0.0.1:9/internal/push".to_string(),
+                topic: "com.example.apassy".to_string(),
+                secret: apassy_relay::secret::SecretString::new("p".repeat(40)),
+            });
+        },
+        UpstreamOptions::default(),
+    );
+    let (team, mac) = connect(&relay, "Rafal");
+    // No vault sync on the relay: a receipt is plan_required, even for version 0.
+    let (status, value) = relay.call(
+        "POST",
+        "/v1/sync/receipt",
+        Some(&mac.token),
+        Some(&json!({"version": 0})),
+    );
+    assert_eq!(
+        (status, value["error"]["code"].as_str()),
+        (403, Some("plan_required"))
+    );
+    relay
+        .operator(Command::Limits {
+            team: team.clone(),
+            set: Some(TeamLimitsUpdate {
+                sync_bytes: Some(67_108_864),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    for _ in 0..3 {
+        relay.ok(
+            "POST",
+            "/v1/sync/receipt",
+            &mac.token,
+            Some(&json!({"version": 0})),
+        );
+    }
+    assert_eq!(audit_rows(&relay, &team, "sync_received").len(), 1);
+    // The same push token again moves its time only; a new one is a new row.
+    let token = |hex: &str, environment: &str| json!({"token": hex.repeat(16), "environment": environment, "bundle_id": "com.example.apassy"});
+    for _ in 0..3 {
+        relay.ok(
+            "PUT",
+            "/v1/push/token",
+            &mac.token,
+            Some(&token("ab", "production")),
+        );
+    }
+    assert_eq!(audit_rows(&relay, &team, "push_token_set").len(), 1);
+    relay.ok(
+        "PUT",
+        "/v1/push/token",
+        &mac.token,
+        Some(&token("ab", "development")),
+    );
+    relay.ok(
+        "PUT",
+        "/v1/push/token",
+        &mac.token,
+        Some(&token("cd", "development")),
+    );
+    assert_eq!(audit_rows(&relay, &team, "push_token_set").len(), 3);
+}
+
+#[test]
+fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
+    let relay = start(UpstreamOptions::default());
+    let (team, mac) = connect(&relay, "Rafal");
+    for _ in 0..105 {
+        relay.ok("POST", "/v1/devices/links", &mac.token, None);
+    }
+    let now = now_unix();
+    let conn = open_team_file(&relay.config, &team);
+    conn.execute_batch(&format!("UPDATE device_link SET expires_at = {};", now - 1))
+        .unwrap();
+    let hub = relay.hub();
+    apassy_relay::server::http::maintain(&hub, now);
+    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(
+        count("SELECT count(*) FROM device_link WHERE state = 'expired'"),
+        100
+    );
+    assert_eq!(count("SELECT count(*) FROM device_link"), 100);
+    // A week after they ended, the rest go too.
+    conn.execute_batch(&format!(
+        "UPDATE device_link SET decided_at = {};",
+        now - 7 * DAY - 1
+    ))
+    .unwrap();
+    relay.ok("GET", "/v1/me", &mac.token, None);
+    apassy_relay::server::http::maintain(&hub, now + 1);
+    assert_eq!(count("SELECT count(*) FROM device_link"), 0);
+}
+
+#[test]
+fn a_connect_team_file_has_a_cap_and_its_audit_stays_under_it() {
+    let relay = start(UpstreamOptions::default());
+    let (team, mac) = connect(&relay, "Rafal");
+    let hub = relay.hub();
+    let core = hub.team(&team).unwrap();
+    // question_bytes (2 MiB) and 8 MiB, in pages of 4 KiB.
+    let (_, max) = core.store.pages().unwrap();
+    assert_eq!(max, (2 * 1_048_576 + 8 * 1_048_576) / 4096);
+    // An operator team has no cap of its own.
+    let operator = hub.team(&relay.team_id).unwrap();
+    assert!(operator.store.pages().unwrap().1 >= 1_073_741_823);
+    // A plan that gives items gives room for them.
+    relay
+        .operator(Command::Limits {
+            team: team.clone(),
+            set: Some(TeamLimitsUpdate {
+                items: Some(10),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    assert_eq!(core.store.pages().unwrap().1, max + 10 * 16 * 1024 / 4096);
+    // A full file: a write is 403 team_limit, and nothing is half written.
+    core.store
+        .with(|conn| {
+            for n in 0..400 {
+                conn.execute(
+                    "INSERT INTO audit (at, actor, action, detail) VALUES (?1, 'relay', 'filler', ?2)",
+                    rusqlite::params![n, "x".repeat(1000)],
+                )
+                .unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (used, _) = core.store.pages().unwrap();
+    core.store.set_max_bytes(Some((used + 2) * 4096)).unwrap();
+    let mut body = card(&encode_b64(&[42; 16]));
+    body["ciphertext"] = json!(encode_b64(&[1u8; 30_000]));
+    let (status, value) = relay.call("POST", "/v1/questions", Some(&mac.token), Some(&body));
+    assert_eq!(
+        (status, value["error"]["code"].as_str()),
+        (403, Some("team_limit")),
+        "{value}"
+    );
+    assert_eq!(
+        open_team_file(&relay.config, &team)
+            .query_row("SELECT count(*) FROM question", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // Near the cap, the oldest quarter of the audit goes, and the write fits again.
+    apassy_relay::server::audit::bound(&core, now_unix()).unwrap();
+    let trimmed = audit_rows(&relay, &team, "audit_trimmed");
+    assert_eq!(trimmed.len(), 1);
+    let detail: Value = serde_json::from_str(&trimmed[0]).unwrap();
+    assert!(detail["rows"].as_u64().unwrap() >= 100, "{detail}");
+    relay.ok("POST", "/v1/questions", &mac.token, Some(&body));
+    // Far from the cap, nothing goes.
+    core.store.set_max_bytes(Some(64 * 1_048_576)).unwrap();
+    apassy_relay::server::audit::bound(&core, now_unix()).unwrap();
+    assert_eq!(audit_rows(&relay, &team, "audit_trimmed").len(), 1);
+}
+
+#[test]
+fn a_connect_team_has_a_request_rate_and_an_operator_team_has_none() {
+    let relay = start(UpstreamOptions::default());
+    let (team, mac) = connect(&relay, "Rafal");
+    let per_minute = apassy_relay::server::connect::REQUESTS_PER_MINUTE as usize;
+    // A fixed window of a minute: at most two windows' worth before a refusal.
+    let mut limited = None;
+    for _ in 0..=2 * per_minute {
+        let answer = send(
+            &relay.url,
+            "GET",
+            "/v1/me",
+            Some(&mac.token),
+            &[],
+            Vec::new(),
+        );
+        if answer.status != 200 {
+            limited = Some(answer);
+            break;
+        }
+    }
+    let limited = limited.expect("a refusal within two minutes' worth");
+    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
+    let wait: u64 = limited.header("Retry-After").unwrap().parse().unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
+    assert_eq!(
+        audit_rows(&relay, &team, "limit_reached"),
+        [r#"{"limit":"requests_per_minute"}"#]
+    );
+    for _ in 0..=per_minute {
+        relay.ok("GET", "/v1/me", &relay.owner_token, None);
+    }
+}
+
+#[test]
+fn long_polls_of_a_connect_team_answer_at_once_when_nothing_can_come() {
+    let relay = start(UpstreamOptions::default());
+    let (_, mac) = connect(&relay, "Rafal");
+    for path in ["/v1/host/requests?wait=3", "/v1/sync/head?since=0&wait=3"] {
+        let started = Instant::now();
+        relay.ok("GET", path, &mac.token, None);
+        assert!(started.elapsed() < Duration::from_secs(2), "{path}");
+    }
+    // An operator team's sync poll still waits.
+    let (token, key) = relay.new_team_device("Family", "rafal");
+    let device = relay.sign_in(&team_of(&token), &key);
+    let started = Instant::now();
+    relay.ok("GET", "/v1/sync/head?since=0&wait=1", &device, None);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+}
+
+#[test]
+fn connect_teams_hold_at_most_connect_long_polls() {
+    let relay = start_with(
+        |config| config.limits.connect_long_polls = 1,
+        UpstreamOptions::default(),
+    );
+    let (_, first) = connect(&relay, "A");
+    let (_, second) = connect(&relay, "B");
+    let (token, key) = relay.new_team_device("Family", "rafal");
+    let family = relay.sign_in(&team_of(&token), &key);
+    std::thread::scope(|scope| {
+        let held = scope.spawn(|| {
+            let started = Instant::now();
+            relay.ok("GET", "/v1/questions?since=0&wait=3", &first.token, None);
+            started.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        // The one seat of Connect teams is taken: another Connect team's poll answers at
+        // once; an operator team's poll still waits.
+        let started = Instant::now();
+        relay.ok("GET", "/v1/questions?since=0&wait=3", &second.token, None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let started = Instant::now();
+        relay.ok("GET", "/v1/questions?since=0&wait=1", &family, None);
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(held.join().unwrap() >= Duration::from_secs(3));
+    });
+    // The seat came back.
+    let started = Instant::now();
+    relay.ok("GET", "/v1/questions?since=0&wait=1", &second.token, None);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+}
+
+#[test]
+fn the_sweep_leaves_plan_teams_and_synced_teams() {
+    let mut relay = start(UpstreamOptions::default());
+    let (idle, _) = connect(&relay, "Idle");
+    let (lifted, _) = connect(&relay, "Lifted");
+    let (synced, synced_mac) = connect(&relay, "Synced");
+    relay
+        .operator(Command::Limits {
+            team: lifted.clone(),
+            set: Some(TeamLimitsUpdate {
+                members: Some(3),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    // A team that synced once and went back to the Connect limits keeps its snapshots.
+    let lift = |bytes: u64| {
+        relay
+            .operator(Command::Limits {
+                team: synced.clone(),
+                set: Some(TeamLimitsUpdate {
+                    sync_bytes: Some(bytes),
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+    };
+    lift(67_108_864);
+    let body = vec![5u8; 1024];
+    let pushed = send(
+        &relay.url,
+        "PUT",
+        "/v1/sync/snapshot",
+        Some(&synced_mac.token),
+        &first_push(&synced, &synced_mac, &body),
+        body,
+    );
+    assert_eq!(pushed.status, 200, "{}", pushed.body);
+    lift(0);
+    assert_eq!(
+        team_info(&relay, &synced)["limits"],
+        serde_json::to_value(apassy_relay::server::directory::TeamLimits::connect()).unwrap()
+    );
+    let old = now_unix() - 31 * DAY;
+    relay.edit_offline(|config| {
+        for team in [&idle, &lifted, &synced] {
+            open_team_file(config, team)
+                .execute_batch(&format!(
+                    "UPDATE device SET last_seen_at = {old}, created_at = {old};"
+                ))
+                .unwrap();
+        }
+    });
+    let report = sweep(&relay, false);
+    assert_eq!(report["suspended"], json!([idle]));
+    for team in [&lifted, &synced] {
+        assert_eq!(team_info(&relay, team)["state"], "active");
+    }
 }

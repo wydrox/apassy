@@ -113,6 +113,28 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
     to_json(&view)
 }
 
+/// 403 `team_limit` for a write that the team's limits leave no use for (a Connect
+/// team: one member, no items), with a `limit_reached` row at most once per kind and ten
+/// seconds: an invite when one member is the limit; a collection, a policy, or a grant
+/// when items are 0, and a grant when one member is the limit. Checked before any row
+/// is written, so such a team cannot grow its file with them.
+fn refuse_unused(core: &Core, now: u64, kinds: &[&'static str]) -> RelayResult<()> {
+    let limits = core.limits();
+    for kind in kinds {
+        let unused = match *kind {
+            "members" => limits.members <= 1,
+            "items" => limits.items == 0,
+            _ => false,
+        };
+        if unused {
+            return Err(core
+                .store
+                .with(|conn| core.limit_error_on(conn, now, kind))?);
+        }
+    }
+    Ok(())
+}
+
 pub fn invite_invalid() -> RelayError {
     RelayError::new(
         codes::INVITE_INVALID,
@@ -139,6 +161,7 @@ pub fn invite_create(
     if request.shared && request.role != Role::Member {
         return Err(RelayError::invalid("A shared member has the member role."));
     }
+    refuse_unused(core, now, &["members"])?;
     let name = request
         .name
         .as_deref()
@@ -522,6 +545,7 @@ pub fn collection_create(
         .audit
         .mask_text(&checked_label(&request.name, "collection")?);
     let policy = checked_policy(core, request.policy)?;
+    refuse_unused(core, now, &["items"])?;
     let text = policy_json(&policy)?;
     let id = core.store.tx(|tx| {
         match tx.execute(
@@ -607,6 +631,7 @@ pub fn policy_put(
 ) -> RelayResult<Value> {
     let policy = checked_policy(core, policy)?;
     let text = policy_json(&policy)?;
+    refuse_unused(core, now, &["items"])?;
     let view = core.store.tx(|tx| {
         let changed = tx
             .execute(
@@ -922,6 +947,7 @@ pub fn grant_create(
     request: &GrantCreate,
     now: u64,
 ) -> RelayResult<Value> {
+    refuse_unused(core, now, &["items", "members"])?;
     let id = core.store.tx(|tx| {
         let collection = collection_view(tx, request.collection_id)?
             .ok_or_else(|| RelayError::not_found("collection"))?;

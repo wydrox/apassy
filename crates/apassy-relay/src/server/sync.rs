@@ -91,6 +91,15 @@ fn refused(core: &Core, now: u64, reason: &str) {
     );
 }
 
+/// 403 `plan_required`: the team's `sync_bytes` is 0, so vault sync through the relay is
+/// not in its plan (a Connect team on Free, docs/SPEC.md section 26).
+fn plan_required() -> RelayError {
+    RelayError::new(
+        codes::PLAN_REQUIRED,
+        "Vault sync through the relay is not in this team's plan.",
+    )
+}
+
 /// The device of the caller. Sync is for devices only: a member token is 401.
 fn device_of(by: &MemberAuth) -> RelayResult<DeviceId> {
     by.device
@@ -308,8 +317,10 @@ pub fn view(conn: &Connection, since: u64) -> RelayResult<SyncHeadView> {
 
 /// `GET /v1/sync/head?since=N&wait=S`. While the current version equals `since`, holds
 /// the answer up to `wait` seconds on the team notifier (a push or a delete wakes it).
-/// A device has at most one sync long poll; a second is answered at once. Marks the
-/// device as seen, as a push, a download, and a receipt do.
+/// A device has at most one sync long poll; a second is answered at once. A team whose
+/// `sync_bytes` is 0 can get no new version, so it is answered at once too, and so is a
+/// Connect team's poll over `Limits::connect_long_polls`. Marks the device as seen, as a
+/// push, a download, and a receipt do.
 pub fn head(
     core: &Core,
     by: &MemberAuth,
@@ -319,12 +330,13 @@ pub fn head(
 ) -> RelayResult<SyncHeadView> {
     let device = device_of(by)?;
     seen(core, device, now);
-    let poll = if wait_secs > 0 {
+    let poll = if wait_secs > 0 && core.limits().sync_bytes > 0 {
         core.sync_polls.enter(device.0)
     } else {
         None
     };
-    let wait_secs = if poll.is_some() { wait_secs } else { 0 };
+    let seat = poll.as_ref().and_then(|_| core.poll_seat());
+    let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
         let seen = core.notify.current();
@@ -498,11 +510,7 @@ pub fn push(
     // docs/SPEC.md section 26). Before the size, so the answer names the plan.
     if limits.sync_bytes == 0 {
         refused(core, now, "plan_required");
-        return Err(RelayError::new(
-            codes::PLAN_REQUIRED,
-            "Vault sync through the relay is not in this team's plan.",
-        )
-        .into());
+        return Err(plan_required().into());
     }
     if request.content_length > limits.sync_bytes {
         refused(core, now, "too_large");
@@ -804,7 +812,9 @@ pub fn record_fetch(core: &Core, by: &MemberAuth, version: u64, now: u64) -> Rel
     })
 }
 
-/// `POST /v1/sync/receipt`: this device merged `version`.
+/// `POST /v1/sync/receipt`: this device merged `version`. 403 `plan_required` when the
+/// team's `sync_bytes` is 0. The `sync_received` row is written only when the device's
+/// version changes; the same receipt again only moves its time.
 pub fn receipt(
     core: &Core,
     by: &MemberAuth,
@@ -813,6 +823,10 @@ pub fn receipt(
 ) -> RelayResult<Value> {
     let device = device_of(by)?;
     seen(core, device, now);
+    if core.limits().sync_bytes == 0 {
+        refused(core, now, "plan_required");
+        return Err(plan_required());
+    }
     core.store.tx(|tx| {
         let latest = current_version(tx)?;
         if request.version > latest {
@@ -824,20 +838,30 @@ pub fn receipt(
                 ),
             ));
         }
+        let before: Option<i64> = tx
+            .query_row(
+                "SELECT version FROM sync_receipt WHERE device_id = ?1",
+                params![to_i(device.0)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
         tx.execute(
             "INSERT INTO sync_receipt (device_id, version, at) VALUES (?1, ?2, ?3) \
              ON CONFLICT(device_id) DO UPDATE SET version = excluded.version, at = excluded.at",
             params![to_i(device.0), to_i(request.version), to_i(now)],
         )
         .map_err(db)?;
-        core.audit.write_on(
-            tx,
-            now,
-            &member_actor(by.id.0),
-            "sync_received",
-            None,
-            &json!({"version": request.version, "device_id": device}),
-        )?;
+        if before.map(to_u) != Some(request.version) {
+            core.audit.write_on(
+                tx,
+                now,
+                &member_actor(by.id.0),
+                "sync_received",
+                None,
+                &json!({"version": request.version, "device_id": device}),
+            )?;
+        }
         Ok(json!({"version": request.version, "at": now}))
     })
 }

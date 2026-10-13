@@ -430,6 +430,7 @@ mod tests {
             push: None,
             questions_to_approvers: false,
             connect_teams_per_day: 200,
+            connect_teams_max: 1000,
         };
         let owner = Relay::init(&config, "team", "owner").unwrap();
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();

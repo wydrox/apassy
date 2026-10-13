@@ -36,14 +36,17 @@ pub const RELEASED_NOTE: &str = "Released by the owner's host.";
 /// first. A run is listed only while its key is in memory and it is not past its
 /// expiry. While there is none, holds the response up to `wait` seconds. The host
 /// has at most `host_long_polls` long polls open; a poll over that is answered at
-/// once, as with `wait=0`.
+/// once, as with `wait=0`, and so is a poll of a team whose `agents` limit is 0 (it can
+/// have no run), or a Connect team's poll over `Limits::connect_long_polls`.
 pub fn list(core: &Core, owner: &MemberAuth, wait_secs: u64) -> RelayResult<Vec<HostRequestView>> {
-    let poll = if wait_secs > 0 {
+    // A team without agents has no run to wait for (a Connect team): answer at once.
+    let poll = if wait_secs > 0 && core.limits().agents > 0 {
         core.host_polls.enter(owner.id.0)
     } else {
         None
     };
-    let wait_secs = if poll.is_some() { wait_secs } else { 0 };
+    let seat = poll.as_ref().and_then(|_| core.poll_seat());
+    let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
         crate::server::devices::authorize_host(core, owner)?;

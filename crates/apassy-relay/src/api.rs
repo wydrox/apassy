@@ -25,6 +25,11 @@ pub use apassy::agent::wire::{WireError, WireResponse as Envelope};
 
 /// The secret the Worker adds to every request. The relay refuses a request without it.
 pub const EDGE_HEADER: &str = "X-Apassy-Edge";
+/// The coarse prefix of the client (an IPv6 /48 or an IPv4 /24) that the Worker adds to
+/// `POST /v1/connect`, after it removed any copy of the client. The relay reads it only
+/// on that route, behind the edge secret, and keeps only a salted hash of it in memory
+/// (docs/SPEC.md section 26).
+pub const CLIENT_PREFIX_HEADER: &str = "X-Apassy-Client-Prefix";
 /// Set on every response that the relay itself makes on the proxy path:
 /// `refused` (403, 413, 501) or `upstream-error` (502).
 pub const RELAY_HEADER: &str = "X-Apassy-Relay";
@@ -283,9 +288,12 @@ pub struct ConnectCreate {
     pub team: String,
     /// The name of the device, 1 to 64 bytes, no control character.
     pub device_name: String,
-    /// The public key of the device, base64url (`device::decode_public_key`). One key
-    /// makes at most one Connect team, ever.
+    /// The public key of the device, base64url (`device::decode_public_key`): a point
+    /// on P-256. One key makes at most one Connect team, ever.
     pub public_key: String,
+    /// The proof that the caller holds the key: base64url of an ECDSA P-256 SHA-256
+    /// signature (ASN.1 DER) of `device::connect_message(origin, public_key)`.
+    pub signature: String,
 }
 
 /// `POST /v1/join` (no bearer; edge secret only). Read side. Since section 23 a join

@@ -432,10 +432,14 @@ impl Drop for LaneSeat<'_> {
     }
 }
 
-/// A seat of the team's share of the question lane (`question_long_polls_per_team`),
-/// or `None` when the team holds all of its share: then the poll answers at once.
+/// A seat of the team's share of the question lane (`question_long_polls_per_team`, and
+/// for a Connect team at most `connect::TEAM_QUESTION_POLLS`), or `None` when the team
+/// holds all of its share: then the poll answers at once.
 fn lane_seat(core: &Core) -> Option<LaneSeat<'_>> {
-    let max = core.config.limits.question_long_polls_per_team;
+    let mut max = core.config.limits.question_long_polls_per_team;
+    if core.kind == crate::api::TeamKind::Connect {
+        max = max.min(crate::server::connect::TEAM_QUESTION_POLLS);
+    }
     core.question_lane
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
             (held < max).then_some(held + 1)
@@ -647,7 +651,9 @@ pub fn list(
     } else {
         None
     };
-    let seat = poll.as_ref().and_then(|_| lane_seat(core));
+    let lane = poll.as_ref().and_then(|_| lane_seat(core));
+    // The relay's seat of a Connect team is taken only when the team's seat was.
+    let seat = lane.as_ref().and_then(|_| core.poll_seat());
     let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
@@ -833,7 +839,9 @@ pub fn answers(
     } else {
         None
     };
-    let seat = poll.as_ref().and_then(|_| lane_seat(core));
+    let lane = poll.as_ref().and_then(|_| lane_seat(core));
+    // The relay's seat of a Connect team is taken only when the team's seat was.
+    let seat = lane.as_ref().and_then(|_| core.poll_seat());
     let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
@@ -923,7 +931,8 @@ pub fn settle(
 }
 
 /// `PUT /v1/push/token`: one token per device, replaced on each call; clears a failed
-/// mark. 409 `push_unavailable` on a relay without push.
+/// mark. A `push_token_set` row only when the token, environment, or bundle id changes.
+/// 409 `push_unavailable` on a relay without push.
 pub fn push_token_put(
     core: &Core,
     by: &MemberAuth,
@@ -958,6 +967,21 @@ pub fn push_token_put(
         ));
     }
     core.store.tx(|tx| {
+        // The same token again (the app sends it at each start) moves its time and clears
+        // a failed mark, but writes no new audit row.
+        let same: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM push_token WHERE device_id = ?1 AND token = ?2 \
+                 AND environment = ?3 AND bundle_id = ?4)",
+                params![
+                    to_i(device.0),
+                    token.as_bytes(),
+                    request.environment,
+                    request.bundle_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
         tx.execute(
             "INSERT INTO push_token (device_id, token, environment, bundle_id, updated_at, failed_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(device_id) DO UPDATE SET \
@@ -972,14 +996,16 @@ pub fn push_token_put(
             ],
         )
         .map_err(db)?;
-        core.audit.write_on(
-            tx,
-            now,
-            &member_actor(by.id.0),
-            "push_token_set",
-            None,
-            &json!({"device_id": device, "environment": request.environment}),
-        )?;
+        if !same {
+            core.audit.write_on(
+                tx,
+                now,
+                &member_actor(by.id.0),
+                "push_token_set",
+                None,
+                &json!({"device_id": device, "environment": request.environment}),
+            )?;
+        }
         Ok(json!({"device_id": device, "updated_at": now}))
     })
 }

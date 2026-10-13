@@ -39,7 +39,7 @@ CREATE TABLE audit (
   id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   run_id INTEGER, detail TEXT NOT NULL);
 CREATE TABLE connect_key (
-  key_hash BLOB PRIMARY KEY, team_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+  key_hash BLOB PRIMARY KEY, team_id TEXT, created_at INTEGER NOT NULL);
 CREATE INDEX connect_key_created ON connect_key(created_at);
 PRAGMA user_version = 1003;
 ";
@@ -50,7 +50,7 @@ const MIGRATE_1003: &str = "
 ALTER TABLE team ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','connect'));
 ALTER TABLE team ADD COLUMN suspend_reason TEXT;
 CREATE TABLE connect_key (
-  key_hash BLOB PRIMARY KEY, team_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+  key_hash BLOB PRIMARY KEY, team_id TEXT, created_at INTEGER NOT NULL);
 CREATE INDEX connect_key_created ON connect_key(created_at);
 PRAGMA user_version = 1003;
 ";
@@ -184,6 +184,26 @@ impl TeamLimits {
         }
     }
 
+    /// The largest file of a team of `kind` (`Store::set_max_bytes`), or `None` for no
+    /// cap. A Connect team: its `question_bytes`, plus `CONNECT_FILE_SLACK` for its
+    /// rows and audit, plus room for the items and members that a plan may give it. An
+    /// operator team has no cap: the operator made it with a code and watches it.
+    pub fn file_bytes(&self, kind: TeamKind) -> Option<u64> {
+        match kind {
+            TeamKind::Operator => None,
+            TeamKind::Connect => Some(
+                self.question_bytes
+                    .saturating_add(CONNECT_FILE_SLACK)
+                    .saturating_add(self.items.saturating_mul(ITEM_FILE_BYTES))
+                    .saturating_add(
+                        self.members
+                            .saturating_sub(1)
+                            .saturating_mul(MEMBER_FILE_BYTES),
+                    ),
+            ),
+        }
+    }
+
     /// The limits a new team of this kind starts with.
     pub fn for_kind(kind: TeamKind) -> Self {
         match kind {
@@ -304,6 +324,13 @@ pub const MIN_QUESTION_BYTES: u64 = 1_048_576;
 pub const MAX_QUESTION_BYTES: u64 = 268_435_456;
 /// `question_bytes` of a new Connect team: 2 MiB.
 pub const CONNECT_QUESTION_BYTES: u64 = 2_097_152;
+/// The file of a Connect team beyond its `question_bytes`: its team, member, device,
+/// and link rows, the question metadata, and its audit (`TeamLimits::file_bytes`).
+pub const CONNECT_FILE_SLACK: u64 = 8 * 1_048_576;
+/// Room in a Connect team's file for each item and each member beyond the first that a
+/// plan gives it: an item holds up to 4 KiB sealed, a member its devices and its audit.
+pub const ITEM_FILE_BYTES: u64 = 16 * 1024;
+pub const MEMBER_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -500,6 +527,12 @@ impl Directory {
             if changed == 0 {
                 return Err(RelayError::not_found("team"));
             }
+            // The key of a deleted Connect team stays used, but no longer names the team.
+            tx.execute(
+                "UPDATE connect_key SET team_id = NULL WHERE team_id = ?1",
+                params![id.as_str()],
+            )
+            .map_err(db)?;
             self.audit.write_on(
                 tx,
                 now,
@@ -650,7 +683,8 @@ pub fn connect_key_used() -> RelayError {
 /// Checks a new Connect team against `connect_key`, inside the transaction that adds
 /// it: the key made no team before (409 `connect_key_used`), and the relay made fewer
 /// than `per_day` Connect teams in the last 24 hours (503 `busy`). Rows of
-/// `connect_key` stay after their team is deleted, so both checks count them.
+/// `connect_key` stay after their team is deleted (with `team_id` NULL), so both checks
+/// count them.
 pub fn check_connect_key(
     conn: &Connection,
     key_hash: &[u8; 32],
@@ -679,6 +713,32 @@ pub fn check_connect_key(
         return Err(connect_busy());
     }
     Ok(())
+}
+
+/// Checks that the relay holds fewer than `max` Connect teams, active or suspended
+/// (`APASSY_RELAY_CONNECT_TEAMS_MAX`), inside the transaction that adds one: else 503
+/// `busy` (`connect_full`).
+pub fn check_connect_room(conn: &Connection, max: u64) -> RelayResult<()> {
+    let held: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM team WHERE kind = 'connect'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    if to_u(held) >= max {
+        return Err(connect_full());
+    }
+    Ok(())
+}
+
+/// 503 `busy` of `POST /v1/connect` when the relay holds `connect_teams_max` Connect
+/// teams. The same code as the daily cap; the message tells them apart for a person.
+pub fn connect_full() -> RelayError {
+    RelayError::new(
+        codes::BUSY,
+        "The relay has no room for new teams now. Try again later.",
+    )
 }
 
 /// 503 `busy` of `POST /v1/connect`: the relay-wide daily cap is reached, or Connect is
