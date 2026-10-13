@@ -581,23 +581,28 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
         rect.top(),
         egui::Stroke::new(1.0 / ui.ctx().pixels_per_point(), kit::SEPARATOR),
     );
+    // The vault and the Settings button share the middle line of the row. Each gets its
+    // own rect: a horizontal layout centered the button on another line than the vault.
+    let row = rect.shrink2(Vec2::new(0.0, 6.0));
+    let gear = Rect::from_center_size(
+        Pos2::new(row.right() - 14.0, row.center().y),
+        Vec2::splat(28.0),
+    );
+    let switcher = Rect::from_min_max(row.min, Pos2::new(gear.left() - 2.0, row.max.y));
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(Vec2::new(0.0, 6.0)))
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let switcher = (ui.available_width() - 30.0).max(40.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(switcher, 40.0),
-                Layout::top_down(Align::Min),
-                |ui| vault_footer(app, ui),
-            );
-            if kit::plain_icon_button(ui, Icon::Gearshape, "Settings  ⌘,").clicked() {
-                app.open_settings_window();
-            }
-        },
+            .max_rect(switcher)
+            .layout(Layout::top_down(Align::Min)),
+        |ui| vault_footer(app, ui),
     );
+    let settings = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(gear), |ui| {
+            kit::plain_icon_button(ui, Icon::Gearshape, "Settings  ⌘,")
+        })
+        .inner;
+    if settings.clicked() {
+        app.open_settings_window();
+    }
 }
 
 /// The open vault, its status, its lock, and its menu (ADR 0013).
