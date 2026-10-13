@@ -1,5 +1,7 @@
 // The edge Worker of apassy-relay: it serves static files, limits creation
-// requests (a codeless Connect team the most) and snapshot pushes, bounds the declared length of every body, and
+// requests (a codeless Connect team the most, by two keys: the client's /64 or IPv4 address
+// and a coarser /48 or /24 prefix, which also travels to the relay in a header; nothing is
+// stored) and snapshot pushes, bounds the declared length of every body, and
 // forwards relay requests with the required edge secret. `/internal/` routes (the APNs
 // sender, apns.ts) are handled here and never forwarded.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
@@ -38,11 +40,16 @@ export interface Env extends PushEnv {
   SYNC_LIMITER?: CreateLimiter;
   /** The strictest per-IP guard: codeless Connect teams (`POST /v1/connect`, SPEC 26). */
   CONNECT_LIMITER?: CreateLimiter;
+  /** The coarser key of `POST /v1/connect`: an IPv6 /48 or an IPv4 /24. */
+  CONNECT_PREFIX_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
 }
 
 const EDGE_HEADER = "x-apassy-edge";
+// The coarse client prefix of `POST /v1/connect` for the relay. The relay trusts it only
+// together with the edge secret; the Worker always removes the client's copy.
+const CLIENT_PREFIX_HEADER = "x-apassy-client-prefix";
 
 // The VPC service config picks the target and the port. The host of the URL only
 // fills the Host header.
@@ -99,20 +106,45 @@ function lengthError(request: Request, path: string): Response | undefined {
   return undefined;
 }
 
-// The limiter key of `POST /v1/connect`: an IPv4 address as it is, an IPv6 address as
-// its /64, because one client usually holds a whole /64. Nothing is stored here: the
-// key goes to the rate limiter binding only, as every other limiter key does.
-function connectKey(address: string): string {
-  if (!address.includes(":") || address.includes(".")) return address;
+// The eight groups of an IPv6 address (lowercase, `::` expanded), or undefined when the
+// text is not a plain IPv6 address (an IPv4 form, a double `::`, a bad group, a wrong count).
+function ipv6Groups(address: string): string[] | undefined {
+  if (!address.includes(":") || address.includes(".")) return undefined;
   const [head, tail, extra] = address.toLowerCase().split("::");
-  if (extra !== undefined) return address;
+  if (extra !== undefined) return undefined;
   const left = head ? head.split(":") : [];
   const right = tail === undefined ? [] : tail ? tail.split(":") : [];
   const missing = 8 - left.length - right.length;
-  if (tail === undefined ? missing !== 0 : missing < 1) return address;
+  if (tail === undefined ? missing !== 0 : missing < 1) return undefined;
   const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
-  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return address;
-  return groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":") + "::/64";
+  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return undefined;
+  return groups;
+}
+
+function trimGroup(group: string): string {
+  return group.replace(/^0+(?=.)/, "");
+}
+
+// The limiter key of `POST /v1/connect`: an IPv4 address as it is, an IPv6 address as
+// its /64, because one client usually holds a whole /64. There is a second, coarser key,
+// connectPrefix, and the relay gets it in a header. Nothing is stored here: the keys go
+// to the rate limiter bindings and to the relay only, as every other limiter key does.
+function connectKey(address: string): string {
+  const groups = ipv6Groups(address);
+  if (!groups) return address;
+  return groups.slice(0, 4).map(trimGroup).join(":") + "::/64";
+}
+
+// The coarse prefix of a client: an IPv4 /24 or an IPv6 /48. Anything else stays as it is.
+function connectPrefix(address: string): string {
+  if (/^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(address)) {
+    const octets = address.split(".").map(Number);
+    if (octets.every((octet) => octet <= 255)) return `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+    return address;
+  }
+  const groups = ipv6Groups(address);
+  if (!groups) return address;
+  return groups.slice(0, 3).map(trimGroup).join(":") + "::/48";
 }
 
 function unsafeDownloadPath(path: string): boolean {
@@ -181,6 +213,7 @@ export default {
       if (url.pathname === "/guide") url.pathname = "/guide.html";
       const headers = new Headers(request.headers);
       headers.delete(EDGE_HEADER);
+      headers.delete(CLIENT_PREFIX_HEADER);
       const assetRequest = new Request(url, { method: request.method, headers });
       return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
     }
@@ -191,20 +224,29 @@ export default {
       if (refused) return refused;
     }
 
+    // Connect has two guards, each on its own key: the client's /64 (or IPv4 address) first,
+    // then its coarser /48 (or /24) prefix, asked only when the first one lets the call pass.
+    // Every other route has one guard, keyed by the full address.
+    const isConnect = request.method === "POST" && url.pathname === CONNECT_PATH;
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter) {
-      // Fail open if the binding fails: the relay itself checks codes, keys, and
+    if (limiter || isConnect) {
+      // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
       const address = request.headers.get("cf-connecting-ip") ?? "unknown";
-      const key = url.pathname === CONNECT_PATH ? connectKey(address) : address;
-      try {
-        const { success } = await limiter.limit({ key });
-        if (!success) {
-          return jsonError(429, "rate_limited", "Too many requests. Try again in a minute.", { "retry-after": "60" });
+      const guards: [CreateLimiter | undefined, string][] = isConnect
+        ? [[env.CONNECT_LIMITER, connectKey(address)], [env.CONNECT_PREFIX_LIMITER, connectPrefix(address)]]
+        : [[limiter, address]];
+      for (const [guard, key] of guards) {
+        if (!guard) continue;
+        try {
+          const { success } = await guard.limit({ key });
+          if (!success) {
+            return jsonError(429, "rate_limited", "Too many requests. Try again in a minute.", { "retry-after": "60" });
+          }
+        } catch {
+          // Continue to the relay when the flood guard is unavailable.
         }
-      } catch {
-        // Continue to the relay when the flood guard is unavailable.
       }
     }
 
@@ -226,6 +268,10 @@ export default {
     const headers = new Headers(request.headers);
     headers.delete(EDGE_HEADER);
     headers.set(EDGE_HEADER, env.EDGE_SECRET);
+    headers.delete(CLIENT_PREFIX_HEADER);
+    if (request.method === "POST" && url.pathname === CONNECT_PATH) {
+      headers.set(CLIENT_PREFIX_HEADER, connectPrefix(request.headers.get("cf-connecting-ip") ?? "unknown"));
+    }
     if (!hasBody) {
       // No body is forwarded, so no length either: a declared one would make the
       // relay wait for bytes that never come.

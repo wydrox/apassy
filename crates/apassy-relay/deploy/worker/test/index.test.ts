@@ -624,8 +624,19 @@ describe("creation rate limit", () => {
 });
 
 describe("connect rate limit", () => {
-  /** Every limiter of the Worker, recording `<name>:<key>`; CONNECT_LIMITER answers `connect`. */
-  function limiters(connect: boolean) {
+  /** The /64 key of the addresses of the prefix table that are IPv6 hosts; others are keyed as they are. */
+  const CONNECT_KEYS: Record<string, string> = {
+    "2001:db8:1:2:3:4:5:6": "2001:db8:1:2::/64",
+    "2001:0DB8:0001::": "2001:db8:1:0::/64",
+    "2001:db8::1": "2001:db8:0:0::/64",
+    "::1": "0:0:0:0::/64",
+  };
+
+  /**
+   * Every limiter of the Worker, recording `<name>:<key>`; CONNECT_LIMITER answers `connect`,
+   * CONNECT_PREFIX_LIMITER answers `prefix`.
+   */
+  function limiters(connect: boolean, prefix = true) {
     const used: string[] = [];
     const limiter = (name: string, success: boolean) => ({
       async limit({ key }: { key: string }) {
@@ -637,6 +648,7 @@ describe("connect rate limit", () => {
       used,
       env: {
         CONNECT_LIMITER: limiter("connect", connect),
+        CONNECT_PREFIX_LIMITER: limiter("prefix", prefix),
         CREATE_LIMITER: limiter("create", true),
         AUTH_LIMITER: limiter("auth", true),
         SYNC_LIMITER: limiter("sync", true),
@@ -644,7 +656,7 @@ describe("connect rate limit", () => {
     };
   }
 
-  it("uses CONNECT_LIMITER, and no other, for POST /v1/connect", async () => {
+  it("uses CONNECT_LIMITER and CONNECT_PREFIX_LIMITER, and no other, for POST /v1/connect", async () => {
     const refused = limiters(false);
     const response = await call("/v1/connect", {
       method: "POST",
@@ -658,11 +670,24 @@ describe("connect rate limit", () => {
     assert.equal(seen.length, 0);
     assert.equal(vpcTargets.length, 0);
 
+    const prefixRefused = limiters(true, false);
+    const byPrefix = await call("/v1/connect", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    }, { ...prefixRefused.env, RELAY: vpc() });
+    assert.equal(byPrefix.status, 429);
+    assert.equal(byPrefix.headers.get("retry-after"), "60");
+    assert.equal(await byPrefix.text(), '{"ok":false,"error":{"code":"rate_limited","message":"Too many requests. Try again in a minute."}}');
+    assert.deepEqual(prefixRefused.used, ["connect:198.51.100.42", "prefix:198.51.100.0/24"]);
+    assert.equal(seen.length, 0);
+    assert.equal(vpcTargets.length, 0);
+
     const allowed = limiters(true);
     const passed = await call("/v1/connect", { method: "POST", body: '{"v":1}' }, allowed.env);
     assert.equal(passed.status, 201);
     assert.equal(await passed.text(), 'echo:{"v":1}');
-    assert.deepEqual(allowed.used, ["connect:unknown"]);
+    assert.deepEqual(allowed.used, ["connect:unknown", "prefix:unknown"]);
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.url, "/v1/connect");
     assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
@@ -694,6 +719,34 @@ describe("connect rate limit", () => {
     }
   });
 
+  it("keys a client by its coarse prefix for CONNECT_PREFIX_LIMITER", async () => {
+    for (const [address, prefix] of [
+      ["198.51.100.42", "198.51.100.0/24"],
+      ["10.0.0.1", "10.0.0.0/24"],
+      ["256.1.1.1", "256.1.1.1"],
+      ["1.2.3", "1.2.3"],
+      ["1.2.3.4.5", "1.2.3.4.5"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1::/48"],
+      ["2001:0DB8:0001::", "2001:db8:1::/48"],
+      ["2001:db8::1", "2001:db8:0::/48"],
+      ["::1", "0:0:0::/48"],
+      ["::ffff:192.0.2.1", "::ffff:192.0.2.1"],
+      ["2001:db8::1::2", "2001:db8::1::2"],
+      ["2001:db8:zz::1", "2001:db8:zz::1"],
+      ["unknown", "unknown"],
+    ]) {
+      const recorded = limiters(true, false);
+      const response = await call("/v1/connect", {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": address! },
+      }, { ...recorded.env, RELAY: vpc() });
+      assert.equal(response.status, 429, address);
+      assert.deepEqual(recorded.used, [`connect:${CONNECT_KEYS[address!] ?? address}`, `prefix:${prefix}`], address);
+      assert.equal(seen.length, 0, address);
+    }
+  });
+
   it("keeps the other limiters keyed by the full address", async () => {
     const recorded = limiters(true);
     await call("/v1/teams", {
@@ -716,6 +769,94 @@ describe("connect rate limit", () => {
       assert.equal(response.status, 201);
       assert.equal(await response.text(), "echo:{}");
       assert.equal(seen.length, 1);
+    }
+  });
+
+  it("passes POST /v1/connect when CONNECT_PREFIX_LIMITER is missing or fails", async () => {
+    for (const CONNECT_PREFIX_LIMITER of [
+      undefined,
+      { async limit() { throw new Error("limiter unavailable"); } },
+    ]) {
+      const used: string[] = [];
+      const response = await call("/v1/connect", { method: "POST", body: "{}" }, {
+        CONNECT_LIMITER: { async limit({ key }: { key: string }) { used.push(key); return { success: true }; } },
+        CONNECT_PREFIX_LIMITER,
+      });
+      assert.equal(response.status, 201);
+      assert.equal(await response.text(), "echo:{}");
+      assert.equal(seen.length, 1);
+      assert.deepEqual(used, ["unknown"]);
+    }
+  });
+
+  it("still asks CONNECT_PREFIX_LIMITER when CONNECT_LIMITER is missing or fails", async () => {
+    for (const CONNECT_LIMITER of [
+      undefined,
+      { async limit() { throw new Error("limiter unavailable"); } },
+    ]) {
+      const refused = limiters(true, false);
+      const response = await call("/v1/connect", {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": "198.51.100.42" },
+      }, { CONNECT_LIMITER, CONNECT_PREFIX_LIMITER: refused.env.CONNECT_PREFIX_LIMITER });
+      assert.equal(response.status, 429);
+      assert.deepEqual(refused.used, ["prefix:198.51.100.0/24"]);
+      assert.equal(seen.length, 0);
+    }
+  });
+
+  it("sends the client prefix of POST /v1/connect to the relay, once, over any client copy", async () => {
+    for (const [address, prefix] of [
+      ["198.51.100.42", "198.51.100.0/24"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1::/48"],
+      [undefined, "unknown"],
+    ]) {
+      for (const forged of [undefined, "203.0.113.0/24"]) {
+        const recorded = limiters(true);
+        const headers: Record<string, string> = {};
+        if (address) headers["cf-connecting-ip"] = address;
+        if (forged) headers["X-Apassy-Client-Prefix"] = forged;
+        const response = await call("/v1/connect", { method: "POST", body: "{}", headers }, recorded.env);
+        assert.equal(response.status, 201, `${address} ${forged}`);
+        assert.equal(seen.length, 1);
+        assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), [prefix], `${address} ${forged}`);
+        assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+      }
+    }
+    // Without limiter bindings the prefix still travels.
+    const bare = await call("/v1/connect", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    });
+    assert.equal(bare.status, 201);
+    assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), ["198.51.100.0/24"]);
+  });
+
+  it("drops a client x-apassy-client-prefix on every other request", async () => {
+    for (const [method, path] of [
+      ["POST", "/v1/teams"],
+      ["GET", "/v1/me"],
+      ["POST", "/v1/questions"],
+      ["GET", "/v1/connect"],
+      ["POST", "/v1/connect/"],
+      ["PUT", "/v1/sync/snapshot"],
+      ["POST", "/p/session/example.com/v1/connect"],
+    ]) {
+      const recorded = limiters(true);
+      const response = await call(path!, {
+        method,
+        headers: {
+          "cf-connecting-ip": "198.51.100.42",
+          "X-Apassy-Client-Prefix": "203.0.113.0/24",
+          ...(method === "PUT" ? { "content-length": "0" } : {}),
+        },
+      }, recorded.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.equal(seen.length, 1, `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), [], `${method} ${path}`);
+      assert.ok(!recorded.used.some((entry) => entry.startsWith("prefix:")), `${method} ${path}`);
     }
   });
 

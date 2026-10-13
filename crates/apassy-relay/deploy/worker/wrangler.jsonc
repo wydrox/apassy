@@ -16,7 +16,10 @@
     // Codeless Connect teams (POST /v1/connect, SPEC 26), per IPv4 address or IPv6 /64. The
     // binding counts per 10 or 60 seconds only, so 1 a minute is its strictest form; the
     // relay caps the Connect teams of 24 hours for everyone (APASSY_RELAY_CONNECT_TEAMS_PER_DAY).
-    { "name": "CONNECT_LIMITER", "namespace_id": "1004", "simple": { "limit": 1, "period": 60 } }
+    { "name": "CONNECT_LIMITER", "namespace_id": "1004", "simple": { "limit": 1, "period": 60 } },
+    // The same route, per IPv6 /48 or IPv4 /24. The relay also counts Connect teams per this
+    // prefix in memory (the x-apassy-client-prefix header).
+    { "name": "CONNECT_PREFIX_LIMITER", "namespace_id": "1005", "simple": { "limit": 3, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
