@@ -4,7 +4,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-10-12
+## [0.5.0] - 2026-10-13
 
 One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. Agents need no setup for each credential: a connected agent sees the names of your credentials, and the bouncer decides each use from the first one or asks you ([ADR 0025](docs/adr/0025-low-friction-access.md)). The Mac app has a new window with folders, Decisions, and Agents, you add a credential by pasting it, and the iPhone app follows the same model ([ADR 0026](docs/adr/0026-simple-app.md)).
 
