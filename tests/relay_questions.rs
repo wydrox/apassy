@@ -2190,7 +2190,7 @@ fn a_connect_team_needs_no_team_code_and_carries_the_questions() {
         }
     );
 
-    // The call has exactly four fields: no team code, no owner.
+    // The call has exactly five fields, with the proof of key: no team code, no owner.
     assert_eq!(relay.count("POST /v1/connect"), 1);
     let bodies = relay.request_bodies();
     assert_eq!(bodies.len(), 1);
@@ -2202,7 +2202,10 @@ fn a_connect_team_needs_no_team_code_and_carries_the_questions() {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["device_name", "public_key", "team", "v"]);
+    assert_eq!(
+        keys,
+        ["device_name", "public_key", "signature", "team", "v"]
+    );
     assert!(body.get("code").is_none() && body.get("owner").is_none());
 
     // A second call makes no new team.

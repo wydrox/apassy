@@ -811,8 +811,10 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             if relay.connect_missing {
                 return fail(404, "not_found");
             }
-            let Some(map) = exact_object(request, &["v", "team", "device_name", "public_key"])
-            else {
+            let Some(map) = exact_object(
+                request,
+                &["v", "team", "device_name", "public_key", "signature"],
+            ) else {
                 return fail(400, "invalid_request");
             };
             let Some(public_key) = map["public_key"]
@@ -826,6 +828,19 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 || !map["team"].is_string()
                 || !map["device_name"].is_string()
             {
+                return fail(400, "invalid_request");
+            }
+            // The proof of key: the key signs the tag, the origin, and its own text.
+            let message = format!(
+                "apassy-relay connect v1\0{}\0{}",
+                relay.origin,
+                map["public_key"].as_str().unwrap_or_default()
+            );
+            let signature = map["signature"]
+                .as_str()
+                .and_then(decode_b64u)
+                .unwrap_or_default();
+            if !verify(&public_key, message.as_bytes(), &signature) {
                 return fail(400, "invalid_request");
             }
             if relay.refuse_connect_keys > 0 {

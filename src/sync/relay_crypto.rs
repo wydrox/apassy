@@ -376,6 +376,19 @@ impl SignedHead {
     }
 }
 
+/// The domain of the proof of key of `POST /v1/connect` (contract relay-connect-v1
+/// section 2).
+pub const CONNECT_TAG: &str = "apassy-relay connect v1";
+
+/// The message that a new device key signs for `POST /v1/connect`: the tag, the relay
+/// origin with no trailing slash, and the b64u text of the key, joined with `\0`. It
+/// proves that the caller holds the key.
+pub fn connect_message(origin: &str, public_key_b64u: &str) -> Vec<u8> {
+    [CONNECT_TAG, origin.trim_end_matches('/'), public_key_b64u]
+        .join("\0")
+        .into_bytes()
+}
+
 /// The sign-in message (contract section 5): the parts joined with `\0`.
 pub fn sign_in_message(
     origin: &str,

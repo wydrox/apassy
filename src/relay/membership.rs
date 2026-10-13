@@ -281,12 +281,21 @@ fn create_connect_on_relay(
         team: &'a str,
         device_name: &'a str,
         public_key: &'a str,
+        signature: &'a str,
     }
     #[derive(Deserialize)]
     struct Created {
         team_id: String,
         device_id: u64,
     }
+    // The proof that this Mac holds the key (contract relay-connect-v1 section 2).
+    let public_key = key.public_key_b64u();
+    let signature = key
+        .sign(&crate::sync::relay_crypto::connect_message(
+            url.as_str(),
+            &public_key,
+        ))
+        .map_err(ConnectRefused::Other)?;
     let answer: Result<Created, _> = call_once(
         url,
         &json_request(
@@ -297,7 +306,8 @@ fn create_connect_on_relay(
                 v: 1,
                 team,
                 device_name: &clean_name(device, "Mac"),
-                public_key: &key.public_key_b64u(),
+                public_key: &public_key,
+                signature: &crate::sync::relay_crypto::encode_b64u(&signature),
             },
         ),
     );
@@ -329,7 +339,7 @@ fn create_connect_on_relay(
 
 /// The relay part of the first "Add a device…" of a vault with no team, with no vault
 /// and no team code (contract relay-connect-v1, build plan §2a): a new device key and
-/// `POST /v1/connect` (`{v: 1, team, device_name, public_key}`). The relay makes a
+/// `POST /v1/connect` (`{v: 1, team, device_name, public_key, signature}`). The relay makes a
 /// Connect team (`kind: "connect"`) with this key as its first device. The membership
 /// has the purpose `questions` only; the app keeps it with [`adopt_questions_team`].
 /// Only a Mac calls it.
