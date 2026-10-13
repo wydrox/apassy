@@ -511,7 +511,7 @@ fn sees_words(visible: Option<usize>) -> String {
 }
 
 /// A day as in the mockup: "Oct 9", with the year when it is not this year.
-fn short_date(unix: u64, now: u64) -> String {
+pub(super) fn short_date(unix: u64, now: u64) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];

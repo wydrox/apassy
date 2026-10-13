@@ -261,8 +261,9 @@ const FAKE_SERVICE: &str = "https://accounts.example.test";
 
 impl FakePlanProvider {
     /// The provider of the screenshot tour (`examples/screenshots.rs`): `free`,
-    /// `personal`, `team`, `operator`, or `ended` (Personal that ended), checked at
-    /// `now`. `None` for another name.
+    /// `personal`, `team`, `operator`, `ended` (Personal that ended), `past-due`
+    /// (Personal whose last payment failed), or `offline` (Personal last checked two
+    /// days before `now`), checked at `now`. `None` for another name.
     #[doc(hidden)]
     pub fn for_screenshots(name: &str, now: u64) -> Option<Self> {
         let paid = |plan, status| Entitlement {
@@ -282,6 +283,11 @@ impl FakePlanProvider {
                 ..paid(Plan::Operator, PlanStatus::Active)
             },
             "ended" => paid(Plan::Personal, PlanStatus::Ended),
+            "past-due" => paid(Plan::Personal, PlanStatus::PastDue),
+            "offline" => Entitlement {
+                checked_at: now.saturating_sub(2 * 24 * 60 * 60),
+                ..paid(Plan::Personal, PlanStatus::Active)
+            },
             _ => return None,
         };
         Some(Self::with(entitlement))
@@ -291,6 +297,13 @@ impl FakePlanProvider {
     #[cfg(test)]
     pub(crate) fn new(entitlement: Entitlement) -> Self {
         Self::with(entitlement)
+    }
+
+    /// The account service answers with `entitlement` from now on, as after a checkout
+    /// or the end of a period, for the tests.
+    #[cfg(test)]
+    pub(crate) fn set(&self, entitlement: Entitlement) {
+        *self.held() = entitlement;
     }
 
     fn with(entitlement: Entitlement) -> Self {
@@ -463,14 +476,26 @@ mod tests {
             ("personal", Plan::Personal, PlanStatus::Active),
             ("team", Plan::Team, PlanStatus::Active),
             ("ended", Plan::Personal, PlanStatus::Ended),
+            ("past-due", Plan::Personal, PlanStatus::PastDue),
+            ("offline", Plan::Personal, PlanStatus::Active),
         ] {
             let fake = FakePlanProvider::for_screenshots(name, NOW).unwrap();
             let current = fake.current();
             assert_eq!((current.plan, current.status), (plan, status), "{name}");
-            assert_eq!(current.checked_at, NOW);
+            let checked = if name == "offline" {
+                NOW - 2 * DAY
+            } else {
+                NOW
+            };
+            assert_eq!(current.checked_at, checked, "{name}");
             assert!(fake.offer(UpgradeFrom::Sync).is_some());
             assert_eq!(fake.refresh().unwrap(), current);
         }
+        // Offline: the plan works, with the note of its last check.
+        let offline = FakePlanProvider::for_screenshots("offline", NOW).unwrap();
+        let standing = offline.current().standing(NOW);
+        assert!(standing.paid());
+        assert!(matches!(standing.note, Some(PlanNote::Offline { .. })));
         assert!(FakePlanProvider::for_screenshots("gold", NOW).is_none());
         assert!(FakePlanProvider::for_screenshots("", NOW).is_none());
     }

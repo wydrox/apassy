@@ -374,6 +374,8 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::Upgrade(from) => super::plan::upgrade_sheet(app, ctx, from),
         #[cfg(feature = "vault")]
         Sheet::PlanEnded => super::plan::ended_sheet(app, ctx),
+        #[cfg(feature = "vault")]
+        Sheet::Plan(sheet) => super::plan::sheet(app, ctx, &sheet),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
         #[cfg(not(feature = "vault"))]

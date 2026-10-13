@@ -521,6 +521,15 @@ pub enum OwnerRequest {
         relay_url: String,
         team_id: Option<String>,
     },
+    /// Sync the vault `vault` (a list ID, named `name`) through Apassy in its own team
+    /// `team_id` (flow spec Flow B). `devices` are the other devices of the team as the
+    /// owner saw them: they start to sync the vault too.
+    SyncThroughApassy {
+        vault: String,
+        name: String,
+        team_id: String,
+        devices: Vec<String>,
+    },
     /// An approving answer of this Mac to the question of another Mac (relay-questions-v1
     /// section 5.3): `remote_id` is the question in the view of the questions waiter,
     /// `choice` the answer, and `action` the [`OwnerAction::AnswerRemoteQuestion`] of
@@ -832,6 +841,12 @@ impl OwnerRequest {
                     team_id: team_id.clone(),
                 }
             }
+            Self::SyncThroughApassy {
+                team_id, devices, ..
+            } => OwnerAction::SyncThroughApassy {
+                team_id: team_id.clone(),
+                devices: devices.clone(),
+            },
             Self::AnswerRemoteQuestion { action, .. } => action.clone(),
         }
     }
@@ -1159,6 +1174,20 @@ impl OwnerRequest {
             } => format!(
                 "Make a team for the questions of this vault on the Apassy relay at {relay_url}, with the team code. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
             ),
+            Self::SyncThroughApassy { name, devices, .. } => {
+                let mut text = format!(
+                    "Switch “{name}” to Apassy. Changes reach your devices in seconds, also without iCloud. Encrypted on your Mac: Apassy can't read it."
+                );
+                if devices.is_empty() {
+                    text.push_str(" No other device of this vault is on Apassy yet.");
+                } else {
+                    text.push_str(&format!(
+                        " These devices will also sync the vault through Apassy: {}. Each still needs the passphrase to open it.",
+                        devices.join(", ")
+                    ));
+                }
+                text
+            }
             Self::AnswerRemoteQuestion { choice, action, .. } => {
                 let (agent, asker) = match action {
                     OwnerAction::AnswerRemoteQuestion { asker, answer, .. } => (
@@ -1909,6 +1938,12 @@ impl DesktopApp {
             OwnerRequest::EnableRelayQuestions { relay_url, team_id } => {
                 self.questions_enable_with(relay_url, team_id, proof);
             }
+            OwnerRequest::SyncThroughApassy {
+                vault,
+                team_id,
+                devices,
+                ..
+            } => self.plan_switch_with(&vault, &team_id, devices, proof),
             OwnerRequest::AnswerRemoteQuestion {
                 remote_id, choice, ..
             } => self.answer_remote_question(remote_id, choice, Some(proof)),

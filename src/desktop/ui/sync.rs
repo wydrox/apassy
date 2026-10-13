@@ -1427,14 +1427,12 @@ fn passphrase_button(app: &DesktopApp, entry: &VaultEntry) -> &'static str {
     }
 }
 
-/// The choices of the Sync picker: off, each synced folder of this Mac, the Apassy relay,
-/// and "Choose folder…".
+/// The choices of the Sync picker of the Create screen: off, each synced folder of this
+/// Mac, and "Choose folder…". Settings has the choice of [`Choice`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Pick {
     Off,
     Folder(PathBuf),
-    /// The Apassy relay (ADR 0022). Settings offers it; the Create screen does not.
-    Relay,
     Choose,
 }
 
@@ -1443,21 +1441,17 @@ pub(super) enum Pick {
 enum Current<'a> {
     Off,
     Folder(&'a Path),
-    Relay,
 }
 
 /// The choices of the picker in their order, with their labels: off, the detected
-/// folders, the Apassy relay after them when `relay` is true, and "Choose folder…".
-pub(super) fn picker_choices(folders: &[SyncFolder], relay: bool) -> Vec<(Pick, String)> {
+/// folders, and "Choose folder…".
+pub(super) fn picker_choices(folders: &[SyncFolder]) -> Vec<(Pick, String)> {
     let mut choices = vec![(Pick::Off, "Off".to_owned())];
     choices.extend(
         folders
             .iter()
             .map(|folder| (Pick::Folder(folder.path.clone()), folder.label.clone())),
     );
-    if relay {
-        choices.push((Pick::Relay, relay::LABEL.to_owned()));
-    }
     choices.push((Pick::Choose, "Choose folder…".to_owned()));
     choices
 }
@@ -1468,12 +1462,10 @@ fn sync_picker(
     salt: &str,
     folders: &[SyncFolder],
     current: Current<'_>,
-    relay: bool,
 ) -> Option<Pick> {
     let label = match current {
         Current::Off => "Off".to_owned(),
         Current::Folder(path) => folder_label(folders, path),
-        Current::Relay => relay::LABEL.to_owned(),
     };
     let mut pick = None;
     kit::menu(
@@ -1483,9 +1475,9 @@ fn sync_picker(
     )
     .truncate()
     .show_ui(ui, |ui| {
-        for (choice, text) in picker_choices(folders, relay) {
+        for (choice, text) in picker_choices(folders) {
             let selected = match (&choice, current) {
-                (Pick::Off, Current::Off) | (Pick::Relay, Current::Relay) => true,
+                (Pick::Off, Current::Off) => true,
                 (Pick::Folder(path), Current::Folder(now)) => path == now,
                 _ => false,
             };
@@ -1501,8 +1493,88 @@ fn sync_picker(
     pick
 }
 
-/// Settings > Vault > Sync: each vault, its folder or the relay, its status, and its
-/// actions.
+/// The sync choice of the open vault in Vault > Sync (flow spec M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Choice {
+    ICloud,
+    Apassy,
+    Off,
+    /// Another folder ("Other folder…"): no segment is selected.
+    Other,
+}
+
+/// What the owner picked in the Sync row of the open vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowPick {
+    Choice(Choice),
+    /// "Other folder…" (L3): Dropbox, a network share.
+    OtherFolder,
+    /// "Use another relay…" (L3): a relay that its operator runs, with a team code.
+    AnotherRelay,
+}
+
+/// "Other folder…" and "Use another relay…" in the menu of the Sync row.
+pub(super) const OTHER_FOLDER: &str = "Other folder…";
+pub(super) const ANOTHER_RELAY: &str = "Use another relay…";
+
+/// The iCloud Drive folder of this Mac, when iCloud Drive is on: it is among the synced
+/// folders that this Mac has. The path alone exists on every Mac.
+pub(super) fn icloud_on(app: &DesktopApp) -> Option<PathBuf> {
+    app.sync
+        .icloud
+        .clone()
+        .filter(|icloud| app.sync.folders.iter().any(|folder| &folder.path == icloud))
+}
+
+/// The choice of a vault with the sync `link`.
+fn choice_of(app: &DesktopApp, link: Option<&SyncLink>) -> Choice {
+    match link {
+        None => Choice::Off,
+        Some(link) if link.is_relay() => Choice::Apassy,
+        Some(link) if Some(&link.folder) == app.sync.icloud.as_ref() => Choice::ICloud,
+        Some(_) => Choice::Other,
+    }
+}
+
+/// The segmented choice of the open vault and its menu. Returns the pick.
+fn sync_choice(app: &DesktopApp, ui: &mut egui::Ui, id: &str, now: Choice) -> Option<RowPick> {
+    let mut pick = None;
+    // The controls come right to left: the menu is the rightmost.
+    let more = kit::icon_button(ui, kit::Icon::More, "More sync choices", kit::Size::Small);
+    egui::Popup::menu(&more).show(|ui| {
+        ui.set_min_width(180.0);
+        if ui.selectable_label(false, OTHER_FOLDER).clicked() {
+            pick = Some(RowPick::OtherFolder);
+        }
+        if now != Choice::Apassy && ui.selectable_label(false, ANOTHER_RELAY).clicked() {
+            pick = Some(RowPick::AnotherRelay);
+        }
+    });
+    let mut value = now;
+    let options = [
+        (Choice::ICloud, "iCloud Drive", None),
+        (Choice::Apassy, "Apassy", super::plan::sync_tag(app)),
+        (Choice::Off, "Off", None),
+    ];
+    if kit::segmented_tagged(ui, ("sync-choice", id), &mut value, &options).changed() {
+        pick = Some(RowPick::Choice(value));
+    }
+    pick
+}
+
+/// The line under the choice of the open vault.
+fn choice_line(app: &DesktopApp, choice: Choice) -> Option<&'static str> {
+    match choice {
+        Choice::ICloud => Some(super::plan::icloud_line(app)),
+        Choice::Apassy => Some(super::plan::APASSY_LINE),
+        Choice::Off => Some(super::plan::OFF_LINE),
+        Choice::Other => None,
+    }
+}
+
+/// Settings > Vault > Sync: each vault, where it syncs, its status, and its actions. The
+/// open vault has the choice "iCloud Drive", "Apassy", or "Off", with "Other folder…" and
+/// "Use another relay…" in its menu (flow spec M3).
 pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !app.sync.offered {
         return;
@@ -1521,7 +1593,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         // "Received by …" needs the receipts of the other Macs.
         app.relay_receipts_due(id, ui.ctx());
     }
-    let mut action: Option<(String, Pick)> = None;
+    let mut action: Option<(String, RowPick)> = None;
     let mut sheet = None;
     let mut sync_now = false;
     let mut open_synced = false;
@@ -1537,28 +1609,19 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let on_relay = link.is_some_and(SyncLink::is_relay);
                 let syncing = on_relay && app.relay_busy(&entry.id, Job::SyncNow);
                 // No other choice while relay sync turns on or off.
-                let changing = app.relay_changing(&entry.id);
+                let switching = super::plan::switching(app, &entry.id);
+                let changing = app.relay_changing(&entry.id) || switching;
                 let refused = on_relay && status.is_some_and(relay::refused_copy);
                 // Removed from the relay: the line says to turn relay sync off.
                 let removed = on_relay && app.relay_removed(&entry.id);
+                let choice = choice_of(app, link);
                 g.row(|ui| {
                     let label = super::settings::rows::label_text(&entry.name);
                     super::settings::rows::one_line(ui, label.into(), None, |ui| {
                         if open_unlocked {
-                            let now = match link {
-                                None => Current::Off,
-                                Some(link) if link.is_relay() => Current::Relay,
-                                Some(link) => Current::Folder(link.folder.as_path()),
-                            };
                             let picked = ui
                                 .add_enabled_ui(!changing, |ui| {
-                                    sync_picker(
-                                        ui,
-                                        &format!("sync-picker-{}", entry.id),
-                                        &app.sync.folders,
-                                        now,
-                                        true,
-                                    )
+                                    sync_choice(app, ui, &entry.id, choice)
                                 })
                                 .inner;
                             if let Some(pick) = picked {
@@ -1576,36 +1639,60 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             kit::tag(ui, tag, tone);
                         }
                     });
+                    if open_unlocked {
+                        if switching {
+                            kit::tone_note(
+                                ui,
+                                format!("Apassy switches “{}” to Apassy…", entry.name),
+                                Tone::Accent,
+                            );
+                        } else if let Some(line) = choice_line(app, choice) {
+                            ui.add(Label::new(super::settings::rows::note(line)).wrap());
+                        }
+                        if icloud_on(app).is_none() && choice != Choice::Apassy {
+                            ui.add(
+                                Label::new(super::settings::rows::note(
+                                    &super::plan::icloud_off_note(app, &entry.id),
+                                ))
+                                .wrap(),
+                            );
+                        }
+                    }
                     let icloud =
                         link.is_some_and(|link| Some(&link.folder) == app.sync.icloud.as_ref());
                     let line = match (link, status) {
-                        _ if syncing => Job::SyncNow.progress().to_owned(),
+                        _ if syncing => Some(Job::SyncNow.progress().to_owned()),
                         (Some(_), Some(UiStatus::NeedsPassphrase))
                             if on_relay && app.relay_keeps_passphrase(&entry.id) =>
                         {
-                            relay::OLDER_COPY_WORDS.to_owned()
+                            Some(relay::OLDER_COPY_WORDS.to_owned())
                         }
                         (Some(_), Some(status)) if on_relay => {
-                            relay::words(status, app.sync.relay.receipt(&entry.id))
+                            Some(relay::words(status, app.sync.relay.receipt(&entry.id)))
                         }
-                        (Some(_), None) if on_relay => "Syncs through the Apassy relay.".to_owned(),
-                        (Some(link), Some(status)) => format!(
+                        (Some(_), None) if on_relay => {
+                            Some("Syncs through the Apassy relay.".to_owned())
+                        }
+                        (Some(link), Some(status)) => Some(format!(
                             "{} {} in {}.",
                             status.words(icloud),
                             link.file,
                             folder_label(&app.sync.folders, &link.folder)
-                        ),
-                        (Some(link), None) => format!(
+                        )),
+                        (Some(link), None) => Some(format!(
                             "Syncs as {} in {}.",
                             link.file,
                             folder_label(&app.sync.folders, &link.folder)
+                        )),
+                        // The line of the choice says it.
+                        (None, _) if open_unlocked => None,
+                        (None, _) => Some(
+                            "Sync is off. Open and unlock this vault to turn it on.".to_owned(),
                         ),
-                        (None, _) if open_unlocked => "Sync is off.".to_owned(),
-                        (None, _) => {
-                            "Sync is off. Open and unlock this vault to turn it on.".to_owned()
-                        }
                     };
-                    ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    if let Some(line) = line {
+                        ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    }
                     // The actions of a synced vault, under its state.
                     let actions = open_unlocked
                         && ((link.is_some() && !removed)
@@ -1660,35 +1747,61 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     } else if open_synced {
         app.leave_vault_for(Step::OpenSynced, Some(&ctx));
     } else if let Some((id, pick)) = action {
-        let on = app
+        sheet = sheet.or_else(|| app.sync_pick(&id, pick, &ctx));
+    }
+    if let Some(sheet) = sheet {
+        app.sync_open_sheet(sheet, Some(&ctx));
+    }
+}
+
+impl DesktopApp {
+    /// A pick in the Sync row of the open vault `id`. Returns the sync sheet to open.
+    fn sync_pick(&mut self, id: &str, pick: RowPick, ctx: &egui::Context) -> Option<SyncSheet> {
+        let id = id.to_owned();
+        let on = self
             .vault_list
             .registry
             .get(&id)
             .is_some_and(|entry| entry.sync_state().is_some());
         match pick {
-            Pick::Off if on => {
-                sheet = Some(SyncSheet::TurnOff { id });
-            }
-            Pick::Off => {}
-            Pick::Choose => {
-                app.sync.folder_input.clear();
-                sheet = Some(SyncSheet::ChooseFolder { id });
-            }
-            Pick::Relay => {
-                sheet = Some(SyncSheet::RelaySetup { id });
-            }
-            // A vault on the relay leaves its relay team first, in the "Turn off" sheet.
-            Pick::Folder(folder) if app.is_relay(&id) => {
-                app.relay_switch_to_folder(&id, folder, Some(&ctx));
-            }
-            Pick::Folder(folder) => match app.sync_enable(&id, &folder) {
-                Ok(text) => app.set_ok(text),
-                Err(text) => app.set_err(text),
+            RowPick::Choice(Choice::Off) if on => return Some(SyncSheet::TurnOff { id }),
+            RowPick::Choice(Choice::ICloud) => match icloud_on(self) {
+                None => {
+                    let note = super::plan::icloud_off_note(self, &id);
+                    self.set_note(note);
+                }
+                // A vault on the relay leaves its relay team first, in the "Turn off"
+                // sheet: "Sync with iCloud Drive instead…".
+                Some(folder) if self.is_relay(&id) => {
+                    self.relay_switch_to_folder(&id, folder, Some(ctx));
+                }
+                Some(folder) => match self.sync_enable(&id, &folder) {
+                    Ok(text) => self.set_ok(text),
+                    Err(text) => self.set_err(text),
+                },
             },
+            RowPick::Choice(Choice::Apassy) => super::plan::pick_apassy(self, &id, ctx),
+            RowPick::Choice(Choice::Off | Choice::Other) => {}
+            RowPick::OtherFolder => {
+                self.sync.folder_input.clear();
+                return Some(SyncSheet::ChooseFolder { id });
+            }
+            RowPick::AnotherRelay => return Some(SyncSheet::RelaySetup { id }),
         }
+        None
     }
-    if let Some(sheet) = sheet {
-        app.sync_open_sheet(sheet, Some(&ctx));
+
+    /// The pick of a choice in the Sync row of the open vault, as a click on its segment,
+    /// for a test.
+    #[cfg(test)]
+    pub(super) fn sync_pick_for_test(&mut self, choice: Choice) {
+        let Some(id) = self.vault_list.current.clone() else {
+            return;
+        };
+        let ctx = egui::Context::default();
+        if let Some(sheet) = self.sync_pick(&id, RowPick::Choice(choice), &ctx) {
+            self.sync_open_sheet(sheet, Some(&ctx));
+        }
     }
 }
 
@@ -2042,13 +2155,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             Some(folder) if !app.sync.create_custom => Current::Folder(folder),
                             _ => Current::Off,
                         };
-                        pick = sync_picker(
-                            ui,
-                            "sync-create-picker",
-                            &app.sync.folders,
-                            current,
-                            false,
-                        );
+                        pick = sync_picker(ui, "sync-create-picker", &app.sync.folders, current);
                     },
                 );
             });
@@ -2077,7 +2184,7 @@ pub(super) fn create_option(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.sync.create_folder = None;
             app.sync.create_custom = true;
         }
-        Some(Pick::Relay) | None => {}
+        None => {}
     }
 }
 

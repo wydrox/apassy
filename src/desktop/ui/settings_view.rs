@@ -96,7 +96,8 @@ impl SettingsSection {
             #[cfg(feature = "vault")]
             Self::Tools => (99, 99, 102, Icon::Terminal),
             #[cfg(feature = "vault")]
-            Self::Plan => (52, 199, 89, Icon::Check),
+            // Gray for every plan: a paid plan is not a reward color.
+            Self::Plan => (120, 120, 128, Icon::Check),
             #[cfg(feature = "vault")]
             Self::Updates => (142, 142, 147, Icon::Download),
             #[cfg(not(feature = "vault"))]

@@ -251,7 +251,7 @@ fn the_sync_picker_turns_on_moves_and_turns_off() {
     let id = current_id(&app);
     super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
-    assert!(text.contains("Sync is off."), "{text}");
+    assert!(text.contains(super::plan::OFF_LINE), "{text}");
 
     let text = app.sync_enable(&id, &folders.icloud).expect("iCloud");
     assert!(text.contains("iCloud Drive"), "{text}");
@@ -1203,33 +1203,16 @@ fn add_a_device_shows_the_link_as_a_qr_code_for_the_iphone() {
 }
 
 #[test]
-fn the_picker_offers_the_relay_after_the_detected_folders() {
+fn the_create_picker_offers_the_detected_folders_only() {
     use super::sync::{Pick, picker_choices};
     let folders = folders();
     let app = folders.mac("mac-a");
-    let labels: Vec<String> = picker_choices(&app.sync.folders, true)
+    let labels: Vec<String> = picker_choices(&app.sync.folders)
         .into_iter()
         .map(|(_, label)| label)
         .collect();
-    assert_eq!(
-        labels,
-        [
-            "Off",
-            "iCloud Drive",
-            "Dropbox",
-            "Apassy relay",
-            "Choose folder…"
-        ]
-    );
-    assert!(
-        picker_choices(&app.sync.folders, true).contains(&(Pick::Relay, "Apassy relay".into()))
-    );
-    // The Create screen keeps folders only.
-    assert!(
-        !picker_choices(&app.sync.folders, false)
-            .iter()
-            .any(|(pick, _)| *pick == Pick::Relay)
-    );
+    assert_eq!(labels, ["Off", "iCloud Drive", "Dropbox", "Choose folder…"]);
+    assert_eq!(picker_choices(&app.sync.folders)[3].0, Pick::Choose);
 }
 
 #[test]
