@@ -33,6 +33,10 @@ pub(crate) enum SettingsSection {
     /// The command line and the browser extension.
     #[cfg(feature = "vault")]
     Tools,
+    /// Free, Personal, or Team, and the subscription. Listed only when the plan
+    /// provider has an offer ([`SettingsSection::listed`]).
+    #[cfg(feature = "vault")]
+    Plan,
     /// Updates, the version, and the keyboard shortcuts.
     #[cfg(feature = "vault")]
     Updates,
@@ -43,14 +47,15 @@ pub(crate) enum SettingsSection {
 }
 
 impl SettingsSection {
-    /// The sections in the order of the list.
+    /// The sections in the order of the list. The list shows the [`Self::listed`] ones.
     #[cfg(feature = "vault")]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Vault,
         Self::Security,
         Self::Devices,
         Self::Bouncer,
         Self::Tools,
+        Self::Plan,
         Self::Updates,
     ];
     #[cfg(not(feature = "vault"))]
@@ -68,6 +73,8 @@ impl SettingsSection {
             Self::Bouncer => "Bouncer",
             #[cfg(feature = "vault")]
             Self::Tools => "Tools",
+            #[cfg(feature = "vault")]
+            Self::Plan => "Plan",
             #[cfg(feature = "vault")]
             Self::Updates => "Updates",
             #[cfg(not(feature = "vault"))]
@@ -89,11 +96,32 @@ impl SettingsSection {
             #[cfg(feature = "vault")]
             Self::Tools => (99, 99, 102, Icon::Terminal),
             #[cfg(feature = "vault")]
+            Self::Plan => (52, 199, 89, Icon::Check),
+            #[cfg(feature = "vault")]
             Self::Updates => (142, 142, 147, Icon::Download),
             #[cfg(not(feature = "vault"))]
             Self::Rules => (255, 149, 0, Icon::List),
         };
         kit::Tile::icon(egui::Color32::from_rgb(red, green, blue), icon)
+    }
+
+    /// Whether the list shows the section. Plan shows only when there is a plan to
+    /// buy, so a build with no account service shows nothing about plans.
+    pub(crate) fn listed(self, app: &DesktopApp) -> bool {
+        #[cfg(feature = "vault")]
+        if self == Self::Plan {
+            return app.plans_offered();
+        }
+        let _ = app;
+        true
+    }
+
+    /// The listed sections in the order of the list.
+    pub(crate) fn listed_all(app: &DesktopApp) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|section| section.listed(app))
+            .collect()
     }
 }
 
@@ -133,7 +161,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     #[cfg(not(feature = "vault"))]
     let subtitle = "Demo".to_owned();
     columns::list_toolbar(ui, "Settings", &subtitle, |_| {});
-    let rows: Vec<(SettingsSection, String)> = SettingsSection::ALL
+    let rows: Vec<(SettingsSection, String)> = SettingsSection::listed_all(app)
         .into_iter()
         .map(|section| (section, status(app, section)))
         .collect();
@@ -177,6 +205,10 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// The detail column: the selected section under its header.
 pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    // A section that is no longer listed (the offer went away) shows the first one.
+    if !app.ui.settings_section.listed(app) {
+        app.ui.settings_section = SettingsSection::default();
+    }
     let section = app.ui.settings_section;
     columns::detail_toolbar(ui, |_| {});
     // Each section keeps its own scroll position and its own IDs, so the focus of one

@@ -26,6 +26,10 @@ pub mod sync;
 #[cfg(feature = "vault")]
 pub mod questions;
 
+/// The plan of this Mac and its provider (build plan §2c). It needs the vault.
+#[cfg(feature = "vault")]
+pub mod plan;
+
 /// Relay memberships of this Mac for sync and questions (stage 5). It needs the vault.
 #[cfg(feature = "vault")]
 pub mod relay {

@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use apassy::broker::action_kind::ActionKind;
 use apassy::contracts::CredentialKind;
 use apassy::desktop::{DesktopApp, native_options};
+use apassy::plan::FakePlanProvider;
 use apassy::vault::agent_items::{CorrectionKind, NewCredentialRequest};
 use apassy::vault::answers::ProjectRef;
 use apassy::vault::exceptions::ExceptionKind;
@@ -771,8 +772,10 @@ fn run() {
             // An active window shows the traffic lights in color. macOS can refuse
             // the focus; scripts/screenshots.sh then colors them.
             cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            let mut app = DesktopApp::from_creation_context(cc);
+            tour_plan(&mut app);
             Ok(Box::new(Tour {
-                app: DesktopApp::from_creation_context(cc),
+                app,
                 steps,
                 events: Vec::new(),
                 next_at: Instant::now() + Duration::from_secs(2),
@@ -784,6 +787,21 @@ fn run() {
         }),
     )
     .expect("window");
+}
+
+/// `APASSY_PLAN=free|personal|team|operator|ended` gives the window a fake plan with an
+/// offer, so the plan screens show. Without it the window has the plan of the app as it
+/// ships: none.
+fn tour_plan(app: &mut DesktopApp) {
+    let Ok(name) = std::env::var("APASSY_PLAN") else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let provider = FakePlanProvider::for_screenshots(&name, now)
+        .expect("APASSY_PLAN is free, personal, team, operator, or ended");
+    app.set_plan_provider(std::sync::Arc::new(provider));
 }
 
 /// The `.env` file that the tour pastes in New Credential, as in the mockup.

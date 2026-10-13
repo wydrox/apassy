@@ -60,6 +60,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, section: SettingsSec
             command_line_section(app, ui);
             super::browser_settings::section(app, ui);
         }
+        SettingsSection::Plan => super::plan::section(app, ui),
         SettingsSection::Updates => {
             super::updates::section(app, ui);
             shortcuts_section(ui);
@@ -133,6 +134,7 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
                 "Command line not installed".to_owned()
             }
         }
+        SettingsSection::Plan => super::plan::status_line(app),
         SettingsSection::Updates => format!("Version {}", app.updates.build().label()),
     }
 }

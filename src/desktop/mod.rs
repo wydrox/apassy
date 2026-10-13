@@ -169,6 +169,10 @@ pub struct DesktopApp {
     /// tests start nothing.
     #[cfg(feature = "vault")]
     pub(crate) model_server: Option<std::sync::Arc<crate::broker::model_server::ModelServer>>,
+    /// The plan of this Mac (build plan §2c). [`crate::plan::NoPlanProvider`] until the
+    /// account service exists: no offer, so nothing about plans shows.
+    #[cfg(feature = "vault")]
+    pub(crate) plan: std::sync::Arc<dyn crate::plan::PlanProvider>,
     styled: bool,
 }
 
@@ -236,6 +240,8 @@ impl DesktopApp {
             companion: companion::CompanionFlows::default(),
             #[cfg(feature = "vault")]
             model_server: None,
+            #[cfg(feature = "vault")]
+            plan: std::sync::Arc::new(crate::plan::NoPlanProvider),
             styled: false,
         }
     }
@@ -297,6 +303,20 @@ impl DesktopApp {
             handle.approvals().invalidate_all();
         }
         self.stop_companion();
+    }
+
+    /// Use `provider` for the plan of this Mac. The app keeps
+    /// [`crate::plan::NoPlanProvider`]; the screenshot tour sets a fake one.
+    #[cfg(feature = "vault")]
+    pub fn set_plan_provider(&mut self, provider: std::sync::Arc<dyn crate::plan::PlanProvider>) {
+        self.plan = provider;
+    }
+
+    /// Whether the plan provider has something to buy. Without it the app shows no paid
+    /// tag, no Plan section, and no upgrade.
+    #[cfg(feature = "vault")]
+    pub(crate) fn plans_offered(&self) -> bool {
+        self.plan.offer(crate::plan::UpgradeFrom::Plan).is_some()
     }
 
     pub fn model(&self) -> &DesktopModel {
