@@ -972,53 +972,65 @@ Run them in this order. Steps 1 to 4 change nothing on the live relay.
 
 ## 20. Connect teams (directory 1003)
 
-On the Free plan the Mac app makes its own team, without a team code, the first time its owner adds a device: a Connect team (docs/SPEC.md section 26). It is an ordinary team with one member, `owner`, whose devices are the Mac that made it and the devices it confirmed with safety words. It carries questions (section 19) and no vault sync. Nobody gives out a code, so the limits below are what keeps the relay small.
+On the Free plan the Mac app makes its own team, without a team code, the first time its owner adds a device: a Connect team (docs/SPEC.md section 26). It is an ordinary team with one member, `owner`, whose devices are the Mac that made it and the devices it confirmed with safety words. It carries questions (section 19) and no vault sync. Nobody gives out a code, so the bounds below are what keeps the relay small: every write path and long poll that such a team can reach has a count, a rate, or a byte cap.
 
 What changes at the first start of this version:
 
-- `relay.db` moves from version 1002 to 1003 in one transaction: the column `team.kind` (every existing team becomes `operator`), the column `team.suspend_reason`, and the table `connect_key` (the SHA-256 of each public key that made a Connect team). The change is additive. A failure leaves 1002 and the relay does not start. The image before (`questions-*`, directory 1002) refuses a 1003 file: see 20.3. Team files do not change.
-- A new edge route, `POST /v1/connect`. `POST /v1/teams` and team codes work as before.
-- A new setting, `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` (default 200, 0 to 100000): the Connect teams of the whole relay in any 24 hours. Over it, `POST /v1/connect` answers 503 `busy` with `Retry-After: 3600` and the relay audit gets a `connect_refused` row (at most one per ten seconds). `0` turns Connect off without a deploy.
+- `relay.db` moves from version 1002 to 1003 in one transaction: the column `team.kind` (every existing team becomes `operator`), the column `team.suspend_reason`, and the table `connect_key` (the SHA-256 of each public key that made a Connect team, with the id of its team while the team exists). The change is additive. A failure leaves 1002 and the relay does not start. The image before (`questions-*`, directory 1002) refuses a 1003 file: see 20.3. Team files do not change.
+- A new edge route, `POST /v1/connect`. Its body carries a signature of the device key (SPEC 26.3), so only the holder of a key can make a team with it. `POST /v1/teams` and team codes work as before.
+- Two settings:
+  - `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` (default 200, 0 to 100000): the Connect teams of the whole relay in any 24 hours. Over it, 503 `busy` with `Retry-After: 3600`.
+  - `APASSY_RELAY_CONNECT_TEAMS_MAX` (default 1000, 0 to 1000000): the Connect teams the relay holds at once, active or suspended. At it, 503 `busy` ("no room") with `Retry-After: 3600`. A deleted team frees its place.
+
+  Either at `0` turns Connect off without a deploy. Each refusal writes a `connect_refused` row to the relay audit (at most one per reason and ten seconds).
 - One device key makes at most one Connect team, ever; the same key again gets 409 `connect_key_used`.
+- One client network (an IPv6 /48 or an IPv4 /24, which the Worker sends in `X-Apassy-Client-Prefix`) makes at most 5 Connect teams per UTC day, and never more than a tenth of the daily cap; over it 429 `rate_limited` until the next UTC day. The relay counts this **in memory only**: it keeps an HMAC of the prefix under a random salt that it makes at the first call of each UTC day and forgets with the counts at the next. No file, log line, or audit row of the relay holds an address or a prefix, and a restart forgets the counts. Calls without the header (a Worker from before this version) all share one count.
 - A Connect team starts with these limits, and every other limit at its default (section 17):
 
   | Field | Connect | Why |
   | --- | --- | --- |
-  | `members` | 1 | one person; more devices come by device links (10 per member) |
-  | `items`, `agents` | 0 | no runs and no use of the agent proxy: a free team must not be an open HTTP proxy |
-  | `sync_bytes` | 0 | no vault sync on the relay: a snapshot push answers 403 `plan_required` |
+  | `members` | 1 | one person; more devices come by device links (10 per member). Invites are refused |
+  | `items`, `agents` | 0 | no runs and no use of the agent proxy: a free team must not be an open HTTP proxy. Collections, policies, and grants are refused |
+  | `sync_bytes` | 0 | no vault sync on the relay: a snapshot push and a receipt answer 403 `plan_required` |
   | `question_bytes` | 2097152 (2 MiB) | about 60 waiting questions |
 
-- The ranges of three limits change for every team: `--items 0` and `--agents 0` are allowed (none), and `--sync-bytes 0` is allowed (no vault sync). To give one Connect team vault sync by hand: `apassy-relay admin limits <id> --sync-bytes 67108864`.
+- A Connect team's file is capped at `question_bytes` + 8 MiB (10 MiB at the preset; more when `admin limits` gives it items or members). A write past the cap is 403 `team_limit` for that team only. Near the cap, the maintenance pass drops the oldest quarter of that team's audit and writes one `audit_trimmed` row. Operator teams have no file cap and keep their whole audit.
+- A Connect team makes at most 300 authenticated requests a minute (429 `rate_limited` over it); all Connect teams together hold at most 64 long polls and at most half of the push queue (2 jobs per team), so they can take neither the threads of members nor the pushes of operator teams. Long polls that can get nothing (`GET /v1/sync/head` with `sync_bytes` 0, `GET /v1/host/requests` with `agents` 0) answer at once.
+- For every team: a repeated sync receipt or push token writes no new audit row; expired or refused device links go after 7 days (at most 100 stay); a public key must be a point on P-256 (`/v1/teams`, `/v1/join`, `/v1/devices/link`, and sign-in refuse others).
+- The maintenance pass of every team runs on its own thread; a Connect team without requests is passed every 60 seconds instead of every 5. At start the team files open on up to 8 threads (20.5).
+- The ranges of three limits change for every team: `--items 0` and `--agents 0` are allowed (none), and `--sync-bytes 0` is allowed (no vault sync). To give one Connect team vault sync by hand: `apassy-relay admin limits <id> --sync-bytes 67108864`. `--sync-bytes 0` later blocks pushes and receipts only: snapshots pushed before can still be downloaded until `DELETE /v1/sync` or the team's deletion.
 - `admin teams` shows `kind` (`operator` or `connect`) and `suspend_reason` for each team. The sign-in answer and `GET /v1/me` carry `team_kind`.
 - A new admin command, `connect-sweep` (20.4). It does not run by itself.
-- The Worker has a new rate limit binding, `CONNECT_LIMITER` (namespace `1004`): 1 `POST /v1/connect` a minute per IPv4 address or IPv6 /64. Workers Rate Limiting counts only per 10 or 60 seconds, so an hourly or daily limit per address is not possible at the edge; the relay's daily cap is the bound for the whole relay. Like the others, the binding fails open.
+- The Worker has two new rate limit bindings for `POST /v1/connect`: `CONNECT_LIMITER` (namespace `1004`, 1 a minute per IPv4 address or IPv6 /64) and `CONNECT_PREFIX_LIMITER` (namespace `1005`, 3 a minute per IPv4 /24 or IPv6 /48). Workers Rate Limiting counts only per 10 or 60 seconds, so the daily bounds are the relay's. Like the others, the bindings fail open. The Worker also sets `X-Apassy-Client-Prefix` on that route and removes a client's copy of it everywhere.
 
 ### 20.1 What to watch
 
-- `admin teams`: the number of `connect` teams, and how many have one device (`members` is always 1; count devices with the sweep's `--dry-run`).
-- The relay audit (`relay.db`, section 12): `team_created` rows with `"kind":"connect"`, and `connect_refused` rows. Many refusals mean the cap is full: someone makes teams in bulk, or the app grew. Raise or lower the cap, or set it to 0 and restart the relay.
-- Disk: each Connect team is one file in `teams/` plus up to 2 MiB of sealed questions. The backup copies each file (section 13).
+- `admin teams`: the number of `connect` teams against `APASSY_RELAY_CONNECT_TEAMS_MAX`.
+- The relay audit (`relay.db`, section 12): `team_created` rows with `"kind":"connect"`, and `connect_refused` rows with their `reason`: `busy` (the daily cap is full), `full` (the room is full), `rate_limited` (one network made its teams of the day), `prefixes_full` (more than 65536 networks in a day). Many `busy` or `full` refusals mean someone makes teams in bulk, or the app grew: raise or lower the caps, set either to 0 and restart the relay, or run the sweep. Many `rate_limited` refusals right after a deploy mean the Worker does not send the prefix header (20.2 step 2).
+- Disk: Connect teams take at most `APASSY_RELAY_CONNECT_TEAMS_MAX` × 10 MiB (about 10 GiB at the defaults), plus one journal while a transaction runs. The backup copies each file (section 13), so a backup can be as large.
+- A team's audit with `audit_trimmed` rows: a Connect team that writes a lot (or tries to fill its file).
+- The start time of the relay (20.5).
 
 ### 20.2 Owner steps for the deploy
 
 This version is built on the questions image of section 19 (team schema 5). Deploy section 19 first, or both together: the backup of 19.2 step 5 then serves both.
 
 1. **The backup.** Note the image the relay runs now (the rollback target), then back up, as in 19.2 step 5. Keep the folder name: its `relay.db` is the way back to directory 1002.
-2. **The Worker.** It must have `CONNECT_LIMITER` before the app calls `/v1/connect`. Test and deploy (section 7):
+2. **The Worker, first.** It must have `CONNECT_LIMITER`, `CONNECT_PREFIX_LIMITER`, and the prefix header before the app calls `/v1/connect`: without the header the relay counts every call as one network, so the whole relay makes at most 5 Connect teams a day. Test and deploy (section 7):
 
    ```sh
    cd deploy/worker && npm test && npm run typecheck && npx wrangler deploy
    ```
 
-   A Worker with the binding in front of the old relay is harmless: `POST /v1/connect` gets 404 from the relay.
-3. **The relay.** Build and set the image of the commit as in 19.2 step 6, with the tag `apassy-relay:connect-<commit>`. Keep the cap at its default, or set it in `environment` of `relay` in `/opt/apassy/compose.yaml` (and `deploy/vps/compose.yaml`):
+   A Worker with the bindings in front of the old relay is harmless: `POST /v1/connect` gets 404 from the relay, and the old relay ignores the new header.
+3. **The relay.** Build and set the image of the commit as in 19.2 step 6, with the tag `apassy-relay:connect-<commit>`. Keep the caps at their defaults, or set them in `environment` of `relay` in `/opt/apassy/compose.yaml` (and `deploy/vps/compose.yaml`):
 
    ```yaml
       APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "200"
+      APASSY_RELAY_CONNECT_TEAMS_MAX: "1000"
    ```
 
-   Then `docker compose up -d --wait`.
+   Size `APASSY_RELAY_CONNECT_TEAMS_MAX` to the free disk of the volume: 10 MiB a team, twice that with backups. Then `docker compose up -d --wait`.
 4. **Checks.**
 
    ```sh
@@ -1029,32 +1041,38 @@ This version is built on the questions image of section 19 (team schema 5). Depl
    apassy-team me
    ```
 
-   The first Connect team made by the app shows in `admin teams` as `"kind": "connect"` with the limits above.
+   The first Connect team made by the app shows in `admin teams` as `"kind": "connect"` with the limits above, and its first `admin teams` after a restart still `"open": true`.
 
 ### 20.3 Rollback
 
-- **Stop new Connect teams only.** Set `APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "0"` and `docker compose up -d --wait`. Existing Connect teams keep working; new calls get 503. This needs no rollback of anything.
-- **The Worker.** The new Worker serves every old route as before; `npx wrangler rollback` goes back. The `CONNECT_LIMITER` binding is then unused.
-- **The relay image.** The image before (directory 1002) refuses a 1003 `relay.db`, and the limits of a Connect team (`sync_bytes` 0, `items` 0, `agents` 0) are out of its ranges. So a rollback to it restores `relay.db` from the backup of 20.2 step 1. The team files stay as they are (they do not change in this version). With the relay stopped (section 13):
+1. **First, stop new Connect teams.** Set `APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "0"` (or `APASSY_RELAY_CONNECT_TEAMS_MAX: "0"`) and `docker compose up -d --wait`. Existing Connect teams keep working; new calls get 503. This needs no rollback of anything, and it is the step to take before either rollback below.
+2. **The Worker.** The new Worker serves every old route as before; `npx wrangler rollback` goes back. **After a Worker rollback, `POST /v1/connect` has no edge limiter (or only the first one) while the relay stays on the new image**, and no prefix header: the relay then counts every call as the one network `unknown` (at most 5 new teams a day for the whole relay) and still applies its daily cap and room. That is why step 1 comes first: keep the cap at 0 until the Worker with both bindings is back.
+3. **The relay image.** The image before (directory 1002) refuses a 1003 `relay.db`, and the limits of a Connect team (`sync_bytes` 0, `items` 0, `agents` 0) are out of its ranges. So a rollback to it restores `relay.db` from the backup of 20.2 step 1. The team files stay as they are (they do not change in this version). With the relay stopped (section 13):
 
-  ```sh
-  docker compose stop relay
-  # put relay.db of the step 1 backup into the volume, as in section 13
-  ```
+   ```sh
+   docker compose stop relay
+   # put relay.db of the step 1 backup into the volume, as in section 13
+   ```
 
-  Then set the old image in `/opt/apassy/compose.yaml`, remove `APASSY_RELAY_CONNECT_TEAMS_PER_DAY`, and `docker compose up -d --wait`. Every team must be `"open": true` in `admin teams`.
+   Then set the old image in `/opt/apassy/compose.yaml`, remove `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` and `APASSY_RELAY_CONNECT_TEAMS_MAX`, and `docker compose up -d --wait`. Every team must be `"open": true` in `admin teams`.
 
-  What the restore loses: every team made after the backup, Connect or operator (its file stays in `teams/` with no key anywhere; the old relay ignores it; delete those files when you are sure), and every change of `relay.db` since the backup (limits set, teams suspended, resumed, or deleted, team codes made). Members, devices, questions, and sync heads of the teams that existed before stay, because they are in the team files. Every Mac with a Connect team then gets 401 at sign-in and makes a new team when the app calls `/v1/connect` again: that also fails on the old image (404), so Free users have relay questions again only after a fix forward. Prefer the cap of 0 and a fix forward.
+   What the restore loses: every team made after the backup, Connect or operator (its file stays in `teams/` with no key anywhere; the old relay ignores it; delete those files when you are sure), and every change of `relay.db` since the backup (limits set, teams suspended, resumed, or deleted, team codes made). Members, devices, questions, and sync heads of the teams that existed before stay, because they are in the team files. Every Mac with a Connect team then gets 401 at sign-in and makes a new team when the app calls `/v1/connect` again: that also fails on the old image (404), so Free users have relay questions again only after a fix forward. Prefer step 1 and a fix forward.
 
 ### 20.4 Idle Connect teams
 
-A Connect team whose Mac made it and never added another device, and that has not signed in for 30 days, is most likely abandoned. The sweep suspends such teams, then deletes them 30 days after their suspension. It touches only Connect teams with at most one live device, never operator teams, teams with two or more devices, or teams the operator suspended:
+A Connect team whose devices have not signed in for 30 days is most likely abandoned, however many devices it linked. The sweep suspends such teams, then deletes them 30 days after their suspension. It touches only Connect teams whose limits are still the Connect preset and that have no vault sync head: never operator teams, teams a plan or `admin limits` lifted, teams that synced a vault, or teams the operator suspended:
 
 ```sh
 docker compose exec relay apassy-relay admin connect-sweep --dry-run       # names the teams, changes nothing
 docker compose exec relay apassy-relay admin connect-sweep                 # --idle-days 30 --delete-days 30
 ```
 
-The answer lists `suspended`, `deleted`, and `failed` team ids. A suspended team gets `"suspend_reason": "idle"` in `admin teams` and `team_suspended {"reason":"idle"}` in the team and relay audit. Its device gets 401 at the next sign-in, and the app connects again with a new key. During the suspension, `admin resume <id>` brings a team back (and clears the reason). A deleted team's key stays used. Take a backup before the first real run.
+The answer lists `suspended`, `deleted`, and `failed` team ids. A suspended team gets `"suspend_reason": "idle"` in `admin teams` and `team_suspended {"reason":"idle"}` in the team and relay audit. Its devices get 401 at the next sign-in, and the app connects again with a new key. During the suspension, `admin resume <id>` brings a team back (and clears the reason). A deleted team's key stays used, and no longer names the team. Suspended teams still count against `APASSY_RELAY_CONNECT_TEAMS_MAX` until they are deleted. Take a backup before the first real run.
 
 The relay does not schedule it. To run it once a day, the owner can add a cron line on the VPS after the first manual runs, for example `17 4 * * * cd /opt/apassy && docker compose exec -T relay apassy-relay admin connect-sweep >> /opt/apassy/logs/connect-sweep.log 2>&1`; that is not set up.
+
+### 20.5 Start time and open files
+
+Every active team is opened at start, and each open derives the key of its file with PBKDF2-HMAC-SHA512 at 256 000 rounds: about 0.11 s of one core (measured on the build Mac; a shared VPS core is slower, about 0.15 to 0.25 s). The relay opens the files on up to 8 threads (no more than the cores), and it does not listen until all are open, so `/healthz` is down meanwhile. At the defaults (1000 Connect teams) that is about 110 to 250 s of CPU, so about 30 to 60 s on 4 cores. The healthcheck of `deploy/vps/compose.yaml` (10 s start period, then 3 tries 30 s apart) allows about 100 s; with more teams, raise its `start_period` or lower `APASSY_RELAY_CONNECT_TEAMS_MAX`. Each open team also holds one SQLite connection (one file descriptor and its page cache) for as long as the relay runs; suspended teams hold none.
+
+Opening Connect teams only when they are first used, and closing idle ones, would remove this cost. It is not built: `Hub::team` is how every request, the sweep, `admin teams`, and the backup find a team, and an open on first use would let an unauthenticated sign-in call with a known team id start a key derivation. Lower the room, or run the sweep, if the start grows too long.
