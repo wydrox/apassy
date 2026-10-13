@@ -2,6 +2,7 @@
 
 Date: 2026-10-07.
 Status: ACCEPTED in scope by the owner on 2026-10-07 ("build a companion app for iOS … like the 1Password iOS app, and add it to TestFlight"). Updated by the owner on 2026-10-08: personal vaults use the free iCloud Drive sync option; teams use the relay. The first iPhone build supported only the relay. This update adds iCloud Drive. Copying is allowed, device-local and expiring; the TestFlight build declares that it uses exempt encryption only.
+Updated by ADR 0027 (2026-10-13): [ADR 0027](0027-plans-and-connect.md) replaces D5 (sign-up without an operator team code).
 
 ## Context
 

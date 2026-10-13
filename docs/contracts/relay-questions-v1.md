@@ -490,6 +490,8 @@ A remote check can make a proof only for `ApproveRun`, `ApproveInProject`, `Allo
 
 A vault has at most one questions team. A Mac that makes one names it in the vault (`vault_secret` `questions-team-v1`). A second Mac of a vault that syncs another way (iCloud Drive) never makes another: when the vault names a team, or live trusted devices have a device number in a team that this Mac is not in, "Send questions through the relay" joins that team. The owner pastes a device link made on a Mac in the team ("Add an iPhone or a Mac…"); the owner check on the joining Mac names the relay and the team of the link (`EnableRelayQuestions`); both Macs show the safety words; the Mac in the team confirms with its own owner check. The joining Mac then keeps a membership with the purpose `questions` and writes its own row.
 
+Questions work in a Connect team ([relay-connect-v1](relay-connect-v1.md)) the same way as in any other team. The Connect team is the one questions team of the vault. The rules of the question key (section 5.1) do not change: only devices that hold the vault have it.
+
 ## 13. The answering device
 
 1. **Find.** It long-polls `GET /v1/questions?since=<last seq>&wait=25` while it runs in the foreground (an iPhone), or always while the vault is unlocked (a Mac with the feature on). A push wakes the iPhone app only when the owner opens the notification; the app then reads the list.
