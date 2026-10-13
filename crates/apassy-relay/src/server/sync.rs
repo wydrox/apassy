@@ -494,6 +494,16 @@ pub fn push(
     seen(core, device, now);
     let head = &request.head.head;
     let limits = core.limits();
+    // `sync_bytes` 0: the team has no vault sync on the relay (a Connect team on Free,
+    // docs/SPEC.md section 26). Before the size, so the answer names the plan.
+    if limits.sync_bytes == 0 {
+        refused(core, now, "plan_required");
+        return Err(RelayError::new(
+            codes::PLAN_REQUIRED,
+            "Vault sync through the relay is not in this team's plan.",
+        )
+        .into());
+    }
     if request.content_length > limits.sync_bytes {
         refused(core, now, "too_large");
         return Err(RelayError::new(

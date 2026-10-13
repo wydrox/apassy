@@ -17,7 +17,7 @@ use rusqlite::params;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::api::{Role, TeamCreate};
+use crate::api::{ConnectCreate, Role, TeamCreate, TeamKind};
 use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{DeviceId, MemberId, TeamId};
@@ -228,6 +228,24 @@ fn finish_migration(config: &RelayConfig, rows: &[TeamRow]) {
     }
 }
 
+/// The member name of the owner of a Connect team.
+pub const CONNECT_OWNER: &str = "owner";
+
+/// The longest `idle_days` and `delete_days` of `connect-sweep`.
+pub const MAX_SWEEP_DAYS: u64 = 3650;
+
+/// What `admin connect-sweep` did, or would do (`dry_run`).
+#[derive(Debug, Serialize)]
+pub struct SweepReport {
+    pub dry_run: bool,
+    /// Idle Connect teams suspended with the reason `idle`.
+    pub suspended: Vec<TeamId>,
+    /// Connect teams deleted after their idle suspension.
+    pub deleted: Vec<TeamId>,
+    /// `{team, error}` of each team the sweep could not suspend or delete.
+    pub failed: Vec<serde_json::Value>,
+}
+
 /// What the operator sees of one team. No member, item, run, or audit row.
 #[derive(Debug, Serialize)]
 pub struct TeamInfo {
@@ -237,6 +255,10 @@ pub struct TeamInfo {
     pub legacy: bool,
     pub created_at: u64,
     pub suspended_at: Option<u64>,
+    /// `operator` or `connect` (docs/SPEC.md section 26).
+    pub kind: TeamKind,
+    /// `idle` when `connect-sweep` suspended the team.
+    pub suspend_reason: Option<String>,
     pub limits: TeamLimits,
     /// True while the team is served. An active team that is not open failed to open
     /// at start: suspend or delete it.
@@ -330,10 +352,16 @@ impl Hub {
     /// a run that was `ready` becomes `ended`.
     fn open_team(&self, row: &TeamRow) -> RelayResult<Arc<Core>> {
         let store = Store::open_team(&self.config.team_path(&row.id), &row.file_key)?;
-        Ok(self.register(row.id.clone(), store, row.limits))
+        Ok(self.register(row.id.clone(), store, row.limits, row.kind))
     }
 
-    fn register(&self, id: TeamId, store: Store, team_limits: TeamLimits) -> Arc<Core> {
+    fn register(
+        &self,
+        id: TeamId,
+        store: Store,
+        team_limits: TeamLimits,
+        kind: TeamKind,
+    ) -> Arc<Core> {
         let store = Arc::new(store);
         let audit = Audit::new();
         if end_ready_runs(&store, &audit, crate::now_unix()).is_err() {
@@ -345,6 +373,7 @@ impl Hub {
         let core = Arc::new(Core {
             sessions: SessionTable::new(id.clone(), store.clone(), audit.clone()),
             team: id.clone(),
+            kind,
             config: self.config.clone(),
             store,
             audit,
@@ -495,13 +524,99 @@ impl Hub {
             .map(|id| DeviceId(to_u(id)))
             .map_err(db)
         })?;
-        self.register(id.clone(), store, TeamLimits::default());
+        self.register(id.clone(), store, TeamLimits::default(), TeamKind::Operator);
+        Ok((id, owner_id, device_id))
+    }
+
+    /// `POST /v1/connect` (docs/SPEC.md section 26): a Connect team without a code. An
+    /// ordinary team (one file, the member `owner`, its device as the key holder) with
+    /// the `connect` limits. One public key makes at most one Connect team, ever, and the
+    /// relay makes at most `connect_teams_per_day` of them in 24 hours.
+    pub fn create_connect_team(
+        &self,
+        request: &ConnectCreate,
+        now: u64,
+    ) -> RelayResult<(TeamId, MemberId, DeviceId)> {
+        if request.v != 1 {
+            return Err(RelayError::invalid("The version `v` must be 1."));
+        }
+        let name = checked_team_name(&request.team)?.to_string();
+        let device_name = admin::checked_label(&request.device_name, "device name")?;
+        let public_key = crate::device::decode_public_key(&request.public_key)
+            .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
+        let key_hash = directory::connect_key_hash(&public_key);
+        let per_day = self.config.connect_teams_per_day;
+        let mut made: Option<TeamId> = None;
+        let new = self.directory.store.tx(|tx| {
+            // The key and the cap are checked before any work for the team.
+            directory::check_connect_key(tx, &key_hash, per_day, now)?;
+            let new = make_team_file_with_device(
+                &self.config,
+                &name,
+                CONNECT_OWNER,
+                now,
+                Some((&device_name, &public_key)),
+            )?;
+            made = Some(new.id.clone());
+            directory::insert_connect_team(tx, &new.id, &name, &new.file_key, now)
+                .and_then(|()| directory::insert_connect_key(tx, &key_hash, &new.id, now))
+                .and_then(|()| {
+                    self.directory.audit.write_on(
+                        tx,
+                        now,
+                        RELAY_ACTOR,
+                        "team_created",
+                        None,
+                        &json!({"team_id": new.id, "kind": TeamKind::Connect}),
+                    )
+                })?;
+            Ok(new)
+        });
+        let new = match new {
+            Ok(new) => new,
+            Err(error) => {
+                // The team row did not commit: its file, if made, has no key anywhere.
+                if let Some(id) = made {
+                    let _ = remove_team_file(&self.config, &id);
+                }
+                if error.code == codes::BUSY {
+                    self.refusal(
+                        now,
+                        "connect",
+                        "connect_refused",
+                        &json!({"reason": "busy"}),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let NewTeam {
+            id,
+            owner_id,
+            store,
+            ..
+        } = new;
+        let device_id = store.with(|conn| {
+            conn.query_row(
+                "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
+                params![to_i(owner_id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|id| DeviceId(to_u(id)))
+            .map_err(db)
+        })?;
+        self.register(id.clone(), store, TeamLimits::connect(), TeamKind::Connect);
         Ok((id, owner_id, device_id))
     }
 
     /// Suspends a team: its tokens stop at the next request, its sessions and waiting
     /// runs end, and its file is closed. The file and its key stay.
     pub fn suspend(&self, id: &TeamId, now: u64) -> RelayResult<()> {
+        self.suspend_with(id, None, now)
+    }
+
+    /// `suspend` with a reason kept in the directory and the audits (`IDLE_REASON`).
+    fn suspend_with(&self, id: &TeamId, reason: Option<&str>, now: u64) -> RelayResult<()> {
         let row = self
             .directory
             .team(id)?
@@ -512,20 +627,25 @@ impl Hub {
                 "The team is suspended already.",
             ));
         }
-        self.directory.set_state(id, TeamState::Suspended, now)?;
+        self.directory
+            .set_state(id, TeamState::Suspended, reason, now)?;
         let core = self
             .teams
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(id);
         if let Some(core) = core {
+            let detail = match reason {
+                Some(reason) => json!({"reason": reason}),
+                None => json!({}),
+            };
             let _ = core.audit.write(
                 &core.store,
                 now,
                 OPERATOR_ACTOR,
                 "team_suspended",
                 None,
-                &json!({}),
+                &detail,
             );
             core.close();
             self.draining
@@ -553,7 +673,7 @@ impl Hub {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(id);
-        if let Err(error) = self.directory.set_state(id, TeamState::Active, now) {
+        if let Err(error) = self.directory.set_state(id, TeamState::Active, None, now) {
             self.teams
                 .write()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -670,6 +790,8 @@ impl Hub {
                 legacy: row.legacy,
                 created_at: row.created_at,
                 suspended_at: row.suspended_at,
+                kind: row.kind,
+                suspend_reason: row.suspend_reason,
                 limits: row.limits,
                 members: counts.map(|c| c.0),
                 items: counts.map(|c| c.1),
@@ -682,6 +804,91 @@ impl Hub {
             });
         }
         Ok(infos)
+    }
+
+    /// `admin connect-sweep` (docs/SPEC.md section 26.5): suspends each active Connect
+    /// team with at most one live device whose newest sign-in (or, without one, the
+    /// device's creation) is `idle_days` old, with the reason `idle`; deletes each Connect
+    /// team that a sweep suspended `delete_days` ago or earlier. A team that the operator
+    /// suspended, or that a sweep suspended and the operator resumed, is never deleted
+    /// here. A team suspended in this run is deleted in a later one. `dry_run` changes
+    /// nothing and names the same teams.
+    pub fn connect_sweep(
+        &self,
+        idle_days: u64,
+        delete_days: u64,
+        dry_run: bool,
+        now: u64,
+    ) -> RelayResult<SweepReport> {
+        for (name, days) in [("idle_days", idle_days), ("delete_days", delete_days)] {
+            if !(1..=MAX_SWEEP_DAYS).contains(&days) {
+                return Err(RelayError::invalid(format!(
+                    "{name} must be 1 to {MAX_SWEEP_DAYS}."
+                )));
+            }
+        }
+        let idle_before = now.saturating_sub(idle_days.saturating_mul(86_400));
+        let delete_before = now.saturating_sub(delete_days.saturating_mul(86_400));
+        let mut report = SweepReport {
+            dry_run,
+            suspended: Vec::new(),
+            deleted: Vec::new(),
+            failed: Vec::new(),
+        };
+        for row in self.directory.teams()? {
+            if row.kind != TeamKind::Connect {
+                continue;
+            }
+            let done = match row.state {
+                TeamState::Suspended => {
+                    let due = row.suspend_reason.as_deref() == Some(directory::IDLE_REASON)
+                        && row.suspended_at.is_some_and(|at| at <= delete_before);
+                    if !due {
+                        continue;
+                    }
+                    (if dry_run {
+                        Ok(())
+                    } else {
+                        self.delete(&row.id, now)
+                    })
+                    .map(|()| report.deleted.push(row.id.clone()))
+                }
+                TeamState::Active => {
+                    // A team that did not open is the operator's to look at.
+                    let Some(core) = self.team(&row.id) else {
+                        continue;
+                    };
+                    let idle = core.store.with(|conn| {
+                        let (devices, last): (i64, Option<i64>) = conn
+                            .query_row(
+                                "SELECT count(*), max(coalesce(d.last_seen_at, d.created_at)) \
+                                 FROM device d JOIN member m ON m.id = d.member_id \
+                                 WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL",
+                                [],
+                                |r| Ok((r.get(0)?, r.get(1)?)),
+                            )
+                            .map_err(db)?;
+                        Ok(devices <= 1 && last.map_or(row.created_at, to_u) <= idle_before)
+                    });
+                    match idle {
+                        Ok(false) => continue,
+                        Ok(true) => (if dry_run {
+                            Ok(())
+                        } else {
+                            self.suspend_with(&row.id, Some(directory::IDLE_REASON), now)
+                        })
+                        .map(|()| report.suspended.push(row.id.clone())),
+                        Err(error) => Err(error),
+                    }
+                }
+            };
+            if let Err(error) = done {
+                report
+                    .failed
+                    .push(json!({"team": row.id, "error": error.message}));
+            }
+        }
+        Ok(report)
     }
 
     /// Reads or changes the effective limits of a team.

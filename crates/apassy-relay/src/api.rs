@@ -50,6 +50,8 @@ pub mod paths {
     pub const ME: &str = "/v1/me";
     pub const JOIN: &str = "/v1/join";
     pub const TEAMS: &str = "/v1/teams";
+    /// `POST`: a codeless Connect team for one device key (section 26).
+    pub const CONNECT: &str = "/v1/connect";
     /// Sign-in of a device (section 23).
     pub const AUTH_CHALLENGE: &str = "/v1/auth/challenge";
     pub const AUTH_TOKEN: &str = "/v1/auth/token";
@@ -113,6 +115,26 @@ impl Role {
     }
 }
 
+/// How a team was made (docs/SPEC.md section 26). Fixed for the life of the team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamKind {
+    /// Made with a team code of the operator (`POST /v1/teams`, `apassy-relay init`,
+    /// `migrate`).
+    Operator,
+    /// Made without a code by the app of one device (`POST /v1/connect`).
+    Connect,
+}
+
+impl TeamKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Connect => "connect",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKind {
@@ -143,6 +165,9 @@ pub struct MeView {
     /// True when that device holds the item keys of the team.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub key_holder: bool,
+    /// How the team was made (section 26). `None` from a relay before Connect teams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_kind: Option<TeamKind>,
 }
 
 /// `POST /v1/invites` (owner or manager; only the owner may invite a manager or an
@@ -228,6 +253,9 @@ pub struct TeamCreated {
     /// The owner's device, when the request had a device key. It holds the item keys.
     #[serde(default)]
     pub device_id: Option<DeviceId>,
+    /// `connect` in the answer of `POST /v1/connect`; absent from `POST /v1/teams`.
+    #[serde(default)]
+    pub kind: Option<TeamKind>,
 }
 
 /// Write side of `TeamCreated`.
@@ -239,6 +267,25 @@ pub struct TeamCreatedRef<'a> {
     pub secret: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<DeviceId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TeamKind>,
+}
+
+/// `POST /v1/connect` (no bearer; edge secret only): the app of one device makes a
+/// Connect team without a team code (section 26). The owner is the member `owner`; its
+/// device holds the key. Nothing in it is a secret, so one type reads and writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectCreate {
+    /// `1`.
+    pub v: u32,
+    /// The team name. 1 to 64 bytes, no control character.
+    pub team: String,
+    /// The name of the device, 1 to 64 bytes, no control character.
+    pub device_name: String,
+    /// The public key of the device, base64url (`device::decode_public_key`). One key
+    /// makes at most one Connect team, ever.
+    pub public_key: String,
 }
 
 /// `POST /v1/join` (no bearer; edge secret only). Read side. Since section 23 a join
@@ -315,6 +362,9 @@ pub struct AccessGranted {
     pub role: Role,
     pub device_id: DeviceId,
     pub key_holder: bool,
+    /// How the team was made (section 26). `None` from a relay before Connect teams.
+    #[serde(default)]
+    pub team_kind: Option<TeamKind>,
 }
 
 /// Write side of `AccessGranted`.
@@ -329,6 +379,7 @@ pub struct AccessGrantedRef<'a> {
     pub role: Role,
     pub device_id: DeviceId,
     pub key_holder: bool,
+    pub team_kind: TeamKind,
 }
 
 /// `POST /v1/devices/enroll` with a member token: the first device of that member.

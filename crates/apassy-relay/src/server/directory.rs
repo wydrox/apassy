@@ -1,16 +1,17 @@
 //! The directory of the relay: `relay.db` (ADR 0019, docs/SPEC.md "Teams").
 //!
 //! One SQLCipher file, keyed with the master key. It holds the teams (public id, name,
-//! state, and the random key of each team file), the one-time team codes of the
-//! operator, and the audit of the relay: operator actions, and refused requests that
-//! name no known team. It holds no people, no items, and no runs: those are in the
-//! file of each team.
+//! kind, state, and the random key of each team file), the one-time team codes of the
+//! operator, the hashes of the device keys that made Connect teams (section 26), and the
+//! audit of the relay: operator actions, and refused requests that name no known team.
+//! It holds no people, no items, and no runs: those are in the file of each team.
 
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use crate::api::TeamKind;
 use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::TeamId;
@@ -20,14 +21,16 @@ use crate::server::store::{Store, db, to_i, to_u};
 
 /// `PRAGMA user_version` of the directory. Far from the team versions, so one file is
 /// never taken for the other.
-pub const DIRECTORY_VERSION: i64 = 1002;
+pub const DIRECTORY_VERSION: i64 = 1003;
 
 const SCHEMA: &str = "
 CREATE TABLE team (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('active','suspended')),
   legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
-  created_at INTEGER NOT NULL, suspended_at INTEGER, limits TEXT);
+  created_at INTEGER NOT NULL, suspended_at INTEGER, limits TEXT,
+  kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','connect')),
+  suspend_reason TEXT);
 CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
 CREATE TABLE team_code (
   id INTEGER PRIMARY KEY, code_hash BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL,
@@ -35,8 +38,26 @@ CREATE TABLE team_code (
 CREATE TABLE audit (
   id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   run_id INTEGER, detail TEXT NOT NULL);
-PRAGMA user_version = 1002;
+CREATE TABLE connect_key (
+  key_hash BLOB PRIMARY KEY, team_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX connect_key_created ON connect_key(created_at);
+PRAGMA user_version = 1003;
 ";
+
+/// Version 1002 to 1003 (docs/SPEC.md section 26): additive, in one transaction. Every
+/// existing team becomes `operator`.
+const MIGRATE_1003: &str = "
+ALTER TABLE team ADD COLUMN kind TEXT NOT NULL DEFAULT 'operator' CHECK (kind IN ('operator','connect'));
+ALTER TABLE team ADD COLUMN suspend_reason TEXT;
+CREATE TABLE connect_key (
+  key_hash BLOB PRIMARY KEY, team_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX connect_key_created ON connect_key(created_at);
+PRAGMA user_version = 1003;
+";
+
+/// `suspend_reason` of a team that `admin connect-sweep` suspended. A later sweep
+/// deletes only such teams.
+pub const IDLE_REASON: &str = "idle";
 
 /// The actor of an operator action, in the directory and in the team's own audit.
 pub const OPERATOR_ACTOR: &str = "operator";
@@ -148,11 +169,32 @@ pub struct TeamLimitsUpdate {
 }
 
 impl TeamLimits {
+    /// The limits of a new Connect team (docs/SPEC.md section 26): one member, no items
+    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), and 2 MiB
+    /// of questions. The other fields are the defaults. Devices are 10 per member, as in
+    /// every team.
+    pub fn connect() -> Self {
+        Self {
+            members: 1,
+            items: 0,
+            agents: 0,
+            sync_bytes: 0,
+            question_bytes: CONNECT_QUESTION_BYTES,
+            ..Self::default()
+        }
+    }
+
+    /// The limits a new team of this kind starts with.
+    pub fn for_kind(kind: TeamKind) -> Self {
+        match kind {
+            TeamKind::Operator => Self::default(),
+            TeamKind::Connect => Self::connect(),
+        }
+    }
+
     pub fn validate(&self) -> RelayResult<()> {
         for (field, value) in [
             ("members", self.members),
-            ("items", self.items),
-            ("agents", self.agents),
             ("runs_per_hour", self.runs_per_hour),
             ("pending_runs", self.pending_runs),
             ("sync_pushes_per_hour", self.sync_pushes_per_hour),
@@ -166,12 +208,23 @@ impl TeamLimits {
                 )));
             }
         }
+        // 0 items or 0 agents: the team has none (a Connect team).
+        for (field, value) in [("items", self.items), ("agents", self.agents)] {
+            if value > 1_000_000 {
+                return Err(RelayError::invalid(format!(
+                    "{field} must be 0 to 1000000."
+                )));
+            }
+        }
         if !(1..=224).contains(&self.agent_requests) {
             return Err(RelayError::invalid("agent_requests must be 1 to 224."));
         }
-        if !(1_048_576..=crate::sync_head::MAX_SNAPSHOT_BYTES).contains(&self.sync_bytes) {
+        // 0: no vault sync on the relay; a push is 403 `plan_required` (section 26).
+        if self.sync_bytes != 0
+            && !(1_048_576..=crate::sync_head::MAX_SNAPSHOT_BYTES).contains(&self.sync_bytes)
+        {
             return Err(RelayError::invalid(
-                "sync_bytes must be 1048576 to 67108864.",
+                "sync_bytes must be 0 (no vault sync) or 1048576 to 67108864.",
             ));
         }
         if !(1..=8).contains(&self.sync_transfers) {
@@ -249,6 +302,8 @@ impl TeamLimits {
 /// The range of `question_bytes`: 1 MiB to 256 MiB.
 pub const MIN_QUESTION_BYTES: u64 = 1_048_576;
 pub const MAX_QUESTION_BYTES: u64 = 268_435_456;
+/// `question_bytes` of a new Connect team: 2 MiB.
+pub const CONNECT_QUESTION_BYTES: u64 = 2_097_152;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,7 +313,7 @@ pub enum TeamState {
 }
 
 impl TeamState {
-    fn text(self) -> &'static str {
+    pub fn text(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Suspended => "suspended",
@@ -278,6 +333,9 @@ pub struct TeamRow {
     pub created_at: u64,
     pub suspended_at: Option<u64>,
     pub limits: TeamLimits,
+    pub kind: TeamKind,
+    /// `IDLE_REASON` when `admin connect-sweep` suspended the team.
+    pub suspend_reason: Option<String>,
 }
 
 fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
@@ -293,6 +351,11 @@ fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
     limits
         .validate()
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let kind = match row.get::<_, String>(8)?.as_str() {
+        "operator" => TeamKind::Operator,
+        "connect" => TeamKind::Connect,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
     Ok(TeamRow {
         id: TeamId::parse(&id).ok_or(rusqlite::Error::InvalidQuery)?,
         name: row.get(1)?,
@@ -306,10 +369,13 @@ fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
         created_at: to_u(row.get(5)?),
         suspended_at: row.get::<_, Option<i64>>(6)?.map(to_u),
         limits,
+        kind,
+        suspend_reason: row.get(9)?,
     })
 }
 
-const TEAM_COLUMNS: &str = "id, name, file_key, state, legacy, created_at, suspended_at, limits";
+const TEAM_COLUMNS: &str =
+    "id, name, file_key, state, legacy, created_at, suspended_at, limits, kind, suspend_reason";
 
 /// The directory: its file, and the audit writer of the relay.
 pub struct Directory {
@@ -342,16 +408,18 @@ impl Directory {
         })
     }
 
-    /// Opens `relay.db` and checks its version.
+    /// Opens `relay.db` and checks its version. 1001 and 1002 move to 1003 in one
+    /// transaction; a failure leaves the file at its version.
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         match store.user_version()? {
             DIRECTORY_VERSION => {}
-            1001 => store.tx(|tx| {
-                tx.execute_batch(
-                    "ALTER TABLE team ADD COLUMN limits TEXT; PRAGMA user_version = 1002;",
-                )
-                .map_err(db)
+            version @ (1001 | 1002) => store.tx(|tx| {
+                if version == 1001 {
+                    tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
+                        .map_err(db)?;
+                }
+                tx.execute_batch(MIGRATE_1003).map_err(db)
             })?,
             _ => {
                 return Err(RelayError::internal(
@@ -383,15 +451,24 @@ impl Directory {
         self.store.with(|conn| team_by_id(conn, id))
     }
 
-    /// Sets the state of a team, and writes an operator row.
-    pub fn set_state(&self, id: &TeamId, state: TeamState, now: u64) -> RelayResult<()> {
+    /// Sets the state of a team, and writes an operator row. `reason` is kept with a
+    /// suspension (`IDLE_REASON`); a resume clears it.
+    pub fn set_state(
+        &self,
+        id: &TeamId,
+        state: TeamState,
+        reason: Option<&str>,
+        now: u64,
+    ) -> RelayResult<()> {
+        let reason = reason.filter(|_| state == TeamState::Suspended);
         self.store.tx(|tx| {
             let changed = tx
                 .execute(
-                    "UPDATE team SET state = ?1, suspended_at = ?2 WHERE id = ?3",
+                    "UPDATE team SET state = ?1, suspended_at = ?2, suspend_reason = ?3 WHERE id = ?4",
                     params![
                         state.text(),
                         (state == TeamState::Suspended).then_some(to_i(now)),
+                        reason,
                         id.as_str()
                     ],
                 )
@@ -403,14 +480,12 @@ impl Directory {
                 TeamState::Active => "team_resumed",
                 TeamState::Suspended => "team_suspended",
             };
-            self.audit.write_on(
-                tx,
-                now,
-                OPERATOR_ACTOR,
-                action,
-                None,
-                &serde_json::json!({"team_id": id}),
-            )?;
+            let detail = match reason {
+                Some(reason) => serde_json::json!({"team_id": id, "reason": reason}),
+                None => serde_json::json!({"team_id": id}),
+            };
+            self.audit
+                .write_on(tx, now, OPERATOR_ACTOR, action, None, &detail)?;
             Ok(())
         })
     }
@@ -523,7 +598,7 @@ pub fn mark_team_code_used(conn: &Connection, id: u64, team: &TeamId, now: u64) 
     })
 }
 
-/// Adds a team row, inside a transaction.
+/// Adds a team row of kind `operator` with the default limits, inside a transaction.
 pub fn insert_team(
     conn: &Connection,
     id: &TeamId,
@@ -535,6 +610,96 @@ pub fn insert_team(
     conn.execute(
         "INSERT INTO team (id, name, file_key, state, legacy, created_at) VALUES (?1, ?2, ?3, 'active', ?4, ?5)",
         params![id.as_str(), name, file_key.expose(), i64::from(legacy), to_i(now)],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Adds the row of a new Connect team with the `connect` limits, inside a transaction.
+pub fn insert_connect_team(
+    conn: &Connection,
+    id: &TeamId,
+    name: &str,
+    file_key: &SecretString,
+    now: u64,
+) -> RelayResult<()> {
+    let limits = TeamLimits::connect().stored_json()?;
+    conn.execute(
+        "INSERT INTO team (id, name, file_key, state, legacy, created_at, limits, kind) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, 'connect')",
+        params![id.as_str(), name, file_key.expose(), to_i(now), limits],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+/// The hash under which `connect_key` keeps a device public key (65 bytes).
+pub fn connect_key_hash(public_key: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(public_key).into()
+}
+
+/// The error for a public key that made a Connect team before. The same for every such
+/// key: it names no team.
+pub fn connect_key_used() -> RelayError {
+    RelayError::new(
+        codes::CONNECT_KEY_USED,
+        "This device key made a team before. Make a new device key.",
+    )
+}
+
+/// Checks a new Connect team against `connect_key`, inside the transaction that adds
+/// it: the key made no team before (409 `connect_key_used`), and the relay made fewer
+/// than `per_day` Connect teams in the last 24 hours (503 `busy`). Rows of
+/// `connect_key` stay after their team is deleted, so both checks count them.
+pub fn check_connect_key(
+    conn: &Connection,
+    key_hash: &[u8; 32],
+    per_day: u64,
+    now: u64,
+) -> RelayResult<()> {
+    let used: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM connect_key WHERE key_hash = ?1",
+            params![key_hash.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    if used.is_some() {
+        return Err(connect_key_used());
+    }
+    let today: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM connect_key WHERE created_at > ?1",
+            params![to_i(now.saturating_sub(86_400))],
+            |row| row.get(0),
+        )
+        .map_err(db)?;
+    if to_u(today) >= per_day {
+        return Err(connect_busy());
+    }
+    Ok(())
+}
+
+/// 503 `busy` of `POST /v1/connect`: the relay-wide daily cap is reached, or Connect is
+/// off (`APASSY_RELAY_CONNECT_TEAMS_PER_DAY=0`).
+pub fn connect_busy() -> RelayError {
+    RelayError::new(
+        codes::BUSY,
+        "The relay makes no new teams now. Try again later.",
+    )
+}
+
+/// Records the key of a new Connect team, inside the transaction that adds it.
+pub fn insert_connect_key(
+    conn: &Connection,
+    key_hash: &[u8; 32],
+    team: &TeamId,
+    now: u64,
+) -> RelayResult<()> {
+    conn.execute(
+        "INSERT INTO connect_key (key_hash, team_id, created_at) VALUES (?1, ?2, ?3)",
+        params![key_hash.as_slice(), team.as_str(), to_i(now)],
     )
     .map_err(db)?;
     Ok(())
@@ -590,12 +755,14 @@ mod tests {
             "runs_per_hour",
             "pending_runs",
         ] {
-            for value in [0, 1_000_001] {
-                let update =
-                    serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
-                        .unwrap();
-                assert!(defaults.apply(update).is_err(), "{field}={value}");
-            }
+            let zero_ok = matches!(field, "items" | "agents");
+            let update =
+                serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: 0})).unwrap();
+            assert_eq!(defaults.apply(update).is_ok(), zero_ok, "{field}=0");
+            let update =
+                serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: 1_000_001}))
+                    .unwrap();
+            assert!(defaults.apply(update).is_err(), "{field}=1000001");
             for value in [1, 1_000_000] {
                 let update =
                     serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
@@ -642,6 +809,15 @@ mod tests {
             assert!(set(low).is_ok() && set(high).is_ok(), "{field}");
             assert!(set(low - 1).is_err() && set(high + 1).is_err(), "{field}");
         }
+        // sync_bytes: 0 (no vault sync) or 1 MiB to 64 MiB.
+        let sync = |value: u64| {
+            defaults.apply(TeamLimitsUpdate {
+                sync_bytes: Some(value),
+                ..Default::default()
+            })
+        };
+        assert!(sync(0).is_ok() && sync(1_048_576).is_ok() && sync(67_108_864).is_ok());
+        assert!(sync(1).is_err() && sync(1_048_575).is_err() && sync(67_108_865).is_err());
         // A stored row from before questions reads the question defaults.
         let old: TeamLimits = serde_json::from_str(r#"{"members":7,"sync_transfers":3}"#).unwrap();
         assert_eq!((old.open_questions, old.questions_per_hour), (20, 300));
@@ -728,11 +904,183 @@ mod tests {
         );
     }
 
+    /// The directory of the image before Connect teams (version 1002), as it made it.
+    const SCHEMA_1002: &str = "
+CREATE TABLE team (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active','suspended')),
+  legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
+  created_at INTEGER NOT NULL, suspended_at INTEGER, limits TEXT);
+CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
+CREATE TABLE team_code (
+  id INTEGER PRIMARY KEY, code_hash BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER, team_id TEXT);
+CREATE TABLE audit (
+  id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
+  run_id INTEGER, detail TEXT NOT NULL);
+PRAGMA user_version = 1002;
+";
+
+    #[test]
+    fn connect_limits_preset() {
+        let connect = TeamLimits::connect();
+        connect.validate().unwrap();
+        assert_eq!(
+            (
+                connect.members,
+                connect.items,
+                connect.agents,
+                connect.sync_bytes
+            ),
+            (1, 0, 0, 0)
+        );
+        assert_eq!(connect.question_bytes, 2 * 1024 * 1024);
+        let defaults = TeamLimits::default();
+        assert_eq!(
+            TeamLimits {
+                members: defaults.members,
+                items: defaults.items,
+                agents: defaults.agents,
+                sync_bytes: defaults.sync_bytes,
+                question_bytes: defaults.question_bytes,
+                ..connect
+            },
+            defaults
+        );
+        assert_eq!(TeamLimits::for_kind(TeamKind::Operator), defaults);
+        assert_eq!(TeamLimits::for_kind(TeamKind::Connect), connect);
+        let text = connect.stored_json().unwrap();
+        assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), connect);
+        // The operator can still raise every field of a Connect team.
+        let raised = connect
+            .apply(TeamLimitsUpdate {
+                sync_bytes: Some(67_108_864),
+                members: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!((raised.sync_bytes, raised.members), (67_108_864, 5));
+    }
+
+    #[test]
+    fn directory_migrates_1002_to_1003_and_keeps_teams_as_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let store =
+            Store::create_at(&config.directory_path(), &config.master_key, SCHEMA_1002).unwrap();
+        let first = TeamId::parse("t_abcdefgh23").unwrap();
+        let second = TeamId::parse("t_bcdefgh234").unwrap();
+        let key = SecretString::new("test-team-file-key".to_string());
+        store
+            .with(|conn| {
+                insert_team(conn, &first, "First", &key, true, 42)?;
+                insert_team(conn, &second, "Second", &key, false, 43)?;
+                conn.execute(
+                    "UPDATE team SET state = 'suspended', suspended_at = 50, limits = ?1 WHERE id = ?2",
+                    params![r#"{"members":7}"#, second.as_str()],
+                )
+                .map_err(db)?;
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), 1003);
+        let rows = directory.teams().unwrap();
+        assert_eq!(rows.len(), 2);
+        let first_row = directory.team(&first).unwrap().unwrap();
+        assert_eq!(
+            (
+                first_row.name.as_str(),
+                first_row.legacy,
+                first_row.kind,
+                first_row.created_at
+            ),
+            ("First", true, TeamKind::Operator, 42)
+        );
+        assert_eq!(first_row.file_key, key);
+        assert_eq!(first_row.limits, TeamLimits::default());
+        let second_row = directory.team(&second).unwrap().unwrap();
+        assert_eq!(second_row.kind, TeamKind::Operator);
+        assert_eq!(second_row.state, TeamState::Suspended);
+        assert_eq!(second_row.suspended_at, Some(50));
+        assert_eq!(second_row.suspend_reason, None);
+        assert_eq!(second_row.limits.members, 7);
+        // The new table is there and empty.
+        directory
+            .store
+            .with(|conn| {
+                check_connect_key(conn, &connect_key_hash(&[4; 65]), 1, 100)?;
+                Ok(())
+            })
+            .unwrap();
+        drop(directory);
+        // A second open is a no-op.
+        assert_eq!(Directory::open(&config).unwrap().teams().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn connect_keys_are_one_use_and_capped_per_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let directory = Directory::create(&config).unwrap();
+        let team = TeamId::parse("t_abcdefgh23").unwrap();
+        let key = SecretString::new("test-team-file-key".to_string());
+        let one = connect_key_hash(&[4; 65]);
+        let two = connect_key_hash(&[5; 65]);
+        let three = connect_key_hash(&[6; 65]);
+        directory
+            .store
+            .tx(|tx| {
+                check_connect_key(tx, &one, 2, 1000)?;
+                insert_connect_team(tx, &team, "Mac", &key, 1000)?;
+                insert_connect_key(tx, &one, &team, 1000)
+            })
+            .unwrap();
+        let row = directory.team(&team).unwrap().unwrap();
+        assert_eq!(row.kind, TeamKind::Connect);
+        assert_eq!(row.limits, TeamLimits::connect());
+        directory
+            .store
+            .with(|conn| {
+                assert_eq!(
+                    check_connect_key(conn, &one, 100, 1001).unwrap_err().code,
+                    codes::CONNECT_KEY_USED
+                );
+                // The key stays used after a day, and after its team is gone.
+                conn.execute("DELETE FROM team", []).map_err(db)?;
+                assert_eq!(
+                    check_connect_key(conn, &one, 100, 1_000_000)
+                        .unwrap_err()
+                        .code,
+                    codes::CONNECT_KEY_USED
+                );
+                insert_connect_key(conn, &two, &team, 2000)?;
+                // Two in 24 hours: the third waits until the first is a day old.
+                assert_eq!(
+                    check_connect_key(conn, &three, 2, 2001).unwrap_err().code,
+                    codes::BUSY
+                );
+                check_connect_key(conn, &three, 2, 1000 + 86_400)?;
+                check_connect_key(conn, &three, 3, 2001)?;
+                // 0 turns Connect off.
+                assert_eq!(
+                    check_connect_key(conn, &three, 0, 1_000_000)
+                        .unwrap_err()
+                        .code,
+                    codes::BUSY
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[test]
     fn directory_migrates_1001_and_defaults_null_or_partial_limits() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
-        let old_schema = SCHEMA
+        let old_schema = SCHEMA_1002
             .replace(", limits TEXT", "")
             .replace("user_version = 1002", "user_version = 1001");
         let store =
@@ -751,6 +1099,7 @@ mod tests {
         assert_eq!(row.created_at, 42);
         assert_eq!(row.file_key, key);
         assert_eq!(row.limits, TeamLimits::default());
+        assert_eq!(row.kind, TeamKind::Operator);
         directory
             .store
             .with(|conn| {
@@ -776,14 +1125,15 @@ mod tests {
     }
 
     #[test]
-    fn new_directory_uses_1002_and_refuses_unknown_versions() {
+    fn new_directory_uses_1003_and_refuses_unknown_versions() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let directory = Directory::create(&config).unwrap();
         assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        assert_eq!(DIRECTORY_VERSION, 1003);
         directory
             .store
-            .with(|conn| conn.pragma_update(None, "user_version", 1003).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 1004).map_err(db))
             .unwrap();
         drop(directory);
         assert!(Directory::open(&config).is_err());
@@ -792,27 +1142,34 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            1003
+            1004
         );
     }
 
     #[test]
     fn failed_migration_does_not_advance_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path());
-        let directory = Directory::create(&config).unwrap();
-        directory
-            .store
-            .with(|conn| conn.pragma_update(None, "user_version", 1001).map_err(db))
-            .unwrap();
-        drop(directory);
-        assert!(Directory::open(&config).is_err());
-        assert_eq!(
-            Store::open_at(&config.directory_path(), &config.master_key)
-                .unwrap()
-                .user_version()
-                .unwrap(),
-            1001
-        );
+        // A 1003 file that claims an older version: its migration fails (the columns are
+        // there), and the version stays.
+        for version in [1001, 1002] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = config(dir.path());
+            let directory = Directory::create(&config).unwrap();
+            directory
+                .store
+                .with(|conn| {
+                    conn.pragma_update(None, "user_version", version)
+                        .map_err(db)
+                })
+                .unwrap();
+            drop(directory);
+            assert!(Directory::open(&config).is_err());
+            assert_eq!(
+                Store::open_at(&config.directory_path(), &config.master_key)
+                    .unwrap()
+                    .user_version()
+                    .unwrap(),
+                version
+            );
+        }
     }
 }

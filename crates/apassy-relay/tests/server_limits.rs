@@ -170,7 +170,12 @@ fn operator_refuses_invalid_updates_without_partial_writes() {
         "pending_runs",
         "agent_requests",
     ] {
+        // `items` and `agents` may be 0 (none, a Connect team: SPEC 26.4).
+        let zero_ok = matches!(field, "items" | "agents");
         for bad in [json!(0), json!(-1), json!("1"), json!(1.5)] {
+            if zero_ok && bad == json!(0) {
+                continue;
+            }
             let mut update = json!({"items":2});
             update[field] = bad;
             let answer = raw_operator(
@@ -549,7 +554,7 @@ fn directory_connection(config: &apassy_relay::config::RelayConfig) -> rusqlite:
 }
 
 #[test]
-fn directory_1001_migrates_to_1002_without_losing_teams_codes_or_audit() {
+fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     let mut relay = start(UpstreamOptions::default());
     let a = relay.owner_token.clone();
     let a_id = relay.team_id.clone();
@@ -563,10 +568,13 @@ fn directory_1001_migrates_to_1002_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1002
+        1003
     );
+    // Back to the directory of version 1001: no limits, no kinds, no Connect keys.
     conn.execute_batch(
-        "BEGIN IMMEDIATE; ALTER TABLE team DROP COLUMN limits; PRAGMA user_version = 1001; COMMIT;",
+        "BEGIN IMMEDIATE; ALTER TABLE team DROP COLUMN limits; ALTER TABLE team DROP COLUMN kind;
+         ALTER TABLE team DROP COLUMN suspend_reason; DROP INDEX connect_key_created;
+         DROP TABLE connect_key; PRAGMA user_version = 1001; COMMIT;",
     )
     .unwrap();
     let original_codes: Vec<CodeSnapshot> = conn
@@ -611,7 +619,7 @@ fn directory_1001_migrates_to_1002_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1002
+        1003
     );
     let migrated_codes: Vec<CodeSnapshot> = conn
         .prepare("SELECT id,code_hash,used_at,team_id FROM team_code ORDER BY id")
@@ -648,7 +656,7 @@ fn directory_1001_migrates_to_1002_without_losing_teams_codes_or_audit() {
 fn unknown_directory_versions_are_refused_without_changes() {
     let relay = start(UpstreamOptions::default());
     let (config, _dir) = relay.stop_keep();
-    for version in [0, 1000, 1003, 2000] {
+    for version in [0, 1000, 1004, 2000] {
         let conn = directory_connection(&config);
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))
             .unwrap();
@@ -753,7 +761,8 @@ fn limits_cli_reads_and_changes_limits_without_other_configuration() {
     assert_eq!(result["members"], 50);
     assert_eq!(get(&relay, &relay.team_id), result);
     for flags in [
-        &["--items", "0"][..],
+        &["--members", "0"][..],
+        &["--sync-bytes", "1"][..],
         &["--agent-requests", "225"][..],
         &["--items", "1", "--items", "2"][..],
     ] {

@@ -225,6 +225,7 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
                 token: access.expose(), expires_at, team_id: &core.team, team: &team,
                 member_id: member.id, member_name: &member.name, role: member.role,
                 device_id: id, key_holder: member.device.is_some_and(|d| d.key_holder),
+                team_kind: core.kind,
             })?;
             let mut state = core.device_auth.0.lock().unwrap_or_else(PoisonError::into_inner);
             state.purge(now);
@@ -428,6 +429,7 @@ mod tests {
             backup_dir: dir.path().join("backups"),
             push: None,
             questions_to_approvers: false,
+            connect_teams_per_day: 200,
         };
         let owner = Relay::init(&config, "team", "owner").unwrap();
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();

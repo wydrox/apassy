@@ -16,6 +16,7 @@ use apassy_relay::config::{ADMIN_SOCKET, RelayConfig, old_key_from_env};
 use apassy_relay::ids::TeamId;
 use apassy_relay::server::Relay;
 use apassy_relay::server::directory::{TeamLimits, TeamLimitsUpdate};
+use apassy_relay::server::hub::MAX_SWEEP_DAYS;
 use apassy_relay::server::operator::{self, Command as Operator};
 
 const USAGE: &str = "Usage:
@@ -32,6 +33,7 @@ const USAGE: &str = "Usage:
     [--device-open-questions <n>] [--device-questions-per-hour <n>]
   apassy-relay admin suspend|resume|delete <team id>
   apassy-relay admin backup
+  apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run]
 
 The configuration is read from the environment:
   APASSY_RELAY_DATA, APASSY_RELAY_LISTEN, APASSY_RELAY_PUBLIC_URL,
@@ -39,9 +41,13 @@ The configuration is read from the environment:
   APASSY_RELAY_SESSION_TTL, APASSY_RELAY_APPROVAL_TIMEOUT,
   APASSY_RELAY_BLOCKED_ADDRESSES, APASSY_RELAY_BACKUP_DIR, and for push all of
   APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, APASSY_RELAY_PUSH_SECRET or _FILE,
-  APASSY_RELAY_QUESTIONS_TO_APPROVERS (0 or 1).
+  APASSY_RELAY_QUESTIONS_TO_APPROVERS (0 or 1), APASSY_RELAY_CONNECT_TEAMS_PER_DAY.
 `migrate` also reads APASSY_RELAY_OLD_KEY or _FILE: the key of the old team.db.
 `admin` reads only APASSY_RELAY_DATA and talks to the running relay.";
+
+/// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
+/// before a deletion.
+const DEFAULT_SWEEP_DAYS: u64 = 30;
 
 /// Parsed once from the arguments: the size of `Admin` does not matter.
 #[allow(clippy::large_enum_variant)]
@@ -166,6 +172,33 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
             team: team_arg(rest)?,
         }),
         "backup" if rest.is_empty() => Ok(Operator::Backup),
+        "connect-sweep" => {
+            let dry_run = rest.iter().any(|arg| arg == "--dry-run");
+            let others: Vec<String> = rest
+                .iter()
+                .filter(|arg| *arg != "--dry-run")
+                .cloned()
+                .collect();
+            if others.len() + 1 < rest.len() {
+                return Err("--dry-run is given twice.".to_string());
+            }
+            let flags = parse_flags(&others, &["--idle-days", "--delete-days"])?;
+            let mut days = [DEFAULT_SWEEP_DAYS; 2];
+            for (index, name) in ["--idle-days", "--delete-days"].iter().enumerate() {
+                if let Some(text) = &flags[index] {
+                    days[index] = text
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|days| (1..=MAX_SWEEP_DAYS).contains(days))
+                        .ok_or_else(|| format!("{name} is a number from 1 to {MAX_SWEEP_DAYS}."))?;
+                }
+            }
+            Ok(Operator::ConnectSweep {
+                idle_days: days[0],
+                delete_days: days[1],
+                dry_run,
+            })
+        }
         other => Err(format!("Unknown admin command: {other}")),
     }
 }
@@ -344,10 +377,11 @@ mod tests {
             vec!["limits", "bad"],
             vec!["limits", "t_abcdefgh23", "--items"],
             vec!["limits", "t_abcdefgh23", "--items", "-1"],
-            vec!["limits", "t_abcdefgh23", "--items", "0"],
+            vec!["limits", "t_abcdefgh23", "--members", "0"],
             vec!["limits", "t_abcdefgh23", "--items", "1000001"],
             vec!["limits", "t_abcdefgh23", "--agent-requests", "225"],
             vec!["limits", "t_abcdefgh23", "--sync-bytes", "1048575"],
+            vec!["limits", "t_abcdefgh23", "--sync-bytes", "1"],
             vec!["limits", "t_abcdefgh23", "--sync-bytes", "268435457"],
             vec!["limits", "t_abcdefgh23", "--sync-pushes-per-hour", "0"],
             vec!["limits", "t_abcdefgh23", "--sync-transfers", "9"],
@@ -366,6 +400,70 @@ mod tests {
             vec!["limits", "t_abcdefgh23", "--items", "1", "--items", "2"],
             vec!["limits", "t_abcdefgh23", "--unknown", "1"],
             vec!["limits", "t_abcdefgh23", "t_bcdefgh234"],
+        ] {
+            assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn limits_command_accepts_zero_items_agents_and_sync_bytes() {
+        assert_eq!(
+            parse_admin(&args(&[
+                "limits",
+                "t_abcdefgh23",
+                "--items",
+                "0",
+                "--agents",
+                "0",
+                "--sync-bytes",
+                "0",
+            ]))
+            .unwrap(),
+            Operator::Limits {
+                team: TeamId::parse("t_abcdefgh23").unwrap(),
+                set: Some(TeamLimitsUpdate {
+                    items: Some(0),
+                    agents: Some(0),
+                    sync_bytes: Some(0),
+                    ..Default::default()
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn connect_sweep_command() {
+        assert_eq!(
+            parse_admin(&args(&["connect-sweep"])).unwrap(),
+            Operator::ConnectSweep {
+                idle_days: 30,
+                delete_days: 30,
+                dry_run: false
+            }
+        );
+        assert_eq!(
+            parse_admin(&args(&[
+                "connect-sweep",
+                "--dry-run",
+                "--idle-days",
+                "45",
+                "--delete-days",
+                "7",
+            ]))
+            .unwrap(),
+            Operator::ConnectSweep {
+                idle_days: 45,
+                delete_days: 7,
+                dry_run: true
+            }
+        );
+        for values in [
+            vec!["connect-sweep", "--idle-days", "0"],
+            vec!["connect-sweep", "--delete-days", "3651"],
+            vec!["connect-sweep", "--idle-days"],
+            vec!["connect-sweep", "--dry-run", "--dry-run"],
+            vec!["connect-sweep", "--force"],
+            vec!["connect-sweep", "t_abcdefgh23"],
         ] {
             assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
         }

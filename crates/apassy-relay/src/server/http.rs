@@ -18,9 +18,9 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Request, Response};
 
 use crate::api::{
-    self, ChallengeRequest, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkCancel,
-    LinkRequest, NewItem, Policy, ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef,
-    TokenRequest, paths,
+    self, ChallengeRequest, ConnectCreate, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest,
+    LinkCancel, LinkRequest, NewItem, Policy, ReleaseRequest, RunRequest, TeamCreate,
+    TeamCreatedRef, TeamKind, TokenRequest, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
@@ -36,6 +36,8 @@ use crate::server::{Core, admin, approvals, decide, devices, host, joins, mcp, s
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
+/// `Retry-After` of `POST /v1/connect` when the relay made its Connect teams of the day.
+pub const CONNECT_RETRY_AFTER: &str = "3600";
 /// Seconds between two sweeps of timed out runs and expired sessions.
 const MAINTENANCE_SECS: u64 = 5;
 
@@ -44,6 +46,7 @@ const MAINTENANCE_SECS: u64 = 5;
 pub enum Endpoint {
     Me,
     TeamCreate,
+    Connect,
     Join,
     Challenge,
     Token,
@@ -162,6 +165,7 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
         ["v1", "members", n, "role"] => pick(method, &[("PUT", Need::Owner, MemberRole(id(n)?))]),
         ["v1", "join"] => pick(method, &[("POST", Need::Edge, Join)]),
         ["v1", "teams"] => pick(method, &[("POST", Need::Edge, TeamCreate)]),
+        ["v1", "connect"] => pick(method, &[("POST", Need::Edge, Connect)]),
         ["v1", "invites"] => pick(
             method,
             &[
@@ -513,7 +517,11 @@ fn respond_json_with(
     if close && let Ok(header) = Header::from_bytes(&b"Connection"[..], &b"close"[..]) {
         response.add_header(header);
     }
+    let own_retry = headers
+        .iter()
+        .any(|header| header.field.equiv("Retry-After"));
     if status == 503
+        && !own_retry
         && let Ok(header) = Header::from_bytes(&b"Retry-After"[..], BUSY_RETRY_AFTER.as_bytes())
     {
         response.add_header(header);
@@ -616,6 +624,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     if matches!(
         endpoint,
         Endpoint::TeamCreate
+            | Endpoint::Connect
             | Endpoint::Join
             | Endpoint::Challenge
             | Endpoint::Token
@@ -637,6 +646,19 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         let result = dispatch_edge(hub, endpoint, &body, now);
         match result {
             Ok(result) => respond_ok(request, result),
+            // The daily cap of Connect teams lasts longer than a busy moment.
+            Err(error) if endpoint == Endpoint::Connect && error.code == codes::BUSY => {
+                respond_json_with(
+                    request,
+                    error.status(),
+                    &error.to_envelope(),
+                    false,
+                    Header::from_bytes(&b"Retry-After"[..], CONNECT_RETRY_AFTER.as_bytes())
+                        .ok()
+                        .into_iter()
+                        .collect(),
+                );
+            }
             Err(error) => respond_error(request, &error),
         }
         return;
@@ -883,6 +905,7 @@ fn respond_snapshot(request: Request, snapshot: sync::Snapshot<'_>) -> bool {
 fn dispatch_edge(hub: &Hub, endpoint: Endpoint, body: &[u8], now: u64) -> RelayResult<Value> {
     match endpoint {
         Endpoint::TeamCreate => team_create(hub, body, now),
+        Endpoint::Connect => connect_create(hub, body, now),
         Endpoint::Join => {
             let request: JoinRequest = parse_body(body)?;
             let code = request.code.expose();
@@ -937,6 +960,20 @@ fn team_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
         member_id,
         secret: None,
         device_id: Some(device_id),
+        kind: None,
+    })
+}
+
+/// `POST /v1/connect` (docs/SPEC.md section 26).
+fn connect_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
+    let request: ConnectCreate = parse_body(body)?;
+    let (team_id, member_id, device_id) = hub.create_connect_team(&request, now)?;
+    to_value(&TeamCreatedRef {
+        team_id: &team_id,
+        member_id,
+        secret: None,
+        device_id: Some(device_id),
+        kind: Some(TeamKind::Connect),
     })
 }
 
@@ -1122,7 +1159,7 @@ fn dispatch(
             &parse_body(body)?,
             now,
         ),
-        Join | TeamCreate | Challenge | Token | Link | LinkCancel => {
+        Join | TeamCreate | Connect | Challenge | Token | Link | LinkCancel => {
             Err(RelayError::internal("This endpoint is served elsewhere."))
         }
         InviteCreate => admin::invite_create(core, member_of(principal)?, &parse_body(body)?, now),
@@ -1432,7 +1469,12 @@ mod tests {
             route("POST", "/v1/devices/link/cancel").unwrap(),
             (Need::Edge, Endpoint::LinkCancel)
         );
+        assert_eq!(
+            route("POST", "/v1/connect").unwrap(),
+            (Need::Edge, Endpoint::Connect)
+        );
         for (method, path) in [
+            ("GET", "/v1/connect"),
             ("GET", "/v1/sync"),
             ("POST", "/v1/sync/snapshot"),
             ("PUT", "/v1/sync/head"),

@@ -58,6 +58,8 @@ use crate::session::SessionSource;
 pub struct Core {
     /// The team of this state.
     pub team: TeamId,
+    /// How the team was made (docs/SPEC.md section 26). Fixed for its life.
+    pub kind: crate::api::TeamKind,
     pub config: Arc<RelayConfig>,
     pub store: Arc<Store>,
     pub audit: Arc<Audit>,

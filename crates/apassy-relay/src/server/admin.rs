@@ -93,6 +93,7 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
                 .device
                 .as_ref()
                 .is_some_and(|device| device.key_holder),
+            team_kind: Some(core.kind),
         },
         crate::server::auth::Principal::Agent(agent) => MeView {
             team,
@@ -106,6 +107,7 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
             expires_at: Some(agent.expires_at),
             device_id: None,
             key_holder: false,
+            team_kind: Some(core.kind),
         },
     };
     to_json(&view)

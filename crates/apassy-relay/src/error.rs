@@ -78,6 +78,12 @@ pub mod codes {
     pub const QUESTION_EXPIRED: &str = "question_expired";
     /// `PUT /v1/push/token` on a relay without push.
     pub const PUSH_UNAVAILABLE: &str = "push_unavailable";
+    // Connect teams (docs/SPEC.md section 26).
+    /// A snapshot push to a team whose `sync_bytes` is 0: vault sync through the relay
+    /// is not in the team's plan.
+    pub const PLAN_REQUIRED: &str = "plan_required";
+    /// `POST /v1/connect` with a public key that made a Connect team before.
+    pub const CONNECT_KEY_USED: &str = "connect_key_used";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -111,10 +117,12 @@ pub fn status_of(code: &str) -> u16 {
         | SYNC_HEAD_INVALID
         | NOT_ROUTED
         | TOO_MANY_QUESTIONS
-        | TOO_MANY_ANSWERS => 403,
+        | TOO_MANY_ANSWERS
+        | PLAN_REQUIRED => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
-        CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE => 409,
+        CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
+        | CONNECT_KEY_USED => 409,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
         NOT_SUPPORTED => 501,
@@ -204,6 +212,7 @@ mod tests {
             codes::NOT_ROUTED,
             codes::TOO_MANY_QUESTIONS,
             codes::TOO_MANY_ANSWERS,
+            codes::PLAN_REQUIRED,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 403);
         }
@@ -211,6 +220,7 @@ mod tests {
             codes::QUESTION_SETTLED,
             codes::QUESTION_EXPIRED,
             codes::PUSH_UNAVAILABLE,
+            codes::CONNECT_KEY_USED,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 409);
         }

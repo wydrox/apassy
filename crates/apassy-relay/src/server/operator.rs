@@ -57,6 +57,12 @@ pub enum Command {
     },
     /// A consistent copy of `relay.db` and every team file, with a manifest.
     Backup,
+    /// Suspends idle Connect teams and deletes those suspended long enough (SPEC 26.5).
+    ConnectSweep {
+        idle_days: u64,
+        delete_days: u64,
+        dry_run: bool,
+    },
 }
 
 /// Runs one command.
@@ -83,6 +89,12 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
             Ok(json!({"team": team, "state": "deleted"}))
         }
         Command::Backup => hub.backup(now),
+        Command::ConnectSweep {
+            idle_days,
+            delete_days,
+            dry_run,
+        } => serde_json::to_value(hub.connect_sweep(*idle_days, *delete_days, *dry_run, now)?)
+            .map_err(|_| RelayError::internal("A result cannot be written.")),
     }
 }
 
@@ -214,6 +226,14 @@ mod tests {
             (
                 Command::Delete { team },
                 r#"{"command":"delete","team":"t_abcdefgh23"}"#,
+            ),
+            (
+                Command::ConnectSweep {
+                    idle_days: 30,
+                    delete_days: 30,
+                    dry_run: true,
+                },
+                r#"{"command":"connect_sweep","idle_days":30,"delete_days":30,"dry_run":true}"#,
             ),
         ] {
             assert_eq!(serde_json::to_string(&command).unwrap(), text);
