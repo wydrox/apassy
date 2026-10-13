@@ -263,12 +263,36 @@ pub(super) fn duplicates_of(folder: &Path, name: &str) -> Result<Vec<String>, Sy
 }
 
 /// Ask iCloud Drive to download the file at `path` (`/usr/bin/brctl download`). The
-/// request runs in the background. Returns whether the request started. Always `false`
-/// on a system without iCloud Drive. For a file outside iCloud Drive it does nothing.
+/// request runs in the background. Returns whether a request runs: a new one, or one for
+/// the same file that did not end yet. Always `false` on a system without iCloud Drive.
+/// For a file outside iCloud Drive it does nothing.
 #[cfg(target_os = "macos")]
 pub fn start_download(path: &Path) -> bool {
+    spawn_download(Path::new("/usr/bin/brctl"), path)
+}
+
+/// The files with a download request that did not end yet.
+#[cfg(target_os = "macos")]
+static DOWNLOADS: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(target_os = "macos")]
+fn downloads() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<PathBuf>> {
+    DOWNLOADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Run `program download <path>` in the background, once per file at a time. A request
+/// can hang (a full disk, no network); the next ones for the file then start nothing, so
+/// the requests do not pile up processes and threads.
+#[cfg(target_os = "macos")]
+fn spawn_download(program: &Path, path: &Path) -> bool {
     use std::process::{Command, Stdio};
-    let child = Command::new("/usr/bin/brctl")
+    if !downloads().insert(path.to_owned()) {
+        return true;
+    }
+    let child = Command::new(program)
         .arg("download")
         .arg(path)
         .stdin(Stdio::null())
@@ -278,12 +302,18 @@ pub fn start_download(path: &Path) -> bool {
     match child {
         Ok(mut child) => {
             // Reap the child, so it does not stay as a zombie in a long-running app.
+            // Then a new request for the file can start.
+            let path = path.to_owned();
             std::thread::spawn(move || {
                 let _ = child.wait();
+                downloads().remove(&path);
             });
             true
         }
-        Err(_) => false,
+        Err(_) => {
+            downloads().remove(path);
+            false
+        }
     }
 }
 
@@ -487,6 +517,58 @@ mod tests {
     fn candidate_names_use_a_hyphen() {
         assert_eq!(candidate_name("Personal.apassy", 1), "Personal.apassy");
         assert_eq!(candidate_name("Personal.apassy", 3), "Personal-3.apassy");
+    }
+
+    /// A download request that does not end blocks only a new request for the same
+    /// file. After it ends, a request starts again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_download_request_that_still_runs_is_not_started_again() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().expect("temp dir");
+        // A stand-in for brctl: it notes each start, then waits for `<file>.done`.
+        let program = dir.path().join("fake-brctl");
+        fs::write(
+            &program,
+            "#!/bin/sh\necho start >> \"$2.log\"\nwhile [ ! -e \"$2.done\" ]; do sleep 0.02; done\n",
+        )
+        .expect("script");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("mode");
+        let file = dir.path().join("Synthetic.apassy");
+        let log = dir.path().join("Synthetic.apassy.log");
+        let starts = || {
+            fs::read_to_string(&log)
+                .map(|text| text.lines().count())
+                .unwrap_or(0)
+        };
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < until, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        assert!(spawn_download(&program, &file));
+        wait_for("the first request starts", &|| starts() == 1);
+        for _ in 0..3 {
+            assert!(spawn_download(&program, &file), "a request still runs");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(starts(), 1, "no second process while the first one runs");
+        assert!(downloads().contains(&file));
+
+        fs::write(dir.path().join("Synthetic.apassy.done"), b"").expect("done");
+        wait_for("the first request ends", &|| !downloads().contains(&file));
+        assert!(spawn_download(&program, &file));
+        wait_for("a new request starts", &|| starts() == 2);
+        wait_for("the new request ends", &|| !downloads().contains(&file));
+
+        // A program that does not start leaves no request behind.
+        let missing = dir.path().join("no-such-brctl");
+        assert!(!spawn_download(&missing, &file));
+        assert!(!downloads().contains(&file));
     }
 
     #[test]

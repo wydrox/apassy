@@ -35,7 +35,7 @@ use super::SharedVault;
 use super::action_kind::ActionKind;
 use super::approvals::{
     AnswerKind, ApprovalOutcome, ApprovalQueue, CheckMethod, PendingRun, QuestionInfo,
-    QuestionItem, QuestionRefusal,
+    QuestionItem, QuestionRefusal, baseline_of,
 };
 use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
@@ -558,7 +558,7 @@ struct Prepared {
 
 /// A connector use that passed the checks, before the decision (ADR 0025 §3). It has no
 /// secret value.
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct CallChecked {
     agent: AgentSummary,
     /// The vault session and the vault file of the check.
@@ -813,10 +813,13 @@ fn ask_owner(
             .as_ref()
             .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
     };
+    // The broker checks the whole check again after the answer. A call joins the
+    // waiting question only when it saw the same item and access.
     let settled = ctx.approvals.wait_for_question(
         pending,
         checked.agent.id,
         checked.epoch,
+        baseline_of(checked),
         ctx.approval_timeout,
         same_session,
     );

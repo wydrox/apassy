@@ -120,7 +120,14 @@ fn ask(
     let waiter = {
         let queue = Arc::clone(queue);
         std::thread::spawn(move || {
-            queue.wait_for_question(pending, agent_id, epoch, Duration::from_secs(30), || true)
+            queue.wait_for_question(
+                pending,
+                agent_id,
+                epoch,
+                [0; 32],
+                Duration::from_secs(30),
+                || true,
+            )
         })
     };
     let run = loop {

@@ -12,8 +12,9 @@
 //! - every [`CHECK_EVERY`] (every [`DOWNLOAD_EVERY`] while iCloud downloads the file of
 //!   the open vault) it reads the status of each synced vault of the list, asks iCloud
 //!   for a download (again every [`DOWNLOAD_AGAIN`] while the file stays in iCloud: a
-//!   change from another device leaves it there, and iCloud can drop a request), and
-//!   merges the synced file of the open vault when it changed.
+//!   change from another device leaves it there, and iCloud can drop a request; a
+//!   request that did not end yet is not started again, [`crate::sync::start_download`]),
+//!   and merges the synced file of the open vault when it changed.
 //!
 //! A vault that syncs through the relay has no file to look at. The worker pulls it at
 //! the first step after an unlock, every [`RELAY_PULL_EVERY`] as a fallback, at the
@@ -46,8 +47,12 @@
 //! It syncs only the open vault that the window tracks, and only while that vault is
 //! unlocked. A run that waits for the owner does not hold it: the broker checks each
 //! credential of the run again after the answer (its revision, variable, declaration,
-//! and hosts), and a merge that takes another version of a credential raises its
-//! revision, so the run does not start with a version that the owner did not see. The
+//! and hosts) against the first check of the call that takes the answer, and a merge
+//! that takes another version of a credential raises its revision. The same request
+//! again joins the waiting question only with the credentials as they were when it
+//! showed; otherwise that question ends and the call asks again
+//! ([`crate::broker::approvals::ApprovalQueue::wait_for_question`]). So an answer starts
+//! a run only with the credentials as they were when its question showed. The
 //! window reads the statuses and takes the events ([`SyncEvent`]) in each frame; it
 //! shows them, and it does no sync I/O for the schedule.
 //!

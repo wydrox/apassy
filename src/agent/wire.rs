@@ -26,7 +26,8 @@ pub mod codes {
     /// code is the same in each case, so it does not tell which items exist.
     pub const NOT_GRANTED: &str = "not_granted";
     /// Another question of this agent waits for the owner, or a newer identical call
-    /// joined the waiting question. The same request again joins the waiting question.
+    /// took over the waiting question. The same request again joins the waiting question
+    /// (or asks again, when a credential changed after the question showed).
     pub const QUESTION_WAITING: &str = "question_waiting";
     /// The owner answered "Allow ACTION in PROJECT" or "Allow production", and Apassy
     /// could not save the answer. The command did not run.

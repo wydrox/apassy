@@ -51,7 +51,8 @@
 //!        itself. Unclear asks the owner. A candidate in shadow mode answers in parallel
 //!        and has no effect (goal item B9).
 //! 7. A question waits for the owner (at most one per agent; the same request again
-//!    joins it). It names the answers that can take effect. "Allow ACTION in PROJECT"
+//!    joins it while the state that step 8 checks is the same, else it asks again). It
+//!    names the answers that can take effect. "Allow ACTION in PROJECT"
 //!    and "Allow production" remember an answer with the destination hosts of the run
 //!    after step 8; a production item that already has its allowance is skipped. An
 //!    owner denial blocks the pattern of the request.
@@ -79,7 +80,7 @@ use serde_json::json;
 use super::action_kind::{ActionKind, classify, classify_certain};
 use super::approvals::{
     AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, PendingRun, QuestionInfo, QuestionItem,
-    QuestionRefusal, Settled, action_words,
+    QuestionRefusal, Settled, action_words, baseline_of,
 };
 use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_learned};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
@@ -118,8 +119,7 @@ const OWNER_APPROVED_ON_IPHONE: &str = "Owner approved on the iPhone";
 const INVALIDATED: &str = "The vault was locked, or Apassy stopped, before the run started. The approval is not valid. Send the request again after the owner unlocks the vault.";
 /// ADR 0025 §3: an agent has at most one waiting question.
 pub(super) const QUESTION_WAITING: &str = "Another question of this agent waits for the owner in Apassy (up to 5 minutes). Wait for that answer, then call again with the same request. The same request again joins the waiting question.";
-const QUESTION_SUPERSEDED: &str =
-    "A newer call with the same request joined the waiting question. The answer goes to that call.";
+const QUESTION_SUPERSEDED: &str = "A newer call with the same request took over the waiting question. The answer goes to that call.";
 /// The start of the activity text of a run that the owner approved and remembered for the
 /// project. It starts with "Owner approved", so the desktop inbox classifies it as before.
 const OWNER_REMEMBERED: &str = "Owner approved and remembered the answer";
@@ -226,6 +226,26 @@ struct Checked {
     facts: Vec<ItemFacts>,
 }
 
+/// What the broker checks again after the answer of the owner, before it reads a secret.
+type Rechecked<'a> = (
+    &'a [ItemAuthorization],
+    &'a Path,
+    Option<&'a Project>,
+    &'a [ProviderHosts],
+);
+
+impl Checked {
+    /// The state that must not change between the question and the run.
+    fn rechecked(&self) -> Rechecked<'_> {
+        (
+            &self.authorization,
+            &self.cwd,
+            self.project.as_ref(),
+            &self.provider_hosts,
+        )
+    }
+}
+
 /// What the decision order (ADR 0025 §3) needs of one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemFacts {
@@ -255,7 +275,7 @@ impl ItemFacts {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct ItemAuthorization {
     binding: EnvBinding,
     revision: u64,
@@ -935,10 +955,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 valid_answers: valid,
             },
         };
+        // A call joins the waiting question only when it saw the same credentials.
         let settled = ctx.approvals.wait_for_question(
             pending,
             checked.agent.id,
             checked.epoch,
+            baseline_of(&checked.rechecked()),
             ctx.approval_timeout,
             same_session,
         );
@@ -1137,11 +1159,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 return WireResponse::failure(code, reason);
             }
         };
-        if rechecked.authorization != checked.authorization
-            || rechecked.cwd != checked.cwd
-            || rechecked.project != checked.project
-            || rechecked.provider_hosts != checked.provider_hosts
-        {
+        if rechecked.rechecked() != checked.rechecked() {
             let reason = "The credential or its access changed while Apassy checked this run. Send the request again.";
             record(
                 vault,

@@ -335,7 +335,7 @@ The asker seals one settle when its question ends, whatever ended it:
 
 | Field | Rule |
 | --- | --- |
-| `outcome` | `approved`, `denied`, `timed_out`, `invalidated` (the vault was locked or replaced, or the broker stopped), or `replaced` (section 12.5) |
+| `outcome` | `approved`, `denied`, `timed_out`, `invalidated` (the vault was locked or replaced, the broker stopped, or the same request came again after a credential of the question changed), or `replaced` (section 12.5) |
 | `answered_by`, `device_name`, `device_kind` | the device whose answer settled it (`mac` or `iphone`; the asker itself for an answer on its own card or through the local-network companion, with `device_kind` of the device that answered there), or `null` for `timed_out`, `invalidated`, `replaced` |
 | `kind` | the answer kind of section 9.1, or `null` |
 | `at` | the asker's clock |
@@ -446,7 +446,7 @@ When a run starts to wait and "Send questions through the relay" is on for the v
 1. Build the card, check section 6.3 and 7.2, and compute the digest v2.
 2. `qid` = 16 random bytes; nonce = 12 random bytes; `expires_at` = the time the local question ends (`QUESTION_WAIT`, 300 s, after it started to wait).
 3. `POST /v1/questions`. A failure that can pass (no network, `500`, `503`, a non-JSON answer) retries after 2, 4, 8, 16, 30, 30… seconds while the question waits. `403 too_many_questions` and `413` do not retry: the question stays local, and Activity says why. A `404` means a relay without the questions routes (section 10.2): the question stays local, and the loops wait some minutes (5 in the app) before they ask the relay again.
-4. A call of the same agent that joins the waiting question (`QuestionRefusal::Superseded`) posts nothing new.
+4. A call of the same agent that joins the waiting question (`QuestionRefusal::Superseded`) posts nothing new. The same request after a change of one of its credentials does not join: the old question ends as `invalidated` (its copy on the relay settles), and the new question is posted as a new one.
 
 The local card shows at once; it does not wait for the relay.
 
