@@ -1,3 +1,4 @@
+import ApassyCompanionKit
 import ApassyVaultKit
 import Foundation
 import Observation
@@ -50,6 +51,8 @@ final class JoinModel {
     @ObservationIgnored private let onCancel: @MainActor () -> Void
     /// The answer key of this iPhone (X9.63) for the Mac that confirms the join, when there is one.
     @ObservationIgnored private let answerKey: (@Sendable () throws -> Data)?
+    /// A companion QR scanned here belongs to the approval flow, not the relay.
+    @ObservationIgnored private let onCompanionCode: @MainActor (String) -> String?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     /// The passphrase that opened the copy, only until the owner answers the Face ID offer.
     @ObservationIgnored private var openedWith: String?
@@ -59,7 +62,10 @@ final class JoinModel {
         deviceName: String, pollInterval: Duration = .seconds(2), now: @escaping @MainActor () -> Date = { Date() },
         isAway: @escaping @MainActor () -> Bool = { false },
         answerKey: (@Sendable () throws -> Data)? = nil,
-        onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void,
+        onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
+            "This code pairs the iPhone companion. Open Decisions to pair with your Mac."
+        }
     ) {
         self.service = service
         self.passphraseStore = passphraseStore
@@ -72,6 +78,7 @@ final class JoinModel {
         self.onFinished = onFinished
         self.onCancel = onCancel
         self.answerKey = answerKey
+        self.onCompanionCode = onCompanionCode
     }
 
     // MARK: The link
@@ -81,11 +88,26 @@ final class JoinModel {
         step = .scan
     }
 
-    /// Text from the scanner or the pasteboard. Text that is not a device link only sets a note.
+    /// Classify the scanned or pasted code before using it. A companion link must pass its full
+    /// parser; it never goes to the relay, even when its text contains a relay token.
     func handleCode(_ text: String) {
         switch step {
         case .instructions, .scan: break
         default: return
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            _ = try PairingLink.parse(trimmed, now: now())
+            scanNote = onCompanionCode(trimmed)
+            return
+        } catch let error as PairingLinkError {
+            if error != .notAPairingLink || trimmed.lowercased().hasPrefix("apassy:") {
+                scanNote = error.localizedDescription
+                return
+            }
+        } catch {
+            scanNote = error.localizedDescription
+            return
         }
         guard let link = VaultText.joinLink(from: text) else {
             scanNote = "This is not the code of “Add a device…”. On your Mac, open Apassy > Settings > Vault > Sync."

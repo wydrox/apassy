@@ -25,7 +25,7 @@ struct ConnectQuestionsView: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                         Button("Connect") { Task { await model.startAttach(link: link) } }
-                            .disabled(!QuestionsModel.isLink(link))
+                            .disabled(!QuestionsModel.isConnectionCode(link))
                     } footer: {
                         if case .failed(let message) = model.attach {
                             Text(message).foregroundStyle(.red)
@@ -33,6 +33,8 @@ struct ConnectQuestionsView: View {
                             Text("On your Mac: Settings > Devices > Notifications through the relay > Add an iPhone.")
                         }
                     }
+                case .companion:
+                    Section { ProgressView("Opening companion pairing…") }
                 case .starting:
                     Section { ProgressView("Connecting…") }
                 case .waiting(let info):
@@ -57,7 +59,9 @@ struct ConnectQuestionsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    if model.attach == .attached {
+                    if model.attach == .companion {
+                        EmptyView()
+                    } else if model.attach == .attached {
                         Button("Done") { dismiss() }
                     } else {
                         Button("Cancel") {
@@ -66,6 +70,9 @@ struct ConnectQuestionsView: View {
                         }
                     }
                 }
+            }
+            .onChange(of: model.attach) { _, step in
+                if step == .companion { dismiss() }
             }
         }
     }

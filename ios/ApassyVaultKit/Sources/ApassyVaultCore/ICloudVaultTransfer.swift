@@ -1,5 +1,6 @@
 import ApassyVaultKit
 import CryptoKit
+import Darwin
 import Foundation
 
 /// A short lock guards only local publication and session changes. Provider access
@@ -44,6 +45,7 @@ actor ICloudVaultTransfer {
     typealias Complete = @Sendable (String, String) async throws -> SyncStatus
     private let directory: URL
     private let bookmarks: URL
+    private let recovery: URL
     private let files: any ICloudFileAccess
     private let session: ICloudSession
     private var occupied = false
@@ -54,6 +56,7 @@ actor ICloudVaultTransfer {
     init(directory: URL, files: any ICloudFileAccess, session: ICloudSession) {
         self.directory = directory.appendingPathComponent("icloud-transfer", isDirectory: true)
         self.bookmarks = directory.appendingPathComponent("icloud-bookmarks", isDirectory: true)
+        self.recovery = directory.appendingPathComponent("icloud-recovery", isDirectory: true)
         self.files = files
         self.session = session
     }
@@ -84,6 +87,47 @@ actor ICloudVaultTransfer {
     private func bookmarkPath(_ id: String) -> URL {
         let key = SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
         return bookmarks.appendingPathComponent(key)
+    }
+
+    /// Retain ciphertext independently of provider version housekeeping. A failed
+    /// archive prevents publication/resolution; retries reuse verified copies.
+    private func archive(id: String, snapshots: [ICloudConflictSnapshot]) throws {
+        let key = SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+        let archive = recovery.appendingPathComponent(key, isDirectory: true)
+        for folder in [recovery, archive] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            var mutable = folder
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try mutable.setResourceValues(values)
+            #if os(iOS)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: folder.path)
+            #endif
+        }
+        for snapshot in snapshots {
+            let destination = archive.appendingPathComponent(snapshot.sha256 + ".apassy")
+            if !FileManager.default.fileExists(atPath: destination.path) {
+                let staging = archive.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: staging) }
+                try CoordinatedICloudFileAccess.copySnapshot(from: snapshot.url, to: staging)
+                guard try CoordinatedICloudFileAccess.hash(staging) == snapshot.sha256 else {
+                    throw VaultError(.damaged, "The encrypted recovery copy did not pass its check.")
+                }
+                try FileManager.default.moveItem(at: staging, to: destination)
+            }
+            guard try CoordinatedICloudFileAccess.hash(destination) == snapshot.sha256 else {
+                throw VaultError(.damaged, "The encrypted recovery copy did not pass its check.")
+            }
+        }
+        // Flush directory entries too, before resolving a provider version.
+        for folder in [archive, recovery, recovery.deletingLastPathComponent()] {
+            let descriptor = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY)
+            guard descriptor >= 0 else { throw VaultError(.io, "The encrypted recovery copies could not be saved.") }
+            let result = Darwin.fsync(descriptor)
+            Darwin.close(descriptor)
+            guard result == 0 else { throw VaultError(.io, "The encrypted recovery copies could not be saved.") }
+        }
     }
     private func saveBookmark(_ data: Data, id: String) throws {
         try FileManager.default.createDirectory(at: bookmarks, withIntermediateDirectories: true,
@@ -157,6 +201,28 @@ actor ICloudVaultTransfer {
                                   version: 0, lastSyncAt: nil, pushed: false, merged: nil)
     }
 
+    private enum SnapshotSource {
+        case conflictCopy, currentFile
+
+        var unsupportedFormatMessage: String {
+            switch self {
+            case .conflictCopy:
+                "An iCloud conflict copy uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+            case .currentFile:
+                "The current iCloud file uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+            }
+        }
+    }
+
+    private func prepareForSync(id: String, input: URL, output: URL, passphrase: String?,
+                                source: SnapshotSource, prepare: Prepare) async throws -> ICloudPrepared {
+        do {
+            return try await prepare(id, input, output, passphrase)
+        } catch let error as VaultError where error.code == .unsupportedSchema {
+            throw VaultError(error.code, source.unsupportedFormatMessage, rekeyed: error.rekeyed)
+        }
+    }
+
     func sync(id: String, passphrase: String?, epoch: UInt64, prepare: Prepare,
               complete: Complete) async throws -> PassphraseChange {
         await enter()
@@ -170,26 +236,61 @@ actor ICloudVaultTransfer {
                 let input = folder.appendingPathComponent("input")
                 let output = folder.appendingPathComponent("output")
                 let provider = try url(id)
-                try await Task.detached { [files] in try files.snapshot(from: provider, to: input) }.value
+                let conflicts = try await Task.detached { [files] in
+                    try files.snapshotForSync(from: provider, to: input)
+                }.value
                 try session.check(epoch)
-                let prepared = try await prepare(id, input, output, passphrase)
+                // Prepare authenticates identity, epoch and content in Rust and
+                // merges locally. Never resolve a version after hash checks alone.
+                for (index, conflict) in conflicts.enumerated() {
+                    let conflictOutput = folder.appendingPathComponent("merged-conflict-\(index)")
+                    let merged: ICloudPrepared
+                    do {
+                        // An older conflict may still use the current local key,
+                        // while the provider current copy uses a new passphrase.
+                        merged = try await prepareForSync(id: id, input: conflict.url, output: conflictOutput,
+                            passphrase: nil, source: .conflictCopy, prepare: prepare)
+                    } catch let error as VaultError where error.code == .needsPassphrase && passphrase != nil {
+                        try session.check(epoch)
+                        merged = try await prepareForSync(id: id, input: conflict.url, output: conflictOutput,
+                            passphrase: passphrase, source: .conflictCopy, prepare: prepare)
+                    }
+                    rekeyed = rekeyed || merged.rekeyed
+                    try session.check(epoch)
+                    guard merged.inputSHA256 == conflict.sha256,
+                          try CoordinatedICloudFileAccess.hash(conflict.url) == conflict.sha256 else {
+                        throw VaultError(.damaged, "The encrypted conflict version did not pass its check.")
+                    }
+                    // Only the final prepare's output is published.
+                    if FileManager.default.fileExists(atPath: conflictOutput.path) {
+                        try FileManager.default.removeItem(at: conflictOutput)
+                    }
+                }
+                // Prepare current LAST so its token/output includes every merge.
+                let prepared = try await prepareForSync(id: id, input: input, output: output,
+                    passphrase: passphrase, source: .currentFile, prepare: prepare)
                 rekeyed = rekeyed || prepared.rekeyed
                 try session.check(epoch)
                 // Trust neither the input path nor an unverified Rust output hash.
                 guard try CoordinatedICloudFileAccess.hash(input) == prepared.inputSHA256 else {
                     throw VaultError(.damaged, "The encrypted input file did not pass its check.")
                 }
-                if prepared.writeRequired {
-                    guard let outputHash = prepared.outputSHA256 else {
+                if !conflicts.isEmpty {
+                    try archive(id: id, snapshots: conflicts + [ICloudConflictSnapshot(url: input, sha256: prepared.inputSHA256)])
+                    try session.check(epoch)
+                }
+                if prepared.writeRequired || !conflicts.isEmpty {
+                    guard let outputHash = prepared.writeRequired ? prepared.outputSHA256 : prepared.inputSHA256 else {
                         throw VaultError(.damaged, "The encrypted output file has no check value.")
                     }
-                    guard try CoordinatedICloudFileAccess.hash(output) == outputHash else {
+                    let publication = prepared.writeRequired ? output : input
+                    guard try CoordinatedICloudFileAccess.hash(publication) == outputHash else {
                         throw VaultError(.damaged, "The encrypted output file did not pass its check.")
                     }
-                    try protect(output)
+                    try protect(publication)
                     let didWrite = try await Task.detached { [files, session] in
-                        try files.publish(from: output, to: provider, expectedInputHash: prepared.inputSHA256,
-                            outputHash: outputHash, authorize: { operation in
+                        try files.publishForSync(from: publication, to: provider, expectedInputHash: prepared.inputSHA256,
+                            expectedConflictHashes: conflicts.map(\.sha256), outputHash: outputHash, authorize: { operation in
                                 try session.authorize(epoch, operation)
                             })
                     }.value
@@ -231,7 +332,7 @@ actor ICloudVaultTransfer {
             case .staleCopy: state = .staleCopy
             case .forkedCopy: state = .forkedCopy
             case .busy: state = .busy
-            case .conflict, .safetyMismatch, .invalidInput: state = .error
+            case .conflict, .safetyMismatch, .invalidInput, .unsupportedSchema: state = .error
             default: state = .offline
             }
             statuses[id] = SyncStatus(enabled: true, state: state,

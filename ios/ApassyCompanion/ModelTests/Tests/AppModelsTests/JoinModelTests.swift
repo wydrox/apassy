@@ -1,3 +1,4 @@
+import ApassyCompanionKit
 import ApassyVaultKit
 import Foundation
 import Testing
@@ -16,6 +17,8 @@ struct JoinModelTests {
         let settings = makeSettings()
         var finished: [VaultEntry] = []
         var cancelled = 0
+        var companionCodes: [String] = []
+        var companionProblem: String?
         /// Whether the app is in the background, as the vault model says.
         var away = false
         var model: JoinModel!
@@ -29,7 +32,11 @@ struct JoinModelTests {
                 deviceName: deviceName, pollInterval: .milliseconds(20),
                 isAway: { [unowned self] in away }, answerKey: answerKey,
                 onFinished: { [unowned self] vault in finished.append(vault) },
-                onCancel: { [unowned self] in cancelled += 1 })
+                onCancel: { [unowned self] in cancelled += 1 },
+                onCompanionCode: { [unowned self] code in
+                    companionCodes.append(code)
+                    return companionProblem
+                })
         }
 
         /// Scan the link, send it, and wait for the passphrase screen.
@@ -56,6 +63,51 @@ struct JoinModelTests {
         fixture.model.handleCode("  \(link) \n")
         #expect(fixture.model.step == .name(link: link))
         #expect(fixture.model.scanNote == nil)
+        #expect(fixture.companionCodes.isEmpty)
+    }
+
+    @Test("a valid companion QR from either scan entry routes to companion pairing")
+    func companionCode() {
+        for scan in [false, true] {
+            let fixture = Fixture()
+            if scan { fixture.model.showScanner() }
+            let code = pairingLinkText(expiresIn: 300)
+            fixture.model.handleCode("  \(code) \n")
+            #expect(fixture.companionCodes == [code])
+            #expect(fixture.model.scanNote == nil)
+            #expect(fixture.model.step == (scan ? .scan : .instructions))
+        }
+    }
+
+    @Test("invalid companion QR codes stay in the scanner and never enter relay joining")
+    func invalidCompanionCode() {
+        let valid = pairingLinkText(expiresIn: 300)
+        let invalid = [
+            pairingLinkText(expiresIn: -10),
+            valid + "&v=1",
+            valid.replacingOccurrences(of: "p=48620", with: "p=0"),
+            "apassy://pair?v=1&n=/link#apassy_lnk_abc",
+            "apassy://pair/wrong/link#apassy_lnk_abc",
+            "APASSY://pair/wrong/link#apassy_lnk_abc",
+        ]
+        for code in invalid {
+            let fixture = Fixture()
+            fixture.model.showScanner()
+            fixture.model.handleCode(code)
+            #expect(fixture.companionCodes.isEmpty)
+            #expect(fixture.model.step == .scan)
+            #expect(fixture.model.scanNote != nil)
+        }
+    }
+
+    @Test("an unavailable companion flow leaves an actionable scanner note")
+    func companionUnavailable() {
+        let fixture = Fixture()
+        fixture.companionProblem = "Check the existing companion pairing."
+        fixture.model.showScanner()
+        fixture.model.handleCode(pairingLinkText(expiresIn: 300))
+        #expect(fixture.model.step == .scan)
+        #expect(fixture.model.scanNote == fixture.companionProblem)
     }
 
     @Test("a name needs a character and at most 64 bytes")

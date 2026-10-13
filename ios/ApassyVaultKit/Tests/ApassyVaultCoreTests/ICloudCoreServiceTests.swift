@@ -98,4 +98,81 @@ import Testing
         #expect(files.snapshots == 0)
         #expect(files.publications == 0)
     }
+
+    @Test func providerVersionsMergeThroughRealCoreAndPreserveConcurrentEdits() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (provider, _) = try await makeDonor(in: root)
+        let branchFile = root.appendingPathComponent("branch.apassy")
+        try FileManager.default.copyItem(at: provider, to: branchFile)
+        let files = LocalICloudFiles()
+        let phone = try CoreVaultService(dataDirectory: root.appendingPathComponent("phone"),
+            deviceName: "Phone", role: .app, iCloudFiles: files)
+        _ = try await phone.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
+        let other = try CoreVaultService(dataDirectory: root.appendingPathComponent("other"),
+            deviceName: "Other", role: .app, iCloudFiles: LocalICloudFiles())
+        _ = try await other.openICloudVault(url: branchFile, name: "Personal", passphrase: passphrase)
+        for (service, label) in [(phone, "Phone"), (other, "Other")] {
+            let original = try #require(try await service.items(archived: .no).first)
+            _ = try await service.save(id: original.id, revision: original.revision,
+                draft: ItemDraft(title: "Mac item", kind: .login, notes: "", tags: [],
+                    fields: [.named("username", label, secret: false),
+                             .named("password", "synthetic-\(label)", secret: true)]))
+            _ = try await service.save(id: nil, revision: nil,
+                draft: ItemDraft(title: "\(label) addition", kind: .login, notes: "", tags: [],
+                    fields: [.named("username", label, secret: false),
+                             .named("password", "synthetic-addition", secret: true)]))
+        }
+        #expect(try await other.sync().state == .ok)
+        let originals = try [provider, branchFile].map { try CoordinatedICloudFileAccess.hash($0) }
+        files.conflicts = [branchFile]
+        #expect(try await phone.sync().state == .ok)
+        #expect(files.resolved == [originals[1]])
+        #expect(try CoordinatedICloudFileAccess.hash(branchFile) == originals[1])
+
+        let reader = try CoreVaultService(dataDirectory: root.appendingPathComponent("reader"),
+            deviceName: "Reader", role: .app, iCloudFiles: LocalICloudFiles())
+        _ = try await reader.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
+        let active = try await reader.items(archived: .no)
+        #expect(Set(active.map(\.title)) == ["Mac item", "Phone addition", "Other addition"])
+        let archived = try await reader.items(archived: .yes)
+        let conflictCopy = try #require(archived.first { $0.title.contains("conflict copy") })
+        let winner = try #require(active.first { $0.title == "Mac item" })
+        let values = try await [reader.reveal(id: winner.id, field: "password"),
+                                reader.reveal(id: conflictCopy.id, field: "password")]
+        #expect(Set(values) == ["synthetic-Phone", "synthetic-Other"])
+        let archive = root.appendingPathComponent("phone/icloud-recovery")
+        let recovered = FileManager.default.enumerator(at: archive, includingPropertiesForKeys: nil)!
+        let hashes = try recovered.compactMap { $0 as? URL }.filter { $0.pathExtension == "apassy" }
+            .map { try CoordinatedICloudFileAccess.hash($0) }
+        #expect(Set(hashes) == Set(originals))
+    }
+
+    @Test(arguments: [false, true])
+    func incompatibleProviderVersionFailsClosedThroughRealCore(malformed: Bool) async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (provider, _) = try await makeDonor(in: root)
+        let files = LocalICloudFiles()
+        let phone = try CoreVaultService(dataDirectory: root.appendingPathComponent("phone"),
+            deviceName: "Phone", role: .app, iCloudFiles: files)
+        _ = try await phone.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
+        let conflict: URL
+        if malformed {
+            conflict = root.appendingPathComponent("malformed.apassy")
+            try Data("not an encrypted vault".utf8).write(to: conflict)
+        } else {
+            let alienRoot = root.appendingPathComponent("alien")
+            try FileManager.default.createDirectory(at: alienRoot, withIntermediateDirectories: true)
+            (conflict, _) = try await makeDonor(in: alienRoot)
+        }
+        files.conflicts = [conflict]
+        let originals = try [provider, conflict].map { try CoordinatedICloudFileAccess.hash($0) }
+        await #expect(throws: VaultError.self) { _ = try await phone.sync() }
+        #expect(files.publications == 0)
+        #expect(files.resolved.isEmpty)
+        #expect(files.conflicts == [conflict])
+        #expect(try [provider, conflict].map { try CoordinatedICloudFileAccess.hash($0) } == originals)
+        #expect(try await phone.items(archived: .no).map(\.title) == ["Mac item"])
+    }
 }

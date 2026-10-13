@@ -30,11 +30,12 @@
 //! reaches the other Macs and wins over an older edit. A removed trusted device wins
 //! over any edit, also a later one: a revoked device stays revoked.
 //!
-//! A copy of an earlier schema ([`OLDEST_UPGRADABLE_SCHEMA`] 17 to
+//! A copy of an earlier schema ([`OLDEST_UPGRADABLE_SCHEMA`] 16 to
 //! [`UPGRADABLE_SCHEMA`] 18) passes the checks of its own schema first. It has none of
 //! the rows of the later schemas, so the merge keeps the values of this vault for its
 //! records in memory ([`keep_local_v18`], [`keep_local_v19`]), takes none of those
-//! tables from it, and the copy does not change.
+//! tables from it, and the copy does not change. Schema 16 ordinary `passkey_*` fields
+//! also get the deterministic free names of the local schema-17 migration in memory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -157,14 +158,14 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 /// copy of this schema is refused by the app of schema 18 (`UnsupportedSchema`).
 pub(super) const UPGRADABLE_SCHEMA: i64 = FOLDER_SCHEMA_VERSION;
 
-/// The earliest schema of a copy that a merge takes: schema 17, before folders. The
-/// released app (0.4.1) writes it. A copy of another schema is `UnsupportedSchema`.
-pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::PASSKEY_SCHEMA_VERSION;
+/// The earliest supported copy: schema 16, written by the released 0.3.x apps.
+/// Its ordinary reserved-name fields need the same conversion as a local migration.
+pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERSION;
 
-// [`keep_local_v18`] and [`keep_local_v19`] do the steps from schema 17 to schema 19
+// Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19
 // only. A new schema needs its own step for a copy, or a refusal of the old copies.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 1);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 2);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades.
@@ -1005,7 +1006,7 @@ pub(super) fn sync_content_digest(
 /// version and columns, and the digest of the last push (it catches a file that mixes
 /// pages of different copies). Returns its sync record and its schema version.
 ///
-/// A copy of an earlier schema (17 or 18) gets the checks of its schema: its columns,
+/// A copy of an earlier schema (16, 17, or 18) gets the checks of its schema: its columns,
 /// and the stored digest of its own content. The version in the header and in
 /// `vault_meta` must agree, so a copy of schema 19 with the header of schema 18 fails.
 fn check_attached(conn: &Connection, alias: &str) -> VaultResult<(SyncIdentity, i64)> {
@@ -1046,9 +1047,9 @@ fn check_attached(conn: &Connection, alias: &str) -> VaultResult<(SyncIdentity, 
     }
 }
 
-/// Give the records of a schema 17 copy the schema 18 values of this vault, in memory.
+/// Give records from before schema 18 the schema 18 values of this vault, in memory.
 ///
-/// A copy of schema 17 cannot hold a folder, "Always ask", the sources of a declaration,
+/// A copy of schema 16 or 17 cannot hold a folder, "Always ask", the sources of a declaration,
 /// or a share. So each of its records keeps the values of the same credential here, and a
 /// credential that is new here gets none. The merge then compares the same values on both
 /// sides: the upgrade makes no conflict, and an old copy never drops "Always ask".
@@ -1064,7 +1065,7 @@ fn keep_local_v18(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String
 }
 
 /// Give the records of a copy before schema 19 the home of this vault, in memory, as
-/// [`keep_local_v18`] does for the values of schema 18: a copy of schema 17 or 18
+/// [`keep_local_v18`] does for the values of schema 18: a copy of schema 16, 17, or 18
 /// cannot hold the home of a mirror.
 fn keep_local_v19(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String, Record>) {
     for (uuid, record) in remote.iter_mut() {
@@ -1161,7 +1162,7 @@ pub struct MergeReport {
     /// upgrade of its schema).
     pub remote_content: [u8; 32],
     /// The schema version of the other copy: [`SCHEMA_VERSION`], 18 for a copy before
-    /// trusted devices, or 17 for a copy of an installed app before folders.
+    /// trusted devices, 17 before folders, or 16 before reserved passkey fields.
     pub remote_schema: i64,
 }
 
@@ -1840,6 +1841,29 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     .map_err(storage)?;
     let local = load_records(&tx, "main", scope, SCHEMA_VERSION)?;
     let mut remote = load_records(&tx, REMOTE, scope, remote_schema)?;
+    if remote_schema < super::PASSKEY_SCHEMA_VERSION {
+        // Original bytes and digest have already passed check_attached. Convert only
+        // the records we compare/apply; remote_content remains the original digest.
+        for record in remote.values_mut() {
+            let renames = super::passkey::legacy_field_renames(
+                record.fields.iter().map(|(name, _, _)| name.as_str()),
+            );
+            let mut renames = renames.into_iter();
+            for (name, _, _) in &mut record.fields {
+                if !name.starts_with(super::PASSKEY_FIELD_PREFIX) {
+                    continue;
+                }
+                if let Some((old, new)) = renames.next() {
+                    if let Some((_, field, _)) = &mut record.env
+                        && *field == old
+                    {
+                        field.clone_from(&new);
+                    }
+                    *name = new;
+                }
+            }
+        }
+    }
     if remote_schema < FOLDER_SCHEMA_VERSION {
         keep_local_v18(&mut remote, &local);
     }
@@ -2078,7 +2102,7 @@ impl Vault {
     /// Check a copy at `path` with the key of this vault and return its sync record. The
     /// copy does not change. A copy that does not open with the key (another vault, or a
     /// passphrase that changed on another Mac) is `WrongKeyOrCorrupt`; a copy that opens
-    /// but fails a check is `Damaged`. A copy of schema 17 or 18 gets the checks of its
+    /// but fails a check is `Damaged`. A copy of schema 16, 17, or 18 gets the checks of its
     /// schema; a copy of another earlier or a later schema is `UnsupportedSchema`.
     pub fn check_sync_copy(&self, path: &Path, scope: &SyncScope) -> VaultResult<SyncIdentity> {
         let conn = self.conn_ref()?;
@@ -2091,8 +2115,8 @@ impl Vault {
     /// Merge the copy at `path` into this vault, record by record (ADR 0014). The vault
     /// must be unlocked. The copy is a local file, never a file in a synced folder. It
     /// must pass the checks of [`Vault::check_sync_copy`] and have the vault ID of this
-    /// vault (`OtherVault`). A copy of schema 17 merges with the folders, policies, and
-    /// shares of this vault, and a copy of schema 17 or 18 with its homes and trusted
+    /// vault (`OtherVault`). A copy of schema 16 or 17 merges with the folders, policies, and
+    /// shares of this vault, and a copy of schema 16, 17, or 18 with its homes and trusted
     /// devices; the report says so ([`MergeReport::remote_outdated`]).
     pub fn merge_from(&mut self, path: &Path, scope: &SyncScope) -> VaultResult<MergeReport> {
         self.require_unlocked()?;
@@ -2612,7 +2636,7 @@ mod schema17_tests {
         let report = w.a.merge_from(&same, &scope).unwrap();
         assert!(!report.changed_local());
         assert!(report.remote_outdated());
-        assert_eq!(report.remote_schema, OLDEST_UPGRADABLE_SCHEMA);
+        assert_eq!(report.remote_schema, 17);
         assert_eq!(w.a.sync_content(&scope).unwrap(), content);
         assert_eq!(sha(&same), before);
         assert_eq!(versions(&same), (17, 17));
@@ -2874,6 +2898,314 @@ mod schema17_tests {
         assert_eq!(
             w.a.sync_content(&SyncScope::vault()).unwrap(),
             w.b.sync_content(&SyncScope::vault()).unwrap()
+        );
+    }
+}
+
+/// Frozen released-schema coverage: these files are created from the SQL of 0.3.6,
+/// not from current tables with an older version number.
+#[cfg(test)]
+mod schema16_tests {
+    use super::super::{OPEN_EXISTING, apply_key, close_conn};
+    use super::*;
+    use std::fs;
+
+    const PASS: &str = "synthetic-schema16-passphrase";
+    const UUID: &str = "22222222222222222222222222222222";
+    const OLD_DEVICE: &str = "33333333333333333333333333333333";
+
+    fn sha(path: &Path) -> Vec<u8> {
+        digest::digest(&digest::SHA256, &fs::read(path).unwrap())
+            .as_ref()
+            .to_vec()
+    }
+
+    fn mutate(path: &Path, sql: &str, refresh_digest: bool) {
+        let conn = Connection::open_with_flags(path, OPEN_EXISTING).unwrap();
+        apply_key(&conn, PASS).unwrap();
+        conn.execute_batch(sql).unwrap();
+        if refresh_digest {
+            let stored = content_digest(&conn, "main").unwrap();
+            conn.execute(
+                "UPDATE sync_meta SET content_digest = ?1",
+                [stored.as_slice()],
+            )
+            .unwrap();
+        }
+        close_conn(conn).unwrap();
+    }
+
+    fn fixture(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        apply_key(&conn, PASS).unwrap();
+        conn.execute_batch(include_str!("../../tests/vault_schema16_fixture.sql"))
+            .unwrap();
+        // Ordinary fields in schema 16 can have any passkey_* name. The first free
+        // custom label collides, so the reserved field must become '(2)'.
+        let collision = format!("x_{}", super::super::sync::to_hex(b"passkey_key"));
+        conn.execute_batch(&format!(
+            "UPDATE sync_device SET applying = 1;
+             INSERT INTO item (id, title, kind, notes, revision, uuid, updated_at, updated_by, clock)
+                 VALUES (1, 'Legacy login', 'login', '', 1, '{UUID}', 1000, '{OLD_DEVICE}', '{OLD_DEVICE}=1');
+             INSERT INTO item_field VALUES (1, 0, 'username', 'synthetic-user', 0);
+             INSERT INTO item_field VALUES (1, 1, 'password', 'synthetic-password', 1);
+             INSERT INTO item_field VALUES (1, 2, 'passkey_key', 'synthetic-ordinary-secret', 1);
+             INSERT INTO item_field VALUES (1, 3, '{collision}', 'synthetic-existing-label', 0);
+             INSERT INTO env_binding (item_id, env_name, field) VALUES (1, 'LEGACY_SECRET', 'passkey_key');
+             DELETE FROM sync_device;
+             UPDATE sync_meta SET generation = 1, pushed_by = 'Released Mac', pushed_at = 1;"
+        )).unwrap();
+        let stored = content_digest(&conn, "main").unwrap();
+        conn.execute(
+            "UPDATE sync_meta SET content_digest = ?1",
+            [stored.as_slice()],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            16
+        );
+        close_conn(conn).unwrap();
+    }
+
+    fn adopt(source: &Path, destination: &Path) -> Vault {
+        let (mut vault, adopted) = Vault::adopt_sync_copy(source, destination, PASS).unwrap();
+        assert_eq!(adopted.schema, 16);
+        assert!(adopted.outdated());
+        vault.unlock(PASS).unwrap();
+        vault
+    }
+
+    fn record(vault: &Vault) -> Record {
+        load_records(
+            vault.conn_ref().unwrap(),
+            "main",
+            &SyncScope::vault(),
+            SCHEMA_VERSION,
+        )
+        .unwrap()
+        .remove(UUID)
+        .unwrap()
+    }
+
+    #[test]
+    fn schema16_snapshot_check_adopt_merge_keeps_binding_and_clocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("released.db");
+        fixture(&source);
+        let before = sha(&source);
+        let identity = Vault::inspect_sync_copy(&source, PASS).unwrap();
+        let mut local = adopt(&source, &dir.path().join("local.db"));
+        assert_eq!(
+            local.check_sync_copy(&source, &SyncScope::vault()).unwrap(),
+            identity
+        );
+        let migrated = record(&local);
+        assert_eq!(migrated.clock, parse_clock(&format!("{OLD_DEVICE}=1")));
+        assert_eq!(
+            (migrated.updated_at, migrated.updated_by.as_str()),
+            (1000, OLD_DEVICE)
+        );
+        let renamed = format!("x_{}", super::super::sync::to_hex(b"passkey_key (2)"));
+        assert_eq!(migrated.env.as_ref().unwrap().1, renamed);
+        assert_eq!(
+            local.reveal(1, &renamed).unwrap().expose(),
+            "synthetic-ordinary-secret"
+        );
+        assert!(
+            local.passkey_info(1).is_err(),
+            "ordinary legacy data must never become a passkey"
+        );
+        let content = local.sync_content(&SyncScope::vault()).unwrap();
+        for _ in 0..2 {
+            let report = local.merge_from(&source, &SyncScope::vault()).unwrap();
+            assert_eq!(report.remote_schema, 16);
+            assert!(report.remote_outdated());
+            assert!(!report.changed_local());
+            assert!(report.conflicts.is_empty());
+            assert_eq!(local.sync_content(&SyncScope::vault()).unwrap(), content);
+        }
+        assert_eq!(sha(&source), before);
+    }
+
+    #[test]
+    fn schema16_concurrent_conflict_keeps_current_policy_home_and_both_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("released.db");
+        fixture(&source);
+        let mut local = adopt(&source, &dir.path().join("local.db"));
+        let folder = local.create_folder(None, "Current folder").unwrap();
+        local.set_item_folder(1, Some(&folder.uuid)).unwrap();
+        local.set_always_ask(1, true).unwrap();
+        local.conn_ref().unwrap().execute(
+            "INSERT INTO item_home (item_id, shared_vault_uuid, home_uuid) VALUES (1, 'synthetic-share', 'synthetic-home')", []
+        ).unwrap();
+        // The old device edits after its own first push, without seeing local changes.
+        mutate(&source, &format!(
+            "UPDATE item_field SET value = 'synthetic-new-secret' WHERE name = 'passkey_key';
+             UPDATE item SET updated_at = 9000000000000, updated_by = '{OLD_DEVICE}', clock = '{OLD_DEVICE}=2';"
+        ), true);
+        let before = sha(&source);
+        let report = local.merge_from(&source, &SyncScope::vault()).unwrap();
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.conflicts.len(), 1);
+        let winner = record(&local);
+        assert_eq!(winner.folder.as_deref(), Some(folder.uuid.as_str()));
+        assert!(winner.always_ask);
+        assert_eq!(
+            winner.home,
+            Some(("synthetic-share".into(), "synthetic-home".into()))
+        );
+        let renamed = format!("x_{}", super::super::sync::to_hex(b"passkey_key (2)"));
+        assert_eq!(winner.env.as_ref().unwrap().1, renamed);
+        assert_eq!(
+            local.reveal(1, &renamed).unwrap().expose(),
+            "synthetic-new-secret"
+        );
+        let all = load_records(
+            local.conn_ref().unwrap(),
+            "main",
+            &SyncScope::vault(),
+            SCHEMA_VERSION,
+        )
+        .unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.values().any(|r| {
+            r.archived_at.is_some()
+                && r.fields
+                    .iter()
+                    .any(|(n, v, _)| n == &renamed && v.as_str() == "synthetic-ordinary-secret")
+        }));
+        let content = local.sync_content(&SyncScope::vault()).unwrap();
+        let again = local.merge_from(&source, &SyncScope::vault()).unwrap();
+        assert!(!again.changed_local());
+        assert_eq!(local.sync_content(&SyncScope::vault()).unwrap(), content);
+        assert_eq!(sha(&source), before);
+    }
+
+    #[test]
+    fn schema16_corrupt_future_and_foreign_snapshots_still_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("released.db");
+        fixture(&source);
+        let mut local = adopt(&source, &dir.path().join("local.db"));
+        let baseline = local.sync_content(&SyncScope::vault()).unwrap();
+        for (name, sql, digest, expected) in [
+            (
+                "changed",
+                "UPDATE item_field SET value = 'changed' WHERE name = 'passkey_key';",
+                false,
+                VaultErrorKind::Damaged,
+            ),
+            (
+                "missing",
+                "DROP TABLE env_binding;",
+                true,
+                VaultErrorKind::UnsupportedSchema,
+            ),
+            (
+                "future",
+                "PRAGMA user_version = 20; UPDATE vault_meta SET schema_version = 20;",
+                true,
+                VaultErrorKind::UnsupportedSchema,
+            ),
+            (
+                "foreign",
+                "UPDATE sync_meta SET vault_id = '99999999-9999-4999-8999-999999999999';",
+                true,
+                VaultErrorKind::OtherVault,
+            ),
+        ] {
+            let path = dir.path().join(format!("{name}.db"));
+            fs::copy(&source, &path).unwrap();
+            mutate(&path, sql, digest);
+            let before = sha(&path);
+            assert_eq!(
+                local
+                    .merge_from(&path, &SyncScope::vault())
+                    .unwrap_err()
+                    .kind(),
+                expected,
+                "{name}"
+            );
+            if name != "foreign" {
+                assert!(local.check_sync_copy(&path, &SyncScope::vault()).is_err());
+                assert!(Vault::inspect_sync_copy(&path, PASS).is_err());
+                assert!(
+                    Vault::adopt_sync_copy(
+                        &path,
+                        &dir.path().join(format!("{name}-adopt.db")),
+                        PASS
+                    )
+                    .is_err()
+                );
+            }
+            assert_eq!(sha(&path), before);
+            assert_eq!(local.sync_content(&SyncScope::vault()).unwrap(), baseline);
+        }
+        assert!(Vault::inspect_sync_copy(&source, "synthetic-wrong-passphrase").is_err());
+    }
+
+    #[test]
+    fn schema16_copy_passphrase_paths_validate_original_and_keep_source_unchanged() {
+        const OTHER: &str = "synthetic-schema16-other-passphrase";
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("released.db");
+        fixture(&source);
+        let before = sha(&source);
+        let mut local = adopt(&source, &dir.path().join("local.db"));
+        local.change_passphrase(PASS, OTHER).unwrap();
+        assert_eq!(
+            local
+                .merge_from(&source, &SyncScope::vault())
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::WrongKeyOrCorrupt
+        );
+        assert_eq!(
+            local
+                .merge_from_with_passphrase(&source, &SyncScope::vault(), OTHER)
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::WrongKeyOrCorrupt
+        );
+        let report = local
+            .merge_from_with_passphrase(&source, &SyncScope::vault(), PASS)
+            .unwrap();
+        assert_eq!(report.remote_schema, 16);
+        assert!(!report.changed_local());
+        local.lock().unwrap();
+        local.unlock(OTHER).unwrap();
+        local.take_passphrase_of_copy(&source, PASS).unwrap();
+        local.lock().unwrap();
+        local.unlock(PASS).unwrap();
+        assert_eq!(sha(&source), before);
+    }
+
+    #[test]
+    fn schema16_newer_record_uses_the_same_renaming_as_local_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("released.db");
+        fixture(&source);
+        let mut local = adopt(&source, &dir.path().join("local.db"));
+        // A new record and an updated old record exercise both insert and replace.
+        mutate(&source, &format!(
+            "UPDATE item SET updated_at = 2000, clock = '{OLD_DEVICE}=2';
+             INSERT INTO item (id, title, kind, notes, revision, uuid, updated_at, updated_by, clock)
+               VALUES (2, 'New legacy', 'custom', '', 1, '44444444444444444444444444444444', 2000, '{OLD_DEVICE}', '{OLD_DEVICE}=1');
+             INSERT INTO item_field VALUES (2, 0, 'passkey_rp_id', 'ordinary-value', 0);
+             INSERT INTO item_field VALUES (2, 1, 'passkey_rp_id', 'second-ordinary-value', 0);"
+        ), true);
+        let expected = adopt(&source, &dir.path().join("expected.db"));
+        let report = local.merge_from(&source, &SyncScope::vault()).unwrap();
+        assert_eq!(
+            (report.inserted, report.updated, report.conflicts.len()),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            local.sync_content(&SyncScope::vault()).unwrap(),
+            expected.sync_content(&SyncScope::vault()).unwrap()
         );
     }
 }

@@ -1,4 +1,5 @@
 import ApassyCompanionKit
+import ApassyVaultKit
 import Foundation
 import Testing
 
@@ -93,6 +94,74 @@ struct PairingModelTests {
         let requests = f.mac.requests
         #expect(requests.first == "POST /v1/pair")
         #expect(requests.dropFirst().allSatisfy { $0 == "GET /v1/pair/\(saved.deviceID)" })
+    }
+
+    @Test("a companion QR in the relay scanner waits for Continue, then uses the normal pairing")
+    func companionFromRelayScanner() async throws {
+        let f = Fixture(polls: [.waiting, .paired])
+        let service = PreviewVaultService(empty: true)
+        let join = JoinModel(
+            service: service, passphraseStore: MemoryPassphraseStore(), settings: makeSettings(), biometry: .faceID,
+            deviceName: "Test iPhone", onFinished: { _ in }, onCancel: {},
+            onCompanionCode: { f.model.receiveCode($0) })
+        join.showScanner()
+        join.handleCode(pairingLinkText(expiresIn: 300))
+        #expect(join.scanNote == nil)
+        #expect(f.model.hasScannedCode)
+        #expect(f.model.step == .welcome)
+        #expect(f.mac.requests.isEmpty)
+        #expect(try await service.info().join == nil)
+
+        f.model.startScanning()
+        #expect(!f.model.hasScannedCode)
+        #expect(await waitUntil {
+            if case .code = f.model.step { return true }
+            return false
+        })
+        #expect(await waitUntil { f.model.step == .paired(macName: "Mac mini") })
+        #expect(f.paired.isEmpty)
+        f.model.finish()
+        #expect(f.paired.count == 1)
+        #expect(f.mac.requests.first == "POST /v1/pair")
+    }
+
+    @Test("a QR received from another scanner retains name validation and rejects malformed links")
+    func receivedCodeValidation() {
+        let f = Fixture(polls: [], deviceName: "")
+        #expect(f.model.receiveCode(pairingLinkText(expiresIn: 300)) == nil)
+        f.model.startScanning()
+        #expect(f.model.step == .welcome)
+        #expect(f.model.hasScannedCode)
+        #expect(f.mac.requests.isEmpty)
+
+        let invalid = Fixture(polls: [])
+        #expect(invalid.model.receiveCode(pairingLinkText(expiresIn: -10)) != nil)
+        #expect(!invalid.model.hasScannedCode)
+        #expect(invalid.model.step == .welcome)
+        #expect(invalid.mac.requests.isEmpty)
+    }
+
+    @Test("another scanner cannot replace a pairing that is waiting for Mac confirmation")
+    func receivedCodeWhilePairing() async {
+        let f = Fixture(polls: [])
+        #expect(await f.scanToCode())
+        let before = f.model.step
+        #expect(f.model.receiveCode(pairingLinkText(expiresIn: 300)) != nil)
+        #expect(f.model.step == before)
+        #expect(!f.model.hasScannedCode)
+        f.model.backToWelcome()
+    }
+
+    @Test("Back clears a QR received from another scanner without starting pairing")
+    func cancelReceivedCode() {
+        let f = Fixture(polls: [])
+        #expect(f.model.receiveCode(pairingLinkText(expiresIn: 300)) == nil)
+        f.model.backToWelcome()
+        #expect(!f.model.hasScannedCode)
+        #expect(f.model.notice == nil)
+        f.model.startScanning()
+        #expect(f.model.step == .scan)
+        #expect(f.mac.requests.isEmpty)
     }
 
     @Test("the Mac closing the pairing ends with nothing stored, and start again scans")

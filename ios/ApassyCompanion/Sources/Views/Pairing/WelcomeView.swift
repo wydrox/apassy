@@ -34,7 +34,7 @@ struct WelcomeView: View {
                 }
                 deviceName
                 Text(
-                    "On your Mac, open Apassy, select Settings > iPhone companion, and select \"Pair an iPhone\". A code shows on the Mac."
+                    "On your Mac, open Apassy > Settings > Devices > iPhone, and select “Pair…”. A code shows on the Mac."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -44,7 +44,8 @@ struct WelcomeView: View {
             Button {
                 model.startScanning()
             } label: {
-                Label("Scan the code", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
+                Label(model.hasScannedCode ? "Continue" : "Scan the code", systemImage: "qrcode.viewfinder")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .disabled(model.deviceNameProblem != nil)
