@@ -185,6 +185,9 @@ enum Left {
     Gone,
     /// The device stays, for this reason.
     Kept(String),
+    /// The team is also the vault's Apassy Connect team: this Mac stays in it, so
+    /// approvals stay on every device. Only sync stops.
+    Connected,
     /// "Delete the copy on the relay" failed: sync stays on.
     NotDeleted(SyncError),
 }
@@ -1742,6 +1745,16 @@ impl DesktopApp {
                 entry.name
             ));
         }
+        // A team that also carries the questions is the vault's Apassy Connect team:
+        // leaving it would take approvals away from every device (ADR 0027: a downgrade
+        // never removes them). Only sync stops; the copy stays unless deleted.
+        let connected = entry
+            .sync_relay()
+            .is_some_and(|link| self.relay_membership_team(id).as_deref() == Some(&link.team_id));
+        if connected && !delete_copy {
+            self.relay_turned_off(id, Left::Connected, switch_to);
+            return Ok(());
+        }
         if !delete_copy && last == Some(true) {
             self.relay_turned_off(id, Left::LastMac, switch_to);
             return Ok(());
@@ -1815,6 +1828,9 @@ impl DesktopApp {
             ),
             Left::LastMac => format!(
                 "{off} The copy on the relay stays. This Mac was the last Mac of the relay team, so only the operator of the relay can delete the copy now."
+            ),
+            Left::Connected => format!(
+                "{off} The copy on the relay stays. This Mac stays connected, so approvals stay on all your devices."
             ),
             Left::Kept(reason) => format!(
                 "{off} The copy on the relay stays. This Mac is still in the relay team ({reason}): remove it in “Devices…” on another Mac."

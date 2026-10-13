@@ -326,10 +326,7 @@ fn each_pick_follows_the_plan() {
             // switch.
             assert_eq!(app.ui.sheet, None, "{name}");
             assert!(
-                matches!(
-                    asked(&app),
-                    Some(OwnerRequest::EnableRelayQuestions { team_id: None, .. })
-                ),
+                matches!(asked(&app), Some(OwnerRequest::ConnectVault { .. })),
                 "{name}: {:?}",
                 asked(&app)
             );
@@ -806,6 +803,61 @@ fn personal_ended_shows_once_and_keeps_the_approvals() {
         "{}",
         app.status_text
     );
+}
+
+/// A paid vault that picks iCloud Drive again, with the "Turn off" sheet: sync stops and
+/// the copy stays, but this Mac stays in the vault's Apassy Connect team, so approvals
+/// stay on every device (ADR 0027: a downgrade never removes them).
+#[test]
+fn turning_apassy_sync_off_keeps_the_connect_team() {
+    let relay = fake_relay::FakeRelay::start();
+    let Mac {
+        mut app,
+        icloud,
+        _dir: _keep,
+    } = mac(true);
+    fake(&mut app, "personal");
+    let id = current_id(&app);
+    let team = connect(&mut app, &relay);
+    relay.lift_plan(&team);
+    let action = OwnerAction::SyncThroughApassy {
+        team_id: team.clone(),
+        devices: Vec::new(),
+    };
+    app.plan_switch_with(&id, &team, Vec::new(), proof(&app, action));
+    settle_switch(&mut app);
+    assert!(app.is_relay(&id), "{}", app.status_text);
+
+    app.sync_pick_for_test(Choice::ICloud);
+    assert!(
+        matches!(
+            app.ui.sheet,
+            Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::TurnOff { .. })))
+        ),
+        "{:?}",
+        app.ui.sheet
+    );
+    app.relay_turn_off(&id, false, Some(icloud.clone()))
+        .expect("turn off");
+    assert!(!app.is_relay(&id), "{}", app.status_text);
+    assert!(icloud.join("Work.apassy").is_file(), "{}", app.status_text);
+    assert!(
+        app.status_text
+            .contains("approvals stay on all your devices"),
+        "{}",
+        app.status_text
+    );
+    let questions = app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            crate::relay::membership::questions_membership(vault)
+                .expect("read")
+                .map(|membership| membership.team_id)
+        })
+        .expect("open");
+    assert_eq!(questions, Some(team.clone()));
+    assert_eq!(relay.team_ids(), vec![team], "the team stays on the relay");
 }
 
 #[test]
