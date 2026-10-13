@@ -36,15 +36,20 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use apassy::agent::client;
 use apassy::agent::wire::Action;
+use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
-use apassy::broker::{self, SharedVault};
+use apassy::broker::{self, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{Field, ItemDraft, SecretValue, Vault};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+#[path = "../common/mod.rs"]
+mod common;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PASS: &str = "isolation-pass-ok";
@@ -228,8 +233,15 @@ fn fixture() -> Fixture {
         .expect("grant");
     let shared: SharedVault = Arc::new(Mutex::new(Some(live)));
     let tls = TlsClient::platform().expect("platform TLS");
+    // ADR 0025 §3: a connector use without a running bouncer waits for the owner.
+    // The fake bouncer allows, so the use runs and this test checks the boundary.
+    // A use that waits by mistake fails after one second.
+    let bouncer = common::fake_bouncer(&[]);
+    let mut options = BrokerOptions::with_tls(tls);
+    options.bouncer = Some(BouncerClient::new(&bouncer.url).expect("bouncer url"));
+    options.approval_timeout = Duration::from_secs(1);
     let handle =
-        broker::start_with_tls(shared, &layout.socket, tls).expect("start broker on socket");
+        broker::start_with(shared, &layout.socket, options).expect("start broker on socket");
     Fixture {
         token: token.expose().to_owned(),
         item_id: item.id,

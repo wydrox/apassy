@@ -1,24 +1,35 @@
 //! Credentials: the list, the detail page, and their sheets (vault build).
 //!
-//! The list shows each credential with its agent status. It sorts and filters, and it
-//! hides archived credentials unless the owner searches or selects their archive filter.
-//! Sync conflict copies have a persistent review notice and a separate filter.
-//! The detail page shows the secret (masked), the details that are set, the custom
-//! details, three agent settings, the change history, and the agent requests. Each
-//! change opens a sheet. A change that decides where a secret goes needs the owner check.
+//! The list shows each credential with its provider tile, its name, and one line: the
+//! username or the kind (ADR 0026 §1). A production credential has a red dot. The list
+//! sorts and filters, and it hides archived credentials unless the owner searches or
+//! selects their archive filter. Sync conflict copies have a persistent review notice
+//! and a separate filter.
+//!
+//! The detail page follows the approved mockup (ADR 0026 §2): the header with the tile,
+//! the name, the provider and the kind, and the caps; the question "Is this a
+//! development key?" while the environment is only a default; the secret (masked), the
+//! variable, and the host; the folder and the shared vaults; the agent use; the rules
+//! from the owner's answers and the exceptions of agents; "Always ask me", the
+//! environment, and "Hosts and risk" with the declaration, the variable, and the
+//! connector. A change that makes the bouncer less careful needs the owner check; a
+//! stricter change does not (ADR 0025 §3b, §3f).
 
 use std::collections::BTreeMap;
 
 use eframe::egui::{self, Align, Label, Layout, Pos2, Rect, RichText, Sense, Vec2};
 
+use super::columns;
+use super::detail_rows as rows;
+use super::folders::FolderTree;
 use super::kit::{self, Font, Icon, Section, Size, Style, Tone};
 use super::otp;
 use super::timeline::{self, relative_time};
 use super::{
     SECRET_VALUE_CAPACITY, Sheet, UiState, ask_owner_from_sheet, close_sheet, extra_label,
-    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, kind_plural, meta_line,
-    secure_input,
+    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, meta_line, secure_input,
 };
+use crate::broker::approvals::action_words;
 use crate::broker::profile::REPORTING_API_V0;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{DesktopModel, DetailDraft, ExtraField, ItemDraft, MASKED_VALUE};
@@ -27,9 +38,12 @@ use crate::desktop::owner_store::{
     DETAIL_PREFIX, DeclarationForm, DetailLine, MAX_DETAILS, OwnerDetails, OwnerSummary,
     PasskeyItem, SecretForm, field_label,
 };
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
+use crate::vault::answers::{AnswerScope, OwnerAnswer};
+use crate::vault::exceptions::{AgentException, ExceptionKind};
 use crate::vault::providers::{self, Suggested};
-use crate::vault::{EnvDelivery, Environment, ItemTimes, Reversibility, RiskLevel, Scope};
+use crate::vault::usage::{ItemUse, UseDecidedBy, UseOutcome};
+use crate::vault::{DeclarationSource, EnvDelivery, Environment, Reversibility, RiskLevel, Scope};
 
 // ---- The list. ----
 
@@ -38,32 +52,15 @@ use crate::vault::{EnvDelivery, Environment, ItemTimes, Reversibility, RiskLevel
 pub(crate) enum Filter {
     #[default]
     All,
-    Kind(CredentialKind),
-    /// No declaration, or a review after a restore.
-    NeedsSetup,
     /// Archived versions retained after concurrent sync changes.
     Conflicts,
     Archived,
 }
 
 impl Filter {
-    const ALL: [Self; 9] = [
-        Self::All,
-        Self::Kind(CredentialKind::ApiKey),
-        Self::Kind(CredentialKind::Login),
-        Self::Kind(CredentialKind::SshKey),
-        Self::Kind(CredentialKind::Database),
-        Self::Kind(CredentialKind::Custom),
-        Self::NeedsSetup,
-        Self::Conflicts,
-        Self::Archived,
-    ];
-
     fn label(self) -> &'static str {
         match self {
             Self::All => "All credentials",
-            Self::Kind(kind) => kind_plural(kind),
-            Self::NeedsSetup => "Needs setup",
             Self::Conflicts => "Conflicting changes",
             Self::Archived => "Archived",
         }
@@ -72,14 +69,7 @@ impl Filter {
 
 /// Conflict copies have a separate review list and archive count. A search still
 /// finds them with a distinct label. Restored copies follow the active filters.
-fn matches_filter(
-    item: &OwnerSummary,
-    filter: Filter,
-    searching: bool,
-    archived: bool,
-    conflict: bool,
-    needs_setup: impl FnOnce(u64) -> bool,
-) -> bool {
+fn matches_filter(filter: Filter, searching: bool, archived: bool, conflict: bool) -> bool {
     let conflict = archived && conflict;
     if filter == Filter::Conflicts {
         return conflict;
@@ -90,330 +80,425 @@ fn matches_filter(
     if archived && !searching {
         return false;
     }
-    match filter {
-        Filter::Kind(kind) => item.kind == kind,
-        Filter::NeedsSetup => needs_setup(item.id),
-        Filter::All | Filter::Archived | Filter::Conflicts => true,
-    }
+    true
 }
 
-/// The order of the list.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum Sort {
-    #[default]
-    Name,
-    Changed,
-    Used,
-    Added,
+/// One row of the credential list, read before the list draws.
+struct ListedItem {
+    id: u64,
+    name: String,
+    subtitle: String,
+    /// "Archived", "Conflict copy", or nothing.
+    status: String,
+    production: bool,
+    /// In at least one shared vault.
+    shared: bool,
+    tile: kit::Tile,
 }
 
-impl Sort {
-    const ALL: [Self; 4] = [Self::Name, Self::Changed, Self::Used, Self::Added];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::Changed => "Last changed",
-            Self::Used => "Last used",
-            Self::Added => "Date added",
-        }
-    }
-
-    /// The title of the list in this order.
-    fn title(self) -> &'static str {
-        match self {
-            Self::Name => "Credentials",
-            Self::Changed => "Recently changed",
-            Self::Used => "Recently used by agents",
-            Self::Added => "Newest first",
-        }
-    }
-}
-
-pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    // A passkey removal that waits for the owner does not outlive its credential page.
-    forget_removal(ui.ctx());
-    let all = app.owner_ui.session.search("").unwrap_or_default();
-    let mut add = false;
-    // With no credential, the empty state has the one main action (⌘N still works).
-    kit::page_header(ui, "Credentials", None, |ui| {
-        if !all.is_empty() {
-            add = kit::button_with(ui, Some(Icon::Plus), "Add", Style::Prominent, Size::Regular)
-                .on_hover_text("New credential  ⌘N")
-                .clicked();
-        }
-    });
-    // A vault from another Mac: its agents stay on that Mac, so this one sets them up
-    // here. The panel is part of this page, under its title.
-    if app.ui.setup_vault.is_some() && super::agents::next_steps_panel(app, ui) {
-        app.ui.setup_vault = None;
-    }
-    // The steps of a new vault. With no credential, they replace the empty state:
-    // "Add a credential" is then the one main action.
-    let guided = super::get_started::draw(app, ui);
-    if all.is_empty() && guided {
-        if add {
-            open_add(app);
-        }
-        app.ui.focus_search = false;
+/// The list column of a credentials place: the toolbar with the title, the count, and
+/// "+", the search field, then the rows. By name, the rows
+/// group by folder, and the header of a group stays at the top while its rows scroll.
+pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let title = columns::place_title(app);
+    if let Place::Shared(_) = &app.place {
+        shared_list(app, ui, &title);
         return;
     }
-    if all.is_empty() {
-        add |= kit::empty_state(
-            ui,
-            Icon::Key,
-            "No credentials yet",
-            "Add an API key, a login, an SSH key, or a database password. Agents use a credential through Apassy and never see its value.",
-            Some("Add credential"),
-        );
-        if add {
-            open_add(app);
-        }
+    let place = app.place.clone();
+    let tree = FolderTree::load(app);
+    let session = &app.owner_ui.session;
+    let all = session.search("").unwrap_or_default();
+    let archived = session.archived().unwrap_or_default();
+    let conflicts = session.conflict_copies().unwrap_or_default();
+    let vault_empty = all.is_empty();
+    let in_place: Vec<OwnerSummary> = all
+        .into_iter()
+        .filter(|item| tree.contains(&place, item.id))
+        .collect();
+    let active = in_place
+        .iter()
+        .filter(|item| !archived.contains_key(&item.id))
+        .count();
+    let mut add = false;
+    columns::list_toolbar(
+        ui,
+        &title,
+        &columns::count_label(active, "item", "items"),
+        |ui| {
+            add = kit::plain_icon_button(ui, Icon::Plus, "New credential  ⌘N").clicked();
+        },
+    );
+    if add {
+        app.ui.sheet = Some(Sheet::NewCredential);
+    }
+    if vault_empty {
         // No search field without credentials. ⌘F must not focus it later by surprise.
         app.ui.focus_search = false;
+        columns::list_note(ui, "No items");
         return;
     }
-    let archived = app.owner_ui.session.archived().unwrap_or_default();
-    let conflicts = app.owner_ui.session.conflict_copies().unwrap_or_default();
-    let conflict_count = all
-        .iter()
-        .filter(|item| archived.contains_key(&item.id) && conflicts.contains_key(&item.id))
-        .count();
-    let archived_count = all
+    columns::list_inset(ui, |ui| toolbar(app, ui));
+
+    let session = &app.owner_ui.session;
+    let query = app.search.trim().to_owned();
+    let filter = app.ui.credential_filter;
+    let archived_count = in_place
         .iter()
         .filter(|item| archived.contains_key(&item.id) && !conflicts.contains_key(&item.id))
         .count();
-    // Each scope keeps the IDs below a notice the same when it comes or goes.
-    ui.scope(|ui| review_notice(app, ui));
-    ui.scope(|ui| conflict_notice(app, ui, conflict_count));
-    toolbar(app, ui);
-    ui.add_space(18.0);
-
-    let session = &app.owner_ui.session;
-    let times = session.item_times().unwrap_or_default();
-    let query = app.search.trim().to_owned();
-    let filter = app.ui.credential_filter;
-    let sort = app.ui.credential_sort;
-    let found = if query.is_empty() {
-        all
+    let found: Vec<OwnerSummary> = if query.is_empty() {
+        in_place
     } else {
-        session.search(&query).unwrap_or_default()
-    };
-    let needs_setup = |id: u64| {
-        session.needs_review(id).unwrap_or(false)
-            || session.declaration(id).ok().flatten().is_none()
+        session
+            .search(&query)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| tree.contains(&place, item.id))
+            .collect()
     };
     let mut items: Vec<OwnerSummary> = found
         .into_iter()
         .filter(|item| {
             matches_filter(
-                item,
                 filter,
                 !query.is_empty(),
                 archived.contains_key(&item.id),
                 conflicts.contains_key(&item.id),
-                needs_setup,
             )
         })
         .collect();
-    sort_items(&mut items, sort, &times);
+    items.sort_by_key(|item| item.name.to_lowercase());
     let hidden_archived = if filter == Filter::Archived || !query.is_empty() {
         0
     } else {
         archived_count
     };
-
-    if items.is_empty() {
-        let message = match filter {
-            _ if !query.is_empty() => format!("No credential matches “{query}”."),
-            Filter::Archived => "No credential is archived.".to_owned(),
-            Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
-            Filter::NeedsSetup => "Every credential has a declaration.".to_owned(),
-            _ => "No credential matches the filter.".to_owned(),
-        };
-        kit::note(ui, message);
-        ui.add_space(12.0);
-    }
-    let mut open = None;
-    let grouped = sort == Sort::Name && !matches!(filter, Filter::Kind(_) | Filter::Conflicts);
-    let row = |s: &mut Section<'_>, item: &OwnerSummary, open: &mut Option<u64>| {
-        let meta = meta_line(&item.project, &item.service);
-        let subtitle = (!meta.is_empty()).then_some(meta.as_str());
-        let detail = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
-            kit::medium("Conflict copy", Font::Callout).color(Tone::Warning.text())
+    let listed = |item: &OwnerSummary| {
+        let status = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
+            "Conflict copy".to_owned()
         } else if archived.contains_key(&item.id) {
-            kit::medium("Archived", Font::Callout).color(kit::SECONDARY)
+            "Archived".to_owned()
         } else {
-            row_detail(app, item.id, sort, times.get(&item.id))
+            String::new()
         };
-        if s.nav(
-            Some(kind_icon(item.kind)),
-            &item.name,
-            subtitle,
-            Some(detail),
-        )
-        .clicked()
-        {
-            *open = Some(item.id);
+        let looks = Looks::of(app, item.id, item.kind, &item.service, &item.name);
+        let username = matches!(item.kind, CredentialKind::Login | CredentialKind::Database)
+            .then(|| page_text(&plain_field(app, item.id, "username")))
+            .unwrap_or_default();
+        ListedItem {
+            id: item.id,
+            name: item.name.clone(),
+            subtitle: if username.is_empty() {
+                looks.kind_label.clone()
+            } else {
+                username
+            },
+            status,
+            production: looks.environment == EnvState::Production,
+            shared: !looks.shared.is_empty(),
+            tile: looks.tile,
         }
     };
-    if grouped {
-        for kind in CredentialKind::ALL {
-            let group: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
-            if group.is_empty() {
-                continue;
-            }
-            kit::section(ui, Some(kind_plural(kind)), None, |s| {
-                for item in group {
-                    row(s, item, &mut open);
-                }
-            });
+    let grouped = filter != Filter::Conflicts;
+    let groups: Vec<columns::Group<ListedItem>> = if grouped {
+        // The top level first, then each folder by its path.
+        let mut by_folder: BTreeMap<(bool, String), Vec<ListedItem>> = BTreeMap::new();
+        for item in &items {
+            let folder = tree.folder_of(item.id);
+            by_folder
+                .entry((folder.is_some(), tree.path_label(folder)))
+                .or_default()
+                .push(listed(item));
         }
-    } else if !items.is_empty() {
+        by_folder
+            .into_iter()
+            .map(|((_, title), rows)| columns::Group { title, rows })
+            .collect()
+    } else if items.is_empty() {
+        Vec::new()
+    } else {
         let title = match filter {
-            Filter::Kind(kind) => kind_plural(kind).to_owned(),
-            Filter::Conflicts => format!("Conflicting changes ({conflict_count})"),
-            _ => sort.title().to_owned(),
+            Filter::Conflicts => format!("Conflicting changes ({})", items.len()),
+            _ => "Credentials".to_owned(),
         };
-        kit::section(ui, Some(&title), None, |s| {
-            for item in &items {
-                row(s, item, &mut open);
+        vec![columns::Group {
+            title,
+            rows: items.iter().map(listed).collect(),
+        }]
+    };
+    let headers = !grouped || groups.len() > 1;
+    let empty_message = items.is_empty().then(|| match filter {
+        _ if !query.is_empty() => format!("No credential matches “{query}”."),
+        Filter::Archived => "No credential is archived.".to_owned(),
+        Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
+        _ if place != Place::CREDENTIALS && active == 0 => {
+            "No credentials in this folder.".to_owned()
+        }
+        _ => "No credential matches the filter.".to_owned(),
+    });
+    let selected = selected_id(app);
+    let mut open = None;
+    let mut show_archived = false;
+    columns::grouped_rows(
+        ui,
+        ("credential-list", &place),
+        &groups,
+        headers,
+        |ui, item| {
+            let response = ui
+                .push_id(("credential-row", item.id), |ui| {
+                    credential_row(ui, item, selected == Some(item.id))
+                })
+                .inner;
+            if response.clicked() {
+                open = Some(item.id);
             }
-        });
-    }
-    if hidden_archived > 0 {
-        ui.horizontal(|ui| {
-            let noun = if hidden_archived == 1 {
-                "archived credential is hidden."
-            } else {
-                "archived credentials are hidden."
-            };
-            kit::note(ui, format!("{hidden_archived} {noun}"));
-            if kit::small_button(ui, "Show archived", Style::Link).clicked() {
-                app.ui.credential_filter = Filter::Archived;
+        },
+        |ui| {
+            if let Some(message) = &empty_message {
+                columns::list_note(ui, message);
             }
-        });
+            if hidden_archived > 0 {
+                ui.add_space(8.0);
+                let noun = if hidden_archived == 1 {
+                    "archived credential is hidden."
+                } else {
+                    "archived credentials are hidden."
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(8.0);
+                    kit::note(ui, format!("{hidden_archived} {noun}"));
+                    show_archived = kit::small_button(ui, "Show archived", Style::Link).clicked();
+                });
+            }
+        },
+    );
+    if show_archived {
+        app.ui.credential_filter = Filter::Archived;
     }
     if let Some(id) = open {
         app.select_item(id.to_string());
     }
-    if add {
-        open_add(app);
+}
+
+/// The list of a shared vault: "From you" and "From others" (ADR 0026 §6). Shared vaults
+/// come later, so the list has no item yet.
+fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
+    columns::list_toolbar(ui, title, "0 items", |_| {});
+    app.ui.focus_search = false;
+    columns::list_note(ui, "No items yet.");
+}
+
+/// The search field. ⌘F puts the focus in it. The list has no filter or order menus,
+/// as in the mockup: the rows group by folder. A list of archived credentials or of
+/// conflict copies (from "Show archived" and from the review of conflicting changes)
+/// says so under the field, with "Show All" to go back.
+fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
+        .on_hover_text("Search by name, project, service, or notes  ⌘F");
+    ui.ctx()
+        .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
+    if std::mem::take(&mut app.ui.focus_search) {
+        field.request_focus();
+    }
+    if app.ui.credential_filter != Filter::All {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(
+                kit::text(app.ui.credential_filter.label(), Font::Footnote).color(kit::SECONDARY),
+            );
+            if kit::small_button(ui, "Show All", Style::Link).clicked() {
+                app.ui.credential_filter = Filter::All;
+            }
+        });
     }
 }
 
-/// Search, filter, and sort in one row. ⌘F puts the focus in the search field. The
-/// search field takes the width that the two menus leave. The controls draw from left
-/// to right, so Tab visits them in the order that the owner sees.
-fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    const MENU_WIDTH: f32 = 150.0;
-    let width = ui.available_width();
-    ui.allocate_ui_with_layout(
-        Vec2::new(width, 28.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            let gap = ui.spacing().item_spacing.x;
-            // A menu button is exactly `MENU_WIDTH` wide, with its padding and chevron.
-            // The search field takes the rest, so the toolbar ends at the page edge.
-            let menus = 2.0 * (MENU_WIDTH + gap);
-            let search_width = (width - menus).max(160.0);
-            let field = ui
-                .scope(|ui| {
-                    ui.set_width(search_width);
-                    kit::text_input(
-                        ui,
-                        &mut app.search,
-                        "credential-search",
-                        "Search by name, project, service, or notes",
-                    )
-                    .on_hover_text("Search  ⌘F")
-                })
-                .inner;
-            ui.ctx()
-                .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
-            if std::mem::take(&mut app.ui.focus_search) {
-                field.request_focus();
-            }
-            let mut filter = app.ui.credential_filter;
-            let filters: Vec<(Filter, String)> = Filter::ALL
-                .into_iter()
-                .map(|option| (option, option.label().to_owned()))
-                .collect();
-            let label = filter.label();
-            kit::picker(
-                ui,
-                "credential-filter",
-                &mut filter,
-                &filters,
-                label,
-                MENU_WIDTH,
-            );
-            app.ui.credential_filter = filter;
-            let mut sort = app.ui.credential_sort;
-            let sorts: Vec<(Sort, String)> = Sort::ALL
-                .into_iter()
-                .map(|option| (option, option.label().to_owned()))
-                .collect();
-            let label = format!("Sort: {}", sort.label());
-            kit::picker(ui, "credential-sort", &mut sort, &sorts, label, MENU_WIDTH);
-            app.ui.credential_sort = sort;
+/// A row of the credential list: [`kit::list_row`], with the shared mark at the right.
+fn credential_row(ui: &mut egui::Ui, item: &ListedItem, selected: bool) -> egui::Response {
+    // Room for the mark: the row keeps its text clear of it.
+    const MARK: &str = "     ";
+    let meta = match (item.shared, item.status.is_empty()) {
+        (false, _) => item.status.clone(),
+        (true, true) => MARK.to_owned(),
+        (true, false) => format!("{}{MARK}", item.status),
+    };
+    let response = kit::list_row(
+        ui,
+        &kit::ListRow {
+            tile: item.tile.clone(),
+            title: &item.name,
+            subtitle: &item.subtitle,
+            meta: Some(&meta),
+            production: item.production,
+            selected,
         },
     );
+    if item.shared && ui.is_rect_visible(response.rect) {
+        let right = response.rect.right() - 8.0 - if item.production { 13.0 } else { 0.0 };
+        let rect = Rect::from_center_size(
+            Pos2::new(right - 8.0, response.rect.center().y),
+            Vec2::splat(14.0),
+        );
+        let color = if selected {
+            egui::Color32::WHITE
+        } else {
+            kit::SECONDARY
+        };
+        kit::paint_icon(ui.painter(), rect, Icon::People, color);
+    }
+    if item.shared || item.production {
+        // VoiceOver hears the marks after the name and the line.
+        let mut name = format!("{}, {}", item.name, item.subtitle);
+        if item.production {
+            name.push_str(", production");
+        }
+        if item.shared {
+            name.push_str(", shared");
+        }
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_label(name));
+    }
+    response
 }
 
-/// Name order, or newest first by a time. An item without the time goes last.
-fn sort_items(items: &mut [OwnerSummary], sort: Sort, times: &BTreeMap<u64, ItemTimes>) {
-    let time = |item: &OwnerSummary| {
-        let times = times.get(&item.id).copied().unwrap_or_default();
-        match sort {
-            Sort::Name => None,
-            Sort::Changed => times.changed,
-            Sort::Used => times.used,
-            Sort::Added => times.added,
-        }
-    };
-    items.sort_by(|a, b| {
-        time(b)
-            .cmp(&time(a))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+/// A plain (not secret) field of a credential, such as its username. Empty when the
+/// credential has none.
+fn plain_field(app: &DesktopApp, item_id: u64, name: &str) -> String {
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .reveal(item_id, name)
+                .ok()
+                .map(|value| value.expose().to_owned())
+        })
+        .flatten()
+        .unwrap_or_default()
 }
 
-/// The right side of a list row: the time of the sort, or the agent status.
-fn row_detail(app: &DesktopApp, item_id: u64, sort: Sort, times: Option<&ItemTimes>) -> RichText {
-    let times = times.copied().unwrap_or_default();
-    let now = timeline::now();
-    let when = |at: Option<u64>, verb: &str, never: &str| match at {
-        Some(at) => format!("{verb} {}", relative_time(at, now)),
-        None => never.to_owned(),
-    };
-    match sort {
-        Sort::Name => row_status(app, item_id),
-        Sort::Changed => kit::text(when(times.changed, "Changed", "No change"), Font::Callout)
-            .color(kit::SECONDARY),
-        Sort::Used => {
-            kit::text(when(times.used, "Used", "Not used yet"), Font::Callout).color(kit::SECONDARY)
+/// What the owner knows of the environment of a credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EnvState {
+    /// No declaration: each run waits for the owner.
+    None,
+    /// Only a default or the usage found it (ADR 0025 §4). The bouncer treats the
+    /// credential as production until the owner answers.
+    Unconfirmed(Environment),
+    /// The owner or a signal of the credential set it.
+    Known(Environment),
+    /// Production that the owner or a signal set: the one red mark.
+    Production,
+}
+
+impl EnvState {
+    pub(super) fn of(app: &DesktopApp, item_id: u64) -> Self {
+        let session = &app.owner_ui.session;
+        let Some(declaration) = session.declaration(item_id).ok().flatten() else {
+            return Self::None;
+        };
+        let source = session
+            .with_vault(|vault| vault.declaration_sources(item_id))
+            .and_then(Result::ok)
+            .map_or(DeclarationSource::Owner, |sources| sources.environment);
+        match (source, declaration.environment) {
+            (DeclarationSource::Default | DeclarationSource::Usage, environment) => {
+                Self::Unconfirmed(environment)
+            }
+            (_, Environment::Production) => Self::Production,
+            (_, environment) => Self::Known(environment),
         }
-        Sort::Added => {
-            kit::text(when(times.added, "Added", ""), Font::Callout).color(kit::SECONDARY)
+    }
+
+    /// The cap of the header: "Production" in red, or the environment in gray.
+    fn cap(self) -> Option<(&'static str, bool)> {
+        match self {
+            Self::Production => Some(("Production", true)),
+            Self::Known(environment) => Some((environment_label(environment), false)),
+            Self::None | Self::Unconfirmed(_) => None,
         }
     }
 }
 
-/// The agent status of a list row: review, declaration, or variable.
-fn row_status(app: &DesktopApp, item_id: u64) -> RichText {
-    let session = &app.owner_ui.session;
-    if session.needs_review(item_id).unwrap_or(false) {
-        return kit::medium("Needs review", Font::Callout).color(Tone::Warning.text());
+/// "Production", "Staging", "Development", "Local".
+fn environment_label(environment: Environment) -> &'static str {
+    match environment {
+        Environment::Production => "Production",
+        Environment::Staging => "Staging",
+        Environment::Development => "Development",
+        Environment::Local => "Local",
     }
-    let Some(declaration) = session.declaration(item_id).ok().flatten() else {
-        return kit::text("No declaration", Font::Callout).color(kit::SECONDARY);
-    };
-    match session.env_binding(item_id).ok().flatten() {
-        Some(binding) => kit::text(binding.env_name, Font::Mono).color(kit::SECONDARY),
-        None => kit::text(title_case(declaration.environment.as_str()), Font::Callout)
-            .color(kit::SECONDARY),
+}
+
+/// How a credential looks in the list and in its header: its tile, its provider, its
+/// environment, and its shared vaults.
+struct Looks {
+    tile: kit::Tile,
+    /// The label of its provider, such as "Stripe": the provider of its declaration,
+    /// else the provider that its service or its name names (the one of its tile).
+    provider: Option<String>,
+    /// Its kind as its provider names it, such as "Secret key" (see [`field_kind`]).
+    kind_label: String,
+    environment: EnvState,
+    /// The names of the shared vaults that hold it. Empty until shared vaults land
+    /// (ADR 0026 §6).
+    shared: Vec<String>,
+}
+
+impl Looks {
+    fn of(app: &DesktopApp, item_id: u64, kind: CredentialKind, service: &str, name: &str) -> Self {
+        let session = &app.owner_ui.session;
+        let declared = session
+            .with_vault(|vault| vault.declaration_provider(item_id))
+            .and_then(Result::ok)
+            .flatten()
+            .and_then(|id| providers::find(&id))
+            .map(|provider| provider.label.clone());
+        let tile_service = declared.as_deref().unwrap_or(service);
+        let variable = session
+            .env_binding(item_id)
+            .ok()
+            .flatten()
+            .map(|binding| binding.env_name)
+            .filter(|variable| variable != &format!("APASSY_ITEM_{item_id}"));
+        let provider = declared
+            .clone()
+            .or_else(|| super::named_provider(service, name).map(|(label, _)| label.to_owned()));
+        Self {
+            tile: super::credential_tile(kind, tile_service, name),
+            provider,
+            kind_label: field_kind(kind, variable.as_deref()),
+            environment: EnvState::of(app, item_id),
+            shared: shared_vaults(app, item_id),
+        }
     }
+}
+
+/// The kind of a key as its provider names it, from the end of its variable:
+/// `STRIPE_SECRET_KEY` is a "Secret key", `CLOUDFLARE_API_TOKEN` an "API token", and
+/// `GITHUB_TOKEN` a "Token", as in the mockup. Another variable or kind gives the label
+/// of the kind.
+fn field_kind(kind: CredentialKind, variable: Option<&str>) -> String {
+    const ENDINGS: [(&str, &str); 7] = [
+        ("_SECRET_KEY", "Secret key"),
+        ("_API_TOKEN", "API token"),
+        ("_AUTH_TOKEN", "Auth token"),
+        ("_ACCESS_TOKEN", "Access token"),
+        ("_API_KEY", "API key"),
+        ("_ACCESS_KEY_ID", "Access key"),
+        ("_TOKEN", "Token"),
+    ];
+    if kind == CredentialKind::ApiKey
+        && let Some(variable) = variable
+        && let Some((_, label)) = ENDINGS
+            .iter()
+            .find(|(ending, _)| variable.to_ascii_uppercase().ends_with(ending))
+    {
+        return (*label).to_owned();
+    }
+    kind.label().to_owned()
 }
 
 /// Open the add sheet with an empty form. ⌘N does the same.
@@ -439,7 +524,7 @@ fn review_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Tone::Warning,
         "Review after restore",
         Some(
-            "This vault came from a backup. Agents cannot use these credentials until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Register the agents again.",
+            "This vault came from a backup. Agents cannot use these credentials until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Connect the agents again.",
         ),
         |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -555,14 +640,15 @@ fn selected_id(app: &DesktopApp) -> Option<u64> {
     app.selected_item_id.as_deref()?.parse().ok()
 }
 
-/// Navigation stays outside the scrolling detail body.
-pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if kit::back_link(ui, "Credentials") {
-        app.view = OwnerView::Vault;
-        return;
-    }
+/// The detail column of a credentials place: the selected credential, or, with none,
+/// the notices of the vault and its first steps.
+pub(super) fn detail_column(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &super::shell::Pending,
+) {
     let Some(id) = selected_id(app) else {
-        kit::note(ui, "Select a credential in the list.");
+        overview(app, ui, pending);
         return;
     };
     let details = match app.owner_ui.session.details(id) {
@@ -571,59 +657,287 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
             // The credential is gone, for example after "Delete login" for a passkey
             // without a password, or after a delete on another device.
             app.selected_item_id = None;
-            app.view = OwnerView::Vault;
+            overview(app, ui, pending);
             return;
         }
         Err(err) => {
-            kit::tone_note(ui, err.message, Tone::Critical);
+            columns::detail_toolbar(ui, |_| {});
+            kit::column(ui, columns::DETAIL_WIDTH, |ui| {
+                kit::tone_note(ui, err.message, Tone::Critical);
+            });
             return;
         }
     };
     if details.hidden {
-        kit::note(ui, &details.message);
+        columns::detail_toolbar(ui, |_| {});
+        kit::column(ui, columns::DETAIL_WIDTH, |ui| {
+            kit::note(ui, &details.message)
+        });
         return;
     }
+    detail_toolbar(app, ui, &details);
+    // The header scrolls with the body, as in the mockup. A credential has its own
+    // scroll position: opening a different credential must not start at the bottom of
+    // the details of the one before. A question of an agent waits in Decisions, not on
+    // the page.
+    columns::detail_body(ui, ("credential", id), |ui| {
+        rows::reading_column(ui, |ui| {
+            ui.scope(|ui| super::updates::banner(app, ui));
+            ui.scope(|ui| super::sync::banner(app, ui));
+            draw_detail_header(app, ui);
+            draw_detail_body(app, ui);
+        });
+    });
+}
+
+/// The key of the history of a credential, shown from the "⋯" menu.
+fn history_key(id: u64) -> String {
+    format!("credential-history-{id}")
+}
+
+/// The toolbar of a credential: Share, Edit, and "⋯" with the rare actions: Move to
+/// Folder, Share, Add Custom Detail, the history, Archive, and Delete (ADR 0026 §1).
+fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let id = details.id;
+    let history_open = app.ui.is_expanded(&history_key(id));
     let mut edit = false;
-    let title_width = (ui.available_width() - 100.0).max(100.0);
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            ui.set_max_width(title_width);
-            ui.horizontal(|ui| {
-                let (icon, color) = kind_icon(details.kind);
-                kit::icon_tile_sized(ui, icon, color, 40.0);
-                ui.add_space(4.0);
-                ui.vertical(|ui| {
-                    ui.set_max_width((title_width - 56.0).max(40.0));
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.add(
-                        Label::new(kit::text(&details.name, Font::Title).color(kit::LABEL)).wrap(),
-                    );
-                    let meta = meta_line(&details.project, &details.service);
-                    let subtitle = if meta.is_empty() {
-                        details.kind.label().to_owned()
-                    } else {
-                        format!("{} · {meta}", details.kind.label())
-                    };
-                    ui.add(
-                        Label::new(kit::text(subtitle, Font::Callout).color(kit::SECONDARY)).wrap(),
-                    );
-                });
-            });
-        },
-        |ui| edit = kit::button(ui, "Edit", Style::Bordered).clicked(),
-    );
+    let mut share = false;
+    let mut move_to = false;
+    let mut add_detail = false;
+    let mut history = false;
+    let mut archive = false;
+    let mut delete = false;
+    columns::detail_toolbar(ui, |ui| {
+        let more =
+            kit::toolbar_button(ui, Some(Icon::More), "", "More actions for this credential");
+        egui::Popup::menu(&more).show(|ui| {
+            ui.set_min_width(200.0);
+            move_to = ui.selectable_label(false, "Move to Folder…").clicked();
+            share |= ui.selectable_label(false, "Share…").clicked();
+            if details.details.len() < MAX_DETAILS {
+                add_detail = ui.selectable_label(false, "Add Custom Detail…").clicked();
+            }
+            let label = if history_open {
+                "Hide History"
+            } else {
+                "Show History"
+            };
+            history = ui.selectable_label(false, label).clicked();
+            ui.separator();
+            if !details.archived {
+                archive = ui.selectable_label(false, "Archive…").clicked();
+            }
+            delete = ui.selectable_label(false, "Delete…").clicked();
+            // A choice with Return or Space closes the menu, as a click does.
+            if move_to || share || add_detail || history || archive || delete {
+                ui.close();
+            }
+        });
+        // A choice closes the menu. For a keyboard user the focus goes back to "⋯", so
+        // a sheet or an alert that the choice opens gives it back there, not to an item
+        // of the closed menu.
+        let chosen = move_to || share || add_detail || history || archive || delete;
+        if chosen && kit::keyboard_mode(ui.ctx()) {
+            more.request_focus();
+        }
+        edit = kit::toolbar_button(ui, None, "Edit", "Edit").clicked();
+        share |= kit::toolbar_button(ui, Some(Icon::Share), "Share", "Share").clicked();
+    });
     if edit {
-        open_edit(app, &details, false);
+        open_edit(app, details, false);
+    } else if share {
+        app.ui.sheet = Some(Sheet::Share { item_id: id });
+    } else if move_to {
+        super::folders::open_move(app, id);
+    } else if add_detail {
+        open_edit(app, details, true);
+    } else if history {
+        app.ui.set_expanded(&history_key(id), !history_open);
+    } else if archive {
+        app.ui.sheet = Some(Sheet::ArchiveItem);
+    } else if delete {
+        app.pending_delete = true;
     }
+}
+
+/// No credential is selected: the banners, the setup of a vault from another Mac, the
+/// first steps, the review and conflict notices, and an empty state.
+fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pending) {
+    // A passkey removal that waits for the owner does not outlive its credential page.
+    forget_removal(ui.ctx());
+    columns::detail_toolbar(ui, |_| {});
+    let shared = matches!(app.place, Place::Shared(_));
+    columns::detail_body(ui, ("credentials-overview", shared), |ui| {
+        super::shell::banners(app, ui, pending);
+        if shared {
+            columns::nothing_selected(
+                ui,
+                Icon::People,
+                "No items yet",
+                "Use Share on a credential to add it to this shared vault.",
+            );
+            return;
+        }
+        // A vault from another Mac: its agents stay on that Mac, so this one sets them
+        // up here.
+        if app.ui.setup_vault.is_some() && super::agents::next_steps_panel(app, ui) {
+            app.ui.setup_vault = None;
+        }
+        let session = &app.owner_ui.session;
+        let all = session.search("").unwrap_or_default();
+        let archived = session.archived().unwrap_or_default();
+        let conflicts = session.conflict_copies().unwrap_or_default();
+        let conflict_count = all
+            .iter()
+            .filter(|item| archived.contains_key(&item.id) && conflicts.contains_key(&item.id))
+            .count();
+        // The two first steps of a new vault. With no credential, they are the empty
+        // state.
+        let guided = super::first_steps::draw(app, ui);
+        ui.scope(|ui| review_notice(app, ui));
+        ui.scope(|ui| conflict_notice(app, ui, conflict_count));
+        if all.is_empty() {
+            if !guided
+                && kit::empty_state(
+                    ui,
+                    Icon::Key,
+                    "No credentials yet",
+                    "Paste an API key, a .env file, or a database URL. Agents use a credential through Apassy and never see its value.",
+                    Some("Add credential"),
+                )
+            {
+                app.ui.sheet = Some(Sheet::NewCredential);
+            }
+        } else {
+            columns::nothing_selected(
+                ui,
+                Icon::Key,
+                "No credential selected",
+                "Select a credential in the list.",
+            );
+        }
+    });
+}
+
+/// The header of a credential, as in the mockup: its tile, its name at 20 points, its
+/// provider and kind ("Stripe · Secret key"), and its caps (Production, the shared
+/// vaults). It scrolls with the body.
+pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    const TILE: f32 = 56.0;
+    let Some(id) = selected_id(app) else {
+        return;
+    };
+    let Ok(details) = app.owner_ui.session.details(id) else {
+        return;
+    };
+    if details.hidden {
+        return;
+    }
+    let looks = Looks::of(app, id, details.kind, &details.service, &details.name);
+    // "Stripe · Secret key"; without a provider, the service or the project.
+    let source = looks
+        .provider
+        .clone()
+        .unwrap_or_else(|| meta_line(&details.project, &details.service));
+    let subtitle = if source.is_empty() {
+        looks.kind_label.clone()
+    } else {
+        format!("{source} · {}", looks.kind_label)
+    };
+    let title = kit::text(&details.name, Font::Title)
+        .size(20.0)
+        .color(kit::LABEL);
+    let subtitle = kit::text(subtitle, Font::Body).color(kit::SECONDARY);
+    let cap = looks.environment.cap();
+    let caps = cap.is_some() || details.archived || !looks.shared.is_empty();
+    let width = (ui.available_width() - TILE - 14.0).max(40.0);
+    // The tile is centered on the text, as `align-items: center` of the mockup.
+    let text_height = {
+        let wrapped = |text: RichText| {
+            let job = egui::WidgetText::from(text);
+            job.into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                width,
+                egui::TextStyle::Body,
+            )
+            .size()
+            .y
+        };
+        wrapped(title.clone()) + 2.0 + wrapped(subtitle.clone()) + if caps { 24.0 } else { 0.0 }
+    };
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
+        ui.vertical(|ui| {
+            ui.add_space(((text_height - TILE) / 2.0).max(0.0));
+            kit::tile(ui, &looks.tile, TILE);
+        });
+        ui.vertical(|ui| {
+            ui.set_max_width(width);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let top = ((TILE - text_height) / 2.0).max(0.0);
+            ui.add_space(top);
+            ui.add(Label::new(title).wrap());
+            ui.add(Label::new(subtitle).wrap());
+            if caps {
+                ui.add_space(5.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if let Some((label, red)) = cap {
+                        kit::cap(ui, label, red);
+                    }
+                    // The tag of each shared vault. None until shared vaults land
+                    // (ADR 0026 §6).
+                    for vault in &looks.shared {
+                        kit::cap(ui, vault, false);
+                    }
+                    if details.archived {
+                        kit::cap(ui, "Archived", false);
+                    }
+                });
+            }
+        });
+    });
+    ui.add_space(rows::HEADER_GAP);
 }
 
 #[cfg(test)]
 fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     draw_detail_header(app, ui);
-    if app.view == OwnerView::Item {
+    if app.selected_item_id.is_some() {
         draw_detail_body(app, ui);
     }
+}
+
+/// The Share sheet (ADR 0026 §6). Shared vaults come later, so it says so and closes.
+/// Returns true on Escape.
+pub(super) fn share_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64) -> bool {
+    let name = app
+        .owner_ui
+        .session
+        .details(item_id)
+        .map(|details| details.name)
+        .unwrap_or_default();
+    let mut done = false;
+    let response = kit::sheet(ctx, "share-credential", 440.0, |ui| {
+        kit::sheet_title(
+            ui,
+            &format!("Share “{name}”"),
+            Some(
+                "A shared vault gets the same credential, not a copy. This Mac has no shared vault yet.",
+            ),
+        );
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| done = kit::button(ui, "Done", Style::Prominent).clicked(),
+        );
+    });
+    if done || super::save_pressed(app, ctx) {
+        close_sheet(app, ctx);
+    }
+    response.escape
 }
 
 pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
@@ -658,17 +972,33 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     }
     review_card(app, ui, id);
+    if !details.archived {
+        environment_question(app, ui, &details);
+    }
     let passkey = passkey_of(app, &details);
-    secret_section(app, ui, &details);
+    fields_group(app, ui, &details, passkey.is_some());
     otp::code_section(app, ui, &details);
     if let Some(passkey) = &passkey {
         passkey_section(ui, &details, passkey);
     }
-    details_section(app, ui, &details, passkey.is_some());
-    detail_disclosure(app, ui, id, "access", "Agent access", |app, ui| {
-        access_section(app, ui, id, details.kind);
-    });
-    detail_disclosure(app, ui, id, "history", "History and requests", |app, ui| {
+    place_group(app, ui, &details);
+    let agents_use_it = !app
+        .owner_ui
+        .session
+        .secret_fields(id)
+        .unwrap_or_default()
+        .is_empty();
+    if agents_use_it {
+        agent_use_group(app, ui, id);
+        rules_group(app, ui, &details);
+        agent_settings_group(app, ui, &details);
+    }
+    // The history comes from "Show History" in the "⋯" menu: a rare look back.
+    if app.ui.is_expanded(&history_key(id)) {
+        if rows::group_label(ui, "History", Some(("Hide", "Hide the history"))) {
+            app.ui.set_expanded(&history_key(id), false);
+        }
+        ui.spacing_mut().item_spacing.y = 6.0;
         timeline::change_timeline(app, ui, id);
         let requests = app
             .owner_ui
@@ -684,34 +1014,9 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
             "No agent asked for this credential yet.",
             false,
         );
-    });
-    let mut archive = false;
-    let mut delete = false;
-    detail_disclosure(app, ui, id, "actions", "More actions", |_app, ui| {
-        kit::section(ui, None, None, |s| {
-            if !details.archived {
-                archive = s
-                    .clickable_row("Archive credential…", |ui| {
-                        ui.label(kit::text("Archive credential…", Font::Body).color(kit::LABEL));
-                        kit::note(ui, "Agents cannot use it. Search still finds it.");
-                    })
-                    .clicked();
-            }
-            delete = s
-                .clickable_row("Delete credential…", |ui| {
-                    ui.label(
-                        kit::text("Delete credential…", Font::Body).color(Tone::Critical.text()),
-                    );
-                })
-                .clicked();
-        });
-    });
-    if archive {
-        app.ui.sheet = Some(Sheet::ArchiveItem);
+        ui.spacing_mut().item_spacing.y = 0.0;
     }
-    if delete {
-        app.pending_delete = true;
-    }
+    footer(app, ui, id);
     removal_sheet(app, ui.ctx(), &details, passkey.as_ref());
 }
 
@@ -810,125 +1115,185 @@ fn secret_value(ui: &mut egui::Ui, app: &DesktopApp, id: u64, name: &str) {
 /// "Show" or "Hide" for the secret values. The value sits below its field label.
 fn mask_button(ui: &mut egui::Ui, revealed: bool) -> bool {
     let label = if revealed { "Hide" } else { "Show" };
-    let button = kit::button_with(ui, Some(Icon::Eye), label, Style::Bordered, Size::Small)
-        .on_hover_text("Show or hide secret values  ⌘⇧H");
     let name = if revealed {
         "Hide the secret values"
     } else {
         "Show the secret values"
     };
-    ui.ctx()
-        .accesskit_node_builder(button.id, |node| node.set_label(name));
-    button.clicked()
+    rows::pill_button(ui, label, name)
+        .on_hover_text("Show or hide secret values  ⌘⇧H")
+        .clicked()
 }
 
-fn secret_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
-    let id = details.id;
-    let revealed = details.any_revealed();
-    let lines: Vec<_> = details
-        .secret_lines
-        .iter()
-        .filter(|line| !line.name.starts_with(DETAIL_PREFIX))
-        .collect();
-    if lines.is_empty() {
-        return;
-    }
-    let footer = if revealed {
-        details.reveal_warning()
-    } else {
-        "Show asks for your passphrase. Apassy never copies a secret value to the clipboard."
-    };
-    let mut toggle = false;
-    kit::section(ui, Some("Secret"), Some(footer), |s| {
-        for line in lines {
-            s.row(|ui| {
-                egui::Sides::new().show(
-                    ui,
-                    |ui| {
-                        ui.label(
-                            kit::text(field_label(&line.name), Font::Callout).color(kit::SECONDARY),
-                        )
-                    },
-                    |ui| toggle |= mask_button(ui, revealed),
-                );
-                secret_value(ui, app, id, &line.name);
-            });
+/// A row of a group: the label at the left, the value at the right, as in System
+/// Settings. A value that does not fit goes under the label.
+fn pair_row(group: &mut rows::Group<'_>, label: &str, value: RichText) {
+    group.pair(label, value);
+}
+
+/// The masked secret row, as in the mockup: the label, the dots, and Show or Hide. A
+/// shown value goes under the row, in its own scroll area. Returns true when Show or
+/// Hide is pressed.
+fn secret_row(
+    app: &DesktopApp,
+    group: &mut rows::Group<'_>,
+    id: u64,
+    label: &str,
+    name: &str,
+    revealed: bool,
+) -> bool {
+    let shown = app.owner_ui.session.revealed_value(id, name).is_some();
+    group.row(|ui| {
+        let width = ui.available_width();
+        let toggle = ui
+            .allocate_ui_with_layout(
+                Vec2::new(width, 24.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_size(Vec2::new(width, 24.0));
+                    ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let toggle = mask_button(ui, revealed);
+                        if !shown {
+                            ui.label(
+                                kit::text(MASKED_VALUE, Font::Body)
+                                    .size(15.0)
+                                    .extra_letter_spacing(2.0)
+                                    .color(kit::LABEL),
+                            );
+                        }
+                        toggle
+                    })
+                    .inner
+                },
+            )
+            .inner;
+        if shown {
+            ui.add_space(4.0);
+            secret_value(ui, app, id, name);
         }
-    });
-    if toggle {
-        toggle_values(app, ui.ctx());
-    }
+        toggle
+    })
 }
 
-/// The details that are set, and the custom details. A hidden custom detail is masked
-/// like the secret, and "Show" shows it with the secret.
+/// The first group: the username, the secret, the variable, the host or the website,
+/// and the other details that are set, then the custom details. A hidden custom detail
+/// is masked like the secret, and Show shows it with the secret.
 ///
 /// `from_page`: the login has a passkey. A website or macOS gave its account name, and the
 /// vault copied it to the username. The page cleans it like the passkey rows.
-fn details_section(
-    app: &mut DesktopApp,
-    ui: &mut egui::Ui,
-    details: &OwnerDetails,
-    from_page: bool,
-) {
+fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails, from_page: bool) {
     let id = details.id;
     let username = if from_page {
         page_text(&details.username)
     } else {
         details.username.clone()
     };
-    let rows: Vec<(&str, &str)> = [
-        ("Username", username.as_str()),
-        ("Website", details.website.as_str()),
+    let secrets: Vec<_> = details
+        .secret_lines
+        .iter()
+        .filter(|line| !line.name.starts_with(DETAIL_PREFIX))
+        .collect();
+    let session = &app.owner_ui.session;
+    let provider_known = session
+        .with_vault(|vault| vault.declaration_provider(id))
+        .and_then(Result::ok)
+        .flatten()
+        .is_some_and(|provider| providers::find(&provider).is_some());
+    let variable = session
+        .env_binding(id)
+        .ok()
+        .flatten()
+        .map(|binding| binding.env_name)
+        .filter(|name| name != &format!("APASSY_ITEM_{id}"));
+    let other: Vec<(&str, &str)> = [
         ("Host", details.host.as_str()),
+        ("Website", details.website.as_str()),
         ("Database", details.database_name.as_str()),
         ("Public key", details.public_label.as_str()),
-        ("Service", details.service.as_str()),
-        ("Project", details.project.as_str()),
+        // Without a provider, the header shows the service and the project.
+        (
+            "Service",
+            if provider_known {
+                details.service.as_str()
+            } else {
+                ""
+            },
+        ),
+        (
+            "Project",
+            if provider_known {
+                details.project.as_str()
+            } else {
+                ""
+            },
+        ),
     ]
     .into_iter()
     .filter(|(_, value)| !value.is_empty())
     .collect();
     let revealed = details.any_revealed();
+    let footer = revealed.then(|| details.reveal_warning());
     let mut toggle = false;
-    let mut add_detail = false;
-    kit::section(
-        ui,
-        Some("Details"),
-        Some(
-            "Custom details are yours: an account number, a region, recovery codes. A hidden detail is masked like the secret.",
-        ),
-        |s| {
-            for (label, value) in rows {
-                value_row(s, label, value);
-            }
-            // A one-time password has its own section. Its seed is never a detail row. A
-            // visible setup key is not drawn.
-            for detail in details
-                .details
-                .iter()
-                .filter(|detail| !is_import_data(detail) && !otp::is_otp_detail(detail))
-            {
-                if otp::exposes_setup_key(detail) {
-                    otp::exposed_row(s, detail);
-                } else {
-                    toggle |= custom_value_row(app, s, id, detail, revealed);
+    rows::group(ui, |s| {
+        if !username.is_empty() {
+            pair_row(
+                s,
+                "Username",
+                kit::text(&username, Font::Body).color(kit::SECONDARY),
+            );
+        }
+        for (index, line) in secrets.iter().enumerate() {
+            // A key or a token says "Secret", as in the mockup; a login says "Password".
+            let label = match details.kind {
+                CredentialKind::ApiKey | CredentialKind::Custom if index == 0 => {
+                    "Secret".to_owned()
+                }
+                _ => field_label(&line.name),
+            };
+            toggle |= secret_row(app, s, id, &label, &line.name, revealed);
+        }
+        if let Some(variable) = &variable {
+            pair_row(
+                s,
+                "Variable",
+                kit::text(variable, Font::Mono).color(kit::SECONDARY),
+            );
+        }
+        for (label, value) in other {
+            pair_row(s, label, kit::text(value, Font::Body).color(kit::SECONDARY));
+        }
+        // A one-time password has its own section. Its seed is never a detail row. A
+        // visible setup key is not drawn.
+        for detail in details
+            .details
+            .iter()
+            .filter(|detail| !is_import_data(detail) && !otp::is_otp_detail(detail))
+        {
+            if otp::exposes_setup_key(detail) {
+                s.row(|ui| otp::exposed_content(ui, detail));
+            } else {
+                match &detail.value {
+                    Some(value) => pair_row(
+                        s,
+                        &detail.label,
+                        kit::text(value, Font::Body).color(kit::SECONDARY),
+                    ),
+                    None => {
+                        toggle |= secret_row(app, s, id, &detail.label, &detail.name, revealed);
+                    }
                 }
             }
-            if details.details.len() < MAX_DETAILS {
-                add_detail = s
-                    .clickable_row("Add custom detail", |ui| {
-                        ui.horizontal(|ui| {
-                            kit::paint_icon_in(ui, Icon::Plus, 12.0, kit::ACCENT);
-                            ui.label(
-                                kit::text("Add custom detail", Font::Body).color(kit::ACCENT_TEXT),
-                            );
-                        });
-                    })
-                    .clicked();
-            }
-        },
-    );
+        }
+    });
+    if let Some(footer) = footer {
+        ui.add_space(6.0);
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(12, 0))
+            .show(ui, |ui| kit::note(ui, footer));
+    }
+    ui.add_space(rows::GROUP_GAP);
     if details.details.iter().any(is_import_data) {
         detail_disclosure(app, ui, id, "import", "Import data", |app, ui| {
             kit::section(ui, None, None, |s| {
@@ -943,16 +1308,600 @@ fn details_section(
         });
     }
     if !details.notes.is_empty() {
-        kit::section(ui, Some("Notes"), None, |s| {
+        rows::group_label(ui, "Notes", None);
+        rows::group(ui, |s| {
             s.row(|ui| kit::paragraph(ui, &details.notes, Font::Body, kit::LABEL));
         });
+        ui.add_space(rows::GROUP_GAP);
     }
     if toggle {
         toggle_values(app, ui.ctx());
     }
-    if add_detail {
-        open_edit(app, details, true);
+}
+
+/// The names of the shared vaults that hold a credential. None until shared vaults
+/// land (ADR 0026 §6).
+fn shared_vaults(_app: &DesktopApp, _item_id: u64) -> Vec<String> {
+    Vec::new()
+}
+
+/// The second group: the folder (Move to Folder) and the shared vaults (Share).
+fn place_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let id = details.id;
+    let tree = FolderTree::load(app);
+    let folder = tree.path_label(tree.folder_of(id));
+    let shared = shared_vaults(app, id);
+    let shared = if shared.is_empty() {
+        "Not shared".to_owned()
+    } else {
+        shared.join(", ")
+    };
+    let mut move_to = false;
+    let mut share = false;
+    rows::group(ui, |s| {
+        move_to = s.chevron("Folder", &folder).clicked();
+        share = s.chevron("Shared in", &shared).clicked();
+    });
+    ui.add_space(rows::GROUP_GAP);
+    if move_to {
+        super::folders::open_move(app, id);
+    } else if share {
+        app.ui.sheet = Some(Sheet::Share { item_id: id });
     }
+}
+
+/// The uses that the "Agent use" group shows before "Show All".
+const RECENT_USES: usize = 3;
+/// The uses that "Show All" shows.
+const ALL_USES: usize = 200;
+
+/// What a use of a credential came to, for its row: the round mark and the words.
+pub(super) fn use_outcome(item_use: &ItemUse) -> (rows::Mark, String) {
+    use rows::Mark;
+    let on = if item_use.answered_on.is_empty() {
+        String::new()
+    } else {
+        format!(", on {}", item_use.answered_on)
+    };
+    match (item_use.outcome, item_use.decided_by) {
+        (UseOutcome::Allowed, UseDecidedBy::Owner) => {
+            (Mark::Owner, format!("You allowed once{on}"))
+        }
+        (UseOutcome::Allowed, UseDecidedBy::Answer) => {
+            (Mark::Allowed, "Allowed by your answer".to_owned())
+        }
+        (UseOutcome::Allowed, UseDecidedBy::Pattern) => {
+            (Mark::Allowed, "Allowed by a remembered pattern".to_owned())
+        }
+        (UseOutcome::Allowed, UseDecidedBy::Rule) => {
+            (Mark::Allowed, "Allowed by a rule".to_owned())
+        }
+        (UseOutcome::Allowed, UseDecidedBy::Bouncer) => {
+            (Mark::Allowed, "Allowed automatically".to_owned())
+        }
+        (UseOutcome::Denied, UseDecidedBy::Owner) => (Mark::Refused, format!("You denied it{on}")),
+        (UseOutcome::Denied, _) => (Mark::Refused, "Denied".to_owned()),
+        (UseOutcome::Refused, _) => (Mark::Refused, "Refused".to_owned()),
+        (UseOutcome::TimedOut, _) => (Mark::TimedOut, "No answer in time".to_owned()),
+    }
+}
+
+/// "Agent use", as in the mockup: the newest uses, each with its round mark, the agent
+/// and the project, the command and its result, and the time at the right; "Show All"
+/// on the label lists every use.
+fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
+    let key = format!("credential-uses-{id}");
+    let all = app.ui.is_expanded(&key);
+    let uses = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_uses(id, if all { ALL_USES } else { RECENT_USES + 1 }))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let link = if all {
+        Some(("Show Less", "Show fewer agent uses"))
+    } else if !uses.is_empty() {
+        Some(("Show All", "Show all agent uses"))
+    } else {
+        None
+    };
+    if rows::group_label(ui, "Agent use", link) {
+        app.ui.set_expanded(&key, !all);
+    }
+    let now = timeline::now();
+    let shown = if all { uses.len() } else { RECENT_USES };
+    rows::group(ui, |s| {
+        if uses.is_empty() {
+            s.line(|ui| {
+                ui.label(kit::text("No agent used it yet.", Font::Body).color(kit::SECONDARY))
+            });
+        }
+        for item_use in uses.iter().take(shown) {
+            let (mark, outcome) = use_outcome(item_use);
+            let who = format!("{} in {}", item_use.agent_name, item_use.project_label);
+            let when = relative_time(item_use.at, now);
+            s.row(|ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.vertical(|ui| {
+                        ui.add_space(1.0);
+                        rows::status_mark(ui, mark);
+                    });
+                    let when_width =
+                        kit::galley(ui, kit::text(&when, Font::Callout)).size().x + 10.0;
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - when_width).max(80.0));
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        // The second line sits right under the first: no minimum
+                        // control height.
+                        ui.spacing_mut().interact_size.y = 0.0;
+                        ui.add(
+                            Label::new(kit::text(&who, Font::Body).color(kit::LABEL)).truncate(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.add(
+                                Label::new(
+                                    kit::text(&item_use.command_summary, Font::Mono)
+                                        .color(kit::SECONDARY),
+                                )
+                                .truncate(),
+                            );
+                            ui.add(Label::new(rows::small(format!(" · {outcome}"))).truncate());
+                        });
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        ui.label(kit::text(&when, Font::Callout).color(kit::TERTIARY));
+                    });
+                });
+            });
+        }
+    });
+    ui.add_space(rows::GROUP_GAP);
+}
+
+/// One rule of the "Rules from your answers" group.
+enum Rule {
+    /// "Allow ACTION in PROJECT". Removing it is stricter: no owner check (ADR 0025 §3b).
+    Answer(OwnerAnswer),
+    /// "Never for AGENT" or "Always ask for AGENT". Removing it gives authority back:
+    /// the owner check first (ADR 0025 §3f).
+    Exception(AgentException, String),
+}
+
+impl Rule {
+    fn title(&self) -> String {
+        match self {
+            Self::Answer(answer) => format!(
+                "Allow {} in {}",
+                action_words(answer.action),
+                answer.project.label
+            ),
+            Self::Exception(exception, agent) => match exception.kind {
+                ExceptionKind::Never => format!("Never for {agent}"),
+                ExceptionKind::AlwaysAsk => format!("Always ask for {agent}"),
+                ExceptionKind::Only => format!("Only these credentials for {agent}"),
+            },
+        }
+    }
+}
+
+/// The remembered answers of the owner for the credential and the exceptions of
+/// agents. "Only these credentials" belongs to the agent page, not to one credential.
+fn rules_of(app: &DesktopApp, id: u64) -> Vec<Rule> {
+    let session = &app.owner_ui.session;
+    let agents = session.agents().unwrap_or_default();
+    let agent_name = |agent_id: u64| {
+        agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .map_or_else(|| format!("agent {agent_id}"), |agent| agent.name.clone())
+    };
+    let (answers, exceptions) = session
+        .with_vault(|vault| {
+            (
+                vault.answers_for_item(id).unwrap_or_default(),
+                vault.item_exceptions(id).unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
+    // The answers first, then "Never for" before "Always ask for", as in the mockup.
+    let mut exceptions = exceptions;
+    exceptions.sort_by_key(|exception| exception.kind != ExceptionKind::Never);
+    answers
+        .into_iter()
+        .map(Rule::Answer)
+        .chain(
+            exceptions
+                .into_iter()
+                .filter(|exception| exception.kind != ExceptionKind::Only)
+                .map(|exception| {
+                    let name = agent_name(exception.agent_id);
+                    Rule::Exception(exception, name)
+                }),
+        )
+        .collect()
+}
+
+/// The line under a remembered answer, as in the mockup: "All agents · production ·
+/// your answer on iPhone, Oct 10".
+fn answer_line(answer: &OwnerAnswer, now: u64) -> String {
+    let mut parts = vec!["All agents".to_owned()];
+    if answer.scope == AnswerScope::Production {
+        parts.push("production".to_owned());
+    }
+    let on = if answer.answered_on.is_empty() {
+        String::new()
+    } else {
+        format!(" on {}", answer.answered_on)
+    };
+    parts.push(format!(
+        "your answer{on}, {}",
+        relative_time(answer.created_at, now)
+    ));
+    parts.join(" · ")
+}
+
+/// "Rules from your answers": each rule with Remove at the right.
+fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let rules = rules_of(app, details.id);
+    let now = timeline::now();
+    let mut remove = None;
+    rows::group_label(ui, "Rules from your answers", None);
+    rows::group(ui, |s| {
+        if rules.is_empty() {
+            s.line(|ui| {
+                ui.label(
+                    kit::text("None. The bouncer decides each use.", Font::Body)
+                        .color(kit::SECONDARY),
+                )
+            });
+        }
+        for (index, rule) in rules.iter().enumerate() {
+            let title = rule.title();
+            let line = match rule {
+                Rule::Answer(answer) => Some(answer_line(answer, now)),
+                Rule::Exception(..) => None,
+            };
+            s.line(|ui| {
+                let button_width = 80.0;
+                let title_text = kit::text(&title, Font::Body).color(kit::LABEL);
+                match &line {
+                    // A title alone stays on the center line of the row, with Remove.
+                    None => {
+                        ui.add(Label::new(title_text).truncate());
+                    }
+                    Some(line) => {
+                        ui.vertical(|ui| {
+                            ui.set_width((ui.available_width() - button_width).max(80.0));
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            ui.add(Label::new(title_text).wrap());
+                            ui.add(Label::new(rows::small(line)).wrap());
+                        });
+                    }
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let name = format!("Remove the rule: {title}");
+                    if rows::pill_button(ui, "Remove", &name).clicked() {
+                        remove = Some(index);
+                    }
+                });
+            });
+        }
+    });
+    ui.add_space(rows::GROUP_GAP);
+    let Some(rule) = remove.and_then(|index| rules.into_iter().nth(index)) else {
+        return;
+    };
+    match rule {
+        Rule::Answer(answer) => {
+            // Stricter: the bouncer asks again. No owner check (ADR 0025 §3b).
+            let title = Rule::Answer(answer.clone()).title();
+            let result = app
+                .owner_ui
+                .session
+                .with_vault(|vault| vault.remove_answer(answer.id));
+            match result {
+                Some(Ok(_)) => app.set_ok(format!("“{title}” is removed. The bouncer asks again.")),
+                Some(Err(err)) => app.set_err(format!("The rule did not change: {err}.")),
+                None => app.set_err("The vault is locked."),
+            }
+        }
+        Rule::Exception(exception, agent_name) => {
+            let ctx = ui.ctx().clone();
+            app.ask_owner(
+                OwnerRequest::RemoveAgentException {
+                    agent_id: exception.agent_id,
+                    agent_name,
+                    item_id: exception.item_id,
+                    kind: exception.kind,
+                },
+                Some(&ctx),
+            );
+        }
+    }
+}
+
+/// The third group: "Always ask me", the environment, and "Hosts and risk" with the
+/// declaration, the variable, and the connector.
+fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let id = details.id;
+    let always_ask = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.always_ask(id))
+        .and_then(Result::ok)
+        .unwrap_or(false);
+    let state = EnvState::of(app, id);
+    let access_key = format!("credential-access-{id}");
+    let access_open = app.ui.is_expanded(&access_key);
+    let mut ask = always_ask;
+    let mut environment = match state {
+        EnvState::Production => Some(Environment::Production),
+        EnvState::Known(environment) => Some(environment),
+        EnvState::None | EnvState::Unconfirmed(_) => None,
+    };
+    let chosen = environment;
+    let shown = match state {
+        EnvState::None => "Not set".to_owned(),
+        EnvState::Unconfirmed(_) => "Not confirmed".to_owned(),
+        EnvState::Known(environment) => environment_label(environment).to_owned(),
+        EnvState::Production => "Production".to_owned(),
+    };
+    let options: Vec<(Option<Environment>, String)> = [
+        Environment::Production,
+        Environment::Staging,
+        Environment::Development,
+        Environment::Local,
+    ]
+    .into_iter()
+    .map(|environment| (Some(environment), environment_label(environment).to_owned()))
+    .collect();
+    // Each value set or confirmed by the owner, or found by Apassy.
+    let by_owner = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.declaration_sources(id))
+        .and_then(Result::ok)
+        .is_some_and(|sources| sources == crate::vault::DeclarationSources::default());
+    let hosts = match state {
+        EnvState::None => "Not set",
+        _ if by_owner => "Set by you",
+        _ => "Set automatically",
+    };
+    let mut toggle_access = false;
+    rows::group(ui, |s| {
+        s.toggle("Always ask me", &mut ask)
+            .on_hover_text("Each use by an agent waits for you.");
+        s.line(|ui| {
+            ui.label(kit::text("Environment", Font::Body).color(kit::LABEL));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.push_id(("credential-environment", id), |ui| {
+                    rows::pop_menu(
+                        ui,
+                        &mut environment,
+                        &options,
+                        &shown,
+                        &format!("Environment, {shown}"),
+                    )
+                });
+            });
+        });
+        let access = s.chevron("Hosts and risk", hosts);
+        ui_expanded(&access, access_open);
+        toggle_access = access.clicked();
+    });
+    ui.add_space(rows::GROUP_GAP);
+    if toggle_access {
+        app.ui.set_expanded(&access_key, !access_open);
+    }
+    if access_open {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        access_section(app, ui, id, details.kind);
+        ui.spacing_mut().item_spacing.y = 0.0;
+    }
+    if ask != always_ask {
+        set_always_ask(app, ui.ctx(), details, ask);
+    }
+    if environment != chosen
+        && let Some(environment) = environment
+    {
+        set_environment(app, ui.ctx(), details, environment);
+    }
+}
+
+/// A row that opens and closes a part says so to VoiceOver.
+fn ui_expanded(response: &egui::Response, open: bool) {
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+}
+
+/// Turn "Always ask me" on at once; turning it off asks for the owner check first.
+pub(super) fn set_always_ask(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    details: &OwnerDetails,
+    on: bool,
+) {
+    let id = details.id;
+    if on {
+        // Stricter: each use waits for the owner. No check.
+        match app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.set_always_ask(id, true))
+        {
+            Some(Ok(())) => app.set_ok(format!(
+                "Each use of {} by an agent now waits for you.",
+                details.name
+            )),
+            Some(Err(err)) => app.set_err(format!("\"Always ask me\" did not change: {err}.")),
+            None => app.set_err("The vault is locked."),
+        }
+    } else {
+        app.ask_owner(
+            OwnerRequest::AlwaysAskOff {
+                item_id: id,
+                name: details.name.clone(),
+            },
+            Some(ctx),
+        );
+    }
+}
+
+/// Set the environment as the answer of the owner. Production is stricter and needs no
+/// check. Another environment makes the bouncer less careful: the owner check first.
+pub(super) fn set_environment(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    details: &OwnerDetails,
+    environment: Environment,
+) {
+    let id = details.id;
+    if EnvState::of(app, id) == EnvState::None {
+        // No declaration yet: the owner sees and saves each value in its sheet, with
+        // the owner check, so no value from a suggestion counts as the owner's.
+        prepare_sheet(app, id, &Sheet::Declaration);
+        app.owner_ui.declaration_form.environment = environment;
+        app.ui.sheet = Some(Sheet::Declaration);
+        return;
+    }
+    if environment != Environment::Production {
+        app.ask_owner(
+            OwnerRequest::SetEnvironment {
+                item_id: id,
+                name: details.name.clone(),
+                environment,
+            },
+            Some(ctx),
+        );
+        return;
+    }
+    let result = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.set_declaration_environment(id, environment));
+    match result {
+        Some(Ok(())) => {
+            app.reload_declaration_form(id);
+            app.set_ok(format!(
+                "{} is marked as production. Each run with it waits for you.",
+                details.name
+            ));
+        }
+        Some(Err(err)) => app.set_err(format!("The environment did not change: {err}.")),
+        None => app.set_err("The vault is locked."),
+    }
+}
+
+/// The kinds that a "development key?" question fits: a key or a token.
+fn asks_for_environment(details: &OwnerDetails) -> bool {
+    match details.kind {
+        CredentialKind::ApiKey => true,
+        CredentialKind::Custom => {
+            let name = details.name.to_lowercase();
+            name.contains("key") || name.contains("token")
+        }
+        CredentialKind::Login | CredentialKind::SshKey | CredentialKind::Database => false,
+    }
+}
+
+/// "Is this a development key?" (ADR 0025 §4): only a default found the environment, so
+/// the bouncer treats the key as production until the owner answers.
+fn environment_question(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    if !matches!(EnvState::of(app, details.id), EnvState::Unconfirmed(_))
+        || !asks_for_environment(details)
+    {
+        return;
+    }
+    let hosts = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.declaration_provider(details.id))
+        .and_then(Result::ok)
+        .flatten()
+        .and_then(|id| providers::find(&id))
+        .map(|provider| provider.known_hosts.clone())
+        .unwrap_or_default();
+    let host = hosts
+        .first()
+        .cloned()
+        .or_else(|| (!details.host.is_empty()).then(|| details.host.clone()));
+    let message = match host {
+        Some(host) => {
+            format!("It goes to {host}. Until you answer, the bouncer treats it as production.")
+        }
+        None => "Until you answer, the bouncer treats it as production.".to_owned(),
+    };
+    // The banner of the mockup: an icon, the question and its line, and two buttons.
+    let mut answer = None;
+    rows::group(ui, |s| {
+        s.line(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 7, egui::Color32::from_rgb(255, 244, 229));
+            kit::paint_icon(
+                ui.painter(),
+                Rect::from_center_size(rect.center(), Vec2::splat(16.0)),
+                Icon::Warning,
+                egui::Color32::from_rgb(200, 106, 0),
+            );
+            let buttons = 200.0;
+            ui.vertical(|ui| {
+                ui.set_width((ui.available_width() - buttons).max(80.0));
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(kit::medium("Is this a development key?", Font::Body).color(kit::LABEL));
+                ui.add(Label::new(rows::small(&message)).wrap());
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if rows::pill_button(ui, "Production", "Mark as a production key").clicked() {
+                    answer = Some(Environment::Production);
+                }
+                if rows::pill_button(ui, "Development", "Mark as a development key").clicked() {
+                    answer = Some(Environment::Development);
+                }
+            });
+        });
+    });
+    ui.add_space(rows::GROUP_GAP);
+    if let Some(environment) = answer {
+        set_environment(app, ui.ctx(), details, environment);
+    }
+}
+
+/// "Added … · Changed …". "Added by AGENT in PROJECT" comes with the API of
+/// `item_origin` (stream T2).
+fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
+    let times = app
+        .owner_ui
+        .session
+        .item_times()
+        .ok()
+        .and_then(|times| times.get(&id).copied())
+        .unwrap_or_default();
+    let now = timeline::now();
+    let mut parts = Vec::new();
+    if let Some(added) = times.added {
+        parts.push(format!("Added {}", relative_time(added, now)));
+    }
+    if let Some(changed) = times
+        .changed
+        .filter(|changed| Some(*changed) != times.added)
+    {
+        parts.push(format!("Changed {}", relative_time(changed, now)));
+    }
+    if parts.is_empty() {
+        return;
+    }
+    // Each group adds its gap under it; the footer sits 22 points under the last one.
+    ui.add_space(rows::FOOTER_GAP - rows::GROUP_GAP);
+    ui.vertical_centered(|ui| {
+        ui.label(kit::text(parts.join(" · "), Font::Footnote).color(kit::TERTIARY));
+    });
+    ui.add_space(8.0);
 }
 
 /// Labels and values share one reading edge, including paths and long identifiers.
@@ -1261,7 +2210,7 @@ pub(super) fn draw_delete_alert(app: &mut DesktopApp, ctx: &egui::Context) {
         app.pending_delete = false;
         if app.apply(result, "The credential is deleted.").is_some() {
             app.selected_item_id = None;
-            app.view = OwnerView::Vault;
+            app.show_credentials();
         }
     }
 }
@@ -1355,6 +2304,11 @@ pub(super) fn request_close_form(app: &mut DesktopApp, ctx: &egui::Context) {
                 .unwrap_or(false)
         }),
         Some(Sheet::AddItem { kind_chosen: true }) => new_form_dirty(app),
+        Some(Sheet::NewCredential) => {
+            // The paste is erased. A paste is quick to make again; no confirmation.
+            super::new_credential::forget(app, ctx);
+            false
+        }
         _ => false,
     };
     if dirty {
@@ -1504,6 +2458,13 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
                     forget_secret_form(ctx, "add");
                     app.add_form = ItemDraft::default();
                     app.ui.sheet = None;
+                    // The credential goes to the folder that the list shows (ADR 0026 §4).
+                    if let Some(folder) = FolderTree::load(app).folder_of_place(&app.place) {
+                        let _ = app
+                            .owner_ui
+                            .session
+                            .with_vault(|vault| vault.set_item_folder(item.id, Some(&folder)));
+                    }
                     app.set_ok(format!(
                         "{} is stored. Next, set up agent access.",
                         item.name
@@ -2740,7 +3701,7 @@ pub(super) fn connector_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool
             ui,
             None,
             Some(
-                "Use https://, or http:// on this computer only. The broker does not follow redirects. You let each agent use an operation in Agents.",
+                "Use https://, or http:// on this computer only. The broker does not follow redirects. The app has no switch for an operation: let an agent use one with apassy grant operation AGENT ITEM OPERATION.",
             ),
             |s| {
                 s.labeled(
@@ -2814,22 +3775,10 @@ mod conflict_tests {
     const PASS: &str = "conflict-ui-test-pass";
     const CANARY: &str = "conflict-ui-secret-canary";
 
-    fn summary() -> OwnerSummary {
-        OwnerSummary {
-            id: 1,
-            name: "User name (conflict copy, Mac)".to_owned(),
-            kind: CredentialKind::ApiKey,
-            service: String::new(),
-            project: String::new(),
-            revision: 1,
-        }
-    }
-
     #[test]
     fn conflict_filter_separates_verified_copies_and_preserves_search() {
-        let item = summary();
         let matches = |filter, searching, archived, conflict| {
-            matches_filter(&item, filter, searching, archived, conflict, |_| true)
+            matches_filter(filter, searching, archived, conflict)
         };
         // A user-selected name cannot make an ordinary archived item a conflict.
         assert!(matches(Filter::Archived, false, true, false));
@@ -2838,22 +3787,9 @@ mod conflict_tests {
         assert!(!matches(Filter::Archived, true, true, true));
         assert!(!matches(Filter::All, false, true, true));
         assert!(matches(Filter::All, true, true, true));
-        assert!(matches(
-            Filter::Kind(CredentialKind::ApiKey),
-            true,
-            true,
-            true
-        ));
-        assert!(!matches(
-            Filter::Kind(CredentialKind::Login),
-            true,
-            true,
-            true
-        ));
         // A deliberate restore removes the copy from the archived review list.
         assert!(!matches(Filter::Conflicts, false, false, true));
         assert!(matches(Filter::All, false, false, true));
-        assert!(matches(Filter::NeedsSetup, false, false, true));
     }
 
     fn add(app: &mut DesktopApp, name: &str) -> u64 {
@@ -2895,7 +3831,8 @@ mod conflict_tests {
                     if detail {
                         draw_detail(app, ui);
                     } else {
-                        draw_list(app, ui);
+                        list_column(app, ui);
+                        detail_column(app, ui, &Vec::new());
                     }
                 },
             );
@@ -3118,3 +4055,41 @@ mod conflict_tests {
 #[cfg(test)]
 #[path = "passkey_tests.rs"]
 mod passkey_tests;
+
+#[cfg(test)]
+mod looks_tests {
+    use super::*;
+
+    /// The kind of a key comes from its variable, as in the mockup.
+    #[test]
+    fn a_key_is_named_by_the_end_of_its_variable() {
+        let key = CredentialKind::ApiKey;
+        assert_eq!(field_kind(key, Some("STRIPE_SECRET_KEY")), "Secret key");
+        assert_eq!(field_kind(key, Some("CLOUDFLARE_API_TOKEN")), "API token");
+        assert_eq!(field_kind(key, Some("GITHUB_TOKEN")), "Token");
+        assert_eq!(field_kind(key, Some("OPENAI_API_KEY")), "API key");
+        assert_eq!(field_kind(key, Some("STRIPE_TEST_KEY")), key.label());
+        assert_eq!(field_kind(key, None), key.label());
+        let database = CredentialKind::Database;
+        assert_eq!(
+            field_kind(database, Some("DATABASE_TOKEN")),
+            database.label()
+        );
+    }
+
+    /// The header names the provider of the tile; a database without one gets the
+    /// blue database tile of the mockup, not a green kind tile.
+    #[test]
+    fn the_provider_and_the_tile_follow_one_rule() {
+        let (label, tile) = super::super::named_provider("", "Stripe live").expect("Stripe");
+        assert_eq!(label, "Stripe");
+        assert_eq!(
+            tile,
+            super::super::credential_tile(CredentialKind::ApiKey, "", "Stripe live")
+        );
+        assert!(super::super::named_provider("", "Billing database").is_none());
+        let tile = super::super::credential_tile(CredentialKind::Database, "", "Billing database");
+        assert_eq!(tile.color, egui::Color32::from_rgb(51, 103, 145));
+        assert_eq!(tile.mark, kit::Mark::Icon(Icon::Database));
+    }
+}

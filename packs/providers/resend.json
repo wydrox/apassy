@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "resend",
   "kind": "provider",
   "label": "Resend",
   "description": "Resend API keys (re_) for email.",
   "known_hosts": ["api.resend.com"],
+  "variable": "RESEND_API_KEY",
+  "prefixes": ["re_"],
   "signals": [
     {
       "id": "api-key",

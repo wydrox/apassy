@@ -122,5 +122,6 @@ pub fn run(remember: bool) -> PendingRun {
             approvals: 1,
             needed: 3,
         }),
+        question: Default::default(),
     }
 }

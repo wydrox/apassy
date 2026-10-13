@@ -3323,26 +3323,29 @@ mod tests {
         server.shutdown();
     }
 
-    /// A run that waits for a first start, then for the owner, ends before the hosts
-    /// stop the tool call: 180 s in the commands of `apassy setup`.
+    /// A run that waits for a first start reaches its question before the hosts stop the
+    /// tool call: 330 s in the commands of `apassy setup`. The question itself waits 5
+    /// minutes (ADR 0025 §3e); when the host stops the call earlier, the same request
+    /// again joins the waiting question (`ApprovalQueue::wait_for_question`).
     #[test]
     fn a_run_that_waits_for_a_first_start_ends_within_the_tool_time_out() {
         let setup =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/setup.rs"))
                 .expect("setup.rs");
-        assert!(setup.contains("MCP_TOOL_TIMEOUT=180000"), "Claude Code");
-        assert!(setup.contains("tool_timeout_sec = 180"), "Codex");
-        let host_limit = Duration::from_secs(180);
+        assert!(setup.contains("MCP_TOOL_TIMEOUT=330000"), "Claude Code");
+        assert!(setup.contains("tool_timeout_sec = 330"), "Codex");
+        let host_limit = Duration::from_secs(330);
         let owner_wait = crate::broker::server::BrokerOptions::with_tls(
             crate::broker::http::TlsClient::platform().expect("tls"),
         )
         .approval_timeout;
+        assert_eq!(owner_wait, crate::broker::server::QUESTION_WAIT);
         // Time for the hook, the request checks, and the answer of the model.
         let margin = Duration::from_secs(10);
         for gate in [NEEDED_WAIT, FIRST_START_WAIT] {
             assert!(
-                gate + owner_wait + margin <= host_limit,
-                "{gate:?} + {owner_wait:?} + {margin:?} > {host_limit:?}"
+                gate + margin <= host_limit,
+                "{gate:?} + {margin:?} > {host_limit:?}"
             );
         }
     }

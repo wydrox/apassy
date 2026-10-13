@@ -163,3 +163,120 @@ fn doctor_json_session_fix_has_shell_quotes_without_extra_backslashes() {
         String::from_utf8_lossy(&shell.stderr)
     );
 }
+
+/// A fake app that answers one `add` with two summary rows, and returns the request
+/// that it read.
+fn add_server(socket: &Path) -> std::thread::JoinHandle<serde_json::Value> {
+    use apassy::contracts::CredentialKind;
+    use apassy::owner::wire::AddedRow;
+
+    let listener = UnixListener::bind(socket).unwrap();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let rows = [
+            (2, "Anthropic API key", "ANTHROPIC_API_KEY", "production"),
+            (3, "Dev Api Token", "DEV_API_TOKEN", "development"),
+        ];
+        let items = rows
+            .iter()
+            .map(|(id, name, variable, environment)| AddedRow {
+                id: *id,
+                name: (*name).to_owned(),
+                kind: CredentialKind::ApiKey,
+                variable: Some((*variable).to_owned()),
+                environment: (*environment).to_owned(),
+                folder: "Work / Acme".to_owned(),
+                summary: format!("{name} · {variable} · {environment}"),
+            })
+            .collect();
+        let response = Response::ok("2 credentials are added.", Data::Added { items });
+        let mut stream = stream;
+        serde_json::to_writer(&mut stream, &response).unwrap();
+        stream.write_all(b"\n").unwrap();
+        request
+    })
+}
+
+#[test]
+fn add_reads_the_paste_from_stdin_and_prints_one_line_for_each_credential() {
+    let dir = TempDir::new().unwrap();
+    let socket = dir.path().join("owner.sock");
+    let anthropic = "sk-ant-api03-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+    let text = format!("ANTHROPIC_API_KEY={anthropic}\nDEV_API_TOKEN=plain-dev-0000\n");
+    let paste = dir.path().join("paste.env");
+    std::fs::write(&paste, &text).unwrap();
+    for json in [false, true] {
+        let server = add_server(&socket);
+        let mut args = vec!["add", "--folder", "Work/Acme", "--socket"];
+        args.push(socket.to_str().unwrap());
+        if json {
+            args.push("--json");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+            .args(&args)
+            .env("APASSY_SESSION", "apassy_cli_synthetic-session")
+            .env_remove("APASSY_OWNER_SOCKET")
+            .stdin(std::fs::File::open(&paste).unwrap())
+            .output()
+            .unwrap();
+        let request = server.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(request["command"]["cmd"], "add");
+        assert_eq!(request["command"]["secret"], text.trim_end_matches('\n'));
+        assert_eq!(request["command"]["folder"], "Work/Acme");
+        assert!(request["command"].get("create_folder").is_none());
+        assert_eq!(request["session"], "apassy_cli_synthetic-session");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for secret in [anthropic, "plain-dev-0000"] {
+            assert!(!stdout.contains(secret) && !stderr.contains(secret));
+        }
+        if json {
+            let response: Response = serde_json::from_str(&stdout).unwrap();
+            assert!(matches!(response.data, Data::Added { ref items } if items.len() == 2));
+        } else {
+            assert_eq!(
+                stdout,
+                "Anthropic API key · ANTHROPIC_API_KEY · production\n\
+                 Dev Api Token · DEV_API_TOKEN · development\n"
+            );
+        }
+    }
+
+    // Usage errors come before any connection.
+    let missing = dir.path().join("none.sock");
+    let empty = dir.path().join("empty.env");
+    std::fs::write(&empty, "\n").unwrap();
+    for (args, stdin) in [
+        (vec!["add", "--create-folder"], &paste),
+        (vec!["add"], &empty),
+        (vec!["add", "extra"], &paste),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+            .args(&args)
+            .args(["--socket", missing.to_str().unwrap()])
+            .env_remove("APASSY_SESSION")
+            .stdin(std::fs::File::open(stdin).unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(anthropic));
+    }
+    let help = cli(&["help", "add"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("apassy add [--folder PATH")
+    );
+}

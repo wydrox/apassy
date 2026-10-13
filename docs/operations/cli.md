@@ -2,7 +2,7 @@
 
 Date: 2026-10-03. Decision: [ADR 0017](../adr/0017-owner-command-line.md). Wire: [owner-cli-v1](../contracts/owner-cli-v1.md).
 
-The `apassy` program opens the window when it runs without arguments. With a command, it talks to the running window. Every change uses the same checks as the window: grants, approvals, new tokens, and agent settings ask for Touch ID or the passphrase in the window, for each change.
+The `apassy` program opens the window when it runs without arguments. With a command, it talks to the running window. Every change uses the same checks as the window: approvals, new tokens, connector operations, and agent settings ask for Touch ID or the passphrase in the window, for each change.
 
 The command line never shows a secret value, and never takes one as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
 
@@ -10,7 +10,7 @@ The command line never shows a secret value, and never takes one as an argument.
 
 The app contains `apassy`, `apassy-mcp`, `apassy-hook`, and `apassy-sandbox`. It also contains the Seatbelt profile for `apassy-sandbox`.
 
-In Apassy, open Settings > Agents > Command line. Use Install CLI tools to put links in `~/.local/bin`.
+In Apassy, open Settings > Tools > Command line. Use Install CLI tools to put links in `~/.local/bin`.
 
 You can also install the links from Terminal:
 
@@ -87,11 +87,31 @@ apassy status
 apassy logout                 # or: eval "$(apassy logout)"
 ```
 
-`login` prints `export APASSY_SESSION='apassy_cli_…'` (`set -gx …` in fish). It refuses to print the token on a terminal: use it with `eval`, or add `--raw` for the token only. A session belongs to the open vault. It ends after 30 idle minutes, after 12 hours, at a lock, when another vault opens, after a backup or a passphrase change, and when Apassy quits. Settings > Agents > Command line shows the open sessions and ends them.
+`login` prints `export APASSY_SESSION='apassy_cli_…'` (`set -gx …` in fish). It refuses to print the token on a terminal: use it with `eval`, or add `--raw` for the token only. A session belongs to the open vault. It ends after 30 idle minutes, after 12 hours, at a lock, when another vault opens, after a backup or a passphrase change, and when Apassy quits. Settings > Tools > Command line shows the open sessions and ends them.
 
 Do not start an agent from a shell that has `APASSY_SESSION`. `apassy-sandbox` removes it from the agent environment; an agent started without the sandbox would inherit it.
 
 ## 3. Credentials
+
+The quickest way is to paste (ADR 0025 §4, "two steps to add"):
+
+```sh
+apassy add                                # a hidden prompt: paste one secret or KEY=value line
+apassy add < .env                         # every line of a .env file
+pbpaste | apassy add --folder Work/Acme   # into a folder that exists
+op read op://dev/db/url | apassy add --folder Work/Acme --create-folder
+```
+
+`apassy add` reads the text from stdin when it is not a terminal, else from a hidden prompt (one line, at most 64 KiB). The text is a secret, a `KEY=value` line, a whole `.env` file, a URL with a password (`postgres://`, `mysql://`, `mongodb://`, `redis://`, `amqp://`), or an `otpauth://` link. The app finds the rest on this Mac, without sending the value anywhere, and adds every credential in one transaction: all of them or none. It prints one line for each, such as `Anthropic API key · ANTHROPIC_API_KEY · production`, and never a value.
+
+- The kind, the name, the provider, the variable, and the provider hosts come from the provider catalog (the value prefix, the variable name, the host). A URL is split into fields; its password is the secret, and the variable gets the whole URL.
+- A name that another credential has gets ` 2`, ` 3`, … A variable that another credential uses is not taken: the new credential gets the automatic name `APASSY_ITEM_<id>`. A reserved name such as `PATH` is not used.
+- A known provider starts in placeholder mode for its hosts (ADR 0011), as a new variable does in the window, when the value is long enough for a placeholder. Else programs get the real value. Change it with `apassy item env`. A one-time password setup key is never bound.
+- The declaration is saved with the credential, with the source of each value: `signal` (the catalog found it) or `default` (nothing did, so the most sensitive value).
+- `--folder PATH` names a folder by its names from the top level, such as `Work/Acme`, exactly or without regard to case. A folder that does not exist is an error unless `--create-folder`.
+- A session is needed and no owner check, as for `apassy item add`: a new credential gives no agent anything that the bouncer does not decide (ADR 0025 §3). Binding a variable of an existing credential still asks for the owner check.
+
+Each field by hand:
 
 ```sh
 apassy item list                          # or: apassy item list stripe --archived
@@ -161,17 +181,17 @@ apassy agent show "Claude Code"
 apassy agent add "CI bot"                 # prints the token once
 apassy agent rotate "Claude Code"         # owner check; prints the new token once
 apassy agent revoke "CI bot"
-apassy agent see-all "Claude Code" on     # owner check
+apassy agent see-all "Claude Code" on     # owner check; removes "Only these items"
 apassy agent lifetime 30                  # owner check
-
-apassy grant set "Claude Code" "Stripe test" "Prod DB"            # this folder, you approve each run
-apassy grant set "Claude Code" "Stripe test" --folder ~/src/billing --mode bouncer
-apassy grant set "Claude Code" "Stripe test" --any-folder
-apassy grant rule "Claude Code" "Stripe test" --allow "npm test" --allow "npm run migrate" \
-    --forbid prod --max-runs 20 --expires 24 --instruction "Staging only."
-apassy grant remove "Claude Code" "Stripe test"
-apassy grant operation "Claude Code" Reporting get_sales_summary
+apassy grant operation "Claude Code" Reporting get_sales_summary   # owner check
 ```
+
+Since 0.5.0 an agent needs no grant ([ADR 0025](../adr/0025-low-friction-access.md)). Connecting it is the only setup, and the bouncer decides each use of each credential.
+
+- `apassy grant operation` allows one connector operation for `apassy_use_credential`. The app has no switch for it.
+- `apassy grant set`, `grant rule`, and `grant remove` still save or remove a process grant with its folder, mode, and rule. The broker does not read them for a run. A process grant only adds the credential to the list of an agent with "Only these items", and shows in `process_access` of `apassy_list_access`.
+- `apassy agent see-all AGENT off` gives the agent "Only these items" (no owner check). `on` removes it.
+- The command line has no command for exceptions. Answer a question in Decisions with "Never for AGENT" or "Always Ask for AGENT", and remove an exception on the page of the agent.
 
 `setup` writes `~/.config/apassy/apassy-mcp-HOST.sh` and `~/.config/apassy/apassy-hook-HOST.sh` with mode 0700. These wrapper scripts hold the token. The host configuration files do not hold the token.
 
@@ -190,17 +210,20 @@ A copy of each changed file stays next to it (`.before-apassy`). Trust the hook 
 
 ```sh
 apassy request list                       # --all for the decided ones too
-apassy request grant 12 --folder ~/src/billing      # owner check
 apassy request deny 12
-apassy runs                               # runs that wait for you
+apassy runs                               # questions that wait for you
 apassy runs approve 41                    # owner check; the window shows the run
-apassy runs approve 41 --remember
+apassy runs approve 41 --remember         # owner check; also one approval for its pattern
 apassy runs deny 41
 apassy pattern list
 apassy pattern remove 3
 apassy activity --agent "Claude Code" --limit 20
 apassy decisions export --output decisions.jsonl     # mode 0600
 ```
+
+- `apassy request` lists and closes the notes of `apassy_request_access`. An agent does not need them, and the app does not show them. `apassy request grant ID` still saves a process grant and closes the request; like `grant set`, it gives the agent nothing that the bouncer does not decide.
+- `apassy runs approve` is "Allow Once". The command line cannot give "Allow ACTION in PROJECT" or a production allowance: answer in Decisions.
+- `--remember` is the only way left to teach a pattern ([learning](learning.md), section 2). The app shows only the number of patterns (Settings > Bouncer > Calibration and learning). `apassy pattern list` shows each pattern, and `apassy pattern remove` removes one.
 
 ## 7. Vault
 

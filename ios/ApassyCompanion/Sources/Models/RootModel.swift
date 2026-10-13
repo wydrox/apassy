@@ -29,6 +29,10 @@ final class RootModel {
     let companion = AppModel()
     let settings = VaultSettings(defaults: SharedContainer.defaults)
     private(set) var vault: VaultModel?
+    /// Questions through the relay of the selected vault (contract relay-questions-v1).
+    private(set) var questions: QuestionsModel?
+    /// The owner opened the notification of a question: the vault tabs show Questions.
+    var questionsRequested = false
     /// Imports from and exports to another app (Apple's credential exchange).
     private(set) var exchange: CredentialExchangeModel?
     /// An import token that arrived before the vault model existed (a cold start).
@@ -51,6 +55,7 @@ final class RootModel {
                 let made = try makeVault()
                 vault = made
                 exchange = CredentialExchangeModel(vault: made, system: Self.exchangeSystem())
+                makeQuestions(service: made.service)
                 if let token = earlyImportToken {
                     earlyImportToken = nil
                     exchange?.receive(token: token)
@@ -103,6 +108,7 @@ final class RootModel {
                 service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
                 biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
                 isAway: { [weak vault] in vault?.isInBackground ?? false },
+                answerKey: { try EnclaveAnswerSigner().publicKey() },
                 onFinished: { [weak self] _ in self?.finishAddVault() },
                 onCancel: { [weak self] in self?.cancelAddVault() }))
     }
@@ -182,6 +188,20 @@ final class RootModel {
             importCredentials: { token in try await ASCredentialImportManager().importCredentials(token: token) },
             requestExport: { try await session.request() },
             exportCredentials: { data in try await session.send(data) })
+    }
+
+    // MARK: Questions
+
+    private func makeQuestions(service: any VaultService) {
+        let push = PushRegistrar.shared
+        let model = QuestionsModel(
+            service: service, signer: EnclaveAnswerSigner(), push: push,
+            deviceName: settings.deviceName ?? DeviceName.current(), defaults: SharedContainer.defaults)
+        questions = model
+        push.onToken = { [weak model] token in
+            Task { await model?.receivePushToken(token) }
+        }
+        push.onOpen = { [weak self] in self?.questionsRequested = true }
     }
 
     // MARK: The service

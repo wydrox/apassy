@@ -13,20 +13,72 @@ public protocol ICloudFileAccess: Sendable {
                  outputHash: String, authorize: @Sendable (@Sendable () throws -> Void) throws -> Void) throws -> Bool
 }
 
+/// The state of the local copy of an iCloud file.
+enum ICloudItemState: Sendable {
+    /// The local copy is the latest version that this device knows.
+    case current
+    /// iCloud has a newer version, or the download runs.
+    case downloading
+    /// iCloud cannot download the file.
+    case failed
+}
+
+/// What iOS does with an iCloud file: the security scope, the kind of item, and the download.
+/// Tests play iCloud with a local file.
+protocol ICloudItems: Sendable {
+    func startAccessing(_ url: URL) -> Bool
+    func stopAccessing(_ url: URL)
+    /// Whether the URL is a regular file in iCloud Drive, not a folder or a link.
+    func isICloudFile(_ url: URL) throws -> Bool
+    /// Ask iCloud for the latest version of the file. When the file is on this device already,
+    /// iOS syncs the local copy with the version in iCloud.
+    func requestLatest(_ url: URL) throws
+    /// The state of the local copy, read fresh.
+    func state(_ url: URL) throws -> ICloudItemState
+}
+
+/// `ICloudItems` of iOS.
+struct SystemICloudItems: ICloudItems {
+    func startAccessing(_ url: URL) -> Bool { url.startAccessingSecurityScopedResource() }
+
+    func stopAccessing(_ url: URL) { url.stopAccessingSecurityScopedResource() }
+
+    func isICloudFile(_ url: URL) throws -> Bool {
+        let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .isDirectoryKey, .isSymbolicLinkKey])
+        return values.isUbiquitousItem == true && values.isDirectory != true && values.isSymbolicLink != true
+    }
+
+    func requestLatest(_ url: URL) throws {
+        try FileManager.default.startDownloadingUbiquitousItem(at: url)
+    }
+
+    func state(_ url: URL) throws -> ICloudItemState {
+        var freshURL = url
+        freshURL.removeAllCachedResourceValues()
+        let values = try freshURL.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey,
+                                                          .ubiquitousItemDownloadingErrorKey])
+        if values.ubiquitousItemDownloadingError != nil { return .failed }
+        return values.ubiquitousItemDownloadingStatus == .current ? .current : .downloading
+    }
+}
+
 public struct CoordinatedICloudFileAccess: ICloudFileAccess {
-    public init() {}
+    private let items: any ICloudItems
+
+    public init() { items = SystemICloudItems() }
+
+    init(items: any ICloudItems) { self.items = items }
 
     private func access<T>(_ url: URL, _ body: () throws -> T) throws -> T {
-        guard url.startAccessingSecurityScopedResource() else {
+        guard items.startAccessing(url) else {
             throw VaultError(.io, "Select the iCloud vault file again to give access to it.")
         }
-        defer { url.stopAccessingSecurityScopedResource() }
+        defer { items.stopAccessing(url) }
         return try body()
     }
 
     private func validate(_ url: URL) throws {
-        let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .isDirectoryKey, .isSymbolicLinkKey])
-        guard values.isUbiquitousItem == true, values.isDirectory != true, values.isSymbolicLink != true else {
+        guard try items.isICloudFile(url) else {
             throw VaultError(.invalidInput, "Select an Apassy vault file in iCloud Drive.")
         }
     }
@@ -59,18 +111,17 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
 
     private func download(_ url: URL) throws {
         try validate(url)
-        try FileManager.default.startDownloadingUbiquitousItem(at: url)
+        try items.requestLatest(url)
         let deadline = Date().addingTimeInterval(20)
         repeat {
             try Task.checkCancellation()
-            var freshURL = url
-            freshURL.removeAllCachedResourceValues()
-            let values = try freshURL.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey, .ubiquitousItemDownloadingErrorKey])
-            if values.ubiquitousItemDownloadingError != nil {
+            switch try items.state(url) {
+            case .failed:
                 throw VaultError(.io, "iCloud cannot download this file. Try again when iCloud is available.")
-            }
-            if values.ubiquitousItemDownloadingStatus == .current {
+            case .current:
                 return
+            case .downloading:
+                break
             }
             Thread.sleep(forTimeInterval: 0.2)
         } while Date() < deadline
@@ -86,17 +137,18 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
     public func hasChanged(at url: URL, previousHash: String?) throws -> Bool {
         try access(url) {
             try validate(url)
-            var freshURL = url
-            freshURL.removeAllCachedResourceValues()
-            let values = try freshURL.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey,
-                                                              .ubiquitousItemDownloadingErrorKey])
-            if values.ubiquitousItemDownloadingError != nil {
+            // Ask iCloud for its latest version at each check, as the snapshot of a sync does.
+            // "Current" is the latest version that this iPhone knows, and iOS may not learn of
+            // a version that the Mac saved until an app asks.
+            try items.requestLatest(url)
+            switch try items.state(url) {
+            case .failed:
                 throw VaultError(.io, "iCloud cannot download this file. Try again when iCloud is available.")
-            }
-            if values.ubiquitousItemDownloadingStatus != .current {
-                // Start the download, then let the next bounded poll check it.
-                try FileManager.default.startDownloadingUbiquitousItem(at: url)
+            case .downloading:
+                // Let the next bounded poll check the download.
                 return false
+            case .current:
+                break
             }
             var coordinationError: NSError?
             var result: Result<Bool, any Error> = .failure(VaultError(.io, "iCloud did not give access to the file."))

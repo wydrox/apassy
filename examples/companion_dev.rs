@@ -123,6 +123,7 @@ fn synthetic_run(command: &[&str], purpose: &str, pattern: Option<&str>) -> Pend
             approvals: 1,
             needed: 3,
         }),
+        question: Default::default(),
     }
 }
 

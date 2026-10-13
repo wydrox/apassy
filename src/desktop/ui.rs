@@ -1,11 +1,10 @@
 //! Drawing code for the desktop shell. Keep state changes in [`super::DesktopApp`].
 //!
-//! The look follows SwiftUI on macOS: a sidebar, large page titles, grouped form
-//! sections, sheets for changes, and a toast for results. [`kit`] has the tokens and
-//! the controls. Each screen shows the common path first and folds the rest away.
+//! The window follows Mail and 1Password (ADR 0026): a sidebar, a list, and a detail
+//! with grouped rows; sheets for changes, a toast for results, and Settings in its own
+//! window. [`kit`] has the tokens and the controls. Each screen shows the common path
+//! first and folds the rest away.
 
-#[cfg(feature = "vault")]
-mod activity;
 #[cfg(feature = "vault")]
 mod agent_onboarding;
 #[cfg(feature = "vault")]
@@ -20,18 +19,30 @@ mod browser_tests;
 mod cli_tests;
 #[cfg(feature = "vault")]
 mod cli_tools;
+/// The list column and the detail column of each place.
+mod columns;
 #[cfg(feature = "vault")]
 mod companion;
 #[cfg(all(test, feature = "vault"))]
 mod companion_tests;
+/// Decisions: the questions that wait for the owner (ADR 0026 §2).
+#[cfg(feature = "vault")]
+mod decisions;
+#[cfg(all(test, feature = "vault"))]
+mod decisions_tests;
 #[cfg(not(feature = "vault"))]
 mod demo;
 #[cfg(feature = "vault")]
-pub(crate) mod files;
-mod focus;
-/// The steps from a new vault to the first agent request.
+mod detail_rows;
 #[cfg(feature = "vault")]
-mod get_started;
+pub(crate) mod files;
+/// The two first steps of a new vault (ADR 0026 §7).
+#[cfg(feature = "vault")]
+mod first_steps;
+mod focus;
+/// Folders of the personal vault: the tree and the sheets (ADR 0026 §5).
+#[cfg(feature = "vault")]
+mod folders;
 #[cfg(feature = "vault")]
 pub(crate) mod import;
 #[cfg(feature = "vault")]
@@ -39,6 +50,10 @@ mod items;
 #[cfg(all(test, feature = "vault"))]
 mod keyboard_tests;
 pub(crate) mod kit;
+/// "New Credential" (ADR 0026 §4): a stub that leads to the kind picker until paste
+/// detection lands.
+#[cfg(feature = "vault")]
+mod new_credential;
 /// One-time passwords (TOTP) on the credential pages.
 #[cfg(feature = "vault")]
 mod otp;
@@ -50,7 +65,11 @@ mod owner_check_view;
 mod owner_tests;
 #[cfg(feature = "vault")]
 mod settings;
+/// Settings as a view of the window (ADR 0026 §3).
+mod settings_view;
 mod shell;
+/// The sidebar: full, as a rail of icons, or floating over the list.
+mod sidebar;
 #[cfg(feature = "vault")]
 mod start;
 /// Sync of the vaults through a folder (ADR 0014).
@@ -78,7 +97,9 @@ use crate::desktop::{DesktopApp, StatusKind};
 
 pub(crate) use kit::WINDOW as WINDOW_COLOR;
 #[cfg(feature = "vault")]
-pub(crate) use settings::{SettingsTab, open as open_settings};
+pub(crate) use settings::rows as settings_rows;
+#[cfg(feature = "vault")]
+pub(crate) use settings_view::{SettingsSection, open as open_settings};
 
 /// Byte capacity of a passphrase field. A field holds at most `MAX_PASSPHRASE_BYTES`
 /// characters, and a character has at most 4 bytes, so typing never moves the text
@@ -205,6 +226,10 @@ fn secure_input(
     response
 }
 
+/// The size of a new main window, and its smallest size.
+pub(crate) const DEFAULT_WINDOW: (f32, f32) = (1180.0, 800.0);
+pub(crate) const MIN_WINDOW: (f32, f32) = (900.0, 600.0);
+
 /// The vault file of Apassy 0.2. The agent profile denies this directory (isolation,
 /// §1). New vaults go to `vaults/` in the same directory (ADR 0013).
 #[cfg(feature = "vault")]
@@ -234,28 +259,37 @@ pub(crate) struct UiState {
     /// The step of the start screens.
     #[cfg(feature = "vault")]
     pub(crate) start: start::Step,
-    /// The tab of the Activity view.
-    #[cfg(feature = "vault")]
-    pub(crate) activity_tab: activity::Tab,
-    /// The owner hid the sidebar (⌃⌘S or the title bar button). `ui.json` keeps it
-    /// across restarts.
+    /// The owner collapsed the sidebar to its icons in a wide window (⌃⌘S or the
+    /// sidebar button). `ui.json` keeps it across restarts.
     pub(crate) sidebar_hidden: bool,
-    /// The list IDs of the vaults where the owner hid the "Get started" list. `ui.json`
-    /// keeps them across restarts.
+    /// In a narrow window, the owner opened the sidebar: it floats over the list until
+    /// a choice or a click outside it.
+    pub(crate) sidebar_float: bool,
+    /// The folders whose subfolders the sidebar shows, by UUID.
+    pub(crate) open_folders: BTreeSet<String>,
+    /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
+    /// keeps shared vaults; the tests draw synthetic ones.
+    pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,
+    /// The section that Settings shows.
+    pub(crate) settings_section: settings_view::SettingsSection,
+    /// The selected question of Decisions.
     #[cfg(feature = "vault")]
-    get_started_hidden: BTreeSet<String>,
+    pub(crate) decisions: decisions::State,
+    /// The note that the owner edits on an agent page.
+    #[cfg(feature = "vault")]
+    pub(crate) agents: agents::State,
+    /// The name field of the New Folder and Rename sheets.
+    #[cfg(feature = "vault")]
+    pub(crate) folder_name: String,
+    /// The folder that the Move sheet selects. `None`: the top level.
+    #[cfg(feature = "vault")]
+    pub(crate) move_target: Option<String>,
     /// `ui.json`. Only the window sets it, so a test never writes the real folder.
     #[cfg(feature = "vault")]
     prefs_path: Option<std::path::PathBuf>,
-    /// The tab of the Settings view.
-    #[cfg(feature = "vault")]
-    pub(crate) settings_tab: settings::SettingsTab,
     /// The filter of the credential list.
     #[cfg(feature = "vault")]
     pub(crate) credential_filter: items::Filter,
-    /// The order of the credential list.
-    #[cfg(feature = "vault")]
-    pub(crate) credential_sort: items::Sort,
     /// ⌘F: the search field takes the focus in the next frame.
     #[cfg(feature = "vault")]
     pub(crate) focus_search: bool,
@@ -271,6 +305,7 @@ pub(crate) struct UiState {
     pub(crate) setup_host: usize,
     #[cfg(feature = "vault")]
     agent_setup: agent_setup::SetupState,
+    /// "Connect an Agent": the host and the connection that waits for the owner check.
     #[cfg(feature = "vault")]
     agent_onboarding: agent_onboarding::State,
     /// The newly adopted vault whose local agent setup is still offered.
@@ -279,13 +314,6 @@ pub(crate) struct UiState {
     /// The first field of a start screen takes the focus, after a step change.
     #[cfg(feature = "vault")]
     pub(crate) focus_start_field: bool,
-    /// The form of a grant for several credentials or of an access request.
-    #[cfg(feature = "vault")]
-    pub(crate) grant: agents::GrantForm,
-    /// The declaration forms of first-use cards, by waiting run and item (ADR 0024).
-    #[cfg(feature = "vault")]
-    pub(crate) first_use_forms:
-        std::collections::BTreeMap<(u64, u64), crate::desktop::owner_store::DeclarationForm>,
 }
 
 #[cfg_attr(not(feature = "vault"), allow(dead_code))]
@@ -309,7 +337,7 @@ impl UiState {
         let path = crate::desktop::ui_prefs::UiPrefs::path(&data_dir);
         let prefs = crate::desktop::ui_prefs::UiPrefs::load(&path);
         self.sidebar_hidden = prefs.sidebar_hidden;
-        self.get_started_hidden = prefs.get_started_hidden;
+        self.open_folders = prefs.open_folders;
         self.prefs_path = Some(path);
     }
 
@@ -320,15 +348,34 @@ impl UiState {
         if let Some(path) = &self.prefs_path {
             let prefs = crate::desktop::ui_prefs::UiPrefs {
                 sidebar_hidden: self.sidebar_hidden,
-                get_started_hidden: self.get_started_hidden.clone(),
+                open_folders: self.open_folders.clone(),
             };
             let _ = prefs.save(path);
         }
     }
 
-    /// Hide or show the sidebar, and keep the choice.
+    /// Collapse the sidebar to its icons or expand it, and keep the choice.
     pub(crate) fn toggle_sidebar(&mut self) {
         self.sidebar_hidden = !self.sidebar_hidden;
+        self.save_prefs();
+    }
+
+    /// The sidebar button and ⌃⌘S. In a narrow window the sidebar is a rail: the
+    /// button opens it over the list, or closes it. That choice is not kept.
+    pub(crate) fn toggle_sidebar_in(&mut self, narrow: bool) {
+        if narrow {
+            self.sidebar_float = !self.sidebar_float;
+        } else {
+            self.sidebar_float = false;
+            self.toggle_sidebar();
+        }
+    }
+
+    /// Show or hide the subfolders of a folder in the sidebar, and keep the choice.
+    pub(crate) fn toggle_folder(&mut self, uuid: &str) {
+        if !self.open_folders.remove(uuid) {
+            self.open_folders.insert(uuid.to_owned());
+        }
         self.save_prefs();
     }
 }
@@ -347,36 +394,18 @@ pub(crate) enum Sheet {
     Variable,
     #[cfg(feature = "vault")]
     Connector,
+    /// "Connect an Agent": pick the host, then one owner check (ADR 0025 §2).
     #[cfg(feature = "vault")]
     RegisterAgent,
     /// Archive the selected item.
     #[cfg(feature = "vault")]
     ArchiveItem,
+    /// "Disconnect AGENT…".
     #[cfg(feature = "vault")]
     RevokeAgent {
         agent_id: u64,
         name: String,
     },
-    #[cfg(feature = "vault")]
-    ProcessAccess {
-        agent_id: u64,
-        item_id: u64,
-        mode: crate::vault::ExecMode,
-        any_folder: bool,
-    },
-    /// Give one agent access to several credentials (ADR 0012).
-    #[cfg(feature = "vault")]
-    GrantMany {
-        agent_id: u64,
-    },
-    /// Decide an access request of an agent (ADR 0012).
-    #[cfg(feature = "vault")]
-    AccessRequest {
-        request_id: u64,
-    },
-    /// Review one waiting run.
-    #[cfg(feature = "vault")]
-    Approval(u64),
     #[cfg(feature = "vault")]
     ChangePassphrase,
     #[cfg(feature = "vault")]
@@ -392,6 +421,33 @@ pub(crate) enum Sheet {
     /// Remove every paired iPhone and make a new certificate (ADR 0020).
     #[cfg(feature = "vault")]
     ResetCompanion,
+    /// "+" and ⌘N: a new credential from a paste (ADR 0026 §4). A stub for now.
+    #[cfg(feature = "vault")]
+    NewCredential,
+    /// Move a credential to a folder (ADR 0026 §5).
+    #[cfg(feature = "vault")]
+    MoveToFolder {
+        item_id: u64,
+    },
+    /// A new folder in `parent` (`None`: the top level).
+    #[cfg(feature = "vault")]
+    NewFolder {
+        parent: Option<String>,
+    },
+    #[cfg(feature = "vault")]
+    RenameFolder {
+        uuid: String,
+    },
+    /// Delete a folder. Its credentials move to its parent.
+    #[cfg(feature = "vault")]
+    DeleteFolder {
+        uuid: String,
+    },
+    /// Share a credential in shared vaults (ADR 0026 §6). A stub for now.
+    #[cfg(feature = "vault")]
+    Share {
+        item_id: u64,
+    },
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -414,12 +470,17 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         close_sheet_after_check(app);
         let session = &app.owner_ui.session;
         if !session.has_file() || session.is_locked() {
-            // A lock also hides a token that the owner did not dismiss.
+            // A lock also hides a token that the owner did not dismiss, and leaves
+            // Settings: it shows the settings of the open vault.
             app.owner_ui.fresh_token = None;
             app.ui.agent_setup = Default::default();
             app.ui.agent_onboarding = Default::default();
-            app.ui.grant = Default::default();
+            app.ui.agents = Default::default();
+            app.ui.decisions = Default::default();
             app.ui.sheet = None;
+            if app.place == crate::desktop::Place::Settings {
+                app.place = crate::desktop::Place::CREDENTIALS;
+            }
             app.import.forget();
             start::draw(app, ui);
         } else {
@@ -570,19 +631,70 @@ pub(super) fn meta_line(project: &str, service: &str) -> String {
     }
 }
 
-/// The icon and the tile color of a credential kind.
+/// The color of the Postgres tile. A database of an unknown engine gets it too, as in
+/// the mockup.
+const DATABASE_TILE: egui::Color32 = egui::Color32::from_rgb(51, 103, 145);
+
+/// The icon and the tile color of a credential kind, in the colors of the mockup: a
+/// database has the blue Postgres tile and an SSH key the dark gray terminal tile.
 pub(super) fn kind_icon(kind: crate::contracts::CredentialKind) -> (kit::Icon, egui::Color32) {
     use crate::contracts::CredentialKind;
     match kind {
         CredentialKind::ApiKey => (kit::Icon::Key, egui::Color32::from_rgb(255, 149, 0)),
         CredentialKind::Login => (kit::Icon::Person, kit::ACCENT),
-        CredentialKind::SshKey => (kit::Icon::Terminal, egui::Color32::from_rgb(88, 86, 214)),
-        CredentialKind::Database => (kit::Icon::Database, egui::Color32::from_rgb(52, 170, 90)),
+        CredentialKind::SshKey => (kit::Icon::Terminal, egui::Color32::from_rgb(75, 79, 88)),
+        CredentialKind::Database => (kit::Icon::Database, DATABASE_TILE),
         CredentialKind::Custom => (kit::Icon::Asterisk, egui::Color32::from_rgb(142, 142, 147)),
     }
 }
 
-/// The plural section title of a credential kind.
+/// The tile of a credential in a list or a header: the tile of its provider when the
+/// service or the name names a known one, else the tile of its kind.
+pub(super) fn credential_tile(
+    kind: crate::contracts::CredentialKind,
+    service: &str,
+    name: &str,
+) -> kit::Tile {
+    if let Some((_, tile)) = named_provider(service, name) {
+        return tile;
+    }
+    let (icon, color) = kind_icon(kind);
+    kit::Tile::icon(color, icon)
+}
+
+/// The provider that the service or the name of a credential names: its label and its
+/// tile, such as "Stripe" and the purple S. None without a known provider.
+pub(super) fn named_provider(service: &str, name: &str) -> Option<(&'static str, kit::Tile)> {
+    use egui::Color32;
+    const PROVIDERS: [(&str, &str, Color32); 12] = [
+        ("anthropic", "Anthropic", Color32::from_rgb(204, 120, 92)),
+        ("github", "GitHub", Color32::from_rgb(31, 35, 40)),
+        ("stripe", "Stripe", Color32::from_rgb(99, 91, 255)),
+        ("cloudflare", "Cloudflare", Color32::from_rgb(244, 129, 32)),
+        ("fly.io", "Fly.io", Color32::from_rgb(123, 63, 228)),
+        ("openai", "OpenAI", Color32::from_rgb(16, 163, 127)),
+        ("aws", "AWS", Color32::from_rgb(35, 47, 62)),
+        ("amazon", "AWS", Color32::from_rgb(35, 47, 62)),
+        ("slack", "Slack", Color32::from_rgb(74, 21, 75)),
+        ("sentry", "Sentry", Color32::from_rgb(54, 45, 89)),
+        ("resend", "Resend", Color32::from_rgb(17, 17, 17)),
+        ("netflix", "Netflix", Color32::from_rgb(229, 9, 20)),
+    ];
+    let words = format!("{} {}", service.to_lowercase(), name.to_lowercase());
+    if words.contains("postgres") {
+        return Some((
+            "Postgres",
+            kit::Tile::icon(DATABASE_TILE, kit::Icon::Database),
+        ));
+    }
+    PROVIDERS
+        .iter()
+        .find(|(needle, _, _)| words.contains(needle))
+        .map(|(_, provider, color)| (*provider, kit::Tile::letter(*color, provider)))
+}
+
+/// The plural section title of a credential kind, for the demo list.
+#[cfg(not(feature = "vault"))]
 pub(super) fn kind_plural(kind: crate::contracts::CredentialKind) -> &'static str {
     use crate::contracts::CredentialKind;
     match kind {
@@ -620,7 +732,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "vault")]
     use crate::broker::approvals::{OwnerAction, OwnerCheck};
-    use crate::desktop::OwnerView;
+    use crate::desktop::Place;
     use crate::desktop::model::MASKED_VALUE;
     #[cfg(not(feature = "vault"))]
     use crate::desktop::model::REPORTING_ITEM_ID;
@@ -853,52 +965,126 @@ mod tests {
         assert!(text.contains("Open vault"), "{text}");
     }
 
-    /// The heading of each view.
-    fn heading_for(view: OwnerView) -> &'static str {
-        match view {
-            #[cfg(feature = "vault")]
-            OwnerView::Item => "Drawn key",
-            #[cfg(not(feature = "vault"))]
-            OwnerView::Item => "Project A reporting service",
-            other => other.label(),
-        }
+    /// An app with a selected credential in a folder and a synthetic shared vault, and
+    /// each place with two texts that it shows.
+    #[cfg(feature = "vault")]
+    fn app_with_places(dir: &tempfile::TempDir) -> (DesktopApp, Vec<(Place, [&'static str; 2])>) {
+        let (mut app, item) = app_with_item(dir);
+        let folder = folders::create(&mut app, None, "Drawn folder").expect("folder");
+        assert!(folders::move_item(&mut app, item, Some(&folder.uuid)));
+        app.ui.shared_vaults = vec![sidebar::SharedVaultRow {
+            uuid: "drawn-shared".to_owned(),
+            name: "Drawn team".to_owned(),
+            color: kit::ACCENT,
+        }];
+        app.select_item(item.to_string());
+        let places = vec![
+            (Place::CREDENTIALS, ["All credentials", "Drawn key"]),
+            (
+                Place::Folder(Some(folder.uuid)),
+                ["Drawn folder", "Drawn key"],
+            ),
+            (
+                Place::Shared("drawn-shared".to_owned()),
+                ["Drawn team", "No items yet"],
+            ),
+            (Place::Decisions, ["Decisions", "All clear"]),
+            (Place::Agents, ["Agents", "No agents yet"]),
+        ];
+        (app, places)
     }
 
+    /// The demo app, open, with a selected item, and each place with two texts.
+    #[cfg(not(feature = "vault"))]
+    fn app_with_places() -> (DesktopApp, Vec<(Place, [&'static str; 2])>) {
+        let mut app = DesktopApp::new();
+        app.model
+            .unlock()
+            .expect("open vault is not authentication");
+        app.select_item(REPORTING_ITEM_ID.to_owned());
+        let places = vec![
+            (
+                Place::CREDENTIALS,
+                ["All credentials", "Project A reporting service"],
+            ),
+            (Place::Decisions, ["Decisions", "Activity"]),
+            (Place::Agents, ["Agents", "Connect agent"]),
+        ];
+        (app, places)
+    }
+
+    /// Each place draws in three columns at the default and the smallest window size,
+    /// with the sidebar full, collapsed to a rail, and floating in a narrow window; and
+    /// Settings draws as a place, with its sections in the list column.
     #[test]
-    fn every_view_draws_at_default_and_minimum_sizes() {
+    fn every_place_draws_at_default_and_minimum_sizes() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum Sidebar {
+            Full,
+            Collapsed,
+            Float,
+        }
         for size in [DEFAULT_SIZE, MIN_SIZE] {
-            for view in OwnerView::ALL {
+            for sidebar_state in [Sidebar::Full, Sidebar::Collapsed, Sidebar::Float] {
                 #[cfg(feature = "vault")]
                 let dir = tempfile::TempDir::new().expect("temp dir");
                 #[cfg(feature = "vault")]
-                let mut app = app_with_item(&dir).0;
+                let (template, places) = app_with_places(&dir);
                 #[cfg(not(feature = "vault"))]
-                let mut app = {
-                    let mut app = DesktopApp::new();
-                    app.model
-                        .unlock()
-                        .expect("open vault is not authentication");
-                    app.select_item(REPORTING_ITEM_ID.to_owned());
-                    app
-                };
-                app.view = view;
-                let (text, shape_count) = draw_frames(&mut app, size, 3);
-                assert!(shape_count > 0, "{view:?} paints nothing");
-                let heading = heading_for(view);
-                assert!(
-                    text.contains(heading),
-                    "missing {heading} at {size:?}: {text}"
-                );
-                assert_masked(&text);
-                if view == OwnerView::Item {
-                    assert!(text.contains(MASKED_VALUE), "masked value missing: {text}");
+                let (template, places) = app_with_places();
+                let mut app = template;
+                let selected = app.selected_item_id.clone();
+                for (place, expected) in places {
+                    app.place = place.clone();
+                    app.selected_item_id = match place {
+                        Place::Shared(_) => None,
+                        _ => selected.clone(),
+                    };
+                    app.ui.sidebar_hidden = sidebar_state == Sidebar::Collapsed;
+                    app.ui.sidebar_float = sidebar_state == Sidebar::Float;
+                    let (text, shape_count) = draw_frames(&mut app, size, 3);
+                    let at = format!("{place:?} at {size:?}, {sidebar_state:?}");
+                    assert!(shape_count > 0, "{at} paints nothing");
+                    for needle in expected {
+                        assert!(text.contains(needle), "missing {needle} in {at}: {text}");
+                    }
+                    assert_masked(&text);
+                    if place.is_credentials() && app.selected_item_id.is_some() {
+                        assert!(text.contains(MASKED_VALUE), "masked value missing: {text}");
+                    }
+                    // The full sidebar has its section titles; the rail has icons only.
+                    let narrow = size.x < kit::NARROW_WINDOW;
+                    let full = match sidebar_state {
+                        Sidebar::Full => !narrow,
+                        Sidebar::Collapsed => false,
+                        // A wide window has no float: the sidebar is full.
+                        Sidebar::Float => true,
+                    };
+                    assert_eq!(text.contains("Personal"), full, "sidebar in {at}: {text}");
+                    if full {
+                        assert!(text.contains("Shared"), "{at}: {text}");
+                        #[cfg(feature = "vault")]
+                        assert!(text.contains("Drawn folder"), "{at}: {text}");
+                    }
                 }
+                app.place = Place::Settings;
+                let (text, _) = draw_frames(&mut app, size, 3);
+                #[cfg(feature = "vault")]
+                for section in [
+                    "Vault", "Security", "Devices", "Bouncer", "Tools", "Updates",
+                ] {
+                    assert!(text.contains(section), "{section} at {size:?}: {text}");
+                }
+                #[cfg(not(feature = "vault"))]
+                assert!(text.contains("Rules"), "{size:?}: {text}");
+                assert!(!text.contains("Done"), "Settings is no window: {text}");
+                assert_masked(&text);
             }
         }
     }
 
-    /// Goal item P1: the agent page shows the expiry and rotation. Settings shows the
-    /// lifetime. Rotation waits for the owner check (A4), then shows the token once.
+    /// Goal item P1: the agent page shows the expiry of the token and "Reconnect…".
+    /// A new token waits for the owner check (A4), then shows once.
     #[cfg(feature = "vault")]
     #[test]
     fn agent_page_shows_token_expiry_and_rotation() {
@@ -909,32 +1095,31 @@ mod tests {
         let (agent, _token) = app
             .owner_ui
             .session
-            .register_agent("UI agent")
+            .register_agent("Claude Code")
             .expect("register");
-        app.view = OwnerView::Agents;
+        app.place = Place::Agents;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("UI agent"), "{text}");
-        assert!(text.contains("Token valid"), "{text}");
+        assert!(text.contains("Claude Code"), "{text}");
+        assert!(text.contains("This Mac · 0 uses this week"), "{text}");
         app.owner_ui.selected_agent = Some(agent.id);
-        app.ui.set_expanded("agent-advanced-details", true);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Expires"), "{text}");
-        assert!(
-            text.contains(&crate::vault::format_utc(agent.token_expires_at)),
-            "{text}"
-        );
-        assert!(text.contains("Rotate token"), "{text}");
-        assert!(
-            text.contains("Token lifetime: 30 days after issue."),
-            "{text}"
-        );
+        // A valid token is a rare matter, as in the mockup: its date and "Reconnect
+        // with a New Token…" are in the "⋯" menu of the toolbar
+        // (`agents::tests::the_token_line_tells_valid_from_expired`). An expired token
+        // shows on the page with "Reconnect…".
+        assert!(text.contains("Disconnect Claude Code…"), "{text}");
+        assert!(!text.contains("Valid until"), "{text}");
+        assert!(!text.contains("Reconnect…"), "{text}");
 
-        open_settings(&mut app, SettingsTab::Agents);
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Token lifetime"), "{text}");
-        assert!(text.contains("Current lifetime: 30 days."), "{text}");
+        // Settings has no token lifetime (ADR 0025 §3f); the command line sets it.
+        for section in SettingsSection::ALL {
+            open_settings(&mut app, section);
+            let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+            assert!(!text.contains("Current lifetime"), "{section:?}: {text}");
+        }
 
-        app.view = OwnerView::Agents;
+        app.place = Place::Agents;
+        // The command line rotates a token; the sheet saves the settings of the host.
         app.ask_owner(
             OwnerRequest::RotateToken {
                 agent_id: agent.id,
@@ -979,7 +1164,7 @@ mod tests {
     fn passphrase_sheet_asks_for_the_new_passphrase_two_times() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
-        app.view = OwnerView::Settings;
+        app.place = Place::Settings;
         app.ui.sheet = Some(Sheet::ChangePassphrase);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         for label in [
@@ -1044,14 +1229,13 @@ mod tests {
             .expect("restore");
         app.owner_ui.session.unlock(UI_PASS).expect("unlock");
 
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Review after restore"), "{text}");
         assert!(text.contains("Restored key"), "{text}");
-        assert!(text.contains("Needs review"), "{text}");
 
         app.select_item(item.id.to_string());
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Review after restore"), "{text}");
         assert!(text.contains("Confirm settings"), "{text}");
         assert!(text.contains("production, high risk"), "{text}");
         assert_masked(&text);
@@ -1198,8 +1382,8 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
-        // A new vault shows the steps; their first one adds a credential.
-        assert!(text.contains("Get started · 0 of 5"), "{text}");
+        // A new vault shows the two first steps; the first one pastes a credential.
+        assert!(text.contains("Paste your first credential"), "{text}");
         app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         for kind in [
@@ -1421,178 +1605,6 @@ mod tests {
         );
     }
 
-    /// ADR 0012: "see all" waits for the owner check, several credentials get access with
-    /// one check, and an access request shows in Activity until a grant answers it.
-    #[cfg(feature = "vault")]
-    #[test]
-    fn access_model_screens_wait_for_the_owner_check() {
-        use crate::broker::approvals::OwnerAction;
-        use crate::desktop::owner_store::SecretForm;
-        use crate::vault::{EnvDelivery, ExecMode, GrantPlace, RequestState};
-
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let (mut app, first) = app_with_item(&dir);
-        let ctx = egui::Context::default();
-        let mut secrets = SecretForm::default();
-        secrets.token = "ui-second-token-canary".to_owned();
-        let second = app
-            .owner_ui
-            .session
-            .add(
-                &crate::desktop::ItemDraft {
-                    name: "Second key".to_owned(),
-                    ..crate::desktop::ItemDraft::default()
-                },
-                &secrets,
-            )
-            .expect("add")
-            .id;
-        for (item_id, name) in [(first, "FIRST_KEY"), (second, "SECOND_KEY")] {
-            let proof = owner_ok(
-                &app,
-                OwnerAction::BindVariable {
-                    item_id,
-                    field: "token".to_owned(),
-                    env_name: name.to_owned(),
-                    delivery: EnvDelivery::Value,
-                    setup_key: false,
-                },
-            );
-            app.owner_ui
-                .session
-                .set_env_binding(item_id, name, "token", &EnvDelivery::Value, proof)
-                .expect("variable");
-        }
-        let (agent, _token) = app
-            .owner_ui
-            .session
-            .register_agent("Finder")
-            .expect("register");
-        app.view = OwnerView::Agents;
-        app.owner_ui.selected_agent = Some(agent.id);
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        for expected in [
-            "What it can see",
-            "All credentials, without values",
-            "Give access to several credentials",
-        ] {
-            assert!(text.contains(expected), "missing {expected}: {text}");
-        }
-
-        app.ask_owner(
-            OwnerRequest::ShowAllCredentials {
-                agent_id: agent.id,
-                agent_name: agent.name.clone(),
-            },
-            None,
-        );
-        assert!(!app.owner_ui.session.agent_sees_all(agent.id).expect("read"));
-        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
-            .expect("owner check");
-        assert!(app.owner_ui.session.agent_sees_all(agent.id).expect("read"));
-
-        // Two credentials in any folder with one check. They hold the real value, so
-        // the sheet says that each run waits.
-        app.ui.grant = agents::GrantForm {
-            selection: [first, second].into_iter().collect(),
-            any_folder: true,
-            ..agents::GrantForm::default()
-        };
-        app.ui.sheet = Some(Sheet::GrantMany { agent_id: agent.id });
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 2);
-        for expected in [
-            "Give Finder access",
-            "Give access to 2 credentials",
-            "Any folder",
-            "you approve each run with it",
-        ] {
-            assert!(text.contains(expected), "missing {expected}: {text}");
-        }
-        ask_owner_from_sheet(
-            &mut app,
-            OwnerRequest::GrantMany {
-                agent_id: agent.id,
-                item_ids: vec![first, second],
-                place: GrantPlace::AnyFolder,
-                mode: ExecMode::Ask,
-            },
-            &ctx,
-        );
-        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
-            .expect("owner check");
-        draw_frames(&mut app, TALL_SIZE, 1);
-        assert_eq!(app.ui.sheet, None, "the sheet closes after the check");
-        let grants = app.owner_ui.session.exec_grants(agent.id).expect("grants");
-        assert_eq!(grants.len(), 2);
-        assert!(
-            grants
-                .iter()
-                .all(|grant| grant.place == GrantPlace::AnyFolder)
-        );
-
-        // An access request of the agent shows in Activity.
-        app.owner_ui
-            .session
-            .remove_exec_grant(agent.id, second)
-            .expect("remove");
-        let request_id = {
-            let shared = app.owner_ui.session.shared_vault();
-            let mut guard = shared.lock().expect("vault");
-            guard
-                .as_mut()
-                .expect("open")
-                .request_access(agent.id, second, "Run the second job.", "")
-                .expect("request")
-                .0
-        };
-        app.view = OwnerView::Activity;
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Access requests"), "{text}");
-        assert!(text.contains("Finder asks for Second key"), "{text}");
-        assert!(text.contains("Run the second job."), "{text}");
-        assert!(!text.contains("ui-second-token-canary"));
-
-        app.ui.grant = agents::GrantForm {
-            any_folder: true,
-            ..agents::GrantForm::default()
-        };
-        app.ui.sheet = Some(Sheet::AccessRequest { request_id });
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 2);
-        assert!(text.contains("Give access"), "{text}");
-        ask_owner_from_sheet(
-            &mut app,
-            OwnerRequest::GrantRequest {
-                request_id,
-                agent_id: agent.id,
-                item_id: second,
-                agent_name: agent.name.clone(),
-                item_name: "Second key".to_owned(),
-                place: GrantPlace::AnyFolder,
-                mode: ExecMode::Ask,
-            },
-            &ctx,
-        );
-        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
-            .expect("owner check");
-        let requests = app.owner_ui.session.access_requests(false).expect("read");
-        assert_eq!(requests[0].state, RequestState::Granted);
-        assert_eq!(
-            app.owner_ui
-                .session
-                .exec_grants(agent.id)
-                .expect("grants")
-                .len(),
-            2
-        );
-
-        // Turning "see all" off needs no check.
-        app.owner_ui
-            .session
-            .set_agent_sees_all(agent.id, false, None)
-            .expect("off");
-        assert!(!app.owner_ui.session.agent_sees_all(agent.id).expect("read"));
-    }
-
     /// A lock leaves the main window, closes every sheet, and hides a fresh token.
     #[cfg(feature = "vault")]
     #[test]
@@ -1650,7 +1662,7 @@ mod tests {
         app.model
             .approve_once(&waiting.id, None)
             .expect("approve once");
-        app.view = OwnerView::Activity;
+        app.place = Place::Decisions;
 
         let (compact, _) = draw_frames(&mut app, MIN_SIZE, 3);
         assert!(
@@ -1727,20 +1739,20 @@ mod tests {
             .id
     }
 
-    /// The list hides an archived credential until a search or the "Archived" filter.
-    /// A filter by kind and the recency orders work.
+    /// The list hides an archived credential until a search or the "Archived" list
+    /// ("Show archived"), and goes back to all credentials by name.
     #[cfg(feature = "vault")]
     #[test]
-    fn the_list_sorts_filters_and_hides_archived_credentials() {
+    fn the_list_hides_archived_credentials_until_asked() {
         use crate::contracts::CredentialKind;
 
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
-        let alpha = add_named(&mut app, "Alpha key", CredentialKind::ApiKey);
+        add_named(&mut app, "Alpha key", CredentialKind::ApiKey);
         add_named(&mut app, "Beta login", CredentialKind::Login);
         let gamma = add_named(&mut app, "Gamma key", CredentialKind::ApiKey);
         app.owner_ui.session.archive(gamma).expect("archive");
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(
             text.contains("Alpha key") && text.contains("Beta login"),
@@ -1765,30 +1777,14 @@ mod tests {
             "{text}"
         );
 
-        app.ui.credential_filter = items::Filter::Kind(CredentialKind::Login);
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(
-            text.contains("Beta login") && !text.contains("Alpha key"),
-            "{text}"
-        );
-
-        // The newest change goes first.
+        // "Show All" under the search field goes back to all credentials, by name.
+        assert!(text.contains("Show All"), "{text}");
         app.ui.credential_filter = items::Filter::All;
-        app.ui.credential_sort = items::Sort::Changed;
-        let details = app.owner_ui.session.details(alpha).expect("details");
-        let mut draft = details.to_draft();
-        draft.notes = "changed".to_owned();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        app.owner_ui
-            .session
-            .update(alpha, details.revision, &draft, &Default::default())
-            .expect("update");
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         let first = text.find("Alpha key").expect("alpha");
         let second = text.find("Beta login").expect("beta");
         assert!(first < second, "{text}");
-        assert!(text.contains("Recently changed"), "{text}");
-        assert!(text.contains("Changed just now"), "{text}");
+        assert!(!text.contains("Show All"), "{text}");
     }
 
     /// The page of a credential shows custom details (hidden ones masked), the history,
@@ -1831,21 +1827,22 @@ mod tests {
         app.select_item(item.id.to_string());
         app.ui
             .set_expanded(&format!("credential-history-{}", item.id), true);
-        app.ui
-            .set_expanded(&format!("credential-actions-{}", item.id), true);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         for expected in [
             "Account ID",
             "acct_ui",
             "Recovery code",
-            "Add custom detail",
             "History",
             "Added",
             "Agent requests",
             "No agent asked for this credential yet.",
-            "Archive credential…",
         ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        // The rare actions are in the "⋯" menu of the toolbar, not on the page (ADR
+        // 0026 §1).
+        for gone in ["Add custom detail", "More actions", "Archive credential…"] {
+            assert!(!text.contains(gone), "{gone} is on the page: {text}");
         }
         assert!(!text.contains(HIDDEN), "a hidden detail is masked");
         assert_masked(&text);
@@ -1923,9 +1920,9 @@ mod tests {
         app.close_owner_check(None);
 
         draw_events(&mut app, vec![key(Key::F, Modifiers::COMMAND)]);
-        assert_eq!(app.view, OwnerView::Vault);
+        assert!(app.place.is_credentials());
         draw_events(&mut app, vec![key(Key::N, Modifiers::COMMAND)]);
-        assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: false }));
+        assert_eq!(app.ui.sheet, Some(Sheet::NewCredential));
         app.ui.sheet = None;
 
         app.select_item(item_id.to_string());

@@ -16,11 +16,14 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, OwnerProof};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault, shadow};
 use apassy::contracts::CredentialKind;
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
     ActivationAction, CandidateState, Declaration, Environment, ExecMode, Field, ItemDraft,
     NewCandidate, OwnerLabel, RealOutcome, Reversibility, RiskLevel, Scope, SecretValue,
@@ -139,13 +142,44 @@ impl Drop for Fixture {
     }
 }
 
+/// A staging item of the project of the runs (ADR 0025 §3: the item of another project
+/// asks the owner, so the declared project is the folder `project`).
 fn staging() -> Declaration {
     Declaration {
-        project: "demo".to_owned(),
+        project: "project".to_owned(),
         environment: Environment::Staging,
         risk: RiskLevel::Medium,
         scope: Scope::ReadWrite,
         reversibility: Reversibility::Reversible,
+    }
+}
+
+/// ADR 0025 §3: a staging item asks the owner at its first use in the project, before
+/// the model. Shadow mode runs only at the model step, so the agent used the item in the
+/// project before, for each kind of action, and the bouncer allowed it.
+fn seed_history(vault: &mut Vault, item_id: u64, agent_id: u64, project: &std::path::Path) {
+    for action in [
+        ActionKind::Read,
+        ActionKind::Change,
+        ActionKind::Deploy,
+        ActionKind::Delete,
+    ] {
+        vault
+            .record_item_use(&NewItemUse {
+                item_id,
+                agent_id: Some(agent_id),
+                agent_name: "Shadow agent".to_owned(),
+                project_key: project.display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run sh -c ./report.sh".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
     }
 }
 
@@ -197,6 +231,7 @@ fn fixture() -> Fixture {
     vault
         .set_declaration(item.id, &staging())
         .expect("declaration");
+    seed_history(&mut vault, item.id, agent.id, &project);
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = Duration::from_secs(20);
@@ -727,10 +762,7 @@ fn shadow_session_on_synthetic_requests() {
     vault
         .set_env_binding(item.id, "SUPABASE_SERVICE_KEY", "token")
         .expect("binding");
-    let declaration = Declaration {
-        project: "odealo".to_owned(),
-        ..staging()
-    };
+    let declaration = staging();
     vault
         .set_declaration(item.id, &declaration)
         .expect("declaration");
@@ -743,6 +775,14 @@ fn shadow_session_on_synthetic_requests() {
     vault
         .set_exec_grant(agent.id, item.id, &project.display().to_string(), mode)
         .expect("grant");
+    // The upgrade to schema 18 turned an "ask" grant into "Always ask for this agent"
+    // (ADR 0025 §3f). A grant is no authority.
+    if ask_mode {
+        vault
+            .add_agent_exception(agent.id, item.id, ExceptionKind::AlwaysAsk)
+            .expect("always ask");
+    }
+    seed_history(&mut vault, item.id, agent.id, &project);
     let candidate = vault
         .register_candidate(
             &NewCandidate {

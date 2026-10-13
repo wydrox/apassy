@@ -27,13 +27,15 @@ use super::unlock::{
     self, PASSPHRASE_CHANGED_NOTE, TouchIdUnlockError, UnlockMethod, UnlockSetting,
 };
 use super::{BrokerState, DesktopApp};
+use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
-    ApprovalQueue, CheckMethod, FirstUseDeclaration, FirstUseOffer, OwnerAction, OwnerAuthError,
-    OwnerCheck, OwnerGate, OwnerProof, PendingRun, grant_declarations, grant_has_production,
-    shown_path, touch_id_detail,
+    ApprovalQueue, CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof,
+    PendingRun, action_words, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
+use crate::broker::project::Project;
 use crate::native::{AuthCancel, Biometry, CancelOnDrop, NativeHelper};
+use crate::questions::{Choice, RemoteEnvironment};
 use crate::vault::{EnvDelivery, ExecMode, ExecRule, GrantPlace};
 
 /// The result of a poll of a [`Task`].
@@ -87,6 +89,21 @@ pub(crate) fn page_text(text: &str) -> String {
     dialog_cut(clean.trim())
 }
 
+/// The credentials of a question for the dialog: their names, or else the variables.
+fn question_items(run: &PendingRun) -> String {
+    let names: Vec<String> = run
+        .question
+        .items
+        .iter()
+        .map(|item| format!("\"{}\"", page_text(&item.name)))
+        .collect();
+    if names.is_empty() {
+        run.env_names.join(", ")
+    } else {
+        names.join(", ")
+    }
+}
+
 /// At most 64 characters of a username from the browser, for the dialog.
 fn dialog_cut(text: &str) -> String {
     let mut cut: String = text.chars().take(64).collect();
@@ -97,12 +114,9 @@ fn dialog_cut(text: &str) -> String {
 }
 
 /// The decision of a process grant, for the owner check dialog.
-fn decides(mode: ExecMode) -> &'static str {
-    match mode {
-        ExecMode::Ask => "You approve each run.",
-        ExecMode::Bouncer => "The bouncer decides.",
-    }
-}
+/// What a process grant does since ADR 0025: it adds the item to the list of an agent
+/// with "Only these items", and it approves no run. Its mode has no effect.
+const GRANT_EFFECT: &str = "It adds the credential to the list of an agent with \"Only these items\". It approves no run: the bouncer decides each use.";
 
 /// Whether `field` is a custom detail with the label of a one-time password. The value
 /// can also show a setup key: [`DesktopApp::ask_owner`] reads it before the dialog.
@@ -300,15 +314,47 @@ pub enum OwnerRequest {
         name: String,
         delete_login: bool,
     },
+    /// "Allow Once": approve one waiting question, exactly as the owner saw it.
     ApproveRun(PendingRun),
-    /// Approve one run and add one approval to its pattern (ADR 0010).
+    /// Approve one run and add one approval to its pattern (ADR 0010). Only the command
+    /// line asks for it.
     ApproveAndRemember(PendingRun),
-    /// Approve a first use and give the agent access in the folder of the offer, with
-    /// the declarations of the card (ADR 0024).
-    ApproveAndGrant {
+    /// "Allow ACTION in PROJECT" (ADR 0025 §3): approve the question and remember the
+    /// answer for its credentials, the project, and the kind of action, for every agent.
+    ApproveInProject {
         run: PendingRun,
-        offer: FirstUseOffer,
-        declarations: Vec<FirstUseDeclaration>,
+        project: Project,
+        action: ActionKind,
+    },
+    /// "Allow production: ACTION in PROJECT" (ADR 0025 §3b): approve the question and
+    /// allow production for the project and the kind of action.
+    AllowProduction {
+        run: PendingRun,
+        project: Project,
+        action: ActionKind,
+    },
+    /// "Development" on a question about a credential that is production only by default
+    /// (ADR 0025 §3, §5). The bouncer is then less careful with it, so it needs the
+    /// check. The question still waits. "Production" is stricter and needs none.
+    CorrectEnvironment {
+        run_id: u64,
+        agent: String,
+        item_id: u64,
+        name: String,
+        environment: crate::vault::Environment,
+    },
+    /// Answer a suggestion of Decisions (ADR 0025 §5) so that its credential is not
+    /// production: accept "development", choose development instead of production, or
+    /// ignore a raise to production. The bouncer is then less careful, so it needs the
+    /// check. `environment` is what the credential gets.
+    AnswerSuggestion {
+        correction_id: u64,
+        item_id: u64,
+        name: String,
+        answer: crate::vault::agent_items::CorrectionAnswer,
+        /// The environment that the owner chose instead of the proposal.
+        chosen: Option<crate::vault::Environment>,
+        environment: crate::vault::Environment,
     },
     /// Apply a calibrated `task_match` level, in hundredths (ADR 0009 step 3).
     ApplyCalibration {
@@ -395,6 +441,28 @@ pub enum OwnerRequest {
         item_id: u64,
         name: String,
     },
+    /// Set the environment of an item to a value that is not production, as the owner's
+    /// answer (ADR 0025 §4). The bouncer is then less careful, so it needs the check.
+    /// Production is stricter and needs none: the page sets it without this request.
+    SetEnvironment {
+        item_id: u64,
+        name: String,
+        environment: crate::vault::Environment,
+    },
+    /// Turn "Always ask me" off for an item (ADR 0025 §3). Turning it on is stricter and
+    /// needs no check.
+    AlwaysAskOff {
+        item_id: u64,
+        name: String,
+    },
+    /// Remove an exception of an agent for an item (ADR 0025 §3f). It gives authority
+    /// back.
+    RemoveAgentException {
+        agent_id: u64,
+        agent_name: String,
+        item_id: u64,
+        kind: crate::vault::exceptions::ExceptionKind,
+    },
     RotateToken {
         agent_id: u64,
         agent_name: String,
@@ -432,6 +500,35 @@ pub enum OwnerRequest {
         link_id: u64,
         device_name: String,
         public_key: Vec<u8>,
+    },
+    /// Add an iPhone or a Mac to the notifications-only questions team of the vault
+    /// `vault` (plan §A7): the same proof as [`OwnerRequest::ConfirmSyncDevice`] for the
+    /// link exactly as the sheet showed it with its safety words. The `device_name` of an
+    /// iPhone carries its answer key (`questions::device_link`), so the proof covers it,
+    /// and the confirmation writes the row of the iPhone from the keys of the link. The
+    /// device gets the questions and can answer them; it gets no vault.
+    ConfirmQuestionsDevice {
+        vault: String,
+        link_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+    },
+    /// Turn "Send questions through the relay" on (relay-questions-v1): through the relay
+    /// sync team `team_id` of the vault, or through a new notifications-only team on
+    /// `relay_url` (`team_id` `None`, with the team code of the sheet). It opens a new
+    /// channel that can approve runs.
+    EnableRelayQuestions {
+        relay_url: String,
+        team_id: Option<String>,
+    },
+    /// An approving answer of this Mac to the question of another Mac (relay-questions-v1
+    /// section 5.3): `remote_id` is the question in the view of the questions waiter,
+    /// `choice` the answer, and `action` the [`OwnerAction::AnswerRemoteQuestion`] of
+    /// both, as the card showed them.
+    AnswerRemoteQuestion {
+        remote_id: u64,
+        choice: Choice,
+        action: OwnerAction,
     },
 }
 
@@ -590,14 +687,23 @@ impl OwnerRequest {
             },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
-            Self::ApproveAndGrant {
+            Self::ApproveInProject {
                 run,
-                offer,
-                declarations,
-            } => OwnerAction::ApproveAndGrant {
+                project,
+                action,
+            } => OwnerAction::ApproveInProject {
                 run: run.clone(),
-                offer: offer.clone(),
-                declarations: declarations.clone(),
+                project: project.clone(),
+                action: *action,
+            },
+            Self::AllowProduction {
+                run,
+                project,
+                action,
+            } => OwnerAction::AllowProduction {
+                run: run.clone(),
+                project: project.clone(),
+                action: *action,
             },
             Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
             Self::PromoteModel {
@@ -659,7 +765,23 @@ impl OwnerRequest {
             Self::SaveDeclaration { item_id, .. }
             | Self::SaveConnector { item_id, .. }
             | Self::ConfirmReview { item_id }
-            | Self::Unarchive { item_id, .. } => OwnerAction::ChangeItemRules { item_id: *item_id },
+            | Self::Unarchive { item_id, .. }
+            | Self::SetEnvironment { item_id, .. }
+            | Self::CorrectEnvironment { item_id, .. }
+            | Self::AnswerSuggestion { item_id, .. }
+            | Self::AlwaysAskOff { item_id, .. } => {
+                OwnerAction::ChangeItemRules { item_id: *item_id }
+            }
+            Self::RemoveAgentException {
+                agent_id,
+                item_id,
+                kind,
+                ..
+            } => OwnerAction::RemoveAgentException {
+                agent_id: *agent_id,
+                item_id: *item_id,
+                kind: *kind,
+            },
             Self::ConnectAgent {
                 agent_id, show_all, ..
             } => OwnerAction::ConnectAgent {
@@ -693,11 +815,24 @@ impl OwnerRequest {
                 device_name,
                 public_key,
                 ..
+            }
+            | Self::ConfirmQuestionsDevice {
+                link_id,
+                device_name,
+                public_key,
+                ..
             } => OwnerAction::ConfirmSyncDevice {
                 link_id: *link_id,
                 device_name: device_name.clone(),
                 public_key: public_key.clone(),
             },
+            Self::EnableRelayQuestions { relay_url, team_id } => {
+                OwnerAction::EnableRelayQuestions {
+                    relay_url: relay_url.clone(),
+                    team_id: team_id.clone(),
+                }
+            }
+            Self::AnswerRemoteQuestion { action, .. } => action.clone(),
         }
     }
 
@@ -813,39 +948,29 @@ impl OwnerRequest {
                 run.agent,
                 run.command.join(" ")
             ),
-            Self::ApproveAndGrant {
+            Self::ApproveInProject {
                 run,
-                offer,
-                declarations,
+                project,
+                action,
             } => format!(
-                "Give agent \"{}\" access to {} in {} and its subfolders, and approve this run: {}. Apassy saves {}. {}",
+                "Allow {} in \"{}\" for every agent, and approve this run of agent \"{}\": {}. Apassy remembers the answer for {}. A later run of that kind there asks you no question.",
+                action_words(*action),
+                page_text(&project.label),
                 run.agent,
-                offer
-                    .items
-                    .iter()
-                    .map(|item| format!("\"{}\"", item.name))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                shown_path(&offer.folder, 120),
                 run.command.join(" "),
-                grant_declarations(offer, declarations)
-                    .map(|(name, declaration)| match declaration {
-                        Some(declaration) => format!(
-                            "the declaration of \"{name}\": {}, {} risk, {}, {}",
-                            declaration.environment.as_str(),
-                            declaration.risk.as_str(),
-                            declaration.scope.as_str(),
-                            declaration.reversibility.as_str()
-                        ),
-                        None => format!("no declaration for \"{name}\""),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                if grant_has_production(offer, declarations) {
-                    "A production credential still waits for you at each run; the access saves no approval for it. Other runs there that the bouncer finds clean may start without asking."
-                } else {
-                    "Later runs there that the bouncer finds clean may start without asking."
-                }
+                question_items(run)
+            ),
+            Self::AllowProduction {
+                run,
+                project,
+                action,
+            } => format!(
+                "Allow production for \"{}\": {}, for every agent, and approve this run of agent \"{}\": {}. Apassy remembers it for {}. Another kind of action still waits for you.",
+                page_text(&project.label),
+                action_words(*action),
+                run.agent,
+                run.command.join(" "),
+                question_items(run)
             ),
             Self::ApproveAndRemember(run) => format!(
                 "Approve one run of agent \"{}\" and remember its pattern{}: {}",
@@ -872,35 +997,28 @@ impl OwnerRequest {
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
-            Self::SetProcessAccess { place, mode, .. } => format!(
-                "Give the agent process access in {}. {}",
-                place.describe(),
-                decides(*mode)
+            Self::SetProcessAccess { place, .. } => format!(
+                "Save a process grant in {}. {GRANT_EFFECT}",
+                place.describe()
             ),
             Self::GrantMany {
-                item_ids,
-                place,
-                mode,
-                ..
+                item_ids, place, ..
             } => format!(
-                "Give the agent process access to {} credentials in {}. {}",
+                "Save process grants for {} credentials in {}. {GRANT_EFFECT}",
                 item_ids.len(),
-                place.describe(),
-                decides(*mode)
+                place.describe()
             ),
             Self::ShowAllCredentials { agent_name, .. } => format!(
-                "Let {agent_name} see all your credentials without values: names, usernames, hosts, and visible details. It can ask for access to each."
+                "Remove \"Only these items\" from {agent_name}. It sees all your credentials without values: names, usernames, hosts, and visible details. The bouncer decides each use."
             ),
             Self::GrantRequest {
                 agent_name,
                 item_name,
                 place,
-                mode,
                 ..
             } => format!(
-                "Give {agent_name} process access to {item_name} in {}. {}",
-                place.describe(),
-                decides(*mode)
+                "Save a process grant for {agent_name} to {item_name} in {}. {GRANT_EFFECT}",
+                place.describe()
             ),
             Self::SaveRule { .. } => "Save the rule of this process grant.".to_owned(),
             Self::SaveDeclaration { form, .. } => format!(
@@ -938,8 +1056,55 @@ impl OwnerRequest {
                 "Confirm the agent settings of this restored item.".to_owned()
             }
             Self::Unarchive { name, .. } => format!(
-                "Bring \"{name}\" back from the archive. Agents with a grant can use it again."
+                "Bring \"{name}\" back from the archive. Agents can use it again; the bouncer decides each use."
             ),
+            Self::SetEnvironment {
+                name, environment, ..
+            } => format!(
+                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production.",
+                environment.as_str()
+            ),
+            Self::CorrectEnvironment {
+                agent,
+                name,
+                environment,
+                ..
+            } => format!(
+                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production. The question of agent \"{agent}\" still waits for your answer.",
+                environment.as_str()
+            ),
+            Self::AnswerSuggestion {
+                name,
+                answer: crate::vault::agent_items::CorrectionAnswer::Ignored,
+                chosen: None,
+                environment,
+                ..
+            } => format!(
+                "Ignore the suggestion for \"{name}\": it is {} again. The bouncer is less careful with it than with production.",
+                environment.as_str()
+            ),
+            Self::AnswerSuggestion {
+                name, environment, ..
+            } => format!(
+                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production.",
+                environment.as_str()
+            ),
+            Self::AlwaysAskOff { name, .. } => format!(
+                "Turn off \"Always ask me\" for \"{name}\". The bouncer then decides each use."
+            ),
+            Self::RemoveAgentException {
+                agent_name, kind, ..
+            } => match kind {
+                crate::vault::exceptions::ExceptionKind::Never => format!(
+                    "Remove \"Never for {agent_name}\". The bouncer then decides each use by {agent_name}."
+                ),
+                crate::vault::exceptions::ExceptionKind::AlwaysAsk => format!(
+                    "Remove \"Always ask for {agent_name}\". The bouncer then decides each use by {agent_name}."
+                ),
+                crate::vault::exceptions::ExceptionKind::Only => format!(
+                    "Remove this item from the items that {agent_name} may use."
+                ),
+            },
             Self::RotateToken { agent_name, .. } => {
                 format!("Give {agent_name} a new token. The old token stops working.")
             }
@@ -969,7 +1134,67 @@ impl OwnerRequest {
             Self::ConfirmSyncDevice { device_name, .. } => format!(
                 "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
             ),
+            Self::ConfirmQuestionsDevice { device_name, .. } => {
+                let (name, answer_key) =
+                    crate::questions::device_link::split_link_device_name(device_name);
+                if answer_key.is_some() {
+                    format!(
+                        "Add the iPhone \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them with Face ID; Apassy keeps its keys in the vault. It gets no vault and no secret value through the relay."
+                    )
+                } else {
+                    format!(
+                        "Add the Mac \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them after Touch ID on it. It gets no vault and no secret value through the relay."
+                    )
+                }
+            }
+            Self::EnableRelayQuestions {
+                relay_url,
+                team_id: Some(_),
+            } => format!(
+                "Send the questions of this vault through the Apassy relay at {relay_url}. Your other devices of this vault can then answer them, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+            ),
+            Self::EnableRelayQuestions {
+                relay_url,
+                team_id: None,
+            } => format!(
+                "Make a team for the questions of this vault on the Apassy relay at {relay_url}, with the team code. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+            ),
+            Self::AnswerRemoteQuestion { choice, action, .. } => {
+                let (agent, asker) = match action {
+                    OwnerAction::AnswerRemoteQuestion { asker, answer, .. } => (
+                        answer.run().map_or("the agent", |run| run.agent.as_str()),
+                        asker.as_str(),
+                    ),
+                    _ => ("the agent", "another Mac"),
+                };
+                format!(
+                    "Answer \"{}\" to the question of {} on {}. Apassy signs the answer with the key of this Mac and sends it, end-to-end encrypted, through the relay.",
+                    choice_words(choice),
+                    page_text(agent),
+                    page_text(asker)
+                )
+            }
         }
+    }
+}
+
+/// The words of a remote answer for the owner check dialog.
+fn choice_words(choice: &Choice) -> String {
+    match choice {
+        Choice::ApproveOnce => "Allow Once".to_owned(),
+        Choice::ApproveInProject { action, .. } => format!("Allow {}", action_words(*action)),
+        Choice::AllowProduction { action, .. } => {
+            format!("Allow production: {}", action_words(*action))
+        }
+        Choice::CorrectEnvironment {
+            environment: RemoteEnvironment::Development,
+            ..
+        } => "Development".to_owned(),
+        Choice::CorrectEnvironment { .. } => "Production".to_owned(),
+        Choice::Deny => "Deny".to_owned(),
+        Choice::NeverForAgent => "Never".to_owned(),
+        Choice::AlwaysAskForAgent => "Always Ask".to_owned(),
+        Choice::Disconnect => "Disconnect".to_owned(),
     }
 }
 
@@ -1088,6 +1313,9 @@ pub struct OwnerFlows {
     pub(crate) check: Option<CheckDialog>,
     pub(crate) unlock: UnlockState,
     pub(crate) notifications: Option<NotificationCenter>,
+    /// The questions waiter: the questions through the relay (ADR 0025 §3e). It does
+    /// nothing until the open vault has a membership with the purpose `questions`.
+    pub(crate) questions: Option<crate::questions::QuestionsWorker>,
     /// Inbox events that the owner marked as seen. This is not an approval (N4).
     pub(crate) acknowledged: BTreeSet<EventKey>,
     /// A copied one-time code and its clear.
@@ -1154,6 +1382,20 @@ impl DesktopApp {
                 helper,
                 move || repaint.request_repaint(),
             ));
+        }
+        if let Some(approvals) = self.approvals() {
+            let worker = crate::questions::QuestionsWorker::start(
+                approvals,
+                self.owner_ui.session.shared_vault(),
+                self.owner_gate(),
+                crate::questions::QuestionsConfig::default(),
+            );
+            let repaint = ctx.clone();
+            worker.set_on_change(move || repaint.request_repaint());
+            if let Some(center) = &self.owner.notifications {
+                center.set_question_hook(worker.waker());
+            }
+            self.owner.questions = Some(worker);
         }
     }
 
@@ -1358,38 +1600,70 @@ impl DesktopApp {
                     Err(message) => self.set_err(message),
                 }
             }
-            OwnerRequest::ApproveAndGrant {
-                run,
-                offer,
-                declarations,
+            OwnerRequest::ApproveInProject {
+                project, action, ..
             } => {
-                // The same queue path as "Approve once". The broker saves the access after
-                // its second check (ADR 0024). Here the queue only took the answer: the
-                // access is saved when the run starts, and not if that step fails.
+                // The same queue path as "Allow Once". The broker remembers the answer
+                // after its second check (ADR 0025 §3).
                 let result = match self.approvals() {
                     Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
                     None => Err("The broker is not running. Nothing was approved."),
                 };
                 match result {
                     Ok(()) => self.set_ok(format!(
-                        "The run of {} is approved. Apassy saves the access to {} in {} when the run starts; check Agents. {}",
-                        run.agent,
-                        offer
-                            .items
-                            .iter()
-                            .map(|item| item.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        shown_path(&offer.folder, 80),
-                        if grant_has_production(&offer, &declarations) {
-                            "A production credential still asks you at each run."
-                        } else {
-                            "Later clean runs there may start without asking."
-                        }
+                        "Allowed. Apassy remembers {} in {} for all agents.",
+                        action_words(action),
+                        project.label
                     )),
                     Err(message) => self.set_err(message),
                 }
             }
+            OwnerRequest::AllowProduction {
+                project, action, ..
+            } => {
+                let result = match self.approvals() {
+                    Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
+                    None => Err("The broker is not running. Nothing was approved."),
+                };
+                match result {
+                    Ok(()) => self.set_ok(format!(
+                        "Allowed. Production is allowed for {} in {}. Other kinds of action still ask you.",
+                        action_words(action),
+                        project.label
+                    )),
+                    Err(message) => self.set_err(message),
+                }
+            }
+            OwnerRequest::CorrectEnvironment {
+                agent,
+                item_id,
+                name,
+                environment,
+                ..
+            } => match session.correct_environment(item_id, environment, proof) {
+                Ok(()) => self.set_ok(format!(
+                    "{name} is marked as {}. The question of {agent} still waits: allow it or deny it.",
+                    environment.as_str()
+                )),
+                Err(err) => self.set_err(err.message),
+            },
+            OwnerRequest::AnswerSuggestion {
+                correction_id,
+                item_id,
+                name,
+                answer,
+                chosen,
+                environment,
+            } => match session.answer_correction(
+                correction_id,
+                item_id,
+                answer,
+                chosen,
+                Some(proof),
+            ) {
+                Ok(_) => self.set_ok(format!("{name} is {}.", environment.as_str())),
+                Err(err) => self.set_err(err.message),
+            },
             OwnerRequest::ApproveAndRemember(run) => {
                 // The same queue path as "Approve once". The proof names this action.
                 let result = match self.approvals() {
@@ -1428,13 +1702,10 @@ impl DesktopApp {
                 mode,
             } => {
                 let result = session.set_exec_grant(agent_id, item_id, &place, mode, proof);
-                let message = match mode {
-                    ExecMode::Ask => "Process access is saved. You approve each run.",
-                    ExecMode::Bouncer => {
-                        "Process access is saved. The bouncer decides. A risky run waits for you."
-                    }
-                };
-                let _ = self.apply(result, message);
+                let _ = self.apply(
+                    result,
+                    "The process grant is saved. It approves no run: the bouncer decides each use, and asks you in Decisions when it is not sure.",
+                );
             }
             OwnerRequest::GrantMany {
                 agent_id,
@@ -1446,14 +1717,16 @@ impl DesktopApp {
                 let result = session.set_exec_grants(agent_id, &item_ids, &place, mode, proof);
                 let _ = self.apply(
                     result,
-                    &format!("Process access to {count} credentials is saved."),
+                    &format!(
+                        "Process grants for {count} credentials are saved. The bouncer decides each use."
+                    ),
                 );
             }
             OwnerRequest::ShowAllCredentials { agent_id, .. } => {
                 let result = session.set_agent_sees_all(agent_id, true, Some(proof));
                 let _ = self.apply(
                     result,
-                    "The agent sees all credentials without values. It can ask for access.",
+                    "\"Only these items\" is removed. The agent sees all credentials without values, and the bouncer decides each use.",
                 );
             }
             OwnerRequest::GrantRequest {
@@ -1464,7 +1737,12 @@ impl DesktopApp {
                 ..
             } => {
                 let result = session.grant_access_request(request_id, &place, mode, proof);
-                let _ = self.apply(result, &format!("Access to {item_name} is given."));
+                let _ = self.apply(
+                    result,
+                    &format!(
+                        "The process grant for {item_name} is saved, and the request is closed. The bouncer decides each use."
+                    ),
+                );
             }
             OwnerRequest::SaveRule {
                 agent_id,
@@ -1478,6 +1756,10 @@ impl DesktopApp {
                 let result = session.set_declaration(item_id, &form, proof);
                 if self.apply(result, "The declaration is saved.").is_some() {
                     self.owner_ui.declaration_form.stored = true;
+                    // The owner saw and confirmed each value (ADR 0025 §4).
+                    let _ = self.owner_ui.session.with_vault(|vault| {
+                        vault.set_declaration_sources(item_id, &Default::default())
+                    });
                 }
             }
             OwnerRequest::SaveVariable {
@@ -1514,15 +1796,65 @@ impl DesktopApp {
                 let _ = self.apply(
                     result,
                     &format!(
-                        "{name} is back from the archive. Agents with a grant can use it again."
+                        "{name} is back from the archive. Agents can use it again; the bouncer decides each use."
                     ),
                 );
+            }
+            OwnerRequest::SetEnvironment {
+                item_id,
+                name,
+                environment,
+            } => self.complete_set_environment(item_id, &name, environment, proof),
+            OwnerRequest::AlwaysAskOff { item_id, name } => {
+                let action = OwnerAction::ChangeItemRules { item_id };
+                let result = session.with_vault(|vault| {
+                    proof
+                        .check(&action, &vault.epoch())
+                        .map_err(|refusal| refusal.message().to_owned())?;
+                    vault
+                        .set_always_ask(item_id, false)
+                        .map_err(|err| format!("\"Always ask me\" did not change: {err}."))
+                });
+                match result {
+                    Some(Ok(())) => self.set_ok(format!(
+                        "\"Always ask me\" is off for {name}. The bouncer decides each use."
+                    )),
+                    Some(Err(message)) => self.set_err(message),
+                    None => self.set_err("The vault is locked."),
+                }
+            }
+            OwnerRequest::RemoveAgentException {
+                agent_id,
+                agent_name,
+                item_id,
+                kind,
+            } => {
+                let action = OwnerAction::RemoveAgentException {
+                    agent_id,
+                    item_id,
+                    kind,
+                };
+                let result = session.with_vault(|vault| {
+                    proof
+                        .check(&action, &vault.epoch())
+                        .map_err(|refusal| refusal.message().to_owned())?;
+                    vault
+                        .remove_agent_exception(agent_id, item_id, kind)
+                        .map_err(|err| format!("The exception did not change: {err}."))
+                });
+                match result {
+                    Some(Ok(_)) => self.set_ok(format!(
+                        "The exception for {agent_name} is removed. The bouncer decides each use."
+                    )),
+                    Some(Err(message)) => self.set_err(message),
+                    None => self.set_err("The vault is locked."),
+                }
             }
             OwnerRequest::ConfirmReview { item_id } => {
                 let result = session.confirm_review(item_id, proof);
                 let _ = self.apply(
                     result,
-                    "The agent settings are confirmed. Agents with a grant can use the item again.",
+                    "The agent settings are confirmed. Agents can use the item again; the bouncer decides each use.",
                 );
             }
             OwnerRequest::ConnectAgent {
@@ -1570,9 +1902,16 @@ impl DesktopApp {
             OwnerRequest::OpenCliSession => self.open_cli_session(proof),
             OwnerRequest::BindVariables { variables } => self.bind_variables(variables, proof),
             OwnerRequest::PairCompanion { .. } => self.complete_pairing(proof),
-            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. } => {
+            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. }
+            | OwnerRequest::ConfirmQuestionsDevice { vault, link_id, .. } => {
                 self.relay_confirm_link(&vault, link_id, proof);
             }
+            OwnerRequest::EnableRelayQuestions { relay_url, team_id } => {
+                self.questions_enable_with(relay_url, team_id, proof);
+            }
+            OwnerRequest::AnswerRemoteQuestion {
+                remote_id, choice, ..
+            } => self.answer_remote_question(remote_id, choice, Some(proof)),
         }
     }
 
@@ -1603,7 +1942,7 @@ impl DesktopApp {
         if delete_login {
             if selected {
                 self.selected_item_id = None;
-                self.view = super::OwnerView::Vault;
+                self.show_credentials();
             }
             self.pending_delete = false;
             self.set_ok(format!("The login \"{name}\" is deleted with its passkey."));
@@ -1615,6 +1954,43 @@ impl DesktopApp {
             self.set_ok(format!(
                 "The passkey is removed from \"{name}\". The login keeps its password."
             ));
+        }
+    }
+
+    /// Mark the environment of an item as the answer of the owner: only the environment
+    /// and its source "owner" change (ADR 0025 §4). The project of a pasted credential
+    /// stays empty, and the other values and sources stay.
+    fn complete_set_environment(
+        &mut self,
+        item_id: u64,
+        name: &str,
+        environment: crate::vault::Environment,
+        proof: OwnerProof,
+    ) {
+        let action = OwnerAction::ChangeItemRules { item_id };
+        let result = self.owner_ui.session.with_vault(|vault| {
+            proof
+                .check(&action, &vault.epoch())
+                .map_err(|refusal| refusal.message().to_owned())?;
+            vault
+                .set_declaration_environment(item_id, environment)
+                .map_err(|err| format!("The environment did not change: {err}."))
+        });
+        match result {
+            Some(Ok(())) => {
+                self.reload_declaration_form(item_id);
+                self.set_ok(format!("{name} is marked as {}.", environment.as_str()));
+            }
+            Some(Err(message)) => self.set_err(message),
+            None => self.set_err("The vault is locked."),
+        }
+    }
+
+    /// Show the stored declaration of an item in the declaration form.
+    pub(crate) fn reload_declaration_form(&mut self, item_id: u64) {
+        if let Ok(mut form) = self.owner_ui.session.declaration_form(item_id) {
+            form.stored = true;
+            self.owner_ui.declaration_form = form;
         }
     }
 
@@ -1732,6 +2108,8 @@ impl DesktopApp {
         self.expire_platform_check(ctx);
         self.poll_unlock(ctx);
         self.poll_companion(ctx);
+        self.questions_poll(ctx);
+        self.poll_remote_answers(ctx);
         self.owner_ui.session.expire_reveals();
         if let Some(left) = self.owner_ui.session.next_reveal_expiry() {
             ctx.request_repaint_after(left);
@@ -2007,6 +2385,10 @@ impl DesktopApp {
         }
         // A lock stops the iPhone listener at once and drops its key from memory.
         self.stop_companion();
+        // The relay token of the questions goes; their open questions expire on the relay.
+        if let Some(questions) = &self.owner.questions {
+            questions.forget();
+        }
         self.erase_typed_secrets(ctx);
     }
 
@@ -2054,6 +2436,9 @@ impl DesktopApp {
         self.erase_typed_secrets(None);
         if let Some(mut center) = self.owner.notifications.take() {
             center.stop();
+        }
+        if let Some(mut questions) = self.owner.questions.take() {
+            questions.stop();
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();

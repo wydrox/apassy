@@ -203,6 +203,19 @@ pub enum Command {
     /// Bring the Apassy window to the front, for example to unlock. No session.
     Show,
 
+    /// Add the credentials of a pasted text (ADR 0025 §4): a secret, a `KEY=value` line,
+    /// a `.env` file, a URL with credentials, or an `otpauth://` link. The app finds the
+    /// kind, the title, the variable, the provider hosts, and the declaration of each,
+    /// and adds them in one transaction. No owner check: a new credential moves no
+    /// authority. `folder` is a folder path such as `Work/Acme`; `create_folder` makes
+    /// the folders that are missing. `data.items` (type `added`) has one row for each.
+    Add {
+        secret: SecretText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        create_folder: bool,
+    },
     ItemList {
         #[serde(default)]
         query: String,
@@ -477,6 +490,10 @@ pub enum Data {
     Bindings {
         results: Vec<BindingRow>,
     },
+    /// The credentials that [`Command::Add`] added, in order.
+    Added {
+        items: Vec<AddedRow>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +533,22 @@ pub struct ItemRow {
     pub archived: bool,
     /// The environment variable of the item.
     pub variable: Option<String>,
+}
+
+/// One credential that [`Command::Add`] added. It has no secret value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedRow {
+    pub id: u64,
+    pub name: String,
+    pub kind: CredentialKind,
+    /// The variable that programs get, if any.
+    pub variable: Option<String>,
+    pub environment: String,
+    /// The folder path, such as `Work / Acme`. Empty at the top level.
+    #[serde(default)]
+    pub folder: String,
+    /// The result in one line: "Anthropic API key · ANTHROPIC_API_KEY · development".
+    pub summary: String,
 }
 
 /// One variable of a batch binding. `reason` says why it is not bound, and is empty
@@ -716,6 +749,48 @@ mod tests {
         };
         assert_eq!(item.secret.expect("secret").expose(), "sk_test_wire-canary");
         assert_eq!(item.kind, Some(CredentialKind::ApiKey));
+    }
+
+    #[test]
+    fn an_add_round_trips_and_redacts_the_pasted_text() {
+        let request = Request {
+            v: OWNER_WIRE_VERSION,
+            session: None,
+            command: Command::Add {
+                secret: SecretText::new("ANTHROPIC_API_KEY=sk-ant-wire-canary".to_owned()),
+                folder: Some("Work/Acme".to_owned()),
+                create_folder: false,
+            },
+        };
+        assert!(request.command.needs_session());
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("canary"), "{debug}");
+        let line = serde_json::to_string(&request).expect("serialize");
+        assert!(line.contains(r#""cmd":"add""#), "{line}");
+        assert!(!line.contains("create_folder"), "{line}");
+        let back: Request = serde_json::from_str(&line).expect("parse");
+        let Command::Add {
+            secret,
+            folder,
+            create_folder,
+        } = back.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(secret.expose(), "ANTHROPIC_API_KEY=sk-ant-wire-canary");
+        assert_eq!(folder.as_deref(), Some("Work/Acme"));
+        assert!(!create_folder);
+        let minimal: Request =
+            serde_json::from_str(r#"{"v":1,"command":{"cmd":"add","secret":"x"}}"#)
+                .expect("parse a minimal add");
+        assert!(matches!(
+            minimal.command,
+            Command::Add {
+                folder: None,
+                create_folder: false,
+                ..
+            }
+        ));
     }
 
     #[test]

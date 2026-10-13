@@ -1,4 +1,4 @@
-//! Import from 1Password: Settings > General > Import. A sheet with three steps: the path of the
+//! Import from 1Password: Settings > Vault > Import. A sheet with three steps: the path of the
 //! export file, a preview with a switch for each item, and the result.
 //!
 //! The parsed preview holds the secrets of the export in erasing buffers. The app drops
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use super::kit::{self, Font, Icon, Style, Tone};
+use super::kit::{self, Font, Style, Tone};
 use super::{Sheet, close_sheet};
 use crate::contracts::CredentialKind;
 use crate::desktop::DesktopApp;
@@ -193,26 +193,24 @@ fn existing_items(
 
 // ---- Settings section. ----
 
+/// Settings > Vault > Import: one row with "Import…".
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::settings::rows;
+
     let mut open = false;
-    kit::section(
-        ui,
-        Some("Import"),
-        Some(
-            "Apassy reads a 1Password export and shows each item before it adds anything. Agents get no access to imported credentials.",
-        ),
-        |s| {
-            let blue = egui::Color32::from_rgb(10, 132, 255);
-            open = s
-                .nav(
-                    Some((Icon::Key, blue)),
-                    "Import from 1Password…",
-                    Some("From a 1PUX or CSV export file."),
-                    None,
-                )
-                .clicked();
-        },
-    );
+    rows::group(ui, Some("Import"), |g| {
+        g.line(
+            "1Password",
+            Some(rows::value("1PUX or CSV export file")),
+            |ui| {
+                open = kit::small_button(ui, "Import…", Style::Bordered)
+                    .on_hover_text(
+                        "Apassy reads a 1Password export and shows each item before it adds anything. Agents get no access to imported credentials.",
+                    )
+                    .clicked();
+            },
+        );
+    });
     if open {
         app.import.forget();
         app.ui.sheet = Some(Sheet::Import);
@@ -752,10 +750,13 @@ mod tests {
         );
         let ctx = egui::Context::default();
 
-        // Settings > General has the section.
-        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsTab::General);
+        // Settings > Vault has the section.
+        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsSection::Vault);
         let text = frames(&ctx, &mut app, Vec::new());
-        assert!(text.contains("Import from 1Password…"), "{text}");
+        assert!(
+            text.contains("1Password") && text.contains("Import…"),
+            "{text}"
+        );
 
         // Step 1: the path and the hint. A file dropped on the window fills the path.
         app.ui.sheet = Some(Sheet::Import);

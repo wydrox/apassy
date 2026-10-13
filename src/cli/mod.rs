@@ -182,6 +182,7 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
         "logout" => commands::logout(cli, args),
         "lock" => commands::simple(cli, args, Command::Lock),
         "unlock" | "show" | "open" => commands::simple(cli, args, Command::Show),
+        "add" => commands::add(cli, args),
         "item" | "items" | "credential" | "credentials" => commands::item(cli, args),
         "import" => commands::import(cli, args),
         "agent" | "agents" => commands::agent(cli, args),
@@ -234,6 +235,7 @@ fn report(failure: Failure, json: bool) -> i32 {
 /// The help of one command group.
 fn help_for(topic: Option<&str>) -> Option<&'static str> {
     Some(match topic? {
+        "add" => commands::ADD_HELP,
         "item" | "items" | "credential" | "credentials" => commands::ITEM_HELP,
         "import" => commands::IMPORT_HELP,
         "agent" | "agents" => commands::AGENT_HELP,
@@ -267,6 +269,8 @@ Session (the window must run):
   unlock                      Bring the window to the front to unlock it.
 
 Credentials:
+  add [--folder PATH]         Paste a secret, a KEY=value line, a .env file, a URL, or an
+                              otpauth:// link. Apassy finds the rest: apassy add < .env
   item list|show|add|edit|delete|archive|unarchive|history
   item env|declare|connector|review       Agent settings of a credential.
   import FILE                 Add credentials from a .env file, or a 1Password or Bitwarden CSV export.
@@ -276,9 +280,9 @@ Agents and access:
   setup claude|codex          Register an agent and write the MCP server and the prompt hook.
   setup browser               Connect the browser extension. Each fill asks for Touch ID.
   grant set|remove|rule|operation
-  request list|grant|deny     Access requests of agents.
+  request list|grant|deny     Notes of agents from apassy_request_access.
   runs list|approve|deny      Runs that wait for you.
-  pattern list|remove         Remembered approvals.
+  pattern list|remove         Remembered patterns (apassy runs approve --remember).
 
 History and vault:
   activity                    Agent requests and decisions.

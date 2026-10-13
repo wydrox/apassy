@@ -90,10 +90,10 @@ fn can_connect(port: u16) -> bool {
     .is_ok()
 }
 
-/// The text of Settings > Notifications after three frames, and the output commands of
+/// The text of Settings > Devices after three frames, and the output commands of
 /// the last one (a copy to the pasteboard would be one).
 fn settings_frame(ctx: &egui::Context, app: &mut DesktopApp) -> (String, Vec<OutputCommand>) {
-    super::open_settings(app, super::SettingsTab::Notifications);
+    super::open_settings(app, super::SettingsSection::Devices);
     let mut text = String::new();
     let mut commands = Vec::new();
     for _ in 0..3 {
@@ -456,33 +456,26 @@ fn without_the_broker_the_listener_does_not_start() {
 #[test]
 fn the_settings_page_shows_the_companion() {
     let dir = TempDir::new().expect("temp dir");
-    let (mut app, port) = app_with_broker(&dir);
+    let (mut app, _) = app_with_broker(&dir);
     let ctx = egui::Context::default();
     let (text, _) = settings_frame(&ctx, &mut app);
     for expected in [
-        "iPhone companion",
+        "iPhone",
         "Allow the iPhone app on this network",
-        "This works only while the vault is unlocked.",
-        "Off. Nothing listens on the network.",
-        "Paired iPhones",
-        "No iPhone is paired.",
-        "Reset pairing…",
+        "It never shows a secret value",
+        "Pair an iPhone",
+        "Pair…",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
-    assert!(!text.contains("Pair an iPhone"), "off: no pairing: {text}");
+    // No paired iPhone: nothing to reset.
+    assert!(!text.contains("Reset pairing…"), "{text}");
 
     app.set_companion_on(true);
     let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(
-        text.contains(&format!("Listening on port {port}")),
-        "{text}"
-    );
+    // A listener that works needs no status row.
+    assert!(!text.contains("Listening on port"), "{text}");
     assert!(text.contains("Pair an iPhone"), "{text}");
-    assert!(
-        text.contains("Open the Apassy app on the iPhone and scan the code."),
-        "{text}"
-    );
 }
 
 #[test]

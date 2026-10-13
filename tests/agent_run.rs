@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{
     ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
@@ -20,6 +21,9 @@ use apassy::broker::http::TlsClient;
 use apassy::broker::model_server::ModelGate;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
+use apassy::sync::{FolderSync, SyncConfig};
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
     ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, ItemDraft,
     Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultErrorKind,
@@ -101,11 +105,21 @@ fn fixture_with(
 }
 
 fn run(fx: &Fixture, cwd: &std::path::Path, script: &str) -> WireResponse {
+    send_run(&fx.socket, &fx.token, fx.item_id, cwd, script)
+}
+
+fn send_run(
+    socket: &std::path::Path,
+    token: &str,
+    item_id: u64,
+    cwd: &std::path::Path,
+    script: &str,
+) -> WireResponse {
     client::send(
-        &fx.socket,
-        &fx.token,
+        socket,
+        token,
         Action::Run {
-            items: vec![fx.item_id],
+            items: vec![item_id],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
             purpose: "Test the process mode.".into(),
@@ -114,6 +128,16 @@ fn run(fx: &Fixture, cwd: &std::path::Path, script: &str) -> WireResponse {
         },
     )
     .expect("broker answer")
+}
+
+/// [`run`] in the project on another thread.
+fn spawn_run(fx: &Fixture, script: &str) -> std::thread::JoinHandle<WireResponse> {
+    let socket = fx.socket.clone();
+    let token = fx.token.clone();
+    let item_id = fx.item_id;
+    let cwd = fx.project.clone();
+    let script = script.to_owned();
+    std::thread::spawn(move || send_run(&socket, &token, item_id, &cwd, &script))
 }
 
 fn code(response: &WireResponse) -> &str {
@@ -502,14 +526,16 @@ fn a_run_result_stays_in_the_vault_of_the_run() {
     );
 }
 
+/// ADR 0025: a grant is no authority. Outside its folder the grant gives nothing: the
+/// item has no declaration and no history there, so the run waits for the owner.
 #[test]
 fn working_directory_must_stay_in_the_project() {
-    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
-    assert_eq!(code(&run(&fx, fx.dir.path(), "true")), "outside_project");
+    let fx = fixture(ExecMode::Bouncer, Duration::from_millis(500));
+    assert_eq!(code(&run(&fx, fx.dir.path(), "true")), "approval_timeout");
 
     let escape = fx.project.join("escape");
     std::os::unix::fs::symlink(fx.dir.path(), &escape).expect("symlink");
-    assert_eq!(code(&run(&fx, &escape, "true")), "outside_project");
+    assert_eq!(code(&run(&fx, &escape, "true")), "approval_timeout");
 
     assert_eq!(
         code(&run(&fx, &fx.project.join("missing"), "true")),
@@ -676,14 +702,9 @@ fn a_changed_process_binding_invalidates_a_pending_approval() {
 
 #[test]
 fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
-    for change in [
-        "mode",
-        "place",
-        "rule",
-        "declaration",
-        "provider",
-        "revision",
-    ] {
+    // A process grant is no authority any more (ADR 0025): a change of its mode, place,
+    // or rule changes no decision. An exception of the agent does.
+    for change in ["exception", "declaration", "provider", "revision"] {
         let fx = fixture(ExecMode::Ask, Duration::from_secs(5));
         if change == "provider" {
             with_vault(&fx, |vault| {
@@ -691,7 +712,7 @@ fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
                     .save_declaration(
                         fx.item_id,
                         &Declaration {
-                            project: "Demo project".into(),
+                            project: "project".into(),
                             environment: Environment::Development,
                             risk: RiskLevel::Low,
                             scope: Scope::ReadOnly,
@@ -706,37 +727,13 @@ fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
         let vault = Arc::clone(&fx.vault);
         let item_id = fx.item_id;
         let agent_id = fx.agent_id;
-        let project = fx.project.clone();
         decide_later(&fx, true, move || {
             let mut guard = vault.lock().expect("vault");
             let vault = guard.as_mut().expect("open");
             match change {
-                "mode" => vault
-                    .set_exec_grant(
-                        agent_id,
-                        item_id,
-                        &project.display().to_string(),
-                        ExecMode::Bouncer,
-                    )
-                    .expect("mode"),
-                "place" => vault
-                    .set_exec_grants(
-                        agent_id,
-                        &[item_id],
-                        &apassy::vault::GrantPlace::AnyFolder,
-                        ExecMode::Ask,
-                    )
-                    .expect("place"),
-                "rule" => vault
-                    .set_exec_rule(
-                        agent_id,
-                        item_id,
-                        ExecRule {
-                            instruction: "Use this credential only for the revised task.".into(),
-                            ..ExecRule::default()
-                        },
-                    )
-                    .expect("rule"),
+                "exception" => vault
+                    .add_agent_exception(agent_id, item_id, ExceptionKind::AlwaysAsk)
+                    .expect("exception"),
                 "declaration" => vault
                     .set_declaration(
                         item_id,
@@ -800,6 +797,255 @@ fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
     }
 }
 
+/// The value that the second Mac saves. A run must never show it either.
+const MERGED_SECRET: &str = "FAKE-merged-secret-7730-canary";
+
+/// The fixture vault synced through a temporary folder (ADR 0014), and a second Mac that
+/// adopted it. The broker keeps the vault of the first Mac.
+struct SecondMac {
+    _root: TempDir,
+    /// The sync of the vault of the broker.
+    here: FolderSync,
+    there: FolderSync,
+    vault: Vault,
+}
+
+impl SecondMac {
+    fn item_id(&self) -> u64 {
+        self.vault
+            .search("")
+            .expect("search")
+            .into_iter()
+            .find(|summary| summary.title == "Demo API key")
+            .expect("synced credential")
+            .id
+    }
+
+    /// Change the credential on the second Mac and push it.
+    fn change(&mut self, change: &str) {
+        let item_id = self.item_id();
+        match change {
+            "value" => {
+                let revision = self.vault.details(item_id).expect("item").summary.revision;
+                self.vault
+                    .update(
+                        item_id,
+                        revision,
+                        ItemDraft {
+                            title: "Demo API key".into(),
+                            kind: CredentialKind::ApiKey,
+                            notes: String::new(),
+                            tags: Vec::new(),
+                            fields: vec![Field {
+                                name: "token".into(),
+                                value: SecretValue::new(MERGED_SECRET.into()),
+                                secret: true,
+                            }],
+                        },
+                    )
+                    .expect("new value");
+            }
+            "hosts" => self
+                .vault
+                .set_env_binding_with(
+                    item_id,
+                    ENV_NAME,
+                    "token",
+                    &EnvDelivery::Placeholder(vec![
+                        "api.stripe.invalid".into(),
+                        "collector.example.invalid".into(),
+                    ]),
+                )
+                .expect("wider hosts"),
+            _ => unreachable!(),
+        }
+        assert!(
+            self.there.sync(&mut self.vault).expect("sync b").pushed,
+            "{change}"
+        );
+    }
+}
+
+fn synced(fx: &Fixture) -> SecondMac {
+    let root = TempDir::new().expect("temp dir");
+    let service = root.path().join("Dropbox");
+    std::fs::create_dir_all(&service).expect("sync service folder");
+    let folder = service.join("Apassy");
+    let here = FolderSync::new(SyncConfig::in_data_dir(
+        fx.dir.path(),
+        &fx.dir.path().join("vault.db"),
+        &folder,
+        "vault",
+    ));
+    let file = with_vault(fx, |vault| {
+        here.enable(vault, "Personal").expect("enable").file_name
+    });
+    let data = root.path().join("mac-b").join("Apassy");
+    std::fs::create_dir_all(&data).expect("data dir");
+    let there = FolderSync::new(SyncConfig::in_data_dir(
+        &data,
+        &data.join("vault.db"),
+        &folder,
+        "vault",
+    ));
+    let (mut vault, _) = there.adopt(&file, PASS).expect("adopt");
+    vault.unlock(PASS).expect("unlock b");
+    SecondMac {
+        _root: root,
+        here,
+        there,
+        vault,
+    }
+}
+
+/// The first waiting run other than `not`.
+fn next_pending(fx: &Fixture, not: Option<u64>) -> PendingRun {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(run) = fx
+            .broker
+            .approvals()
+            .pending()
+            .into_iter()
+            .find(|run| Some(run.id) != not)
+        {
+            return run;
+        }
+        assert!(Instant::now() < deadline, "no waiting run");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn no_merged_secret(value: &impl std::fmt::Debug) {
+    no_secret(value);
+    let text = format!("{value:?}");
+    assert!(
+        !text.contains(MERGED_SECRET),
+        "merged secret leaked: {text}"
+    );
+}
+
+/// ADR 0014 §6: the worker syncs while a run waits for the owner. A merge of a change
+/// from another Mac (a new value, or wider hosts) after the question showed makes the
+/// owner's approval of that question refuse the run: the run never starts with a
+/// version that the owner did not see.
+#[test]
+fn a_merged_change_from_another_mac_refuses_a_waiting_run() {
+    for change in ["value", "hosts"] {
+        let fx = fixture(ExecMode::Ask, Duration::from_secs(10));
+        with_vault(&fx, |vault| {
+            vault
+                .set_env_binding_with(
+                    fx.item_id,
+                    ENV_NAME,
+                    "token",
+                    &EnvDelivery::Placeholder(vec!["api.stripe.invalid".into()]),
+                )
+                .expect("placeholder");
+        });
+        let mut mac_b = synced(&fx);
+        mac_b.change(change);
+        let here = mac_b.here.clone();
+        let vault = Arc::clone(&fx.vault);
+        // The owner checks the card as it shows, then the merge comes, then the answer.
+        decide_later(&fx, true, move || {
+            let mut guard = vault.lock().expect("vault");
+            let outcome = here
+                .sync(guard.as_mut().expect("open"))
+                .expect("merge on this Mac");
+            assert!(outcome.merge.is_some(), "{outcome:?}");
+        });
+        let response = run(
+            &fx,
+            &fx.project,
+            "touch command-started; echo \"$DEMO_API_KEY\"",
+        );
+        assert_eq!(
+            code(&response),
+            "authorization_changed",
+            "{change}: {response:?}"
+        );
+        no_merged_secret(&response);
+        assert!(!fx.project.join("command-started").exists(), "{change}");
+        assert_eq!(
+            with_vault(&fx, |v| v.runs_in_last_hour(fx.agent_id, fx.item_id)).expect("run count"),
+            0
+        );
+        // The merge took the change of the other Mac.
+        with_vault(&fx, |vault| {
+            let binding = vault
+                .env_binding(fx.item_id)
+                .expect("binding")
+                .expect("some");
+            match change {
+                "value" => assert_eq!(
+                    vault.reveal(fx.item_id, "token").expect("reveal").expose(),
+                    MERGED_SECRET
+                ),
+                _ => assert_eq!(
+                    binding.delivery,
+                    EnvDelivery::Placeholder(vec![
+                        "api.stripe.invalid".into(),
+                        "collector.example.invalid".into(),
+                    ])
+                ),
+            }
+        });
+    }
+}
+
+/// The same request again after a merge (the agent's host ended the first call) does
+/// not join the question that showed before the merge. That question ends, and its
+/// approval does nothing. The new call asks again, and only the new card starts the run.
+#[test]
+fn the_same_request_after_a_merged_change_asks_again() {
+    let fx = fixture(ExecMode::Ask, Duration::from_secs(20));
+    let mut mac_b = synced(&fx);
+    mac_b.change("value");
+    let script = "touch command-started; echo len=${#DEMO_API_KEY}; echo \"$DEMO_API_KEY\"";
+
+    let first = spawn_run(&fx, script);
+    let old = next_pending(&fx, None);
+    let old_card = owner_check(&fx.vault, old.clone());
+    with_vault(&fx, |vault| {
+        let outcome = mac_b.here.sync(vault).expect("merge on this Mac");
+        assert!(outcome.merge.is_some(), "{outcome:?}");
+    });
+    let second = spawn_run(&fx, script);
+    let response = first.join().expect("first call");
+    assert_eq!(code(&response), "question_waiting", "{response:?}");
+    no_merged_secret(&response);
+
+    let new = next_pending(&fx, Some(old.id));
+    assert_eq!(
+        fx.broker.approvals().pending().len(),
+        1,
+        "the old card ended"
+    );
+    assert_eq!(
+        fx.broker.approvals().approve(old_card),
+        Err(ApprovalRefusal::NotWaiting)
+    );
+    assert!(!fx.project.join("command-started").exists());
+
+    fx.broker
+        .approvals()
+        .approve(owner_check(&fx.vault, new))
+        .expect("approve the new card");
+    let response = second.join().expect("second call");
+    assert!(response.ok, "{response:?}");
+    no_merged_secret(&response);
+    let stdout = response.result.expect("result")["stdout"]
+        .as_str()
+        .expect("stdout")
+        .to_owned();
+    assert!(
+        stdout.contains(&format!("len={}", MERGED_SECRET.len())),
+        "{stdout}"
+    );
+    assert!(stdout.contains(&format!("[apassy:{ENV_NAME}]")), "{stdout}");
+}
+
 struct ChangedBindingGate {
     target: Mutex<Option<(SharedVault, u64)>>,
 }
@@ -847,7 +1093,7 @@ fn a_changed_binding_invalidates_a_model_decision_without_an_owner_prompt() {
             .set_declaration(
                 fx.item_id,
                 &Declaration {
-                    project: "Demo project".into(),
+                    project: "project".into(),
                     environment: Environment::Development,
                     risk: RiskLevel::Low,
                     scope: Scope::ReadOnly,
@@ -1154,7 +1400,7 @@ fn restore_needs_owner_review_before_runs() {
         v.set_declaration(
             fx.item_id,
             &Declaration {
-                project: "demo".to_owned(),
+                project: "project".to_owned(),
                 environment: Environment::Staging,
                 risk: RiskLevel::Medium,
                 scope: Scope::ReadWrite,
@@ -1223,6 +1469,26 @@ fn restore_needs_owner_review_before_runs() {
             ExecMode::Bouncer,
         )
         .expect("grant");
+    // ADR 0025 §3: the model decides for a staging item that this agent used in the
+    // project before.
+    for action in [ActionKind::Read, ActionKind::Change] {
+        restored
+            .record_item_use(&NewItemUse {
+                item_id: fx.item_id,
+                agent_id: Some(agent.id),
+                agent_name: "Run agent".to_owned(),
+                project_key: fx.project.display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run echo".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
+    }
     let token = token.expose().to_owned();
     let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
     let bouncer = common::fake_bouncer(&[]);

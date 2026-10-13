@@ -178,6 +178,12 @@ pub enum DecidedBy {
     Owner,
     /// The request waited, and the owner did not answer in time.
     NoAnswer,
+    /// A remembered answer of the owner for the items, the project, and the kind of
+    /// action allowed the request without a question (ADR 0025 §3). The owner did not
+    /// see this request, so it is no owner label for a fine-tune or a calibration. The
+    /// log stores it as `owner` with `asked = 0`: the check of the schema 7 column has
+    /// no `answer`, and no other entry has this pair.
+    Answer,
 }
 
 impl DecidedBy {
@@ -188,15 +194,26 @@ impl DecidedBy {
             Self::Pattern => "pattern",
             Self::Owner => "owner",
             Self::NoAnswer => "no_answer",
+            Self::Answer => "answer",
         }
     }
 
-    fn parse(text: &str) -> VaultResult<Self> {
+    /// The value of the `decided_by` column. See [`DecidedBy::Answer`].
+    fn stored(self) -> &'static str {
+        match self {
+            Self::Answer => Self::Owner.as_str(),
+            other => other.as_str(),
+        }
+    }
+
+    /// The value of the `decided_by` column with the `asked` column.
+    fn parse(text: &str, asked: bool) -> VaultResult<Self> {
         match text {
             "rule" => Ok(Self::Rule),
             "model" => Ok(Self::Model),
             "pattern" => Ok(Self::Pattern),
-            "owner" => Ok(Self::Owner),
+            "owner" if asked => Ok(Self::Owner),
+            "owner" | "answer" => Ok(Self::Answer),
             "no_answer" => Ok(Self::NoAnswer),
             _ => Err(err(VaultErrorKind::Storage)),
         }
@@ -512,9 +529,9 @@ impl Vault {
                 Value::Object(facts).to_string(),
                 mask(&entry.pattern, MAX_COMMAND_BYTES),
                 entry.grant_asks,
-                entry.asked,
+                entry.asked && entry.decided_by != DecidedBy::Answer,
                 entry.decision.as_str(),
-                entry.decided_by.as_str(),
+                entry.decided_by.stored(),
                 entry.remembered,
                 cut(&entry.policy, MAX_TEXT_BYTES),
                 mask(&entry.note, MAX_NOTE_BYTES),
@@ -858,7 +875,7 @@ impl Vault {
 
     /// The values to mask: each secret field, and each setup key of a one-time password
     /// that an older Apassy stored as a plain field.
-    fn secret_values(&self, items: &[u64]) -> VaultResult<Vec<String>> {
+    pub(super) fn secret_values(&self, items: &[u64]) -> VaultResult<Vec<String>> {
         let conn = self.conn_ref()?;
         let mut stmt = conn
             .prepare("SELECT name, value, secret FROM item_field WHERE item_id = ?1")
@@ -1200,7 +1217,7 @@ fn decision_from(row: DecisionRow) -> VaultResult<DecisionRecord> {
             grant_asks: grant_asks != 0,
             asked: asked != 0,
             decision: LoggedDecision::parse(&decision)?,
-            decided_by: DecidedBy::parse(&decided_by)?,
+            decided_by: DecidedBy::parse(&decided_by, asked != 0)?,
             remembered: remembered != 0,
             policy,
             note,
@@ -1268,6 +1285,7 @@ fn export_line(entry: &DecisionEntry) -> Value {
         "model_facts": facts,
         "decision": entry.decision.as_str(),
         "decided_by": entry.decided_by.as_str(),
+        "asked": entry.asked,
         "remembered": entry.remembered,
     });
     if let (Some(model), Some(line)) = (entry.model_version(), line.as_object_mut()) {
@@ -1283,7 +1301,9 @@ fn rfc3339(unix: u64) -> String {
     format!("{}Z", text.replacen(' ', "T", 1))
 }
 
-fn mask_values(text: &str, values: &[String]) -> String {
+/// `text` with each of `values` replaced by the mask. The use log and the interaction
+/// count (`super::usage`) mask their text with it too.
+pub(super) fn mask_values(text: &str, values: &[String]) -> String {
     let mut out = text.to_owned();
     for value in values {
         if out.contains(value.as_str()) {

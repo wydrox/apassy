@@ -1,13 +1,13 @@
-//! Settings > About > Updates, and the banner of a ready update (ADR 0015).
+//! Settings > Updates, and the banner of a ready update (ADR 0015).
 
 use eframe::egui;
 
 use super::kit::{self, Font, Style, Tone};
 use super::timeline;
+use crate::desktop::DesktopApp;
 use crate::desktop::update::{
-    CHANGELOG_URL, DOWNLOAD_PAGE_URL, Phase, StagedKind, UpdateView, open,
+    CHANGELOG_URL, DOWNLOAD_PAGE_URL, Phase, StagedKind, UpdateView, image_file, open,
 };
-use crate::desktop::{DesktopApp, OwnerView};
 
 /// What the owner clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,63 +21,60 @@ enum Action {
     HideBanner,
 }
 
-const FOOTER: &str = "Apassy downloads a new version from apassy.wyderka.cc. It installs it only when Apple notarized it and it is signed by the same Developer ID team as this copy. It never installs an older version.";
+const FOOTER: &str =
+    "Apassy installs only a newer version that Apple notarized and the Apassy team signed.";
 const LINUX_NOTE: &str = "Updates are available only for the macOS app. On Linux, build the new version from the source.";
 
-/// The Updates section of Settings.
+/// Settings > Updates: the version with "Check now", the state with its action, the two
+/// switches, and "What's new in Apassy".
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::settings::rows;
+
     let view = app.updates.view();
     let build = app.updates.build().label();
     if !view.supported {
-        kit::section(ui, Some("Updates"), Some(LINUX_NOTE), |s| {
-            s.labeled(
-                "Version",
-                kit::text(build, Font::Body).color(kit::SECONDARY),
-            );
+        rows::section(ui, Some("Updates"), Some(LINUX_NOTE), |g| {
+            g.line("Version", Some(rows::value(build)), |_| {});
         });
         return;
     }
     let mut auto_check = view.auto_check;
     let mut auto_install = view.auto_install;
     let mut action = None;
-    kit::section(ui, Some("Updates"), Some(FOOTER), |s| {
-        s.labeled(
-            "Version",
-            kit::text(build, Font::Body).color(kit::SECONDARY),
-        );
-        s.toggle(
-            "Check for updates automatically",
-            Some("At the start of Apassy and every 6 hours."),
-            &mut auto_check,
-        );
-        s.toggle(
-            "Download and install automatically",
-            Some("A new version installs when you quit Apassy."),
-            &mut auto_install,
-        );
-        s.row(|ui| status(&view, ui, &mut action));
-        if let Some(report) = &view.last_install {
-            s.row(|ui| {
-                let tone = if report.ok {
-                    Tone::Good
-                } else {
-                    Tone::Critical
-                };
-                let when = timeline::relative_time(report.at, timeline::now());
-                kit::tone_note(
-                    ui,
-                    format!("Last install, {when}: {}", report.message),
-                    tone,
-                );
+    let busy = matches!(
+        view.phase,
+        Phase::Checking | Phase::Downloading { .. } | Phase::Verifying { .. }
+    );
+    rows::section(ui, Some("Updates"), Some(FOOTER), |g| {
+        g.line("Version", Some(rows::value(build)), |ui| {
+            ui.add_enabled_ui(!busy && view.running, |ui| {
+                if kit::small_button(ui, "Check now", Style::Bordered).clicked() {
+                    action = Some(Action::CheckNow);
+                }
             });
+        });
+        g.row(|ui| status(&view, ui, &mut action));
+        g.toggle("Check for updates automatically", None, &mut auto_check)
+            .on_hover_text("At the start of Apassy and every 6 hours.");
+        g.toggle(
+            "Download and install automatically",
+            None,
+            &mut auto_install,
+        )
+        .on_hover_text("A new version installs when you quit Apassy.");
+        if let Some(report) = &view.last_install {
+            let tone = if report.ok {
+                Tone::Good
+            } else {
+                Tone::Critical
+            };
+            let when = timeline::relative_time(report.at, timeline::now());
+            g.tone_row(
+                format!("Last install, {when}: {}", report.message),
+                tone.text(),
+            );
         }
-        // A whole-row link, as "New vault…" in Settings > General: its text lines up
-        // with the other rows.
-        let changelog = s
-            .clickable_row("What's new in Apassy", |ui| {
-                ui.label(kit::text("What's new in Apassy", Font::Body).color(kit::ACCENT_TEXT));
-            })
-            .on_hover_text(CHANGELOG_URL);
+        let changelog = g.link("What's new in Apassy").on_hover_text(CHANGELOG_URL);
         if changelog.clicked() {
             action = Some(Action::OpenChangelog);
         }
@@ -93,12 +90,10 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The state line, its buttons, and "Check now".
+/// The state line with the last check and its action, and its notes.
 fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
-    let busy = matches!(
-        view.phase,
-        Phase::Checking | Phase::Downloading { .. } | Phase::Verifying { .. }
-    );
+    use super::settings::rows;
+
     let (line, tone) = match &view.phase {
         Phase::Idle => (
             view.last_result
@@ -138,29 +133,32 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
         },
         Phase::Error(_) => ("The last check failed.".to_owned(), Tone::Critical),
     };
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            ui.vertical(|ui| {
-                ui.label(kit::text(line, Font::Body).color(tone.text()));
-                let checked = view.last_check.map_or_else(
-                    || "Last check: never".to_owned(),
-                    |at| {
-                        format!(
-                            "Last check: {}",
-                            timeline::relative_time(at, timeline::now())
-                        )
-                    },
-                );
-                kit::note(ui, checked);
-            });
+    let checked = view.last_check.map_or_else(
+        || "Last check: never".to_owned(),
+        |at| {
+            format!(
+                "Last check: {}",
+                timeline::relative_time(at, timeline::now())
+            )
         },
+    );
+    let color = if tone == Tone::Neutral {
+        kit::LABEL
+    } else {
+        tone.text()
+    };
+    rows::one_line(
+        ui,
+        kit::text(line, Font::Body).color(color).into(),
+        Some(rows::value(checked)),
         |ui| {
-            ui.add_enabled_ui(!busy && view.running, |ui| {
-                if kit::small_button(ui, "Check now", Style::Bordered).clicked() {
-                    *action = Some(Action::CheckNow);
-                }
-            });
+            if let Some((label, style, hover, next)) = phase_button(view)
+                && kit::small_button(ui, label, style)
+                    .on_hover_text(hover)
+                    .clicked()
+            {
+                *action = Some(next);
+            }
         },
     );
     match &view.phase {
@@ -172,50 +170,65 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
         Phase::Available {
             blocked: Some(reason),
             ..
-        } => {
-            kit::tone_note(ui, reason, Tone::Warning);
-            if kit::small_button(ui, "Open the download page", Style::Bordered).clicked() {
-                *action = Some(Action::OpenDownloadPage);
-            }
-        }
-        Phase::Available { blocked: None, .. } => {
-            if kit::small_button(ui, "Download now", Style::Prominent)
-                .on_hover_text(
-                    "Apassy downloads and checks the new version. Then you restart to install it.",
-                )
-                .clicked()
-            {
-                *action = Some(Action::Download);
-            }
-        }
+        } => kit::tone_note(ui, reason, Tone::Warning),
         Phase::Ready(staged) if staged.kind == StagedKind::App => {
             if view.auto_install {
                 kit::note(ui, "It installs when you quit Apassy.");
             }
-            if kit::small_button(ui, "Restart now", Style::Prominent)
-                .on_hover_text("Apassy locks the vault, ends runs that wait for you, installs the new version, and opens it.")
-                .clicked()
-            {
-                *action = Some(Action::Restart);
-            }
         }
-        Phase::Ready(_) => {
-            kit::note(ui, IMAGE_NOTE);
-            if kit::small_button(ui, "Open the disk image", Style::Prominent).clicked() {
-                *action = Some(Action::OpenImage);
-            }
-        }
+        Phase::Ready(staged) => kit::note(ui, image_note(&staged.version)),
         Phase::Error(err) => kit::tone_note(ui, err, Tone::Critical),
         _ => {}
     }
 }
 
-const IMAGE_NOTE: &str = "Apassy cannot replace itself in its folder. Open the disk image, quit Apassy, and drag Apassy to Applications.";
+/// The action of the state line: its label, its style, its hover text, and the action.
+fn phase_button(view: &UpdateView) -> Option<(&'static str, Style, &'static str, Action)> {
+    match &view.phase {
+        Phase::Available {
+            blocked: Some(_), ..
+        } => Some((
+            "Open the download page",
+            Style::Bordered,
+            "Download the new version from apassy.wyderka.cc.",
+            Action::OpenDownloadPage,
+        )),
+        Phase::Available { blocked: None, .. } => Some((
+            "Download now",
+            Style::Prominent,
+            "Apassy downloads and checks the new version. Then you restart to install it.",
+            Action::Download,
+        )),
+        Phase::Ready(staged) if staged.kind == StagedKind::App => Some((
+            "Restart now",
+            Style::Prominent,
+            "Apassy locks the vault, ends runs that wait for you, installs the new version, and opens it.",
+            Action::Restart,
+        )),
+        Phase::Ready(_) => Some((
+            "Open the disk image",
+            Style::Prominent,
+            "Open the disk image, quit Apassy, and drag Apassy to Applications.",
+            Action::OpenImage,
+        )),
+        _ => None,
+    }
+}
 
-/// "Apassy X is ready" on top of each page but Settings > About, which has the same
+/// What the owner does with a checked image of `version`.
+fn image_note(version: &str) -> String {
+    format!(
+        "Apassy cannot replace itself in its folder. Open the disk image {}, quit Apassy, and drag Apassy to Applications.",
+        image_file(version)
+    )
+}
+
+/// "Apassy X is ready" on top of each page but Settings > Updates, which has the same
 /// buttons.
 pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if app.view == OwnerView::Settings && app.ui.settings_tab == super::SettingsTab::About {
+    if app.place == crate::desktop::Place::Settings
+        && app.ui.settings_section == super::SettingsSection::Updates
+    {
         return;
     }
     let view = app.updates.view();
@@ -232,15 +245,16 @@ pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 "It installs when you quit Apassy. Restart now to install it at once."
             } else {
                 "Restart Apassy to install it."
-            },
+            }
+            .to_owned(),
         ),
         StagedKind::Image => (
             format!("Apassy {} is downloaded.", staged.version),
-            IMAGE_NOTE,
+            image_note(&staged.version),
         ),
     };
     let mut action = None;
-    kit::notice(ui, Tone::Accent, &title, Some(message), |ui| {
+    kit::notice(ui, Tone::Accent, &title, Some(&message), |ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let main = match staged.kind {
@@ -292,6 +306,7 @@ fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desktop::Place;
     use crate::desktop::update::{SUPPORTED, Staged};
     use eframe::egui::{Pos2, RawInput, Rect, Shape, Vec2};
 
@@ -354,7 +369,7 @@ mod tests {
     fn settings_show_the_updates_section() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = unlocked(&dir);
-        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsTab::About);
+        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsSection::Updates);
         let text = draw(&mut app, TALL);
         assert!(text.contains("Updates"), "{text}");
         let version = app.updates.build().label();
@@ -466,10 +481,10 @@ mod tests {
 
         app.updates
             .set_phase_for_test(Phase::Ready(staged(StagedKind::App)));
-        for view in [OwnerView::Vault, OwnerView::Agents, OwnerView::Activity] {
-            app.view = view;
+        for place in [Place::CREDENTIALS, Place::Agents, Place::Decisions] {
+            app.place = place.clone();
             let text = draw(&mut app, size);
-            assert!(text.contains("Apassy 0.3.1 is ready."), "{view:?}: {text}");
+            assert!(text.contains("Apassy 0.3.1 is ready."), "{place:?}: {text}");
             assert!(text.contains("Restart now"), "{text}");
             assert!(text.contains("It installs when you quit Apassy."), "{text}");
             assert!(text.contains("Later"), "{text}");
@@ -483,6 +498,7 @@ mod tests {
         let text = draw(&mut app, size);
         assert!(text.contains("Apassy 0.3.1 is downloaded."), "{text}");
         assert!(text.contains("Open the disk image"), "{text}");
+        assert!(text.contains("Apassy-0.3.1.dmg"), "{text}");
 
         app.updates.banner_hidden = Some(staged(StagedKind::Image).commit);
         let text = draw(&mut app, size);

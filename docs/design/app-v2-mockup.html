@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy</title>
+<style>
+:root{
+  --bg:#ffffff;--side:#ececef;--detail:#f6f6f7;--group:#ffffff;
+  --line:rgba(0,0,0,.09);--line2:rgba(0,0,0,.06);
+  --label:rgba(0,0,0,.88);--sec:rgba(0,0,0,.52);--ter:rgba(0,0,0,.30);
+  --fill:rgba(0,0,0,.05);--fill2:rgba(0,0,0,.08);--fill3:rgba(0,0,0,.12);
+  --accent:#0a6cff;--accent-press:#005ee0;--sel:#0a6cff;
+  --red:#e0352b;--orange:#c86a00;--green:#24a148;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;color:var(--label);-webkit-font-smoothing:antialiased;background:#cfd0d5}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:default}
+.stage{height:100vh;padding:28px;display:flex;align-items:stretch;justify-content:center}
+.win{display:flex;width:100%;max-width:1320px;background:var(--bg);border-radius:12px;overflow:hidden;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 22px 70px rgba(0,0,0,.28);position:relative}
+.side{width:216px;flex:none;background:var(--side);border-right:.5px solid var(--line);display:flex;flex-direction:column}
+.side .chrome{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;gap:8px}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;display:block;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.15)}
+.side .scroll{flex:1;overflow-y:auto;padding:0 10px 10px}
+.sh{font-size:11px;font-weight:600;color:var(--sec);padding:12px 8px 4px;display:flex;align-items:center}
+.sh .add{margin-left:auto;opacity:0;border:0;background:none;width:18px;height:18px;border-radius:4px;color:var(--sec);display:grid;place-items:center;padding:0}
+.sh .add svg{width:12px;height:12px}
+.sh:hover .add{opacity:1}.sh .add:hover{background:var(--fill2)}
+.si{display:flex;align-items:center;gap:7px;width:100%;height:28px;border:0;background:none;border-radius:6px;padding:0 8px;text-align:left}
+.si:hover{background:rgba(0,0,0,.04)}
+.si.on{background:rgba(0,0,0,.09)}
+.si svg{width:15px;height:15px;flex:none;color:var(--accent)}
+.si .lbl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.si .cnt{color:var(--sec);font-size:12px;font-variant-numeric:tabular-nums}
+.si .bdg{background:rgba(0,0,0,.14);color:var(--label);font-size:11px;font-weight:600;border-radius:9px;padding:0 6px;min-width:18px;text-align:center}
+.si .bdg.hot{background:var(--red);color:#fff}
+.si.l1{padding-left:22px}.si.l2{padding-left:38px}
+.si .tw{width:12px;margin-left:-14px;color:var(--sec);font-size:8px;text-align:center;flex:none}
+.sq{width:13px;height:13px;border-radius:3.5px;flex:none;margin:0 1px}
+.side .foot{padding:8px 10px 10px;border-top:.5px solid var(--line)}
+.me{display:flex;align-items:center;gap:8px;padding:4px 6px}
+.me .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(#ffa43a,#ff8a00);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.me .t{flex:1;line-height:1.2}.me .t small{display:block;color:var(--sec);font-size:11px}
+.ib{border:0;background:none;width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--sec);padding:0;flex:none}
+.ib:hover{background:var(--fill2)}
+.ib svg{width:16px;height:16px}
+.listcol{width:300px;flex:none;border-right:.5px solid var(--line);display:flex;flex-direction:column;background:var(--bg)}
+.tb{height:52px;flex:none;display:flex;align-items:center;padding:0 10px 0 16px;gap:6px}
+.tb .ttl{flex:1;min-width:0;line-height:1.2}
+.tb .ttl b{font-size:13px;font-weight:700;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .ttl small{font-size:11px;color:var(--sec)}
+.searchf{margin:0 12px 8px;height:28px;border-radius:7px;background:var(--fill);display:flex;align-items:center;gap:6px;padding:0 8px;color:var(--ter);flex:none}
+.searchf svg{width:13px;height:13px}
+.rows{flex:1;overflow-y:auto;padding:0 8px 12px}
+.gh{position:sticky;top:0;background:rgba(255,255,255,.94);backdrop-filter:blur(8px);font-size:11px;font-weight:600;color:var(--sec);padding:10px 8px 4px;z-index:1;display:flex}
+.gh span{margin-left:auto;font-weight:400}
+.r{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;min-height:48px}
+.r:hover{background:rgba(0,0,0,.03)}
+.r.on{background:var(--sel);color:#fff}
+.r.on .sub,.r.on .meta{color:rgba(255,255,255,.82)}
+.r .tx{flex:1;min-width:0}
+.r .ttl2{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .sub{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .meta{display:flex;align-items:center;gap:6px;color:var(--sec);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.r .meta svg{width:13px;height:13px}
+.dotp{width:7px;height:7px;border-radius:50%;background:var(--red);flex:none}
+.r.on .dotp{background:#fff}
+.tm{color:var(--orange);font-weight:500;font-variant-numeric:tabular-nums}
+.r.on .tm{color:#fff}
+.tile{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;flex:none;letter-spacing:-.02em;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.tile svg{width:16px;height:16px}
+.tile.l{width:56px;height:56px;border-radius:13px;font-size:24px}.tile.l svg{width:28px;height:28px}
+.tile.s{width:20px;height:20px;border-radius:5px;font-size:10px}.tile.s svg{width:11px;height:11px}
+.ava{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px;flex:none}
+.ava.l{width:56px;height:56px;font-size:22px}.ava.s{width:20px;height:20px;font-size:10px}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--detail)}
+.detail .tb{justify-content:flex-end;padding:0 12px;gap:4px}
+.tbtn{border:0;background:none;height:28px;border-radius:6px;padding:0 9px;display:flex;align-items:center;gap:5px;color:var(--label)}
+.tbtn:hover{background:var(--fill2)}
+.tbtn svg{width:16px;height:16px;color:var(--sec)}
+.dscroll{flex:1;overflow-y:auto}
+.dpad{max-width:640px;margin:0 auto;padding:6px 28px 40px}
+.hdr{display:flex;align-items:center;gap:14px;margin:6px 0 22px}
+.hdr h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-.01em;line-height:1.2}
+.hdr .s{color:var(--sec);margin-top:2px}
+.caps{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.cap{font-size:11px;font-weight:500;border-radius:5px;padding:1px 6px;background:var(--fill2);color:var(--sec);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.cap.red{background:rgba(224,53,43,.1);color:#c42b22}
+.cap svg{width:11px;height:11px}
+.gl{font-size:12px;font-weight:600;color:var(--sec);margin:18px 2px 6px;display:flex;align-items:center}
+.gl a{margin-left:auto;font-weight:400;color:var(--accent);text-decoration:none}
+.grp{background:var(--group);border-radius:10px;box-shadow:0 0 0 .5px rgba(0,0,0,.08),0 .5px 1.5px rgba(0,0,0,.05)}
+.fr{display:flex;align-items:center;gap:10px;min-height:38px;padding:7px 12px;position:relative}
+.fr+.fr::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.fr .k{flex:none;min-width:110px;color:var(--label)}
+.fr .v{flex:1;min-width:0;text-align:right;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr .v.l{text-align:left;color:var(--label);white-space:normal}
+.fr .chev{color:var(--ter);font-size:15px;margin-left:-4px}
+.fr.click:hover{background:rgba(0,0,0,.02)}
+.mono{font-family:var(--mono);font-size:12px}
+.secret{font-size:15px;letter-spacing:2px;color:var(--label)}
+.pb{border:0;border-radius:6px;height:24px;padding:0 10px;background:var(--fill2);font-size:12.5px;font-weight:500;flex:none}
+.pb:hover{background:var(--fill3)}
+.sw{width:32px;height:19px;border-radius:10px;background:var(--fill3);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 .5px 2px rgba(0,0,0,.3);transition:.15s}
+.sw.on{background:var(--green)}.sw.on::after{left:15px}
+.pop{border:0;background:var(--fill);border-radius:6px;height:22px;padding:0 8px;font-size:12.5px;display:inline-flex;align-items:center;gap:5px;color:var(--label)}
+.pop::after{content:"";width:6px;height:6px;border-right:1.5px solid var(--sec);border-bottom:1.5px solid var(--sec);transform:rotate(45deg) translateY(-2px)}
+.act{display:flex;align-items:flex-start;gap:10px}
+.act .tx{flex:1;min-width:0;text-align:left}
+.act .a1{color:var(--label)}.act .a2{font-size:12px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act .when{font-size:12px;color:var(--ter);flex:none}
+.st{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:1px}
+.st svg{width:10px;height:10px;color:#fff}
+.st.ok{background:var(--green)}.st.you{background:var(--accent)}.st.no{background:var(--red)}
+.cmd{font-family:var(--mono);font-size:12px;background:#f2f2f4;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;color:var(--label);flex:1;text-align:left}
+.note{font-size:12px;color:var(--sec);margin:6px 4px 0;line-height:1.4}
+.meta-foot{text-align:center;font-size:11px;color:var(--ter);margin-top:22px}
+.banner{display:flex;align-items:center;gap:12px;background:#fff;border-radius:10px;padding:10px 12px;box-shadow:0 0 0 .5px rgba(0,0,0,.08);margin-bottom:12px}
+.banner .ic{width:28px;height:28px;border-radius:7px;background:#fff4e5;color:var(--orange);display:grid;place-items:center;flex:none}
+.banner .ic svg{width:16px;height:16px}
+.banner .tx{flex:1;min-width:0}.banner .tx b{font-weight:600;display:block}.banner .tx span{font-size:12px;color:var(--sec)}
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--sec);gap:6px;text-align:center}
+.empty svg{width:40px;height:40px;color:var(--ter)}
+.empty b{color:var(--label);font-size:15px;font-weight:600}
+.abar{flex:none;border-top:.5px solid var(--line);background:rgba(246,246,247,.92);backdrop-filter:blur(12px);padding:10px 16px;display:flex;align-items:center;gap:8px}
+.abar .cap2{flex:1;font-size:11.5px;color:var(--sec);min-width:0}
+.btn{border:0;border-radius:7px;height:28px;padding:0 14px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.16),0 .5px 1px rgba(0,0,0,.08);font-weight:500;white-space:nowrap;flex:none}
+.btn:hover{background:#fafafa}
+.btn.pri{background:var(--accent);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.2)}.btn.pri:hover{background:var(--accent-press)}
+.btn.pri:disabled{opacity:.4}
+.btn.des{color:var(--red)}
+.menu{position:absolute;background:rgba(250,250,250,.98);backdrop-filter:blur(20px);border-radius:8px;box-shadow:0 0 0 .5px rgba(0,0,0,.2),0 10px 30px rgba(0,0,0,.2);padding:5px;z-index:30;min-width:230px}
+.menu button{display:block;width:100%;text-align:left;border:0;background:none;padding:0 10px;border-radius:5px;height:24px}
+.menu button:hover{background:var(--accent);color:#fff}
+.menu hr{border:0;border-top:.5px solid var(--line);margin:4px 6px}
+.field{width:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 0 0 .5px rgba(0,0,0,.18) inset;padding:7px 9px;resize:none;display:block}
+.field:focus{outline:3px solid rgba(10,108,255,.35);outline-offset:0}
+.veil{position:absolute;inset:0;background:rgba(0,0,0,.12);display:none;align-items:flex-start;justify-content:center;z-index:40}
+.veil.on{display:flex}
+.sheet{margin-top:52px;width:520px;max-width:calc(100% - 40px);background:#f6f6f7;border-radius:12px;box-shadow:0 0 0 .5px rgba(0,0,0,.25),0 24px 60px rgba(0,0,0,.3);padding:20px;max-height:calc(100% - 80px);overflow-y:auto}
+.sheet.prefs{width:600px}
+.sheet h2{font-size:13px;font-weight:700;margin:0 0 2px}
+.sheet .lead{color:var(--sec);font-size:12px;margin:0 0 14px}
+.sheet .sbar{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;align-items:center}
+.sheet .sbar .left{margin-right:auto;font-size:12px;color:var(--sec);display:flex;align-items:center;gap:6px}
+.ex{display:flex;gap:6px;margin-top:8px;align-items:center;font-size:11px;color:var(--ter)}
+.ex button{border:0;background:var(--fill);border-radius:5px;font-size:11px;padding:2px 7px;color:var(--sec)}
+.ex button:hover{background:var(--fill2)}
+.dt{display:flex;align-items:center;gap:10px;padding:8px 12px;position:relative}
+.dt+.dt::before{content:"";position:absolute;top:0;left:12px;right:0;border-top:.5px solid var(--line2)}
+.dt input[type=text]{border:0;background:none;font-weight:500;padding:0;width:100%;outline:0}
+.dt small{display:block;font-size:11.5px;color:var(--sec)}
+.ptabs{display:flex;justify-content:center;gap:4px;margin:-6px 0 6px}
+.ptabs button{border:0;background:none;border-radius:7px;padding:5px 10px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;color:var(--sec);width:80px}
+.ptabs button svg{width:22px;height:22px}
+.ptabs button.on{background:var(--fill2);color:var(--accent)}
+.pick{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pick button{border:0;background:#fff;border-radius:10px;padding:12px;text-align:left;box-shadow:0 0 0 .5px rgba(0,0,0,.1);display:flex;gap:10px;align-items:center}
+.pick button:hover{box-shadow:0 0 0 2px var(--accent)}
+.pick b{display:block;font-weight:600}.pick small{color:var(--sec);font-size:11.5px}
+label.fr{cursor:default}
+#hud{position:absolute;left:50%;bottom:64px;transform:translateX(-50%) translateY(8px);background:rgba(40,40,42,.92);color:#fff;border-radius:10px;padding:9px 14px;font-size:12.5px;opacity:0;transition:.18s;pointer-events:none;z-index:60;display:flex;gap:8px;align-items:center;max-width:80%}
+#hud.on{opacity:1;transform:translateX(-50%)}
+#hud svg{width:14px;height:14px;flex:none}
+@media (max-width:1040px){.stage{padding:0}.listcol{width:236px}.dpad{padding:6px 18px 30px}.fr .k{min-width:84px}.r .meta .shr{display:none}.abar .cap2{display:none}.abar{justify-content:flex-end}.abar .btn.des{margin-right:auto}}
+.sidetoggle{margin-left:auto;border:0;background:none;width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--sec);padding:0}
+.sidetoggle:hover{background:var(--fill2)}
+.sidetoggle svg{width:17px;height:17px}
+.sq{display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:700;line-height:1}
+.win.rail .side{width:56px}
+.win.rail .side .chrome{padding:0;justify-content:center;flex-direction:column;gap:10px;height:76px}
+.win.rail .lights{gap:5px}.win.rail .lights i{width:9px;height:9px}
+.win.rail .sidetoggle{margin:0}
+.win.rail .side .scroll{padding:0 8px 6px}
+.win.rail .sh,.win.rail .si .lbl,.win.rail .si .cnt,.win.rail .si.l1,.win.rail .si.l2,.win.rail .me .t,.win.rail .side .foot .ib{display:none}
+.win.rail .si{justify-content:center;padding:0;height:34px;position:relative}
+.win.rail .si svg{width:18px;height:18px}
+.win.rail .sq{width:18px;height:18px;border-radius:5px;font-size:10px}
+.win.rail .si .bdg{position:absolute;top:2px;right:3px;font-size:9px;min-width:14px;padding:0 3px;line-height:14px}
+.win.rail .si.gap,.win.rail .si.sgap{margin-top:12px}
+.win.rail .me{justify-content:center;padding:4px 0}
+.win.rail .si[data-tip]:hover::after{content:attr(data-tip);position:absolute;left:46px;top:50%;transform:translateY(-50%);background:rgba(40,40,42,.94);color:#fff;font-size:11.5px;padding:3px 8px;border-radius:5px;white-space:nowrap;z-index:50;pointer-events:none}
+.win.float .side{position:absolute;left:0;top:0;bottom:0;z-index:35;box-shadow:0 0 0 .5px rgba(0,0,0,.2),12px 0 40px rgba(0,0,0,.18)}
+.win.float .listcol{margin-left:56px}
+.win.float .scrim{position:absolute;inset:0;z-index:34}
+</style>
+</head>
+<body>
+<div class="stage">
+<div class="win" id="win">
+  <aside class="side" id="side"></aside>
+  <section class="listcol" id="list"></section>
+  <section class="detail" id="detail"></section>
+  <div class="veil" id="veil"><div class="sheet" id="sheet"></div></div>
+  <div id="hud"></div>
+</div>
+</div>
+<script>
+const ic=(p,extra='')=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" ${extra}>${p}</svg>`;
+const I={
+  key:ic('<circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/>'),
+  folder:ic('<path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>'),
+  people:ic('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19c.8-3.2 3.2-5 6-5s5.2 1.8 6 5"/><circle cx="17" cy="9.5" r="2.4"/><path d="M16.5 14.2c2.3.2 3.8 1.6 4.5 4.3"/>'),
+  check:ic('<path d="M5 12.5l4.5 4.5L19 7.5"/>','stroke-width="2.6"'),
+  checkc:ic('<circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/>'),
+  agent:ic('<rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/>'),
+  gear:ic('<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>','stroke-width="1.6"'),
+  plus:ic('<path d="M12 5v14M5 12h14"/>','stroke-width="2"'),
+  search:ic('<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>','stroke-width="2"'),
+  share:ic('<path d="M12 15V4M8 7.5L12 4l4 3.5"/><path d="M7 11H6a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-1"/>'),
+  more:ic('<circle cx="6" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18" cy="12" r="1.3"/>','fill="currentColor"'),
+  person:ic('<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c1.2-3.8 3.8-5.5 7-5.5s5.8 1.7 7 5.5"/>','stroke-width="2.4"'),
+  x:ic('<path d="M7 7l10 10M17 7L7 17"/>','stroke-width="2.6"'),
+  lock:ic('<rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/>'),
+  sliders:ic('<path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>'),
+  bulb:ic('<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>'),
+  db:ic('<ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/>'),
+  wifi:ic('<path d="M4 9.5a12 12 0 0 1 16 0M7 13a7.5 7.5 0 0 1 10 0M10 16.5a3 3 0 0 1 4 0"/>'),
+  term:ic('<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 14.5h4"/>'),
+  sidebar:ic('<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9.5 5v14"/><path d="M5.5 8.5h2M5.5 11h2"/>'),
+  laptop:ic('<rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/>'),
+};
+const PV={Anthropic:['#cc785c','A'],GitHub:['#1f2328','G'],Stripe:['#635bff','S'],Postgres:['#336791',null,'db'],Cloudflare:['#f48120','C'],'Fly.io':['#7b3fe4','F'],OpenAI:['#10a37f','O'],SSH:['#4b4f58',null,'term'],Netflix:['#e50914','N'],WiFi:['#8e8e93',null,'wifi'],Resend:['#111111','R'],Sentry:['#362d59','S'],AWS:['#232f3e','A'],Slack:['#4a154b','S'],Custom:['#8e8e93',null,'key'],'One-time code':['#ff375f',null,'lock'],Disney:['#113ccf','D']};
+function tile(p,size=''){const d=PV[p]||PV.Custom;return `<div class="tile ${size}" style="background:${d[0]}">${d[1]?d[1]:I[d[2]]}</div>`}
+const AG={
+  cc:{name:'Claude Code',color:'#d97757',where:'This Mac',uses:54,projects:'apassy, acme-billing'},
+  cx:{name:'Codex',color:'#10a37f',where:'This Mac',uses:21,projects:'newsletter, apassy'},
+  t3:{name:'T3 Code',color:'#6e5ae6',where:'This Mac',uses:12,projects:'apassy'},
+  ci:{name:'CI on GitHub',color:'#24292f',where:'Remote',uses:3,projects:'acme-billing',note:'CI agent for Acme. Only the Stripe test key.'},
+};
+const ava=(id,size='')=>`<div class="ava ${size}" style="background:${AG[id].color}">${AG[id].name[0]}</div>`;
+const S={
+  view:'vault',sideOpen:null,folder:null,shared:null,sel:{vault:3,decisions:'d1',agents:'cc'},open:{work:true},menu:null,ptab:'general',
+  folders:[{id:'work',name:'Work',kids:[{id:'work/acme',name:'Acme'},{id:'work/apassy',name:'Apassy'}]},{id:'side',name:'Side projects',kids:[]},{id:'infra',name:'Infra',kids:[]},{id:'home',name:'Home',kids:[]}],
+  shares:[{id:'acme',name:'Acme team',color:'#0a84ff',members:[['Rafal','Owner','#ff9500'],['Ola','Manager','#bf5af2'],['Bartek','Member','#30d158']]},{id:'family',name:'Family',color:'#ff375f',members:[['Rafal','Owner','#ff9500'],['Kasia','Member','#64d2ff']]}],
+  items:[
+    {id:1,name:'Anthropic API',pv:'Anthropic',kind:'API key',env:'ANTHROPIC_API_KEY',host:'api.anthropic.com',envt:'dev',folder:'work/apassy',shared:[]},
+    {id:2,name:'GitHub deploy bot',pv:'GitHub',kind:'Token',env:'GITHUB_TOKEN',host:'api.github.com',envt:'dev',folder:'work/apassy',shared:['acme']},
+    {id:3,name:'Stripe live',pv:'Stripe',kind:'Secret key',env:'STRIPE_SECRET_KEY',host:'api.stripe.com',envt:'prod',folder:'work/acme',shared:['acme']},
+    {id:4,name:'Stripe test',pv:'Stripe',kind:'Secret key',env:'STRIPE_SECRET_KEY',host:'api.stripe.com',envt:'dev',folder:'work/acme',shared:['acme']},
+    {id:5,name:'Billing database',pv:'Postgres',kind:'Database',env:'DATABASE_URL',host:'db.acme.internal',envt:'prod',folder:'work/acme',shared:[],user:'billing_rw'},
+    {id:6,name:'Cloudflare Workers',pv:'Cloudflare',kind:'API token',env:'CLOUDFLARE_API_TOKEN',host:'api.cloudflare.com',envt:'dev',folder:'infra',shared:['acme']},
+    {id:7,name:'Fly.io',pv:'Fly.io',kind:'Login',env:'FLY_API_TOKEN',host:'fly.io',envt:'unk',folder:'infra',shared:[],user:'rafal@example.com'},
+    {id:8,name:'OpenAI API',pv:'OpenAI',kind:'API key',env:'OPENAI_API_KEY',host:'api.openai.com',envt:'unk',folder:'side',shared:[]},
+    {id:9,name:'Build server',pv:'SSH',kind:'SSH key',env:'SSH_KEY',host:'build.acme.dev',envt:'unk',folder:'infra',shared:[]},
+    {id:10,name:'Netflix',pv:'Netflix',kind:'Login',env:'—',host:'netflix.com',envt:'unk',folder:'home',shared:['family'],user:'family@example.com'},
+    {id:11,name:'Home Wi-Fi',pv:'WiFi',kind:'Password',env:'—',host:'',envt:'unk',folder:'home',shared:['family']},
+  ],
+  others:[{id:101,name:'Sentry',pv:'Sentry',kind:'Auth token',from:'Ola',vault:'acme'},{id:102,name:'Acme staging database',pv:'Postgres',kind:'Database',from:'Bartek',vault:'acme'},{id:103,name:'Disney+',pv:'Disney',kind:'Login',from:'Kasia',vault:'family'}],
+  rules:{3:[{t:'Allow read in acme-billing',s:'All agents · production · your answer on iPhone, Oct 10'}],5:[{t:'Allow read in acme-billing',s:'All agents · production · your answer, Oct 9'}]},
+  exc:{cx:[5],ci:[3,5]},askAlways:{t3:[3]},
+  decided:7,auto:128,next:200,
+  decs:[
+    {id:'d1',t:'ask',agent:'cc',item:3,project:'acme-billing',action:'Read',cmd:'stripe payouts list --limit 10',host:'api.stripe.com',why:'This is a production key, and there is no production rule for reading in acme-billing yet.',secs:292},
+    {id:'d2',t:'ask',agent:'cx',item:8,project:'newsletter',action:'Change',cmd:'node scripts/summarize.mjs drafts/',host:'api.openai.com',why:'First use of this key in newsletter, and you have not confirmed whether it is a development key.',secs:241},
+    {id:'d3',t:'ask',agent:'cc',member:'Ola',item:3,project:'acme-billing',action:'Deploy',cmd:'stripe prices create --product prod_N1 --unit-amount 4900',host:'api.stripe.com',why:'A production deploy with a key shared in Acme team. It needs an owner or a manager of the team.',secs:188},
+    {id:'d4',t:'req',agent:'cx',name:'Resend API key',project:'newsletter',purpose:'Send the test email of the newsletter',where:'resend.com/api-keys'},
+    {id:'d5',t:'fix',item:8,q:'Is OpenAI API a development key?',facts:[['Uses this week','14'],['Projects','newsletter, apassy, scratch'],['Sends to','only api.openai.com'],['Key type','project key']]},
+  ],
+};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt=s=>{s=Math.max(0,s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+const allF=()=>{const o=[];(function w(l){for(const f of l){o.push(f);w(f.kids||[])}})(S.folders);return o};
+function fpath(id){if(!id)return 'Personal';const out=[];let acc='';let list=S.folders;for(const p of id.split('/')){acc=acc?acc+'/'+p:p;const f=list.find(x=>x.id===acc);if(!f)break;out.push(f.name);list=f.kids||[]}return out.join(' › ')}
+const item=id=>S.items.find(i=>i.id===id)||S.others.find(i=>i.id===id);
+const inF=(it,f)=>f===null||it.folder===f||(it.folder||'').startsWith(f+'/');
+const pending=()=>S.decs.filter(d=>d.t!=='fix').length;
+function hud(t){const h=$('#hud');h.innerHTML=I.checkc+esc(t);h.classList.add('on');clearTimeout(hud.t);hud.t=setTimeout(()=>h.classList.remove('on'),2400)}
+
+function side(){
+  const on=c=>c?' on':'';
+  const cnt=f=>S.items.filter(i=>inF(i,f)).length;
+  let tree='';
+  for(const f of S.folders){
+    const k=f.kids&&f.kids.length;
+    tree+=`<button class="si l1${on(S.view==='vault'&&S.folder===f.id)}" data-a="folder" data-id="${f.id}" title="${esc(f.name)}">${k?`<span class="tw" data-a="tw" data-id="${f.id}">${S.open[f.id]?'▼':'▶'}</span>`:''}${I.folder}<span class="lbl">${esc(f.name)}</span><span class="cnt">${cnt(f.id)}</span></button>`;
+    if(k&&S.open[f.id])for(const c of f.kids)tree+=`<button class="si l2${on(S.view==='vault'&&S.folder===c.id)}" data-a="folder" data-id="${c.id}">${I.folder}<span class="lbl">${esc(c.name)}</span><span class="cnt">${cnt(c.id)}</span></button>`;
+  }
+  const p=pending();
+  $('#side').innerHTML=`<div class="chrome"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div><button class="sidetoggle" data-a="sidetoggle" title="${isRail()?'Show sidebar':'Hide sidebar'} (⌃⌘S)">${I.sidebar}</button></div>
+  <div class="scroll">
+    <div class="sh">Personal<button class="add" data-a="newfolder" title="New folder">${I.plus}</button></div>
+    <button class="si${on(S.view==='vault'&&S.folder===null)}" data-a="folder" data-id="" data-tip="All credentials">${I.key}<span class="lbl">All credentials</span><span class="cnt">${S.items.length}</span></button>
+    ${tree}
+    <div class="sh">Shared<button class="add" data-a="newshare" title="New shared vault">${I.plus}</button></div>
+    ${S.shares.map((v,ix)=>`<button class="si${ix===0?' sgap':''}${on(S.view==='shared'&&S.shared===v.id)}" data-a="shared" data-id="${v.id}" data-tip="${esc(v.name)}"><span class="sq" style="background:${v.color}">${esc(v.name[0])}</span><span class="lbl">${esc(v.name)}</span><span class="cnt">${S.items.filter(i=>i.shared.includes(v.id)).length+S.others.filter(o=>o.vault===v.id).length}</span></button>`).join('')}
+    <div class="sh">Agents</div>
+    <button class="si gap${on(S.view==='decisions')}" data-a="view" data-v="decisions" data-tip="Decisions">${I.checkc}<span class="lbl">Decisions</span>${p?`<span class="bdg hot">${p}</span>`:''}</button>
+    <button class="si${on(S.view==='agents')}" data-a="view" data-v="agents" data-tip="Agents">${I.agent}<span class="lbl">Agents</span><span class="cnt">${Object.keys(AG).length}</span></button>
+  </div>
+  <div class="foot"><div class="me"><div class="av" data-a="prefs" title="Settings">R</div><div class="t">Rafal<small>Unlocked · Touch ID</small></div><button class="ib" data-a="prefs" title="Settings">${I.gear}</button></div></div>`;
+}
+
+function credRow(it,sel){
+  const shared=(it.shared||[]).length;
+  return `<div class="r${sel?' on':''}" data-a="sel" data-id="${it.id}">${tile(it.pv)}
+    <div class="tx"><div class="ttl2">${esc(it.name)}</div><div class="sub">${esc(it.from?'from '+it.from:(it.user||it.kind))}</div></div>
+    <div class="meta">${shared?`<span class="shr" title="Shared">${I.people}</span>`:''}${it.envt==='prod'?'<span class="dotp" title="Production"></span>':''}</div></div>`;
+}
+function listVault(){
+  const f=S.folder,its=S.items.filter(i=>inF(i,f));
+  const groups={};for(const i of its)(groups[i.folder]=groups[i.folder]||[]).push(i);
+  const keys=Object.keys(groups).sort();
+  const title=f===null?'All credentials':fpath(f).split(' › ').pop();
+  return `<div class="tb"><div class="ttl"><b>${esc(title)}</b><small>${its.length} items</small></div><button class="ib" data-a="paste" title="New credential">${I.plus}</button></div>
+  <div class="searchf">${I.search}Search</div>
+  <div class="rows">${keys.map(k=>`${keys.length>1?`<div class="gh">${esc(fpath(k))}</div>`:''}${groups[k].map(i=>credRow(i,S.sel.vault===i.id)).join('')}`).join('')||'<div class="empty" style="padding:40px 0">No items</div>'}</div>`;
+}
+function listShared(){
+  const v=S.shares.find(x=>x.id===S.shared);
+  const mine=S.items.filter(i=>i.shared.includes(v.id)),theirs=S.others.filter(o=>o.vault===v.id);
+  return `<div class="tb"><div class="ttl"><b>${esc(v.name)}</b><small>${v.members.length} people · ${mine.length+theirs.length} items</small></div><button class="ib" data-a="members" title="People">${I.people}</button><button class="ib" data-a="addshare" title="Add">${I.plus}</button></div>
+  <div class="searchf">${I.search}Search</div>
+  <div class="rows">${mine.length?`<div class="gh">From you<span>${mine.length}</span></div>${mine.map(i=>credRow(i,S.sel.vault===i.id)).join('')}`:''}
+  ${theirs.length?`<div class="gh">From others<span>${theirs.length}</span></div>${theirs.map(i=>credRow(i,S.sel.vault===i.id)).join('')}`:''}
+  ${!mine.length&&!theirs.length?'<div class="empty" style="padding:40px 0">No items yet</div>':''}</div>`;
+}
+function decRow(d,sel){
+  if(d.t==='ask'){const it=item(d.item);return `<div class="r${sel?' on':''}" data-a="dsel" data-id="${d.id}">${ava(d.agent)}
+    <div class="tx"><div class="ttl2">${esc(it.name)}</div><div class="sub">${esc(d.member?d.member+'’s '+AG[d.agent].name:AG[d.agent].name)} · ${esc(d.project)}</div></div>
+    <div class="meta">${it.envt==='prod'?'<span class="dotp"></span>':''}<span class="tm" data-timer="${d.id}">${fmt(d.secs)}</span></div></div>`}
+  if(d.t==='req')return `<div class="r${sel?' on':''}" data-a="dsel" data-id="${d.id}">${ava(d.agent)}<div class="tx"><div class="ttl2">${esc(d.name)}</div><div class="sub">${esc(AG[d.agent].name)} · ${esc(d.project)}</div></div></div>`;
+  const it=item(d.item);return `<div class="r${sel?' on':''}" data-a="dsel" data-id="${d.id}">${tile(it.pv)}<div class="tx"><div class="ttl2">${esc(it.name)}</div><div class="sub">Development or production?</div></div></div>`;
+}
+function listDecisions(){
+  const a=S.decs.filter(d=>d.t==='ask'),r=S.decs.filter(d=>d.t==='req'),f=S.decs.filter(d=>d.t==='fix');
+  const sec=(t,l)=>l.length?`<div class="gh">${t}<span>${l.length}</span></div>${l.map(d=>decRow(d,S.sel.decisions===d.id)).join('')}`:'';
+  return `<div class="tb"><div class="ttl"><b>Decisions</b><small>${S.decided} by you · ${S.auto} automatic this week</small></div></div>
+  <div class="rows">${sec('Waiting',a)}${sec('Requests',r)}${sec('Suggestions',f)}${S.decs.length?'':'<div class="empty" style="padding:60px 0">Nothing needs you</div>'}</div>`;
+}
+function listAgents(){
+  return `<div class="tb"><div class="ttl"><b>Agents</b><small>${Object.keys(AG).length} connected</small></div><button class="ib" data-a="connect" title="Connect an agent">${I.plus}</button></div>
+  <div class="rows">${Object.entries(AG).map(([id,a])=>`<div class="r${S.sel.agents===id?' on':''}" data-a="asel" data-id="${id}">${ava(id)}<div class="tx"><div class="ttl2">${esc(a.name)}</div><div class="sub">${esc(a.where)} · ${a.uses} uses this week</div></div></div>`).join('')}</div>`;
+}
+
+function frow(k,v){return `<div class="fr"><div class="k">${k}</div><div class="v">${v}</div></div>`}
+function detailCred(){
+  const it=item(S.sel.vault);
+  if(!it)return `<div class="tb"></div><div class="empty">${I.key}<b>No item selected</b></div>`;
+  if(it.from){const v=S.shares.find(x=>x.id===it.vault);return `<div class="tb"></div><div class="dscroll"><div class="dpad">
+    <div class="hdr">${tile(it.pv,'l')}<div><h1>${esc(it.name)}</h1><div class="s">${esc(it.kind)} · shared by ${esc(it.from)}</div></div></div>
+    <div class="grp">${frow('Shared vault',esc(v.name))}${frow('Owner',esc(it.from))}${frow('You can','Use it with your agents')}</div>
+    <div class="note">Only ${esc(it.from)} can change this item. The bouncer decides each use by your agents.</div></div></div>`}
+  const rules=S.rules[it.id]||[];
+  const ex=[...Object.entries(S.exc).filter(([a,l])=>l.includes(it.id)).map(([a])=>({a,t:'Never for '+AG[a].name})),...Object.entries(S.askAlways).filter(([a,l])=>l.includes(it.id)).map(([a])=>({a,t:'Always ask for '+AG[a].name}))];
+  const shared=it.shared.map(id=>S.shares.find(v=>v.id===id).name);
+  const uses=[
+    {st:'ok',a:'cc',p:'apassy',c:`${it.pv.toLowerCase()} status`,r:'Allowed automatically',w:'2h ago'},
+    {st:'you',a:'cx',p:'acme-billing',c:`${it.pv.toLowerCase()} deploy`,r:'You allowed once, on iPhone',w:'Yesterday'},
+    {st:'no',a:'t3',p:'scratch',c:'curl -X POST paste.example',r:`Refused, not a ${it.pv} host`,w:'Oct 10'},
+  ];
+  const mark={ok:I.check,you:I.person,no:I.x};
+  const secretLbl=it.kind==='Login'||it.kind==='Password'?'Password':'Secret';
+  return `<div class="tb"><button class="tbtn" data-a="share">${I.share}Share</button><button class="tbtn" data-a="edit">Edit</button><span style="position:relative"><button class="tbtn" data-a="imenu">${I.more}</button>${S.menu==='item'?`<div class="menu" style="right:0;top:32px"><button data-a="move">Move to Folder…</button><button data-a="share">Share…</button><hr><button data-a="noop">Archive</button><button data-a="noop">Delete…</button></div>`:''}</span></div>
+  <div class="dscroll"><div class="dpad">
+    <div class="hdr">${tile(it.pv,'l')}<div><h1>${esc(it.name)}</h1><div class="s">${esc(it.pv==='WiFi'?'Wi-Fi':it.pv)} · ${esc(it.kind)}</div>
+      <div class="caps">${it.envt==='prod'?'<span class="cap red">Production</span>':it.envt==='dev'?'<span class="cap">Development</span>':''}${shared.map(n=>`<span class="cap">${I.people}${esc(n)}</span>`).join('')}</div></div></div>
+    ${it.envt==='unk'&&/key|token/i.test(it.kind)?`<div class="banner"><div class="ic">${I.bulb}</div><div class="tx"><b>Is this a development key?</b><span>Used only with ${esc(it.host)}. Until you answer, the bouncer treats it as production.</span></div><button class="pb" data-a="envt" data-v="dev">Development</button><button class="pb" data-a="envt" data-v="prod">Production</button></div>`:''}
+    <div class="grp">
+      ${it.user?frow('Username',esc(it.user)):''}
+      <div class="fr"><div class="k">${secretLbl}</div><div class="v"><span class="secret">••••••••••••</span></div><button class="pb" data-a="show">Show</button></div>
+      ${it.env!=='—'?frow('Variable',`<span class="mono">${esc(it.env)}</span>`):''}
+      ${it.host?frow(it.kind==='Login'?'Website':'Host',esc(it.host)):''}
+    </div>
+    <div class="grp" style="margin-top:12px">
+      <div class="fr click" data-a="move"><div class="k">Folder</div><div class="v">${esc(fpath(it.folder))}</div><span class="chev">›</span></div>
+      <div class="fr click" data-a="share"><div class="k">Shared in</div><div class="v">${shared.length?esc(shared.join(', ')):'Not shared'}</div><span class="chev">›</span></div>
+    </div>
+    ${it.env!=='—'?`<div class="gl">Agent use<a>Show All</a></div>
+    <div class="grp">${uses.map(u=>`<div class="fr"><div class="act" style="flex:1;min-width:0"><span class="st ${u.st}">${mark[u.st]}</span><div class="tx"><div class="a1">${esc(AG[u.a].name)} in ${esc(u.p)}</div><div class="a2"><span class="mono">${esc(u.c)}</span> · ${esc(u.r)}</div></div><span class="when">${u.w}</span></div></div>`).join('')}</div>
+    <div class="gl">Rules from your answers</div>
+    <div class="grp">${rules.length||ex.length?'':'<div class="fr"><div class="v l" style="color:var(--sec)">None. The bouncer decides each use.</div></div>'}
+      ${rules.map((r,i)=>`<div class="fr"><div style="flex:1;min-width:0"><div>${esc(r.t)}</div><div style="font-size:12px;color:var(--sec)">${esc(r.s)}</div></div><button class="pb" data-a="rmrule" data-i="${i}">Remove</button></div>`).join('')}
+      ${ex.map(e=>`<div class="fr"><div style="flex:1">${esc(e.t)}</div><button class="pb" data-a="rmexc" data-ag="${e.a}">Remove</button></div>`).join('')}
+    </div>
+    <div class="grp" style="margin-top:12px">
+      <div class="fr"><div class="k">Always ask me</div><div class="v"></div><button class="sw" data-a="sw"></button></div>
+      <div class="fr"><div class="k">Environment</div><div class="v"><span class="pop">${it.envt==='prod'?'Production':it.envt==='dev'?'Development':'Not confirmed'}</span></div></div>
+      <div class="fr click" data-a="edit"><div class="k">Hosts and risk</div><div class="v">Set automatically</div><span class="chev">›</span></div>
+    </div>`:''}
+    <div class="meta-foot">Added Oct 3 · Changed Oct 10</div>
+  </div></div>`;
+}
+function detailDecision(){
+  const d=S.decs.find(x=>x.id===S.sel.decisions);
+  if(!d)return `<div class="tb"></div><div class="empty">${I.checkc}<b>All clear</b>New questions also come to your iPhone.</div>`;
+  if(d.t==='ask'){
+    const a=AG[d.agent],it=item(d.item),prod=it.envt==='prod';
+    const allow=prod?`Allow ${d.action} in ${d.project}`:`Allow in ${d.project}`;
+    return `<div class="tb"><span style="position:relative"><button class="tbtn" data-a="dmenu">${I.more}</button>${S.menu==='dec'?`<div class="menu" style="right:0;top:32px"><button data-a="decide" data-c="never">Never for ${esc(a.name)}</button><button data-a="decide" data-c="askall">Always Ask for ${esc(a.name)}</button><hr><button data-a="decide" data-c="disc">Disconnect ${esc(a.name)}…</button></div>`:''}</span></div>
+    <div class="dscroll"><div class="dpad">
+      <div class="hdr">${ava(d.agent,'l')}<div><h1>${esc(d.member?d.member+'’s '+a.name:a.name)} wants to use ${esc(it.name)}</h1><div class="s">${esc(d.project)} · <span class="tm" data-timer2="${d.id}">${fmt(d.secs)}</span> left to answer</div></div></div>
+      <div class="grp">
+        <div class="fr"><div class="k">Credential</div><div class="v" style="display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--label)">${tile(it.pv,'s')}${esc(it.name)}${prod?'<span class="cap red">Production</span>':''}</div></div>
+        ${frow('Action',d.action)}
+        ${frow('Project',esc(d.project))}
+        ${frow('Sends to',esc(d.host))}
+        ${d.member?frow('Asked by',esc(d.member)+', Acme team'):''}
+      </div>
+      <div class="gl">Command</div>
+      <div class="grp"><div class="fr"><div class="cmd">${esc(d.cmd)}</div></div></div>
+      <div class="gl">Why you are asked</div>
+      <div class="grp"><div class="fr"><div class="v l">${esc(d.why)}</div></div></div>
+    </div></div>
+    <div class="abar"><button class="btn des" data-a="decide" data-c="deny">Deny</button><div class="cap2">Allow is remembered for all agents in ${esc(d.project)}. Also on your iPhone.</div><button class="btn" data-a="decide" data-c="once">Allow Once</button><button class="btn pri" data-a="decide" data-c="allow">${esc(allow)}</button></div>`;
+  }
+  if(d.t==='req'){const a=AG[d.agent];return `<div class="tb"></div><div class="dscroll"><div class="dpad">
+      <div class="hdr">${ava(d.agent,'l')}<div><h1>${esc(a.name)} asks for a ${esc(d.name)}</h1><div class="s">${esc(d.project)}</div></div></div>
+      <div class="grp">${frow('For',esc(d.purpose))}${frow('Get it at',`<span style="color:var(--accent)">${esc(d.where)} ↗</span>`)}${frow('Saves to','Side projects')}</div>
+      <div class="gl">Key</div>
+      <textarea class="field mono" rows="3" id="reqv" placeholder="Paste the key"></textarea>
+      <div class="note">${esc(a.name)} never sees the value. It can use the key as soon as you save it.</div>
+    </div></div>
+    <div class="abar"><div class="cap2"></div><button class="btn" data-a="decide" data-c="dismiss">Not Now</button><button class="btn pri" data-a="fulfil">Save</button></div>`}
+  const it=item(d.item);
+  return `<div class="tb"></div><div class="dscroll"><div class="dpad">
+    <div class="hdr">${tile(it.pv,'l')}<div><h1>${esc(d.q)}</h1><div class="s">Apassy noticed this from how agents use it.</div></div></div>
+    <div class="grp">${d.facts.map(f=>frow(f[0],esc(f[1]))).join('')}</div>
+    <div class="note">Until you answer, the bouncer treats it as production and asks more often.</div>
+  </div></div>
+  <div class="abar"><button class="btn" data-a="decide" data-c="dismiss">Ignore</button><div class="cap2"></div><button class="btn" data-a="fix" data-v="prod">Production</button><button class="btn pri" data-a="fix" data-v="dev">Development</button></div>`;
+}
+function detailAgent(){
+  const id=S.sel.agents,a=AG[id];
+  const ex=[...(S.exc[id]||[]).map(i=>({i,t:'Never: '})),...(S.askAlways[id]||[]).map(i=>({i,t:'Always ask: '}))];
+  return `<div class="tb"></div><div class="dscroll"><div class="dpad">
+    <div class="hdr">${ava(id,'l')}<div><h1>${esc(a.name)}</h1><div class="s">${esc(a.where)} · connected Oct 9</div>${a.where==='Remote'?'<div class="caps"><span class="cap">Remote · the bouncer asks more often</span></div>':''}</div></div>
+    <div class="grp">${frow('Uses this week',a.uses)}${frow('Projects',esc(a.projects))}${frow('Sees','Credential names, never values')}</div>
+    <div class="gl">Note for the bouncer</div>
+    <textarea class="field" rows="2" placeholder="Optional. For example: CI agent for Acme, only the Stripe test key.">${esc(a.note)}</textarea>
+    <div class="gl">Exceptions</div>
+    <div class="grp">${ex.length?ex.map(e=>`<div class="fr"><div style="flex:1;display:flex;align-items:center;gap:8px">${tile(item(e.i).pv,'s')}${e.t}${esc(item(e.i).name)}</div><button class="pb" data-a="rmagexc" data-i="${e.i}">Remove</button></div>`).join(''):'<div class="fr"><div class="v l" style="color:var(--sec)">None. Exceptions come from your answers in Decisions.</div></div>'}</div>
+    <div class="grp" style="margin-top:22px"><div class="fr click" data-a="noop"><div class="k" style="color:var(--red)">Disconnect ${esc(a.name)}…</div><div class="v"></div></div></div>
+  </div></div>`;
+}
+
+function isNarrow(){return document.querySelector('#win').clientWidth<1000}
+function isRail(){return S.sideOpen===null?isNarrow():!S.sideOpen}
+function layout(){const w=$('#win'),rail=isRail();w.classList.toggle('rail',rail);w.classList.toggle('float',!rail&&isNarrow());let sc=w.querySelector('.scrim');if(!rail&&isNarrow()){if(!sc){sc=document.createElement('div');sc.className='scrim';sc.dataset.a='closeside';w.appendChild(sc)}}else if(sc)sc.remove()}
+window.addEventListener('resize',()=>{render()});
+function render(){
+  layout();
+  side();
+  const v=S.view;
+  $('#list').innerHTML=v==='vault'?listVault():v==='shared'?listShared():v==='decisions'?listDecisions():listAgents();
+  $('#detail').innerHTML=v==='vault'||v==='shared'?detailCred():v==='decisions'?detailDecision():detailAgent();
+}
+function firstIn(view){
+  if(view==='vault'){const l=S.items.filter(i=>inF(i,S.folder)).sort((a,b)=>a.folder.localeCompare(b.folder));return l[0]?.id}
+  if(view==='shared'){const m=S.items.filter(i=>i.shared.includes(S.shared));return (m[0]||S.others.find(o=>o.vault===S.shared))?.id}
+}
+function sheet(h,cls=''){$('#sheet').className='sheet '+cls;$('#sheet').innerHTML=h;$('#veil').classList.add('on')}
+function closeSheet(){$('#veil').classList.remove('on')}
+const PROV=[[/^sk-ant-/,'Anthropic','ANTHROPIC_API_KEY','api.anthropic.com'],[/^(ghp_|github_pat_)/,'GitHub','GITHUB_TOKEN','api.github.com'],[/^(sk|rk)_live_/,'Stripe','STRIPE_SECRET_KEY','api.stripe.com','prod'],[/^(sk|rk)_test_/,'Stripe','STRIPE_SECRET_KEY','api.stripe.com','dev'],[/^AKIA/,'AWS','AWS_ACCESS_KEY_ID','amazonaws.com'],[/^sk-/,'OpenAI','OPENAI_API_KEY','api.openai.com'],[/^re_/,'Resend','RESEND_API_KEY','api.resend.com'],[/^sntrys_/,'Sentry','SENTRY_AUTH_TOKEN','sentry.io'],[/^xox[bp]-/,'Slack','SLACK_BOT_TOKEN','slack.com']];
+const tcase=k=>k.toLowerCase().split('_').filter(Boolean).map(w=>w[0].toUpperCase()+w.slice(1)).join(' ');
+function dv(v,key){for(const [re,pv,env,host,et] of PROV)if(re.test(v)){let e=et||'unk';if(key&&/PROD|LIVE/.test(key))e='prod';return {name:pv==='Stripe'?(e==='prod'?'Stripe live':'Stripe test'):pv+(pv==='GitHub'?' token':' API'),pv,env:key||env,host,envt:e,kind:'API key'}}
+  return {name:key?tcase(key):'Credential',pv:'Custom',env:key||'CREDENTIAL',host:'',envt:key&&/PROD|LIVE/.test(key)?'prod':'unk',kind:'Secret'}}
+function detect(t){t=t.trim();if(!t)return[];
+  if(/^otpauth:/.test(t))return [{name:decodeURIComponent((t.match(/totp\/([^?]+)/)||[,'Account'])[1]),pv:'One-time code',env:'—',host:'',envt:'unk',kind:'One-time code'}];
+  const m=t.match(/^(postgres(?:ql)?|mysql|redis):\/\/([^:@\/]+)(?::[^@]*)?@([^\/:?]+)[^\/]*\/?([^?]*)/);
+  if(m)return [{name:(m[4]?tcase(m[4])+' ':'')+'database',pv:'Postgres',env:'DATABASE_URL',host:m[3],envt:/prod/.test(m[3])?'prod':'unk',kind:'Database',user:m[2]}];
+  const ls=t.split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#'));
+  if(ls.length&&ls.every(l=>/^(export\s+)?[A-Za-z_]\w*\s*=/.test(l)))return ls.map(l=>{const mm=l.replace(/^export\s+/,'').match(/^(\w+)\s*=\s*["']?(.*?)["']?$/);return dv(mm[2],mm[1].toUpperCase())});
+  return [dv(t)]}
+const EX={key:'sk-ant-api03-FAKE0000000000000000',env:'# .env\nRESEND_API_KEY=re_FAKE123\nSTRIPE_SECRET_KEY=sk_test_FAKE51H\nSENTRY_AUTH_TOKEN=sntrys_FAKE\nDATABASE_PASSWORD=fake-pass',url:'postgres://billing_rw:FAKE@db.prod.acme.internal:5432/billing'};
+let DET=[];
+function pasteSheet(){
+  const opts=['',...allF().map(f=>f.id)].map(id=>`<option value="${id}" ${id===(S.folder||'')?'selected':''}>${esc(fpath(id||null))}</option>`).join('');
+  sheet(`<h2>New Credential</h2><p class="lead">Paste a key, a .env file, a database URL, or an otpauth:// link.</p>
+    <textarea class="field mono" rows="4" id="pbox" placeholder="⌘V"></textarea>
+    <div class="ex">Examples:<button data-a="ex" data-v="key">API key</button><button data-a="ex" data-v="env">.env file</button><button data-a="ex" data-v="url">Database URL</button></div>
+    <div id="det" style="margin-top:12px"></div>
+    <div class="sbar"><span class="left">Folder <select id="pf" class="pop">${opts}</select></span><button class="btn" data-a="close">Cancel</button><button class="btn pri" data-a="savepaste" id="sv" disabled>Add</button></div>`);
+  $('#pbox').focus();$('#pbox').addEventListener('input',upd);upd();
+}
+function upd(){DET=detect($('#pbox').value);const b=$('#sv');b.disabled=!DET.length;b.textContent=DET.length>1?`Add ${DET.length}`:'Add';
+  $('#det').innerHTML=DET.length?`<div class="grp">${DET.map((d,i)=>`<div class="dt">${DET.length>1?`<input type="checkbox" checked class="dchk" data-i="${i}">`:''}${tile(d.pv)}<div style="flex:1;min-width:0"><input type="text" class="dname" data-i="${i}" value="${esc(d.name)}"><small>${esc(d.pv==='Custom'?'Secret':d.pv)} · <span class="mono">${esc(d.env)}</span>${d.host?' · '+esc(d.host):''}</small></div>${d.envt==='prod'?'<span class="cap red">Production</span>':d.envt==='dev'?'<span class="cap">Development</span>':''}</div>`).join('')}</div><div class="note">Everything else is set automatically.</div>`:''}
+function prefsSheet(){
+  const tabs=[['general','General',I.gear],['devices','Devices',I.laptop],['security','Security',I.lock],['advanced','Advanced',I.sliders]];
+  const g=(t,rows)=>`<div class="gl">${t}</div><div class="grp">${rows}</div>`;
+  const b={
+    general:g('Vault',frow('Personal','On this Mac · iCloud Drive'))+g('Import',`<div class="fr"><div class="k">1Password, Bitwarden, .env</div><div class="v"></div><button class="pb">Import…</button></div>`)+g('Browser',frow('Chrome extension','Installed')),
+    devices:g('Questions go to every device',`${frow('Mac mini','This Mac')}${frow('MacBook Pro','Online')}${frow('iPhone','Push · Face ID')}<div class="fr"><div class="k">Relay</div><div class="v">End-to-end encrypted</div><button class="sw on" data-a="sw"></button></div>`)+`<div style="margin-top:10px"><button class="btn">Add Device…</button></div>`,
+    security:g('Unlock',`<div class="fr"><div class="k">Touch ID</div><div class="v"></div><button class="sw on" data-a="sw"></button></div>${frow('Passphrase','Changed Sep 26')}${frow('Lock after','15 minutes')}`)+g('Backup',`<div class="fr"><div class="k">Last backup</div><div class="v">Today 09:12</div><button class="pb">Back Up Now</button></div>`),
+    advanced:g('Bouncer',`${frow('Model','Running')}${frow('Asked you','4 times this week')}`)+g('Command line',frow('apassy','/usr/local/bin'))+g('Updates',frow('Version','Automatic')),
+  }[S.ptab];
+  sheet(`<div class="ptabs">${tabs.map(([k,l,i])=>`<button class="${S.ptab===k?'on':''}" data-a="ptab" data-v="${k}">${i}${l}</button>`).join('')}</div>${b}<div class="sbar"><button class="btn pri" data-a="close">Done</button></div>`,'prefs');
+}
+function membersSheet(){const v=S.shares.find(x=>x.id===S.shared);
+  sheet(`<h2>${esc(v.name)}</h2><p class="lead">Their agents can use the items here. The bouncer decides each use.</p>
+  <div class="grp">${v.members.map(m=>`<div class="fr"><div style="display:flex;align-items:center;gap:8px;flex:1"><div class="ava s" style="background:${m[2]}">${m[0][0]}</div>${m[0]}</div><span class="pop">${m[1]}</span></div>`).join('')}</div>
+  <div class="note">Members use items through their agents. Managers and owners can also see values.</div>
+  <div class="sbar"><span class="left"><button class="btn" data-a="noop">Invite…</button></span><button class="btn pri" data-a="close">Done</button></div>`)}
+function shareSheet(){const it=item(S.sel.vault);if(!it||it.from)return;
+  sheet(`<h2>Share “${esc(it.name)}”</h2><p class="lead">It stays in ${esc(fpath(it.folder))}. A shared vault gets the same item, not a copy.</p>
+  <div class="grp">${S.shares.map(v=>`<label class="fr"><span class="sq" style="background:${v.color}"></span><div style="flex:1">${esc(v.name)}<div style="font-size:12px;color:var(--sec)">${v.members.map(m=>m[0]).join(', ')}</div></div><input type="checkbox" class="schk" value="${v.id}" ${it.shared.includes(v.id)?'checked':''}></label>`).join('')}</div>
+  <div class="sbar"><span class="left">Touch ID</span><button class="btn" data-a="close">Cancel</button><button class="btn pri" data-a="saveshare">Share</button></div>`)}
+function moveSheet(){const it=item(S.sel.vault);if(!it||it.from)return;
+  sheet(`<h2>Move “${esc(it.name)}”</h2><p class="lead">Sharing does not change.</p><div class="grp">${['',...allF().map(f=>f.id)].map(id=>`<label class="fr"><div style="flex:1;padding-left:${id?id.split('/').length*14:0}px;display:flex;align-items:center;gap:6px"><span style="color:var(--accent);display:inline-grid;width:15px">${I.folder}</span>${esc(id?fpath(id).split(' › ').pop():'Personal')}</div><input type="radio" name="mv" value="${id}" ${id===it.folder?'checked':''}></label>`).join('')}</div>
+  <div class="sbar"><button class="btn" data-a="close">Cancel</button><button class="btn pri" data-a="savemove">Move</button></div>`)}
+function connectSheet(){sheet(`<h2>Connect an Agent</h2><p class="lead">Apassy sets up the host. There is nothing else to configure.</p>
+  <div class="pick">${[['Claude Code','#d97757','MCP server'],['Codex','#10a37f','MCP server'],['T3 Code','#6e5ae6','Through Claude Code or Codex'],['Other','#8e8e93','Token and CLI, also remote']].map(([n,c,s])=>`<button data-a="host" data-v="${n}"><div class="ava" style="background:${c}">${n[0]}</div><div><b>${n}</b><small>${s}</small></div></button>`).join('')}</div>
+  <div class="sbar"><button class="btn" data-a="close">Cancel</button></div>`)}
+
+function doneDecision(msg){const ids=S.decs.map(d=>d.id);const i=ids.indexOf(S.sel.decisions);S.decs=S.decs.filter(d=>d.id!==S.sel.decisions);S.decided++;S.menu=null;S.sel.decisions=(S.decs[Math.min(i,S.decs.length-1)]||{}).id;render();hud(msg)}
+document.addEventListener('click',e=>{
+  if(e.target.id==='veil'){closeSheet();return}
+  const el=e.target.closest('[data-a]');
+  if(!el){if(S.menu){S.menu=null;render()}return}
+  const a=el.dataset.a,id=el.dataset.id;
+  if(isNarrow()&&S.sideOpen&&['folder','shared','view'].includes(a))S.sideOpen=null;
+  if(a!=='imenu'&&a!=='dmenu'&&S.menu&&!el.closest('.menu'))S.menu=null;
+  switch(a){
+    case 'sidetoggle':S.sideOpen=isRail();return render();
+    case 'closeside':S.sideOpen=null;return render();
+    case 'tw':e.stopPropagation();S.open[id]=!S.open[id];return side();
+    case 'folder':S.view='vault';S.folder=id||null;{const cur=S.items.find(i=>i.id===S.sel.vault);if(!cur||!inF(cur,S.folder))S.sel.vault=firstIn('vault')}return render();
+    case 'shared':S.view='shared';S.shared=id;S.sel.vault=firstIn('shared');return render();
+    case 'view':S.view=el.dataset.v;if(S.view==='decisions'&&!S.decs.find(d=>d.id===S.sel.decisions))S.sel.decisions=S.decs[0]?.id;return render();
+    case 'sel':S.sel.vault=+id;return render();
+    case 'dsel':S.sel.decisions=id;S.menu=null;return render();
+    case 'asel':S.sel.agents=id;return render();
+    case 'imenu':S.menu=S.menu==='item'?null:'item';return render();
+    case 'dmenu':S.menu=S.menu==='dec'?null:'dec';return render();
+    case 'paste':return pasteSheet();
+    case 'ex':$('#pbox').value=EX[el.dataset.v];return upd();
+    case 'close':return closeSheet();
+    case 'savepaste':{const f=$('#pf').value;const ch=DET.map((d,i)=>({...d,name:document.querySelector(`.dname[data-i="${i}"]`).value,on:(document.querySelector(`.dchk[data-i="${i}"]`)||{checked:true}).checked})).filter(d=>d.on);if(!ch.length)return;let last;for(const d of ch){last=S.next++;S.items.push({id:last,name:d.name,pv:d.pv,kind:d.kind,env:d.env,host:d.host,envt:d.envt,folder:f,shared:[],user:d.user})}closeSheet();S.view='vault';S.folder=f||null;S.sel.vault=last;render();return hud(ch.length>1?`Added ${ch.length} credentials`:`Added ${ch[0].name}`)}
+    case 'share':S.menu=null;render();return shareSheet();
+    case 'saveshare':{const it=item(S.sel.vault);it.shared=[...document.querySelectorAll('.schk')].filter(c=>c.checked).map(c=>c.value);closeSheet();render();return hud(it.shared.length?'Shared':'No longer shared')}
+    case 'move':S.menu=null;render();return moveSheet();
+    case 'savemove':{const it=item(S.sel.vault);it.folder=document.querySelector('input[name=mv]:checked').value;closeSheet();render();return hud('Moved to '+fpath(it.folder||null))}
+    case 'members':return membersSheet();
+    case 'addshare':return hud('Use Share… on any credential to add it here');
+    case 'prefs':return prefsSheet();
+    case 'ptab':S.ptab=el.dataset.v;return prefsSheet();
+    case 'connect':return connectSheet();
+    case 'host':closeSheet();return hud(`${el.dataset.v} connected`);
+    case 'newfolder':{const n=prompt('Folder name','Clients');if(!n)return;const f={id:n.toLowerCase().replace(/\W+/g,'-'),name:n,kids:[]};S.folders.push(f);S.view='vault';S.folder=f.id;S.sel.vault=null;return render()}
+    case 'newshare':{const n=prompt('Shared vault name','Client X');if(!n)return;const v={id:n.toLowerCase().replace(/\W+/g,'-'),name:n,color:'#ff9f0a',members:[['Rafal','Owner','#ff9500']]};S.shares.push(v);S.view='shared';S.shared=v.id;S.sel.vault=null;return render()}
+    case 'envt':{item(S.sel.vault).envt=el.dataset.v;render();return hud('Saved')}
+    case 'show':return hud('Shown for 20 seconds after Touch ID');
+    case 'edit':return hud('Edit shows every field, for those who want it');
+    case 'sw':el.classList.toggle('on');return;
+    case 'rmrule':{S.rules[S.sel.vault].splice(+el.dataset.i,1);render();return hud('Rule removed')}
+    case 'rmexc':{const g=el.dataset.ag,i=S.sel.vault;S.exc[g]=(S.exc[g]||[]).filter(x=>x!==i);S.askAlways[g]=(S.askAlways[g]||[]).filter(x=>x!==i);render();return hud('Exception removed')}
+    case 'rmagexc':{const g=S.sel.agents,i=+el.dataset.i;S.exc[g]=(S.exc[g]||[]).filter(x=>x!==i);S.askAlways[g]=(S.askAlways[g]||[]).filter(x=>x!==i);render();return hud('Exception removed')}
+    case 'decide':{const d=S.decs.find(x=>x.id===S.sel.decisions);const c=el.dataset.c;
+      return doneDecision({allow:`Remembered for all agents in ${d.project}`,once:'Allowed once',deny:'Denied',never:'Saved as an exception',askall:'Saved as an exception',disc:'Agent disconnected',dismiss:'Dismissed'}[c])}
+    case 'fulfil':{const v=$('#reqv').value.trim();if(!v)return hud('Paste the key first');const d=S.decs.find(x=>x.id===S.sel.decisions);S.items.push({id:S.next++,name:d.name,pv:'Resend',kind:'API key',env:'RESEND_API_KEY',host:'api.resend.com',envt:'unk',folder:'side',shared:[]});return doneDecision('Saved. Codex can use it now.')}
+    case 'fix':{const d=S.decs.find(x=>x.id===S.sel.decisions);item(d.item).envt=el.dataset.v;return doneDecision('Saved')}
+    case 'noop':S.menu=null;render();return;
+  }
+});
+setInterval(()=>{for(const d of S.decs)if(d.secs>0){d.secs--;document.querySelectorAll(`[data-timer="${d.id}"],[data-timer2="${d.id}"]`).forEach(t=>t.textContent=fmt(d.secs))}},1000);
+render();
+</script>
+</body>
+</html>

@@ -27,7 +27,7 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     # The app has no App Intents. This stops the note "Metadata extraction skipped".
     LM_SKIP_METADATA_EXTRACTION: YES
-    MARKETING_VERSION: 0.4.1
+    MARKETING_VERSION: 0.5.0
     CURRENT_PROJECT_VERSION: 1
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"
@@ -67,6 +67,11 @@ targets:
           - $(AppIdentifierPrefix)com.wydrox.apassy.companion
           - $(AppIdentifierPrefix)com.wydrox.apassy.shared
         com.apple.developer.authentication-services.autofill-credential-provider: true
+        # Questions through the relay (contract relay-questions-v1, section 14.2). Xcode writes
+        # `production` into an App Store or TestFlight export. Both need the Push Notifications and
+        # Time Sensitive Notifications capabilities on the App ID and new provisioning profiles.
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
     info:
       path: Info.plist
       properties:
@@ -111,6 +116,10 @@ targets:
         # (the value of ASCredentialExchangeActivity).
         NSUserActivityTypes:
           - ASCredentialExchangeActivity
+        # The notification of a question wakes nothing; it opens Questions when tapped. The mode
+        # lets iOS hand the APNs device token to the app (contract relay-questions-v1, section 14.2).
+        UIBackgroundModes:
+          - remote-notification
     settings:
       base:
         PRODUCT_NAME: ApassyCompanion

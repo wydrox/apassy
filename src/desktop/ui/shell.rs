@@ -1,136 +1,236 @@
-//! The window frame: the sidebar, the page area, and the sheets.
+//! The window frame (ADR 0026 §1): the sidebar, the list column, the detail column, and
+//! the sheets.
 
-use eframe::egui::{self, Align, Frame, Layout, Margin, Pos2, Rect, ScrollArea, Vec2};
+use eframe::egui::{self, Frame, Margin};
 
 use super::Sheet;
 #[cfg(not(feature = "vault"))]
 use super::close_sheet;
-use super::kit::{self, Icon, Style, Tone};
-use crate::desktop::{DesktopApp, OwnerView};
-
-const SIDEBAR_WIDTH: f32 = 216.0;
-/// The reading width of a page.
-const PAGE_WIDTH: f32 = 760.0;
+use super::columns::{Columns, SidebarMode};
+use super::kit;
+#[cfg(feature = "vault")]
+use super::kit::{Style, Tone};
+use crate::desktop::{DesktopApp, Place};
 
 #[cfg(feature = "vault")]
-type Pending = Vec<crate::broker::approvals::PendingRun>;
+pub(super) type Pending = Vec<crate::broker::approvals::PendingRun>;
 #[cfg(not(feature = "vault"))]
-type Pending = ();
+pub(super) type Pending = ();
 
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
     #[cfg(feature = "vault")]
-    let pending = watch_approvals(app, ui.ctx());
-    #[cfg(feature = "vault")]
-    shortcuts(app, &ui.ctx().clone());
+    let pending = watch_approvals(app, &ctx);
     #[cfg(not(feature = "vault"))]
     let pending = ();
-    if !app.ui.sidebar_hidden {
-        egui::Panel::left("apassy-sidebar")
-            .resizable(false)
-            .exact_size(SIDEBAR_WIDTH)
-            .show_separator_line(true)
-            .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
-                left: 10,
-                right: 10,
-                top: 0,
-                bottom: 12,
-            }))
-            .show(ui, |ui| sidebar(app, ui, &pending));
+    shortcuts(app, &ctx);
+    let columns = Columns::of(app, ctx.content_rect().width());
+    if !columns.narrow {
+        app.ui.sidebar_float = false;
+    }
+    // The columns are split by a hairline, as in the mockup, not by the 1-point line
+    // of egui.
+    let sidebar = egui::Panel::left("apassy-sidebar")
+        .resizable(false)
+        .exact_size(columns.sidebar_width())
+        .show_separator_line(false)
+        .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
+            left: side_margin(columns.sidebar),
+            right: side_margin(columns.sidebar),
+            top: 0,
+            bottom: 10,
+        }))
+        .show(ui, |ui| {
+            super::sidebar::draw(app, ui, &pending, columns.sidebar)
+        })
+        .response
+        .rect;
+    let list = egui::Panel::left("apassy-list")
+        .resizable(false)
+        .exact_size(columns.list_width)
+        .show_separator_line(false)
+        .frame(Frame::NONE.fill(kit::LIST))
+        .show(ui, |ui| list_column(app, ui, &pending))
+        .response
+        .rect;
+    for rect in [sidebar, list] {
+        column_edge(ui, rect);
     }
     egui::CentralPanel::default()
-        .frame(Frame::NONE.fill(kit::WINDOW))
-        .show(ui, |ui| content(app, ui, &pending));
-    sidebar_toggle(app, &ui.ctx().clone());
-    sheets(app, &ui.ctx().clone());
+        .frame(Frame::NONE.fill(kit::DETAIL))
+        .show(ui, |ui| detail_column(app, ui, &pending));
+    if columns.sidebar == SidebarMode::Float {
+        super::sidebar::draw_float(app, &ctx, &pending);
+    }
+    sheets(app, &ctx);
 }
 
-/// The sidebar button in the title bar, right of the window buttons, as in a macOS
-/// window. It stays at the same place when the sidebar hides, so the owner finds it
-/// again. ⌃⌘S does the same.
-fn sidebar_toggle(app: &mut DesktopApp, ctx: &egui::Context) {
-    // The window buttons end at 70 points; the title bar is 38 points high.
-    let name = if app.ui.sidebar_hidden {
-        "Show sidebar  ⌃⌘S"
-    } else {
-        "Hide sidebar  ⌃⌘S"
-    };
-    let clicked = egui::Area::new(egui::Id::new("apassy-sidebar-toggle"))
-        .fixed_pos(Pos2::new(80.0, 3.0))
-        .show(ctx, |ui| {
-            kit::title_bar_button(ui, Icon::Sidebar, name).clicked()
-        })
-        .inner;
-    if clicked {
-        app.ui.toggle_sidebar();
+/// The margin at the sides of the sidebar. On the rail, wide enough for the traffic
+/// lights ([`kit::RAIL_WIDTH`]), it keeps the icon rows 42 points wide, near the 40 of
+/// the mockup.
+fn side_margin(mode: SidebarMode) -> i8 {
+    if mode == SidebarMode::Full { 10 } else { 18 }
+}
+
+/// The hairline at the right edge of a column, inside it.
+fn column_edge(ui: &egui::Ui, rect: egui::Rect) {
+    let width = 1.0 / ui.ctx().pixels_per_point();
+    let x = rect.right() - width / 2.0;
+    ui.painter().vline(
+        x,
+        rect.y_range(),
+        egui::Stroke::new(width, kit::COLUMN_EDGE),
+    );
+}
+
+/// The list column of the place. After a navigation with the keyboard, its first
+/// control takes the focus.
+fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
+    super::focus::page_start(&mut app.ui.focus, &ui.ctx().clone());
+    #[cfg(feature = "vault")]
+    match &app.place {
+        Place::Folder(_) | Place::Shared(_) => super::items::list_column(app, ui),
+        Place::Decisions => super::decisions::list_column(app, ui, pending),
+        Place::Agents => super::agents::list_column(app, ui),
+        Place::Settings => super::settings_view::list_column(app, ui),
     }
+    #[cfg(not(feature = "vault"))]
+    {
+        let _ = pending;
+        match &app.place {
+            Place::Folder(_) | Place::Shared(_) => super::demo::list_column(app, ui),
+            Place::Decisions => super::demo::decisions_list(app, ui),
+            Place::Agents => super::demo::agents_list(app, ui),
+            Place::Settings => super::settings_view::list_column(app, ui),
+        }
+    }
+}
+
+/// The detail column of the place.
+fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
+    #[cfg(feature = "vault")]
+    match &app.place {
+        Place::Folder(_) | Place::Shared(_) => super::items::detail_column(app, ui, pending),
+        Place::Decisions => super::decisions::detail_column(app, ui, pending),
+        Place::Agents => super::agents::detail_column(app, ui, pending),
+        Place::Settings => super::settings_view::detail_column(app, ui),
+    }
+    #[cfg(not(feature = "vault"))]
+    {
+        let _ = pending;
+        match &app.place {
+            Place::Folder(_) | Place::Shared(_) => super::demo::detail_column(app, ui),
+            Place::Decisions => super::demo::decisions_detail(app, ui),
+            Place::Agents => super::demo::agents_detail(app, ui),
+            Place::Settings => super::settings_view::detail_column(app, ui),
+        }
+    }
+}
+
+/// The banners on top of a detail: a run that waits (but in Decisions), a ready update,
+/// and a sync note. Each scope keeps the IDs below it the same when it comes or goes, so
+/// the focus stays on its control.
+#[cfg(feature = "vault")]
+pub(super) fn banners(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[crate::broker::approvals::PendingRun],
+) {
+    ui.scope(|ui| {
+        if app.place != Place::Decisions {
+            approval_banner(app, ui, pending);
+        }
+    });
+    ui.scope(|ui| super::updates::banner(app, ui));
+    ui.scope(|ui| super::sync::banner(app, ui));
+}
+
+/// Go to a place with the keyboard. The first control of its list takes the focus.
+fn go(app: &mut DesktopApp, place: Place) {
+    super::sidebar::navigate(app, place);
+    app.ui.focus.focus_page_start();
 }
 
 /// Window shortcuts. They act only when no sheet, alert, token, or owner check is open,
 /// except ⌘L.
 ///
-/// - ⌘1 to ⌘4: Credentials, Agents, Activity, Learning. ⌘,: Settings.
-/// - ⌘[: back from a credential or an agent to its list.
+/// - ⌘1, ⌘2, ⌘3: All credentials, Decisions, Agents. ⌘,: Settings.
+/// - ⌘[: back from a credential or an agent to nothing selected.
 /// - ⌘N: a new credential.
 /// - ⌘F: search the credentials.
 /// - ⌘⇧H: show or hide the secret values of the open credential. ⌘H stays the macOS
 ///   shortcut for "Hide Apassy": the app menu takes it before the window.
 /// - ⌘L: lock the vault, also with a sheet open, but not during an owner check.
-/// - ⌃⌘S: hide or show the sidebar.
+/// - ⌃⌘S: collapse or expand the sidebar; in a narrow window, open or close it over
+///   the list.
 ///
 /// Tab and Shift-Tab move the focus, and the page scrolls to it. Space or Return
 /// presses the focused control. Page Up, Page Down, Home, and End scroll the page.
-#[cfg(feature = "vault")]
-fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
+pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
     use eframe::egui::{Key, Modifiers};
 
+    #[cfg(feature = "vault")]
     if app.owner.check.is_none() && kit::shortcut(ctx, Modifiers::COMMAND, Key::L) {
         app.lock_vault(Some(ctx));
         return;
     }
+    #[cfg(feature = "vault")]
     let busy = app.ui.sheet.is_some()
         || app.pending_delete
         || app.owner_ui.fresh_token.is_some()
         || app.owner.check.is_some()
         || app.learning.inspected.is_some();
+    #[cfg(not(feature = "vault"))]
+    let busy = app.ui.sheet.is_some() || app.pending_delete;
     if busy {
         return;
     }
     // Before ⌘ alone: ⌃⌘S must not reach a ⌘S handler.
     if kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::CTRL, Key::S) {
-        app.ui.toggle_sidebar();
+        app.ui
+            .toggle_sidebar_in(ctx.content_rect().width() < kit::NARROW_WINDOW);
         return;
     }
-    let views = [
-        (Key::Num1, OwnerView::Vault),
-        (Key::Num2, OwnerView::Agents),
-        (Key::Num3, OwnerView::Activity),
-        (Key::Num4, OwnerView::Learning),
-        (Key::Comma, OwnerView::Settings),
+    let places = [
+        (Key::Num1, Place::CREDENTIALS),
+        (Key::Num2, Place::Decisions),
+        (Key::Num3, Place::Agents),
     ];
-    for (key, view) in views {
+    for (key, place) in places {
         if kit::shortcut(ctx, Modifiers::COMMAND, key) {
-            navigate(app, view);
-            app.ui.focus.focus_page_start();
+            go(app, place);
             return;
         }
     }
-    if kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
-        if app.view == OwnerView::Item {
-            super::items::toggle_masking(app, ctx);
-        }
-    } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::OpenBracket) {
-        if app.view == OwnerView::Item {
-            app.view = OwnerView::Vault;
+    if kit::shortcut(ctx, Modifiers::COMMAND, Key::Comma) {
+        super::settings_view::show(app);
+        app.ui.focus.focus_page_start();
+        return;
+    }
+    if kit::shortcut(ctx, Modifiers::COMMAND, Key::OpenBracket) {
+        if app.place.is_credentials() && app.selected_item_id.is_some() {
+            app.selected_item_id = None;
             app.ui.focus.focus_page_start();
-        } else if app.view == OwnerView::Agents && app.owner_ui.selected_agent.is_some() {
+        }
+        #[cfg(feature = "vault")]
+        if app.place == Place::Agents && app.owner_ui.selected_agent.is_some() {
             app.owner_ui.selected_agent = None;
             app.ui.focus.focus_page_start();
         }
+        // The demo build has no shortcut after this one.
+        #[cfg_attr(not(feature = "vault"), allow(clippy::needless_return))]
+        return;
+    }
+    #[cfg(feature = "vault")]
+    if kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
+        if app.place.is_credentials() && app.selected_item_id.is_some() {
+            super::items::toggle_masking(app, ctx);
+        }
     } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::N) {
-        app.view = OwnerView::Vault;
-        super::items::open_add(app);
+        app.show_credentials();
+        app.ui.sheet = Some(Sheet::NewCredential);
     } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::F) {
-        app.view = OwnerView::Vault;
+        app.show_credentials();
         app.ui.focus_search = true;
     }
 }
@@ -156,108 +256,6 @@ fn watch_approvals(app: &mut DesktopApp, ctx: &egui::Context) -> Pending {
     pending
 }
 
-/// The views in the sidebar list, with their icons.
-fn primary_views() -> &'static [(OwnerView, Icon)] {
-    #[cfg(feature = "vault")]
-    {
-        &[
-            (OwnerView::Vault, Icon::Key),
-            (OwnerView::Agents, Icon::Person),
-            (OwnerView::Activity, Icon::Tray),
-            (OwnerView::Learning, Icon::Chart),
-        ]
-    }
-    #[cfg(not(feature = "vault"))]
-    {
-        &[
-            (OwnerView::Vault, Icon::Key),
-            (OwnerView::Rules, Icon::List),
-            (OwnerView::Agents, Icon::Person),
-            (OwnerView::Activity, Icon::Tray),
-        ]
-    }
-}
-
-/// Go to a view from the sidebar. A click on the current view goes back to its root.
-pub(super) fn navigate(app: &mut DesktopApp, view: OwnerView) {
-    app.view = view;
-    #[cfg(feature = "vault")]
-    if view == OwnerView::Agents {
-        app.owner_ui.selected_agent = None;
-    }
-}
-
-fn sidebar(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
-    let full = ui.max_rect();
-    kit::window_drag_region(
-        ui,
-        Rect::from_min_max(
-            Pos2::new(full.left() - 10.0, full.top()),
-            Pos2::new(full.right() + 10.0, full.top() + kit::TITLE_BAR),
-        ),
-    );
-    ui.add_space(kit::TITLE_BAR + 10.0);
-    #[cfg(feature = "vault")]
-    super::vaults::sidebar_switcher(app, ui);
-    ui.spacing_mut().item_spacing.y = 2.0;
-    for (index, (view, icon)) in primary_views().iter().enumerate() {
-        let selected =
-            app.view == *view || (*view == OwnerView::Vault && app.view == OwnerView::Item);
-        let badge = badge(app, *view, pending);
-        // The shortcut shows on hover, as in the menus of a macOS app.
-        let hint = format!("{}  ⌘{}", view.label(), index + 1);
-        if kit::sidebar_item(ui, *icon, view.label(), selected, badge)
-            .on_hover_text(hint)
-            .clicked()
-        {
-            navigate(app, *view);
-        }
-    }
-    ui.with_layout(Layout::bottom_up(Align::Min), |ui| sidebar_footer(app, ui));
-}
-
-#[cfg(feature = "vault")]
-fn badge(app: &DesktopApp, view: OwnerView, pending: &Pending) -> Option<kit::Badge> {
-    let session = &app.owner_ui.session;
-    match view {
-        OwnerView::Vault => {
-            // The count leaves out archived credentials, as the list does.
-            let archived = session.archived().map_or(0, |archived| archived.len());
-            session.search("").ok().map(|items| kit::Badge {
-                count: items.len().saturating_sub(archived),
-                tone: Tone::Neutral,
-                what: "",
-            })
-        }
-        OwnerView::Agents => {
-            let expired = session
-                .agents()
-                .map_or(0, |agents| expired_tokens(&agents, kit::now()));
-            Some(kit::Badge {
-                count: expired,
-                tone: Tone::Warning,
-                what: if expired == 1 {
-                    "token expired"
-                } else {
-                    "tokens expired"
-                },
-            })
-        }
-        OwnerView::Activity => {
-            // Runs that wait, and access requests of agents (ADR 0012).
-            let requests = session
-                .access_requests(true)
-                .map_or(0, |requests| requests.len());
-            Some(kit::Badge {
-                count: pending.len() + requests,
-                tone: Tone::Warning,
-                what: "waiting",
-            })
-        }
-        _ => None,
-    }
-}
-
 /// Active agents whose token expired. An expired token stops the agent until the owner
 /// rotates it; a revoked agent needs nothing.
 #[cfg(feature = "vault")]
@@ -268,166 +266,23 @@ pub(super) fn expired_tokens(agents: &[crate::vault::AgentSummary], now: u64) ->
         .count()
 }
 
-#[cfg(not(feature = "vault"))]
-fn badge(app: &DesktopApp, view: OwnerView, _pending: &Pending) -> Option<kit::Badge> {
-    match view {
-        OwnerView::Vault if !app.model.is_locked() => Some(kit::Badge {
-            count: app.model.list_items("").len(),
-            tone: Tone::Neutral,
-            what: "",
-        }),
-        OwnerView::Activity => {
-            let waiting = app
-                .model
-                .list_requests()
-                .iter()
-                .filter(|request| request.status == crate::desktop::RequestStatus::Pending)
-                .count();
-            Some(kit::Badge {
-                count: waiting,
-                tone: Tone::Warning,
-                what: "waiting",
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Settings. The lock is at the top, with the open vault it locks.
+/// A question that waits for the owner, on top of each detail but Decisions. "Review"
+/// opens it in Decisions.
 #[cfg(feature = "vault")]
-fn sidebar_footer(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let selected = app.view == OwnerView::Settings;
-    if kit::sidebar_item(ui, Icon::Gear, OwnerView::Settings.label(), selected, None)
-        .on_hover_text("Settings  ⌘,")
-        .clicked()
-    {
-        navigate(app, OwnerView::Settings);
-    }
-}
-
-/// The demo notice, the lock controls, and "Reset demo".
-#[cfg(not(feature = "vault"))]
-fn sidebar_footer(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if kit::small_button(ui, "Reset demo", Style::Link).clicked() {
-        app.reset_demo();
-    }
-    let locked = app.model.is_locked();
-    let (label, icon) = if locked {
-        ("Open vault", Icon::Key)
-    } else {
-        ("Lock vault", Icon::Lock)
-    };
-    if kit::button_with(ui, Some(icon), label, Style::Bordered, kit::Size::Small).clicked() {
-        if locked {
-            let result = app.model.unlock();
-            let _ = app.apply(
-                result,
-                "The vault is open. This control is not owner authentication.",
-            );
-        } else {
-            let result = app.model.lock();
-            if app
-                .apply(result, "The vault is locked. Item details are hidden.")
-                .is_some()
-            {
-                app.pending_delete = false;
-            }
-        }
-    }
-    ui.add_space(4.0);
-    kit::note(ui, app.model.lock_state_label());
-    ui.add_space(8.0);
-    kit::note(ui, crate::desktop::DEMO_BANNER);
-    kit::tag(ui, "Demo", Tone::Warning);
-}
-
-fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
-    let full = ui.max_rect();
-    kit::window_drag_region(
-        ui,
-        Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TITLE_BAR)),
-    );
-    ui.add_space(kit::TITLE_BAR + 6.0);
-    let ctx = ui.ctx().clone();
-    #[cfg(feature = "vault")]
-    if app.view == OwnerView::Item {
-        kit::column_with_bottom_space(ui, PAGE_WIDTH, 12.0, |ui| {
-            super::focus::page_start(&mut app.ui.focus, &ctx);
-            super::items::draw_detail_header(app, ui);
-        });
-        ui.separator();
-        ui.add_space(12.0);
-    }
-    // A credential has its own scroll position. Opening a different credential
-    // must not start at the bottom of the previous one's details.
-    let item_scroll = (app.view == OwnerView::Item)
-        .then(|| app.selected_item_id.clone())
-        .flatten();
-    ScrollArea::vertical()
-        .id_salt(("page", app.view, item_scroll))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            kit::column(ui, PAGE_WIDTH, |ui| {
-                #[cfg(feature = "vault")]
-                if app.view != OwnerView::Item {
-                    super::focus::page_start(&mut app.ui.focus, &ctx);
-                }
-                #[cfg(not(feature = "vault"))]
-                super::focus::page_start(&mut app.ui.focus, &ctx);
-                // The scope keeps the IDs of the page the same when the banner comes
-                // or goes, so the focus stays on its control.
-                #[cfg(feature = "vault")]
-                ui.scope(|ui| {
-                    if app.view != OwnerView::Activity {
-                        approval_banner(app, ui, pending);
-                    }
-                });
-                #[cfg(feature = "vault")]
-                ui.scope(|ui| super::updates::banner(app, ui));
-                #[cfg(feature = "vault")]
-                ui.scope(|ui| super::sync::banner(app, ui));
-                page(app, ui, pending);
-            });
-            kit::follow_focus(ui);
-            kit::keyboard_scroll(ui);
-        });
-}
-
-#[cfg(feature = "vault")]
-fn page(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
-    match app.view {
-        OwnerView::Vault => super::items::draw_list(app, ui),
-        OwnerView::Item => super::items::draw_detail_body(app, ui),
-        OwnerView::Agents => super::agents::draw(app, ui),
-        OwnerView::Activity => super::activity::draw(app, ui, pending),
-        OwnerView::Learning => crate::desktop::learning_ui::draw(app, ui),
-        OwnerView::Settings => super::settings::draw(app, ui),
-    }
-}
-
-#[cfg(not(feature = "vault"))]
-fn page(app: &mut DesktopApp, ui: &mut egui::Ui, _pending: &Pending) {
-    match app.view {
-        OwnerView::Vault => super::demo::draw_list(app, ui),
-        OwnerView::Item => super::demo::draw_detail(app, ui),
-        OwnerView::Rules => super::demo::draw_rules(app, ui),
-        OwnerView::Agents => super::demo::draw_agents(app, ui),
-        OwnerView::Activity => super::demo::draw_activity(app, ui),
-    }
-}
-
-/// A run that waits for the owner, on top of every view but Activity.
-#[cfg(feature = "vault")]
-fn approval_banner(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
+fn approval_banner(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[crate::broker::approvals::PendingRun],
+) {
     let Some(run) = pending.first() else {
         return;
     };
-    let title = format!("{} asks to run a command with secrets", run.agent);
+    let title = format!("{} waits for your answer", run.agent);
     let more = pending.len() - 1;
     kit::notice(ui, Tone::Warning, &title, None, |ui| {
         ui.add(
             egui::Label::new(
-                kit::text(super::activity::shell_words(&run.command), kit::Font::Mono)
+                kit::text(super::decisions::shell_words(&run.command), kit::Font::Mono)
                     .color(kit::LABEL),
             )
             .truncate(),
@@ -435,30 +290,32 @@ fn approval_banner(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             if kit::small_button(ui, "Review", Style::Prominent).clicked() {
-                app.ui.sheet = Some(Sheet::Approval(run.id));
+                super::decisions::select(app, run.id);
+                super::sidebar::navigate(app, Place::Decisions);
             }
             if more > 0
                 && kit::small_button(ui, &format!("{more} more waiting"), Style::Link).clicked()
             {
-                navigate(app, OwnerView::Activity);
+                super::sidebar::navigate(app, Place::Decisions);
             }
         });
     });
 }
 
-fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
+/// The sheet over the window, the delete alert, and the token sheet.
+pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
     #[cfg(feature = "vault")]
     {
         if app.owner_ui.fresh_token.is_some() {
             super::agents::draw_fresh_token(app, ctx);
             return;
         }
-        if app.pending_delete && app.view == OwnerView::Item {
+        if app.pending_delete && app.selected_item_id.is_some() {
             super::items::draw_delete_alert(app, ctx);
         }
     }
     #[cfg(not(feature = "vault"))]
-    if app.pending_delete && app.view == OwnerView::Item {
+    if app.pending_delete && app.selected_item_id.is_some() {
         super::demo::draw_delete_alert(app, ctx);
     }
     let Some(sheet) = app.ui.sheet.clone() else {
@@ -480,26 +337,11 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         Sheet::ArchiveItem => super::items::archive_sheet(app, ctx),
         #[cfg(feature = "vault")]
-        Sheet::RegisterAgent => super::agents::register_sheet(app, ctx),
+        Sheet::RegisterAgent => super::agent_onboarding::sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::RevokeAgent { agent_id, name } => {
             super::agents::revoke_sheet(app, ctx, agent_id, &name)
         }
-        #[cfg(feature = "vault")]
-        Sheet::ProcessAccess {
-            agent_id,
-            item_id,
-            mode,
-            any_folder,
-        } => super::agents::access_sheet(app, ctx, agent_id, item_id, mode, any_folder),
-        #[cfg(feature = "vault")]
-        Sheet::GrantMany { agent_id } => super::agents::grant_many_sheet(app, ctx, agent_id),
-        #[cfg(feature = "vault")]
-        Sheet::AccessRequest { request_id } => {
-            super::activity::access_request_sheet(app, ctx, request_id)
-        }
-        #[cfg(feature = "vault")]
-        Sheet::Approval(run_id) => super::activity::approval_sheet(app, ctx, run_id),
         #[cfg(feature = "vault")]
         Sheet::ChangePassphrase => super::settings::passphrase_sheet(app, ctx),
         #[cfg(feature = "vault")]
@@ -512,6 +354,20 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::Import => super::import::sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::ResetCompanion => super::companion::reset_sheet(app, ctx),
+        #[cfg(feature = "vault")]
+        Sheet::NewCredential => super::new_credential::sheet(app, ctx),
+        #[cfg(feature = "vault")]
+        Sheet::MoveToFolder { item_id } => super::folders::move_sheet(app, ctx, item_id),
+        #[cfg(feature = "vault")]
+        Sheet::NewFolder { parent } => {
+            super::folders::new_folder_sheet(app, ctx, parent.as_deref())
+        }
+        #[cfg(feature = "vault")]
+        Sheet::RenameFolder { uuid } => super::folders::rename_sheet(app, ctx, &uuid),
+        #[cfg(feature = "vault")]
+        Sheet::DeleteFolder { uuid } => super::folders::delete_sheet(app, ctx, &uuid),
+        #[cfg(feature = "vault")]
+        Sheet::Share { item_id } => super::items::share_sheet(app, ctx, item_id),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
         #[cfg(not(feature = "vault"))]

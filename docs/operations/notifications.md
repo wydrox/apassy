@@ -7,11 +7,11 @@ This document does not open the real-secret gate.
 
 ## What the owner sees
 
-- A run that waits for the owner causes a macOS notification "Approval waiting".
+- A question that waits for the owner, a credential request of an agent, and a suggestion each cause one macOS notification "Approval waiting". A suggestion uses the name "Apassy", because no agent asked for it.
 - A request that the broker blocks causes a macOS notification "Request blocked".
-- The preview has the agent name and the event type only. It never has the command, the user request, the purpose, or a value (N2).
-- The owner decides in the app. A notification is not an approval. "Mark as seen" in the inbox is not an approval (N4).
-- Activity > Inbox shows the events and the delivery result of each event. Settings > Notifications shows the channel state and its buttons. When macOS cannot show a banner, Activity shows a short notice with a link to Settings.
+- The preview has the agent name and the event type only. It never has the command, the user request, the purpose, the credential name, or a value (N2).
+- The owner decides in Decisions. A notification is not an approval (N4).
+- Settings > Devices > This Mac shows the channel state, its buttons, and the number of failed notifications. When macOS cannot show a banner, Decisions shows "macOS notifications are off" with "Open Settings". Since 0.5.0 the app has no inbox view: the events stay in the activity log (`apassy activity`).
 
 ## Design
 
@@ -21,8 +21,8 @@ This document does not open the real-secret gate.
 | Sender thread | `src/desktop/notify.rs` | Calls `NativeHelper::notify` for each event. A call can block for 40 s, so the watcher does not wait for it. |
 | Notifier | `native/ApassyNotify`, in `Apassy.app/Contents/Helpers/ApassyNotify.app` | The app starts it as its child for each call. Bundle ID and signing ID `com.wydrox.apassy.notify`, display name "Apassy". It checks its parent (the signed Apassy app), builds the text from fixed templates, and posts with `UNUserNotificationCenter`. See [native-app.md](native-app.md#notification-research-n1). |
 | Preview | `src/native/mod.rs` | `Notification::new(event_id, agent_name, event)` is the only constructor. It takes no free text. The request has the id, the event type, and the agent name only. |
-| Inbox | `src/desktop/inbox.rs` | Waiting runs from the queue, and events from the activity log in the vault. |
-| Inbox and channel views | `src/desktop/ui/activity.rs`, `src/desktop/ui/settings.rs` | Events, delivery results, and "Mark as seen" in Activity. Channel state and permission buttons in Settings. |
+| Inbox | `src/desktop/inbox.rs` | Waiting runs from the queue, and events from the activity log in the vault. The watcher reads it; no view shows it. |
+| Notice and channel view | `src/desktop/ui/decisions.rs`, `src/desktop/ui/settings.rs` | The notice in Decisions when macOS cannot show a banner. Channel state, permission buttons, and the number of failed notifications in Settings > Devices > This Mac. |
 
 The notification center starts with the window, after the broker. It replaces the notifier of the approval queue: the notifier wakes the watcher and repaints the window.
 The helper calls run on worker threads only. The UI thread never calls the helper.
@@ -31,8 +31,9 @@ The helper calls run on worker threads only. The UI thread never calls the helpe
 
 | Event | Source | Notification |
 | --- | --- | --- |
-| A run starts to wait for the owner | Approval queue | "Approval waiting", one for each run |
-| A request is refused (rule, grant, bouncer, token, directory) | Activity entry with decision `deny` | "Request blocked" |
+| A question starts to wait for the owner | Approval queue | "Approval waiting", one for each question |
+| An agent asks for a credential (`apassy_ask_owner_for_credential`), or Apassy proposes a correction | Credential requests and corrections in the vault | "Approval waiting", one for each |
+| A request is refused (a hard rule, an exception of the agent, a token, a directory check) | Activity entry with decision `deny` | "Request blocked" |
 | The owner denied a run, the owner did not decide in time, or a lock ended the run | Activity entry with decision `deny` | None. The owner already knows. |
 | A run that the bouncer allowed | Activity entry with decision `allow` | None |
 
@@ -59,27 +60,27 @@ The inbox has no own table. It reuses the encrypted activity log of the vault (s
 - The broker stores each refusal and each result of a request in the log.
 - A waiting run gets its entry when the wait ends: approved, denied, timed out, or invalidated.
 - When the owner locks the vault, or quits Apassy, while runs wait, the app first stores a denial for each waiting run: "The owner locked the vault before a decision. The run did not start." or "Apassy stopped before the owner decided. The run did not start." The app holds the vault mutex from this entry to the lock. So the broker finds the vault locked and does not store a second entry.
-- The inbox shows the last 100 log entries that are inbox events, and the runs that wait now.
+- The inbox holds the last 100 log entries that are inbox events, and the runs that wait now.
 
-After a restart, the vault starts locked (V3). The inbox shows the events after the owner unlocks the vault.
+After a restart, the vault starts locked (V3). The log is readable again after the owner unlocks the vault.
 
 ### Delivery failure (N3)
 
 A delivery fails when the notifier answers `notifications_denied`, `notifications_unavailable`, or `caller_not_allowed`, when `delivered` is false, when the notifier is missing, or when the notifier does not answer in 40 s.
 Then:
 
-- the event in the inbox shows "Notification failed: ... The event stays in this inbox.",
-- Settings > Notifications shows the number of failed notifications and the channel state,
-- nothing changes in the approval queue. The run still waits until the owner decides or the approval time ends.
+- Settings > Devices > This Mac shows the number of failed notifications ("1 notification failed.") and the channel state,
+- Decisions shows "macOS notifications are off" when the channel cannot deliver,
+- nothing changes in the approval queue. The question still waits in Decisions until the owner decides or the 5 minutes end.
 
-The channel state comes from `notify_status` at start, from each `notify` answer, and from the "Check again" button in Settings > Notifications. After a `notifications_denied` answer, the sender reads `notify_status` again, so Settings shows the real permission state.
+The channel state comes from `notify_status` at start, from each `notify` answer, and from the "Check again" button in Settings > Devices > This Mac. After a `notifications_denied` answer, the sender reads `notify_status` again, so Settings shows the real permission state.
 
 Permission (measured on macOS 27, [native-app.md](native-app.md#notification-research-n1)):
 
 - macOS shows the permission prompt only while the notifier waits. An unanswered prompt ends as "denied", and macOS does not ask again.
-- So `notify` never asks. When the owner has not decided, the delivery fails with "The owner has not allowed notifications for Apassy yet", and the card keeps the "Allow notifications" button.
-- "Allow notifications" calls `notify_authorize`. macOS shows the prompt for "Apassy" at the top right of the screen for at most 120 s. The card shows "macOS asks you now" and hides the button during that time.
-- After a denial, the card shows "Open notification settings". It opens System Settings > Notifications. The owner turns on "Allow notifications" for Apassy there.
+- So `notify` never asks. When the owner has not decided, the delivery fails with "The owner has not allowed notifications for Apassy yet", and Settings > Devices > This Mac keeps the "Allow notifications" button.
+- "Allow notifications" calls `notify_authorize`. macOS shows the prompt for "Apassy" at the top right of the screen for at most 120 s. Settings shows "macOS asks you now" and hides the button during that time.
+- After a denial, Settings shows "Open System Settings". It opens System Settings > Notifications > Apassy. The owner turns on "Allow notifications" for Apassy there.
 
 ### Not an approval (N4)
 
@@ -93,8 +94,8 @@ Tests, all with synthetic values:
 
 | Test | Item | What it shows |
 | --- | --- | --- |
-| `tests/notifications.rs` `waiting_approval_notifies_within_five_seconds` | N1, N2, N4 | Real broker, fake helper. A run in "ask" mode waits. The `notify` request arrives in less than 5 s. Title and body are exactly the fixed text. The request log has no command, purpose, user request, or secret canary. The delivered notification does not approve: the run times out, and the command does not run. |
-| `tests/notifications.rs` `blocked_request_notifies_within_five_seconds` | N1, N2 | A refused run (directory outside the grant) causes "Request blocked" in less than 5 s. An owner denial causes no "Request blocked". |
+| `tests/notifications.rs` `waiting_approval_notifies_within_five_seconds` | N1, N2, N4 | Real broker, fake helper. A question waits. The `notify` request arrives in less than 5 s. Title and body are exactly the fixed text. The request log has no command, purpose, user request, or secret canary. The delivered notification does not approve: the run times out, and the command does not run. |
+| `tests/notifications.rs` `blocked_request_notifies_within_five_seconds` | N1, N2 | A refused run (a credential that is "Not for this agent") causes "Request blocked" in less than 5 s. An owner denial causes no "Request blocked". |
 | `tests/notifications.rs` `delivery_failure_is_visible_and_the_request_stays` | N3 | The fake answers `notifications_denied`. The delivery is `Failed`, the channel cannot deliver and offers System Settings, the run still waits, and the inbox lists it. |
 | `tests/notifications.rs` `an_undecided_permission_keeps_the_allow_button` | N1, N3 | The owner has not decided. The delivery fails, the card keeps "Allow notifications", the app sends no `notify_authorize` on its own, and the run still waits. |
 | `tests/native_helper.rs` `the_notifier_takes_no_free_text`, `swift_and_rust_previews_match` | N2 | The real notifier (unsigned, development build) refuses `title`, `body`, `command`, an unknown event, and a bad agent name. Its fixed text is the same as the Rust text. |
@@ -103,7 +104,7 @@ Tests, all with synthetic values:
 | `tests/notifications.rs` `inbox_keeps_events_after_a_restart` | N3 | A blocked request and a waiting run. The app quits with `lock_ending_runs`. A new session opens the file and unlocks. The inbox has both events, one entry for the run, and no secret. |
 | `tests/notifications.rs` `old_or_changed_request_cannot_be_approved` | N4 | With a passed passphrase check: a changed command or directory gives `Changed`. After a denial, the old run gives `NotWaiting`. The command does not run. |
 | `src/broker/approvals.rs` `approve_refuses_without_a_matching_fresh_proof` | N4, A4 | A proof for another action, an old proof, a changed run, and another run ID are refused. "Approve and remember" uses the same path. |
-| `src/desktop/ui/owner_tests.rs` `approval_needs_the_owner_check_and_seen_is_not_an_approval` | N4, A4 | In the app: "Mark as seen" and a wrong passphrase do not approve. The correct passphrase approves. |
+| `src/desktop/ui/owner_tests.rs` `allow_once_needs_the_owner_check` | N4, A4 | In Decisions: the question says "A notification is not an approval". "Allow Once" with a wrong passphrase approves nothing. The correct passphrase approves. |
 | `src/desktop/inbox.rs` unit tests | N1, N3 | The classification of log entries, and the notification identifiers. |
 
 Measured time from the event to the `notify` request, three runs of the two N1 tests:
@@ -146,17 +147,16 @@ End-to-end time for N1: the time from the event to the notifier request (table a
 
 - A crash or `kill -9` while a run waits leaves no entry for that run. The run did not start, and the agent got no approval. A crash-safe "waiting" entry needs a new activity decision value, which is a schema change. The worker that owns schema v7 decides this.
 - The watcher reads at most 50 new log entries per second. A burst of more refusals causes notifications for the newest 50 only. All entries stay in the log and in the inbox.
-- "Mark as seen" is kept in memory only. After a restart, each event shows again as not seen.
-- The delivery result of an event is kept in memory only. After a restart, the inbox shows the events without a delivery result.
+- The delivery result of an event is kept in memory only. After a restart, the count of failed notifications starts at zero.
 - A notification tells the owner that an event exists. It cannot prove that the owner saw it.
 
 ## Owner checklist
 
 Use a vault with synthetic values. Record the results here.
 
-1. Build: `scripts/build-app.sh`. Run `scripts/n1-check.sh` (see [N1 with the real notifier](#n1-with-the-real-notifier)). Start: `open target/Apassy.app`. Activity > Inbox: expect "Notifications are allowed. Banners are on." If the card shows "Allow notifications", select it and click "Allow" in the macOS prompt within 120 s. If it shows "Open notification settings", select it and turn on "Allow notifications" for Apassy.
-2. N1, N2 waiting: register an agent, give it process access with "Ask me each time", and send a run from the agent. Expect a banner "Approval waiting" within 5 seconds, with the agent name and no command. Measure with a stopwatch from the agent request to the banner.
-3. N1, N2 blocked: send a run from a directory outside the grant. Expect a banner "Request blocked" within 5 seconds.
-4. N4: click the banner. Expect that Apassy opens and the run still waits. Select "Mark as seen". Expect that the run still waits. Approve it only through "Approve once" and Touch ID or the passphrase.
-5. N3 failure: turn off notifications for Apassy in System Settings > Notifications. Send a run in "ask" mode. Expect "Notification failed" at the event, and the run still waits.
-6. N3 restart: while a run waits, quit Apassy. Start it, open and unlock the vault. Expect the event "Approval ended without a run" with "Apassy stopped before the owner decided", and the earlier "Request blocked" event.
+1. Build: `scripts/build-app.sh`. Run `scripts/n1-check.sh` (see [N1 with the real notifier](#n1-with-the-real-notifier)). Start: `open target/Apassy.app`. Settings > Devices > This Mac: expect Notifications "On". If it shows "Allow notifications", click it and click "Allow" in the macOS prompt within 120 s. If it shows "Open System Settings", click it and turn on "Allow notifications" for Apassy.
+2. N1, N2 waiting: connect an agent ("Connect an Agent" in Agents), turn on "Always ask me" on a credential, and send a run with that credential from the agent. Expect a banner "Approval waiting" within 5 seconds, with the agent name and no command. Measure with a stopwatch from the agent request to the banner.
+3. N1, N2 blocked: answer the question with "Never for AGENT" in its "⋯" menu. Send the same run again. Expect a banner "Request blocked" within 5 seconds.
+4. N4: remove the exception (Agents > the agent > Exceptions > "Remove", with the owner check), and send the run again. Click the banner. Expect that Apassy opens and the question still waits in Decisions. Allow it only with "Allow Once" and Touch ID or the passphrase.
+5. N3 failure: turn off notifications for Apassy in System Settings > Notifications. Send the run again. Expect "1 notification failed." in Settings > Devices > This Mac, and the question still waits in Decisions.
+6. N3 restart: while a question waits, quit Apassy. Start it, open and unlock the vault. Expect in `apassy activity` the entry "Apassy stopped before the owner decided. The run did not start.", and the earlier refusal.

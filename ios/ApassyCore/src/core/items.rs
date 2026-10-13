@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    Field, FieldSummary, ItemDetails, ItemDraft, ItemEventKind, SecretValue, Vault, VaultErrorKind,
-    custom_detail_label,
+    DeclarationSource, Environment, Field, FieldSummary, ItemDetails, ItemDraft, ItemEventKind,
+    SecretValue, Vault, VaultErrorKind, custom_detail_label,
 };
 use serde::{Deserialize, Serialize};
 
@@ -199,6 +199,13 @@ pub struct Row {
     pub added_at: Option<u64>,
     pub changed_at: Option<u64>,
     pub used_at: Option<u64>,
+    /// The folder UUID of the item; null at the top level (section 5.11).
+    pub folder: Option<String>,
+    /// The label of the provider of its declaration, such as "Stripe" (the Mac's tile).
+    pub provider: Option<String>,
+    /// Production that the owner or a signal set: the one red mark of the Mac. A default
+    /// or a value from usage is not (the bouncer still treats it as production).
+    pub production: bool,
 }
 
 /// A field of an item. `value` is set for a plain field only.
@@ -222,6 +229,15 @@ pub struct Detail {
     /// The passkey of the item, without its key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passkey: Option<passkey::Summary>,
+    /// The folder names from the top level; empty at the top level.
+    pub folder_path: Vec<String>,
+    /// The variable that agent processes get, if any.
+    pub env_name: Option<String>,
+    pub always_ask: bool,
+    /// The environment of the declaration; null without a declaration.
+    pub environment: Option<&'static str>,
+    /// `owner`, `signal`, `usage`, or `default`; null without a declaration.
+    pub environment_source: Option<&'static str>,
 }
 
 /// The metadata of the vault that each row needs, read once for a list.
@@ -317,6 +333,14 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         }
     }
     let times = context.times.get(&id);
+    let declaration = vault.declaration(id)?;
+    let production = match &declaration {
+        Some(declaration) if declaration.environment == Environment::Production => matches!(
+            vault.declaration_sources(id)?.environment,
+            DeclarationSource::Owner | DeclarationSource::Signal
+        ),
+        _ => false,
+    };
     Ok(Row {
         id,
         revision: details.summary.revision,
@@ -333,6 +357,9 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         added_at: times.and_then(|times| times.added),
         changed_at: times.and_then(|times| times.changed),
         used_at: times.and_then(|times| times.used),
+        folder: vault.item_folder(id)?,
+        provider: super::organize::provider_label(vault.declaration_provider(id)?.as_deref()),
+        production,
     })
 }
 
@@ -392,11 +419,22 @@ pub fn detail(vault: &Vault, id: u64) -> CoreResult<Detail> {
             custom: custom_detail_label(&field.name).is_some(),
         });
     }
+    let folder_path = vault.folder_path(row.folder.as_deref())?;
+    let declaration = vault.declaration(id)?;
+    let environment_source = match declaration {
+        Some(_) => Some(vault.declaration_sources(id)?.environment.as_str()),
+        None => None,
+    };
     Ok(Detail {
         row,
         notes: details.notes,
         fields,
         passkey,
+        folder_path,
+        env_name: vault.process_binding(id)?.map(|binding| binding.env_name),
+        always_ask: vault.always_ask(id)?,
+        environment: declaration.map(|declaration| declaration.environment.as_str()),
+        environment_source,
     })
 }
 
@@ -442,6 +480,8 @@ pub fn history(vault: &Vault, id: u64) -> CoreResult<Vec<Event>> {
                 ItemEventKind::OperationRemoved => format!("Operation removed: {detail}"),
                 ItemEventKind::Restored => "Restored from a backup".to_owned(),
                 ItemEventKind::ReviewConfirmed => "Agent settings confirmed".to_owned(),
+                ItemEventKind::Moved if event.detail.is_empty() => "Moved to the top".to_owned(),
+                ItemEventKind::Moved => format!("Moved to {}", event.detail),
             };
             Event {
                 at: event.at,

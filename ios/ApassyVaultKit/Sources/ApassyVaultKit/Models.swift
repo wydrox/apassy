@@ -149,11 +149,19 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
     public var addedAt: Int64?
     public var changedAt: Int64?
     public var usedAt: Int64?
+    /// The folder UUID of the item; nil at the top level, and from an older core (contract section 5.11).
+    public var folder: String?
+    /// The label of the provider of its declaration, such as "Stripe", for the provider tile. nil
+    /// without one, and from an older core.
+    public var provider: String?
+    /// Production that the owner or a signal set: the red dot. nil from an older core.
+    public var production: Bool?
 
     public init(
         id: UInt64, revision: UInt64, title: String, kind: ItemKind, subtitle: String, websites: [String],
         tags: [String], archived: Bool, hasTotp: Bool, conflictOf: UInt64?, addedAt: Int64?,
-        changedAt: Int64?, usedAt: Int64?, hasPasskey: Bool = false, hasPassword: Bool? = nil
+        changedAt: Int64?, usedAt: Int64?, hasPasskey: Bool = false, hasPassword: Bool? = nil,
+        folder: String? = nil, provider: String? = nil, production: Bool? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -170,10 +178,13 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
         self.addedAt = addedAt
         self.changedAt = changedAt
         self.usedAt = usedAt
+        self.folder = folder
+        self.provider = provider
+        self.production = production
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, revision, title, kind, subtitle, websites, tags, archived
+        case id, revision, title, kind, subtitle, websites, tags, archived, folder, provider, production
         case hasTotp = "has_totp"
         case hasPasskey = "has_passkey"
         case hasPassword = "has_password"
@@ -200,6 +211,9 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
         addedAt = try container.decodeIfPresent(Int64.self, forKey: .addedAt)
         changedAt = try container.decodeIfPresent(Int64.self, forKey: .changedAt)
         usedAt = try container.decodeIfPresent(Int64.self, forKey: .usedAt)
+        folder = try container.decodeIfPresent(String.self, forKey: .folder)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        production = try container.decodeIfPresent(Bool.self, forKey: .production)
     }
 }
 
@@ -253,17 +267,47 @@ public struct ItemDetail: Codable, Sendable, Hashable, Identifiable {
     /// The passkey of a login: what it is for, never its key. The key is not a field, so no
     /// reveal, copy, or large type can show it.
     public var passkey: PasskeySummary?
+    /// The folder names from the top level; empty at the top level. nil from an older core.
+    public var folderPath: [String]?
+    /// The variable that agent processes get. nil without one, and from an older core.
+    public var envName: String?
+    /// "Always ask me": each use by an agent waits for the owner. nil from an older core.
+    public var alwaysAsk: Bool?
+    /// The environment of the declaration. nil without a declaration, and from an older core.
+    public var environment: CredentialEnvironment?
+    /// Where the environment came from. nil without a declaration, and from an older core.
+    public var environmentSource: DeclarationSource?
 
     public var id: UInt64 { row.id }
+    /// The folder UUID (`row.folder`).
+    public var folder: String? { row.folder }
+    /// The provider label (`row.provider`).
+    public var provider: String? { row.provider }
 
-    public init(row: ItemRow, notes: String, fields: [FieldView], passkey: PasskeySummary? = nil) {
+    public init(
+        row: ItemRow, notes: String, fields: [FieldView], passkey: PasskeySummary? = nil,
+        folderPath: [String]? = nil, envName: String? = nil, alwaysAsk: Bool? = nil,
+        environment: CredentialEnvironment? = nil, environmentSource: DeclarationSource? = nil
+    ) {
         self.row = row
         self.notes = notes
         self.fields = fields
         self.passkey = passkey
+        self.folderPath = folderPath
+        self.envName = envName
+        self.alwaysAsk = alwaysAsk
+        self.environment = environment
+        self.environmentSource = environmentSource
     }
 
-    enum CodingKeys: String, CodingKey { case notes, fields, passkey }
+    enum CodingKeys: String, CodingKey {
+        case notes, fields, passkey
+        case folderPath = "folder_path"
+        case envName = "env_name"
+        case alwaysAsk = "always_ask"
+        case environment
+        case environmentSource = "environment_source"
+    }
 
     public init(from decoder: any Decoder) throws {
         row = try ItemRow(from: decoder)
@@ -271,6 +315,14 @@ public struct ItemDetail: Codable, Sendable, Hashable, Identifiable {
         notes = try container.decode(String.self, forKey: .notes)
         fields = try container.decode([FieldView].self, forKey: .fields)
         passkey = try container.decodeIfPresent(PasskeySummary.self, forKey: .passkey)
+        folderPath = try container.decodeIfPresent([String].self, forKey: .folderPath)
+        envName = try container.decodeIfPresent(String.self, forKey: .envName)
+        alwaysAsk = try container.decodeIfPresent(Bool.self, forKey: .alwaysAsk)
+        // A value of a newer core that this app does not know reads as unknown.
+        environment = try container.decodeIfPresent(String.self, forKey: .environment)
+            .flatMap(CredentialEnvironment.init(rawValue:))
+        environmentSource = try container.decodeIfPresent(String.self, forKey: .environmentSource)
+            .flatMap(DeclarationSource.init(rawValue:))
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -279,6 +331,11 @@ public struct ItemDetail: Codable, Sendable, Hashable, Identifiable {
         try container.encode(notes, forKey: .notes)
         try container.encode(fields, forKey: .fields)
         try container.encodeIfPresent(passkey, forKey: .passkey)
+        try container.encodeIfPresent(folderPath, forKey: .folderPath)
+        try container.encodeIfPresent(envName, forKey: .envName)
+        try container.encodeIfPresent(alwaysAsk, forKey: .alwaysAsk)
+        try container.encodeIfPresent(environment, forKey: .environment)
+        try container.encodeIfPresent(environmentSource, forKey: .environmentSource)
     }
 
     /// The first field with `role`.

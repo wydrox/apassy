@@ -30,8 +30,10 @@
 //! [`devices`].
 
 mod devices;
+mod member;
 
 pub use devices::{DeviceView, KeySource, LinkCode, PendingLink};
+pub use member::{RelayCallError, RelayMember};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -51,7 +53,6 @@ use zeroize::Zeroizing;
 use super::relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, decode_b64u, hash_from_hex,
     link_code_team, safety_words, same_words, sha256_hex, sign_in_message, valid_team_code,
-    valid_team_id,
 };
 use super::relay_http::{self, Answer, Body, Cancel, HttpError, RelayUrl, Request};
 use super::state::{self, SyncState, TransportKind};
@@ -300,7 +301,10 @@ fn pause(request: &Request<'_>, wait: Duration) -> bool {
 /// One call with the retries of `503 busy`. A `429` makes every call to that relay
 /// fail at once, without the network, until its `Retry-After` passed (contract
 /// section 3). A cancel or a deadline ends the wait before a retry.
-fn call<T: DeserializeOwned>(url: &RelayUrl, request: &Request<'_>) -> Result<T, ApiError> {
+pub(crate) fn call<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+) -> Result<T, ApiError> {
     let mut attempt = 0;
     loop {
         if let Some(left) = rate_limited(url) {
@@ -340,7 +344,7 @@ fn call<T: DeserializeOwned>(url: &RelayUrl, request: &Request<'_>) -> Result<T,
 
 /// A JSON request. The body is written into a buffer that is erased on drop: it can
 /// hold a team code or a link code.
-fn json_request<'a>(
+pub(crate) fn json_request<'a>(
     method: &'static str,
     path: &str,
     bearer: Option<&'a str>,
@@ -2102,38 +2106,8 @@ impl RelaySync {
         }
         let key = DeviceKey::generate()?;
         let team = clean_name(vault_name, "Vault");
-        #[derive(Serialize)]
-        struct NewTeam<'a> {
-            code: &'a str,
-            team: &'a str,
-            owner: &'a str,
-            device_name: &'a str,
-            public_key: &'a str,
-        }
-        #[derive(Deserialize)]
-        struct Created {
-            team_id: String,
-            device_id: u64,
-        }
-        let created: Created = call(
-            &url,
-            &json_request(
-                "POST",
-                "/v1/teams",
-                None,
-                &NewTeam {
-                    code: team_code,
-                    team: &team,
-                    owner: "owner",
-                    device_name: &clean_name(device, "Mac"),
-                    public_key: &key.public_key_b64u(),
-                },
-            ),
-        )
-        .map_err(sync_error)?;
-        if !valid_team_id(&created.team_id) || created.device_id == 0 {
-            return Err(SyncError::RelayUnreachable);
-        }
+        let created =
+            crate::relay::membership::create_team_on_relay(&url, team_code, &team, device, &key)?;
         let session = Arc::new(Session::new(
             url,
             &created.team_id,

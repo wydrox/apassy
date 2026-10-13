@@ -20,11 +20,14 @@ struct JoinModelTests {
         var away = false
         var model: JoinModel!
 
-        init(biometry: Biometry = .faceID, deviceName: String = "Test iPhone") {
+        init(
+            biometry: Biometry = .faceID, deviceName: String = "Test iPhone",
+            answerKey: (@Sendable () throws -> Data)? = nil
+        ) {
             model = JoinModel(
                 service: service, passphraseStore: store, settings: settings, biometry: biometry,
                 deviceName: deviceName, pollInterval: .milliseconds(20),
-                isAway: { [unowned self] in away },
+                isAway: { [unowned self] in away }, answerKey: answerKey,
                 onFinished: { [unowned self] vault in finished.append(vault) },
                 onCancel: { [unowned self] in cancelled += 1 })
         }
@@ -80,6 +83,24 @@ struct JoinModelTests {
         #expect(join.words == ["amber", "marble"])
         #expect(fixture.settings.deviceName == "Test iPhone")
         #expect(await waitUntil { fixture.model.step == .passphrase(team: "Personal") })
+    }
+
+    @Test("start sends the answer key of this iPhone with the link; without a key it sends none")
+    func sendsTheAnswerKey() async {
+        let key = Data([4] + [UInt8](repeating: 9, count: 64))
+        let withKey = Fixture(answerKey: { key })
+        withKey.model.handleCode(link)
+        await withKey.model.start()
+        #expect(await withKey.service.attachedAnswerKey() == key)
+
+        let failing = Fixture(answerKey: { throw VaultError(.internal, "no key") })
+        failing.model.handleCode(link)
+        await failing.model.start()
+        #expect(await failing.service.attachedAnswerKey() == nil)
+        guard case .waiting = failing.model.step else {
+            Issue.record("a missing key stopped the join")
+            return
+        }
     }
 
     @Test("an error of the relay while waiting ends in a failure")

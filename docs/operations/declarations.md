@@ -33,11 +33,12 @@ The provider data is in `packs/providers/`, one JSON file for each provider. The
 | `resend.json` | Resend | api.resend.com | `re_` |
 | `sendgrid.json` | SendGrid | api.sendgrid.com | `SG.` |
 | `sentry.json` | Sentry | sentry.io | DSN host `*.ingest.sentry.io`, `sntrys_`, `sntryu_` |
+| `slack.json` | Slack | slack.com | `xoxb-` bot, `xoxp-` user, and `xapp-` app-level tokens |
 | `stripe.json` | Stripe | api.stripe.com, files.stripe.com, connect.stripe.com, uploads.stripe.com | `sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`, `pk_live_`, `pk_test_` |
 | `supabase.json` | Supabase | supabase.co, supabase.com | JWT role `service_role` or `anon`, `sb_secret_`, `sb_publishable_`, `sbp_` |
 | `twilio.json` | Twilio | twilio.com | `AC` account SID, `SK` API key SID, `TWILIO_AUTH_TOKEN` |
 | `vercel.json` | Vercel | api.vercel.com | `VERCEL_TOKEN` |
-| `general.json` | none | none | words and hosts for any credential: prod, staging, test, dev, local, localhost, read-only, admin |
+| `general.json` | none | none | words and hosts for any credential: prod, staging, test, dev, local, localhost with a local word, read-only, admin |
 
 The files use only public, documented key formats. Each provider file also has signals for the variable name, the item name, and the hosts of the provider. A known host also covers its subdomains.
 
@@ -54,9 +55,25 @@ A file is one JSON object. The loader rejects unknown fields at every level, and
 | `label`, `description` | Text for the owner. |
 | `generic` | Optional. A generic provider (PostgreSQL) loses to a specific provider (Supabase, Neon). |
 | `known_hosts` | Provider API hosts in lowercase. A provider needs one or more, unless it is generic. A general file has none. |
+| `variable` | The default environment variable of a detected credential, such as `STRIPE_SECRET_KEY`. A provider needs one. The loader refuses a reserved name (`PATH`, `APASSY_*`, ...). A general file has none. |
+| `title` | Optional. The title of a detected credential, such as `GitHub token`. The default is the label and "API key". |
+| `real_value` | Optional, default `false`. `true` for a provider that signs requests with the secret (AWS, Google Cloud), or whose main command-line tools do not work with a placeholder (GitHub, Stripe, Supabase, PlanetScale; see the table below): a detected credential then gets the real value, never a placeholder, and the known hosts stay recorded for the bouncer. A general file has none. |
+| `prefixes` | Optional. Value prefixes of the keys of the provider, such as `sk_live_`. Case matters. Two or more characters, no space, and one provider for each prefix. The paste detection (section 3a) names the provider of a value by the longest prefix. |
 | `signals` | A list of signals: `id`, `when`, `suggest`, `reason`. |
 
 `suggest` has the optional fields `environment`, `risk`, `scope`, and `reversibility`, with the values of ADR 0008. A general signal must suggest a field. `reason` is one or two sentences for the owner.
+
+Providers with `"real_value": true` (Gate 2, 2026-10-12; [agent-path.md §8b](agent-path.md#8b-placeholder-mode-adr-0011)):
+
+| Provider | `provider_version` | Why |
+| --- | --- | --- |
+| `aws`, `gcp` | 3 | The secret signs each request (SigV4, a service account key). |
+| `github` | 3 | `gh` (Go) does not trust the certificate of the run on macOS; `git` over HTTPS often gets the token through `gh`. |
+| `stripe` | 3 | The Stripe CLI is a Go program. |
+| `supabase` | 3 | The Supabase CLI (Go) uses the `sbp_` access token; `supabase secrets set` copies keys to another service. |
+| `planetscale` | 3 | `pscale` is a Go program; a `pscale_pw_` password goes over the MySQL protocol, not HTTPS. |
+
+The cost: such a credential reaches the process as it is, so a command can send it to any host. The `foreign_host` flag (section 6) and the bouncer still see the provider hosts, and the owner can choose "Placeholder" for one credential. `tests/add_detected.rs` (`providers_of_cli_tools_get_the_real_value`) checks the delivery.
 
 All conditions in `when` must hold. A list means "one of the items".
 
@@ -73,7 +90,7 @@ All conditions in `when` must hold. A list means "one of the items".
 What the detection reads from an item:
 
 - Names and labels: the title, the tags, the variable name, the field names, the plain field values (not the public key), and the labels of each host (`db.prod.example.com` gives `db`, `prod`, `example`, `com`). A secret value gives no words.
-- Hosts: the host of each `scheme://` URL in a field value or in the notes, and the `host` field.
+- Hosts: the host of each `scheme://` URL in a plain field value or in the notes, the host of a URL at the start of a secret value (only when its split is certain, see section 3a), and the `host` field.
 - Values: every field value, for the value conditions.
 
 ### Rules for the result
@@ -87,7 +104,7 @@ What the detection reads from an item:
 
 1. The owner adds an item, or saves a change of an item. The app computes the declaration form with `OwnerSession::declaration_form` (`Vault::suggest_declaration`). This runs only in the owner flow, with the vault unlocked. The broker never runs the detection.
 2. The detection reads the field values in the owner process. The values stay in erasing buffers (`Zeroizing`). The suggestion has the provider name, the field values, and the reasons from the data files. It has no secret value.
-3. The Declaration sheet (open a credential, then "Agent access" > "Declaration") shows:
+3. The Declaration sheet (open a credential, then "Hosts and risk" > "Declaration") shows:
    - the provider, with a choice of "None" or a built-in provider, and the known hosts of the chosen provider,
    - each field as a segmented control, filled with the suggested value, or with the most sensitive default when no signal matched,
    - "Apassy suggested VALUE. You changed it." under a field when the owner changed a suggested value, and the reason when signals disagree,
@@ -97,6 +114,44 @@ What the detection reads from an item:
 5. An item with a stored declaration shows the stored values. The suggestion stays as a hint.
 
 The review card after a restore (goal item V4) shows the provider, because the provider gives known hosts to the analysis.
+
+## 3a. Paste detection
+
+ADR 0025 §4 ("Two steps to add"). `apassy::vault::detect::detect(text) -> Vec<Detected>` reads one pasted text on this Mac. It is pure: no vault, no network. `summary_line(&Detected)` gives the result line, for example "Anthropic API key · `ANTHROPIC_API_KEY` · production".
+
+| Input | Result |
+| --- | --- |
+| A secret | One item. A value prefix of the catalog (`prefixes`, longest wins) or a value signal (shape, JWT, JSON key file) names the provider: kind API key, field `token`, title from `title` (Stripe: "Stripe live" or "Stripe test" by the prefix), the provider `variable`, the provider `known_hosts` as the hosts. |
+| `KEY=value`, a `.env` file | One item for each line with a value, with its line number. `export`, quotes, comments, and blank lines as in the import (`src/vault/detect/dotenv.rs`, shared with `apassy import`). The variable is the key in uppercase. A key without a provider gives a Custom item titled from the key ("Database Password"). |
+| `postgres://`, `postgresql://`, `mysql://`, `mongodb://`, `mongodb+srv://`, `redis://`, `amqp://` | Fields `host`, `database`, `username`, `password` (secret, decoded), and `url` (secret, the whole URL). The variable (`DATABASE_URL`, `MONGODB_URI`, `REDIS_URL`, `AMQP_URL`) delivers `url`. Kind Database when the URL has a user, a password, and a database; otherwise Custom. No hosts: the value goes to the process as it is. The user part ends at the last `@` before the host. When an `@` comes after the first `/`, `?`, or `#` (a password with `#`, `/`, or `?` that is not encoded), the split is not certain: the URL is one secret field `url`, with no plain field, and the title comes from the scheme ("PostgreSQL database"). A user part without `:` is secret (`password`), not a user name, for Redis and RabbitMQ, and for any scheme when it looks random (an escape, 24 characters or more, or 12 or more with upper case, lower case, and digits). |
+| `otpauth://totp/...` | A Custom item with the one-time password detail, titled "Issuer (account)". No variable. A HOTP or broken link gives nothing. |
+| `-----BEGIN ... PRIVATE KEY-----` | An SSH key. |
+| Anything else | A Custom item "Credential" with the field `secret` and no variable: the vault names it `APASSY_ITEM_<id>`. |
+
+The declaration comes from the catalog signals of section 2, with the facts of the new item (variable, fields, URL hosts). Each value has a source: `signal`, or `default`. ADR 0025 §4: the bouncer is more careful with a value that only a weak signal found, so the detection stores only strong values as `signal`:
+
+- Strong: a value signal (strength 3: `sk_live_`, `sk_test_`, a shape, a JWT, a JSON key file), with all its fields, and an environment word of the variable name (`STRIPE_LIVE_KEY`, `DEV_API_TOKEN`, `LOCAL_DATABASE_URL`), with the environment only.
+- Weak: a host, a variable or field name condition of a provider, a word of a plain field (user, database), a host word, and "live", "prod", or "production" as a word of the value. A weak value never lowers a value. It can only raise a strong value, and a raised value has the source `default`. Without a strong value, a field keeps the most sensitive default (production, high, admin, irreversible) with the source `default`.
+- `localhost`, `127.0.0.1`, `0.0.0.0`, or `host.docker.internal` alone never makes a credential local, low-risk, or reversible: a tunnel or a proxy to a production database has the same URL. The general signal `local-host` also needs a local word. A secret value gives only the host of a URL at its start, never a host of its query (`?application_name=http://localhost`) or its password.
+- A title and the result line never have a part of a secret value: they come from the provider, the scheme, the variable name, or the database name of a certain split.
+
+A Stripe test key (`sk_test_`, `rk_test_`, `pk_test_`) gives development, as the catalog says. A test word of the variable (`STRIPE_TEST_KEY`, `TEST_TOKEN`) still gives staging.
+
+`swap.rs` keeps the vendor prefix of a value in its placeholder. A test there checks that its table covers every pack prefix. The pack prefixes it does not keep yet: `AIza`, `nfp_`, `sk-admin-`, `pscale_tkn_`, `pscale_oauth_`, `sntrys_`, `sntryu_`, `sb_secret_`, `sb_publishable_`, `sbp_`.
+
+## 3b. Corrections from the use log
+
+ADR 0025 §5, `src/broker/corrections.rs`. After an allowed run, the broker may propose a correction of the declaration. The facts JSON never has a value.
+
+| Correction | When | Changes before the owner answers | Facts |
+| --- | --- | --- | --- |
+| Environment "production" | The value has a strong production signal (`sk_live_`, ...) and the item is not production. | When the environment did not come from the owner: production at once, source `usage`. When the owner set it: nothing. | `provider`, `previous_source`, `previous_environment`, `applied` (`true` or `false`), and `raised_from` only when applied. Ignoring an applied correction gives `raised_from` back, which is looser. |
+| Environment "development" | Production only by default, 3 or more allowed uses, every use to a development or test host (a word such as `dev`, `test`, `sandbox`, or a `.test` name), no other host, and no production signal in the value. | Nothing. | `hosts`, `uses`, `previous_environment`, `applied: false`, `unverified: true`: the agent chose the hosts, and Apassy did not check them. |
+| Project | No project, 5 or more allowed uses, all in one project. | Nothing. | `project_key`, `project_label`, `uses`, `agents`. |
+
+The development hint comes only from host names. The packs have no list of documented sandbox hosts yet, so a hint alone never makes a development proposal without the conditions above.
+
+Cost: the broker remembers, for each item of the vault session, the item revision, the declaration, its sources, and the field of the variable. It reveals the value and runs the detection only after one of them changed. It reads the use log while the item has fewer than 5 allowed uses, after a change, and else every 10 allowed uses (`RECHECK_USES`). `corrections::checks` counts both for the tests.
 
 ## 4. Synthetic evaluation
 

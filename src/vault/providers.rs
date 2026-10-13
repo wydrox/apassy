@@ -17,6 +17,16 @@
 //! When two signals suggest different values for one field, the suggestion takes the
 //! more sensitive value and says so. A field without a signal keeps the most sensitive
 //! value of the declaration form (ADR 0008).
+//!
+//! A provider also names what the paste detection ([`super::detect`], ADR 0025 §4)
+//! gives a new item: the default environment variable (`variable`), the title of a
+//! detected credential (`title`), and the value prefixes of its keys (`prefixes`).
+//!
+//! The paste detection stores a value as found from a signal only when a strong signal
+//! gives it ([`Suggestion::strong`]): a value signal (a prefix, a shape, a JWT, a JSON
+//! key file), or an environment word of the variable name (`STRIPE_LIVE_KEY`). A host,
+//! a field name, or a word of another label is a weak signal. A host is read from the
+//! start of a secret value only, never from its query or its password.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,7 +36,7 @@ use serde::Deserialize;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use zeroize::Zeroizing;
 
-use super::agents::{Environment, Reversibility, RiskLevel, Scope};
+use super::agents::{Environment, Reversibility, RiskLevel, Scope, checked_env_name};
 use super::suggestions::{DeclarationField, SuggestedDeclaration};
 
 /// The provider file format that this version of Apassy reads.
@@ -84,6 +94,10 @@ const BUILTIN: &[(&str, &str)] = &[
     (
         "sentry.json",
         include_str!("../../packs/providers/sentry.json"),
+    ),
+    (
+        "slack.json",
+        include_str!("../../packs/providers/slack.json"),
     ),
     (
         "stripe.json",
@@ -149,6 +163,20 @@ struct ProviderFile {
     generic: bool,
     #[serde(default)]
     known_hosts: Vec<String>,
+    /// The default environment variable of a credential of the provider, such as
+    /// `STRIPE_SECRET_KEY`. A provider needs one. A general file has none.
+    variable: Option<String>,
+    /// The title of a detected credential, such as `GitHub token`. The default is the
+    /// label and "API key".
+    title: Option<String>,
+    /// Value prefixes of the keys of the provider, such as `sk_live_`. The detection
+    /// names the provider of a value by the longest prefix. Case matters.
+    #[serde(default)]
+    prefixes: Vec<String>,
+    /// The provider signs requests with the secret (AWS SigV4, Google service-account
+    /// keys), so a placeholder cannot stand for it. Default false.
+    #[serde(default)]
+    real_value: bool,
     signals: Vec<SignalFile>,
 }
 
@@ -228,18 +256,26 @@ impl Charset {
 
 // ---- Loaded data ----
 
-/// Declaration fields that one signal suggests.
+/// Declaration fields that one signal suggests, or the strong values of a suggestion.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Fields {
-    environment: Option<Environment>,
-    risk: Option<RiskLevel>,
-    scope: Option<Scope>,
-    reversibility: Option<Reversibility>,
+pub struct Fields {
+    pub environment: Option<Environment>,
+    pub risk: Option<RiskLevel>,
+    pub scope: Option<Scope>,
+    pub reversibility: Option<Reversibility>,
 }
 
 impl Fields {
     fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Take the more sensitive value of each field. `None` is no value.
+    fn raise(&mut self, other: &Self) {
+        self.environment = self.environment.max(other.environment);
+        self.risk = self.risk.max(other.risk);
+        self.scope = self.scope.max(other.scope);
+        self.reversibility = self.reversibility.max(other.reversibility);
     }
 }
 
@@ -263,8 +299,48 @@ pub struct Provider {
     pub version: u64,
     /// Provider API hosts. A host also covers its subdomains.
     pub known_hosts: Vec<String>,
+    /// The default environment variable of a credential of the provider.
+    pub variable: String,
+    /// The title of a detected credential of the provider.
+    pub title: String,
+    /// Value prefixes of the keys of the provider. Case matters.
+    pub prefixes: Vec<String>,
+    /// The provider signs requests with the secret, so the credential is delivered as
+    /// the real value, never as a placeholder (the known hosts stay for the bouncer).
+    pub real_value: bool,
     generic: bool,
     signals: Vec<Signal>,
+}
+
+impl Signal {
+    /// The fields that the signal gives as a strong signal (ADR 0025 §4): every field of
+    /// a value signal (strength 3), and the environment of a word signal whose word is a
+    /// word of the variable name. A host, a variable or field name condition, or a word
+    /// of another label gives nothing strong.
+    fn strong_fields(&self, view: &FactsView<'_>) -> Fields {
+        if self.strength >= 3 {
+            return self.suggest;
+        }
+        let by_variable = self.when.words_only().is_some_and(|list| {
+            list.iter()
+                .any(|phrase| label_has_phrase(&view.variable, phrase))
+        });
+        if by_variable {
+            Fields {
+                environment: self.suggest.environment,
+                ..Fields::default()
+            }
+        } else {
+            Fields::default()
+        }
+    }
+}
+
+impl Provider {
+    /// A generic provider, such as a PostgreSQL URL of any host.
+    pub fn is_generic(&self) -> bool {
+        self.generic
+    }
 }
 
 /// All provider files.
@@ -286,6 +362,11 @@ pub fn builtin() -> Result<&'static Catalog, &'static ProviderError> {
 /// A built-in provider by its ID.
 pub fn find(id: &str) -> Option<&'static Provider> {
     builtin().ok()?.find(id)
+}
+
+/// The built-in provider of the longest value prefix, and the prefix.
+pub fn prefix_match(value: &str) -> Option<(&'static Provider, &'static str)> {
+    builtin().ok()?.prefix_match(value)
 }
 
 /// The known API hosts of a built-in provider. Empty for an unknown ID.
@@ -320,6 +401,21 @@ impl Catalog {
         self.providers.iter().find(|provider| provider.id == id)
     }
 
+    /// The provider of the longest prefix that `value` starts with, and the prefix. The
+    /// value must be longer than the prefix.
+    pub fn prefix_match(&self, value: &str) -> Option<(&Provider, &str)> {
+        self.providers
+            .iter()
+            .flat_map(|provider| {
+                provider
+                    .prefixes
+                    .iter()
+                    .map(move |prefix| (provider, prefix.as_str()))
+            })
+            .filter(|(_, prefix)| value.len() > prefix.len() && value.starts_with(prefix))
+            .max_by_key(|(_, prefix)| prefix.len())
+    }
+
     fn add(&mut self, name: &str, text: &str) -> Result<(), String> {
         let file: ProviderFile = serde_json::from_str(text).map_err(|error| error.to_string())?;
         if file.schema_version != SCHEMA_VERSION {
@@ -347,16 +443,67 @@ impl Catalog {
             check_host(host).map_err(|message| format!("`known_hosts`: {message}"))?;
         }
         match file.kind {
-            FileKind::General if file.generic || !file.known_hosts.is_empty() => {
+            FileKind::General
+                if file.generic
+                    || !file.known_hosts.is_empty()
+                    || file.variable.is_some()
+                    || file.title.is_some()
+                    || file.real_value
+                    || !file.prefixes.is_empty() =>
+            {
                 return Err(
-                    "a general file has no provider, so it has no `known_hosts` and no `generic`"
+                    "a general file has no provider, so it has no `known_hosts`, \
+                     `generic`, `variable`, `title`, `real_value`, or `prefixes`"
                         .to_owned(),
                 );
             }
             FileKind::Provider if !file.generic && file.known_hosts.is_empty() => {
                 return Err("a provider needs `known_hosts`, or `generic: true`".to_owned());
             }
+            FileKind::Provider if file.variable.is_none() => {
+                return Err("a provider needs a `variable`".to_owned());
+            }
             _ => {}
+        }
+        if let Some(variable) = &file.variable
+            && checked_env_name(variable).is_err()
+        {
+            return Err(format!(
+                "`variable` `{variable}` must be an environment variable name (uppercase \
+                 letters, digits, `_`) and not a reserved name"
+            ));
+        }
+        if let Some(title) = &file.title
+            && (title.trim().is_empty()
+                || title.trim() != title
+                || title.len() > super::types::MAX_TITLE_BYTES)
+        {
+            return Err(format!(
+                "`title` must have text, no spaces at the ends, and at most {} bytes",
+                super::types::MAX_TITLE_BYTES
+            ));
+        }
+        for (at, prefix) in file.prefixes.iter().enumerate() {
+            if prefix.chars().count() < 2
+                || prefix.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(format!(
+                    "`prefixes` has `{prefix}`: a prefix has two or more characters and no space"
+                ));
+            }
+            if file.prefixes[..at].contains(prefix) {
+                return Err(format!("`prefixes` has `{prefix}` twice"));
+            }
+            if let Some(other) = self
+                .providers
+                .iter()
+                .find(|provider| provider.prefixes.contains(prefix))
+            {
+                return Err(format!(
+                    "`prefixes` has `{prefix}`, which is a prefix of `{}` already",
+                    other.id
+                ));
+            }
         }
         if file.signals.is_empty() {
             return Err("`signals` is an empty list".to_owned());
@@ -389,11 +536,17 @@ impl Catalog {
         match file.kind {
             FileKind::General => self.general = signals,
             FileKind::Provider => self.providers.push(Provider {
+                title: file
+                    .title
+                    .unwrap_or_else(|| format!("{} API key", file.label)),
                 id: file.id,
                 label: file.label,
                 description: file.description,
                 version: file.provider_version,
                 known_hosts: file.known_hosts,
+                variable: file.variable.unwrap_or_default(),
+                prefixes: file.prefixes,
+                real_value: file.real_value,
                 generic: file.generic,
                 signals,
             }),
@@ -418,6 +571,7 @@ impl Catalog {
                     .signals
                     .push(format!("{}/{}", provider.id, signal.id));
                 votes.add(&signal.suggest, &signal.reason);
+                suggestion.strong.raise(&signal.strong_fields(&view));
                 let rank = (!provider.generic, signal.strength);
                 if best.is_none_or(|(current, _, _)| rank > current) {
                     best = Some((rank, index, &signal.reason));
@@ -428,10 +582,12 @@ impl Catalog {
             if signal.when.matches(&view) {
                 suggestion.signals.push(format!("general/{}", signal.id));
                 votes.add(&signal.suggest, &signal.reason);
+                suggestion.strong.raise(&signal.strong_fields(&view));
             }
         }
-        if let Some((_, index, reason)) = best {
+        if let Some(((_, strength), index, reason)) = best {
             suggestion.provider = Some(self.providers[index].id.clone());
+            suggestion.provider_strength = strength;
             reason.clone_into(&mut suggestion.provider_reason);
         }
         suggestion.environment = merge(votes.environment);
@@ -503,6 +659,19 @@ fn check_claims(map: &BTreeMap<String, Vec<String>>, field: &str) -> Result<(), 
 }
 
 impl Conditions {
+    /// The words of a signal that has no other condition.
+    fn words_only(&self) -> Option<&Vec<String>> {
+        let other = self.value_starts.is_some()
+            || self.value_contains.is_some()
+            || self.value_shape.is_some()
+            || self.jwt_claims.is_some()
+            || self.json_fields.is_some()
+            || self.env_names.is_some()
+            || self.env_name_contains.is_some()
+            || self.hosts.is_some();
+        if other { None } else { self.words.as_ref() }
+    }
+
     /// Check the conditions. Gives the strength of the signal.
     fn validate(&self) -> Result<u8, String> {
         let mut strength = None;
@@ -665,10 +834,13 @@ struct FactsView<'a> {
     values: Vec<&'a Zeroizing<String>>,
     /// The variable name and the field names, in lowercase.
     env_names: Vec<String>,
-    /// URL hosts of the values and the notes, and the `host` field.
+    /// URL hosts of the plain values and the notes, the host of a URL that starts a
+    /// secret value, and the `host` field.
     hosts: Vec<String>,
     /// Lowercase words of each name or label. A phrase does not cross two labels.
     labels: Vec<Vec<String>>,
+    /// Lowercase words of the variable name.
+    variable: Vec<String>,
 }
 
 impl<'a> FactsView<'a> {
@@ -678,6 +850,7 @@ impl<'a> FactsView<'a> {
             env_names: Vec::new(),
             hosts: url_hosts(&facts.notes),
             labels: Vec::new(),
+            variable: facts.env_name.as_deref().map(words).unwrap_or_default(),
         };
         if let Some(name) = &facts.env_name {
             view.env_names.push(name.to_lowercase());
@@ -693,7 +866,13 @@ impl<'a> FactsView<'a> {
             view.env_names.push(field.name.to_lowercase());
             view.labels.push(words(&field.name));
             let value = field.value.as_str();
-            view.hosts.extend(url_hosts(value));
+            if field.secret {
+                // Only the host of a URL at the start: the query or the password of a
+                // secret value can name any host (`?application_name=http://localhost`).
+                view.hosts.extend(leading_url_hosts(value));
+            } else {
+                view.hosts.extend(url_hosts(value));
+            }
             if field.secret || value.contains("://") || NOT_LABEL_FIELDS.contains(&&*field.name) {
                 continue;
             }
@@ -715,13 +894,18 @@ impl<'a> FactsView<'a> {
     }
 
     fn has_phrase(&self, phrase: &str) -> bool {
-        let wanted: Vec<&str> = phrase.split_whitespace().collect();
-        self.labels.iter().any(|label| {
-            label
-                .windows(wanted.len())
-                .any(|window| window.iter().zip(&wanted).all(|(a, b)| a == b))
-        })
+        self.labels
+            .iter()
+            .any(|label| label_has_phrase(label, phrase))
     }
+}
+
+/// The words of one label have the words of the phrase, in order.
+fn label_has_phrase(label: &[String], phrase: &str) -> bool {
+    let wanted: Vec<&str> = phrase.split_whitespace().collect();
+    label
+        .windows(wanted.len())
+        .any(|window| window.iter().zip(&wanted).all(|(a, b)| a == b))
 }
 
 /// Lowercase words, split at every character that is not a letter or a digit.
@@ -762,6 +946,72 @@ pub(crate) fn url_hosts(text: &str) -> Vec<String> {
         rest = after;
     }
     hosts
+}
+
+/// The parts of a URL at the start of a text, as written (percent-encoded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UrlParts<'a> {
+    pub scheme: &'a str,
+    /// The text before the last `@` of the authority.
+    pub user_info: Option<&'a str>,
+    /// The host and the port, or several of them (`h1:27017,h2:27017`).
+    pub host: &'a str,
+    /// The rest from the first `/`, `?`, or `#` after the scheme.
+    pub rest: &'a str,
+}
+
+/// Split a text that starts with `scheme://`. RFC 3986 allows no `@`, `/`, `?`, or `#`
+/// in the user info, but a pasted password often has one. The user info ends at the
+/// last `@` before the first `/`, `?`, or `#`. `None` when an `@` comes after that `/`,
+/// `?`, or `#`: then the split is not certain, and a part of a password could become the
+/// host, the path, or a title. The caller keeps the whole text as one secret.
+pub(crate) fn split_url(text: &str) -> Option<UrlParts<'_>> {
+    let (scheme, after) = text.split_once("://")?;
+    let scheme_ok = scheme
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b));
+    if !scheme_ok {
+        return None;
+    }
+    let (authority, rest) = after.split_at(after.find(['/', '?', '#']).unwrap_or(after.len()));
+    if rest.contains('@') {
+        return None;
+    }
+    let (user_info, host) = match authority.rfind('@') {
+        Some(at) => (Some(&authority[..at]), &authority[at + 1..]),
+        None => (None, authority),
+    };
+    Some(UrlParts {
+        scheme,
+        user_info,
+        host,
+        rest,
+    })
+}
+
+/// The hosts of a URL at the start of a secret value. Nothing when the value does not
+/// start with a URL, or when its split is not certain ([`split_url`]).
+fn leading_url_hosts(value: &str) -> Vec<String> {
+    let Some(parts) = split_url(value.trim()) else {
+        return Vec::new();
+    };
+    parts
+        .host
+        .split(',')
+        .filter_map(|host| {
+            let host = host
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('.')
+                .to_lowercase();
+            check_host(&host).is_ok().then_some(host)
+        })
+        .collect()
 }
 
 /// The value is a JWT (`header.payload.signature`), and each claim of the payload is a
@@ -886,10 +1136,17 @@ pub struct Suggestion {
     pub provider: Option<String>,
     /// Why Apassy names the provider.
     pub provider_reason: String,
+    /// The strength of the signal that names the provider: 3 for a value, 2 for a host,
+    /// 1 for a variable name, and 0 for a word or no provider.
+    pub provider_strength: u8,
     pub environment: Option<Suggested<Environment>>,
     pub risk: Option<Suggested<RiskLevel>>,
     pub scope: Option<Suggested<Scope>>,
     pub reversibility: Option<Suggested<Reversibility>>,
+    /// The values of the strong signals only: a value signal, or an environment word of
+    /// the variable name. Each is the most sensitive of them. The paste detection stores
+    /// only these as found from a signal; a weak signal can only raise them (ADR 0025 §4).
+    pub strong: Fields,
     /// The signals that matched, as `file/signal`.
     pub signals: Vec<String>,
 }
@@ -1077,6 +1334,7 @@ mod tests {
     fn live_and_test_keys_suggest_their_environment() {
         let live = suggest(&key_item("Payments", &fake("sk_live_", 24)));
         assert_eq!(live.provider.as_deref(), Some("stripe"));
+        assert_eq!(live.provider_strength, 3);
         assert_eq!(
             live.prefilled(),
             SuggestedDeclaration {
@@ -1090,7 +1348,7 @@ mod tests {
         );
         let test = suggest(&key_item("Payments", &fake("sk_test_", 24)));
         let environment = test.environment.expect("environment");
-        assert_eq!(environment.value, Environment::Staging);
+        assert_eq!(environment.value, Environment::Development);
         assert!(!environment.conflict);
         assert_eq!(test.risk.expect("risk").value, RiskLevel::Low);
     }
@@ -1105,7 +1363,8 @@ mod tests {
         assert_eq!(environment.value, Environment::Production);
         assert!(environment.conflict);
         assert!(
-            environment.reason.contains("staging") && environment.reason.contains("more sensitive"),
+            environment.reason.contains("development")
+                && environment.reason.contains("more sensitive"),
             "{}",
             environment.reason
         );
@@ -1226,6 +1485,100 @@ mod tests {
     }
 
     #[test]
+    fn a_url_split_is_certain_or_none() {
+        let parts = split_url("postgres://app:p@ss@db.example.com:5432/app?x=1").expect("split");
+        assert_eq!(parts.scheme, "postgres");
+        assert_eq!(parts.user_info, Some("app:p@ss"));
+        assert_eq!(parts.host, "db.example.com:5432");
+        assert_eq!(parts.rest, "/app?x=1");
+        let bare = split_url("redis://localhost").expect("split");
+        assert_eq!(
+            (bare.user_info, bare.host, bare.rest),
+            (None, "localhost", "")
+        );
+        // An `@` after the first `/`, `?`, or `#`: a password could become the host.
+        for text in [
+            "postgres://app:Xk9Qz7#mQ2vL7@db.example.com:5432/app",
+            "postgres://app:Xk9/Qz7?mQ2vL7@db.example.com:5432/app",
+            "postgres://db.example.com/app?user=a@b",
+        ] {
+            assert_eq!(split_url(text), None, "{text}");
+        }
+        assert_eq!(split_url("no scheme"), None);
+        assert_eq!(split_url("1x://host"), None);
+        assert_eq!(split_url("://host"), None);
+    }
+
+    #[test]
+    fn a_secret_value_gives_only_the_host_at_its_start() {
+        let item = ItemFacts {
+            fields: vec![field(
+                "url",
+                "postgres://app:pw@db.example.com:5432/app?application_name=http://localhost",
+                true,
+            )],
+            ..ItemFacts::default()
+        };
+        assert_eq!(FactsView::new(&item).hosts, ["db.example.com"]);
+        let hidden = ItemFacts {
+            fields: vec![field("url", "postgres://app:x#y@localhost:5432/app", true)],
+            ..ItemFacts::default()
+        };
+        assert!(FactsView::new(&hidden).hosts.is_empty());
+        let several = ItemFacts {
+            fields: vec![field(
+                "url",
+                "mongodb://u:p@h1.example:1,h2.example:2/db",
+                true,
+            )],
+            ..ItemFacts::default()
+        };
+        assert_eq!(FactsView::new(&several).hosts, ["h1.example", "h2.example"]);
+        // A plain value and the notes still give every URL host.
+        let notes = ItemFacts {
+            notes: "see https://a.example and https://b.example".to_owned(),
+            ..ItemFacts::default()
+        };
+        assert_eq!(FactsView::new(&notes).hosts, ["a.example", "b.example"]);
+    }
+
+    #[test]
+    fn only_value_signals_and_environment_words_of_the_variable_are_strong() {
+        // A value signal: every field it suggests.
+        let live = suggest(&key_item("Payments", &fake("sk_live_", 24)));
+        assert_eq!(live.strong.environment, Some(Environment::Production));
+        assert_eq!(live.strong.risk, Some(RiskLevel::High));
+        // A localhost host alone suggests nothing now, and a host is never strong.
+        let local = suggest(&key_item("Tunnel", "postgres://app:pw@127.0.0.1:5432/app"));
+        assert_eq!(local.environment, None);
+        assert_eq!(local.risk, None);
+        assert_eq!(local.strong, Fields::default());
+        // With a local word, the general signal holds, but it is weak.
+        let mut named = key_item("Local tunnel", "postgres://app:pw@localhost:5432/app");
+        let suggestion = suggest(&named);
+        assert_eq!(
+            suggestion.risk.as_ref().map(|s| s.value),
+            Some(RiskLevel::Low)
+        );
+        assert_eq!(suggestion.strong, Fields::default());
+        // An environment word of the variable is strong; a scope word is not.
+        named.env_name = Some("LOCAL_READONLY_URL".to_owned());
+        let suggestion = suggest(&named);
+        assert_eq!(suggestion.strong.environment, Some(Environment::Local));
+        assert_eq!(suggestion.strong.scope, None);
+        assert_eq!(suggestion.strong.risk, None);
+        // A variable name condition of a provider is weak.
+        let mut anon = key_item("Frontend", "EXAMPLE0EXAMPLE0");
+        anon.env_name = Some("SUPABASE_ANON_KEY".to_owned());
+        let suggestion = suggest(&anon);
+        assert_eq!(
+            suggestion.risk.as_ref().map(|s| s.value),
+            Some(RiskLevel::Low)
+        );
+        assert_eq!(suggestion.strong, Fields::default());
+    }
+
+    #[test]
     fn debug_output_hides_the_values() {
         let secret = fake("sk_live_", 24);
         let item = key_item("Payments", &secret);
@@ -1241,6 +1594,7 @@ mod tests {
     const GOOD: &str = r#"{
       "schema_version": 1, "provider_version": 1, "id": "demo", "kind": "provider",
       "label": "Demo", "description": "A demo provider.", "known_hosts": ["api.demo.example"],
+      "variable": "DEMO_API_KEY", "prefixes": ["demo_"],
       "signals": [ { "id": "key", "when": { "value_starts": ["demo_"] },
                      "suggest": { "risk": "low" }, "reason": "A demo key." } ]
     }"#;
@@ -1268,11 +1622,75 @@ mod tests {
                 r#""value_shape": { "starts": ["demo_"], "min_len": 9, "max_len": 3, "chars": "alnum" }"#,
             ),
             GOOD.replace(r#""value_starts": ["demo_"]"#, r#""words": ["Demo"]"#),
+            GOOD.replace(r#""variable": "DEMO_API_KEY", "#, ""),
+            GOOD.replace("DEMO_API_KEY", "demo_api_key"),
+            GOOD.replace("DEMO_API_KEY", "PATH"),
+            GOOD.replace("DEMO_API_KEY", "APASSY_KEY"),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": ["demo_", "demo_"]"#),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": ["d"]"#),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": ["demo key"]"#),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": "demo_""#),
+            GOOD.replace(r#""prefixes""#, r#""title": "", "prefixes""#),
+            GOOD.replace(r#""prefixes""#, r#""title": " Demo", "prefixes""#),
+            GOOD.replace(r#""prefixes""#, r#""variables": "X", "prefixes""#),
+            GOOD.replace(r#""prefixes""#, r#""real_value": "yes", "prefixes""#),
         ];
         for text in &bad {
             assert!(load_one(text).is_err(), "must be rejected: {text}");
         }
         let twice = Catalog::from_files(&[("demo.json", GOOD), ("demo.json", GOOD)]);
         assert!(twice.is_err());
+        // Two providers cannot share a prefix.
+        let other = GOOD.replace(r#""id": "demo""#, r#""id": "other""#);
+        let shared = Catalog::from_files(&[("demo.json", GOOD), ("other.json", &other)]);
+        assert!(shared.is_err());
+        // A general file has no provider data.
+        let general = r#"{ "schema_version": 1, "provider_version": 1, "id": "general",
+          "kind": "general", "label": "General", "description": "Words.", "variable": "X_KEY",
+          "signals": [ { "id": "prod", "when": { "words": ["prod"] },
+                         "suggest": { "environment": "production" }, "reason": "Prod." } ] }"#;
+        assert!(Catalog::from_files(&[("general.json", general)]).is_err());
+        let loaded = load_one(GOOD).expect("the good file loads");
+        let demo = loaded.find("demo").expect("demo");
+        assert_eq!(demo.variable, "DEMO_API_KEY");
+        assert_eq!(demo.title, "Demo API key");
+        assert_eq!(demo.prefixes, ["demo_"]);
+        assert!(!demo.real_value);
+        let signing = load_one(&GOOD.replace(r#""prefixes""#, r#""real_value": true, "prefixes""#))
+            .expect("real_value loads");
+        assert!(signing.find("demo").expect("demo").real_value);
+        let titled =
+            load_one(&GOOD.replace(r#""prefixes""#, r#""title": "Demo token", "prefixes""#))
+                .expect("a title loads");
+        assert_eq!(titled.find("demo").expect("demo").title, "Demo token");
+    }
+
+    #[test]
+    fn every_provider_names_a_variable_and_the_longest_prefix_wins() {
+        let catalog = builtin().expect("built-in provider files");
+        for provider in catalog.providers() {
+            assert!(
+                checked_env_name(&provider.variable).is_ok(),
+                "{}",
+                provider.id
+            );
+            assert!(!provider.title.is_empty(), "{}", provider.id);
+        }
+        let name = |value: &str| {
+            catalog
+                .prefix_match(value)
+                .map(|(provider, prefix)| (provider.id.clone(), prefix.to_owned()))
+        };
+        let pair = |id: &str, prefix: &str| Some((id.to_owned(), prefix.to_owned()));
+        assert_eq!(
+            name(&fake("sk-ant-api03-", 40)),
+            pair("anthropic", "sk-ant-")
+        );
+        assert_eq!(name(&fake("sk-proj-", 40)), pair("openai", "sk-proj-"));
+        assert_eq!(name(&fake("sk-", 40)), pair("openai", "sk-"));
+        assert_eq!(name(&fake("sk_live_", 24)), pair("stripe", "sk_live_"));
+        // A value must be longer than its prefix.
+        assert_eq!(name("sk_live_"), None);
+        assert_eq!(name("plain-value-0000"), None);
     }
 }

@@ -56,7 +56,7 @@ fn next_steps_show_choices_without_registration_and_exclude_archived_items() {
     for choice in ["Claude Code", "Codex", "CLI", "Skip"] {
         assert!(text.contains(choice), "{text}");
     }
-    assert!(text.contains("Agents and grants stay on this Mac"));
+    assert!(text.contains("Agents stay on this Mac. Connect them here"));
     assert!(
         !text.contains("Setup checks"),
         "the initial panel stays compact"
@@ -93,7 +93,7 @@ fn next_steps_distinguish_a_cli_session_from_a_successful_agent_request() {
     assert!(text.contains("Checked\nCLI connected"), "{text}");
     assert!(
         text.contains(
-            "To check\nFirst successful request\nCheck the result of a test request and its entry in Activity"
+            "To check\nFirst successful request\nCheck the result of a test request and its entry in Decisions"
         ),
         "{text}"
     );
@@ -863,9 +863,9 @@ fn backup_locks_and_restore_opens_the_sheet() {
     );
     assert!(restore.ok, "{restore:?}");
     assert!(matches!(app.ui.sheet, Some(super::Sheet::Restore)));
-    // Settings > Security has Backup, under the sheet.
-    assert_eq!(app.view, crate::desktop::OwnerView::Settings);
-    assert_eq!(app.ui.settings_tab, super::SettingsTab::Security);
+    // Settings > Vault has Backup, under the sheet.
+    assert_eq!(app.place, crate::desktop::Place::Settings);
+    assert_eq!(app.ui.settings_section, super::SettingsSection::Vault);
     assert_eq!(app.owner_ui.restore_source, backup.display().to_string());
 }
 
@@ -1528,4 +1528,111 @@ fn import_bind_binds_the_keys_of_a_env_file_with_one_check() {
             "{name} is added"
         );
     }
+}
+
+/// `apassy add`: the app adds each credential of a pasted text with a session and no
+/// owner check, answers one summary line for each, and never answers a value. A folder
+/// path must exist unless `create_folder`.
+#[test]
+fn add_detects_and_adds_each_credential_of_a_paste() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let anthropic = "sk-ant-api03-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+    let paste = |text: &str, folder: Option<&str>, create_folder: bool| Command::Add {
+        secret: SecretText::new(text.to_owned()),
+        folder: folder.map(str::to_owned),
+        create_folder,
+    };
+    let env = format!(
+        "ANTHROPIC_API_KEY={anthropic}\nDATABASE_URL=postgres://app:FAKE-db-pass@db.example.com:5432/shop\nDEV_API_TOKEN=plain-dev-0000\n"
+    );
+
+    let refused = now(&ask(&mut app, &ctx, None, paste(&env, None, false)));
+    assert_eq!(refused.code, "session_required");
+    let token = login(&mut app, &ctx);
+    assert_eq!(app.owner_ui.session.search("").unwrap().len(), 1);
+
+    let response = run(&mut app, &ctx, &token, paste(&env, None, false));
+    assert!(response.ok, "{response:?}");
+    assert!(app.owner.check.is_none(), "no owner check");
+    let json = as_json(&response);
+    for secret in [anthropic, "FAKE-db-pass", "plain-dev-0000"] {
+        assert!(!json.contains(secret), "the answer shows {secret}");
+    }
+    assert_eq!(response.message, "3 credentials are added.");
+    let Data::Added { items } = response.data else {
+        panic!("no added rows: {json}");
+    };
+    let lines: Vec<&str> = items.iter().map(|item| item.summary.as_str()).collect();
+    assert_eq!(
+        lines,
+        [
+            "Anthropic API key · ANTHROPIC_API_KEY · production",
+            "Shop database · DATABASE_URL · production",
+            "Dev Api Token · DEV_API_TOKEN · development",
+        ]
+    );
+    assert_eq!(items[1].kind, CredentialKind::Database);
+    assert_eq!(app.owner_ui.session.search("").unwrap().len(), 4);
+
+    // The same key again: a numbered title, and the variable of the first one stays.
+    let again = run(&mut app, &ctx, &token, paste(anthropic, None, false));
+    let message = again.message.clone();
+    let Data::Added { items } = again.data else {
+        panic!("no added rows");
+    };
+    assert_eq!(items[0].name, "Anthropic API key 2");
+    assert_eq!(
+        items[0].variable,
+        Some(format!("APASSY_ITEM_{}", items[0].id))
+    );
+    assert_eq!(message, format!("{} is added.", items[0].summary));
+
+    // A folder path that does not exist adds nothing, unless the command makes it.
+    let resend = "RESEND_API_KEY=re_EXAMPLE0EXAMPLE0EXAMPLE0";
+    let missing = run(
+        &mut app,
+        &ctx,
+        &token,
+        paste(resend, Some("Work/Acme"), false),
+    );
+    assert_eq!(missing.code, "not_found");
+    assert!(missing.message.contains("Work"), "{}", missing.message);
+    assert!(missing.message.contains("--create-folder"));
+    assert_eq!(app.owner_ui.session.search("").unwrap().len(), 5);
+    let placed = run(
+        &mut app,
+        &ctx,
+        &token,
+        paste(resend, Some(" Work / Acme "), true),
+    );
+    assert!(placed.ok, "{placed:?}");
+    let Data::Added { items } = placed.data else {
+        panic!("no added rows");
+    };
+    assert_eq!(items[0].folder, "Work / Acme");
+    // A second paste finds the folders without regard to case.
+    let github = format!("GITHUB_TOKEN=ghp_{}", "EXAMPLE0".repeat(5));
+    let found = run(
+        &mut app,
+        &ctx,
+        &token,
+        paste(&github, Some("work/acme"), false),
+    );
+    let Data::Added { items } = found.data else {
+        panic!("no added rows");
+    };
+    assert_eq!(items[0].folder, "Work / Acme");
+    let folders = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.folders().unwrap())
+        .unwrap();
+    assert_eq!(folders.len(), 2, "no folder made twice");
+
+    // A text without a credential.
+    let nothing = run(&mut app, &ctx, &token, paste("   ", None, false));
+    assert_eq!(nothing.code, "invalid_input");
+    assert_eq!(app.owner_ui.session.search("").unwrap().len(), 7);
 }

@@ -60,6 +60,24 @@ SECRET: the token, password, private key, or custom value. add asks on the termi
         the passphrase of an SSH key.
 ";
 
+pub const ADD_HELP: &str = "\
+apassy add [--folder PATH [--create-folder]]
+
+Paste a secret, a KEY=value line, a whole .env file, a URL with a password
+(postgres://user:pass@host/db), or an otpauth:// link. Apassy finds the kind, the name,
+the variable, the provider hosts, and the declaration of each credential on this Mac,
+and adds all of them at once. It prints one line for each, such as:
+  Anthropic API key · ANTHROPIC_API_KEY · production
+The text comes from stdin when it is not a terminal (apassy add < .env), else from a
+hidden prompt (one line). The command never prints a value.
+  --folder PATH     Add to this folder, such as Work/Acme. The folder must exist.
+  --create-folder   Make the folders of PATH that are missing.
+A name that another credential has gets \" 2\". A variable that another credential uses
+becomes APASSY_ITEM_<id>. A known provider gets a placeholder for its hosts (ADR 0011);
+change it with apassy item env. No owner check: a new credential gives an agent nothing
+that the bouncer does not decide.
+";
+
 pub const IMPORT_HELP: &str = "\
 apassy import FILE [--format env|1password|bitwarden|csv] [--kind KIND]
               [--project P] [--service S] [--dry-run] [--allow-duplicates] [--bind]
@@ -88,7 +106,7 @@ Agent commands. AGENT is an ID or the exact name.
   apassy agent add NAME               Register. Prints the token one time.
   apassy agent revoke AGENT [--yes]
   apassy agent rotate AGENT           Owner check. Prints the new token one time.
-  apassy agent see-all AGENT on|off   on: owner check.
+  apassy agent see-all AGENT on|off   on: owner check; removes \"Only these items\".
   apassy agent lifetime [DAYS]        Read, or set (owner check), the token lifetime.
   apassy setup claude|codex           Register and connect an agent host. See apassy help setup.
 ";
@@ -96,23 +114,32 @@ Agent commands. AGENT is an ID or the exact name.
 pub const GRANT_HELP: &str = "\
 Grant commands. Each change that gives access asks for the owner check in the window.
 
+An agent needs no grant to run a command: the bouncer decides each use, and asks you in
+Decisions when it is not sure. A process grant does not approve runs, and its mode, folder,
+and rule have no effect on a run.
+
   apassy grant set AGENT ITEM... [--folder DIR | --any-folder] [--mode ask|bouncer]
-                              Process access. The default folder is the current one, and
-                              the default mode is ask (you approve each run). Each ITEM
-                              variable names are optional.
+                              Save a process grant. It adds ITEM to the list of an agent
+                              with \"Only these items\" and shows in process_access of
+                              apassy_list_access. The default folder is the current one.
   apassy grant remove AGENT ITEM      No owner check.
   apassy grant rule AGENT ITEM [--allow PREFIX]... [--forbid WORD]... [--expires HOURS]
                               [--max-runs N] [--instruction TEXT]
-                              Replaces the rule of the grant.
+                              Replaces the rule of the grant. The broker does not apply it.
   apassy grant operation AGENT ITEM OPERATION [--remove]
-                              A connector operation, for example get_sales_summary.
+                              Let the agent use a connector operation, for example
+                              get_sales_summary, with apassy_use_credential. The app has
+                              no switch for it.
 ";
 
 pub const REQUEST_HELP: &str = "\
-Access requests of agents.
+Notes of agents from apassy_request_access. An agent does not need one: it uses each
+credential of its catalog at once, and the bouncer decides. The app does not show them.
 
   apassy request list [--all]
   apassy request grant ID [--folder DIR | --any-folder] [--mode ask|bouncer]   Owner check.
+                              Saves a process grant (see apassy help grant) and closes the
+                              request. It approves no run.
   apassy request deny ID
 ";
 
@@ -125,7 +152,7 @@ Runs that wait for you.
 ";
 
 pub const PATTERN_HELP: &str = "\
-Remembered approvals (\"Approve and remember\").
+Remembered patterns. Only apassy runs approve ID --remember teaches one.
 
   apassy pattern list
   apassy pattern remove ID            Matching runs ask you again.
@@ -736,6 +763,52 @@ fn owner_check_call(cli: &Cli, command: Command) -> Outcome {
     simple_call(cli, command)
 }
 
+// ---- Add ----
+
+/// The hidden prompt of `apassy add` on a terminal.
+const ADD_PROMPT: &str =
+    "Paste a secret, a KEY=value line, a URL, or an otpauth:// link (hidden): ";
+
+/// `apassy add`: the pasted text goes to the app, which adds each credential in it.
+pub fn add(cli: &Cli, mut args: Args) -> Outcome {
+    let folder = args.value(&["--folder"])?;
+    let create_folder = args.flag(&["--create-folder"]);
+    args.finish()?;
+    if create_folder && folder.is_none() {
+        return Err(Failure::Usage(usage(
+            "--create-folder needs --folder PATH.",
+        )));
+    }
+    let text = if terminal::stdin_is_terminal() {
+        terminal::read_hidden(ADD_PROMPT)?
+    } else {
+        terminal::read_stdin_secret()?
+    };
+    if text.expose().trim().is_empty() {
+        return Err(Failure::Usage(usage(
+            "Nothing to add: paste a secret, or pipe it on stdin (apassy add < .env).",
+        )));
+    }
+    let response = cli.call(Command::Add {
+        secret: text,
+        folder,
+        create_folder,
+    })?;
+    if cli.json {
+        print_json(&response);
+        return Ok(());
+    }
+    match &response.data {
+        Data::Added { items } => {
+            for item in items {
+                println!("{}", clean(&item.summary));
+            }
+        }
+        _ => cli.print_message(&response),
+    }
+    Ok(())
+}
+
 // ---- Import ----
 
 pub fn import(cli: &Cli, mut args: Args) -> Outcome {
@@ -1166,13 +1239,13 @@ pub fn agent(cli: &Cli, mut args: Args) -> Outcome {
                 if view.agent.sees_all {
                     "yes: names and plain fields of every credential"
                 } else {
-                    "no: only the credentials it can use"
+                    "no: only its listed credentials (\"Only these items\")"
                 },
             );
             print!("{}", block.render());
             if !view.grants.is_empty() {
-                println!("\nProcess access:");
-                let mut table = Table::new(&["ITEM", "NAME", "FOLDER", "DECIDES", "RULE"]);
+                println!("\nProcess grants (no effect on runs; the bouncer decides each use):");
+                let mut table = Table::new(&["ITEM", "NAME", "FOLDER", "MODE", "RULE"]);
                 for grant in &view.grants {
                     let mut rule = Vec::new();
                     if !grant.rule.allow.is_empty() {
@@ -1198,7 +1271,7 @@ pub fn agent(cli: &Cli, mut args: Args) -> Outcome {
                             .clone()
                             .unwrap_or_else(|| "any folder".to_owned()),
                         match grant.mode {
-                            GrantMode::Ask => "you",
+                            GrantMode::Ask => "ask",
                             GrantMode::Bouncer => "bouncer",
                         }
                         .to_owned(),
@@ -1358,12 +1431,8 @@ pub fn grant(cli: &Cli, mut args: Args) -> Outcome {
                 return Err(Failure::Usage(usage("Name at least one credential.")));
             }
             terminal::tell(&format!(
-                "Folder: {}. Decides: {}.",
+                "Folder: {}. The grant approves no run: the bouncer decides each use, and the mode has no effect.",
                 folder.as_deref().unwrap_or("any folder"),
-                match mode {
-                    GrantMode::Ask => "you, for each run",
-                    GrantMode::Bouncer => "the bouncer; a risky run waits for you",
-                }
             ));
             owner_check_call(
                 cli,

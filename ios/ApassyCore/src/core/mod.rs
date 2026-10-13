@@ -15,8 +15,10 @@ mod generate;
 mod icloud;
 mod items;
 mod join;
+mod organize;
 mod otp;
 mod passkey;
+mod questions;
 mod sync;
 mod watchtower;
 mod wire;
@@ -79,6 +81,8 @@ pub struct Core {
     status: Mutex<sync::Memory>,
     /// A private snapshot that still needs confirmation from coordinated file I/O.
     icloud_pending: Mutex<Option<icloud::Pending>>,
+    /// Questions through the relay of the selected vault (section 5.10).
+    questions: Mutex<questions::State>,
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -207,6 +211,7 @@ impl Core {
             joins: AtomicU64::new(0),
             status: Mutex::new(sync::Memory::default()),
             icloud_pending: Mutex::new(None),
+            questions: Mutex::new(questions::State::default()),
         };
         if core.role == Role::App {
             core.clear_unfinished_joins();
@@ -499,6 +504,26 @@ impl Core {
             // imports and removes.
             "passkey_list" | "passkey_assert" | "passkey_register" | "passkey_import"
             | "passkey_remove" => self.passkey_call(&op, request),
+            // 5.11 Folders, adding by paste, and the options of a credential.
+            "folders" | "folder_create" | "folder_rename" | "folder_move" | "folder_delete"
+            | "item_folder_set" | "detect" | "add_pasted" | "item_options_set" => {
+                self.organize_call(&op, request)
+            }
+            // 5.10 Questions through the relay: the app only.
+            "questions_list"
+            | "questions_wait"
+            | "question_open"
+            | "question_answer_string"
+            | "question_answer"
+            | "answer_key_register"
+            | "push_token_set"
+            | "push_token_clear"
+            | "join_attach"
+            | "join_attach_poll"
+            | "join_attach_cancel" => {
+                self.require_app()?;
+                self.questions_call(&op, request)
+            }
             _ => Err(CoreError::invalid("This call is not known.")),
         }
     }
@@ -633,6 +658,7 @@ impl Core {
         if let Some(relay) = guard(&self.relay).as_ref() {
             relay.forget();
         }
+        self.questions_close();
         // Lock order: the vault, then the kept passphrase, as in `unlock`.
         let mut slot = guard(&self.vault);
         self.closes.fetch_add(1, Ordering::SeqCst);

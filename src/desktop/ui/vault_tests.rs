@@ -11,13 +11,13 @@ use tempfile::TempDir;
 
 use super::start::{self, Step};
 use super::vaults::VaultSheet;
-use super::{SettingsTab, Sheet, draw};
+use super::{SettingsSection, Sheet, draw};
 use crate::agent::client;
 use crate::agent::wire::Action;
 use crate::broker::approvals::{ApprovalOutcome, OwnerAction, OwnerCheck, PendingRun};
 use crate::desktop::inbox::EventKey;
 use crate::desktop::owner_store::{ENDED_BY_SWITCH, FreshToken, SecretForm};
-use crate::desktop::{BrokerState, DesktopApp, ItemDraft, OwnerView};
+use crate::desktop::{BrokerState, DesktopApp, ItemDraft};
 use crate::vault::{ActivityDecision, NewActivity};
 use crate::vaults::Registry;
 
@@ -199,76 +199,76 @@ fn create_asks_for_a_name_and_lists_the_vault() {
     // The sidebar shows the open vault. Settings lists each vault with its file.
     let text = frames(&mut app);
     assert!(text.contains("Client Work"), "{text}");
-    app.view = OwnerView::Settings;
+    super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
-    for expected in [
-        "Vaults",
-        "Personal",
-        "Client Work",
-        "Open",
-        "Rename…",
-        "Remove from list…",
-        "New vault…",
-        "Open vault file…",
-    ] {
+    for expected in ["Vaults", "Personal", "Client Work", "Open"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
 }
 
-/// Settings has five tabs. Only the sections of the selected tab show.
+/// Settings is a view with six sections (ADR 0026 §3). The list column names each one;
+/// the detail column shows the groups of the selected section only.
 #[test]
-fn settings_show_the_sections_of_the_selected_tab_only() {
+fn settings_show_the_groups_of_the_selected_section_only() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
-    app.view = OwnerView::Settings;
+    super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
-    for tab in ["General", "Security", "Agents", "Notifications", "About"] {
-        assert!(text.contains(tab), "tab {tab}: {text}");
+    for section in SettingsSection::ALL {
+        assert!(text.contains(section.label()), "{section:?}: {text}");
     }
     let cases = [
         (
-            SettingsTab::General,
-            &["Vaults", "New vault…", "Import from 1Password…"][..],
-            &["Keyboard shortcuts", "Back up now", "Broker and bouncer"][..],
+            SettingsSection::Vault,
+            &["Personal", "Back up now…", "Restore…", "Import…"][..],
+            &["Change passphrase…", "Install tools…", "Keyboard shortcuts"][..],
         ),
         (
-            SettingsTab::Security,
-            &["Change passphrase", "Back up now"][..],
-            &["Lock now", "Token lifetime", "Updates"][..],
+            SettingsSection::Security,
+            &["Touch ID", "Change passphrase…"][..],
+            &["Back up now…", "Token lifetime", "Owner checks\n"][..],
         ),
         (
-            SettingsTab::Agents,
-            &["Token lifetime", "Broker and bouncer", "Command line"][..],
-            &["Lock now", "Back up now", "Keyboard shortcuts"][..],
+            SettingsSection::Devices,
+            &["This Mac", "Allow the iPhone app on this network", "Relay"][..],
+            &["Back up now…", "Change passphrase…", "Other Macs"][..],
         ),
         (
-            SettingsTab::Notifications,
-            &["A waiting approval or a blocked request causes a macOS notification."][..],
-            &["Lock now", "Token lifetime", "Keyboard shortcuts"][..],
+            SettingsSection::Bouncer,
+            &["Calibration and learning"][..],
+            &["Back up now…", "Asked you", "Address", "Install tools…"][..],
         ),
         (
-            SettingsTab::About,
-            &["Updates", "Keyboard shortcuts", "Contract"][..],
-            &["Lock now", "Back up now", "Token lifetime"][..],
+            SettingsSection::Tools,
+            &["Command line", "Install tools…", "Browser extension"][..],
+            &["Back up now…", "Socket", "Sessions"][..],
+        ),
+        (
+            SettingsSection::Updates,
+            &["Version", "Keyboard shortcuts"][..],
+            &["Back up now…", "Contract", "Install tools…"][..],
         ),
     ];
-    for (tab, shown, hidden) in cases {
-        app.ui.settings_tab = tab;
+    for (section, shown, hidden) in cases {
+        super::open_settings(&mut app, section);
         let text = frames(&mut app);
         for expected in shown {
-            assert!(text.contains(expected), "{tab:?} shows {expected}: {text}");
+            assert!(
+                text.contains(expected),
+                "{section:?} shows {expected}: {text}"
+            );
         }
         for unexpected in hidden {
             assert!(
                 !text.contains(unexpected),
-                "{tab:?} hides {unexpected}: {text}"
+                "{section:?} hides {unexpected}: {text}"
             );
         }
     }
 }
 
-/// Settings > Agents: how the bouncer model starts. "When a run needs it" is the
+/// Settings > Bouncer: how the bouncer model starts. "When a run needs it" is the
 /// default (ADR 0024) and starts nothing before a run. Each mode shows its label, its
 /// status, and its actions, and a missing start script shows the install commands.
 #[test]
@@ -294,16 +294,9 @@ fn settings_show_how_the_bouncer_model_starts() {
         Host::none(),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
-    app.ui.settings_tab = SettingsTab::Agents;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
     let text = frames(&mut app);
-    for expected in [
-        "Broker and bouncer",
-        "Start the model",
-        "When a run needs it",
-        "Status",
-        "Open log",
-    ] {
+    for expected in ["Bouncer", "Model", "Start the model", "When a run needs it"] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("Start now"), "{text}");
@@ -320,12 +313,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     set(StartMode::External);
     let text = frames(&mut app);
     assert!(text.contains("Managed outside Apassy"), "{text}");
-    for hidden in [
-        "Stop after",
-        "Start now",
-        "Install the Laya environment",
-        "Install the model",
-    ] {
+    for hidden in ["Stop after", "Start now", "Install…"] {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     set(StartMode::WhenNeeded);
@@ -336,16 +324,20 @@ fn settings_show_how_the_bouncer_model_starts() {
         "30 minutes without a run",
         // The script is missing here, so the status does not promise a start.
         "Cannot start",
-        "Something that the model needs is missing.",
-        "Or install the Laya environment with these commands in Terminal:",
+        "Apassy cannot find the start script tools/basemodel/start.sh.",
         // No uv here, so no install button.
         "Install uv first: brew install uv",
         "Until then, every run waits for you.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert!(text.contains("laya[serve]==0.3.20"), "{text}");
-    assert!(!text.contains("Install the model"), "{text}");
+    // The Terminal commands are in the menu of the row, not on the page.
+    assert!(!text.contains("laya[serve]==0.3.20"), "{text}");
+    assert!(
+        super::settings::install_commands(&server.status()).contains("laya[serve]==0.3.20"),
+        "the menu copies the install commands"
+    );
+    assert!(!text.contains("Install…"), "{text}");
     // A start would fail, so there is no "Start now".
     assert!(!text.contains("Start now"), "{text}");
 
@@ -379,7 +371,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     server.shutdown();
 }
 
-/// Settings > Agents: "Install the model" shows only in a managed mode while the Laya
+/// Settings > Bouncer: "Install the model" shows only in a managed mode while the Laya
 /// environment is missing. A LaunchAgent that runs start.sh with a missing model, or
 /// in a mode where Apassy starts the server, gets a note with the commands that remove
 /// it. The test does not run the install.
@@ -439,8 +431,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         std::thread::sleep(Duration::from_millis(20));
     }
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
-    app.ui.settings_tab = SettingsTab::Agents;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
     let remove = format!(
         "launchctl bootout gui/$(id -u)/com.example.bouncer\nrm {}",
         plist.display()
@@ -449,24 +440,29 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     // The environment and the model are missing.
     let text = frames(&mut app);
     for expected in [
-        "Install the model",
-        "with these commands in Terminal:",
+        "Install…",
+        "The LaunchAgent com.example.bouncer starts the bouncer with APASSY_BASE_MODEL",
+        "That file does not exist, so the start fails.",
+        "Copy remove commands",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("Install uv first"), "{text}");
+    // The install commands are in the menu of the row; the last downloads the weights.
+    let commands = super::settings::install_commands(&server.status());
+    for expected in [
         "\nuv venv --python 3.12 .venv\n",
-        // The last command downloads the base weights.
         &format!(
             "\n.venv/bin/python -B {}",
             dir.path()
                 .join("tools/basemodel/fetch_weights.py")
                 .display()
         ),
-        "The LaunchAgent com.example.bouncer starts the bouncer with APASSY_BASE_MODEL",
-        "That file does not exist, so the start fails.",
-        "To remove it, run these commands in Terminal. Apassy does not change it.",
-        &remove,
     ] {
-        assert!(text.contains(expected), "{expected}: {text}");
+        assert!(commands.contains(expected), "{expected}: {commands}");
     }
-    assert!(!text.contains("Install uv first"), "{text}");
+    // "Copy remove commands" copies the commands that remove the LaunchAgent.
+    assert_eq!(server.status().launch_agents[0].remove_commands(), remove);
 
     // "Managed outside Apassy" offers no install. The missing model still shows.
     server
@@ -476,7 +472,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         })
         .expect("settings");
     let text = frames(&mut app);
-    assert!(!text.contains("Install the model"), "{text}");
+    assert!(!text.contains("Install…"), "{text}");
     assert!(text.contains("That file does not exist"), "{text}");
 
     // With the model, "Managed outside Apassy" has no note.
@@ -495,8 +491,8 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     for expected in [
         "The LaunchAgent com.example.bouncer also starts the bouncer.",
         "With \"With Apassy\", Apassy starts and stops the model itself.",
-        &remove,
-        "Install the model",
+        "Copy remove commands",
+        "Install…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -505,7 +501,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     std::fs::remove_file(&uv).expect("remove");
     let text = frames(&mut app);
     assert!(text.contains("Install uv first: brew install uv"), "{text}");
-    assert!(!text.contains("Install the model"), "{text}");
+    assert!(!text.contains("Install…"), "{text}");
 
     // A `.venv` whose Python is gone: the Terminal commands clear it, as the install.
     std::fs::create_dir_all(laya_dir.join(".venv/bin")).expect("dir");
@@ -514,10 +510,10 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         laya_dir.join(".venv/bin/python"),
     )
     .expect("symlink");
-    let text = frames(&mut app);
+    let commands = super::settings::install_commands(&server.status());
     assert!(
-        text.contains("\nuv venv --clear --python 3.12 .venv\n"),
-        "{text}"
+        commands.contains("\nuv venv --clear --python 3.12 .venv\n"),
+        "{commands}"
     );
     std::fs::remove_file(laya_dir.join(".venv/bin/python")).expect("remove");
 
@@ -525,17 +521,13 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     executable(&laya_dir.join(".venv/bin/python"));
     executable(&laya_dir.join(".venv/bin/laya-serve"));
     let text = frames(&mut app);
-    for hidden in [
-        "Install the model",
-        "Install uv first",
-        "with these commands in Terminal",
-    ] {
+    for hidden in ["Install…", "Install uv first"] {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     server.shutdown();
 }
 
-/// Settings > Agents: "Start now" shows only when the server can start. A first start
+/// Settings > Bouncer: "Start now" shows only when the server can start. A first start
 /// without the base weights in the Hugging Face cache says that it downloads them.
 #[test]
 fn settings_show_start_now_and_the_first_start_download() {
@@ -581,8 +573,7 @@ fn settings_show_start_now_and_the_first_start_download() {
         Duration::from_secs(1),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
-    app.ui.settings_tab = SettingsTab::Agents;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
 
     // laya-serve is missing: "Cannot start" and no "Start now".
     let text = frames(&mut app);
@@ -614,7 +605,7 @@ fn settings_show_start_now_and_the_first_start_download() {
     server.shutdown();
 }
 
-/// Settings > Agents: when only the download of the weights failed, the environment is
+/// Settings > Bouncer: when only the download of the weights failed, the environment is
 /// there. The status does not say that it is missing, and "Install the model" tries the
 /// download again.
 #[test]
@@ -667,8 +658,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
         Duration::from_secs(1),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
-    app.ui.settings_tab = SettingsTab::Agents;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
     // A run finds no environment.
     assert!(crate::broker::model_server::ModelGate::before_model(&*server).is_err());
     assert!(matches!(server.state(), ServerState::Failed { .. }));
@@ -684,9 +674,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
         "The install failed. Downloading the model weights failed",
         "The first start of the model server downloads the weights.",
         "Stopped",
-        "Install the model",
-        "Or download them with this command in Terminal:",
-        &format!(".venv/bin/python -B {}", tools.join(FETCH_SCRIPT).display()),
+        "Install…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -696,25 +684,27 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
     server.shutdown();
 }
 
-/// Settings > General shows the file of the open vault one time, in Vaults. "Lock now"
-/// is a row of Vaults, and About has no second version row.
+/// Settings > Vault shows where the open vault lives in short words, not its whole
+/// path (that is the hover text). "Lock now" is on its row, and About has no second
+/// version row.
 #[test]
 fn settings_show_the_vault_file_one_time() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
     let path = path_of(&app, "Personal").display().to_string();
-    app.view = OwnerView::Settings;
-    app.ui.settings_tab = SettingsTab::General;
+    super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
-    assert_eq!(text.matches(path.as_str()).count(), 1, "{path}: {text}");
-    assert!(text.contains("Lock now"), "{text}");
-    assert!(
-        text.contains("The broker refuses all agent requests while the vault is locked."),
-        "{text}"
+    assert_eq!(text.matches(path.as_str()).count(), 0, "{path}: {text}");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let place = super::vaults::short_location(
+        &path_of(&app, "Personal"),
+        home.as_deref(),
+        &app.vault_list.data_dir,
     );
+    assert!(text.contains(&place), "{place}: {text}");
 
-    app.ui.settings_tab = SettingsTab::About;
+    super::open_settings(&mut app, SettingsSection::Updates);
     let text = frames(&mut app);
     assert_eq!(
         text.lines().filter(|line| *line == "Version").count(),
@@ -815,6 +805,7 @@ fn a_switch_ends_waiting_runs_and_clears_the_state_of_the_vault() {
                     request_source: String::new(),
                     agent_request: String::new(),
                     remember: None,
+                    question: Default::default(),
                 },
                 Duration::from_secs(20),
                 || true,
@@ -857,7 +848,7 @@ fn a_switch_ends_waiting_runs_and_clears_the_state_of_the_vault() {
     // Nothing of Beta stays.
     assert!(!app.ui.agent_setup.advanced);
     assert!(app.ui.agent_setup.result.is_none());
-    assert_eq!(app.view, OwnerView::Vault);
+    assert!(app.place.is_credentials());
     assert!(app.selected_item_id.is_none());
     assert!(app.search.is_empty());
     assert!(app.owner_ui.session.revealed_value(item, "token").is_none());
@@ -980,7 +971,7 @@ fn remove_from_list_keeps_the_file_and_rename_checks_the_name() {
         app.status_text
     );
 
-    app.view = OwnerView::Settings;
+    super::open_settings(&mut app, SettingsSection::Vault);
     app.ui.sheet = Some(Sheet::Vault(VaultSheet::Remove { id: alpha.clone() }));
     let text = frames(&mut app);
     assert!(text.contains("Remove “Alpha” from the list?"), "{text}");
@@ -1094,4 +1085,754 @@ fn open_and_restore_add_the_file_to_the_list() {
     assert!(restored.ends_with("vaults/restored-x.db"), "{restored:?}");
     assert!(app.owner_ui.session.is_locked());
     assert_eq!(app.vault_list.registry.entries().len(), 2);
+}
+
+/// Draw one frame with `events` and two without, at the tall size, in one context.
+/// Returns the painted text and each text with its position, of the last frame.
+fn frames_with(app: &mut DesktopApp, events: Vec<egui::Event>) -> (String, Vec<(String, Pos2)>) {
+    let ctx = egui::Context::default();
+    let mut text = String::new();
+    let mut placed = Vec::new();
+    for events in [events, Vec::new(), Vec::new()] {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(app, ui));
+        text.clear();
+        placed.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+            collect_placed(&clipped.shape, &mut placed);
+        }
+        output.drop_without_applying_deltas();
+    }
+    (text, placed)
+}
+
+fn collect_placed(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((text.galley.text().to_owned(), text.pos)),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| collect_placed(inner, out)),
+        _ => {}
+    }
+}
+
+/// ⌘S: the default action of the open sheet.
+fn command_s() -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::S,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    }
+}
+
+/// Click the last painted text `needle` (the top layer draws last) in one context.
+fn click_text(app: &mut DesktopApp, needle: &str) {
+    let ctx = egui::Context::default();
+    let frame = |app: &mut DesktopApp, events: Vec<egui::Event>| {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(app, ui));
+        let mut placed = Vec::new();
+        for clipped in &output.shapes {
+            collect_placed(&clipped.shape, &mut placed);
+        }
+        output.drop_without_applying_deltas();
+        placed
+    };
+    frame(app, Vec::new());
+    let placed = frame(app, Vec::new());
+    let at = placed
+        .iter()
+        .rev()
+        .find(|(text, _)| text == needle)
+        .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+        .unwrap_or_else(|| panic!("{needle} is not on the screen"));
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(app, vec![egui::Event::PointerMoved(at)]);
+    frame(app, vec![button(true)]);
+    frame(app, vec![button(false)]);
+    frame(app, Vec::new());
+}
+
+/// Folders (ADR 0026 §5): New Folder makes a folder and a nested one, a taken name is
+/// refused, Rename renames, Move to Folder moves a credential and the list follows the
+/// folder, and Delete moves the credentials of the folder up to its parent.
+#[test]
+fn folder_sheets_create_nested_rename_move_and_delete() {
+    use super::folders::{self, FolderTree};
+    use crate::desktop::Place;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let filed = add_item(&mut app, "Filed key");
+    add_item(&mut app, "Loose key");
+    let folder_of = |app: &DesktopApp, id: u64| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.item_folder(id))
+            .expect("open")
+            .expect("item")
+    };
+
+    // New Folder at the top level: "+" on the Personal header opens it.
+    folders::open_new(&mut app, None);
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("New Folder") && text.contains("In Personal."),
+        "{text}"
+    );
+    app.ui.folder_name = "Work".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    let tree = FolderTree::load(&app);
+    let work = tree.folders[0].uuid.clone();
+    assert_eq!(
+        app.place,
+        Place::Folder(Some(work.clone())),
+        "the new folder shows"
+    );
+
+    // A nested folder: its parent opens in the sidebar.
+    folders::open_new(&mut app, Some(work.clone()));
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("In Work."), "{text}");
+    app.ui.folder_name = "Acme".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    let tree = FolderTree::load(&app);
+    let acme = tree
+        .children(Some(&work))
+        .next()
+        .expect("nested folder")
+        .uuid
+        .clone();
+    assert_eq!(tree.path(&acme), ["Work", "Acme"]);
+    assert!(app.ui.open_folders.contains(&work));
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("Acme"),
+        "the sidebar shows the nested folder: {text}"
+    );
+
+    // A taken name, in any case, is refused and the sheet stays.
+    folders::open_new(&mut app, Some(work.clone()));
+    app.ui.folder_name = "acme".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert!(app.ui.sheet.is_some(), "the sheet stays after an error");
+    assert!(
+        app.status_text.contains("already there"),
+        "{}",
+        app.status_text
+    );
+    app.ui.sheet = None;
+
+    // Rename.
+    folders::open_rename(&mut app, &acme);
+    assert_eq!(app.ui.folder_name, "Acme", "Rename starts with the name");
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("Rename “Acme”"), "{text}");
+    app.ui.folder_name = "Acme Inc".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(
+        FolderTree::load(&app).name(&acme).as_deref(),
+        Some("Acme Inc")
+    );
+
+    // Move to Folder: the credential goes to Acme Inc; the folder list holds it.
+    app.place = Place::CREDENTIALS;
+    app.select_item(filed.to_string());
+    folders::open_move(&mut app, filed);
+    assert_eq!(app.ui.move_target, None, "it starts at the top level");
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("Move “Filed key”") && text.contains("Acme Inc"),
+        "{text}"
+    );
+    app.ui.move_target = Some(acme.clone());
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(folder_of(&app, filed).as_deref(), Some(acme.as_str()));
+    // "All credentials" groups by folder path.
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("Work › Acme Inc"), "{text}");
+    // The list of Work holds the credentials of its subfolders.
+    app.place = Place::Folder(Some(work.clone()));
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("Filed key") && !text.contains("Loose key"),
+        "{text}"
+    );
+
+    // Delete Acme Inc: its credential moves up to Work. No credential is deleted.
+    app.place = Place::Folder(Some(acme.clone()));
+    folders::open_delete(&mut app, &acme);
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("Delete “Acme Inc”?"), "{text}");
+    assert!(
+        text.contains("move to Work. No credential is deleted."),
+        "{text}"
+    );
+    click_text(&mut app, "Delete");
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert!(FolderTree::load(&app).get(&acme).is_none());
+    assert_eq!(folder_of(&app, filed).as_deref(), Some(work.as_str()));
+    assert_eq!(
+        app.place,
+        Place::Folder(Some(work.clone())),
+        "the list shows the parent"
+    );
+    assert!(
+        app.status_text.contains("Its credential is in Work."),
+        "{}",
+        app.status_text
+    );
+    assert!(
+        app.owner_ui.session.details(filed).is_ok(),
+        "the credential stays"
+    );
+
+    // Delete Work: the credential goes to the top level.
+    assert!(folders::delete(&mut app, &work));
+    assert_eq!(folder_of(&app, filed), None);
+    assert_eq!(app.place, Place::CREDENTIALS);
+}
+
+// ---- The credential page (ADR 0025, ADR 0026 §2). ----
+
+/// Three frames of the whole app at `size`, in a new context. Returns the painted text
+/// of the last frame.
+fn frames_at(app: &mut DesktopApp, size: Vec2) -> String {
+    let ctx = egui::Context::default();
+    let mut text = String::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(app, ui));
+        text.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+        }
+        output.drop_without_applying_deltas();
+    }
+    text
+}
+
+/// A synthetic value with a provider prefix, as in `tests/detect.rs`.
+fn fake_key(prefix: &str, len: usize) -> String {
+    format!("{prefix}{}", &"EXAMPLE0".repeat(len / 8 + 1)[..len])
+}
+
+/// Paste `text` as the owner does in New Credential, at the top level.
+fn paste(app: &mut DesktopApp, text: &str) -> u64 {
+    app.owner_ui
+        .session
+        .add_detected(text, None)
+        .expect("add pasted credential")[0]
+        .id
+}
+
+fn register(app: &mut DesktopApp, name: &str) -> u64 {
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.register_agent(name))
+        .expect("open")
+        .expect("register")
+        .0
+        .id
+}
+
+fn record_use(app: &mut DesktopApp, item_id: u64, agent_id: u64, command: &str) {
+    use crate::broker::action_kind::ActionKind;
+    use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.record_item_use(&NewItemUse {
+                item_id,
+                agent_id: Some(agent_id),
+                agent_name: "Claude Code".to_owned(),
+                project_key: "/synthetic/apassy".to_owned(),
+                project_label: "apassy".to_owned(),
+                action: ActionKind::Read,
+                command_summary: command.to_owned(),
+                hosts: vec!["api.example.com".to_owned()],
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+        })
+        .expect("open")
+        .expect("record use");
+}
+
+/// The rules of a credential: an answer of the owner and an exception of an agent. The
+/// page lists both and the agent use. Removing the exception gives authority back, so
+/// it asks for the owner check first; removing the answer makes the bouncer ask again,
+/// so it needs no check (ADR 0025 §3b, §3f).
+#[test]
+fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner() {
+    use crate::broker::action_kind::ActionKind;
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::answers::ProjectRef;
+    use crate::vault::exceptions::ExceptionKind;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Deploy key");
+    let agent = register(&mut app, "Claude Code");
+    app.owner_ui
+        .session
+        .with_vault(|vault| -> crate::vault::VaultResult<()> {
+            vault.add_agent_exception(agent, id, ExceptionKind::Never)?;
+            let project = ProjectRef {
+                key: "/synthetic/apassy".to_owned(),
+                label: "apassy".to_owned(),
+            };
+            vault.remember_answer(id, &project, ActionKind::Change, "this Mac", &[])?;
+            Ok(())
+        })
+        .expect("open")
+        .expect("rules");
+    for command in [
+        "gh api user",
+        "gh pr list",
+        "gh run list",
+        "gh release view",
+    ] {
+        record_use(&mut app, id, agent, command);
+    }
+    app.select_item(id.to_string());
+    let text = frames(&mut app);
+    for expected in [
+        "Agent use",
+        "Show All",
+        "Claude Code in apassy",
+        "gh release view",
+        " · Allowed automatically",
+        "Rules from your answers",
+        "Allow changes in apassy",
+        "Never for Claude Code",
+        "Always ask me",
+        "Environment",
+        "Hosts and risk",
+        "Folder",
+        "Shared in",
+        "Not shared",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(
+        !text.contains("gh api user"),
+        "only the 3 newest uses: {text}"
+    );
+    assert!(!text.contains(CANARY), "the secret stays masked");
+
+    // "Show All" lists every use.
+    click_text(&mut app, "Show All");
+    let text = frames(&mut app);
+    assert!(
+        text.contains("gh api user") && text.contains("Show Less"),
+        "{text}"
+    );
+
+    // The exception row is the last Remove: the owner check first.
+    click_text(&mut app, "Remove");
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        matches!(
+            &check.request,
+            OwnerRequest::RemoveAgentException { agent_id, item_id, kind: ExceptionKind::Never, .. }
+                if *agent_id == agent && *item_id == id
+        ),
+        "{:?}",
+        check.request
+    );
+    let still = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_exceptions(id))
+        .expect("open")
+        .expect("exceptions");
+    assert_eq!(still.len(), 1, "nothing changes before the check");
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let left = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_exceptions(id))
+        .expect("open")
+        .expect("exceptions");
+    assert!(left.is_empty(), "{left:?}");
+    let text = frames(&mut app);
+    assert!(!text.contains("Never for Claude Code"), "{text}");
+
+    // The answer: removed at once, without a check.
+    click_text(&mut app, "Remove");
+    assert!(
+        app.owner.check.is_none(),
+        "a stricter change needs no check"
+    );
+    let answers = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.answers_for_item(id))
+        .expect("open")
+        .expect("answers");
+    assert!(answers.is_empty(), "{answers:?}");
+    let text = frames(&mut app);
+    assert!(
+        text.contains("None. The bouncer decides each use."),
+        "{text}"
+    );
+}
+
+/// "Always ask me": on at once (stricter), off only after the owner check.
+#[test]
+fn always_ask_turns_on_at_once_and_off_after_the_owner_check() {
+    use crate::desktop::owner_check::OwnerRequest;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Careful key");
+    app.select_item(id.to_string());
+    let always_ask = |app: &DesktopApp| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.always_ask(id))
+            .expect("open")
+            .expect("read")
+    };
+    let details = app.owner_ui.session.details(id).expect("details");
+    let ctx = egui::Context::default();
+    super::items::set_always_ask(&mut app, &ctx, &details, true);
+    assert!(app.owner.check.is_none(), "turning it on needs no check");
+    assert!(always_ask(&app));
+
+    super::items::set_always_ask(&mut app, &ctx, &details, false);
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        matches!(&check.request, OwnerRequest::AlwaysAskOff { item_id, .. } if *item_id == id),
+        "{:?}",
+        check.request
+    );
+    assert!(always_ask(&app), "still on before the check");
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    assert!(!always_ask(&app));
+}
+
+/// "Is this a development key?" shows while only a default found the environment.
+/// "Production" is stricter: no check. "Development" waits for the owner check. Each
+/// answer counts as the owner's (the source "owner"), and the question goes away.
+#[test]
+fn the_development_key_question_and_its_answers() {
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::{DeclarationSource, Environment};
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let first = paste(&mut app, &fake_key("sk-ant-api03-", 40));
+    let second = paste(&mut app, &fake_key("sk-ant-api03-", 41));
+    let state = |app: &DesktopApp, id: u64| {
+        let declaration = app
+            .owner_ui
+            .session
+            .declaration(id)
+            .expect("read")
+            .expect("declaration");
+        let sources = app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.declaration_sources(id))
+            .expect("open")
+            .expect("sources");
+        (declaration.environment, sources.environment, sources.risk)
+    };
+    let (_, _, risk_before) = state(&app, first);
+
+    app.select_item(first.to_string());
+    let text = frames(&mut app);
+    assert!(text.contains("Is this a development key?"), "{text}");
+    assert!(text.contains("api.anthropic.com"), "{text}");
+    assert!(text.contains("Not confirmed"), "{text}");
+    click_text(&mut app, "Production");
+    assert!(
+        app.owner.check.is_none(),
+        "production is stricter: no check"
+    );
+    assert_eq!(
+        state(&app, first),
+        (
+            Environment::Production,
+            DeclarationSource::Owner,
+            risk_before
+        )
+    );
+    let text = frames(&mut app);
+    assert!(!text.contains("Is this a development key?"), "{text}");
+    assert!(text.contains("Production"), "the red cap: {text}");
+
+    app.select_item(second.to_string());
+    let text = frames(&mut app);
+    assert!(text.contains("Is this a development key?"), "{text}");
+    click_text(&mut app, "Development");
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        matches!(
+            &check.request,
+            OwnerRequest::SetEnvironment { item_id, environment: Environment::Development, .. }
+                if *item_id == second
+        ),
+        "{:?}",
+        check.request
+    );
+    assert_eq!(state(&app, second).1, DeclarationSource::Default);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let (environment, source, risk) = state(&app, second);
+    assert_eq!(environment, Environment::Development);
+    assert_eq!(source, DeclarationSource::Owner);
+    assert_eq!(risk, risk_before, "the other sources stay");
+    let text = frames(&mut app);
+    assert!(!text.contains("Is this a development key?"), "{text}");
+    assert!(text.contains("Development"), "{text}");
+
+    // A login is no key: no question.
+    let mut secrets = SecretForm::default();
+    secrets.password = CANARY.to_owned();
+    let login = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                kind: crate::contracts::CredentialKind::Login,
+                name: "Router".to_owned(),
+                username: "admin".to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add login")
+        .id;
+    app.select_item(login.to_string());
+    let text = frames(&mut app);
+    assert!(!text.contains("Is this a development key?"), "{text}");
+}
+
+/// A pasted credential has an empty project on purpose (ADR 0025 §4). Changing the
+/// environment on the detail page changes only the environment and its source: the
+/// project stays empty, and the folder name or title never stands in for it.
+#[test]
+fn changing_the_environment_keeps_the_pasted_project_empty() {
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::{DeclarationSource, Environment};
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let first = paste(&mut app, &fake_key("sk-ant-api03-", 42));
+    let second = paste(&mut app, &fake_key("sk-ant-api03-", 43));
+    let read = |app: &DesktopApp, id: u64| {
+        let declaration = app
+            .owner_ui
+            .session
+            .declaration(id)
+            .expect("read")
+            .expect("declaration");
+        let sources = app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.declaration_sources(id))
+            .expect("open")
+            .expect("sources");
+        (declaration, sources.environment)
+    };
+    let (before, _) = read(&app, first);
+    assert!(before.project.is_empty(), "a pasted item has no project");
+
+    app.select_item(first.to_string());
+    frames(&mut app);
+    click_text(&mut app, "Development");
+    assert!(matches!(
+        app.owner.check.as_ref().map(|check| &check.request),
+        Some(OwnerRequest::SetEnvironment { .. })
+    ));
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let (after, source) = read(&app, first);
+    assert_eq!(after.environment, Environment::Development);
+    assert_eq!(source, DeclarationSource::Owner);
+    assert!(after.project.is_empty(), "the project stays empty");
+    assert_eq!(
+        (after.risk, after.scope, after.reversibility),
+        (before.risk, before.scope, before.reversibility)
+    );
+
+    // Production needs no check and keeps the project empty as well.
+    app.select_item(second.to_string());
+    frames(&mut app);
+    click_text(&mut app, "Production");
+    assert!(app.owner.check.is_none());
+    let (after, source) = read(&app, second);
+    assert_eq!(after.environment, Environment::Production);
+    assert_eq!(source, DeclarationSource::Owner);
+    assert!(after.project.is_empty(), "the project stays empty");
+}
+
+/// Every variant of the credential page draws at the default and the minimum window
+/// size, with the sidebar full and collapsed: a plain key, a pasted key with the
+/// question, a production key, a login, a one-time password, an archived credential, a
+/// credential with rules, uses, "Always ask me", and "Hosts and risk" open. No value
+/// shows.
+#[test]
+fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
+    use crate::broker::action_kind::ActionKind;
+    use crate::vault::answers::ProjectRef;
+    use crate::vault::exceptions::ExceptionKind;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let plain = add_item(&mut app, "Plain key");
+    let question = paste(&mut app, &fake_key("sk-ant-api03-", 40));
+    let production = paste(
+        &mut app,
+        &format!("STRIPE_SECRET_KEY={}", fake_key("sk_live_", 24)),
+    );
+    let mut secrets = SecretForm::default();
+    secrets.password = CANARY.to_owned();
+    let login = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                kind: crate::contracts::CredentialKind::Login,
+                name: "Router login".to_owned(),
+                username: "admin".to_owned(),
+                website: "https://router.example".to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add login")
+        .id;
+    let code = paste(
+        &mut app,
+        "otpauth://totp/Example:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+    );
+    let archived = add_item(&mut app, "Old key");
+    app.owner_ui.session.archive(archived).expect("archive");
+    let ruled = add_item(&mut app, "Ruled key");
+    let agent = register(&mut app, "Claude Code");
+    app.owner_ui
+        .session
+        .with_vault(|vault| -> crate::vault::VaultResult<()> {
+            vault.add_agent_exception(agent, ruled, ExceptionKind::AlwaysAsk)?;
+            let project = ProjectRef {
+                key: "/synthetic/a-very-long-project-name-for-the-narrow-window".to_owned(),
+                label: "a-very-long-project-name-for-the-narrow-window".to_owned(),
+            };
+            vault.remember_answer(ruled, &project, ActionKind::Deploy, "this Mac", &[])?;
+            vault.set_always_ask(ruled, true)?;
+            Ok(())
+        })
+        .expect("open")
+        .expect("rules");
+    for index in 0..5 {
+        record_use(
+            &mut app,
+            ruled,
+            agent,
+            &format!("curl --silent https://api.example.com/v1/items/{index}"),
+        );
+    }
+    app.ui
+        .set_expanded(&format!("credential-access-{ruled}"), true);
+    app.ui
+        .set_expanded(&format!("credential-uses-{ruled}"), true);
+
+    let pages = [
+        (plain, "Plain key"),
+        (question, "Anthropic API key"),
+        (production, "Stripe live"),
+        (login, "Router login"),
+        (code, "Example"),
+        (archived, "Old key"),
+        (ruled, "Ruled key"),
+    ];
+    for (id, name) in pages {
+        for size in [Vec2::new(1180.0, 800.0), Vec2::new(900.0, 600.0)] {
+            for collapsed in [false, true] {
+                app.ui.sidebar_hidden = collapsed;
+                app.select_item(id.to_string());
+                let text = frames_at(&mut app, size);
+                assert!(text.contains(name), "{name} at {size:?}: {text}");
+                assert!(!text.contains(CANARY), "{name}: a value is visible");
+                assert!(!text.contains("EXAMPLE0"), "{name}: a value is visible");
+                assert!(
+                    !text.contains("JBSWY3DPEHPK3PXP"),
+                    "{name}: the seed is visible"
+                );
+            }
+        }
+    }
+    app.ui.sidebar_hidden = false;
+    app.select_item(ruled.to_string());
+    let text = frames(&mut app);
+    for expected in ["Always ask me", "Agent use"] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    app.select_item(production.to_string());
+    let text = frames_at(&mut app, Vec2::new(1180.0, 800.0));
+    assert!(text.contains("Production"), "{text}");
+    assert!(!text.contains("Is this a development key?"), "{text}");
+}
+
+/// Settings > Vault says where a vault lives in short words: the place, and the last
+/// two folders under it.
+#[test]
+fn the_vault_place_reads_in_short_words() {
+    use super::vaults::short_location;
+    let home = Path::new("/Users/synthetic");
+    let data = home.join("Library/Application Support/Apassy");
+    let place = |path: &Path| short_location(path, Some(home), &data);
+    assert_eq!(place(&data.join("vault.db")), "On this Mac");
+    assert_eq!(
+        place(&home.join("Library/Mobile Documents/com~apple~CloudDocs/Apassy/vault.db")),
+        "iCloud Drive › Apassy"
+    );
+    assert_eq!(
+        place(&home.join("Library/CloudStorage/GoogleDrive-a@example.com/My Drive/Vaults/w.db")),
+        "Google Drive › My Drive › Vaults"
+    );
+    assert_eq!(
+        place(&home.join("Documents/a/b/c/v.db")),
+        "Home › … › b › c"
+    );
+    assert_eq!(
+        place(Path::new("/Volumes/Backup/Apassy/v.db")),
+        "Backup › Apassy"
+    );
+    assert_eq!(place(Path::new("/srv/vaults/v.db")), "/srv/vaults");
 }

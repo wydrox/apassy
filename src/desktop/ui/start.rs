@@ -13,7 +13,7 @@ use super::{
 };
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 
 /// Width of the start column.
 const WIDTH: f32 = 400.0;
@@ -317,7 +317,7 @@ pub(super) fn create_vault(app: &mut DesktopApp, ctx: &egui::Context) {
     app.end_waiting_runs();
     app.list_open_vault(&name, Some(ctx));
     app.ui.start = Step::Home;
-    app.view = OwnerView::Vault;
+    app.place = Place::CREDENTIALS;
     drop(passphrase);
     // The Sync choice of the Create screen.
     let synced = if unlocked.is_ok() {
@@ -528,7 +528,7 @@ pub(super) fn restore_now(app: &mut DesktopApp, ctx: &egui::Context) {
         app.end_waiting_runs();
         app.list_open_vault(&name, Some(ctx));
         app.ui.start = Step::Home;
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
     }
 }
 
@@ -612,7 +612,7 @@ pub(crate) fn unlock_with_passphrase(app: &mut DesktopApp, ctx: &egui::Context) 
     // Sync before the owner sees the list (ADR 0014). A sync problem does not stop the
     // unlock.
     let loaded = if result.is_ok() {
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
         app.sync_after_unlock()
     } else {
         None

@@ -23,7 +23,15 @@ use eframe::egui::{
 // ---- Color tokens (macOS light appearance). ----
 
 pub(crate) const WINDOW: Color32 = Color32::from_rgb(250, 250, 251);
-pub(crate) const SIDEBAR: Color32 = Color32::from_rgb(242, 242, 245);
+pub(crate) const SIDEBAR: Color32 = Color32::from_rgb(236, 236, 239);
+/// The list column (ADR 0026): white, as the content list of Mail.
+pub(crate) const LIST: Color32 = Color32::WHITE;
+/// The detail column, behind its white groups.
+pub(crate) const DETAIL: Color32 = Color32::from_rgb(246, 246, 247);
+/// The fill of the selected list row. White text on it passes 4.5:1.
+pub(crate) const SELECTION: Color32 = Color32::from_rgb(10, 108, 255);
+/// The one colored mark of the window: production, and what blocks an agent.
+pub(crate) const PRODUCTION: Color32 = Color32::from_rgb(224, 53, 43);
 pub(crate) const SURFACE: Color32 = Color32::WHITE;
 /// Hairlines between rows.
 pub(crate) const SEPARATOR: Color32 = Color32::from_rgb(232, 232, 236);
@@ -150,6 +158,11 @@ pub(crate) fn text(value: impl Into<String>, font: Font) -> RichText {
 /// Medium weight for emphasis inside body text.
 pub(crate) fn medium(value: impl Into<String>, font: Font) -> RichText {
     text(value, font).variation(b"wght", 560.0)
+}
+
+/// The title of a list row: 13 points at weight 500, as in the mockup.
+pub(crate) fn row_title(value: impl Into<String>) -> RichText {
+    text(value, Font::Body).variation(b"wght", 500.0)
 }
 
 /// A wrapping label.
@@ -996,24 +1009,6 @@ pub(crate) fn mono_input(
     response
 }
 
-/// A narrow field for a number.
-pub(crate) fn number_input(
-    ui: &mut Ui,
-    value: &mut String,
-    salt: &str,
-    placeholder: &str,
-) -> Response {
-    let response = ui.add(
-        TextEdit::singleline(value)
-            .id_salt(salt)
-            .hint_text(text(placeholder, Font::Body).color(TERTIARY))
-            .margin(FIELD_MARGIN)
-            .desired_width(90.0),
-    );
-    claim_first_field(&response);
-    response
-}
-
 /// A multi-line field.
 pub(crate) fn text_area(
     ui: &mut Ui,
@@ -1394,84 +1389,7 @@ pub(crate) fn dot(ui: &mut Ui, tone: Tone) -> Response {
     response
 }
 
-/// A count badge for the sidebar.
-fn count_badge(painter: &Painter, ui: &Ui, right: Pos2, count: usize, tone: Tone) {
-    let label = count.to_string();
-    let color = if tone == Tone::Neutral {
-        SECONDARY
-    } else {
-        Color32::WHITE
-    };
-    let galley = galley(ui, medium(label, Font::Footnote));
-    let size = Vec2::new((galley.size().x + 10.0).max(18.0), 16.0);
-    let rect = Rect::from_min_size(Pos2::new(right.x - size.x, right.y - size.y / 2.0), size);
-    if tone != Tone::Neutral {
-        painter.rect_filled(rect, 8, tone.mark());
-    }
-    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
-}
-
 // ---- Sidebar. ----
-
-/// A sidebar `List` row: icon, label, and an optional count.
-pub(crate) fn sidebar_item(
-    ui: &mut Ui,
-    icon: Icon,
-    label: &str,
-    selected: bool,
-    badge: Option<Badge>,
-) -> Response {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
-    let name = match badge.filter(|badge| badge.count > 0) {
-        Some(Badge {
-            count,
-            tone: Tone::Neutral,
-            ..
-        }) => format!("{label}, {count}"),
-        Some(Badge { count, what, .. }) => format!("{label}, {count} {what}"),
-        None => label.to_owned(),
-    };
-    response
-        .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, &name));
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        if selected {
-            painter.rect_filled(rect, 6, SIDEBAR_SELECTED);
-        } else if response.hovered() {
-            painter.rect_filled(rect, 6, SIDEBAR_HOVER);
-        }
-        if response.has_focus() {
-            inner_focus_ring(painter, rect, 6);
-        }
-        let icon_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + 18.0, rect.center().y),
-            Vec2::splat(15.0),
-        );
-        paint_icon(painter, icon_rect, icon, ACCENT);
-        let weight = if selected {
-            medium(label, Font::Body)
-        } else {
-            text(label, Font::Body)
-        };
-        let galley = galley(ui, weight);
-        painter.galley(
-            Pos2::new(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            LABEL,
-        );
-        if let Some(badge) = badge.filter(|badge| badge.count > 0) {
-            count_badge(
-                painter,
-                ui,
-                Pos2::new(rect.right() - 8.0, rect.center().y),
-                badge.count,
-                badge.tone,
-            );
-        }
-    }
-    response
-}
 
 /// A count on a sidebar row. A neutral count is a total; another tone means that the
 /// owner has something to do, and `what` names it for VoiceOver ("3 waiting").
@@ -1511,24 +1429,25 @@ pub(crate) fn vault_header(
         if response.has_focus() {
             inner_focus_ring(painter, rect, 8);
         }
-        // The tile: the initial of the vault on its color.
+        // The avatar: the initial of the vault in a 22-point circle of its color, as in
+        // the mockup.
         let tile_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + 18.0, rect.center().y),
-            Vec2::splat(26.0),
+            Pos2::new(rect.left() + 17.0, rect.center().y),
+            Vec2::splat(22.0),
         );
-        painter.rect_filled(tile_rect, 7, tile);
+        painter.circle_filled(tile_rect.center(), 11.0, tile);
         let initial: String = name
             .chars()
             .find(|c| c.is_alphanumeric())
             .map_or_else(|| "V".to_owned(), |c| c.to_uppercase().collect());
-        let letter = galley(ui, medium(initial, Font::Body));
+        let letter = galley(ui, text(initial, Font::Footnote).variation(b"wght", 600.0));
         painter.galley(
             tile_rect.center() - letter.size() / 2.0,
             letter,
             Color32::WHITE,
         );
         // The name and the status, cut to the room left of the chevrons.
-        let text_left = tile_rect.right() + 9.0;
+        let text_left = tile_rect.right() + 8.0;
         let text_width = (rect.right() - 20.0 - text_left).max(0.0);
         let line = |value: RichText, color: Color32| {
             WidgetText::from(value.color(color)).into_galley(
@@ -1538,7 +1457,7 @@ pub(crate) fn vault_header(
                 TextStyle::Body,
             )
         };
-        let title = line(medium(name, Font::Body), LABEL);
+        let title = line(text(name, Font::Body), LABEL);
         let status_color = match tone {
             Tone::Neutral => SECONDARY,
             other => other.text(),
@@ -1589,6 +1508,793 @@ pub(crate) fn title_bar_button(ui: &mut Ui, icon: Icon, name: &str) -> Response 
         paint_icon(painter, rect.shrink(5.0), icon, SECONDARY);
     }
     response.on_hover_text(name)
+}
+
+// ---- The three-column window (ADR 0026, `docs/design/app-v2-mockup.html`). ----
+
+/// The width of the full sidebar.
+pub(crate) const SIDEBAR_WIDTH: f32 = 216.0;
+/// The width of the sidebar as a rail of icons. The traffic lights of macOS take
+/// [`LIGHTS_RIGHT`] points, wider than the 56 points of the mockup, where they are
+/// smaller: the rail keeps them inside, with the margin of the red one at the right, so
+/// they do not run into the list. Its icons center under the yellow light.
+pub(crate) const RAIL_WIDTH: f32 = 78.0;
+/// The width of the list column, and in a window narrower than [`WIDE_LIST_WINDOW`].
+pub(crate) const LIST_WIDTH: f32 = 300.0;
+pub(crate) const LIST_WIDTH_NARROW: f32 = 236.0;
+/// From this window width on, the list column has its full width.
+pub(crate) const WIDE_LIST_WINDOW: f32 = 1040.0;
+/// Below this window width, the sidebar is a rail of icons. Opened, it floats over the
+/// list.
+pub(crate) const NARROW_WINDOW: f32 = 1000.0;
+/// The vertical center of the traffic lights, from the top of the window. The window
+/// has a transparent title bar and no toolbar (an NSToolbar would need unsafe code, which
+/// the crate forbids), so macOS draws the lights at the height of a plain title bar. The
+/// top row of each column centers on this line: the sidebar button, the title of the
+/// list and its "+", and the buttons of the detail.
+pub(crate) const LIGHTS_Y: f32 = 16.0;
+/// The right edge of the traffic lights, from the left edge of the window. A title next
+/// to the lights starts after it.
+pub(crate) const LIGHTS_RIGHT: f32 = 69.0;
+/// The height of the toolbar on top of the list: the title on the row of the traffic
+/// lights, the count under it, and "+". It holds the title bar.
+pub(crate) const TOOLBAR: f32 = 40.0;
+/// The height of the toolbar on top of the detail: its buttons on the row of the traffic
+/// lights.
+pub(crate) const DETAIL_TOOLBAR: f32 = 34.0;
+/// The top of the sidebar rows: right under the row of the traffic lights.
+pub(crate) const SIDEBAR_TOP: f32 = 30.0;
+/// The top of the rail icons: under the traffic lights and the sidebar button.
+pub(crate) const RAIL_TOP: f32 = 66.0;
+/// The hairline between the columns (the mockup: 0.5 px of black at 9 %).
+pub(crate) const COLUMN_EDGE: Color32 = Color32::from_black_alpha(23);
+/// The fill of a hovered sidebar row and of a pressed small button.
+const FILL2: Color32 = Color32::from_rgb(235, 235, 237);
+/// The leading edge of each row, as in the mockup.
+const ROW_RADIUS: u8 = 6;
+
+/// What a provider tile shows: a letter or an icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Mark {
+    Letter(String),
+    Icon(Icon),
+}
+
+/// A provider tile (Stripe, GitHub, Postgres…), or a kind tile when the provider is not
+/// known: a rounded square with a white letter or icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tile {
+    pub(crate) color: Color32,
+    pub(crate) mark: Mark,
+    /// A circle instead of a rounded square: the avatar of an agent.
+    pub(crate) round: bool,
+}
+
+impl Tile {
+    pub(crate) fn letter(color: Color32, name: &str) -> Self {
+        let letter: String = name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect());
+        Self {
+            color,
+            mark: Mark::Letter(letter),
+            round: false,
+        }
+    }
+
+    pub(crate) fn icon(color: Color32, icon: Icon) -> Self {
+        Self {
+            color,
+            mark: Mark::Icon(icon),
+            round: false,
+        }
+    }
+
+    /// The round avatar of an agent, in [`agent_color`], as in Decisions.
+    pub(crate) fn agent(name: &str) -> Self {
+        Self {
+            round: true,
+            ..Self::letter(agent_color(name), name)
+        }
+    }
+}
+
+/// Paint `tile` in `rect`: 8 of 32 points round, the letter in bold at 7/16 of the side.
+pub(crate) fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile) {
+    let side = rect.width();
+    let painter = ui.painter();
+    if tile.round {
+        painter.circle_filled(rect.center(), side / 2.0, tile.color);
+    } else {
+        painter.rect_filled(rect, (side * 0.25).round() as u8, tile.color);
+    }
+    match &tile.mark {
+        Mark::Letter(letter) => {
+            let galley = galley(
+                ui,
+                text(letter.clone(), Font::Body)
+                    .size((side * 0.44).round())
+                    .variation(b"wght", 700.0),
+            );
+            painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        }
+        Mark::Icon(icon) => paint_icon(painter, rect.shrink(side * 0.25), *icon, Color32::WHITE),
+    }
+}
+
+/// A tile of `side` points in the layout.
+pub(crate) fn tile(ui: &mut Ui, tile: &Tile, side: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_tile(ui, rect, tile);
+    }
+    response
+}
+
+// ---- Agent avatars. ----
+
+/// The color of an agent, as in the mockup and Connect an Agent: Claude Code orange,
+/// Codex green, T3 Code purple, a CI agent of GitHub near black. Any other agent gets
+/// a steady color from its name. The name is compared without case, spaces, or dashes,
+/// so "claude-code" and "Ola's Claude Code" are Claude Code too.
+pub(crate) fn agent_color(name: &str) -> Color32 {
+    const OTHERS: [Color32; 6] = [
+        Color32::from_rgb(0, 122, 255),
+        Color32::from_rgb(88, 86, 214),
+        Color32::from_rgb(191, 90, 242),
+        Color32::from_rgb(48, 176, 199),
+        Color32::from_rgb(255, 55, 95),
+        Color32::from_rgb(142, 142, 147),
+    ];
+    let plain: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if plain.contains("claude") {
+        Color32::from_rgb(217, 119, 87)
+    } else if plain.contains("codex") {
+        Color32::from_rgb(16, 163, 127)
+    } else if plain.contains("t3code") {
+        Color32::from_rgb(110, 90, 230)
+    } else if plain.contains("github") {
+        Color32::from_rgb(36, 41, 47)
+    } else {
+        let sum = plain
+            .bytes()
+            .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize));
+        OTHERS[sum % OTHERS.len()]
+    }
+}
+
+/// Paint the round avatar of an agent in `rect`: its first letter in white, semibold,
+/// on [`agent_color`].
+pub(crate) fn paint_avatar(ui: &Ui, rect: Rect, name: &str) {
+    let side = rect.width().min(rect.height());
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), side / 2.0, agent_color(name));
+    let letter: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect());
+    let galley = galley(
+        ui,
+        text(letter, Font::Body)
+            .size((side * 0.42).round())
+            .variation(b"wght", 600.0),
+    );
+    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
+/// The round avatar of an agent, `side` points wide, in the layout: 28 in a list row,
+/// 56 in the header of a detail, 20 in a fact row.
+pub(crate) fn avatar(ui: &mut Ui, name: &str, side: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_avatar(ui, rect, name);
+    }
+    response
+}
+
+/// A cap: a small gray label in the header of a detail ("Development", the name of a
+/// shared vault). `red` is the one red cap, "Production".
+pub(crate) fn cap(ui: &mut Ui, label: &str, red: bool) -> Response {
+    let color = if red {
+        Color32::from_rgb(196, 43, 34)
+    } else {
+        SECONDARY
+    };
+    let galley = galley(ui, medium(label, Font::Footnote));
+    let size = galley.size() + Vec2::new(12.0, 2.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, label));
+    if ui.is_rect_visible(rect) {
+        let fill = if red {
+            PRODUCTION.gamma_multiply(0.1)
+        } else {
+            FILL2
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 5, fill);
+        painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+    }
+    response
+}
+
+/// The title of a list toolbar with its first line centered on `center_y` (the row of
+/// the traffic lights) and the line under it, from `left` to `right`.
+pub(crate) fn toolbar_title_on_row(
+    ui: &mut Ui,
+    left: f32,
+    right: f32,
+    center_y: f32,
+    title: &str,
+    subtitle: &str,
+) {
+    let width = (right - left).max(10.0);
+    let title_text = text(title, Font::Body)
+        .variation(b"wght", 700.0)
+        .color(LABEL);
+    let height = galley(ui, title_text.clone()).size().y;
+    let title_rect = Rect::from_min_size(
+        Pos2::new(left, (center_y - height / 2.0).round()),
+        Vec2::new(width, height),
+    );
+    put_left(
+        ui,
+        title_rect,
+        Label::new(title_text).truncate().selectable(false),
+    );
+    if subtitle.is_empty() {
+        return;
+    }
+    let sub_text = text(subtitle, Font::Footnote).color(SECONDARY);
+    let sub_height = galley(ui, sub_text.clone()).size().y;
+    put_left(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(left, title_rect.bottom()),
+            Vec2::new(width, sub_height),
+        ),
+        Label::new(sub_text).truncate().selectable(false),
+    );
+}
+
+/// A widget in `rect`, at its left edge and centered vertically.
+fn put_left(ui: &mut Ui, rect: Rect, widget: impl egui::Widget) -> Response {
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| ui.add(widget),
+    )
+    .inner
+}
+
+/// A borderless 28-point icon button of a toolbar or a footer. `name` is its name for
+/// VoiceOver and its tooltip.
+pub(crate) fn plain_icon_button(ui: &mut Ui, icon: Icon, name: &str) -> Response {
+    plain_icon_toggle(ui, icon, name, false)
+}
+
+/// A [`plain_icon_button`] that can show as selected, as the gear of the sidebar while
+/// Settings shows: the gray fill of a selected sidebar row, and the icon in the label
+/// color.
+pub(crate) fn plain_icon_toggle(ui: &mut Ui, icon: Icon, name: &str, selected: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let enabled = ui.is_enabled();
+    if selected {
+        response.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, true, name));
+    } else {
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    }
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+        } else if response.is_pointer_button_down_on() {
+            painter.rect_filled(rect, ROW_RADIUS, FILL_PRESSED);
+        } else if response.hovered() {
+            painter.rect_filled(rect, ROW_RADIUS, FILL2);
+        }
+        if response.has_focus() {
+            inner_focus_ring(painter, rect, ROW_RADIUS);
+        }
+        let color = if !enabled {
+            SECONDARY.gamma_multiply(0.45)
+        } else if selected {
+            LABEL
+        } else {
+            SECONDARY
+        };
+        paint_icon(painter, rect.shrink(6.0), icon, color);
+    }
+    response.on_hover_text(name)
+}
+
+/// A toolbar button of the detail column: an optional gray icon and a label, no border.
+pub(crate) fn toolbar_button(ui: &mut Ui, icon: Option<Icon>, label: &str, name: &str) -> Response {
+    let galley = galley(ui, text(label, Font::Body));
+    let icon_space = if icon.is_some() {
+        if label.is_empty() { 16.0 } else { 21.0 }
+    } else {
+        0.0
+    };
+    let width = galley.size().x + icon_space + 18.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.is_pointer_button_down_on() {
+            painter.rect_filled(rect, ROW_RADIUS, FILL_PRESSED);
+        } else if response.hovered() {
+            painter.rect_filled(rect, ROW_RADIUS, FILL2);
+        }
+        if response.has_focus() {
+            inner_focus_ring(painter, rect, ROW_RADIUS);
+        }
+        let mut x = rect.left() + 9.0;
+        if let Some(icon) = icon {
+            let icon_rect =
+                Rect::from_center_size(Pos2::new(x + 8.0, rect.center().y), Vec2::splat(16.0));
+            paint_icon(painter, icon_rect, icon, SECONDARY);
+            x += icon_space;
+        }
+        let color = if enabled { LABEL } else { TERTIARY };
+        painter.galley(
+            Pos2::new(x, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    }
+    response
+}
+
+/// A search field: a gray capsule, 28 points high, with a magnifier.
+pub(crate) fn search_field(
+    ui: &mut Ui,
+    value: &mut String,
+    salt: &str,
+    placeholder: &str,
+) -> Response {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
+    ui.painter().rect_filled(rect, 7, FILL);
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(rect.left() + 15.0, rect.center().y),
+            Vec2::splat(13.0),
+        ),
+        Icon::Search,
+        TERTIARY,
+    );
+    let field_rect = Rect::from_min_max(
+        Pos2::new(rect.left() + 24.0, rect.top()),
+        Pos2::new(rect.right() - 4.0, rect.bottom()),
+    );
+    // The margin goes in the frame: with a frame, a text edit has no margin of its own.
+    // The row is centered on the magnifier.
+    let response = ui
+        .scope_builder(
+            UiBuilder::new()
+                .max_rect(field_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+            |ui| {
+                ui.add(
+                    TextEdit::singleline(value)
+                        .id_salt(salt)
+                        .frame(Frame::NONE.inner_margin(Margin::symmetric(2, 6)))
+                        .hint_text(text(placeholder, Font::Body).color(TERTIARY))
+                        .desired_width(field_rect.width()),
+                )
+            },
+        )
+        .inner;
+    if response.has_focus() {
+        focus_ring(ui.painter(), rect, 7);
+    }
+    response
+}
+
+/// One row of a list column.
+pub(crate) struct ListRow<'a> {
+    pub(crate) tile: Tile,
+    pub(crate) title: &'a str,
+    pub(crate) subtitle: &'a str,
+    /// A short text at the right, such as a status or a time.
+    pub(crate) meta: Option<&'a str>,
+    /// The red dot of a production credential.
+    pub(crate) production: bool,
+    pub(crate) selected: bool,
+}
+
+/// A row of a list column: the tile, the title, one line of detail, and a short meta on
+/// the right. The selected row has the accent fill. It is one stop in the Tab order.
+pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 48.0), Sense::click());
+    let name = if row.subtitle.is_empty() {
+        row.title.to_owned()
+    } else {
+        format!("{}, {}", row.title, row.subtitle)
+    };
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, true, row.selected, &name)
+    });
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if row.selected {
+        painter.rect_filled(rect, 8, SELECTION);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 8, Color32::from_rgb(247, 247, 248));
+    }
+    if response.has_focus() {
+        inner_focus_ring(painter, rect, 8);
+    }
+    let tile_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y - 16.0),
+        Vec2::splat(32.0),
+    );
+    paint_tile(ui, tile_rect, &row.tile);
+    let (title_color, sub_color) = if row.selected {
+        (Color32::WHITE, Color32::from_white_alpha(210))
+    } else {
+        (LABEL, SECONDARY)
+    };
+    let mut right = rect.right() - 8.0;
+    if row.production {
+        let center = Pos2::new(right - 3.5, rect.center().y);
+        let dot = if row.selected {
+            Color32::WHITE
+        } else {
+            PRODUCTION
+        };
+        painter.circle_filled(center, 3.5, dot);
+        right -= 13.0;
+    }
+    if let Some(meta) = row.meta.filter(|meta| !meta.is_empty()) {
+        let galley = WidgetText::from(text(meta, Font::Callout).color(sub_color)).into_galley(
+            ui,
+            Some(TextWrapMode::Truncate),
+            (width * 0.4).max(40.0),
+            TextStyle::Body,
+        );
+        let pos = Pos2::new(
+            right - galley.size().x,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        right = pos.x - 6.0;
+        painter.galley(pos, galley, sub_color);
+    }
+    let left = tile_rect.right() + 10.0;
+    let text_width = (right - left).max(10.0);
+    let line = |value: RichText| {
+        WidgetText::from(value).into_galley(
+            ui,
+            Some(TextWrapMode::Truncate),
+            text_width,
+            TextStyle::Body,
+        )
+    };
+    let title = line(row_title(row.title).color(title_color));
+    let subtitle = (!row.subtitle.is_empty())
+        .then(|| line(text(row.subtitle, Font::Callout).color(sub_color)));
+    let height = title.size().y + subtitle.as_ref().map_or(0.0, |sub| sub.size().y);
+    let top = rect.center().y - height / 2.0;
+    let title_height = title.size().y;
+    painter.galley(Pos2::new(left, top), title, title_color);
+    if let Some(subtitle) = subtitle {
+        painter.galley(Pos2::new(left, top + title_height), subtitle, sub_color);
+    }
+    response
+}
+
+/// Paint the header of a group of list rows in `rect`: the name and an optional count
+/// on the right, on an almost opaque white, so a header pinned at the top of the list
+/// covers the rows under it.
+pub(crate) fn paint_group_header(ui: &Ui, rect: Rect, title: &str, count: Option<usize>) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0, Color32::from_white_alpha(240));
+    let title = galley(ui, medium(title, Font::Footnote).variation(b"wght", 600.0));
+    painter.galley(
+        Pos2::new(rect.left() + 8.0, rect.bottom() - 4.0 - title.size().y),
+        title,
+        SECONDARY,
+    );
+    if let Some(count) = count {
+        let count = galley(ui, text(count.to_string(), Font::Footnote));
+        painter.galley(
+            Pos2::new(
+                rect.right() - 8.0 - count.size().x,
+                rect.bottom() - 4.0 - count.size().y,
+            ),
+            count,
+            SECONDARY,
+        );
+    }
+}
+
+/// The height of a group header in a list column.
+pub(crate) const GROUP_HEADER: f32 = 28.0;
+
+/// What a sidebar row leads with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Lead {
+    Icon(Icon),
+    /// The letter square of a shared vault, in its color.
+    Square(Color32, String),
+}
+
+/// One row of the sidebar.
+pub(crate) struct SidebarRow<'a> {
+    pub(crate) lead: Lead,
+    pub(crate) label: &'a str,
+    /// A neutral total, in gray.
+    pub(crate) count: Option<usize>,
+    /// A count that needs the owner, in a capsule.
+    pub(crate) badge: Option<Badge>,
+    pub(crate) selected: bool,
+    /// The nesting level of a folder: 0 for a top row.
+    pub(crate) level: usize,
+    /// A disclosure triangle: `Some(open)` for a folder with subfolders.
+    pub(crate) disclosure: Option<bool>,
+}
+
+/// What the owner did on a sidebar row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarClick {
+    None,
+    Select,
+    /// A click on the disclosure triangle.
+    Disclose,
+}
+
+/// The name of a sidebar row for VoiceOver: the label with its count.
+fn sidebar_name(label: &str, count: Option<usize>, badge: Option<Badge>) -> String {
+    match (badge.filter(|badge| badge.count > 0), count) {
+        (Some(Badge { count, what, .. }), _) => format!("{label}, {count} {what}"),
+        (None, Some(count)) => format!("{label}, {count}"),
+        (None, None) => label.to_owned(),
+    }
+}
+
+fn paint_lead(ui: &Ui, center: Pos2, lead: &Lead, side: f32) {
+    match lead {
+        Lead::Icon(icon) => paint_icon(
+            ui.painter(),
+            Rect::from_center_size(center, Vec2::splat(side)),
+            *icon,
+            ACCENT,
+        ),
+        Lead::Square(color, name) => {
+            let rect = Rect::from_center_size(center, Vec2::splat(side - 2.0));
+            paint_tile(ui, rect, &Tile::letter(*color, name));
+        }
+    }
+}
+
+fn paint_badge(ui: &Ui, right: Pos2, badge: Badge, small: bool) {
+    let painter = ui.painter();
+    let label = badge.count.to_string();
+    let galley = galley(
+        ui,
+        medium(label, Font::Footnote).size(if small { 9.0 } else { 11.0 }),
+    );
+    let height = if small { 14.0 } else { 16.0 };
+    let size = Vec2::new((galley.size().x + 10.0).max(height + 2.0), height);
+    let rect = Rect::from_min_size(Pos2::new(right.x - size.x, right.y - size.y / 2.0), size);
+    let (fill, color) = match badge.tone {
+        Tone::Neutral => (Color32::from_black_alpha(36), LABEL),
+        Tone::Critical => (PRODUCTION, Color32::WHITE),
+        other => (other.mark(), Color32::WHITE),
+    };
+    painter.rect_filled(rect, height / 2.0, fill);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+}
+
+/// A row of the full sidebar: 28 points high, the icon in the accent color, the label,
+/// and a count or a badge. A folder row has its level of indent and, with subfolders, a
+/// disclosure triangle.
+pub(crate) fn sidebar_row(ui: &mut Ui, row: &SidebarRow<'_>) -> (Response, SidebarClick) {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
+    let name = sidebar_name(row.label, row.count, row.badge);
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, true, row.selected, &name)
+    });
+    if let Some(open) = row.disclosure {
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+    }
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    let indent = 8.0 + 16.0 * row.level as f32;
+    let triangle = Rect::from_center_size(
+        Pos2::new(rect.left() + indent - 1.0, rect.center().y),
+        Vec2::new(14.0, 28.0),
+    );
+    let mut click = SidebarClick::None;
+    if response.clicked() {
+        let on_triangle = row.disclosure.is_some()
+            && response
+                .interact_pointer_pos()
+                .is_some_and(|pos| triangle.contains(pos));
+        click = if on_triangle {
+            SidebarClick::Disclose
+        } else {
+            SidebarClick::Select
+        };
+    }
+    // The keyboard opens and closes a folder with the arrows, as in Finder.
+    if response.has_focus() && row.disclosure.is_some() {
+        let (left, right) = ui.input(|input| {
+            (
+                input.key_pressed(Key::ArrowLeft),
+                input.key_pressed(Key::ArrowRight),
+            )
+        });
+        if (left && row.disclosure == Some(true)) || (right && row.disclosure == Some(false)) {
+            click = SidebarClick::Disclose;
+        }
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+    if !ui.is_rect_visible(rect) {
+        return (response, click);
+    }
+    let painter = ui.painter();
+    if row.selected {
+        painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+    } else if response.hovered() {
+        painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(10));
+    }
+    if response.has_focus() {
+        inner_focus_ring(painter, rect, ROW_RADIUS);
+    }
+    if let Some(open) = row.disclosure {
+        let center = Pos2::new(rect.left() + indent - 1.0, rect.center().y);
+        let (w, h) = (3.0, 2.2);
+        let points = if open {
+            vec![
+                center + Vec2::new(-w, -h / 1.4),
+                center + Vec2::new(w, -h / 1.4),
+                center + Vec2::new(0.0, h * 1.2),
+            ]
+        } else {
+            vec![
+                center + Vec2::new(-h / 1.4, -w),
+                center + Vec2::new(h * 1.2, 0.0),
+                center + Vec2::new(-h / 1.4, w),
+            ]
+        };
+        painter.add(Shape::convex_polygon(points, SECONDARY, Stroke::NONE));
+    }
+    let lead_center = Pos2::new(rect.left() + indent + 14.0, rect.center().y);
+    paint_lead(ui, lead_center, &row.lead, 15.0);
+    let mut right = rect.right() - 8.0;
+    if let Some(badge) = row.badge.filter(|badge| badge.count > 0) {
+        paint_badge(ui, Pos2::new(right, rect.center().y), badge, false);
+        right -= 30.0;
+    } else if let Some(count) = row.count {
+        let galley = galley(ui, text(count.to_string(), Font::Callout));
+        let pos = Pos2::new(
+            right - galley.size().x,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        right = pos.x - 6.0;
+        ui.painter().galley(pos, galley, SECONDARY);
+    }
+    let left = lead_center.x + 15.0;
+    let label = WidgetText::from(text(row.label, Font::Body).color(LABEL)).into_galley(
+        ui,
+        Some(TextWrapMode::Truncate),
+        (right - left).max(10.0),
+        TextStyle::Body,
+    );
+    ui.painter().galley(
+        Pos2::new(left, rect.center().y - label.size().y / 2.0),
+        label,
+        LABEL,
+    );
+    (response, click)
+}
+
+/// A row of the sidebar rail: the icon or the letter square alone, centered, with the
+/// name in a tooltip and the badge at its corner.
+pub(crate) fn rail_row(
+    ui: &mut Ui,
+    lead: &Lead,
+    name: &str,
+    selected: bool,
+    badge: Option<Badge>,
+) -> Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    let spoken = sidebar_name(name, None, badge);
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, &spoken));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+        } else if response.hovered() {
+            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(10));
+        }
+        if response.has_focus() {
+            inner_focus_ring(painter, rect, ROW_RADIUS);
+        }
+        paint_lead(ui, rect.center(), lead, 18.0);
+        if let Some(badge) = badge.filter(|badge| badge.count > 0) {
+            paint_badge(
+                ui,
+                Pos2::new(rect.right() - 3.0, rect.top() + 9.0),
+                badge,
+                true,
+            );
+        }
+    }
+    response.on_hover_text(name)
+}
+
+/// The title of a sidebar section ("Personal", "Shared", "Agents"), with an optional
+/// "+" that shows when the pointer is on the header. Returns the response of "+".
+pub(crate) fn sidebar_section(ui: &mut Ui, title: &str, add: Option<&str>) -> Option<Response> {
+    let (rect, header) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
+    let galley = galley(ui, medium(title, Font::Footnote).variation(b"wght", 600.0));
+    ui.painter().galley(
+        Pos2::new(rect.left() + 8.0, rect.bottom() - 6.0 - galley.size().y),
+        galley,
+        SECONDARY,
+    );
+    let name = add?;
+    let button_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - 13.0, rect.bottom() - 6.0 - 6.0),
+        Vec2::splat(18.0),
+    );
+    let response = ui.interact(button_rect, header.id.with("add"), Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    let visible = header.hovered()
+        || response.hovered()
+        || response.has_focus()
+        || ui.rect_contains_pointer(rect);
+    if visible {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(button_rect, 4, FILL2);
+        }
+        if response.has_focus() {
+            inner_focus_ring(painter, button_rect, 4);
+        }
+        paint_icon(painter, button_rect.shrink(3.0), Icon::Plus, SECONDARY);
+    }
+    Some(response.on_hover_text(name))
 }
 
 // ---- Banners, empty states, figures. ----
@@ -2109,9 +2815,7 @@ pub(crate) enum Icon {
     Database,
     Asterisk,
     Lock,
-    Tray,
     Chart,
-    Gear,
     Plus,
     ChevronRight,
     ChevronLeft,
@@ -2127,9 +2831,27 @@ pub(crate) enum Icon {
     List,
     Folder,
     Eye,
-    Phone,
     /// A window with a sidebar, for "Hide sidebar" and "Show sidebar".
     Sidebar,
+    /// The Settings gear with teeth, as SF Symbols `gearshape`.
+    Gearshape,
+    /// A check in a circle: Decisions.
+    CheckCircle,
+    /// A robot head: Agents.
+    Agent,
+    /// Two people: a shared vault.
+    People,
+    Search,
+    /// Three dots: the menu of rare actions.
+    More,
+    /// An arrow out of a box.
+    Share,
+    /// A laptop: Settings > Devices.
+    #[cfg(feature = "vault")]
+    Laptop,
+    /// An arrow down in a circle: Settings > Updates.
+    #[cfg(feature = "vault")]
+    Download,
 }
 
 /// An icon in a rounded color tile, as in System Settings.
@@ -2232,39 +2954,9 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             shackle.push((0.7, 0.44));
             line(&shackle);
         }
-        Icon::Tray => {
-            closed(&[
-                (0.1, 0.56),
-                (0.26, 0.18),
-                (0.74, 0.18),
-                (0.9, 0.56),
-                (0.9, 0.84),
-                (0.1, 0.84),
-            ]);
-            line(&[
-                (0.1, 0.56),
-                (0.34, 0.56),
-                (0.4, 0.66),
-                (0.6, 0.66),
-                (0.66, 0.56),
-                (0.9, 0.56),
-            ]);
-        }
         Icon::Chart => {
             for (x, top) in [(0.2, 0.5), (0.5, 0.26), (0.8, 0.1)] {
                 line(&[(x, 0.9), (x, top)]);
-            }
-        }
-        Icon::Gear => {
-            circle(0.5, 0.5, 0.14);
-            circle(0.5, 0.5, 0.3);
-            for step in 0..8 {
-                let angle = step as f32 * TAU / 8.0;
-                let (c, s) = (angle.cos(), angle.sin());
-                line(&[
-                    (0.5 + 0.3 * c, 0.5 + 0.3 * s),
-                    (0.5 + 0.44 * c, 0.5 + 0.44 * s),
-                ]);
             }
         }
         Icon::Plus => {
@@ -2338,14 +3030,76 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             );
             line(&[(0.38, 0.16), (0.38, 0.84)]);
         }
-        Icon::Phone => {
+        Icon::Gearshape => {
+            let step = TAU / 8.0;
+            let mut outline = Vec::new();
+            for tooth in 0..8 {
+                let angle = tooth as f32 * step;
+                for (offset, radius) in [(-0.36, 0.34), (-0.17, 0.45), (0.17, 0.45), (0.36, 0.34)] {
+                    let at = angle + offset * step;
+                    outline.push((0.5 + radius * at.cos(), 0.5 + radius * at.sin()));
+                }
+            }
+            closed(&outline);
+            circle(0.5, 0.5, 0.13);
+        }
+        Icon::CheckCircle => {
+            circle(0.5, 0.5, 0.4);
+            line(&[(0.33, 0.52), (0.45, 0.64), (0.68, 0.38)]);
+        }
+        Icon::Agent => {
             painter.rect_stroke(
-                Rect::from_min_max(p(0.27, 0.08), p(0.73, 0.92)),
-                size * 0.12,
+                Rect::from_min_max(p(0.18, 0.3), p(0.82, 0.8)),
+                size * 0.13,
                 stroke,
                 StrokeKind::Middle,
             );
-            line(&[(0.42, 0.79), (0.58, 0.79)]);
+            line(&[(0.5, 0.14), (0.5, 0.3)]);
+            line(&[(0.4, 0.5), (0.4, 0.58)]);
+            line(&[(0.6, 0.5), (0.6, 0.58)]);
+        }
+        Icon::People => {
+            circle(0.37, 0.36, 0.13);
+            line(&arc(0.37, 0.86, 0.25, 0.3, PI, TAU));
+            circle(0.72, 0.4, 0.1);
+            line(&arc(0.72, 0.84, 0.18, 0.24, 1.25 * PI, TAU));
+        }
+        Icon::Search => {
+            circle(0.44, 0.44, 0.26);
+            line(&[(0.63, 0.63), (0.86, 0.86)]);
+        }
+        Icon::More => {
+            for x in [0.22, 0.5, 0.78] {
+                painter.circle_filled(p(x, 0.5), stroke.width * 1.1, color);
+            }
+        }
+        Icon::Share => {
+            line(&[(0.5, 0.62), (0.5, 0.1)]);
+            line(&[(0.33, 0.26), (0.5, 0.1), (0.67, 0.26)]);
+            line(&[
+                (0.32, 0.42),
+                (0.18, 0.42),
+                (0.18, 0.9),
+                (0.82, 0.9),
+                (0.82, 0.42),
+                (0.68, 0.42),
+            ]);
+        }
+        #[cfg(feature = "vault")]
+        Icon::Laptop => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.2, 0.22), p(0.8, 0.66)),
+                size * 0.06,
+                stroke,
+                StrokeKind::Middle,
+            );
+            line(&[(0.06, 0.8), (0.94, 0.8)]);
+        }
+        #[cfg(feature = "vault")]
+        Icon::Download => {
+            circle(0.5, 0.5, 0.4);
+            line(&[(0.5, 0.28), (0.5, 0.7)]);
+            line(&[(0.33, 0.54), (0.5, 0.7), (0.67, 0.54)]);
         }
     }
 }

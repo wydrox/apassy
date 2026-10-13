@@ -250,7 +250,10 @@ actor ICloudVaultTransfer {
         await enter()
         defer { leave() }
         try session.check(epoch)
-        if statuses[id]?.state == .pending { return true }
+        // New local changes, or a sync that failed (a push 2 s after a save runs outside the
+        // loop): the iCloud file does not change for them, so sync again. The loop backs off
+        // when the sync fails again.
+        if let state = statuses[id]?.state, state != .ok { return true }
         let provider = try url(id)
         let previousHash = inputHashes[id]
         let changed = try await Task.detached { [files] in

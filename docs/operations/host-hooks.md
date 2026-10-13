@@ -14,7 +14,7 @@ With the hook, the agent host sends the user request to Apassy directly:
 3. The broker keeps the newest prompt for each agent and host session in memory.
 4. When the agent calls `apassy_run_with_secrets`, the broker finds the hook prompt for the run. The hook prompt replaces the text from the agent. The bouncer gets the hook prompt.
 5. Before the broker trusts the hook prompt, it checks the host transcript. The prompt must be the newest user message in the transcript file of the same session.
-6. The approval card and the activity log show the request, its source, and a different text from the agent.
+6. The question in Decisions and the activity log show the request, its source, and a different text from the agent.
 
 `apassy-hook` never writes to stdout, and it always exits with code 0. On both hosts, stdout of this hook becomes model context. So the hook does not change the prompt. If the broker is down or slow, the hook waits a maximum of 2 seconds, writes one line to stderr, and exits. The line does not contain the prompt.
 
@@ -81,11 +81,11 @@ Code: `PromptStore::check_transcript` in `src/broker/prompts.rs`. The broker doe
 
 ## 5. What the owner sees
 
-The approval card shows the source of the user request:
+The question in Decisions shows the source of the user request under "Request":
 
 ```
-User request (from the Claude Code hook, verified in the host transcript): "Run the unit tests of the billing module."
-The agent sent a different user request: "Deploy everything to production."
+"Run the unit tests of the billing module." (from the Claude Code hook, verified in the host transcript)
+The agent sent a different request: "Deploy everything to production."
 ```
 
 The activity log entry of the run has the same data:
@@ -117,7 +117,7 @@ APASSY_AGENT_TOKEN='apassy_agt_...' exec /path/to/target/release/apassy-hook
 chmod 700 ~/.config/apassy/apassy-hook.sh
 ```
 
-Keep `apassy-hook` in the name of the wrapper. The `hook_channel` flag (section 7) looks for this name. After "Rotate token" in Agents, put the new token in the wrapper and in the MCP server configuration.
+Keep `apassy-hook` in the name of the wrapper. The `hook_channel` flag (section 7) looks for this name. "Reconnect…" on the page of the agent gives a new token, and Apassy writes it into the wrappers of Claude Code and Codex (`apassy setup --token-stdin`). After `apassy agent rotate`, put the new token in the wrapper and in the MCP server configuration yourself.
 
 ### Claude Code
 
@@ -166,14 +166,14 @@ Set the MCP server in `~/.codex/config.toml`:
 [mcp_servers.apassy]
 command = "/path/to/target/release/apassy-mcp"
 env = { APASSY_AGENT_TOKEN = "apassy_agt_..." }
-tool_timeout_sec = 180
+tool_timeout_sec = 330
 ```
 
-`tool_timeout_sec` must be higher than the approval wait of 120 seconds.
+`tool_timeout_sec` must be higher than the wait of a question, 300 seconds (5 minutes). When the host ends the call first, the agent gets the time-out of its host; it calls again with the same request, which joins the waiting question (`question_waiting` for another request).
 
 ### Check the installation
 
-Send a prompt that makes the agent call `apassy_run_with_secrets`. The approval card must say "from the Claude Code hook, verified in the host transcript" or "from the Codex hook, matched by the project directory, verified in the host transcript". "from the agent, no hook request for this host session" means that the hook did not reach the broker. Run the hook by hand to see its error:
+Send a prompt that makes the agent call `apassy_run_with_secrets`. The question in Decisions, or the entry in `apassy activity` when the bouncer allowed the run, must say "from the Claude Code hook, verified in the host transcript" or "from the Codex hook, matched by the project directory, verified in the host transcript". "from the agent, no hook request for this host session" means that the hook did not reach the broker. Run the hook by hand to see its error:
 
 ```
 echo '{"hook_event_name":"UserPromptSubmit","cwd":"/tmp","prompt":"test"}' | ~/.config/apassy/apassy-hook.sh

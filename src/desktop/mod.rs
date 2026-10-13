@@ -57,56 +57,39 @@ pub use model::{
     OTHER_AGENT_ID, REPORTING_AGENT_ID, REPORTING_ITEM_ID, RequestStatus, SAMPLE_RULE_TEXT,
 };
 
-/// Owner views in the desktop shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OwnerView {
-    /// The list of credentials.
-    Vault,
-    /// One credential.
-    Item,
-    /// The fixture rule interpreter of the demo build.
-    #[cfg(not(feature = "vault"))]
-    Rules,
+/// A place in the sidebar of the desktop shell (ADR 0026): what the list column and the
+/// detail column show.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Place {
+    /// The credentials of the personal vault: every one (`None`), or one folder with its
+    /// subfolders (the UUID of the folder).
+    Folder(Option<String>),
+    /// The credentials of one shared vault, by its UUID.
+    Shared(String),
+    /// Runs and requests that wait for the owner, and the history.
+    Decisions,
+    /// The connected agents.
     Agents,
-    Activity,
-    /// Ask rate, automatic decisions, patterns, and calibration (ADR 0009, goal item B10).
-    #[cfg(feature = "vault")]
-    Learning,
-    /// Vault file, passphrase, backup, notifications, and the broker.
-    #[cfg(feature = "vault")]
+    /// Settings (ADR 0026 §3): its sections in the list column, the selected one in the
+    /// detail column. The gear at the bottom of the sidebar and ⌘, open it.
     Settings,
 }
 
-impl OwnerView {
-    #[cfg(feature = "vault")]
-    pub const ALL: [Self; 6] = [
-        Self::Vault,
-        Self::Item,
-        Self::Agents,
-        Self::Activity,
-        Self::Learning,
-        Self::Settings,
-    ];
-    #[cfg(not(feature = "vault"))]
-    pub const ALL: [Self; 5] = [
-        Self::Vault,
-        Self::Item,
-        Self::Rules,
-        Self::Agents,
-        Self::Activity,
-    ];
+impl Place {
+    /// "All credentials".
+    pub const CREDENTIALS: Self = Self::Folder(None);
 
-    pub fn label(self) -> &'static str {
+    /// A place whose list shows credentials.
+    pub fn is_credentials(&self) -> bool {
+        matches!(self, Self::Folder(_) | Self::Shared(_))
+    }
+
+    /// The name of the kind of place, as ⌘1 to ⌘3 name it.
+    pub fn label(&self) -> &'static str {
         match self {
-            Self::Vault => "Credentials",
-            Self::Item => "Credential",
-            #[cfg(not(feature = "vault"))]
-            Self::Rules => "Rules",
+            Self::Folder(_) | Self::Shared(_) => "Credentials",
+            Self::Decisions => "Decisions",
             Self::Agents => "Agents",
-            Self::Activity => "Activity",
-            #[cfg(feature = "vault")]
-            Self::Learning => "Learning",
-            #[cfg(feature = "vault")]
             Self::Settings => "Settings",
         }
     }
@@ -123,7 +106,8 @@ pub(crate) enum StatusKind {
 /// Native desktop app. Drawing code lives in [`ui`]. Tests use [`DesktopModel`].
 pub struct DesktopApp {
     pub(crate) model: DesktopModel,
-    pub(crate) view: OwnerView,
+    /// The place of the sidebar that the window shows.
+    pub(crate) place: Place,
     pub(crate) selected_item_id: Option<String>,
     pub(crate) search: String,
     pub(crate) status_text: String,
@@ -210,7 +194,7 @@ impl DesktopApp {
     pub fn new() -> Self {
         Self {
             model: DesktopModel::new(),
-            view: OwnerView::Vault,
+            place: Place::CREDENTIALS,
             selected_item_id: None,
             search: String::new(),
             status_text: String::new(),
@@ -319,8 +303,16 @@ impl DesktopApp {
         &self.model
     }
 
-    pub fn view(&self) -> OwnerView {
-        self.view
+    pub fn place(&self) -> &Place {
+        &self.place
+    }
+
+    /// Show a list of credentials: the current one, or "All credentials" when the window
+    /// shows another place.
+    pub(crate) fn show_credentials(&mut self) {
+        if !self.place.is_credentials() {
+            self.place = Place::CREDENTIALS;
+        }
     }
 
     pub(crate) fn set_ok(&mut self, message: impl Into<String>) {
@@ -365,14 +357,29 @@ impl DesktopApp {
         {
             self.edit_form = draft_from_details(&details);
         }
-        self.view = OwnerView::Item;
+        self.show_credentials();
     }
 
     #[cfg(feature = "vault")]
     pub(crate) fn select_item(&mut self, id: String) {
         self.pending_delete = false;
         self.ui.sheet = None;
-        self.view = OwnerView::Item;
+        self.show_credentials();
+        // The list shows the credential: a folder that does not hold it gives way to
+        // "All credentials".
+        if let Place::Folder(Some(folder)) = &self.place
+            && let Ok(parsed) = id.parse::<u64>()
+        {
+            let inside = self
+                .owner_ui
+                .session
+                .with_vault(|vault| vault.items_in_folder(Some(folder), true))
+                .and_then(Result::ok)
+                .is_some_and(|items| items.contains(&parsed));
+            if !inside {
+                self.place = Place::CREDENTIALS;
+            }
+        }
         self.owner_ui.edit_secrets.clear();
         if let Ok(parsed) = id.parse::<u64>()
             && let Ok(details) = self.owner_ui.session.details(parsed)
@@ -420,7 +427,7 @@ impl DesktopApp {
             )
             .is_some()
         {
-            self.view = OwnerView::Vault;
+            self.place = Place::CREDENTIALS;
             self.selected_item_id = None;
             self.search.clear();
             self.add_form = ItemDraft::default();
@@ -492,8 +499,8 @@ pub fn native_options() -> eframe::NativeOptions {
     native_options.viewport = native_options
         .viewport
         .with_icon(egui::IconData::default())
-        .with_inner_size(egui::Vec2::new(1180.0, 800.0))
-        .with_min_inner_size(egui::Vec2::new(900.0, 600.0))
+        .with_inner_size(egui::Vec2::new(ui::DEFAULT_WINDOW.0, ui::DEFAULT_WINDOW.1))
+        .with_min_inner_size(egui::Vec2::new(ui::MIN_WINDOW.0, ui::MIN_WINDOW.1))
         .with_title("Apassy")
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)

@@ -2,9 +2,13 @@
 # Package target/Apassy.app into a signed disk image, and notarize it.
 #
 # Output in target/dist:
-#   Apassy.dmg    Apassy.app and a link to /Applications
+#   Apassy-<version>.dmg  Apassy.app and a link to /Applications. The version
+#                 is the version of the app, the same as Cargo.toml.
 #   latest.json   version, build, commit, date, size, and SHA-256 of the image.
 #                 The site serves it at /latest.json (site/worker/index.ts).
+#                 Its "file" stays "Apassy.dmg": apps before 0.5.0 accept no
+#                 other name. The release uploads the same image under both
+#                 names (docs/operations/release.md).
 #
 # Run scripts/build-app.sh first. The script signs the disk image with the
 # certificate that signed the app. target/Apassy.app does not change: the
@@ -36,13 +40,12 @@ cd "$ROOT"
 
 APP="$ROOT/target/Apassy.app"
 OUT="$ROOT/target/dist"
-DMG="$OUT/Apassy.dmg"
 
 NOTARIZE=0
 for arg in "$@"; do
   case "$arg" in
     --notarize) NOTARIZE=1 ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "build-dmg: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -182,6 +185,15 @@ check_provider "$APP" "target/Apassy.app"
 VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")"
 MIN_MACOS="$(plutil -extract LSMinimumSystemVersion raw -o - "$APP/Contents/Info.plist")"
 [[ "$VERSION" =~ ^[0-9A-Za-z.+-]+$ ]] || fail "unexpected version: $VERSION"
+# The image name carries the version, and the site serves only
+# /download/Apassy-MAJOR.MINOR.PATCH[-PRE].dmg: no build metadata (+...).
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] \
+  || fail "the version $VERSION cannot name the disk image. Use MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-PRE."
+CARGO_VERSION="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
+[ "$VERSION" = "$CARGO_VERSION" ] \
+  || fail "the app has version $VERSION, Cargo.toml says ${CARGO_VERSION:-nothing}. Run scripts/build-app.sh again."
+IMAGE_NAME="Apassy-$VERSION.dmg"
+DMG="$OUT/$IMAGE_NAME"
 [[ "$MIN_MACOS" =~ ^[0-9.]+$ ]] || fail "unexpected LSMinimumSystemVersion: $MIN_MACOS"
 COMMIT="$(git rev-parse HEAD)"
 BUILD="${COMMIT:0:7}"
@@ -287,7 +299,7 @@ codesign --verify --strict --verbose=2 "$DMG"
 
 if [ "$NOTARIZE" = "1" ]; then
   step "Notarize the disk image"
-  notarize "$DMG" "Apassy.dmg"
+  notarize "$DMG" "$IMAGE_NAME"
   xcrun stapler staple "$DMG"
   xcrun stapler validate "$DMG"
   spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
@@ -298,6 +310,8 @@ step "Write latest.json"
 SIZE="$(stat -f %z "$DMG")"
 SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 NOTARIZED="$([ "$NOTARIZE" = "1" ] && echo true || echo false)"
+# "file" is the compatibility name, the same bytes as $IMAGE_NAME. Apps from 0.5.0
+# also accept "Apassy-<version>.dmg". Switch only when no app before 0.5.0 is in use.
 cat >"$OUT/latest.json" <<EOF
 {
   "version": "$VERSION",

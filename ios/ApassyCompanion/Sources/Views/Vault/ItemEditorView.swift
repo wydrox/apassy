@@ -30,6 +30,11 @@ struct ItemEditorView: View {
                 } header: {
                     Text("Title")
                 }
+                if !model.folders.isEmpty {
+                    Section {
+                        FolderMenuRow(folders: model.folders, selection: $model.folder)
+                    }
+                }
                 mainFields
                 if let passkey = model.passkey {
                     Section {
@@ -81,6 +86,16 @@ struct ItemEditorView: View {
             .sheet(isPresented: $scanningCode) { otpScanner }
         }
         .interactiveDismissDisabled(model.isSaving)
+        .task { await model.loadFolders(from: vault.service) }
+        // A move into the folder that failed after the save: its alert shows once the sheet is
+        // gone, a moment after the end of the dismissal.
+        .onDisappear {
+            guard model.moveFailure != nil else { return }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(150))
+                model.reportMoveFailure(to: vault)
+            }
+        }
     }
 
     private var title: String {

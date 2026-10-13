@@ -166,7 +166,9 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
     let fx = fixture();
     let before = list(&fx);
     assert_eq!(before["sees_all_credentials"], false);
-    assert!(before.get("catalog").is_none());
+    // ADR 0025 §3f: an agent that does not see all credentials has the exception "only
+    // these items". It has no grant, so its catalog is empty.
+    assert_eq!(before["catalog"], serde_json::json!([]));
     assert_eq!(code(&ask(&fx, fx.bound, "Deploy the app.")), "not_visible");
 
     with_vault(&fx, |v| v.set_agent_sees_all(fx.agent_id, true)).expect("see all");
@@ -184,7 +186,8 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
     );
     let stripe = &catalog[1];
     assert_eq!(stripe["kind"], "api_key");
-    assert_eq!(stripe["access"], "can_request");
+    // ADR 0025: no grant is needed; the bouncer decides each use.
+    assert_eq!(stripe["access"], "can_use");
     assert_eq!(stripe["details"]["username"], "ops@example.invalid");
     assert_eq!(stripe["details"]["Region"], "eu-west");
     assert_eq!(
@@ -192,7 +195,7 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
         Some(2),
         "no secret field and no hidden detail"
     );
-    assert_eq!(catalog[0]["access"], "can_request");
+    assert_eq!(catalog[0]["access"], "can_use");
     assert_eq!(catalog[2]["access"], "needs_field");
 }
 
@@ -219,7 +222,8 @@ fn an_access_request_waits_for_the_owner_and_a_grant_answers_it() {
     );
     assert_eq!(code(&ask(&fx, fx.archived, "Archived.")), "not_visible");
     assert_eq!(code(&ask(&fx, fx.bound, " ")), "invalid_request");
-    assert_eq!(list(&fx)["catalog"][1]["access"], "requested");
+    // An open request changes nothing: the credential is usable without a grant.
+    assert_eq!(list(&fx)["catalog"][1]["access"], "can_use");
 
     let open = with_vault(&fx, |v| v.access_requests(true, 10)).expect("requests");
     assert_eq!(open.len(), 1);

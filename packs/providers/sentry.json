@@ -1,11 +1,14 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "sentry",
   "kind": "provider",
   "label": "Sentry",
   "description": "Sentry DSNs, organization tokens, and user tokens.",
   "known_hosts": ["sentry.io"],
+  "variable": "SENTRY_AUTH_TOKEN",
+  "title": "Sentry token",
+  "prefixes": ["sntrys_", "sntryu_"],
   "signals": [
     {
       "id": "dsn",

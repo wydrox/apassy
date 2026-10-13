@@ -1178,12 +1178,9 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_active_agent(&tx, agent)?;
-        let decides = match mode {
-            ExecMode::Ask => "the owner approves each run",
-            ExecMode::Bouncer => "the bouncer decides",
-        };
+        // ADR 0025: the mode of a grant approves nothing, so the history does not name it.
         let detail = format!(
-            "{} · {decides} · {}",
+            "{} · {}",
             history::agent_name(&tx, agent)?,
             place.describe().trim()
         );
@@ -1586,6 +1583,9 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
     tx.execute("DELETE FROM access_request", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     super::learning::forget_all_patterns(&tx)?;
+    // ADR 0025: a restored answer or production allowance would let a run start
+    // without the owner. The owner answers again.
+    super::answers::forget_all(&tx)?;
     // A restored device is not trusted either. The owner pairs each iPhone again, and
     // the listener gets a new certificate and starts off (ADR 0020).
     super::companion::prepare_restored(&tx)?;

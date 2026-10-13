@@ -34,7 +34,9 @@ pub struct RequestPattern {
 #[derive(Debug, Clone, Copy)]
 pub struct RunScope<'a> {
     pub agent_id: u64,
-    /// Canonical project directory of the grant of the first item.
+    /// Canonical project directory: the folder of a process grant of the first item
+    /// that covers the working directory, else the root of the project (ADR 0025 §3a),
+    /// else the working directory.
     pub project_dir: &'a Path,
     /// Canonical working directory.
     pub cwd: &'a Path,
@@ -171,6 +173,9 @@ pub fn lookup(vault: &Vault, pattern: Option<&RequestPattern>, now: u64) -> Lear
 pub enum Outcome {
     /// The bouncer allowed the run without the owner.
     Automatic { by_pattern: bool },
+    /// A remembered answer of the owner for the item, the project, and the kind of
+    /// action allowed the run without a question (ADR 0025 §3).
+    Remembered,
     /// The run waited for the owner.
     Owner(ApprovalOutcome),
 }
@@ -207,6 +212,8 @@ impl LoggedRequest<'_> {
                 },
                 false,
             ),
+            // The owner did not see this request: it is not an owner label (ADR 0025).
+            Outcome::Remembered => (false, LoggedDecision::Allow, DecidedBy::Answer, false),
             Outcome::Owner(ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndGranted) => {
                 (true, LoggedDecision::Allow, DecidedBy::Owner, false)
             }

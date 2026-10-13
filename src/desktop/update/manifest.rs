@@ -16,11 +16,19 @@ pub(crate) const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 /// The largest disk image that the app downloads. The image of 0.2.1 has about
 /// 111 MB.
 pub(crate) const MAX_IMAGE_BYTES: u64 = 1024 * 1024 * 1024;
-/// The only file name that `latest.json` may name.
+/// The image name that every app from 0.3.0 accepts in `latest.json`, and the key
+/// of the bucket at `/download/Apassy.dmg`. A release keeps `latest.json` at this
+/// name while apps before 0.5.0 are in use: they refuse any other name.
 pub(crate) const IMAGE_FILE: &str = "Apassy.dmg";
 /// The only architecture of the published app.
 pub(crate) const ARCH: &str = "arm64";
 
+/// The versioned name of the image of `version`, for example `Apassy-0.5.0.dmg`.
+/// From 0.5.0, `latest.json` may name it instead of [`IMAGE_FILE`]. A checked
+/// version has only `[0-9A-Za-z.+-]`, so the name is never a path.
+pub(crate) fn image_file(version: &str) -> String {
+    format!("Apassy-{version}.dmg")
+}
 /// A checked `latest.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Manifest {
@@ -33,6 +41,8 @@ pub(crate) struct Manifest {
     pub(crate) date: String,
     /// `date` in seconds since 1970.
     pub(crate) date_unix: i64,
+    /// The image under `/download/`: [`IMAGE_FILE`], or [`image_file`] of `version`.
+    pub(crate) file: String,
     /// The size of the disk image in bytes.
     pub(crate) size: u64,
     /// The SHA-256 of the disk image, 64 lowercase hex digits.
@@ -180,7 +190,7 @@ impl Manifest {
             return Err(ManifestError::Build);
         }
         let date_unix = parse_utc(&raw.date).ok_or(ManifestError::Date)?;
-        if raw.file != IMAGE_FILE {
+        if raw.file != IMAGE_FILE && raw.file != image_file(&raw.version) {
             return Err(ManifestError::File);
         }
         if raw.size == 0 || raw.size > MAX_IMAGE_BYTES {
@@ -206,6 +216,7 @@ impl Manifest {
             commit: raw.commit,
             date: raw.date,
             date_unix,
+            file: raw.file,
             size: raw.size,
             sha256: raw.sha256,
             minimum_macos: raw.minimum_macos,
@@ -323,6 +334,7 @@ pub(crate) mod tests {
         assert_eq!(manifest.version, "0.3.1");
         assert_eq!(manifest.build, "e710914");
         assert_eq!(manifest.size, 111_033_131);
+        assert_eq!(manifest.file, IMAGE_FILE);
         assert_eq!(
             manifest.date_unix,
             parse_utc("2026-10-02T09:30:00Z").unwrap()
@@ -369,6 +381,9 @@ pub(crate) mod tests {
             ("file", json!("Apassy.app.zip"), ManifestError::File),
             ("file", json!("../Apassy.dmg"), ManifestError::File),
             ("file", json!("apassy.dmg"), ManifestError::File),
+            ("file", json!("Apassy-0.3.2.dmg"), ManifestError::File),
+            ("file", json!("Apassy-0.3.0.dmg"), ManifestError::File),
+            ("file", json!("apassy-0.3.1.dmg"), ManifestError::File),
             ("size", json!(0), ManifestError::Size),
             ("size", json!(MAX_IMAGE_BYTES + 1), ManifestError::Size),
             ("size", json!(-1), ManifestError::Malformed),
@@ -443,6 +458,55 @@ pub(crate) mod tests {
             Manifest::parse(&manifest_json(&[]), "unknown"),
             Err(ManifestError::RunningMacos)
         );
+    }
+
+    /// `file` is the unversioned name of the older apps, or the versioned name of
+    /// exactly the version of the manifest. Nothing else, so never a path.
+    #[test]
+    fn the_image_is_named_for_its_version_or_with_the_old_name() {
+        use serde_json::json;
+        assert_eq!(image_file("0.3.1"), "Apassy-0.3.1.dmg");
+        let versioned = parse(&[("file", json!("Apassy-0.3.1.dmg"))]).expect("versioned");
+        assert_eq!(versioned.file, "Apassy-0.3.1.dmg");
+        let old = parse(&[("file", json!("Apassy.dmg"))]).expect("old name");
+        assert_eq!(old.file, "Apassy.dmg");
+        let rc = parse(&[
+            ("version", json!("1.0.0-rc.1")),
+            ("file", json!("Apassy-1.0.0-rc.1.dmg")),
+        ])
+        .expect("pre-release");
+        assert_eq!(rc.file, "Apassy-1.0.0-rc.1.dmg");
+        for bad in [
+            // Another version than the manifest.
+            "Apassy-0.3.2.dmg",
+            "Apassy-0.3.0.dmg",
+            "Apassy-0.3.1-rc.1.dmg",
+            "Apassy-0.3.dmg",
+            "Apassy-.dmg",
+            "Apassy-v0.3.1.dmg",
+            // Paths and other names.
+            "../Apassy-0.3.1.dmg",
+            "/Apassy-0.3.1.dmg",
+            "download/Apassy-0.3.1.dmg",
+            "Apassy-0.3.1.dmg/../../latest.json",
+            "Apassy-0.3.1.dmg?x=1",
+            "Apassy-0.3.1.dmg%2F..",
+            "https://example.com/Apassy-0.3.1.dmg",
+            "Apassy-0.3.1.DMG",
+            "apassy-0.3.1.dmg",
+            "Apassy_0.3.1.dmg",
+            " Apassy-0.3.1.dmg",
+            "Apassy-0.3.1.dmg ",
+            "Apassy-0.3.1.dmg.part",
+            "Apassy-0.3.1.app.zip",
+            "",
+        ] {
+            assert_eq!(
+                parse(&[("file", json!(bad))]),
+                Err(ManifestError::File),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

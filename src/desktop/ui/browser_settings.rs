@@ -1,4 +1,4 @@
-//! Settings > General > Browser extension (ADR 0021): connect a browser with one click.
+//! Settings > Tools > Browser extension (ADR 0021): connect a browser with one click.
 //!
 //! "Connect" writes the host manifest of the browser ([`crate::browser::install`]) and
 //! opens the page of the extension in the Chrome Web Store in that browser, where the
@@ -13,7 +13,8 @@ use crate::browser::install::{self, BROWSERS, Browser, Install, State};
 use crate::desktop::DesktopApp;
 
 /// The note of a source build. Tests read it.
-pub(super) const SOURCE_BUILD_NOTE: &str = "The browser extension works with Apassy.app. A source build is not protected from agents, so it does not connect a browser.";
+pub(super) const SOURCE_BUILD_NOTE: &str =
+    "A source build is not protected from agents, so it connects no browser.";
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -37,19 +38,26 @@ fn last_seen_text(seen: Option<Instant>) -> String {
     }
 }
 
+/// Settings > Tools > Browser extension: a row for each Chromium browser on this Mac
+/// with its state and "Connect", and when the extension last asked.
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::settings::rows;
+
     let bundle = Install::current();
     let home = install::home();
     let mut action: Option<(Action, &'static Browser)> = None;
-    kit::section(
+    rows::section(
         ui,
         Some("Browser extension"),
-        Some(
-            "Fill logins in Helium, Chrome, and other Chromium browsers. Each fill asks for Touch ID or your passphrase. Agents never get the password.",
-        ),
-        |s| {
+        Some("Each fill asks for Touch ID or your passphrase. Agents never get the password."),
+        |g| {
             let (Some(bundle), Some(home)) = (&bundle, &home) else {
-                s.row(|ui| kit::tone_note(ui, SOURCE_BUILD_NOTE, Tone::Warning));
+                g.line_note(
+                    "Chrome extension",
+                    Some(kit::text("Needs Apassy.app", Font::Body).color(Tone::Warning.text())),
+                    Some(rows::note(SOURCE_BUILD_NOTE)),
+                    |_| {},
+                );
                 return;
             };
             let host = bundle.host();
@@ -61,61 +69,50 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 }
                 found += 1;
                 let (status, tone) = match &state {
-                    State::Connected => ("Connected", kit::ACCENT),
+                    State::Connected => ("Connected", kit::ACCENT_TEXT),
                     State::Other(_) => ("Connected to another Apassy", Tone::Warning.text()),
                     _ => ("Not connected", kit::SECONDARY),
                 };
-                s.row(|ui| {
-                    egui::Sides::new().shrink_left().show(
-                        ui,
-                        |ui| {
-                            ui.vertical(|ui| {
-                                ui.label(kit::text(browser.name, Font::Body).color(kit::LABEL));
-                                ui.label(kit::text(status, Font::Callout).color(tone));
-                            });
-                        },
-                        |ui| {
-                            if state == State::Connected {
-                                if kit::small_button(ui, "Disconnect", Style::Bordered).clicked() {
-                                    action = Some((Action::Disconnect, browser));
-                                }
-                                if kit::small_button(ui, "Get the extension", Style::Bordered)
-                                    .clicked()
-                                {
-                                    action = Some((Action::OpenStore, browser));
-                                }
-                            } else if kit::button(ui, "Connect", Style::Prominent).clicked() {
-                                action = Some((Action::Connect, browser));
+                g.line(
+                    browser.name,
+                    Some(kit::text(status, Font::Body).color(tone)),
+                    |ui| {
+                        if state == State::Connected {
+                            if kit::small_button(ui, "Disconnect", Style::Bordered).clicked() {
+                                action = Some((Action::Disconnect, browser));
                             }
-                        },
-                    );
-                });
+                            if kit::small_button(ui, "Get the extension", Style::Bordered)
+                                .clicked()
+                            {
+                                action = Some((Action::OpenStore, browser));
+                            }
+                        } else if kit::small_button(ui, "Connect", Style::Prominent)
+                            .on_hover_text(
+                                "Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser.",
+                            )
+                            .clicked()
+                        {
+                            action = Some((Action::Connect, browser));
+                        }
+                    },
+                );
             }
             if found == 0 {
-                s.row(|ui| kit::note(ui, "No Chromium browser is on this Mac."));
+                g.note_row("No Chromium browser is on this Mac.");
             }
-            s.row(|ui| {
-                kit::note(
-                    ui,
-                    "Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser.",
-                );
-            });
-            s.labeled(
+            g.line(
                 "Extension",
-                kit::text(last_seen_text(app.browser.last_seen), Font::Callout)
-                    .color(kit::SECONDARY),
+                Some(rows::value(last_seen_text(app.browser.last_seen))),
+                |_| {},
             );
             if !bundle.is_installed_app() {
-                s.row(|ui| {
-                    kit::tone_note(
-                        ui,
-                        "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app.",
-                        Tone::Warning,
-                    );
-                });
+                g.tone_row(
+                    "This Apassy.app is not /Applications/Apassy.app. The agent profile protects it only when agents start with the apassy-sandbox of this app.",
+                    Tone::Warning.text(),
+                );
             }
             if let Some(problem) = &app.browser.problem {
-                s.row(|ui| kit::tone_note(ui, problem, Tone::Critical));
+                g.tone_row(problem, Tone::Critical.text());
             }
         },
     );

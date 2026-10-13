@@ -1829,7 +1829,7 @@ fn removing_the_passkey_of_a_login_without_a_password_deletes_it() {
         "not_found"
     );
     assert_eq!(app.selected_item_id, None);
-    assert_eq!(app.view, super::OwnerView::Vault);
+    assert!(app.place.is_credentials());
     assert!(app.status_text.contains("deleted"), "{}", app.status_text);
 }
 

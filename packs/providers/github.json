@@ -1,11 +1,15 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 3,
   "id": "github",
   "kind": "provider",
   "label": "GitHub",
   "description": "GitHub tokens: classic and fine-grained personal access tokens, OAuth, app, and refresh tokens.",
   "known_hosts": ["api.github.com", "github.com", "uploads.github.com"],
+  "variable": "GITHUB_TOKEN",
+  "real_value": true,
+  "title": "GitHub token",
+  "prefixes": ["ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"],
   "signals": [
     {
       "id": "classic-token",

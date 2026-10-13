@@ -14,9 +14,9 @@ Use only synthetic values for tests. The real-secret gate stays BLOCKED.
 ## 2. Make a backup
 
 1. Unlock the vault.
-2. In Vault, open "Vault file and backup".
-3. In "Backup path", type the full path of a new file. The file must not exist. The name cannot end in `.lock`, `-journal`, `-wal`, or `-shm`.
-4. Click "Back up vault".
+2. Open Settings > Vault > Backup, and click "Back up now".
+3. In "Backup file", type the full path of a new file. The file must not exist. The name cannot end in `.lock`, `-journal`, `-wal`, or `-shm`.
+4. Click "Back up".
 
 Apassy then does these steps:
 
@@ -29,10 +29,10 @@ Keep backups on a disk that only you can read. The Seatbelt profile for agents (
 
 ## 3. Restore a backup
 
-1. In "Backup to restore", type the path of the backup file.
-2. In "Restored file path", type the path of a new file. Apassy does not overwrite a file.
+1. Open Settings > Vault > Backup, and click "Restore from a backup". In "Backup file", type the path of the backup file.
+2. In "New vault file", type the path of a new file, or leave it empty for the default folder. Apassy does not overwrite a file.
 3. In "Passphrase", type the passphrase that the vault had at the time of the backup.
-4. Click "Restore vault".
+4. Click "Restore".
 
 Apassy then does these steps:
 
@@ -41,7 +41,7 @@ Apassy then does these steps:
 3. It checks the passphrase, the cipher settings, the schema version, the columns, and the integrity of the backup. A wrong passphrase or a damaged file does not make the destination file.
 4. It copies the backup to the new path.
 5. It migrates a backup from an earlier schema version to the current version.
-6. In one transaction, it revokes every agent, removes every grant and every rule, and marks each item with agent settings for review. Agent settings are a declaration, an environment variable, or a connector.
+6. In one transaction, it revokes every agent, removes every grant, every rule, and every remembered answer, and marks each item with agent settings for review. Agent settings are a declaration, an environment variable, or a connector.
 7. It opens the restored file in the locked state. The restored file is a new vault in the vault list, with the name that you typed, or the name of its file ([several vaults](multiple-vaults.md)). An empty file path puts it in `~/Library/Application Support/Apassy/vaults/`. A vault that was open and unlocked closes after the restore, and its waiting runs end, as at a switch.
 
 ## 4. After a restore
@@ -49,11 +49,11 @@ Apassy then does these steps:
 The restored vault does not trust the agent authority in the backup. An old or changed backup can have wrong settings. For example, a connector can send the token to another host, or a production item can have a staging declaration.
 
 1. Unlock the restored vault.
-2. Find the banner "Review after restore" in Credentials. It lists each item that waits for your review. The list marks each such item "Needs review".
-3. Click the name of an item. Examine the declaration, the environment variable, and the connector in the banner "Review after restore". Correct them under "Agent access" if necessary.
-4. Click "Confirm settings". Do this for each item in the list.
-5. In Agents, register each agent again. Put the new token in `APASSY_AGENT_TOKEN` of the MCP configuration of the agent host. The old tokens do not work.
-6. Give process access, grants, and rules again.
+2. Find the banner "Review after restore" in All credentials. It has a button for each item that waits for your review.
+3. Click the name of an item. Examine the declaration, the environment variable, and the connector in the banner "Review after restore" on its page. Correct them under "Hosts and risk" if necessary.
+4. Click "Confirm settings". Do this for each item in the banner.
+5. In Agents, connect each agent again with "+" ("Connect an Agent"). Apassy saves the new token in the settings of Claude Code, Codex, and T3 Code. For "Other", put the new token in `APASSY_AGENT_TOKEN` of the MCP configuration of the agent host. The old tokens do not work.
+6. There is no access to give again: the bouncer decides each use ([ADR 0025](../adr/0025-low-friction-access.md)). The restore removed your remembered answers and production allowances, so the first uses ask you again. Allow each connector operation again with `apassy grant operation` ([command line](cli.md), section 5).
 
 The restore adds "Restored from a backup" to the history of each credential. An archived credential stays archived.
 
@@ -61,7 +61,7 @@ Until you confirm an item, the broker refuses each run and each connector call w
 
 ## 5. Passphrase and backups
 
-- A backup keeps the passphrase of its time. A change of the passphrase (Vault, "Change passphrase") does not change old backups. To restore an old backup, type the old passphrase.
+- A backup keeps the passphrase of its time. A change of the passphrase (Settings > Security, "Change passphrase") does not change old backups. To restore an old backup, type the old passphrase.
 - If you change the passphrase because it leaked, delete the old backups, or keep them in a place that nobody else can read.
 - A lost passphrase makes each backup with that passphrase unrecoverable.
 

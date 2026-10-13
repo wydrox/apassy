@@ -1,10 +1,12 @@
-//! The access model of ADR 0012: what an agent can see, and access requests.
+//! The access model of ADR 0012 and ADR 0025 §3f: what an agent can see, and access
+//! requests.
 //!
-//! An agent sees the items that it can use. When the owner lets it see all items, it
-//! also gets a catalog: the name, the kind, and the plain fields of each item that is
-//! not archived. The catalog never has a secret field, a hidden custom detail, the setup
-//! key of a one-time password, or the notes, which often hold a pasted secret. An agent
-//! that sees an item can ask for process access to it. The owner decides in the app.
+//! Every connected agent gets a catalog of the items that its exceptions do not hide
+//! (`exceptions.rs`): the name, the kind, the folder, and the plain fields of each item
+//! that is not archived. The catalog never has a secret field, a hidden custom detail,
+//! the setup key of a one-time password, or the notes, which often hold a pasted secret.
+//! An agent that sees all items can also ask for process access to one. The owner
+//! decides in the app.
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
@@ -58,6 +60,9 @@ pub struct CatalogEntry {
     pub details: Vec<(String, String)>,
     /// The item has a usable process field, so an agent can ask for process access.
     pub can_use_in_process: bool,
+    /// The names of the folders from the root to the folder of the item. Empty at the
+    /// root, and for an item whose folder is unknown or deleted (schema 18).
+    pub folder: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +151,13 @@ impl Vault {
             (i64::from(on), agent),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        // ADR 0025 §3f: "only these items" follows the setting. On removes the exception
+        // and its list; off adds its marker, so the agent sees only its listed items.
+        if on {
+            super::exceptions::unrestrict_in(&tx, agent)?;
+        } else {
+            super::exceptions::restrict_in(&tx, agent)?;
+        }
         if !on {
             // An agent that cannot see the items cannot keep asking for them.
             tx.execute(
@@ -207,15 +219,47 @@ impl Vault {
                 let value: String = value.chars().take(MAX_CATALOG_VALUE_CHARS).collect();
                 details.push((label, value));
             }
+            let item_id = to_public_id(id)?;
+            let folder = self.item_folder(item_id)?;
             catalog.push(CatalogEntry {
-                item_id: to_public_id(id)?,
+                item_id,
                 name,
                 kind: kind_from_str(&kind)?,
                 details,
                 can_use_in_process: process_binding_in(conn, id)?.is_some(),
+                folder: self.folder_path(folder.as_deref()).unwrap_or_default(),
             });
         }
         Ok(catalog)
+    }
+
+    /// The `host` field of an item (a database), in the form of
+    /// [`super::answers::normal_host`]. Only a plain field counts. `None` when the item
+    /// has none.
+    pub fn item_host_field(&self, item_id: u64) -> VaultResult<Option<String>> {
+        let item = to_sql_id(item_id)?;
+        let value: Option<String> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT value FROM item_field WHERE item_id = ?1 AND name = 'host' AND secret = 0",
+                [item],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(value.and_then(|value| super::answers::normal_host(&value)))
+    }
+
+    /// The catalog that one agent sees (ADR 0025 §3f): [`Vault::catalog`] without the
+    /// items of its `never` exceptions, and for an agent with "only these items", only
+    /// its listed items. A revoked agent sees nothing.
+    pub fn catalog_for_agent(&self, agent_id: u64) -> VaultResult<Vec<CatalogEntry>> {
+        let view = self.agent_view(agent_id)?;
+        Ok(self
+            .catalog()?
+            .into_iter()
+            .filter(|entry| view.visible(entry.item_id))
+            .collect())
     }
 
     /// An agent asks for process access to one item. Returns the request ID and
@@ -268,7 +312,10 @@ impl Vault {
             )
             .optional()
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        if sees_all != 1 || archived.is_some() {
+        if sees_all != 1
+            || archived.is_some()
+            || !super::exceptions::view_in(&tx, agent)?.visible(item_id)
+        {
             return Err(err(VaultErrorKind::NotFound));
         }
         if process_binding_in(&tx, item)?.is_none() {

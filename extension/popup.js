@@ -53,7 +53,7 @@ function renderState(reply) {
     case "host_missing": {
       const command = element("code", "command", "apassy setup browser");
       command.id = "command";
-      const how = element("p", "note", "In Apassy, open Settings > General > Browser extension and click Connect. Or run in Terminal:");
+      const how = element("p", "note", "In Apassy, open Settings > Tools > Browser extension and click Connect. Or run in Terminal:");
       show(note(reply.message), how, command);
       break;
     }

@@ -6,7 +6,7 @@ Use only synthetic values for tests. This document does not open the real-secret
 
 ## 1. What it does
 
-The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when an agent waits for a decision (120 s). The iPhone must reach the Mac through the local network or Tailscale.
+The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when an agent waits for a decision (up to 5 minutes). The iPhone must reach the Mac through the local network or Tailscale.
 
 | The iPhone can | The iPhone cannot |
 | --- | --- |
@@ -21,10 +21,10 @@ An approval on the iPhone is as strong as Touch ID on the Mac: your Face ID, now
 ## 2. Turn it on
 
 1. Unlock the vault.
-2. Open Settings > Notifications > iPhone companion.
+2. Open Settings > Devices > iPhone.
 3. Turn on "Allow the iPhone app on this network".
 
-The status then says "Listening on port 48620". Turning it on gives no access: an iPhone must pair first, and pairing needs your owner check.
+The switch then stays on with no error under it; the listener uses port 48620. Turning it on gives no access: an iPhone must pair first, and pairing needs your owner check.
 
 The listener runs only while the setting is on and the vault is unlocked. A lock, a quit, a backup, a restore, opening another vault file, and a passphrase change stop it at once and drop its key from memory. It starts again after the next unlock when the setting is on. A restore from a backup turns the setting off and removes the paired iPhones and the certificate.
 
@@ -38,7 +38,7 @@ For Tailscale, connect the Mac before you select "Pair an iPhone". The new QR co
 
 Install the updated Mac app to include Tailscale in new QR codes. For mobile data, install the updated iPhone app too. The iPhone permits cellular connections to Tailscale IPv4 addresses from the pairing link. Certificate pin checks still apply to each connection. Apassy reads Tailscale status from its standard installation paths. If Tailscale is absent, stopped, or has no locally assigned IPv4 address, the QR code contains only the available local network hosts.
 
-1. In Settings > Pair an iPhone, select "Pair an iPhone". The Mac shows a QR code, its name, and a countdown. The code works for 5 minutes and for one pairing.
+1. In Settings > Devices > iPhone, select "Pair…". The Mac shows a QR code, its name, and a countdown. The code works for 5 minutes and for one pairing.
 2. In the iPhone app, select "Scan the code" and scan the QR code. Give the iPhone a name if the app asks. The app asks for Face ID once, and then shows a 6-digit code.
 3. On the Mac, the page now says `"NAME" wants to pair. Type the 6-digit code that the iPhone shows.` Type the code and select "Pair". Spaces are ignored. The Mac never shows the code: only the iPhone does.
 4. The Mac asks for your owner check (Touch ID or the passphrase). It names the iPhone.
@@ -57,19 +57,20 @@ The Mac keeps at most 5 paired iPhones and one pairing window at a time.
 
 ## 4. Daily use
 
-Open the app on the iPhone. The Inbox shows each run that waits, with the time it has waited. Select a run, read it, and select "Approve" (Face ID) or "Deny". "Approve and remember" also teaches the pattern of the run, as on the Mac, when the run has an offer ([learning](learning.md)).
+Open the app on the iPhone. The waiting runs of the Mac show in the Waiting list of Decisions, with the relay questions. The Inbox ("⋯" > "MAC on Wi-Fi" in Decisions) shows each run that waits, with the time it has waited. Select a run, read it, and select "Approve" (Face ID) or "Deny". "Approve and remember" also teaches the pattern of the run, as on the Mac, when the run has an offer ([learning](learning.md)).
 
 - The iPhone asks the Mac every 2 s while its app is in the foreground. It does not ask in the background, and there are no push notifications. A run that starts to wait while the app is closed shows on the next open, if it still waits.
-- The 120 s timeout of the run does not change.
+- The 5-minute wait of the question does not change.
+- The companion approves one run. It cannot give "Allow ACTION in PROJECT" or a production allowance; through the relay the iPhone can ([questions](questions.md)).
 - If you approve on the iPhone and the Mac at the same time, the first approval wins. A run settles once.
 - If the run changed after the iPhone showed it, the Mac refuses the approval ("changed") and nothing runs. Read the run again.
 - A denial from the iPhone is recorded as a denial by the owner, so it also blocks a remembered pattern ([ADR 0010](../adr/0010-closing-open-decisions.md)).
-- An access request can be denied on the iPhone. To give access, use Apassy on the Mac.
+- An access request (a note of `apassy_request_access`) can be denied on the iPhone. Since 0.5.0 an agent needs no access, and the Mac app does not show these notes ([agent path](agent-path.md), section 8c).
 - The activity log of the Mac says "Owner approved on the iPhone." for a run that you approved there.
 
 ## 5. Remove an iPhone, and reset
 
-- **Remove**: in Settings > Paired iPhones, select "Remove" next to the device. It needs no owner check, because it only takes authority away. It works at once: the iPhone gets `unpaired` and deletes its pairing. An iPhone can also remove its own pairing: "Unpair this iPhone" in its app.
+- **Remove**: in Settings > Devices > iPhone, select "Remove" next to the device. It needs no owner check, because it only takes authority away. It works at once: the iPhone gets `unpaired` and deletes its pairing. An iPhone can also remove its own pairing: "Unpair this iPhone" in its app.
 - **Reset pairing**: select "Reset pairing…" and confirm. It removes every iPhone and makes a new certificate. The listener restarts with the new certificate. Use it when you lost an iPhone and do not know which one it was, or when you doubt the certificate. Each iPhone must pair again.
 - **A new Face ID enrollment** on the iPhone makes its approval key unusable, by design. The app then asks you to pair again. Remove the old entry on the Mac first.
 
@@ -83,7 +84,7 @@ It never gets a secret value, a placeholder, an agent token, a note, or a hidden
 
 | Symptom | What to check |
 | --- | --- |
-| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). Settings > Notifications > iPhone companion says "Listening on port …". Some guest and hotel networks stop devices from talking to each other. |
+| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). In Settings > Devices > iPhone, "Allow the iPhone app on this network" is on and shows no error. Some guest and hotel networks stop devices from talking to each other. |
 | The iPhone app says to allow local network access | In the iPhone Settings > Privacy & Security > Local Network, turn on Apassy. iOS asks the first time the app connects. If you refused, turn it on there. |
 | The Mac asks "Do you want the application Apassy to accept incoming network connections?" | Select "Allow". macOS asks once, the first time the listener starts. If the firewall is on and you refused, open System Settings > Network > Firewall, and allow incoming connections for Apassy. |
 | "Nothing listens on the network", or "another program already uses port 48620" | Another program uses the port. Close it, then select "Try again". |

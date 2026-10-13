@@ -1,10 +1,16 @@
 //! Schema version 16: the device key of relay sync (ADR 0022, contract relay-sync-v1,
 //! section 14.3).
 //!
-//! One row holds the relay address, the team, the device number on the relay, and the
-//! P-256 key of this Mac. The table is local (`merge::LOCAL_TABLES`): a pushed copy
-//! never carries it, so another Mac never gets this key. The agent sandbox cannot read
-//! the vault file, and the row is encrypted at rest with the rest of the vault.
+//! The relay identity of the vault for sync: the relay address, the team, the device
+//! number on the relay, and the P-256 key of this Mac. Schema 16 kept it in the one-row
+//! table `relay_device`; schema 19 moved the row to `relay_membership` with the purpose
+//! `sync` (one key pair per relay team, [`super::trusted_device`]) and dropped the old
+//! table. [`RelayDevice`] and the methods here are the view of relay sync on that
+//! membership, so the sync code keeps its API.
+//!
+//! The table is local (`merge::LOCAL_TABLES`): a pushed copy never carries it, so
+//! another Mac never gets this key. The agent sandbox cannot read the vault file, and
+//! the row is encrypted at rest with the rest of the vault.
 //!
 //! The private key is the PKCS#8 document of `ring`. It lives in a [`Zeroizing`]
 //! buffer while Apassy holds it. A restore keeps the row: a backup is the owner's own
@@ -12,14 +18,15 @@
 
 use std::fmt;
 
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use zeroize::Zeroizing;
 
 use super::Vault;
-use super::agents::{from_sql_time, now_unix, to_sql_time};
+use super::agents::{now_unix, to_sql_time};
+use super::trusted_device::{MembershipPurpose, RelayMembership, load_memberships, purposes_json};
 use super::types::{VaultErrorKind, VaultResult, err};
 
-/// Tables added in schema version 16.
+/// Tables added in schema version 16. Schema 19 drops the table after it moves the row.
 pub(super) const SCHEMA_V16_SQL: &str = "
 CREATE TABLE relay_device (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -34,6 +41,7 @@ UPDATE vault_meta SET schema_version = 16 WHERE id = 1;
 PRAGMA user_version = 16;
 ";
 
+/// The columns of `relay_device`, for a file or a copy of schema 16, 17, or 18.
 pub(super) const SCHEMA_V16_COLUMNS: [&str; 1] = [
     "SELECT id, relay_url, team_id, device_id, public_key, key_pkcs8, created_at FROM relay_device LIMIT 0",
 ];
@@ -74,71 +82,99 @@ impl fmt::Debug for RelayDevice {
 
 impl RelayDevice {
     fn is_valid(&self) -> bool {
-        let url = self.relay_url.as_str();
-        let team = self.team_id.as_bytes();
-        !url.is_empty()
-            && url.len() <= MAX_URL_BYTES
-            && url.is_ascii()
-            && !url.chars().any(char::is_control)
-            && team.len() == 12
-            && team.starts_with(b"t_")
-            && team[2..]
-                .iter()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-            && self.device_id >= 1
-            && i64::try_from(self.device_id).is_ok()
-            && self.public_key.len() == 65
-            && self.public_key[0] == 0x04
-            && !self.key_pkcs8.is_empty()
-            && self.key_pkcs8.len() <= MAX_KEY_BYTES
+        valid_relay_identity(
+            &self.relay_url,
+            &self.team_id,
+            self.device_id,
+            &self.public_key,
+            &self.key_pkcs8,
+        )
     }
+}
+
+/// The shape of a relay identity: an ASCII address without control characters, a team
+/// `t_` with 10 lowercase letters or digits, a device number from 1, a P-256 point in
+/// X9.63 form, and a PKCS#8 document of at most [`MAX_KEY_BYTES`].
+pub(super) fn valid_relay_identity(
+    relay_url: &str,
+    team_id: &str,
+    device_id: u64,
+    public_key: &[u8],
+    key_pkcs8: &[u8],
+) -> bool {
+    !relay_url.is_empty()
+        && relay_url.len() <= MAX_URL_BYTES
+        && relay_url.is_ascii()
+        && !relay_url.chars().any(char::is_control)
+        && valid_team_id(team_id)
+        && device_id >= 1
+        && i64::try_from(device_id).is_ok()
+        && public_key.len() == 65
+        && public_key[0] == 0x04
+        && !key_pkcs8.is_empty()
+        && key_pkcs8.len() <= MAX_KEY_BYTES
+}
+
+/// A relay team ID: `t_` and 10 lowercase letters or digits.
+pub(super) fn valid_team_id(team_id: &str) -> bool {
+    let team = team_id.as_bytes();
+    team.len() == 12
+        && team.starts_with(b"t_")
+        && team[2..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
 fn storage<T>(result: Result<T, rusqlite::Error>) -> VaultResult<T> {
     result.map_err(|_| err(VaultErrorKind::Storage))
 }
 
-/// An adopted copy never keeps the key of another Mac, also when the source is a raw
-/// vault file and not a stripped copy.
+/// An adopted copy never keeps the keys of another Mac, also when the source is a raw
+/// vault file and not a stripped copy. The new file has the current schema here.
 pub(super) fn prepare_adopted(tx: &Transaction<'_>) -> VaultResult<()> {
-    storage(tx.execute("DELETE FROM relay_device", []))?;
+    storage(tx.execute("DELETE FROM relay_membership", []))?;
+    Ok(())
+}
+
+/// The membership with the purpose `sync`. At most one has it.
+pub(super) fn sync_membership(conn: &Connection) -> VaultResult<Option<RelayMembership>> {
+    Ok(load_memberships(conn, None)?
+        .into_iter()
+        .find(|membership| membership.purposes.contains(&MembershipPurpose::Sync)))
+}
+
+/// Take the purpose `sync` from `membership`: the row goes when it has no other purpose.
+fn drop_sync(tx: &Transaction<'_>, membership: &RelayMembership) -> VaultResult<()> {
+    let mut rest = membership.purposes.clone();
+    rest.remove(&MembershipPurpose::Sync);
+    if rest.is_empty() {
+        storage(tx.execute(
+            "DELETE FROM relay_membership WHERE team_id = ?1",
+            [&membership.team_id],
+        ))?;
+    } else {
+        storage(tx.execute(
+            "UPDATE relay_membership SET purposes = ?1 WHERE team_id = ?2",
+            (purposes_json(&rest), &membership.team_id),
+        ))?;
+    }
     Ok(())
 }
 
 impl Vault {
-    /// The relay identity of this vault, or `None` when relay sync is off. The vault
-    /// must be unlocked.
+    /// The relay identity of this vault, or `None` when relay sync is off: the relay
+    /// membership with the purpose `sync`. The vault must be unlocked.
     pub fn relay_device(&self) -> VaultResult<Option<RelayDevice>> {
-        type Row = (String, String, i64, Vec<u8>, Vec<u8>, i64);
-        let row: Option<Row> = storage(
-            self.conn_ref()?
-                .query_row(
-                    "SELECT relay_url, team_id, device_id, public_key, key_pkcs8, created_at
-                     FROM relay_device WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
-                    },
-                )
-                .optional(),
-        )?;
-        let Some((relay_url, team_id, device_id, public_key, key, created_at)) = row else {
+        let Some(membership) = sync_membership(self.conn_ref()?)? else {
             return Ok(None);
         };
         let device = RelayDevice {
-            relay_url,
-            team_id,
-            device_id: u64::try_from(device_id).map_err(|_| err(VaultErrorKind::Storage))?,
-            public_key,
-            key_pkcs8: Zeroizing::new(key),
-            created_at: from_sql_time(created_at)?,
+            relay_url: membership.relay_url,
+            team_id: membership.team_id,
+            device_id: membership.device_id,
+            public_key: membership.public_key,
+            key_pkcs8: membership.key_pkcs8,
+            created_at: membership.created_at,
         };
         if device.is_valid() {
             Ok(Some(device))
@@ -147,39 +183,70 @@ impl Vault {
         }
     }
 
-    /// Store the relay identity of this vault. It replaces an earlier row. The time is
-    /// now; `device.created_at` is ignored. A value of a bad shape is `InvalidInput`.
+    /// Store the relay identity of this vault: the membership of its team gets the
+    /// purpose `sync` and this address, device number, and key (one key pair per team).
+    /// It replaces an earlier identity: another team loses the purpose `sync`, and its
+    /// row goes when it has no other purpose. The time is now; `device.created_at` is
+    /// ignored. A value of a bad shape is `InvalidInput`.
     pub fn set_relay_device(&mut self, device: &RelayDevice) -> VaultResult<()> {
         if !device.is_valid() {
             return Err(err(VaultErrorKind::InvalidInput));
         }
         let device_id =
             i64::try_from(device.device_id).map_err(|_| err(VaultErrorKind::InvalidInput))?;
-        storage(self.conn_ref()?.execute(
-            "INSERT OR REPLACE INTO relay_device
-                 (id, relay_url, team_id, device_id, public_key, key_pkcs8, created_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+        let now = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        let tx = storage(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
+        if let Some(old) = sync_membership(&tx)?
+            && old.team_id != device.team_id
+        {
+            drop_sync(&tx, &old)?;
+        }
+        let mut purposes = load_memberships(&tx, Some(&device.team_id))?
+            .pop()
+            .map(|membership| membership.purposes)
+            .unwrap_or_default();
+        purposes.insert(MembershipPurpose::Sync);
+        storage(tx.execute(
+            "INSERT INTO relay_membership
+                 (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(team_id) DO UPDATE SET relay_url = excluded.relay_url,
+                 device_id = excluded.device_id, public_key = excluded.public_key,
+                 key_pkcs8 = excluded.key_pkcs8, purposes = excluded.purposes,
+                 created_at = excluded.created_at",
             rusqlite::params![
-                device.relay_url,
                 device.team_id,
+                device.relay_url,
                 device_id,
                 device.public_key,
                 device.key_pkcs8.as_slice(),
-                to_sql_time(now_unix())?,
+                purposes_json(&purposes),
+                now,
             ],
         ))?;
-        Ok(())
+        storage(tx.commit())
     }
 
-    /// Remove the relay identity (relay sync off). Returns whether there was one.
+    /// Remove the relay identity (relay sync off): the membership loses the purpose
+    /// `sync`, and the row goes when it has no other purpose, so the questions keep
+    /// theirs. Returns whether there was one.
     pub fn remove_relay_device(&mut self) -> VaultResult<bool> {
-        let removed = storage(self.conn_ref()?.execute("DELETE FROM relay_device", []))?;
-        Ok(removed > 0)
+        let conn = self.conn_mut()?;
+        let tx = storage(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
+        let Some(old) = sync_membership(&tx)? else {
+            return Ok(false);
+        };
+        drop_sync(&tx, &old)?;
+        storage(tx.commit())?;
+        Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn device() -> RelayDevice {
@@ -247,5 +314,58 @@ mod tests {
             vault.relay_device().unwrap_err().kind(),
             VaultErrorKind::Locked
         );
+    }
+
+    /// Relay sync is the purpose `sync` of one membership: turning sync off keeps a
+    /// membership that the questions use, and sync on another team moves the purpose.
+    #[test]
+    fn the_sync_purpose_lives_on_one_membership() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("m.db"), "synthetic-relay-pass").unwrap();
+        vault.unlock("synthetic-relay-pass").unwrap();
+        vault.set_relay_device(&device()).unwrap();
+        let both = BTreeSet::from([MembershipPurpose::Sync, MembershipPurpose::Questions]);
+        vault
+            .set_membership_purposes("t_7k2m5q4x3c", &both)
+            .unwrap();
+        // Sync off: the questions keep the membership and its key.
+        assert!(vault.remove_relay_device().unwrap());
+        assert!(vault.relay_device().unwrap().is_none());
+        let kept = vault.relay_membership("t_7k2m5q4x3c").unwrap().unwrap();
+        assert_eq!(
+            kept.purposes,
+            BTreeSet::from([MembershipPurpose::Questions])
+        );
+        assert_eq!(kept.key_pkcs8.as_slice(), &[1u8; 138][..]);
+        // Sync on the same team again: one row, both purposes, the new key.
+        let mut again = device();
+        again.key_pkcs8 = Zeroizing::new(vec![2u8; 138]);
+        vault.set_relay_device(&again).unwrap();
+        let memberships = vault.relay_memberships().unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].purposes, both);
+        assert_eq!(memberships[0].key_pkcs8.as_slice(), &[2u8; 138][..]);
+        // Sync on another team: the first team keeps the questions only.
+        let other = RelayDevice {
+            team_id: "t_0000000001".to_owned(),
+            ..device()
+        };
+        vault.set_relay_device(&other).unwrap();
+        assert_eq!(
+            vault.relay_device().unwrap().unwrap().team_id,
+            "t_0000000001"
+        );
+        assert_eq!(
+            vault
+                .relay_membership("t_7k2m5q4x3c")
+                .unwrap()
+                .unwrap()
+                .purposes,
+            BTreeSet::from([MembershipPurpose::Questions])
+        );
+        // A sync-only membership goes with sync.
+        assert!(vault.remove_relay_device().unwrap());
+        assert!(vault.relay_membership("t_0000000001").unwrap().is_none());
+        assert_eq!(vault.relay_memberships().unwrap().len(), 1);
     }
 }

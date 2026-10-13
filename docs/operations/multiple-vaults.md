@@ -28,11 +28,11 @@ The first vault on a Mac has the name "Personal" when you type no name.
 1. In the sidebar, click the name of the open vault at the top.
 2. Click the name of another vault.
 
-Or, on the unlock screen, pick the vault above the passphrase field. Settings > General > Vaults also has "Open" for each vault.
+Or, on the unlock screen, pick the vault above the passphrase field. Settings > Vault also has "Open" for each vault.
 
 Apassy then does these steps:
 
-1. It locks the open vault. Each run that waits for you ends. The inbox of that vault keeps each such run with the text "The owner switched to another vault before a decision. The run did not start."
+1. It locks the open vault. Each run that waits for you ends. The activity log of that vault keeps each such run with the text "The owner switched to another vault before a decision. The run did not start."
 2. It clears what the window holds of that vault: typed secrets, forms, the selection, shown values, an open owner check, a Touch ID prompt, and the learning view. A local training stops.
 3. It opens the chosen file, locked. The unlock screen shows its name.
 4. It reads the Touch ID unlock setting of that file. Touch ID unlock is set up for each vault file.
@@ -50,7 +50,7 @@ A file that is in the list already opens as it is. A restore from a backup also 
 
 ## 5. Rename or remove a vault
 
-In Settings > General > Vaults:
+In Settings > Vault:
 
 - "Rename…" changes the name. The file does not move.
 - "Remove from list…" takes the vault out of the list. Apassy does not delete the file. You can open it again with "Open vault file…". The open vault stays in the list; open another vault first. Sync of the vault stops; its synced copy stays in its folder ([sync](sync.md), section 12).

@@ -37,7 +37,7 @@ struct ICloudVaultFlowView: View {
                 switch model.step {
                 case .instructions:
                     PairingHero(symbol: "icloud", title: "Your personal vault in iCloud",
-                        message: "Personal sync with iCloud is free. On your Mac, select iCloud Drive in Settings > General > Sync.")
+                        message: "Personal sync with iCloud is free. On your Mac, select iCloud Drive in Settings > Vault > Sync.")
                     Text("In Files, select iCloud Drive > Apassy > Personal.apassy. If you changed the filename, select that .apassy file.")
                         .multilineTextAlignment(.center)
                 case .passphrase(let url):

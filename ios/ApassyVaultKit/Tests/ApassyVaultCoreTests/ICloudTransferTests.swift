@@ -56,7 +56,7 @@ final class LocalICloudFiles: ICloudFileAccess, @unchecked Sendable {
     }
 }
 
-private actor TransferProbe {
+actor TransferProbe {
     var prepares = 0
     var completes = 0
     var seen: [String] = []
@@ -250,6 +250,27 @@ private struct TransferFixture: Sendable {
             })
         #expect(result.status.state == .pending)
         #expect(result.status.message.contains("New local changes"))
+    }
+
+    @Test func aFailedPushOutsideTheLoopMakesTheWaitSyncAgain() async throws {
+        let fixture = try TransferFixture()
+        defer { fixture.cleanup() }
+        try await fixture.register()
+        let probe = TransferProbe()
+        _ = try await fixture.transfer.sync(id: "test", passphrase: nil, epoch: fixture.session.capture(),
+            prepare: { _, input, output, _ in try await probe.prepared(input: input, output: output, write: false) },
+            complete: { _, _ in await probe.complete() })
+        #expect(!(try await fixture.transfer.wait(id: "test", timeout: 1, epoch: fixture.session.capture())))
+        // The push of a change on this iPhone fails (the sync 2 s after a save runs outside the
+        // loop). The iCloud file stays as it was, so only the failed sync tells the loop.
+        fixture.files.failPublication = true
+        await #expect(throws: VaultError.self) {
+            _ = try await fixture.transfer.sync(id: "test", passphrase: nil, epoch: fixture.session.capture(),
+                prepare: { _, input, output, _ in try await probe.prepared(input: input, output: output) },
+                complete: { _, _ in await probe.complete() })
+        }
+        fixture.files.failPublication = false
+        #expect(try await fixture.transfer.wait(id: "test", timeout: 1, epoch: fixture.session.capture()))
     }
 
     @Test func largeProviderSnapshotStopsBeforeCopy() throws {

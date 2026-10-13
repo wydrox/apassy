@@ -1,11 +1,14 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 3,
   "id": "stripe",
   "kind": "provider",
   "label": "Stripe",
   "description": "Stripe API keys: live and test mode secret keys, restricted keys, and publishable keys.",
   "known_hosts": ["api.stripe.com", "files.stripe.com", "connect.stripe.com", "uploads.stripe.com"],
+  "variable": "STRIPE_SECRET_KEY",
+  "real_value": true,
+  "prefixes": ["sk_live_", "rk_live_", "pk_live_", "sk_test_", "rk_test_", "pk_test_"],
   "signals": [
     {
       "id": "live-secret-key",
@@ -22,13 +25,13 @@
     {
       "id": "test-secret-key",
       "when": { "value_starts": ["sk_test_"] },
-      "suggest": { "environment": "staging", "risk": "low", "scope": "admin", "reversibility": "reversible" },
-      "reason": "A test mode secret key (sk_test_) reaches test data only. It moves no real money."
+      "suggest": { "environment": "development", "risk": "low", "scope": "admin", "reversibility": "reversible" },
+      "reason": "A test mode secret key (sk_test_) is a development key: it reaches test data only and moves no real money."
     },
     {
       "id": "test-restricted-key",
       "when": { "value_starts": ["rk_test_"] },
-      "suggest": { "environment": "staging", "risk": "low", "reversibility": "reversible" },
+      "suggest": { "environment": "development", "risk": "low", "reversibility": "reversible" },
       "reason": "A test mode restricted key (rk_test_) reaches test data only. Its permissions come from the Stripe dashboard."
     },
     {
@@ -40,7 +43,7 @@
     {
       "id": "test-publishable-key",
       "when": { "value_starts": ["pk_test_"] },
-      "suggest": { "environment": "staging", "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "suggest": { "environment": "development", "risk": "low", "scope": "read-only", "reversibility": "reversible" },
       "reason": "A test mode publishable key (pk_test_) is public and reaches test data only."
     },
     {

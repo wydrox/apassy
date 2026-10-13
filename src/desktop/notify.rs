@@ -2,9 +2,10 @@
 //!
 //! Two worker threads:
 //!
-//! - The watcher wakes when a run starts to wait (the approval queue calls it) and
-//!   every [`POLL_INTERVAL`]. It finds new waiting runs and new blocked requests in
-//!   the activity log.
+//! - The watcher wakes when a question starts to wait (the approval queue calls it) and
+//!   every [`POLL_INTERVAL`]. It finds new waiting questions and new blocked requests in
+//!   the activity log. Each new question gets one notification ([`OwnerEvent`],
+//!   ADR 0025 §3e).
 //! - The sender posts each notification through the notifier
 //!   (`Contents/Helpers/ApassyNotify.app`, see `apassy::native`). A call can block up
 //!   to 40 s, so the sender never delays the watcher.
@@ -71,8 +72,49 @@ impl Delivery {
             Self::Sending => "Notification: sending.".to_owned(),
             Self::Delivered => "Notification: delivered.".to_owned(),
             Self::Failed(text) => {
-                format!("Notification failed: {text} The event stays in this inbox.")
+                format!(
+                    "Notification failed: {text} A question still waits in Decisions; other events are in the activity log."
+                )
             }
+        }
+    }
+}
+
+/// Something new that waits for the owner in Decisions (ADR 0025 §3e, §5, §6). Each one
+/// gets one notification. The preview has the agent name and the kind of event only: no
+/// item name, command, project, or value (N2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerEvent {
+    /// A question of an agent waits in the approval queue.
+    QuestionWaiting,
+    /// An agent asks the owner to paste a credential (`credential_request`).
+    CredentialRequested,
+    /// Apassy proposes a correction of a declaration (`correction`).
+    CorrectionProposed,
+}
+
+impl OwnerEvent {
+    /// The key of the event with the ID of its question, request, or correction.
+    pub fn key(self, id: u64) -> EventKey {
+        match self {
+            Self::QuestionWaiting => EventKey::Run(id),
+            Self::CredentialRequested => EventKey::Request(id),
+            Self::CorrectionProposed => EventKey::Correction(id),
+        }
+    }
+
+    /// The template of the notifier. It has two fixed templates; each of these events
+    /// waits for a decision of the owner, so each uses "waits for your decision".
+    pub fn native(self) -> NotificationEvent {
+        NotificationEvent::ApprovalWaiting
+    }
+
+    /// The name in the preview: the agent, or "Apassy" for a correction, which no agent
+    /// asked for.
+    pub fn preview_name(self, agent: &str) -> String {
+        match self {
+            Self::CorrectionProposed => "Apassy".to_owned(),
+            Self::QuestionWaiting | Self::CredentialRequested => preview_name(agent),
         }
     }
 }
@@ -124,17 +166,17 @@ impl ChannelState {
         match self {
             Self::Unknown => "Apassy is checking the notification settings.".to_owned(),
             Self::Asking => {
-                "macOS asks you now: select \"Allow\" in the Apassy notification at the top right of the screen. Until then, events stay in the inbox only.".to_owned()
+                "macOS asks you now: select \"Allow\" in the Apassy notification at the top right of the screen. Until then, questions wait in Decisions without a notification.".to_owned()
             }
             Self::Problem(text) => {
-                format!("Notifications do not work: {text} Events stay in the inbox.")
+                format!("Notifications do not work: {text} Questions still wait in Decisions.")
             }
             Self::Ready(status) => match status.authorization {
                 NotificationAuthorization::NotDetermined => {
-                    "You did not allow notifications yet. Select \"Allow notifications\". Until then, events stay in the inbox only.".to_owned()
+                    "You did not allow notifications yet. Select \"Allow notifications\". Until then, questions wait in Decisions without a notification.".to_owned()
                 }
                 NotificationAuthorization::Denied => {
-                    "Notifications are not allowed for Apassy. macOS does not ask again: allow them in System Settings > Notifications > Apassy. Events stay in the inbox.".to_owned()
+                    "Notifications are not allowed for Apassy. macOS does not ask again: allow them in System Settings > Notifications > Apassy. Questions still wait in Decisions.".to_owned()
                 }
                 NotificationAuthorization::Authorized | NotificationAuthorization::Provisional
                     if status.can_deliver() =>
@@ -147,10 +189,10 @@ impl ChannelState {
                     format!("Notifications are allowed. {banners}")
                 }
                 NotificationAuthorization::Authorized | NotificationAuthorization::Provisional => {
-                    "Notifications are allowed, but alerts and Notification Center are off for Apassy. Turn them on in System Settings > Notifications > Apassy. Events stay in the inbox.".to_owned()
+                    "Notifications are allowed, but alerts and Notification Center are off for Apassy. Turn them on in System Settings > Notifications > Apassy. Questions still wait in Decisions.".to_owned()
                 }
                 NotificationAuthorization::Unknown => {
-                    "macOS gave an unknown notification permission. Events stay in the inbox.".to_owned()
+                    "macOS gave an unknown notification permission. Questions still wait in Decisions.".to_owned()
                 }
             },
         }
@@ -181,6 +223,9 @@ struct Shared {
     wake: Mutex<bool>,
     woken: Condvar,
     on_change: Box<dyn Fn() + Send + Sync>,
+    /// Also called when a run starts to wait: the questions waiter posts it through the
+    /// relay ([`NotificationCenter::set_question_hook`]).
+    question_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Shared {
@@ -240,11 +285,20 @@ impl NotificationCenter {
             wake: Mutex::new(false),
             woken: Condvar::new(),
             on_change: Box::new(on_change),
+            question_hook: Mutex::new(None),
         });
         {
             let shared = Arc::clone(&shared);
             approvals.set_notifier(move || {
                 shared.wake();
+                if let Some(hook) = shared
+                    .question_hook
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                {
+                    hook();
+                }
                 (shared.on_change)();
             });
         }
@@ -280,6 +334,16 @@ impl NotificationCenter {
         }
     }
 
+    /// Run `hook` too when a run starts to wait: the questions waiter
+    /// (`crate::questions::QuestionsWorker::waker`) then posts it through the relay at once.
+    pub fn set_question_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .shared
+            .question_hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
+    }
+
     /// A copy of the channel state and the deliveries.
     pub fn view(&self) -> CenterView {
         self.shared
@@ -313,6 +377,16 @@ impl NotificationCenter {
     pub fn report_problem(&self, text: String) {
         self.shared
             .update(|view| view.channel = ChannelState::Problem(text));
+    }
+
+    /// Post one notification for `event` with the ID of its question, request, or
+    /// correction. The same key again replaces the notification. The text has no secret
+    /// value ([`OwnerEvent::preview_name`]).
+    pub fn announce(&self, event: OwnerEvent, id: u64, agent: &str) {
+        let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(jobs) = jobs.as_ref() {
+            queue_event(&self.shared, jobs, event, id, agent);
+        }
     }
 
     /// Show the macOS permission prompt when the owner has not decided. The channel
@@ -368,37 +442,126 @@ fn preview_name(agent: &str) -> String {
     }
 }
 
+/// The IDs of `ids` above `last`, oldest first, and the new mark. Without a mark yet
+/// (`None`: the first look at this vault) nothing is new: the mark becomes the highest
+/// ID.
+fn fresh_ids(last: Option<u64>, ids: &[u64]) -> (Vec<u64>, u64) {
+    let highest = ids.iter().copied().max().unwrap_or(0);
+    match last {
+        None => (Vec::new(), highest),
+        Some(last) => {
+            let mut fresh: Vec<u64> = ids.iter().copied().filter(|id| *id > last).collect();
+            fresh.sort_unstable();
+            (fresh, last.max(highest))
+        }
+    }
+}
+
+/// What waits for the owner in the vault besides the questions: the open credential
+/// requests with the agent name, and the open corrections.
+struct OwnerItems {
+    requests: Vec<(u64, String)>,
+    corrections: Vec<u64>,
+}
+
+/// The newest credential request and correction that the watcher saw in one vault file.
+struct OwnerMarks {
+    path: PathBuf,
+    request: u64,
+    correction: u64,
+}
+
+/// Announce the credential requests and the corrections that are newer than `marks`
+/// (ADR 0025 §5, §6), and return the marks for the next pass. The first look at a vault
+/// file announces nothing: what waited before is in Decisions already.
+fn announce_owner_items(
+    shared: &Shared,
+    jobs: &Sender<Job>,
+    marks: Option<OwnerMarks>,
+    path: PathBuf,
+    items: &OwnerItems,
+) -> OwnerMarks {
+    let marks = marks.filter(|marks| marks.path == path);
+    let request_ids: Vec<u64> = items.requests.iter().map(|(id, _)| *id).collect();
+    let (requests, request) = fresh_ids(marks.as_ref().map(|m| m.request), &request_ids);
+    let (corrections, correction) =
+        fresh_ids(marks.as_ref().map(|m| m.correction), &items.corrections);
+    for id in requests {
+        let agent = items
+            .requests
+            .iter()
+            .find(|(request, _)| *request == id)
+            .map_or("", |(_, agent)| agent.as_str());
+        queue_event(shared, jobs, OwnerEvent::CredentialRequested, id, agent);
+    }
+    for id in corrections {
+        queue_event(shared, jobs, OwnerEvent::CorrectionProposed, id, "");
+    }
+    OwnerMarks {
+        path,
+        request,
+        correction,
+    }
+}
+
 fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, jobs: &Sender<Job>) {
     let mut notified_runs = BTreeSet::new();
     // `None` until the watcher sees an unlocked vault. Then that vault file and its
     // newest entry ID: older entries are history and cause no notification. Each vault
     // file has its own entry IDs, so another file starts again (ADR 0013).
     let mut last_entry: Option<(PathBuf, u64)> = None;
+    // The same for the credential requests and the corrections.
+    let mut owner_marks: Option<OwnerMarks> = None;
     loop {
         let pending = approvals.pending();
         for run in &pending {
             if notified_runs.insert(run.id) {
-                queue_notification(
+                queue_event(
                     shared,
                     jobs,
-                    EventKey::Run(run.id),
+                    OwnerEvent::QuestionWaiting,
+                    run.id,
                     &run.agent,
-                    NotificationEvent::ApprovalWaiting,
                 );
             }
         }
         notified_runs.retain(|id| pending.iter().any(|run| run.id == *id));
 
-        let rows = {
+        let (rows, owner_items) = {
             let guard = vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
-                Some(open) if !open.is_locked() => open
-                    .recent_activity(ACTIVITY_WINDOW)
-                    .ok()
-                    .map(|rows| (open.path().to_path_buf(), rows)),
-                _ => None,
+                Some(open) if !open.is_locked() => {
+                    let path = open.path().to_path_buf();
+                    let owner_items = match (open.credential_requests(true), open.corrections(true))
+                    {
+                        (Ok(requests), Ok(corrections)) => Some((
+                            path.clone(),
+                            OwnerItems {
+                                requests: requests
+                                    .into_iter()
+                                    .map(|request| (request.id, request.agent_name))
+                                    .collect(),
+                                corrections: corrections
+                                    .into_iter()
+                                    .map(|correction| correction.id)
+                                    .collect(),
+                            },
+                        )),
+                        _ => None,
+                    };
+                    (
+                        open.recent_activity(ACTIVITY_WINDOW)
+                            .ok()
+                            .map(|rows| (path, rows)),
+                        owner_items,
+                    )
+                }
+                _ => (None, None),
             }
         };
+        owner_marks = owner_items.map(|(path, items)| {
+            announce_owner_items(shared, jobs, owner_marks.take(), path, &items)
+        });
         match rows {
             None => last_entry = None,
             Some((path, rows)) => {
@@ -427,6 +590,17 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
             return;
         }
     }
+}
+
+fn queue_event(shared: &Shared, jobs: &Sender<Job>, event: OwnerEvent, id: u64, agent: &str) {
+    shared.update(|view| {
+        view.deliveries.insert(event.key(id), Delivery::Sending);
+    });
+    let _ = jobs.send(Job::Notify {
+        key: event.key(id),
+        agent: event.preview_name(agent),
+        event: event.native(),
+    });
 }
 
 fn queue_notification(
@@ -564,6 +738,49 @@ mod tests {
             lock_screen: NotificationSetting::Enabled,
             sound: NotificationSetting::Enabled,
         }
+    }
+
+    /// ADR 0025 §3e: each question, request, and correction has its own key, and the
+    /// preview names only the agent (N2).
+    #[test]
+    fn owner_events_have_their_own_keys_and_name_only_the_agent() {
+        assert_eq!(OwnerEvent::QuestionWaiting.key(4), EventKey::Run(4));
+        assert_eq!(OwnerEvent::CredentialRequested.key(4), EventKey::Request(4));
+        assert_eq!(
+            OwnerEvent::CorrectionProposed.key(4),
+            EventKey::Correction(4)
+        );
+        for event in [
+            OwnerEvent::QuestionWaiting,
+            OwnerEvent::CredentialRequested,
+            OwnerEvent::CorrectionProposed,
+        ] {
+            let name = event.preview_name("Claude\u{7}Code");
+            let preview = Notification::new(&event.key(4).notification_id(), &name, event.native())
+                .expect("a valid preview");
+            assert!(!preview.body().contains('\u{7}'), "{}", preview.body());
+            assert_eq!(preview.title(), "Approval waiting");
+        }
+        assert_eq!(
+            OwnerEvent::QuestionWaiting.preview_name("Claude Code"),
+            "Claude Code"
+        );
+        assert_eq!(
+            OwnerEvent::CorrectionProposed.preview_name("Codex"),
+            "Apassy"
+        );
+        assert_eq!(OwnerEvent::QuestionWaiting.preview_name("  "), "unknown");
+    }
+
+    /// ADR 0025 §5, §6: a credential request or a correction gets one notification when
+    /// it is new. What waited at the first look is not announced again.
+    #[test]
+    fn only_new_requests_and_corrections_are_announced() {
+        assert_eq!(fresh_ids(None, &[3, 7, 5]), (Vec::new(), 7));
+        assert_eq!(fresh_ids(Some(7), &[3, 9, 7, 8]), (vec![8, 9], 9));
+        assert_eq!(fresh_ids(Some(9), &[3]), (Vec::new(), 9));
+        assert_eq!(fresh_ids(None, &[]), (Vec::new(), 0));
+        assert_eq!(fresh_ids(Some(0), &[1]), (vec![1], 1));
     }
 
     #[test]

@@ -1,11 +1,14 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "netlify",
   "kind": "provider",
   "label": "Netlify",
   "description": "Netlify personal access tokens for the API and the CLI.",
   "known_hosts": ["api.netlify.com"],
+  "variable": "NETLIFY_AUTH_TOKEN",
+  "title": "Netlify token",
+  "prefixes": ["nfp_"],
   "signals": [
     {
       "id": "personal-access-token",

@@ -182,11 +182,11 @@ denied request, manual promotion) is the check before any new version acts.
 
 Code: `src/broker/finetune.rs` (gate, examples, trainer supervisor),
 `tools/finetune/local_train.py` (trainer), `tools/basemodel/train.py` (heads only),
-`src/desktop/learning_ui.rs` (Learning tab).
+`src/desktop/learning_ui.rs` (Settings > Bouncer > Calibration and learning).
 
 ### 6.1 Steps
 
-1. The owner clicks "Train a candidate" in the Learning tab. Nothing else starts a
+1. The owner clicks "Train a candidate" in Settings > Bouncer > Calibration and learning. Nothing else starts a
    training. There is no timer and no background trigger.
 2. `finetune::train` checks the training gate (section 7). A closed gate stops here.
    The trainer does not start.
@@ -252,7 +252,7 @@ Tests: `export_lines_map_to_owner_labels`, `many_approvals_give_a_heavier_denial
 
 ## 7. Training gate
 
-`finetune::train` enforces the gate in code. The Learning tab shows the gate and turns
+`finetune::train` enforces the gate in code. Settings > Bouncer > Calibration and learning shows the gate and turns
 "Train a candidate" on only when it is open.
 
 | Condition (ADR 0010) | Code | Test |
@@ -262,7 +262,7 @@ Tests: `export_lines_map_to_owner_labels`, `many_approvals_give_a_heavier_denial
 | AC power at the start | `finetune::power_now` runs `/usr/bin/pmset -g batt` (an absolute path, so `PATH` cannot change it) and reads `Now drawing from 'AC Power'`. `'Battery Power'`, another source, or a failure keeps the gate closed | same test: closed on battery and with an unknown source; `pmset_output_names_the_power_source` |
 | AC power during the training | the broker reads the power source every 30 s and stops the trainer on another source | `leaving_ac_power_stops_the_training` |
 | One hour at most | `TIME_LIMIT` = 3600 s. At the limit, the broker sends `SIGKILL` to the process group of the trainer (`/bin/kill -KILL -- -<pgid>`). `local_train.py` also sets `alarm(3600)` | `the_time_limit_stops_the_training`: a trainer that sleeps stops at a limit of 1 s. Its process is gone, and no candidate and no folder stay |
-| The owner starts and can stop it | only the Learning tab calls `finetune::train`. "Stop training" and a quit of the app stop the process group | `the_owner_can_stop_the_training`, `a_bad_or_failed_trainer_makes_no_candidate` |
+| The owner starts and can stop it | only Settings > Bouncer > Calibration and learning calls `finetune::train`. "Stop training" and a quit of the app stop the process group | `the_owner_can_stop_the_training`, `a_bad_or_failed_trainer_makes_no_candidate` |
 
 A closed gate never starts the trainer: the test trainer writes a marker file, and the
 marker is absent for each closed case. Model, rule, and "no answer" entries in the log
@@ -277,7 +277,7 @@ Code: `src/broker/shadow.rs`, `src/broker/run.rs`.
   `APASSY_BASE_MODEL=<candidate folder>/candidate.safetensors LAYA_PORT=8775
   tools/basemodel/start.sh`. `serve.py` reads `manifest.json` next to the checkpoint,
   checks the SHA-256 of the checkpoint and of the base weights, and answers with the
-  version `apassy-local-v1+<hash8>`. The Learning tab shows this command.
+  version `apassy-local-v1+<hash8>`. Settings > Bouncer > Calibration and learning shows this command.
 - For each request that reaches the model step (no hard owner rule, no rule flag, a
   user request, declarations, and no active remembered pattern), the broker starts the
   candidate call on its own thread before it asks the active model. The broker decides
@@ -318,7 +318,7 @@ with version 8 data) and `a_failed_migration_from_version_8_keeps_the_old_versio
 
 ## 10. Promotion and rollback
 
-- "Promote" in the Learning tab is on only when the shadow gate passes. The owner check
+- "Promote" in Settings > Bouncer > Calibration and learning is on only when the shadow gate passes. The owner check
   is `OwnerAction::PromoteModel { candidate_id, version }`: Touch ID or the passphrase
   now, for this candidate and this version, in this vault session.
 - `shadow::promote` checks the proof and checks that the candidate is in shadow mode.
@@ -342,7 +342,7 @@ with version 8 data) and `a_failed_migration_from_version_8_keeps_the_old_versio
 | Promoted at exactly 100 decisions, 95 agreed, and 0 allowed denials. The activity log has the entry. The next run uses the candidate, and its note names the candidate version | same test |
 | A promoted model is pinned to its version | `a_promoted_model_is_pinned_to_its_version`, `a_pinned_client_accepts_only_its_model_version` (`src/broker/bouncer.rs`) |
 | A rollback needs the owner check, returns to the default model, writes the activity entry, and works once | `rollback_returns_to_the_previous_model_and_needs_the_owner_check` |
-| In the Learning tab, a wrong passphrase promotes and rolls back nothing | `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`) |
+| In Settings > Bouncer > Calibration and learning, a wrong passphrase promotes and rolls back nothing | `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`) |
 | Each threshold of ADR 0010 has a refusal text | `promotion_refusal_names_each_failed_threshold` (`src/broker/shadow.rs`) |
 
 ## 11. Measurements on this Mac (2026-09-26)

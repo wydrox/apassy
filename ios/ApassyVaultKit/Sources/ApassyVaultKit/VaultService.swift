@@ -37,6 +37,22 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case exists
         /// A passkey key that is not a P-256 PKCS#8 key.
         case badKey = "bad_key"
+        // Questions through the relay (section 5.10).
+        /// The vault has no questions team.
+        case noQuestions = "no_questions"
+        /// This iPhone has no `trusted_device` row or answer key in the vault yet, or its key changed.
+        case notRegistered = "not_registered"
+        /// The vault row of this iPhone has another answer key (for example after a Face ID change).
+        case answerKeyChanged = "answer_key_changed"
+        /// The card did not pass a check; the message says what to do.
+        case unreadable
+        case alreadyAnswered = "already_answered"
+        case expired
+        case notRouted = "not_routed"
+        case tooManyAnswers = "too_many_answers"
+        /// The time of the answer is too old to send again: answer again.
+        case staleAnswer = "stale_answer"
+        case pushUnavailable = "push_unavailable"
     }
 
     public var code: Code
@@ -84,7 +100,8 @@ public protocol VaultService: Sendable {
 
     // 5.2 Joining a vault
     /// `deviceName`: the name that the Mac shows for this iPhone.
-    func joinStart(link: String, deviceName: String) async throws -> JoinInfo
+    /// `answerKey`: the Secure Enclave answer key of this iPhone (X9.63) for the Mac that confirms.
+    func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo
     func joinPoll() async throws -> JoinInfo
     func joinCancel() async throws
     func joinFinish(passphrase: String) async throws -> VaultEntry
@@ -135,6 +152,52 @@ public protocol VaultService: Sendable {
     /// The app only, after the owner check: what Apple's credential exchange hands to another
     /// app, passkey keys included. Never written to a file.
     func credentialExport() async throws -> CredentialExport
+
+    // 5.10 Questions through the relay (contract relay-questions-v1). The app only.
+    func questionsList() async throws -> QuestionsList
+    /// True when the relay has new or changed questions (a long poll of at most 25 s).
+    func questionsWait(timeout: Int) async throws -> Bool
+    func questionOpen(qid: String) async throws -> RemoteQuestion
+    /// The exact answer string and its time, to sign with the answer key after Face ID.
+    func questionAnswerString(qid: String, answer: RemoteAnswer) async throws -> PreparedAnswer
+    /// Seal and post an answer. `signature` (DER, by the answer key) for an answer that needs Face
+    /// ID; nil for the others, which the core signs with the relay key of this iPhone.
+    func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws -> SentAnswer
+    /// Check that the vault row of this iPhone has this Secure Enclave answer key (X9.63). It writes
+    /// nothing: the Mac that confirmed the join writes the row.
+    func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration
+    func pushTokenSet(token: Data, environment: PushEnvironment) async throws
+    func pushTokenClear() async throws
+    /// Join the notifications-only team of the selected vault with the device link of the Mac.
+    /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
+    func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo
+    func joinAttachPoll() async throws -> AttachInfo
+    func joinAttachCancel() async throws
+
+    // 5.11 Folders, adding by paste, and the options of a credential. The app syncs after each
+    // change, as after `save`.
+    /// The folders, depth first. The AutoFill extension may read them.
+    func folders() async throws -> [Folder]
+    /// A folder in `parent` (nil: the top level). `exists` when a sibling has the name.
+    func createFolder(parent: String?, name: String) async throws -> Folder
+    func renameFolder(uuid: String, name: String) async throws
+    /// Move a folder with its subfolders and credentials into `parent` (nil: the top level).
+    func moveFolder(uuid: String, parent: String?) async throws
+    /// Delete a folder. Its credentials and subfolders go to its parent. Returns the count of
+    /// credentials that moved. No credential is deleted.
+    func deleteFolder(uuid: String) async throws -> Int
+    /// Put a credential in `folder` (nil: the top level).
+    func setItemFolder(id: UInt64, folder: String?) async throws
+    /// The credentials of a paste, without a secret value (a secret field has a masked preview).
+    func detect(text: String) async throws -> [DetectedCredential]
+    /// Detect `text` again in the core and add the picked rows (`pick`: indexes of `detect`; nil:
+    /// all) to `folder` in one transaction. `titles`: a typed title for some rows, by index.
+    func addPasted(text: String, folder: String?, pick: [Int]?, titles: [Int: String]) async throws
+        -> [PastedItem]
+    /// "Always ask me" and the environment, with the owner as its source. The core does not check
+    /// the owner: ask for Face ID first when turning "Always ask me" off or choosing an
+    /// environment other than production, as the Mac does.
+    func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws
 }
 
 public extension VaultService {
@@ -170,5 +233,45 @@ public extension VaultService {
 
     func credentialExport() async throws -> CredentialExport {
         throw VaultError(.notAllowed, "This vault cannot export.")
+    }
+
+    // An older service has no folders and no paste detection. The app must not offer them then.
+
+    func folders() async throws -> [Folder] {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func createFolder(parent: String?, name: String) async throws -> Folder {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func renameFolder(uuid: String, name: String) async throws {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func moveFolder(uuid: String, parent: String?) async throws {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func deleteFolder(uuid: String) async throws -> Int {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func setItemFolder(id: UInt64, folder: String?) async throws {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func detect(text: String) async throws -> [DetectedCredential] {
+        throw VaultError(.notAllowed, "This vault cannot add a pasted credential. Update Apassy.")
+    }
+
+    func addPasted(text: String, folder: String?, pick: [Int]?, titles: [Int: String]) async throws
+        -> [PastedItem]
+    {
+        throw VaultError(.notAllowed, "This vault cannot add a pasted credential. Update Apassy.")
+    }
+
+    func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
+        throw VaultError(.notAllowed, "This vault cannot change the options of a credential. Update Apassy.")
     }
 }

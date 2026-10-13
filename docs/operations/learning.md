@@ -1,13 +1,13 @@
 # Learning: decision log, remembered patterns, and calibration
 
-Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md). Goal items: B3, B5, B10, and the wait record of N3.
+Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [ADR 0025](../adr/0025-low-friction-access.md) (answers, history, and the new order, section 3a). Goal items: B3, B5, B10, and the wait record of N3.
 
 Apassy learns from the owner decisions in two ways:
 
 - A remembered pattern lets a command that the owner approved 3 times run without a prompt (ADR 0009 step 1).
 - A calibration lowers the `task_match` level of the model step when the decision log supports it (ADR 0009 step 3).
 
-Both act only at the model step. They never change a hard rule, the production rule, a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
+Both act only at the model step. They never change a hard rule, the production rule (a production item without an owner allowance), a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
 
 A third way is a local fine-tune of the model (ADR 0009 step 5c, goal item B9). The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
 
@@ -22,6 +22,7 @@ The broker stores one entry for each decision in the encrypted vault (schema 7, 
 | A hard rule or a request check denies the request | `rule` | `deny` | no |
 | The model allows the run | `model` | `allow` | no |
 | An active remembered pattern allows the run | `pattern` | `allow` | no |
+| A remembered answer of the owner allows the run (`Outcome::Remembered`, section 3a) | `answer` (stored as `owner` with `asked` = no) | `allow` | no |
 | The owner approves or denies | `owner` | `allow` or `deny` | yes |
 | The owner does not answer in time, or a lock ends the wait | `no_answer` | `deny` | yes |
 
@@ -79,24 +80,24 @@ Examples:
 - Limits: 1,000 learning and active patterns. When the list is full, the least recently used learning pattern goes. When all are active, Apassy does not store a new pattern. 5,000 blocked patterns; at the limit, the oldest block goes.
 - A revoke of the agent, a delete of an item, and a restore remove the patterns.
 
-### The approval card
+### How a pattern is taught
 
-The card offers "Approve and remember" only for a run that can teach a pattern: no production item, no rule flag, a user request, a declaration for each item, a grant in "bouncer" mode, and no block. The card shows the pattern and its approvals, for example `Pattern: sh -c './report.sh --limit <number>' (1 of 3 approvals)`.
+Since 0.5.0 the question card in Decisions does not offer "Approve and remember". Its remembered answer is "Allow ACTION in PROJECT" (section 3a). Only the command line still teaches a pattern: `apassy runs approve ID --remember` ([command line](cli.md), section 6). It works only for a run that can teach a pattern: no production item, no rule flag, a user request, a declaration for each item, no item that always asks ("Always ask me" or "Always ask for this agent"), and no block. Otherwise the command line answers "This run cannot teach a pattern. Approve it once without --remember."
 
-"Approve and remember" is an approval. It uses the owner check of goal item A4 and the queue path of "Approve once":
+"Approve and remember" is an approval. It uses the owner check of goal item A4 and the queue path of "Allow Once":
 
-1. `DesktopApp::ask_owner(OwnerRequest::ApproveAndRemember(run))` in `src/desktop/ui.rs` (`agents_view::draw_approvals`).
+1. `Command::RunApprove { remember: true }` in `src/desktop/owner_cli.rs` asks for `OwnerRequest::ApproveAndRemember(run)`.
 2. `OwnerGate::authorize(OwnerAction::ApproveAndRemember(run), check)`: Touch ID or the passphrase now.
 3. `ApprovalQueue::approve(proof)` in `src/broker/approvals.rs`. The queue refuses it for a run without a pattern offer (`ApprovalRefusal::NothingToRemember`). The run ends with `ApprovedAndRemembered`.
 4. The broker adds the approval after it checks the vault, the agent, and the rules again, in the same vault session (`learning::remember` in `src/broker/run.rs`).
 
-A denial needs no owner check. Remove a pattern in the Learning view. A removal makes the policy stricter, so it needs no owner check.
+A denial needs no owner check. Remove a pattern with `apassy pattern remove ID` (`apassy pattern list` shows the IDs). The app has no list of patterns since 0.5.0. A removal makes the policy stricter, so it needs no owner check.
 
 Tests: `approve_and_remember_three_times_then_the_pattern_runs_without_a_prompt` and `one_denial_blocks_the_pattern` (`tests/learning.rs`) run the broker. `approve_and_remember_and_calibration_need_the_owner_check` (`src/desktop/ui/owner_tests.rs`) shows that a wrong passphrase approves nothing and the right one gives `ApprovedAndRemembered`. `approve_and_remember_with_an_offer` and `approve_refuses_without_a_matching_fresh_proof` (`src/broker/approvals.rs`) test the queue.
 
 ## 3. Place in the decision order
 
-See [the bouncer](bouncer.md), section 3, step 4a. A pattern replaces only the model step. Tests:
+See [the bouncer](bouncer.md), section 3, step 4a, and section 3.0, step 6 (ADR 0025). A pattern replaces only the model step. Tests:
 
 | What must not change | Test |
 | --- | --- |
@@ -105,7 +106,19 @@ See [the bouncer](bouncer.md), section 3, step 4a. A pattern replaces only the m
 | Rule flag (command analysis) | same two tests |
 | Missing user request | same two tests |
 | Missing declaration | same two tests |
-| A grant in "ask" mode | `decision_log_and_export_have_no_secret_values` (no offer, the owner decides) |
+| "Always ask for this agent" (a grant in "ask" mode before 0.5.0) | `an_active_pattern_never_overrides_the_earlier_steps`; `decision_log_and_export_have_no_secret_values` (no offer, the owner decides) |
+
+## 3a. Answers, history, and patterns (ADR 0025)
+
+ADR 0025 adds two more ways to run without a question. They are not patterns, and they do not use the pattern table. The full order is in [the bouncer](bouncer.md), section 3.0.
+
+- **Remembered answer.** The owner answers a question with "Allow ACTION in PROJECT", or with "Allow production for PROJECT: ACTION". Apassy stores the answer for the item, the project, and the kind of action, for all agents (`src/vault/answers.rs`, table `owner_answer`). A later run with the same item, project, and kind of action starts without a question. This step comes before the check of the user request and the pattern. For a production item, only a production allowance counts. The decision log gets an entry with `decided_by` = `answer` (`DecidedBy::Answer`, `Outcome::Remembered`). The column of schema 7 has no `answer`, so the row stores `owner` with `asked` = no; no other entry has this pair, and a read gives `answer` again. The entry has no owner check of its own, and the owner did not see this run: it is no owner label, so a calibration and a fine-tune skip it. The answer fits a run only when each destination host of the run is a host of the answer or a known host of the item, and for a production item only when the rules are certain of the kind of action. A restore removes every answer, production allowances included. Removing an answer makes the bouncer stricter and needs no owner check.
+- **History.** Apassy counts a use of an item in a project with a kind of action as history when the bouncer allowed it (not a pattern, not the owner), the same agent made it, that agent is still connected, and the use came after the last change that made the declaration of the item stricter. A new agent has no history. A restore revokes every agent, so a restored log never counts. History is checked after the remembered pattern and after the check of a default declaration. History never starts a run: an item with history goes to the model, and an item without it asks the owner unless its declaration is development (or local) with low risk. The history never makes a production allowance, and it does not replace the hard rules.
+- **Pattern.** It still needs 3 approvals of the same generalized command (section 2). It is checked after the remembered answer and the check of the user request and the declaration, and before the check of a default declaration, the history, and the model.
+
+A pattern knows a command. An answer and history know an item, a project, and a kind of action. So an answer or history can start a new command of a known kind that no pattern knows. They cannot change a hard rule, a rule flag, a production item without an allowance, "Always ask me", or an exception of the agent.
+
+The use log (`item_use`) records every decided use of every item, whoever decided: `bouncer`, `pattern`, `answer`, `owner`, or `rule`. It is separate from the decision log. It has no secret value.
 
 ## 4. Threshold calibration (goal item B5)
 
@@ -121,19 +134,18 @@ Proposal:
 4. The held-out part gives the ask rate now and with the proposal, and the misses: owner denials that the proposal allows.
 5. The gate: a replay on all past decisions. The proposal is valid only if it allows no request that the owner denied.
 
-Apply: the owner clicks "Apply" in the Learning view. This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
+Apply: in Settings > Bouncer, the owner opens "Calibration and models" under "Calibration and learning", clicks "Compute a proposal", then "Apply N%". This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
 
 Test: `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it` (`tests/learning.rs`). The owner approves 45 general requests at `task_match` 0.7 and denies 5 at 0.3. The proposal is 0.7, the held-out misses are 0, and the held-out ask rate falls. Before the owner applies it, the broker asks for a request at 0.7. After, the model allows it. A production item still waits. A new owner denial at 0.72 makes the same level invalid, and `apply` refuses it.
 
 ## 5. Visibility (goal item B10)
 
-The Learning view in the app (`src/desktop/learning_ui.rs`) shows:
+Since 0.5.0 the Learning view is not in the window ([ADR 0026](../adr/0026-simple-app.md) §2). The line under the Decisions title counts how often Apassy asked you this week. Settings > Bouncer > Calibration and learning (`settings_panel` in `src/desktop/learning_ui.rs`) shows:
 
-- The ask rate per UTC day for 14 days: requests that reached the bouncer, asked, allowed by the model, allowed by a pattern. Rule denials do not count.
-- The automatic decisions (model or pattern), newest first. "Inspect" shows each stored field of one decision.
-- The remembered patterns: pattern, agent, project, items, state (learning with its approvals, active, blocked, or expired), and runs. "Remove" removes one.
-- The calibration: the active level, "Compute a proposal", the replay numbers, "Apply", and "Back to the default (75%)".
-- The candidate model card (goal items B9 and B10). [The fine-tune](fine-tune.md), sections 6 to 10, describes the pipeline.
+- "Ran without you": the runs of this week that the model or a pattern allowed.
+- "Remembered patterns": the number of active patterns and of patterns that still learn. `apassy pattern list` lists each pattern with its state (learning with its approvals, active, blocked, or expired) and runs. `apassy pattern remove ID` removes one.
+- The disclosure "Calibration and models" has the calibration ("Threshold calibration"): the active level, "Compute a proposal", the replay numbers, "Apply N%", and "Back to the default (75%)".
+- The same disclosure has the candidate model card ("Candidate model", goal items B9 and B10). [The fine-tune](fine-tune.md), sections 6 to 10, describes the pipeline.
   - Without a candidate: "No candidate model."
   - With a candidate in shadow mode: its version, the shadow decisions (owner decisions that the candidate also answered), the agreement with the owner, the owner denials that the candidate would allow, the requests in shadow mode, the requests without a candidate answer, the requests with the same outcome as the active model, and the command that starts the candidate server.
   - "Promote" is on only when the shadow gate passes: 100 or more shadow decisions, 95% or more agreement, and no owner denial that the candidate would allow (`CandidateAgreement::can_promote`, ADR 0010). Otherwise the card names each threshold that fails. "Promote" needs the owner check (`OwnerAction::PromoteModel`).
@@ -144,11 +156,11 @@ Measured on this Mac with a candidate from 300 synthetic owner decisions: 46 of 
 
 The data shape is `vault::CandidateAgreement`: model version, start time, shadow decisions, agreements, and owner denials that the candidate would allow. `Vault::shadow_summary` computes it from the shadow rows of schema 9. An agreement is a candidate "run" of an owner approval, or a candidate "ask" of an owner denial. A candidate "ask" of an owner approval is a disagreement. A candidate "run" of an owner denial is a disagreement and an allowed denial.
 
-Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`, `candidate_card_says_no_candidate_until_shadow_mode`, `training_card_shows_the_gate_and_the_active_model`, and `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`), `shadow_summary_counts_agreement_with_the_owner` (`src/vault/candidate.rs`). The view has no GUI check on a real screen.
+Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`, `candidate_card_says_no_candidate_until_shadow_mode`, `training_card_shows_the_gate_and_the_active_model`, and `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`), `shadow_summary_counts_agreement_with_the_owner` (`src/vault/candidate.rs`). `the_settings_panel_shows_the_week_and_the_calibration` (`src/desktop/learning_ui.rs`) draws the panel of Settings > Bouncer; the first test still draws the old view, which the window no longer opens. The panel has no GUI check on a real screen.
 
 ## 6. Export for fine-tuning
 
-`Vault::export_decisions_jsonl` returns all decisions as JSON Lines, oldest first. The app has no export button. The output has real commands and user requests, so keep it on this computer and delete it after training.
+`Vault::export_decisions_jsonl` returns all decisions as JSON Lines, oldest first. The app has no export button; `apassy decisions export --output FILE` writes it ([command line](cli.md), section 6). The output has real commands and user requests, so keep it on this computer and delete it after training.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -167,13 +179,14 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`,
 | `rule_flags` | array of string | Flags of the command analysis |
 | `model_facts` | object | Model answers by name, each a probability. Empty when the model did not answer |
 | `decision` | string | `allow` or `deny` |
-| `decided_by` | string | `rule`, `model`, `pattern`, `owner`, or `no_answer` |
-| `remembered` | boolean | The owner used "Approve and remember" |
+| `decided_by` | string | `rule`, `model`, `pattern`, `owner`, `answer`, or `no_answer` |
+| `asked` | boolean | The request waited for the owner |
+| `remembered` | boolean | The owner used "Approve and remember" (since 0.5.0 only `apassy runs approve --remember`) |
 | `model_version` | string, optional | The version of the model that answered, for example `apassy-base-v1+1a2b3c4d` or `laya-rl-agent`. Only when the model answered with a version. Added on 2026-10-07; older lines and readers without it stay valid |
 
-The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. The Learning view shows it in "Policy".
+The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. Since 0.5.0 the app does not show the policy text; the export gives the version in `model_version`.
 
-The owner labels are the lines with `decided_by` = `owner`. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
+The owner labels are the lines with `decided_by` = `owner` and `asked` = true. A line of a remembered answer (section 3a) has `decided_by` = `answer` and `asked` = false: the owner did not see that run, so the fine-tune and its gate skip it (`broker::finetune`). An export of an older Apassy has no `asked` field. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
 
 The local fine-tune (goal item B9) reads this export. `broker::finetune::examples_from_export` turns it into training examples. The label mapping is in [the fine-tune](fine-tune.md), section 6.2.
 
@@ -285,7 +298,7 @@ Code: `src/vault/waiting.rs`, `src/broker/run.rs`, `src/desktop/owner_store.rs` 
 
 - The broker stores a wait record (table `waiting_run`) before a run waits for the owner, and removes it when the wait ends. The record has the agent, the item, the operation label, and the purpose. It has no secret value.
 - A lock or a quit of the app turns every record into one activity entry (`ENDED_BY_LOCK`, `ENDED_BY_QUIT`).
-- A crash or `kill -9` leaves the record. The next unlock turns it into an activity entry that starts with "Ended by restart". The inbox shows it as "Approval ended without a run".
+- A crash or `kill -9` leaves the record. The next unlock turns it into an activity entry that starts with "Ended by restart". `apassy activity` shows it.
 - A broker thread that still waits holds a ticket in this process. The unlock skips a record with a ticket, and the thread writes its own entry. So a run gets one entry, also after a fast lock and unlock.
 
 Tests: `a_run_that_waits_during_a_crash_is_in_the_inbox_after_a_restart` and `a_quit_records_a_waiting_run_once` (`tests/waiting_restart.rs`), `an_unlock_ends_only_records_without_a_ticket` (`src/vault/waiting.rs`), and `approval_before_lock_is_not_valid_after_unlock` (`tests/agent_run.rs`). The crash test drops the vault and the broker state with no lock, no quit, and no final entry. This leaves the vault file as `kill -9` does.

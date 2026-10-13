@@ -13,8 +13,9 @@
     "not_found_handling": "404-page",
     "run_worker_first": ["/download", "/download/*", "/latest.json"]
   },
-  // The release workflow (.github/workflows/release.yml) puts Apassy.dmg and
-  // latest.json here after each green CI run on main.
+  // The release workflow (.github/workflows/release.yml) puts Apassy-<version>.dmg,
+  // the same image as Apassy.dmg (for apps before 0.5.0), and latest.json here
+  // after each green CI run on main that names a released version.
   "r2_buckets": [{ "binding": "DOWNLOADS", "bucket_name": "apassy-downloads" }],
   "routes": [{ "pattern": "apassy.wyderka.cc", "custom_domain": true }],
   "workers_dev": false,

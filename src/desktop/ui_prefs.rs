@@ -13,14 +13,16 @@ use serde::{Deserialize, Serialize};
 /// The largest `ui.json` that the app reads.
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 
-/// The content of `ui.json`. A missing field takes its default.
+/// The content of `ui.json`. A missing field takes its default; an unknown field, like
+/// `get_started_hidden` of the "Get started" list before 0.5.0, is ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct UiPrefs {
-    /// The owner hid the sidebar.
+    /// The owner collapsed the sidebar to its icons.
     pub(crate) sidebar_hidden: bool,
-    /// The list IDs of the vaults where the owner hid the "Get started" list.
-    pub(crate) get_started_hidden: BTreeSet<String>,
+    /// The folders whose subfolders the sidebar shows, by UUID. A folder UUID is
+    /// random and the same on each Mac that syncs the vault.
+    pub(crate) open_folders: BTreeSet<String>,
 }
 
 impl UiPrefs {
@@ -89,7 +91,32 @@ mod tests {
         // A missing field takes its default.
         fs::write(&path, br#"{"sidebar_hidden": true}"#).expect("write");
         let prefs = UiPrefs::load(&path);
-        assert!(prefs.sidebar_hidden && prefs.get_started_hidden.is_empty());
+        assert!(prefs.sidebar_hidden && prefs.open_folders.is_empty());
+    }
+
+    /// A file from before 0.5.0 has the vaults where the owner hid "Get started". It
+    /// still loads, and the next save drops that field.
+    #[test]
+    fn a_file_with_the_old_get_started_field_still_loads() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = UiPrefs::path(dir.path());
+        fs::write(
+            &path,
+            br#"{"sidebar_hidden": true, "get_started_hidden": ["vault-a", "vault-b"], "open_folders": ["folder-1"]}"#,
+        )
+        .expect("write");
+        let prefs = UiPrefs::load(&path);
+        assert_eq!(
+            prefs,
+            UiPrefs {
+                sidebar_hidden: true,
+                open_folders: ["folder-1".to_owned()].into(),
+            }
+        );
+        prefs.save(&path).expect("save");
+        let saved = fs::read_to_string(&path).expect("read");
+        assert!(!saved.contains("get_started_hidden"), "{saved}");
+        assert_eq!(UiPrefs::load(&path), prefs);
     }
 
     #[test]
@@ -98,7 +125,7 @@ mod tests {
         let path = dir.path().join("data").join("ui.json");
         let prefs = UiPrefs {
             sidebar_hidden: true,
-            get_started_hidden: ["vault-a".to_owned(), "vault-b".to_owned()].into(),
+            open_folders: ["folder-1".to_owned()].into(),
         };
         prefs.save(&path).expect("save");
         assert_eq!(UiPrefs::load(&path), prefs);
@@ -138,6 +165,19 @@ mod tests {
 
         next.ui.toggle_sidebar();
         assert!(!UiPrefs::load(&path).sidebar_hidden);
+
+        // An open folder stays open after a restart; the narrow-window float does not
+        // touch the file.
+        next.ui.toggle_folder("folder-a");
+        assert!(UiPrefs::load(&path).open_folders.contains("folder-a"));
+        next.ui.toggle_sidebar_in(true);
+        assert!(next.ui.sidebar_float);
+        assert!(!UiPrefs::load(&path).sidebar_hidden);
+        let mut third = crate::desktop::DesktopApp::new();
+        third.ui.load_prefs(dir.path().to_path_buf());
+        assert!(third.ui.open_folders.contains("folder-a"));
+        third.ui.toggle_folder("folder-a");
+        assert!(UiPrefs::load(&path).open_folders.is_empty());
     }
 
     #[test]

@@ -25,7 +25,7 @@ If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run
 
 ### Install from Apassy
 
-You do not need Terminal for these commands. In Settings > Agents > Broker and bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
+You do not need Terminal for these commands. In Settings > Bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
 
 - Apassy runs the same `uv` commands: `uv venv --python 3.12 .venv` (only when `.venv/bin/python` is missing, with `--clear` when `.venv` exists without it), `uv pip install --python .venv/bin/python "laya[serve]==0.3.20"`, and `uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt`. The requirements come from `Apassy.app/Contents/Resources/tools/basemodel`, or from the repository when Apassy runs from `target/`.
 - The last step, "Downloading the model weights", runs `.venv/bin/python -B tools/basemodel/fetch_weights.py`. It downloads the pinned base weights (about 800 MB) into the Hugging Face cache of the user, so the first start of the server does not wait for them. Weights that are already there are not downloaded again. `-B`, and the scripts themselves, write no `__pycache__` next to the scripts: in `Apassy.app` it would break the code signature.
@@ -40,12 +40,12 @@ You do not need Terminal for these commands. In Settings > Agents > Broker and b
 
 ### Start from Apassy
 
-Settings > Agents > Broker and bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
+Settings > Bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
 - **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
 - **Managed outside Apassy**: Apassy starts and stops nothing. It only uses the address.
-- **Off**: the broker asks no model. Every run that needs it waits for you. The log and the approval card say "The bouncer is off in Settings."
+- **Off**: the broker asks no model. Every run that needs it waits for you. The log and the question say "The bouncer is off in Settings."
 
 Apassy runs `/bin/bash tools/basemodel/start.sh` from `Apassy.app/Contents/Resources`, or from the repository when it runs from `target/`. It sets `LAYA_HOST=127.0.0.1`, `LAYA_PORT` from the address, `APASSY_LAYA_DIR`, and `APASSY_BASE_MODEL` only when it finds a checkpoint. Without a checkpoint the model is zero-shot. The server gets its own process group. Stop sends SIGTERM, then SIGKILL after 5 seconds. The output goes to `~/Library/Logs/Apassy/bouncer.log`. "Open log" opens it.
 
@@ -53,7 +53,7 @@ Without the base weights in the Hugging Face cache, the first start downloads th
 
 - The status says "Starting (downloading the model weights, first start only)".
 - The server has 30 minutes to answer, not 180 seconds.
-- In "When a run needs it", the run waits up to 45 seconds, not 25. With the 120 seconds that a run waits for you, the run ends within the 180-second tool time-out of `apassy setup` (`MCP_TOOL_TIMEOUT=180000`, `tool_timeout_sec = 180`). If the server still starts, the run waits for you with the reason "The model server downloads the model weights (first start only). This run waits for you. Later runs use the model." The download goes on. Later runs do not wait for it again: they wait for you with the same reason until the server answers.
+- In "When a run needs it", the run waits up to 45 seconds, not 25. A question waits for you up to 300 seconds (ADR 0025). The tool time-out of `apassy setup` is 330 seconds (`MCP_TOOL_TIMEOUT=330000`, `tool_timeout_sec = 330`), longer than that wait. If the host ends the call first, the agent calls again with the same request and it joins the waiting question. If the server still starts, the run waits for you with the reason "The model server downloads the model weights (first start only). This run waits for you. Later runs use the model." The download goes on. Later runs do not wait for it again: they wait for you with the same reason until the server answers.
 
 "Start now" shows only when the server can start. While the start script or the Laya environment is missing ("Cannot start"), the section has no "Start now", and the rows below the status name what is missing.
 
@@ -87,20 +87,35 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
 - Without a checkpoint, it starts the stock `laya-serve` (zero-shot). Each answer then has `laya-rl-agent` in the `model` field.
 - The activity log shows the version after the model answers, for example `task_match 91%, writes 4%. Model: apassy-base-v1+1a2b3c4d`.
 
-## 2. Set a rule
+## 2. Rules
 
-In Agents, open an agent. Under "Process access", click the credential:
-
-1. Type the project folder. Under "Decision", select "Bouncer decides". Click "Save".
-2. Open the sheet again. Open "Rule". Type the permitted command prefixes, one per line, for example `npm test` and `npm run migrate`.
-3. Optional: forbidden words, an expiry in hours, a limit of runs per hour, and your instruction in plain words.
-4. Click "Save rule".
-
-The bouncer decides only if the rule has command prefixes. Without prefixes, every run waits for you.
+Since 0.5.0 there is no rule to set for an agent and a credential ([ADR 0025](../adr/0025-low-friction-access.md)). The broker does not read process grants and their rules; the upgrade turned a grant with a rule into "Always ask for this agent" (section 3.0). To make a credential stricter, turn on "Always ask me" on its page. To make one agent stricter, answer a question with "Never for AGENT" ("Not for this agent") or "Always Ask for AGENT" ("Always ask for this agent") in its "⋯" menu. Your answers ("Allow ACTION in PROJECT") are the rules that the bouncer remembers; the page of the credential lists them under "Rules from your answers".
 
 ## 3. Decision order
 
-Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
+### 3.0 Order of the broker (ADR 0025)
+
+A process grant is no longer the authority for a run, and the broker does not read it: the upgrade to schema 18 turned each grant that asked, or that had a rule or an instruction, into "Always ask for this agent". A connected agent can use every item that is not archived, unless an exception hides it ("Not for this agent" gives `not_granted`; "Only these items" limits the agent to its list; "Always ask for this agent" asks at each use). After the checks of the request, the broker decides in this order (`src/broker/run.rs`, step 6). The first step that applies decides.
+
+1. Hard rules and security vetoes ask the owner, whatever was remembered: a rule flag of the command analysis (for example `secret_output`, `foreign_host`, a production word); a database host from the command (`db_host_from_command`) that is not a known host of the items (provider hosts, placeholder hosts, the `host` field); "Always ask me" of the item or "Always ask for this agent"; and a production item without a production allowance that fits the run. Production here means production from the owner, a value signal, or usage. An allowance fits when it is for the item, the project, and the kind of action, the rules are certain of that kind (`action_kind::classify_certain`: `./ship.sh` or `sh -c ...` is never certain), and each destination host of the run is a host of the allowance or a known host of the item.
+2. No running bouncer: the run asks the owner. Every remembered route below needs it.
+3. The working directory is no project (the root, the home folder, or a parent of them): the run asks the owner. Nothing can be remembered there.
+4. An item that is production only by default (source `default`, no signal) is unconfirmed: its first use in the project with a kind of action asks the owner. The question offers "Development" or "Production" to correct it. The answer is remembered as a normal project answer, not as a production allowance.
+5. A remembered answer of the owner fits each item: for the item, the project, and the kind of action (for a production item: a production allowance), with each destination host of the run among the hosts of the answer or the known hosts of the item, and for a production item (also an unconfirmed one) with a certain kind of action. The run starts. An answer that exists but does not cover the run (another host, a kind that the rules are not sure of) asks the owner.
+6. An item whose declaration names another project (a non-empty project that is not the label, the folder, or the path of this project) asks the owner. An answer of the owner for this project (step 5) covers it.
+7. A missing user request or a missing declaration asks the owner.
+8. An active remembered pattern starts the run (see [learning](learning.md)). A pattern belongs to the project key, so all worktrees of a repository share it.
+9. A declaration value for `environment` or `risk` that comes only from the source `default` asks the owner. A weak signal makes the bouncer stricter.
+10. An item that this agent did not use in this project with this kind of action asks the owner, unless its declaration is development (or local) with low risk. A use counts as history when the bouncer allowed it, the same agent made it while it is still connected, and it came after the last change that made the declaration of the item stricter (an environment nearer to production, a higher risk, a wider scope, or a less reversible action). A new agent has no history.
+11. The model decides (contract v7, the list below). History never starts a run by itself: it only lets the run reach the model. An unclear answer asks the owner.
+
+A question waits up to 300 seconds (5 minutes). It names the answers that can take effect (`QuestionInfo::valid_answers`): "Allow once", "Not for this agent", "Always ask for this agent", "Disconnect the agent", and, only when the answer can work later, "Allow ACTION in PROJECT" (remembered for all agents) or "Allow production: ACTION in PROJECT". Neither is offered without a project, without a running bouncer, with a rule flag, for an item with "Always ask me", or for a production item when the rules are not certain of the kind of action. "Development" or "Production" is offered for an unconfirmed item. The queue refuses a remembered answer that the question does not offer. A remembered answer keeps the destination hosts of its run and the known hosts of the items. "Allow ACTION in PROJECT" for a run with a production item that already has its allowance saves the other items and skips that one. See [the agent path](agent-path.md), section 8d. A model, a pattern, and the usage log never write an answer and never make a production allowance. A restore removes all answers. The history of agents that a restore revoked does not count.
+
+A connector use (`apassy_use_credential`) keeps the standing rules: "Not for this agent" and "Only these items" refuse (`not_granted`), and "Always ask me", "Always ask for this agent", and a production declaration ask the owner as a question of the agent. A connector use has no project, so no production allowance covers it. The model does not decide a connector use: the operation is a fixed read of its profile that the owner set up with an owner check.
+
+The list below is the detail of the model step (step 11) and of the rules before it. Its step 2 now has the exception of an owner allowance, and its steps 4 and 4a come in the order above. Since 0.5.0 a run has no grant rule and no owner instruction, so step 1 and the `rule_break` check never apply to a run, and "Always ask me" or "Always ask for this agent" takes the place of a grant in "ask" mode.
+
+Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
 
 Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes steps 6 and 7:
 
@@ -108,7 +123,7 @@ Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes st
 - **A known write is never a certain read.** The packs list the write commands of known tools (`writes`, for example `gh pr comment`, `gh issue close`, `git push`, SQL `INSERT`). For such a command the model's `writes` answer does not replace `task_match`, and a high-risk or irreversible declaration always asks. On held-out v3 the base model gave `writes` 0.08 and 0.10 to `gh pr comment` and `gh issue close`.
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
-2. Production rule (ADR 0010). If an item in the run has a production declaration, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
+2. Production rule (ADR 0010, ADR 0025). If an item in the run has a production declaration and the owner has no production allowance for the item, the project, and the kind of action, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
 3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program and general rules give flags: `secret_output`, `data_loss`, `irreversible`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. The analysis looks for injection phrases in the purpose and in the user request (version 5). A flag always asks the owner. The broker does not call the model. Dev round 4 added `secret_output` for debug and trace settings with a bound secret (`TF_LOG=TRACE`, Git trace variables, `NODE_DEBUG=http`, `DEBUG=*`, `aws --debug`, `gcloud --log-http`, `az --debug`, `kubectl -v=8`, `ansible -vvv`, `bash -x`, and others), and for more secret value reads (`kubectl get secret ... --template`, `helm status -o json`, `aws ecr get-login-password`). See [rule-packs.md](rule-packs.md).
 4. A missing user request or a missing declaration asks the owner.
 4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
@@ -126,7 +141,7 @@ A known command (`Analysis::known_command`) is a command that the built-in packs
 
 So unknown programs, project scripts, package scripts, make targets, `cargo run`, `go run`, `dotnet run`, custom framework subcommands (`php artisan app:repair-ledgers`, `mix run x.exs`, `python manage.py custom`), API writes, account-wide access reads, and reads of contact or payment data of people always need `task_match`. A known write (`Analysis::known_write`) can be a known command (`git push`), but it also always needs `task_match`. The decision log does not record `known_command` and `known_write`. A calibration replay (`src/broker/calibration.rs`) reads `known_command` as false, so its task match step is never less strict than the policy. It reads `known_write` as false and uses the model's `writes` answer for a high-risk or irreversible declaration, as version 6 did. That check does not depend on the level, so it changes the replay at the old and at the new level in the same way.
 7. Veto: `destroy` at or above 0.9 for a command that is not known safe. A calibration does not change the veto. The `rule_break` veto of version 6 is now a needed answer in step 6.
-8. If every needed answer is certain and no veto applies, the run starts without a prompt. A grant in "ask" mode always waits for the owner, also with an active pattern.
+8. If every needed answer is certain and no veto applies, the run starts without a prompt. "Always ask me" and "Always ask for this agent" always wait for the owner, also with an active pattern (section 3.0, step 1).
 
 Each decision goes to the decision log in the vault. An owner denial blocks the pattern of the request.
 
@@ -238,7 +253,7 @@ A usage request (`--help`, `--version`) is known safe only for known command lin
 
 After the blind v4 result, v1 to v4 and the fixtures are development sets. This round closes general gaps of the v4 report: debug and trace settings that print secrets, secret values against names, and reads of personal data. The decision code (`src/broker/bouncer.rs`) and the thresholds do not change. The base model still runs 0 violations and 0 critical cases on all five sets. See [dev-round4.md](../evaluation/dev-round4.md).
 
-The bouncer does not compare the project of a declaration with the project of the run. The grant stores a project directory, and the declaration stores a project name as free text; nothing links them. A check needs a schema change. The proposal is in [dev-round4.md](../evaluation/dev-round4.md), section "Credential from another project".
+In this round the bouncer did not compare the project of a declaration with the project of the run. Since 0.5.0 it does: an item whose declaration names another project asks the owner (section 3.0, step 6). The proposal of this round is in [dev-round4.md](../evaluation/dev-round4.md), section "Credential from another project".
 
 ### Dev round 3 (policy v7)
 

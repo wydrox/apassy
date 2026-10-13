@@ -42,7 +42,7 @@ Apassy makes these promises. A way to break one of them is a vulnerability.
 | No secret value, placeholder, or proxy password appears in the activity log, the decision log, the run answer, or the MCP output. | [ADR 0011](docs/adr/0011-run-proxy-placeholders.md) §5 |
 | The vault at rest is one SQLCipher file. Without the passphrase, its content is not readable. Key material is not left in a file. | [Vault verification](docs/operations/vault-verification.md), [Key memory](docs/reviews/key-memory.md) |
 | The iPhone companion listener answers only paired devices. A request needs a valid signature, a fresh time, and a new nonce. Pairing needs a 6-digit code that only the iPhone shows and a fresh owner check on the Mac. An approval from the iPhone is a signature of its approval key, made with Face ID, over the run exactly as the Mac showed it. The listener refuses a connection from the Mac itself. It runs only while the setting is on and the vault is unlocked, and a lock stops it. | [ADR 0020](docs/adr/0020-iphone-companion.md), [Companion](docs/operations/companion.md) |
-| The published `Apassy.dmg` and every program in it are signed with the Developer ID and notarized. | [Release](docs/operations/release.md) |
+| The published `Apassy-<version>.dmg` and every program in it are signed with the Developer ID and notarized. | [Release](docs/operations/release.md) |
 
 Also in scope: an injection through the purpose, the user request, a command, or a tool output that changes a decision the documents say cannot change, and a dependency or build step that does not match what the documents say.
 
@@ -60,10 +60,10 @@ These are recorded. A report that only restates one of them gets a pointer to th
 
 ## Verify a download
 
-The DMG is signed with a Developer ID and notarized. Check the image and the app after you open it:
+The DMG is signed with a Developer ID and notarized. Its name has the version, for example `Apassy-0.5.0.dmg`. Check the image and the app after you open it:
 
 ```
-spctl -a -vv -t open --context context:primary-signature Apassy.dmg
+spctl -a -vv -t open --context context:primary-signature Apassy-0.5.0.dmg
 codesign -dv --verbose=2 /Volumes/Apassy/Apassy.app
 ```
 

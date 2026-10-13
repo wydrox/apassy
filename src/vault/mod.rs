@@ -13,18 +13,31 @@
 //! arbitrary SQLite clients.
 
 mod access;
+mod add;
+pub mod agent_items;
 mod agents;
+pub mod answers;
 mod candidate;
 mod companion;
+pub mod detect;
+pub mod exceptions;
+mod folders;
 mod history;
 mod learning;
 mod merge;
 pub mod passkey;
+mod policy;
 pub mod providers;
+pub mod questions;
 mod relay_device;
+mod schema18;
+mod schema19;
 mod suggestions;
 mod sync;
+mod trusted_device;
 mod types;
+pub mod usage;
+mod vault_secret;
 mod waiting;
 
 use std::fs::{self, File, OpenOptions};
@@ -44,6 +57,7 @@ pub use access::{
     AccessRequest, CatalogEntry, MAX_CATALOG_ITEMS, MAX_OPEN_REQUESTS, MAX_REQUEST_REASON_BYTES,
     RequestState, custom_detail_label,
 };
+pub use add::{ItemOrigin, OriginTool};
 pub use agents::{
     AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken,
     DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, EnvDelivery, Environment,
@@ -60,6 +74,7 @@ pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
     DEFAULT_COMPANION_PORT, MAX_COMPANION_DEVICES, MIN_COMPANION_PORT,
 };
+pub use folders::{Folder, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES};
 pub use history::{
     EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
 };
@@ -77,10 +92,17 @@ pub use passkey::{
     PasskeyAssertion, PasskeyCreate, PasskeyCreated, PasskeyError, PasskeyExport, PasskeyImport,
     PasskeyInfo, PasskeyTarget,
 };
+pub use policy::{DeclarationSource, DeclarationSources};
+pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
 pub use relay_device::RelayDevice;
+pub use schema18::ONLY_MARKER_ITEM;
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
 pub use sync::{AdoptedCopy, CopyPassphraseError, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
 pub(crate) use sync::{copy_hashing, hash_open_file, sync_dir, to_hex};
+pub use trusted_device::{
+    ItemHome, MAX_TRUSTED_DEVICE_NAME_BYTES, MembershipPurpose, RelayMembership, TrustedDevice,
+    TrustedDeviceKind,
+};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
     MIN_PASSPHRASE_BYTES, PASSKEY_FIELD_PREFIX, SCHEMA_VERSION, SecretValue, VaultError,
@@ -150,6 +172,8 @@ const SYNC_META_SCHEMA_VERSION: i64 = 13;
 const RECORD_SYNC_SCHEMA_VERSION: i64 = 14;
 const COMPANION_SCHEMA_VERSION: i64 = 15;
 const RELAY_DEVICE_SCHEMA_VERSION: i64 = 16;
+const PASSKEY_SCHEMA_VERSION: i64 = 17;
+const FOLDER_SCHEMA_VERSION: i64 = 18;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -957,6 +981,8 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | RECORD_SYNC_SCHEMA_VERSION
         | COMPANION_SCHEMA_VERSION
         | RELAY_DEVICE_SCHEMA_VERSION
+        | PASSKEY_SCHEMA_VERSION
+        | FOLDER_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1089,8 +1115,20 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
-    let v16: &[&str] = if version >= RELAY_DEVICE_SCHEMA_VERSION {
+    // Schema 19 moves the row of `relay_device` to `relay_membership` and drops it.
+    let v16: &[&str] = if (RELAY_DEVICE_SCHEMA_VERSION..SCHEMA_VERSION).contains(&version) {
         &relay_device::SCHEMA_V16_COLUMNS
+    } else {
+        &[]
+    };
+    // Schema 17 adds no table and no column: a passkey is an item field.
+    let v18: &[&str] = if version >= FOLDER_SCHEMA_VERSION {
+        &schema18::SCHEMA_V18_COLUMNS
+    } else {
+        &[]
+    };
+    let v19: &[&str] = if version >= SCHEMA_VERSION {
+        &schema19::SCHEMA_V19_COLUMNS
     } else {
         &[]
     };
@@ -1111,6 +1149,8 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v14)
         .chain(v15)
         .chain(v16)
+        .chain(v18)
+        .chain(v19)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1194,7 +1234,13 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(relay_device::SCHEMA_V16_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    passkey::add_schema_v17(&tx)?;
+    if from < PASSKEY_SCHEMA_VERSION {
+        passkey::add_schema_v17(&tx)?;
+    }
+    if from < FOLDER_SCHEMA_VERSION {
+        schema18::add_schema_v18(&tx)?;
+    }
+    schema19::add_schema_v19(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1247,6 +1293,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(relay_device::SCHEMA_V16_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     passkey::add_schema_v17(&tx)?;
+    schema18::add_schema_v18(&tx)?;
+    schema19::add_schema_v19(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }
@@ -1373,6 +1421,8 @@ fn delete_item_rows(tx: &rusqlite::Transaction<'_>, sql_id: i64) -> VaultResult<
     tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [sql_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     agents::delete_item_links(tx, sql_id)?;
+    schema18::forget_item(tx, sql_id)?;
+    schema19::forget_item(tx, sql_id)?;
     history::forget_item(tx, sql_id)?;
     tx.execute("DELETE FROM item WHERE id = ?1", [sql_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;

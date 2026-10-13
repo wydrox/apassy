@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09.
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -17,7 +17,7 @@ Status of the passkey and one-time password work (branch `feat/passkeys-totp`): 
 
 The vault holds an exclusive lock on `<file>.lock` while it is open, and iOS ends a suspended app that holds a file lock in an App Group container. So the core opens the vault only while it is unlocked: `lock` and `suspend` close it. The app calls `suspend` when it leaves the screen, and the AutoFill extension can then open the vault. While the app shows the vault, the extension gets `busy`.
 
-The core is the same vault code as the Mac app: the same schema (17), the same merge, the same relay client. A phone and a Mac that sync one vault must run the same schema. The one exception is a copy of schema 16, which a schema 17 client reads in a private encrypted stage (section 10). Any other schema is refused, as between two Macs.
+The core is the same vault code as the Mac app: the same schema (19), the same merge, the same relay client. A phone and a Mac that sync one vault must run the same schema. The one exception is a copy of an earlier schema: a schema 19 client merges a copy of schema 18 or 17 (`is_mergeable_schema` in `src/vault/merge.rs`) and gives its records the values of schema 19 in memory. The copy on disk or on the relay does not change. Any other schema is refused, as between two Macs. Section 10 is the history of the upgrade from schema 16 to 17.
 
 ## 2. The C interface
 
@@ -89,7 +89,7 @@ Error codes:
 | `not_found` | The item or the field is not there. |
 | `conflict` | The revision is not current: the item changed (a sync merged a change). Reload it. |
 | `storage` | The vault file failed. |
-| `unsupported_schema` | The vault or the copy has a schema that this app does not read. Update the app or the Mac. A schema 17 app reads a copy of schema 16 (section 10). An app of schema 16 cannot open a vault of schema 17. |
+| `unsupported_schema` | The vault or the copy has a schema that this app does not read. Update the app or the Mac. A schema 19 app reads a copy of schema 18 or 17 and no other (section 10). An app of an earlier schema cannot open a vault of schema 19. |
 | `link_invalid` | The text is not a device link of the relay, or the relay refused the link (used, expired, or not valid). |
 | `join_refused` | The Mac refused this iPhone, or the link expired before the confirmation. |
 | `safety_mismatch` | The relay's safety words are not the ones this iPhone computes. |
@@ -105,7 +105,7 @@ Error codes:
 | `io` | A file operation failed. |
 | `excluded` | `passkey_register`: the vault has a passkey that the website lists in `excluded` (archived items count). |
 | `unsupported_algorithm` | `passkey_register`: the website lists algorithms, and ES256 (-7) is not one of them. |
-| `exists` | A passkey with this ID is in the vault already. `passkey_register` gives it when the login that gets the passkey has one. `passkey_import` counts it and does not raise it (section 5.8). |
+| `exists` | A passkey with this ID is in the vault already. `passkey_register` gives it when the login that gets the passkey has one. `passkey_import` counts it and does not raise it (section 5.8). `folder_create`, `folder_rename`, and `folder_move` give it when a folder in that place has the name, without regard to case (section 5.11). |
 | `bad_key` | The key of a passkey is not a P-256 PKCS #8 key. The core and the Swift wrapper define the code, but `passkey_import` counts a bad key as failed, so no call answers it now. |
 | `internal` | A bug. The message says so. |
 
@@ -117,7 +117,7 @@ Error codes:
 
 | Op | Parameters | Result |
 | --- | --- | --- |
-| `info` **R** | | `{"vaults": [Vault], "selected": "<vault_id>" or null, "unlocked": bool, "join": Join or null, "schema": 17, "version": "0.3.4"}` |
+| `info` **R** | | `{"vaults": [Vault], "selected": "<vault_id>" or null, "unlocked": bool, "join": Join or null, "schema": 19, "version": "0.3.4"}` |
 | `select` **R** | `vault_id` | `{}`. Locks the vault that was open. |
 | `unlock` **R** | `passphrase`, `keep` (bool, app only, default false) | `{}`. Opens the selected vault. With `keep`, the core keeps the passphrase in an erasing buffer until `lock`, for `resume`. |
 | `lock` **R** | | `{}`. Closes the vault, erases a kept passphrase, drops the relay key and token from memory, and ends a long poll. |
@@ -135,7 +135,7 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 
 | Op | Parameters | Result |
 | --- | --- | --- |
-| `join_start` | `link`, `device_name` (optional; the config name by default) | `Join`. Makes a device key in memory and sends the link with the name of this iPhone. A join that was waiting is cancelled first. |
+| `join_start` | `link`, `device_name` (optional; the config name by default), `answer_key` (optional, b64u X9.63; section 5.10) | `Join`. Makes a device key in memory and sends the link with the name of this iPhone. A join that was waiting is cancelled first. |
 | `join_poll` | | `Join`. Asks the relay whether the Mac confirmed. After the confirmation it downloads the copy in the same call, then answers `ready`. Call it every 2 s while `waiting`. |
 | `join_cancel` | | `{}`. Cancels the link on the relay, or removes the device after a confirmation. |
 | `join_finish` | `passphrase` | `{"vault": Vault}`. Opens the copy with the passphrase, makes the vault on this iPhone, turns on relay sync, selects and unlocks it. A wrong passphrase is `wrong_passphrase` and keeps the download: the owner tries again. |
@@ -175,7 +175,8 @@ Swift refuses unresolved provider conflict versions before publication. It keeps
 {"id": 12, "revision": 3, "title": "GitHub", "kind": "login", "subtitle": "octocat",
  "websites": ["https://github.com"], "tags": ["work"], "archived": false,
  "has_totp": true, "has_passkey": false, "has_password": true, "conflict_of": null,
- "added_at": 1791100000, "changed_at": 1791200000, "used_at": null}
+ "added_at": 1791100000, "changed_at": 1791200000, "used_at": null,
+ "folder": "5b0e…", "provider": "GitHub", "production": false}
 ```
 
 - `kind`: `login`, `api_key`, `ssh_key`, `database`, or `custom`.
@@ -184,9 +185,22 @@ Swift refuses unresolved provider conflict versions before publication. It keeps
 - `conflict_of`: the ID of the item whose conflict copy this is, when a sync kept both versions.
 - `has_totp`: true when the item has a field with the role `totp` (section 7). The list reads the stored value of a field only to see whether it starts with an explicit `otpauth://totp` URI, and only when the label does not already decide. No answer holds the seed.
 - `has_passkey`: true when the item holds a valid passkey (section 5.8). The row never holds a key.
+- `folder`: the UUID of the folder of the item (section 5.11); null at the top level, also when its folder was deleted on another device.
+- `provider`: the label of the provider of the item's declaration (`Stripe`, `GitHub`, `PostgreSQL`), as the Mac picks its provider tile; null without a declaration or a provider. The app takes the tile from the provider; without one, from the service in `subtitle` (an API key, an SSH key without a public key, and another kind; not a username, a host, or a public key); else from the title. This is close to the Mac's `provider.unwrap_or(service)` but not the same: the Mac reads the service of every kind, and a row has no service member, so a login, a database, or an SSH key with a public key and a service can show another tile on the iPhone.
+- `production`: the red dot of the Mac: the declaration says `production` and its environment came from the owner or a signal. An environment from a default or from usage is not marked (the bouncer still treats it as production until the owner answers).
 - `has_password`: true when the item stores a secret field `password` with a non-empty value. It is the same test that `passkey_remove` uses to decide between keeping and deleting the login. The row never holds the value. The Swift `ItemRow` reads `has_password` as optional: a core that does not send it gives `nil`, and the app must then warn that removing a passkey can delete the login. `has_passkey` is `false` when absent.
 
-`Detail` is a `Row` with `"notes": "…"`, `"fields": [Field]`, and, for a login with a passkey, `"passkey": {"rp_id", "user_name", "user_display_name", "credential_id", "user_handle"}` (base64, no key; the member is absent when the item has no passkey). The fields of a passkey (names that start with `passkey_`) are never in `fields`. `Field`:
+`Detail` is a `Row` with `"notes": "…"`, `"fields": [Field]`, and, for a login with a passkey, `"passkey": {"rp_id", "user_name", "user_display_name", "credential_id", "user_handle"}` (base64, no key; the member is absent when the item has no passkey), and these members (section 5.11):
+
+- `folder_path`: the folder names from the top level to the item's folder; `[]` at the top level.
+- `env_name`: the variable that agent processes get (the stored one, or the automatic `APASSY_ITEM_<id>`); null when the item has no secret field to deliver.
+- `always_ask`: "Always ask me": each use by an agent waits for the owner.
+- `environment`: `production`, `staging`, `development`, or `local`; null without a declaration.
+- `environment_source`: `owner`, `signal`, `usage`, or `default`; null without a declaration.
+
+The Swift `ItemRow` and `ItemDetail` read every member of section 5.11 as optional, so an answer of an older core still decodes (the members are then nil).
+
+The fields of a passkey (names that start with `passkey_`) are never in `fields`. `Field`:
 
 ```json
 {"name": "password", "label": "Password", "secret": true, "value": null, "role": "password", "custom": false}
@@ -325,6 +339,119 @@ The app calls it after a fresh owner check and gives the answer straight to the 
 - `passkey`: only a canonical, parsable passkey. A stored key that does not parse is left out and the other data of the login still goes. A failure of the vault is an error: an export never drops data in silence.
 - One history event without values (kind `revealed`, detail "Credential Exchange export prepared") is recorded for each exported item, before the answer is returned. The event says that the owner prepared the export. It does not prove that the other app took the data.
 
+### 5.10 Questions through the relay (contract relay-questions-v1)
+
+Added 2026-10-12 (stage 5, stream M3). The iPhone is an answering device of [relay-questions-v1](relay-questions-v1.md): it reads the questions of the vault that wait on a Mac, opens and checks each card, and posts the owner's answer. All these calls are of the app only (`not_allowed` in the AutoFill extension) and need the vault unlocked.
+
+The **questions team** of the selected vault is its relay membership with the purpose `questions`, else its relay sync membership (relay-questions-v1 section 3). An iCloud vault gets a notifications-only team with `join_attach` (plan §A7). The question key is the vault secret `question-key-v1` that a Mac made; the iPhone never makes one, and gets it with the sync of the vault. The iPhone's `trusted_device` row (kind `iphone`) has the relay key of the questions team as `sign_key`, the Secure Enclave answer key as `answer_key`, and its device number in that team; the core finds its own row by `sign_key`. The iPhone never writes this row: the Mac that confirms the join writes it (see after the tables).
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `questions_list` | | `{"status": Status, "questions": [Question]}` |
+| `questions_wait` | `timeout` (1 to 25 s) | `{"changed": bool}` |
+| `question_open` | `qid` | `Question` with its card |
+| `question_answer_string` | `qid`, `kind`, `item_id`?, `environment`?, `action`?, `project_key`?, `time`? | `{"time": n, "answer_string": "…", "needs_face_id": bool}` |
+| `question_answer` | the same, `time`, `signature`? | `{"id": n, "at": n, "kind": "…"}` |
+| `answer_key_register` | `public_key` (b64u X9.63) | `{"device_uuid": "…", "team_id": "…", "relay_device_id": n}` |
+| `push_token_set` | `token` (lowercase hex, 32 to 200), `environment` (`development` or `production`), `bundle_id`? (default `com.wydrox.apassy.companion`) | `{"device_id": n, "updated_at": n}` |
+| `push_token_clear` | | `{}` |
+| `join_attach` | `link`, `device_name`?, `answer_key` (b64u X9.63, required) | `{"state": "waiting", "team": "…", "words": [w1, w2], "expires_at": n}` |
+| `join_attach_poll` | | the same, `state` `waiting` or `attached` |
+| `join_attach_cancel` | | `{}` |
+
+`Status`: `{"enabled": bool, "team_id": "…"|null, "relay_device_id": n|null, "device_uuid": "…"|null, "answer_key": "<b64u>"|null, "has_key": bool, "registered": bool, "removed": bool}`. `registered` is true when the row of this iPhone is in the vault. `removed` is true when the key of the membership belongs to a removed row: then the list of questions is empty and the core does not ask the relay. Without a questions team `enabled` is false and the list is empty; `questions_wait` answers `changed: false` at once.
+
+`Question`:
+
+```json
+{"qid": "oKGio6SlpqeoqaqrrK2urw", "state": "open", "asker_name": "MacBook Pro",
+ "created_at": 1790000001, "expires_at": 1790000300, "problem": null, "answered": null,
+ "card": {"asker_device": "0b7e5c3a-…", "created_at": 1790000000, "digest": "f3b3…",
+          "run": {"id": "123456789012345", "agent": "claude-code", "command": ["npm", "run", "migrate"],
+                  "cwd": "/tmp/synthetic-shop", "env_names": ["DATABASE_URL"], "purpose": "…", "risk": "…",
+                  "user_request": "…", "request_source": "…", "agent_request": "…", "remember": null},
+          "question": {"items": [{"item_id": "9", "name": "API token", "production": false,
+                                  "unconfirmed": true, "always_ask": false}],
+                       "project": {"key": "/tmp/synthetic-shop/.git", "label": "synthetic-shop"},
+                       "action": "deploy", "production": true, "why": "…",
+                       "valid_answers": ["once", "production:deploy", "correct_environment"]}},
+ "settle": null}
+```
+
+- `state` is `open`, `settled`, or `expired` (an open question past its `expires_at` on the iPhone's clock is `expired`). A question leaves the list 10 minutes after it ended.
+- `card` is present only when every check of relay-questions-v1 section 7.3 passed: the envelope opens with the key of its `key_id` and the AAD of the relay's clear values; the JSON has exactly the fields within the limits; `v` is 1 and `qid` matches; the core computes the digest v2 itself and gets `digest`; `asker.device` is a live `trusted_device` whose device number in the questions team, when set, equals the relay's `from_device_id`. Else `card` is null and `problem` says why: "Sync this vault to read this question." (no key with that `key_id`), "Update Apassy to read this question." (another `v`, an unknown or a missing field, an unknown answer text), or "This question could not be read." (anything else).
+- Every text of `card` is for display: control and format characters replaced by `?`, the folder and the project key shortened (the rules of `shown_path`). The core keeps the exact card; an answer never sends display text back.
+- `settle` is `{"outcome", "device_name", "device_kind", "kind", "at", "replaced_by"}` when the settle envelope opens, else null. `answered` is the kind of the answer that this process sent, while it remembers it.
+
+Answers (relay-questions-v1 sections 5.3, 9, and 13):
+
+- `kind` is one of section 9.1. The core checks it against the card: `approve_in_project` and `allow_production` need the matching entry of `valid_answers` and a project, and the core fills in `action` and the exact `project_key` from the card (when the request names them, they must match); `correct_environment` needs `item_id` of an item with `unconfirmed: true` and `environment`; `deny` is always valid; the other kinds need their entry. No other field may come with a kind.
+- `question_answer_string` builds the exact answer string of section 9.3 with this iPhone's device UUID, the team, the `qid`, the choice, the digest, and `time` (default: now). `needs_face_id` is true for `approve_once`, `approve_in_project`, `allow_production`, and `correct_environment` to `development`.
+- For such an answer the app signs `answer_string` with the Secure Enclave answer key after Face ID for this answer (`SecureEnclaveKeys.signApproval`, a new `LAContext` with no reuse), and calls `question_answer` with the same `time` and the DER `signature` as b64u. The core checks the signature with the registered `answer_key` before anything is sent (`not_registered` when it does not verify: the key changed).
+- For the other kinds `signature` must be absent: the core signs with the relay key of the questions team (`sign_key`), without Face ID.
+- `time` more than 55 s old is `stale_answer` (answer again); a retry after a network error sends the same `time` and `signature` in a new envelope (section 13 step 4). A time more than 60 s ahead is `invalid_input`.
+- The core seals the answer of section 9.2 (fields in the contract's order) with the question key, a new random nonce, and the AAD with this iPhone's device number, and posts it. The relay taking it does not mean that it counted: the settle says that.
+
+**The row of an iPhone.** The iPhone never writes its own `trusted_device` row. `join_attach` needs `answer_key`; without it the call is `invalid_input`. The core appends the compressed key to the device name of the link: `"<name> ~<44 characters of b64u>"`. The name is shortened so that the whole is at most 64 bytes, the limit of a relay device name. The Mac that confirms the join writes the row during the owner check `ConfirmQuestionsDevice` (the proof covers the whole `device_name`, so it covers the answer key too): kind `iphone`, a new UUID, `sign_key` = the relay key of the link, `answer_key` from the name, and the device number in the team. `join_attach` writes only the membership (purpose `questions`) at the confirmation, and downloads nothing: a notifications-only team has no copy. A refusal of the Mac, an expired link, or a cancel ends the join; the relay removes a device that was confirmed but not stored.
+
+`join_attach` refuses a vault that has a questions team already, unless the key of that membership belongs to a removed row (the owner removed this iPhone) and the membership is for questions only: then the new key replaces the old one after the confirmation. A removed iPhone that syncs the vault through the relay (a sync membership) gets `invalid_input` that asks the owner to turn sync through the relay off and join again.
+
+`join_start` (the sync join, section 5.2) takes the same optional `answer_key` (b64u) and appends it to the device name in the same way. A Mac that confirms a device in "Add a device…" of the relay sync writes the row of the iPhone when the name of the link carries a key.
+
+`answer_key_register` writes nothing. It checks that the vault holds the row of this iPhone (found by `sign_key` = the key of the membership) with this `answer_key`, and returns the row. Its errors: `not_registered` (the row has not reached this iPhone with the sync yet), `removed` (the owner removed this iPhone), and `answer_key_changed` (the row holds another key, for example after a new Face ID enrollment: the owner removes the iPhone on the Mac and connects it again). `question_answer_string` and `question_answer` give `removed` or `not_registered` when there is no row.
+
+The keys of a removed row (`sign_key` and `answer_key`) never register again (the vault answers `AlreadyExists`). A removed iPhone connects again with a new relay key (a new `join_attach`) and a new answer key: the app calls `renew()` on the Secure Enclave key when `status.removed` is true.
+
+Errors of these calls, besides those of section 4: `no_questions` (the vault has no questions team), `not_registered` (no row, no answer key, or the signature does not verify with it), `removed` (the row of this iPhone is removed), `answer_key_changed` (the row holds another answer key), `unreadable` (the card failed a check; the message is the `problem`), `already_answered` (`409 question_settled`), `expired` (`409 question_expired`, `404`, or past `expires_at`), `not_routed`, `too_many_answers` (the relay allows 3 answers of a device for a question, 20 for a question, and a byte budget for the team), `stale_answer`, `push_unavailable` (`409` on `PUT /v1/push/token`).
+
+After an answer the app shows: "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused." The protocol has no receipts yet.
+
+The app asks for notification permission only when the owner turns notifications on, sends the device token with `push_token_set` at each launch with notifications on, and `push_token_clear` when they are turned off. The notification has the fixed text of relay-questions-v1 section 14.1; opening it shows the questions.
+
+A person who knows the passphrase of the vault (has the vault) can still write `trusted_device` rows. This is the same class of risk as holding the vault ([relay-questions-v1](relay-questions-v1.md) section 18).
+
+### 5.11 Folders, adding by paste, and the options of a credential
+
+Added 2026-10-12 for the iPhone app v2 ([ADR 0026](../adr/0026-simple-app.md) §4, §5, §8; [ADR 0025](../adr/0025-low-friction-access.md) §4). The rules are the Mac's: the folders of the vault (`src/vault/folders.rs`), "New Credential" (`src/desktop/ui/new_credential.rs`, `src/desktop/owner_store/add.rs`), and the options of the credential screen (`src/desktop/ui/items.rs`). Every call needs the unlocked vault (`locked`). Only `folders` is open to the `autofill` role; the others give it `not_allowed`. A core older than this section answers each call with `invalid_input` ("This call is not known.").
+
+Each change goes through the vault in its own transaction, so it syncs as `save` does: the app calls `sync` after the change (section 5.5). Folder rows sync one by one (the later change wins; a deleted folder stays deleted). The folder of a credential, "Always ask me", and the source of the environment sync with the credential.
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `folders` **R** | | `{"folders": [Folder]}`, depth first; each level by position, then name. |
+| `folder_create` | `parent` (a folder UUID; null or absent: the top level), `name` | `{"folder": Folder}` with `count` 0. |
+| `folder_rename` | `uuid`, `name` | `{}`. The same name changes nothing. |
+| `folder_move` | `uuid`, `parent` (null or absent: the top level) | `{}`. The folder moves with its subfolders and credentials, after the last subfolder of `parent`. |
+| `folder_delete` | `uuid` | `{"moved": n}`: the count of credentials that moved to the parent folder (the top level when it has none). Its subfolders move there too. No credential is deleted. |
+| `item_folder_set` | `id`, `folder` (null or absent: the top level) | `{}`. Moving changes nothing else (sharing, rules, and history stay); the history gets "Moved to Acme / Billing". |
+| `detect` | `text` | `{"found": [Found]}`. No secret value is in the answer. Nothing found is `[]`. |
+| `add_pasted` | `text`, `folder` (optional), `pick` (optional: indexes of `found`), `titles` (optional: `[{"index": n, "title": "…"}]`) | `{"items": [{"id": 12, "revision": 1, "title": "Stripe live", "summary": "Stripe live · STRIPE_SECRET_KEY · production"}]}` |
+| `item_options_set` | `id`, `always_ask` (optional bool), `environment` (optional: `production`, `staging`, `development`, or `local`) | `{}` |
+
+`Folder`: `{"uuid": "5b0e…", "parent": "…" or null, "name": "Billing", "position": 0, "count": 3}`. `count`: the credentials directly in the folder that are not archived. A parent that another device deleted, or a cycle that two moves on two devices made, reads as the top level.
+
+Folder rules (`Vault::create_folder` and the others): a name is trimmed, has 1 to 64 bytes and no control character, and is unique among its siblings without regard to case (`exists`, "A folder with this name is already there."). Folders nest at most 4 levels. A name that breaks a rule, a folder that would go below level 4, and a move into the folder itself or one of its subfolders are `invalid_input`. A folder or a parent that is not there (another device deleted it) is `not_found`. `item_folder_set` of an item that is not there is `not_found` with the message of an item.
+
+`Found`:
+
+```json
+{"index": 0, "title": "Stripe live", "kind": "api_key", "provider": "Stripe",
+ "env_name": "STRIPE_SECRET_KEY", "hosts": ["api.stripe.com"], "environment": "production",
+ "environment_source": "signal", "risk": "high", "line": null,
+ "summary": "Stripe live · STRIPE_SECRET_KEY · production",
+ "fields": [{"name": "token", "label": "Token", "secret": true, "preview": "sk_live_••••••••"}]}
+```
+
+- The detection is the Mac's (`apassy::vault::detect`): a secret, a `KEY=value` line, a whole `.env` file (one entry for each assignment, with its `line` from 1), a URL with credentials (`postgres://`, `mysql://`, `mongodb://`, `redis://`, `amqp://`), an SSH private key, or an `otpauth://` link. It runs in the core on the iPhone and sends nothing anywhere.
+- `provider` is the label of the provider of the catalog; null for a value without a provider (a Custom item, "Credential"). `kind` is as in `Row`. `environment` and `risk` are the declaration that the detection gives. `environment_source` is `signal` (a strong signal: a value prefix such as `sk_live_`, or an environment word of the variable) or `default` (the most sensitive value). The Mac shows the environment of a row only for `signal`: a red "Production", or "Staging", or "Development" (also for `local`).
+- `summary`: "TITLE · VARIABLE · ENVIRONMENT", without the variable when there is none.
+- The `preview` of a plain field (the user name, the host, and the database of a URL) is its value. The `preview` of a secret field is a mask: the public value prefix of the provider (`sk_live_`, `ghp_`), else the URL scheme (`postgres://`), then `••••••••`. The mask has a fixed length. A plain value that holds a secret value of the same credential is masked too. No title, summary, or field of the answer holds a secret value.
+- `text` has at most 1 MiB (`invalid_input`). The core keeps its own copy in an erasing buffer and drops it after the detection. The copies in the JSON request and the response, and those made while decoding them, are not erased.
+
+`add_pasted` detects `text` again in the core (the app never sends a detected value back) and saves the picked entries in one transaction: all or none (`Vault::add_detected_all`). `pick` names entries by the `index` of `detect` for the same text; when it is absent, every entry. An index that is not there, a repeated index, and an empty `pick` are `invalid_input`; a text with no credential is `invalid_input` with the Mac's note. A title of `titles` replaces the detected title of that entry when it is not empty after trimming (at most 128 bytes), as the title field of each row on the Mac does. The rest is the Mac's: a title that another item has gets " 2", " 3"; a variable that another item uses becomes the automatic name; the declaration, its provider, and the source of each value are saved; the items go to `folder` (`not_found`, "The folder is gone. Select another folder.", when it is not there). The items have no origin: the owner pasted them, as on the Mac (the `item_origin` table records only agents, ADR 0025 §6). `summary` uses the stored title, the stored variable, and the stored environment.
+
+`item_options_set` saves what the owner answered on the credential screen. `always_ask` turns "Always ask me" on or off. `environment` sets the environment of the declaration with the source `owner`; the project, the provider, the other values, and their sources stay. An item without a declaration gets one with this environment and the most sensitive other values, which count as defaults. A declaration event goes to the history. Both members are optional; `always_ask` is applied first. An item that is not there is `not_found` and nothing changes. The core does not check the owner: the app asks for Face ID or the passphrase first when the change makes the bouncer less careful (turning "Always ask me" off, or an environment other than `production`), and for any environment of an item without a declaration (the Mac saves a first declaration only after its owner check), as the Mac asks for its owner check. Turning "Always ask me" on and choosing `production` for an item with a declaration need no check.
+
 ## 6. `phone.json`
 
 ```json
@@ -371,6 +498,8 @@ A website field is the custom detail whose label starts with "website" or "url" 
 - The answer has IDs only, never a value.
 
 ## 10. Schema 17 and the upgrade from schema 16
+
+The current schema is 19. Schema 18 adds `folder`, `shared_vault`, and `vault_secret`. Schema 19 adds `trusted_device`, `relay_membership`, and `item_home` ([relay-questions-v1](relay-questions-v1.md) section 5.2). The rest of this section is the history of schema 17.
 
 Schema 17 adds the passkey fields (section 11.1). It changes no table. A field of an earlier vault that has a reserved name (`passkey_…`) is an ordinary field of the owner, so the migration renames it. The new name is the custom label of the old name (`x_<hex>`), then the label with a number, then `legacy_field_<n>`. The value and the secret flag stay. An environment binding of the old name gets the new name. The item keeps its revision and its sync version, and the names depend only on the old data, so two copies of one vault that migrate do not conflict.
 

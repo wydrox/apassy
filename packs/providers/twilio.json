@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "twilio",
   "kind": "provider",
   "label": "Twilio",
   "description": "Twilio account SIDs, auth tokens, and API keys.",
   "known_hosts": ["twilio.com"],
+  "variable": "TWILIO_AUTH_TOKEN",
+  "title": "Twilio auth token",
   "signals": [
     {
       "id": "account-sid",

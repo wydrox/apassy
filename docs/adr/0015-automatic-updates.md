@@ -56,6 +56,10 @@ The app reads its own team from the signature of the running process (`codesign 
 - The old bundle is outside the agent-denied path for the moment between the two moves. It is removed right after.
 - An app before 0.3.0 has no updater.
 
+## Note of 2026-10-12: versioned image names
+
+From 0.5.0, the release names the disk image `Apassy-<version>.dmg` (owner request of 2026-10-12). The decision above does not change. Apps 0.3.0 to 0.4.1 accept only `file` = `Apassy.dmg` and download only `/download/Apassy.dmg`, so `latest.json` keeps that name, and the bucket keeps the same image under that key. From 0.5.0, the app also accepts `file` = `Apassy-<version>.dmg` with exactly the `version` of `latest.json` (no other name, version, or path), downloads `/download/<file>`, and keeps the checked image as `update/Apassy-<version>.dmg`. The switch of `latest.json` to the versioned name, and the end of `/download/Apassy.dmg`, wait until no app before 0.5.0 is in use ([release](../operations/release.md#image-names)).
+
 ## Relation to other records
 
 - ADR 0003: the vault key lives only in the app process. The install locks the vault first.

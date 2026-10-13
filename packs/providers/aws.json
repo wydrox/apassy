@@ -1,11 +1,15 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 3,
   "id": "aws",
   "kind": "provider",
   "label": "Amazon Web Services",
   "description": "AWS access keys: long-term keys (AKIA), temporary credentials (ASIA), and the standard variable names.",
   "known_hosts": ["amazonaws.com"],
+  "variable": "AWS_ACCESS_KEY_ID",
+  "real_value": true,
+  "title": "AWS access key",
+  "prefixes": ["AKIA", "ASIA"],
   "signals": [
     {
       "id": "long-term-access-key",

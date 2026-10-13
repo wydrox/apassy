@@ -80,12 +80,12 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
         ),
         ItemEventKind::Connector => ("Connector set".to_owned(), detail(), Tone::Accent),
         ItemEventKind::ConnectorRemoved => ("Connector removed".to_owned(), None, Tone::Neutral),
-        ItemEventKind::AccessGiven => ("Process access given".to_owned(), detail(), Tone::Accent),
+        ItemEventKind::AccessGiven => ("Process grant saved".to_owned(), detail(), Tone::Accent),
         ItemEventKind::AccessRemoved => {
-            ("Process access removed".to_owned(), detail(), Tone::Neutral)
+            ("Process grant removed".to_owned(), detail(), Tone::Neutral)
         }
         ItemEventKind::AccessRequested => (
-            "An agent asked for access".to_owned(),
+            "An agent left a note about it".to_owned(),
             detail(),
             Tone::Warning,
         ),
@@ -105,6 +105,7 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
             Tone::Warning,
         ),
         ItemEventKind::ReviewConfirmed => ("Agent settings confirmed".to_owned(), None, Tone::Good),
+        ItemEventKind::Moved => ("Moved".to_owned(), detail(), Tone::Neutral),
     }
 }
 
