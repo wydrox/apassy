@@ -118,7 +118,7 @@ impl RelayMember {
     /// another question to wait for. A request has one cancel, so a call in flight
     /// with `cancel` ends by `cancel` only: the caller closes it at a lock too. A later
     /// call after [`Self::close`] still fails at once.
-    pub(crate) fn call_until(
+    pub fn call_until(
         &self,
         method: &'static str,
         path: &str,

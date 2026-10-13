@@ -150,7 +150,7 @@ pub(crate) struct Request<'a> {
 /// down, and a request that starts after it fails at once. Several requests can use one
 /// `Cancel` at the same time (a long poll and a download).
 #[derive(Debug, Default)]
-pub(crate) struct Cancel {
+pub struct Cancel {
     closed: AtomicBool,
     /// The sockets of the requests in flight, with a number for each request.
     sockets: Mutex<Vec<(u64, TcpStream)>>,
@@ -159,7 +159,7 @@ pub(crate) struct Cancel {
 
 impl Cancel {
     /// End the requests in flight and every later one.
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         let sockets =
             std::mem::take(&mut *self.sockets.lock().unwrap_or_else(PoisonError::into_inner));
@@ -168,7 +168,7 @@ impl Cancel {
         }
     }
 
-    pub(crate) fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 
