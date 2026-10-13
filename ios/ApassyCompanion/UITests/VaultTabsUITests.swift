@@ -12,6 +12,15 @@ final class VaultTabsUITests: XCTestCase {
         return app
     }
 
+    /// An iPhone with an iCloud vault and nothing connected: Agents says where the agents are and
+    /// offers to connect, never "when the Mac is connected".
+    func testAgentsTabSaysWhereTheAgentsAre() {
+        let app = launch(["-ApassyOpen", "agents"])
+        XCTAssertTrue(app.staticTexts["Agents run on your Mac"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
+        XCTAssertTrue(app.buttons["Connect this iPhone"].exists)
+    }
+
     /// The search field belongs to the Search tab only; Vault and Decisions do not show one when
     /// pulled down.
     func testOnlyTheSearchTabHasTheSearchField() {

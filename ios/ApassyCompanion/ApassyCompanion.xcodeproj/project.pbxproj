@@ -38,6 +38,7 @@
 		57F528F0B67E737BA20801B9 /* DecisionsPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD8CEAA508FFCEBC5F4F219 /* DecisionsPreview.swift */; };
 		57F6005A3BA458D149AD653A /* AppWelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F58D1C2BB6F8A7EB17A42568 /* AppWelcomeView.swift */; };
 		58649B1B8B8EA0BF7F0A2E83 /* ApassyVaultKit in Frameworks */ = {isa = PBXBuildFile; productRef = EACEA60C501FAA941326D7E1 /* ApassyVaultKit */; };
+		593715361F8DF9C0D206027C /* AgentsReach.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBC58866E8D84D1709C08E7B /* AgentsReach.swift */; };
 		5F11EE428F560015AA9E2BCE /* VaultModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A053A5569796E7D6C02E46D /* VaultModel.swift */; };
 		609072B00CF0B945807B0E6A /* CodeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7817EDC4D472A14E4FC7E630 /* CodeViews.swift */; };
 		62C2AD2281BED22FAE979FF1 /* QuestionsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D734E9F3EE27770461E0EEA9 /* QuestionsModel.swift */; };
@@ -209,6 +210,7 @@
 		F76344E40653E5870D388064 /* DevicesSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesSettingsView.swift; sourceTree = "<group>"; };
 		F822347FA7AB2283110B8D02 /* CoverPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverPolicy.swift; sourceTree = "<group>"; };
 		FA344DB5652B1982DBA3DA0C /* CredentialLooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialLooks.swift; sourceTree = "<group>"; };
+		FBC58866E8D84D1709C08E7B /* AgentsReach.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsReach.swift; sourceTree = "<group>"; };
 		FF384FB7C7A9E213F181560D /* JoinFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinFlowView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -364,6 +366,7 @@
 		851D92E78BC2F2B7FEB466DE /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				FBC58866E8D84D1709C08E7B /* AgentsReach.swift */,
 				684F437C25C8B450F56C714A /* AppModel.swift */,
 				F822347FA7AB2283110B8D02 /* CoverPolicy.swift */,
 				21DF2C3E82CF25DF1F22D21D /* Decisions.swift */,
@@ -620,6 +623,7 @@
 			files = (
 				B9E78C434584B11B6067254E /* ActivityView.swift in Sources */,
 				F3D5C01F585A08880162E5C5 /* AdvancedSettingsView.swift in Sources */,
+				593715361F8DF9C0D206027C /* AgentsReach.swift in Sources */,
 				CD5D1BA5A01624F519B225F8 /* AgentsView.swift in Sources */,
 				3EB151FA4F3F4C95FDA98FE8 /* ApassyCompanionApp.swift in Sources */,
 				674F78210B56608BDFDE6D0D /* AppModel.swift in Sources */,

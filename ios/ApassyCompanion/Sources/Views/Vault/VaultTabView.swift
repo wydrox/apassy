@@ -20,7 +20,7 @@ struct VaultTabView: View {
             }
             .badge(waitingCount)
             Tab("Agents", systemImage: "cpu", value: VaultTab.agents) {
-                AgentsView()
+                AgentsView(questions: root.questions, companion: root.companion)
             }
             Tab(value: VaultTab.search, role: .search) {
                 SearchView()
