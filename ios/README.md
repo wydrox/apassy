@@ -65,7 +65,7 @@ The Secure Enclave keys are compiled out of a simulator build (`#if !targetEnvir
 
 For a personal vault, keep **iCloud Drive** selected on the Mac. On the iPhone, select **iCloud**, then select the matching `.apassy` file in **Files > iCloud Drive > Apassy**. Enter its passphrase. The app keeps an offline local vault and syncs changes in both directions while it is active and unlocked. iCloud does not need the companion QR code or a relay team. A "saved" result confirms the local iCloud file; receipt on another device needs a check on that device.
 
-If file access expires, use "Select the iCloud file again" in Settings > Devices to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. Unresolved iCloud file conflicts stop publication; the local vault and conflict versions stay intact.
+If file access expires, use "Select the iCloud file again" in Settings > Devices to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. For an already connected vault, sync merges authenticated iCloud conflict versions and retains encrypted recovery copies before resolving the captured versions. Unreadable or incompatible versions stop publication; the provider versions stay intact. Importing or reconnecting a file with unresolved versions still requires resolving those versions first. Tap a sync problem on the Vault tab to open Settings > Devices with the full status and recovery controls.
 
 The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Search**. Settings is a sheet (the gear on the Vault and Decisions tabs).
 
@@ -194,7 +194,8 @@ Use a synthetic vault for these checks.
 6. Edit the same credential differently on both devices before sync. Check the active item and the preserved conflict copy.
 7. Change the passphrase on the Mac. Check the new-passphrase path and Face ID unlock on the iPhone.
 8. Restart the iPhone app. Check that the bookmark still permits sync. Select the file again with "Select the iCloud file again" in Settings > Devices to check recovery.
-9. Remove the test vault from the iPhone. Check that its iCloud file and Mac vault remain.
+9. Create divergent iCloud file versions of a connected synthetic vault. Sync on the iPhone, then check that both changes reach the Mac and that same-item conflicts remain as conflict copies. A damaged or different-vault version must leave provider versions unresolved. These provider checks are distinct from the local merge tests.
+10. Remove the test vault from the iPhone. Check that its iCloud file and Mac vault remain.
 
 Local core and adapter tests do not prove iCloud delivery, persistent file access on a physical iPhone, or Face ID behavior. These checks need the updated app on a physical device.
 
@@ -241,11 +242,13 @@ The Secure Enclave and Face ID exist only on a device, so an approval can only b
 
 ### Pair the iPhone
 
-1. On the Mac, unlock Apassy and open Settings > iPhone companion. Turn on "Allow the iPhone app on this network". The iPhone and the Mac must be on the same Wi-Fi network or connected through Tailscale. For Tailscale, connect the Mac before you make the QR code. Existing pairings need a new pairing to store this address.
-2. Select "Pair an iPhone". The Mac shows a QR code. It never puts the link on the pasteboard.
+1. On the Mac, unlock Apassy and open Settings > Devices > iPhone. Turn on "Allow the iPhone app on this network". The iPhone and the Mac must be on the same Wi-Fi network or connected through Tailscale. For Tailscale, connect the Mac before you make the QR code. Existing pairings need a new pairing to store this address.
+2. Select "Pair…". The Mac shows a QR code. It never puts the link on the pasteboard.
 3. On the iPhone, open Apassy and go to Decisions > "⋯" > Mac on Wi-Fi (an iPhone with no vault starts at the pairing flow with "Only approve agent runs"). Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
 4. The iPhone shows a 6-digit code such as `348 942`. Type it in Apassy on the Mac and select Pair. The Mac then asks for Touch ID or your passphrase.
 5. The iPhone says "Paired". Select Continue. Runs that wait show in the Inbox and in Waiting on the Decisions tab.
+
+If a companion QR is scanned in "Connect this iPhone" or the team-vault scanner, Apassy opens companion pairing and asks for Continue before Face ID and Mac confirmation. It does not connect that QR to the relay. Manage an existing companion pairing in Decisions before pairing another Mac.
 
 A wrong code pairs nothing, and three wrong codes close the window. If the iPhone says "This link does not work", another device may have used the link: select Cancel on the Mac and make a new code.
 

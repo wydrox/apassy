@@ -67,6 +67,103 @@ final class ScriptedPush: PushPermission {
     func open() { onOpen?() }
 }
 
+/// A relay start that ignores task cancellation until the test explicitly releases its response.
+/// All unrelated vault operations forward to the in-memory test service.
+private actor SuspendedQuestionsAttachService: VaultService {
+    enum Completion: CaseIterable, Sendable { case success, relayError, keyError }
+    private let inner = SpyVaultService()
+    private var response: CheckedContinuation<AttachInfo, any Error>?
+    private var started = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var cancelWaiter: CheckedContinuation<Void, Never>?
+    private(set) var pollCalls = 0
+    private(set) var cancelCalls = 0
+
+    func waitForStart() async {
+        if started { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+
+    func waitForCancel() async {
+        if cancelCalls > 0 { return }
+        await withCheckedContinuation { cancelWaiter = $0 }
+    }
+
+    func complete(_ completion: Completion) {
+        let continuation = response
+        response = nil
+        switch completion {
+        case .success:
+            continuation?.resume(returning: AttachInfo(
+                state: .waiting, team: "Notifications", words: ["amber", "marble"], expiresAt: 4_000_000_000))
+        case .relayError:
+            continuation?.resume(throwing: VaultError(.linkInvalid, "The old relay link was rejected."))
+        case .keyError:
+            continuation?.resume(throwing: CompanionKeyError.authenticationFailed)
+        }
+    }
+
+    func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
+        try await withCheckedThrowingContinuation { continuation in
+            response = continuation
+            started = true
+            startWaiter?.resume()
+            startWaiter = nil
+        }
+    }
+    func joinAttachPoll() async throws -> AttachInfo {
+        pollCalls += 1
+        throw VaultError(.invalidInput, "An obsolete request must not poll.")
+    }
+    func joinAttachCancel() async throws {
+        cancelCalls += 1
+        cancelWaiter?.resume()
+        cancelWaiter = nil
+    }
+
+    func info() async throws -> CoreInfo { try await inner.info() }
+    func select(vaultID: String) async throws { try await inner.select(vaultID: vaultID) }
+    func unlock(passphrase: String, keep: Bool) async throws { try await inner.unlock(passphrase: passphrase, keep: keep) }
+    func lock() async throws { try await inner.lock() }
+    func suspend() async throws { try await inner.suspend() }
+    func resume() async throws -> Bool { try await inner.resume() }
+    func checkPassphrase(_ passphrase: String) async throws -> Bool { try await inner.checkPassphrase(passphrase) }
+    func createLocalVault(name: String, passphrase: String) async throws -> VaultEntry {
+        try await inner.createLocalVault(name: name, passphrase: passphrase)
+    }
+    func removeVault(id: String, force: Bool) async throws -> Bool { try await inner.removeVault(id: id, force: force) }
+    func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo {
+        try await inner.joinStart(link: link, deviceName: deviceName, answerKey: answerKey)
+    }
+    func joinPoll() async throws -> JoinInfo { try await inner.joinPoll() }
+    func joinCancel() async throws { try await inner.joinCancel() }
+    func joinFinish(passphrase: String) async throws -> VaultEntry { try await inner.joinFinish(passphrase: passphrase) }
+    func items(archived: ArchiveFilter) async throws -> [ItemRow] { try await inner.items(archived: archived) }
+    func item(id: UInt64) async throws -> ItemDetail { try await inner.item(id: id) }
+    func reveal(id: UInt64, field: String) async throws -> String { try await inner.reveal(id: id, field: field) }
+    func totp(id: UInt64, field: String) async throws -> TotpCode { try await inner.totp(id: id, field: field) }
+    func history(id: UInt64) async throws -> [ItemEvent] { try await inner.history(id: id) }
+    func save(id: UInt64?, revision: UInt64?, draft: ItemDraft) async throws -> SavedItem {
+        try await inner.save(id: id, revision: revision, draft: draft)
+    }
+    func archive(id: UInt64, archived: Bool) async throws { try await inner.archive(id: id, archived: archived) }
+    func delete(id: UInt64, revision: UInt64) async throws { try await inner.delete(id: id, revision: revision) }
+    func generate(_ options: GeneratorOptions) async throws -> GeneratedPassword { try await inner.generate(options) }
+    func strength(_ value: String) async throws -> Strength { try await inner.strength(value) }
+    func watchtower() async throws -> WatchtowerReport { try await inner.watchtower() }
+    func sync() async throws -> SyncStatus { try await inner.sync() }
+    func syncStatus() async throws -> SyncStatus { try await inner.syncStatus() }
+    func syncWait(timeout: Int) async throws -> Bool { try await inner.syncWait(timeout: timeout) }
+    func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
+        try await inner.takeNewPassphrase(passphrase)
+    }
+    func useRelayCopy() async throws -> SyncStatus { try await inner.useRelayCopy() }
+    func devices() async throws -> [RelayDevice] { try await inner.devices() }
+    func autofillList(domains: [String]) async throws -> AutofillList { try await inner.autofillList(domains: domains) }
+    func autofillCredential(id: UInt64) async throws -> FillCredential { try await inner.autofillCredential(id: id) }
+    func credentialIdentities() async throws -> [CredentialIdentity] { try await inner.credentialIdentities() }
+}
+
 @MainActor
 @Suite("QuestionsModel")
 struct QuestionsModelTests {
@@ -78,14 +175,14 @@ struct QuestionsModelTests {
         let defaults: UserDefaults
         let model: QuestionsModel
 
-        init(allows: Bool = true) {
+        init(allows: Bool = true, onCompanionCode: @escaping @MainActor (String) -> String? = { _ in nil }) {
             push = ScriptedPush(allows: allows)
             let suite = "questions-\(UUID().uuidString)"
             defaults = UserDefaults(suiteName: suite)!
             defaults.removePersistentDomain(forName: suite)
             model = QuestionsModel(
                 service: service, signer: signer, push: push, deviceName: "Test iPhone", defaults: defaults,
-                retryInterval: .milliseconds(10))
+                retryInterval: .milliseconds(10), onCompanionCode: onCompanionCode)
         }
 
         func withQuestion() async -> RemoteQuestion {
@@ -324,6 +421,133 @@ struct QuestionsModelTests {
     }
 
     // MARK: Connecting a vault from iCloud Drive
+
+    @Test("a cancelled or dismissed relay start cannot replace a newer companion scan", arguments:
+        [false, true], SuspendedQuestionsAttachService.Completion.allCases)
+    fileprivate func obsoleteRelayStart(dismiss: Bool, completion: SuspendedQuestionsAttachService.Completion) async {
+        let fixture = Fixture()
+        let service = SuspendedQuestionsAttachService()
+        var companionCodes: [String] = []
+        let model = QuestionsModel(
+            service: service, signer: fixture.signer, push: fixture.push, deviceName: "Test iPhone",
+            defaults: fixture.defaults,
+            onCompanionCode: { companionCodes.append($0); return nil })
+        let request = Task {
+            await model.startAttach(link: "https://apassy-relay.example/link#apassy_lnk_old")
+        }
+        // This gate resumes only after joinAttach has suspended its result, without sleep timing.
+        await service.waitForStart()
+        #expect(model.attach == .starting)
+        if dismiss { model.dismissAttach() } else { model.cancelAttach() }
+        let companionCode = pairingLinkText(expiresIn: 300)
+        await model.startAttach(link: companionCode)
+        #expect(model.attach == .companion)
+
+        await service.complete(completion)
+        await request.value
+        #expect(model.attach == .companion)
+        #expect(companionCodes == [companionCode])
+        #expect(await service.pollCalls == 0)
+        model.dismissAttach()
+    }
+
+    @Test("cancelling a current waiting relay connection still cancels it on the service")
+    func cancelCurrentRelayAttach() async {
+        let fixture = Fixture()
+        let service = SuspendedQuestionsAttachService()
+        let model = QuestionsModel(
+            service: service, signer: fixture.signer, push: fixture.push, deviceName: "Test iPhone",
+            defaults: fixture.defaults)
+        let request = Task {
+            await model.startAttach(link: "https://apassy-relay.example/link#apassy_lnk_current")
+        }
+        await service.waitForStart()
+        await service.complete(.success)
+        await request.value
+        guard case .waiting = model.attach else {
+            Issue.record("the current response did not reach waiting")
+            return
+        }
+        model.cancelAttach()
+        await service.waitForCancel()
+        #expect(model.attach == nil)
+        #expect(await service.cancelCalls == 1)
+    }
+
+    @Test("Connect this iPhone routes a companion QR after dismissal without starting a relay join")
+    func companionFromConnectSheet() async throws {
+        let pairing = PairingModelTests.Fixture(polls: [.waiting, .paired])
+        let fixture = Fixture(onCompanionCode: { pairing.model.receiveCode($0) })
+        await fixture.model.refresh()
+        let code = pairingLinkText(expiresIn: 300)
+        #expect(QuestionsModel.isConnectionCode(code))
+        #expect(QuestionsModel.isConnectionCode("  \(code) \n"))
+        #expect(!QuestionsModel.isLink(code))
+        await fixture.model.startAttach(link: "  \(code) \n")
+        #expect(fixture.model.attach == .companion)
+        #expect(fixture.model.phase == .off)
+        #expect(await fixture.service.attachedAnswerKey() == nil)
+        #expect(fixture.signer.renewals == 0)
+        #expect(fixture.signer.reasons.isEmpty)
+        #expect(pairing.model.step == .welcome)
+        #expect(pairing.model.hasScannedCode)
+        #expect(pairing.mac.requests.isEmpty)
+
+        // The host dismisses the scanner before opening the prepared companion flow.
+        fixture.model.dismissAttach()
+        #expect(fixture.model.attach == nil)
+        #expect(pairing.model.hasScannedCode)
+        pairing.model.startScanning()
+        #expect(await waitUntil {
+            if case .code = pairing.model.step { return true }
+            return false
+        })
+        #expect(await waitUntil { pairing.model.step == .paired(macName: "Mac mini") })
+        #expect(pairing.paired.isEmpty)
+        pairing.model.finish()
+        #expect(pairing.paired.count == 1)
+    }
+
+    @Test("Connect this iPhone rejects malformed or expired companion QR without a relay fallback")
+    func invalidCompanionFromConnectSheet() async {
+        let valid = pairingLinkText(expiresIn: 300)
+        let invalid = [
+            pairingLinkText(expiresIn: -10),
+            valid + "&v=1",
+            valid.replacingOccurrences(of: "p=48620", with: "p=0"),
+            "apassy://pair/wrong/link#apassy_lnk_abc",
+            "APASSY://pair/wrong/link#apassy_lnk_abc",
+        ]
+        for code in invalid {
+            var called = false
+            let fixture = Fixture(onCompanionCode: { _ in called = true; return nil })
+            await fixture.model.startAttach(link: code)
+            guard case .failed = fixture.model.attach else {
+                Issue.record("invalid companion code started a connection")
+                continue
+            }
+            #expect(!called)
+            #expect(await fixture.service.attachedAnswerKey() == nil)
+        }
+    }
+
+    @Test("an existing companion pairing keeps its keys and stays in the connect sheet")
+    func companionGuardFromConnectSheet() async throws {
+        let pairing = PairingModelTests.Fixture(polls: [.paired])
+        #expect(await pairing.scanToCode())
+        #expect(await waitUntil { pairing.model.step == .paired(macName: "Mac mini") })
+        let saved = try #require(try pairing.store.load())
+        let fixture = Fixture(onCompanionCode: { pairing.model.receiveCode($0) })
+        await fixture.model.startAttach(link: pairingLinkText(expiresIn: 300))
+        guard case .failed = fixture.model.attach else {
+            Issue.record("existing pairing was replaced")
+            return
+        }
+        #expect(try pairing.store.load() == saved)
+        #expect(pairing.model.step == .paired(macName: "Mac mini"))
+        #expect(await fixture.service.attachedAnswerKey() == nil)
+        pairing.model.finish()
+    }
 
     @Test("a device link connects the vault after the Mac confirms")
     func attach() async {

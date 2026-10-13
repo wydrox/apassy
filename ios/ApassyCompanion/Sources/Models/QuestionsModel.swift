@@ -172,6 +172,8 @@ final class QuestionsModel {
 
     /// Connecting a vault from iCloud Drive to its notifications team (plan §A7).
     enum AttachStep: Equatable {
+        /// A valid companion QR is prepared. Dismiss the relay sheet before showing its flow.
+        case companion
         case starting
         /// The Mac shows the same words and waits for the owner to confirm.
         case waiting(AttachInfo)
@@ -199,14 +201,21 @@ final class QuestionsModel {
     @ObservationIgnored private let deviceName: String
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let retryInterval: Duration
+    @ObservationIgnored private let onCompanionCode: @MainActor (String) -> String?
     @ObservationIgnored private var attachTask: Task<Void, Never>?
+    /// A response belongs only to the scanner attempt that started it. Cancelling/dismissing
+    /// invalidates even a service call that cannot be cancelled while it awaits the relay.
+    @ObservationIgnored private var attachGeneration = 0
     @ObservationIgnored private var askedForToken = false
     @ObservationIgnored private var focusPending = false
 
     init(
         service: any VaultService, signer: any AnswerSigner, push: (any PushPermission)?, deviceName: String,
         defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
-        retryInterval: Duration = .seconds(2)
+        retryInterval: Duration = .seconds(2),
+        onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
+            "This code pairs the iPhone companion. Open Decisions > Devices > Mac on Wi-Fi to pair with your Mac."
+        }
     ) {
         self.service = service
         self.signer = signer
@@ -215,6 +224,7 @@ final class QuestionsModel {
         self.defaults = defaults
         self.now = now
         self.retryInterval = retryInterval
+        self.onCompanionCode = onCompanionCode
         notificationsOn = defaults.bool(forKey: Self.notificationsKey)
         push?.observeOpens { [weak self] in self?.notificationOpened() }
     }
@@ -483,7 +493,37 @@ final class QuestionsModel {
         text.trimmingCharacters(in: .whitespacesAndNewlines).contains("apassy_lnk_")
     }
 
+    /// The paste action accepts either flow. The relay still validates its token in the core.
+    static func isConnectionCode(_ text: String) -> Bool {
+        isLink(text) || (try? PairingLink.parse(text)) != nil
+    }
+
     func startAttach(link: String, pollInterval: Duration = .seconds(2)) async {
+        switch attach {
+        case nil, .failed: break
+        default: return
+        }
+        attachGeneration += 1
+        let generation = attachGeneration
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            _ = try PairingLink.parse(trimmed, now: now())
+            if let problem = onCompanionCode(trimmed) {
+                attach = .failed(problem)
+            } else {
+                attach = .companion
+            }
+            return
+        } catch let error as PairingLinkError {
+            // An invalid companion code must never fall through to the relay token heuristic.
+            if error != .notAPairingLink || trimmed.lowercased().hasPrefix("apassy:") {
+                attach = .failed(error.localizedDescription)
+                return
+            }
+        } catch {
+            attach = .failed(error.localizedDescription)
+            return
+        }
         guard Self.isLink(link) else {
             attach = .failed("This is not a device link of the Apassy relay. On the Mac, make a new link.")
             return
@@ -493,40 +533,52 @@ final class QuestionsModel {
             // The core rejects a key that belonged to a removed row: a removed iPhone gets a new one.
             let key = try status.removed ? signer.renew() : signer.publicKey()
             let info = try await service.joinAttach(
-                link: link.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: deviceName, answerKey: key)
+                link: trimmed, deviceName: deviceName, answerKey: key)
+            guard isCurrentAttach(generation), attach == .starting else { return }
             attach = .waiting(info)
             attachTask?.cancel()
-            attachTask = Task { [weak self] in await self?.pollAttach(every: pollInterval) }
+            attachTask = Task { [weak self] in await self?.pollAttach(every: pollInterval, generation: generation) }
         } catch let error as CompanionKeyError {
+            guard isCurrentAttach(generation), attach == .starting else { return }
             attach = .failed("To answer here, Apassy needs Face ID on this iPhone. \(error.localizedDescription)")
         } catch {
+            guard isCurrentAttach(generation), attach == .starting else { return }
             attach = .failed(error.localizedDescription)
         }
     }
 
-    private func pollAttach(every interval: Duration) async {
-        while !Task.isCancelled, case .waiting = attach {
+    private func isCurrentAttach(_ generation: Int) -> Bool {
+        generation == attachGeneration && !Task.isCancelled
+    }
+
+    private func pollAttach(every interval: Duration, generation: Int) async {
+        while isCurrentAttach(generation), case .waiting = attach {
             try? await Task.sleep(for: interval)
-            guard !Task.isCancelled, case .waiting = attach else { return }
+            guard isCurrentAttach(generation), case .waiting = attach else { return }
             do {
                 let info = try await service.joinAttachPoll()
+                guard isCurrentAttach(generation), case .waiting = attach else { return }
                 if info.state == .attached {
                     attach = .attached
                     await refresh()
+                    guard isCurrentAttach(generation), attach == .attached else { return }
                     registerPushesIfOn()
                     return
                 }
                 attach = .waiting(info)
             } catch let error as VaultError where [.joinRefused, .linkInvalid, .invalidInput].contains(error.code) {
+                guard isCurrentAttach(generation), case .waiting = attach else { return }
                 attach = .failed(error.message)
                 return
             } catch {
+                guard isCurrentAttach(generation), case .waiting = attach else { return }
                 // No network: the next poll tries again.
             }
         }
     }
 
     func cancelAttach() {
+        attachGeneration += 1
         attachTask?.cancel()
         attachTask = nil
         if case .waiting = attach { Task { try? await service.joinAttachCancel() } }
@@ -534,6 +586,7 @@ final class QuestionsModel {
     }
 
     func dismissAttach() {
+        attachGeneration += 1
         attachTask?.cancel()
         attachTask = nil
         attach = nil

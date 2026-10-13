@@ -4,6 +4,12 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- **iPhone pairing:** a companion QR scanned in a device connection flow opens companion pairing with the usual owner confirmation, instead of being rejected as an invalid relay link. A late response from a cancelled relay connection cannot interrupt the new pairing flow.
+- **iCloud sync:** connected vaults merge authenticated conflicting file versions, retain encrypted recovery copies, and check for intervening changes before resolving the captured versions. Unreadable or incompatible copies remain unresolved.
+- **iPhone sync status:** long errors wrap fully; tapping a problem opens Settings > Devices.
+
 ## [0.5.0] - 2026-10-13
 
 One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. Agents need no setup for each credential: a connected agent sees the names of your credentials, and the bouncer decides each use from the first one or asks you ([ADR 0025](docs/adr/0025-low-friction-access.md)). The Mac app has a new window with folders, Decisions, and Agents, you add a credential by pasting it, and the iPhone app follows the same model ([ADR 0026](docs/adr/0026-simple-app.md)).

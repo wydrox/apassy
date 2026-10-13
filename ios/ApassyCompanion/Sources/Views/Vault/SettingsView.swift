@@ -17,6 +17,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var path: [Page] = []
 
+    init(initialPage: Page? = nil) {
+        _path = State(initialValue: initialPage.map { [$0] } ?? [])
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
             Form {

@@ -23,6 +23,7 @@ enum DecisionRoute: Hashable {
 /// are one list. Requests and suggestions live in the Mac's vault and do not reach the iPhone yet,
 /// so their sections say so and show nothing else.
 struct DecisionsView: View {
+    @Environment(RootModel.self) private var root: RootModel?
     let questions: QuestionsModel?
     let companion: AppModel
     var onSettings: (() -> Void)?
@@ -65,7 +66,11 @@ struct DecisionsView: View {
                 }
             }
         }
-        .sheet(isPresented: $showsConnect, onDismiss: { questions?.dismissAttach() }) {
+        .sheet(isPresented: $showsConnect, onDismiss: {
+            let opensCompanion = questions?.attach == .companion
+            questions?.dismissAttach()
+            if opensCompanion { root?.openPreparedCompanion() }
+        }) {
             if let questions { ConnectQuestionsView(model: questions) }
         }
         .sheet(isPresented: $showsMac) {

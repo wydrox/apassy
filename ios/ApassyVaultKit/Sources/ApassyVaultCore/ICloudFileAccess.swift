@@ -2,15 +2,42 @@ import ApassyVaultKit
 import CryptoKit
 import Foundation
 
+/// Closed encrypted copies, captured together under provider coordination.
+public struct ICloudConflictSnapshot: Sendable {
+    public let url: URL
+    public let sha256: String
+    public init(url: URL, sha256: String) { self.url = url; self.sha256 = sha256 }
+}
+
 /// The provider boundary. Tests use a local implementation without iCloud access.
 public protocol ICloudFileAccess: Sendable {
     func makeBookmark(for url: URL) throws -> Data
     func resolveBookmark(_ data: Data) throws -> URL
     func hasChanged(at url: URL, previousHash: String?) throws -> Bool
     func snapshot(from url: URL, to destination: URL) throws
+    func snapshotForSync(from url: URL, to destination: URL) throws -> [ICloudConflictSnapshot]
     /// Return false if the provider changed since the snapshot. Do not write in that case.
     func publish(from source: URL, to url: URL, expectedInputHash: String,
                  outputHash: String, authorize: @Sendable (@Sendable () throws -> Void) throws -> Void) throws -> Bool
+    func publishForSync(from source: URL, to url: URL, expectedInputHash: String,
+                        expectedConflictHashes: [String], outputHash: String,
+                        authorize: @Sendable (@Sendable () throws -> Void) throws -> Void) throws -> Bool
+}
+
+public extension ICloudFileAccess {
+    func snapshotForSync(from url: URL, to destination: URL) throws -> [ICloudConflictSnapshot] {
+        try snapshot(from: url, to: destination)
+        return []
+    }
+    func publishForSync(from source: URL, to url: URL, expectedInputHash: String,
+                        expectedConflictHashes: [String], outputHash: String,
+                        authorize: @Sendable (@Sendable () throws -> Void) throws -> Void) throws -> Bool {
+        guard expectedConflictHashes.isEmpty else {
+            throw VaultError(.conflict, "This file provider cannot safely merge conflicting versions.")
+        }
+        return try publish(from: source, to: url, expectedInputHash: expectedInputHash,
+                           outputHash: outputHash, authorize: authorize)
+    }
 }
 
 /// The state of the local copy of an iCloud file.
@@ -130,7 +157,7 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
 
     private func noConflicts(_ url: URL) throws {
         guard NSFileVersion.unresolvedConflictVersionsOfItem(at: url)?.isEmpty != false else {
-            throw VaultError(.conflict, "iCloud has conflicting file versions. Sync stopped. Keep all versions until you can resolve the conflict on your Mac.")
+            throw VaultError(.conflict, "iCloud has conflicting file versions. Sync the connected vault to merge them. Keep all versions if this vault is not connected yet.")
         }
     }
 
@@ -154,7 +181,7 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
             var result: Result<Bool, any Error> = .failure(VaultError(.io, "iCloud did not give access to the file."))
             NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { actual in
                 result = Result {
-                    try noConflicts(actual)
+                    if NSFileVersion.unresolvedConflictVersionsOfItem(at: actual)?.isEmpty == false { return true }
                     return try Self.hash(actual) != previousHash
                 }
             }
@@ -181,6 +208,44 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
 
     public func publish(from source: URL, to url: URL, expectedInputHash: String,
                         outputHash: String, authorize: @Sendable (@Sendable () throws -> Void) throws -> Void) throws -> Bool {
+        try publishForSync(from: source, to: url, expectedInputHash: expectedInputHash,
+                           expectedConflictHashes: [], outputHash: outputHash, authorize: authorize)
+    }
+
+    public func snapshotForSync(from url: URL, to destination: URL) throws -> [ICloudConflictSnapshot] {
+        try access(url) {
+            try download(url)
+            var coordinationError: NSError?
+            var result: Result<[ICloudConflictSnapshot], any Error> = .failure(VaultError(.io, "iCloud did not give access to the file."))
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { actual in
+                result = Result {
+                    let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: actual) ?? []
+                    guard versions.count <= Self.maximumConflictVersions else {
+                        throw VaultError(.conflict, "iCloud has too many conflicting versions to merge at once. Keep all versions and resolve them on your Mac.")
+                    }
+                    try Self.copySnapshot(from: actual, to: destination)
+                    return try versions.enumerated().map { index, version in
+                        let copy = destination.deletingLastPathComponent().appendingPathComponent("conflict-\(index)")
+                        try Self.copySnapshot(from: version.url, to: copy)
+                        return ICloudConflictSnapshot(url: copy, sha256: try Self.hash(copy))
+                    }
+                }
+            }
+            if let coordinationError { throw coordinationError }
+            return try result.get()
+        }
+    }
+
+    // NSFileVersion objects never leave the synchronous coordinated operation.
+    // The wrapper permits capture in the session's synchronous Sendable guard.
+    private struct CapturedVersions: @unchecked Sendable {
+        let values: [NSFileVersion]
+        func resolve() { for version in values { version.isResolved = true } }
+    }
+
+    public func publishForSync(from source: URL, to url: URL, expectedInputHash: String,
+                               expectedConflictHashes: [String], outputHash: String,
+                               authorize: @Sendable (@Sendable () throws -> Void) throws -> Void) throws -> Bool {
         try access(url) {
             try download(url)
             guard try Self.hash(source) == outputHash else {
@@ -190,8 +255,14 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
             var result: Result<Bool, any Error> = .failure(VaultError(.io, "iCloud did not give access to the file."))
             NSFileCoordinator().coordinate(writingItemAt: url, options: [.forReplacing], error: &coordinationError) { actual in
                 result = Result {
-                    try noConflicts(actual)
+                    let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: actual) ?? []
+                    guard versions.count <= Self.maximumConflictVersions else { return false }
+                    let hashes = try versions.map { try Self.hash($0.url) }
+                    // Compare the complete multiset, including duplicates. A new or
+                    // changed version must be authenticated by a fresh prepare.
+                    guard hashes.sorted() == expectedConflictHashes.sorted() else { return false }
                     guard try Self.hash(actual) == expectedInputHash else { return false }
+                    let captured = CapturedVersions(values: versions)
                     // Ask Foundation for a replacement directory on this volume. A
                     // single-file scope does not permit arbitrary sibling creation.
                     let replacementDirectory = try FileManager.default.url(for: .itemReplacementDirectory,
@@ -204,6 +275,10 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
                     }
                     try authorize {
                         _ = try FileManager.default.replaceItemAt(actual, withItemAt: replacement)
+                        // The caller durably archived every encrypted input and
+                        // authenticated all versions before publication. Keep the
+                        // provider versions too; never call removeOtherVersions.
+                        captured.resolve()
                     }
                     return true
                 }
@@ -214,6 +289,7 @@ public struct CoordinatedICloudFileAccess: ICloudFileAccess {
     }
 
     static let maximumSnapshotBytes: UInt64 = 64 * 1024 * 1024
+    static let maximumConflictVersions = 8
 
     static func copySnapshot(from source: URL, to destination: URL) throws {
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)

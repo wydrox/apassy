@@ -35,6 +35,8 @@ struct VaultTabView: View {
                 switch sheet {
                 case .settings:
                     SettingsView()
+                case .syncSettings:
+                    SettingsView(initialPage: .devices)
                 case .new(let kind):
                     ItemEditorView(model: ItemEditorModel(kind: kind))
                 case .edit(let detail):
