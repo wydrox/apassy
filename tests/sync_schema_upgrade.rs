@@ -354,8 +354,8 @@ fn schema17_adoption_keeps_the_key_digest_and_schema_checks() {
     set_schema(&stale, PASS, OLD, false);
     refuse(&stale, PASS, VaultErrorKind::WrongKeyOrCorrupt);
 
-    // A later and an earlier schema, each with a valid digest.
-    for version in [CURRENT + 1, OLD - 1] {
+    // Schemas beyond the supported 16..=19 range still fail with a valid digest.
+    for version in [CURRENT + 1, 15] {
         let path = root.path().join(format!("v{version}.apassy"));
         a.write_sync_copy(&path, "Mac A").unwrap();
         set_schema(&path, PASS, version, true);
