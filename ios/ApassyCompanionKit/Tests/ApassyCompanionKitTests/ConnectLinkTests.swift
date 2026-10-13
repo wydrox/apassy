@@ -8,7 +8,7 @@ struct ConnectLinkTests {
     static let relay = "https://apassy-relay.wyderka.cc"
     static let code = "apassy_lnk_t_7k2m5q4x3c_" + String(repeating: "0123456789abcdef", count: 4)
     static let pairing =
-        "apassy://pair?v=1&h=192.0.2.10&p=48620&c=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&s=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&n=Mac%20mini&e=1790000300"
+        "apassy://pair?v=1&h=192.0.2.10&p=48620&c=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&s=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA&n=Mac%20mini&e=1790000300"
 
     static func relayLink(_ text: String) throws -> RelayConnectLink {
         guard case .relay(let link) = try ConnectLink.parse(text) else {
@@ -37,7 +37,7 @@ struct ConnectLinkTests {
     @Test("vector 2: the new form with r=connect")
     func vector2() throws {
         let text =
-            "\(Self.relay)/link#\(Self.code)&r=connect&n=Mac%20mini&e=1790000600&p=YXBhc3N5Oi8vcGFpcj92PTEmaD0xOTIuMC4yLjEwJnA9NDg2MjAmYz1BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBJnM9QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQiZuPU1hYyUyMG1pbmkmZT0xNzkwMDAwMzAw"
+            "\(Self.relay)/link#\(Self.code)&r=connect&n=Mac%20mini&e=1790000600&p=YXBhc3N5Oi8vcGFpcj92PTEmaD0xOTIuMC4yLjEwJnA9NDg2MjAmYz1BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBJnM9QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQSZuPU1hYyUyMG1pbmkmZT0xNzkwMDAwMzAw"
         let link = try Self.relayLink(text)
         #expect(link.relay == Self.relay)
         #expect(link.code == Self.code)
