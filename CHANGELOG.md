@@ -42,7 +42,7 @@ One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. 
   - Any other grant in "Bouncer decides" becomes nothing: the bouncer decides by default now. An agent that saw all credentials gets no "only these items".
   - Revoked agents and grants of deleted credentials get nothing. Grants, rules, requests, and remembered patterns stay as history. You remove an exception on the page of the agent, after the owner check.
 - A question waits 5 minutes, so the host of an agent needs a longer tool time-out: `MCP_TOOL_TIMEOUT=330000` for Claude Code, `tool_timeout_sec = 330` for Codex. "Connect an Agent" and `apassy setup` write these values. Set them for a host that you connected by hand.
-- Questions through the relay need a relay with team schema 5, which is not deployed yet. With the current relay, Settings > Devices says "The relay does not support questions yet — update the relay.", and each question stays on the Mac that asks and on an iPhone paired on the local network.
+- Questions through the relay need a relay with team schema 5. The Apassy relay runs it since 2026-10-13. Push notifications are not on yet: the iPhone gets a question while the app is open, and the Mac that asks shows it at once.
 
 ### Not done yet
 
