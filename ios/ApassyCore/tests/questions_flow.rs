@@ -786,3 +786,90 @@ fn a_cancelled_attach_leaves_the_vault_without_a_team() {
         "no_questions"
     );
 }
+
+/// A link that the owner did not make: when the vault names its questions team (from the
+/// Mac that connected it), a link of another team is refused before any relay call, so
+/// it cannot bind this iPhone to a stranger's team. A link of the named team works.
+#[test]
+fn a_link_of_another_team_is_refused_when_the_vault_names_its_team() {
+    let setup = setup();
+    as_the_mac(&setup, |vault| {
+        vault.set_questions_team("t_aaaaaaaaaa").unwrap()
+    });
+    let (link, _) = setup.relay.link();
+    let answer: Value = serde_json::from_str(&setup.core.call(
+        &json!({"op": "join_attach", "link": link, "answer_key": ANSWER_PUBLIC}).to_string(),
+    ))
+    .unwrap();
+    assert_eq!(answer["ok"], false, "{answer}");
+    assert_eq!(answer["error"]["code"], "link_invalid");
+    assert_eq!(
+        answer["error"]["message"],
+        "This code is for another vault's devices. On your Mac, open Settings > Devices > Add a device."
+    );
+    assert!(
+        !setup
+            .relay
+            .log()
+            .iter()
+            .any(|line| line == "POST /v1/devices/link"),
+        "no relay call"
+    );
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["enabled"], false);
+
+    // The vault names the team of the link: the iPhone joins.
+    as_the_mac(&setup, |vault| vault.set_questions_team(TEAM).unwrap());
+    attach(&setup);
+}
+
+/// "Disconnect from Apassy Connect": the iPhone leaves the team with no Face ID. The relay
+/// removes its device, the vault drops the membership and its key, and a new code from the
+/// owner's Mac connects it again.
+#[test]
+fn disconnect_takes_this_iphone_out_of_the_team() {
+    let setup = setup();
+    attach(&setup);
+    assert!(setup.relay.is_live(2));
+    call(&setup.core, json!({"op": "questions_disconnect"}));
+    assert!(!setup.relay.is_live(2), "the relay removed the device");
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["enabled"], false);
+    let memberships = as_the_mac(&setup, |vault| vault.relay_memberships().unwrap().len());
+    assert_eq!(memberships, 0, "the key left the vault");
+    // Again: nothing to do.
+    call(&setup.core, json!({"op": "questions_disconnect"}));
+
+    // The owner's Mac makes a new code: the iPhone joins again with a new relay key.
+    let (link, _) = setup.relay.link();
+    call(
+        &setup.core,
+        json!({"op": "join_attach", "link": link, "answer_key": ANSWER_PUBLIC}),
+    );
+    assert_eq!(setup.relay.confirm_links(), vec![3]);
+    let attached = call(&setup.core, json!({"op": "join_attach_poll"}));
+    assert_eq!(attached["state"], "attached");
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["enabled"], true);
+    assert_eq!(list["status"]["relay_device_id"], 3);
+}
+
+/// A cancel that the relay did not hear keeps its key and goes again when the relay
+/// answers, so the Mac never confirms an iPhone whose key was dropped.
+#[test]
+fn a_cancel_that_the_relay_did_not_hear_is_sent_again() {
+    let setup = setup();
+    let (link, _) = setup.relay.link();
+    call(
+        &setup.core,
+        json!({"op": "join_attach", "link": link, "answer_key": ANSWER_PUBLIC}),
+    );
+    assert_eq!(setup.relay.pending_links(), 1);
+    setup.relay.set_offline(true);
+    call(&setup.core, json!({"op": "join_attach_cancel"}));
+    assert_eq!(setup.relay.pending_links(), 1, "the relay did not hear it");
+    setup.relay.set_offline(false);
+    call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(setup.relay.pending_links(), 0, "cancelled at the next call");
+    assert!(setup.relay.confirm_links().is_empty());
+}

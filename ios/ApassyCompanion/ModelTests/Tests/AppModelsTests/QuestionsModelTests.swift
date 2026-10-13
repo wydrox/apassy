@@ -364,6 +364,18 @@ struct QuestionsModelTests {
         fixture.model.cancelAttach()
     }
 
+    @Test("Disconnect from Apassy Connect takes this iPhone out of the questions, with no Face ID")
+    func disconnect() async {
+        let fixture = Fixture()
+        await fixture.service.setQuestions(enabled: true, questions: [PreviewVaultService.sampleQuestion()])
+        await fixture.model.refresh()
+        #expect(fixture.model.phase == .ready)
+        #expect(await fixture.model.disconnect() == nil)
+        #expect(fixture.model.phase == .off)
+        #expect(fixture.model.questions.isEmpty)
+        #expect(fixture.signer.reasons.isEmpty, "no Face ID")
+    }
+
     // MARK: The outcome in place of the bar
 
     @Test("an open question has no outcome; this iPhone's answer, a settle, or the expiry replace the bar")

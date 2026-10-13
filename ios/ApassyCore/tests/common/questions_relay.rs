@@ -82,6 +82,8 @@ struct Relay {
     next_secret: u64,
     push: Option<(u64, Value)>,
     log: Vec<String>,
+    /// The relay does not answer: each connection closes with no answer.
+    offline: bool,
 }
 
 impl Relay {
@@ -209,6 +211,28 @@ impl QuestionsRelay {
                 Some((device.id, link.device_name.clone(), link.public_key.clone()))
             })
             .collect()
+    }
+
+    /// Whether device `id` is in the team and not revoked.
+    pub fn is_live(&self, id: u64) -> bool {
+        lock(&self.shared.0)
+            .devices
+            .iter()
+            .any(|device| device.id == id && device.live)
+    }
+
+    /// The links that wait for the Mac.
+    pub fn pending_links(&self) -> usize {
+        lock(&self.shared.0)
+            .links
+            .iter()
+            .filter(|link| link.state == LinkState::Pending)
+            .count()
+    }
+
+    /// The relay stops answering, or answers again.
+    pub fn set_offline(&self, offline: bool) {
+        lock(&self.shared.0).offline = offline;
     }
 
     /// The relay revokes device `id`.
@@ -360,6 +384,10 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
     let Some(request) = read_request(&stream) else {
         return;
     };
+    if lock(&shared.0).offline {
+        // No answer: the connection closes.
+        return;
+    }
     lock(&shared.0)
         .log
         .push(format!("{} {}", request.method, request.path));

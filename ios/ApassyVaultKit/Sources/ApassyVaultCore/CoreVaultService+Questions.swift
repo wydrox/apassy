@@ -52,4 +52,6 @@ extension CoreVaultService {
     public func joinAttachPoll() async throws -> AttachInfo { try await call("join_attach_poll") }
 
     public func joinAttachCancel() async throws { try await call("join_attach_cancel") }
+
+    public func questionsDisconnect() async throws { try await call("questions_disconnect") }
 }

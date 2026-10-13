@@ -25,6 +25,10 @@ mod columns;
 mod companion;
 #[cfg(all(test, feature = "vault"))]
 mod companion_tests;
+/// The fixes of the Connect review: a forgotten team, the purpose of a proof, the team
+/// of a late confirmation.
+#[cfg(all(test, feature = "vault"))]
+mod connect_tests;
 /// Decisions: the questions that wait for the owner (ADR 0026 §2).
 #[cfg(feature = "vault")]
 mod decisions;

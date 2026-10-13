@@ -737,6 +737,70 @@ impl Vault {
         tx.commit().map_err(storage)
     }
 
+    /// Move the questions of the vault to the new team of `membership` in one transaction:
+    /// the membership of `old_team` goes with its key (when there is one), `membership`
+    /// comes, and the vault names its team as the questions team (`questions-team-v1`). A
+    /// failure changes nothing. `InvalidInput` and `AlreadyExists` as
+    /// [`Vault::add_relay_membership`], after the old membership went.
+    pub fn replace_questions_membership(
+        &mut self,
+        old_team: Option<&str>,
+        membership: &RelayMembership,
+    ) -> VaultResult<()> {
+        if !membership.is_valid() || membership.purposes.is_empty() {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let device_id =
+            i64::try_from(membership.device_id).map_err(|_| err(VaultErrorKind::InvalidInput))?;
+        let now = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        if let Some(old_team) = old_team {
+            tx.execute(
+                "DELETE FROM relay_membership WHERE team_id = ?1",
+                [old_team],
+            )
+            .map_err(storage)?;
+        }
+        if !load_memberships(&tx, Some(&membership.team_id))?.is_empty()
+            || second_team(&tx, &membership.team_id, &membership.purposes)?
+        {
+            return Err(err(VaultErrorKind::AlreadyExists));
+        }
+        tx.execute(
+            "INSERT INTO relay_membership
+                 (team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                membership.team_id,
+                membership.relay_url,
+                device_id,
+                membership.public_key,
+                membership.key_pkcs8.as_slice(),
+                purposes_json(&membership.purposes),
+                now,
+            ],
+        )
+        .map_err(storage)?;
+        let previous: Option<i64> = tx
+            .query_row(
+                "SELECT updated_at FROM vault_secret WHERE name = ?1",
+                [super::questions::QUESTIONS_TEAM_NAME],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        super::questions::write_secret(
+            &tx,
+            super::questions::QUESTIONS_TEAM_NAME,
+            membership.team_id.as_bytes(),
+            previous,
+        )?;
+        tx.commit().map_err(storage)
+    }
+
     /// Remove the membership of `team_id` with its key, whatever uses it. Returns whether
     /// there was one.
     pub fn remove_relay_membership(&mut self, team_id: &str) -> VaultResult<bool> {

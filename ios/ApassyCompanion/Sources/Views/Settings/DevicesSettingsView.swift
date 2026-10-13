@@ -11,6 +11,8 @@ struct DevicesSettingsView: View {
     @Environment(VaultUI.self) private var ui: VaultUI?
     @State private var showsConnect = false
     @State private var showsPairing = false
+    @State private var confirmsDisconnect = false
+    @State private var disconnectProblem: String?
 
     private var openVault: VaultModel? {
         guard let vault = root.vault, vault.hasVault, vault.isUnlocked else { return nil }
@@ -50,6 +52,14 @@ struct DevicesSettingsView: View {
                         close()
                     }
                 }
+                if canDisconnect {
+                    Button("Disconnect from Apassy Connect", systemImage: "xmark.circle", role: .destructive) {
+                        confirmsDisconnect = true
+                    }
+                    if let disconnectProblem {
+                        Text(disconnectProblem).font(.footnote).foregroundStyle(.red)
+                    }
+                }
             } footer: {
                 Text(
                     "Each question goes to every device. The first answer counts. Apassy Connect sees no command and no credential."
@@ -75,6 +85,16 @@ struct DevicesSettingsView: View {
         }
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog(
+            "Disconnect this iPhone from Apassy Connect?", isPresented: $confirmsDisconnect,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect", role: .destructive) { disconnect() }
+        } message: {
+            Text(
+                "Questions of “\(root.vault?.vault?.name ?? "this vault")” stop coming to this iPhone. To connect it again, open Settings > Devices > Add a device on your Mac."
+            )
+        }
         // A swipe down ends a connection that waits for the Mac.
         .sheet(isPresented: $showsConnect, onDismiss: { root.questions?.cancelAttach() }) {
             ConnectSheet().environment(root)
@@ -83,6 +103,18 @@ struct DevicesSettingsView: View {
             ApprovalsView(app: root.companion)
                 .presentationDragIndicator(.visible)
                 .environment(root)
+        }
+    }
+
+    /// This iPhone gets questions through an Apassy Connect team of its own (not through the
+    /// relay sync of the vault).
+    private var canDisconnect: Bool {
+        root.questions?.phase == .ready && openVault != nil && root.vault?.vault?.isRelay != true
+    }
+
+    private func disconnect() {
+        Task {
+            disconnectProblem = await root.questions?.disconnect()
         }
     }
 
@@ -105,6 +137,11 @@ struct DevicesSettingsView: View {
             else { return }
             await service.setQuestions(enabled: true, questions: [])
             await questions.refresh()
+            // `-ApassyOpen settings:devices:disconnect` asks "Disconnect this iPhone…?" at once.
+            if UserDefaults.standard.string(forKey: "ApassyOpen") == "settings:devices:disconnect" {
+                try? await Task.sleep(for: .milliseconds(500))
+                confirmsDisconnect = true
+            }
         }
     #endif
 }

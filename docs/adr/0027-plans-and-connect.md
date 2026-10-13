@@ -103,6 +103,8 @@ Each phase ships on its own.
 
 Without push (the APNs setup of schema 5), the iPhone sees questions only while the app is in the foreground.
 
+An iPhone app from before P2 reads a link with `r=connect` as an old link and runs the paid join (`join_finish`). A Connect team has no copy of the vault, so that join fails ("the relay has no copy"). The owner updates the iPhone app; the Mac cannot make an old link for a Free vault. A Mac from before P2 that pastes such a link is refused the same way. A Mac of this version refuses a link with `r=connect` in "Use a vault from another Mac" and says where to paste it (Settings > Devices > Approve here…).
+
 ## What this does not protect
 
 - A link shows the team id and a one-use code. It gives nothing without the safety words on both screens and the owner check on a device that already belongs to the vault (ADR 0022 decision 6). The strength of that check is the strength of the words and of the owner check; this record adds nothing to it.
@@ -110,6 +112,7 @@ Without push (the APNs setup of schema 5), the iPhone sees questions only while 
 - The limits are abuse limits, not a proof of who creates a team. The Worker limits fail open when their binding fails, so the relay keeps its own caps. A determined person with many keys and many IPs can still make Connect teams until the daily cap is reached.
 - An account holds an email and a plan, nothing else. It is not a key to a vault. If the accounts service is lost, the paid plans cannot be bought or renewed; vaults and approvals keep working.
 - A Free iPhone that did not open the vault from iCloud cannot read a question away from the Wi-Fi. This is by design (§3).
+- **A link you did not make.** Anyone can make a Connect team and its link, with any Mac name in `n`. A person who gets the owner to scan such a link on an iPhone that has the vault open can join that iPhone to the person's team, and confirm it on the person's own Mac with the two words that both screens show. The iPhone then sends nothing of the vault: the questions of the owner's Macs never reach that team, and a question of the stranger's Mac cannot be read without the question key of a vault that the stranger has. What it gets is an iPhone that listens to the wrong team. Three things limit it. The iPhone refuses a link whose team is not the questions team that the vault names (`questions-team-v1`, written by the owner's Mac), before any relay call. The iPhone never says that a link comes from "your Mac": the name in a link shows only as "Code from “n”", and the words screen says "The Mac that made this code shows the same two words". And Settings > Devices > "Disconnect from Apassy Connect" on the iPhone takes it out of any team, with no Face ID; the owner then connects it again from their own Mac. A vault that names no team yet (its first Connect) takes any link, as before.
 
 ## Relation to other records
 

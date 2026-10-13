@@ -185,6 +185,19 @@ struct JoinModelTests {
         #expect(try await fixture.service.info().join == nil)
     }
 
+    @Test("cancel after a failure gives the join up on the relay too")
+    func cancelAfterFailure() async throws {
+        let fixture = Fixture()
+        fixture.model.handleCode(link)
+        await fixture.model.start()
+        #expect(try await fixture.service.info().join != nil)
+        // A failure that leaves the join in the core, as a network error after the Mac confirmed.
+        fixture.model.step = .failed(title: "This iPhone was not added", message: "Synthetic failure.")
+        await fixture.model.cancel()
+        #expect(fixture.cancelled == 1)
+        #expect(try await fixture.service.info().join == nil)
+    }
+
     @Test("a join that finishes while the app is away leaves the vault closed")
     func finishWhileAway() async throws {
         let fixture = Fixture()

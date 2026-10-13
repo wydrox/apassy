@@ -2541,19 +2541,16 @@ struct LinkBody<'a> {
 impl PendingJoin {
     /// Parse the pasted text: `<relay URL>/link#<code>`, or a bare code with the relay
     /// address `relay_url` from the field above it. The link of "Add a device…" has
-    /// parameters after the code (`&r=…`, [`super::RelayLinkPayload`]): only the code
-    /// before the first `&` counts here.
+    /// parameters after the code (`&r=…`, [`super::RelayLinkPayload`]): the code before
+    /// the first `&` counts here, and a link whose `r` names a route this version does
+    /// not know is refused (contract relay-connect-v1 section 7.2 rule 5). The caller
+    /// that routes by `r` reads [`super::RelayLinkPayload::parse`].
     pub fn parse_link(
         text: &str,
         relay_url: &str,
     ) -> Result<(RelayUrl, Zeroizing<String>), SyncError> {
-        let text = text.trim();
-        let relay = text
-            .split_once("/link#")
-            .map_or(relay_url, |(relay, _)| relay);
-        let url = RelayUrl::parse(relay)?;
-        let parts = super::relay_link::split_link(text)?;
-        Ok((url, Zeroizing::new(parts.code.to_owned())))
+        let payload = super::RelayLinkPayload::parse(text, relay_url)?;
+        Ok((payload.relay, payload.code))
     }
 
     /// Make a device key and send the link (`POST /v1/devices/link`). The relay's
@@ -2656,6 +2653,22 @@ impl PendingJoin {
     /// other Mac confirmed in the meantime (`409`), this Mac removes its new device
     /// instead. The key goes with this value.
     pub fn cancel(self) -> Result<(), SyncError> {
+        self.cancel_call()
+    }
+
+    /// [`Self::cancel`] that keeps the key, so a caller can try again when the relay did
+    /// not hear it. `Ok`: the link ended, or the new device left after a confirmation, or
+    /// the relay no longer knows the link (it was used, refused, or expired). An error
+    /// that can pass by itself (no network, a busy or limiting relay): try again with the
+    /// same value, so the other Mac never confirms a device whose key is gone.
+    pub fn cancel_now(&self) -> Result<(), SyncError> {
+        match self.cancel_call() {
+            Err(error) if is_transient(error) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    fn cancel_call(&self) -> Result<(), SyncError> {
         let public_key = self.session.key.public_key_b64u();
         let cancelled = call::<IgnoredAny>(
             &self.session.url,
@@ -2674,8 +2687,8 @@ impl PendingJoin {
             Ok(_) => Ok(()),
             Err(ApiError::Relay { status: 409, .. }) => {
                 JoinedDevice {
-                    session: self.session,
-                    team: self.team,
+                    session: Arc::clone(&self.session),
+                    team: self.team.clone(),
                 }
                 .cancel();
                 Ok(())
@@ -2924,7 +2937,7 @@ mod tests {
         let code = format!("apassy_lnk_t_7k2m5q4x3c_{}", "ab".repeat(32));
         for text in [
             format!("https://relay.example.test/link#{code}&r=connect&n=Mac%20mini&e=1790000600"),
-            format!("https://relay.example.test/link#{code}&r=share&future=1"),
+            format!("https://relay.example.test/link#{code}&future=1"),
             format!("https://relay.example.test/link#{code}&"),
         ] {
             let (url, parsed) = PendingJoin::parse_link(&text, "").unwrap();
@@ -2935,6 +2948,16 @@ mod tests {
             PendingJoin::parse_link(&format!("{code}&r=sync"), "https://r.example.test").unwrap();
         assert_eq!(url.as_str(), "https://r.example.test");
         assert_eq!(parsed.as_str(), code);
+        // A route that this version does not know refuses the link (relay-connect-v1
+        // section 7.2 rule 5).
+        assert_eq!(
+            PendingJoin::parse_link(
+                &format!("https://relay.example.test/link#{code}&r=share&future=1"),
+                ""
+            )
+            .unwrap_err(),
+            SyncError::Relay(RelayRefusal::Forbidden)
+        );
         assert_eq!(
             PendingJoin::parse_link(
                 &format!("https://relay.example.test/link#&r=sync&{code}"),

@@ -491,4 +491,6 @@ public extension VaultService {
     }
 
     func joinAttachCancel() async throws {}
+
+    func questionsDisconnect() async throws {}
 }

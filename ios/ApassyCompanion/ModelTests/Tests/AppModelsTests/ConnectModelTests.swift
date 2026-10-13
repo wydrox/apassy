@@ -132,7 +132,9 @@ struct ConnectModelTests {
         fixture.model.deviceName = "  Rafał's iPhone "
         await fixture.model.connect()
         #expect(fixture.model.step.id == "connected")
-        if case .connected(let macName) = fixture.model.step { #expect(macName == "Mac mini") }
+        // The words name no Mac: the name in the code shows only as "Code from …".
+        if case .connected(let vaultName) = fixture.model.step { #expect(vaultName == vault?.name) }
+        #expect(fixture.model.codeFrom == "Code from “Mac mini”")
         #expect(fixture.settings.deviceName == "Rafał's iPhone")
         #expect(fixture.questions.phase == .ready)
         #expect(fixture.questions.attach == nil)

@@ -542,6 +542,24 @@ final class QuestionsModel {
         attach = nil
     }
 
+    // MARK: Disconnecting
+
+    /// "Disconnect from Apassy Connect": this iPhone leaves the questions team of the vault. No
+    /// Face ID: it takes authority away. The owner connects it again from their own Mac.
+    /// Returns the problem, or nil when it is done.
+    func disconnect() async -> String? {
+        cancelAttach()
+        do {
+            try await service.questionsDisconnect()
+        } catch {
+            return error.localizedDescription
+        }
+        deliveries = [:]
+        notice = nil
+        await refresh()
+        return nil
+    }
+
     /// Wait for the poll of a connection to end, for the tests.
     func attachFinished() async {
         await attachTask?.value

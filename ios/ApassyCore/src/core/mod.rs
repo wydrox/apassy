@@ -520,7 +520,8 @@ impl Core {
             | "push_token_clear"
             | "join_attach"
             | "join_attach_poll"
-            | "join_attach_cancel" => {
+            | "join_attach_cancel"
+            | "questions_disconnect" => {
                 self.require_app()?;
                 self.questions_call(&op, request)
             }

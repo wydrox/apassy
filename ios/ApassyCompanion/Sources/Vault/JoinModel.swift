@@ -256,12 +256,13 @@ final class JoinModel {
 
     // MARK: Ending
 
-    /// Leave the flow. A join that waits is cancelled on the relay.
+    /// Leave the flow. A join that waits, or that failed, is given up on the relay: the core
+    /// cancels its link, or removes its device after a confirmation (`join_cancel`).
     func cancel() async {
         stopPolling()
         openedWith = nil
         switch step {
-        case .waiting, .passphrase, .starting:
+        case .waiting, .passphrase, .starting, .failed:
             try? await service.joinCancel()
         default:
             break
