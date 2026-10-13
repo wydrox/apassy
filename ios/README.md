@@ -228,7 +228,13 @@ cd ios/ApassyCompanion/ModelTests
 swift test
 ```
 
-The screens have no tests. They are checked by the build and by the `#Preview` of each view, which use synthetic data.
+The screens are checked by the build and by the `#Preview` of each view, which use synthetic data. A few checks of the tabs run in the Simulator (`UITests`, target `ApassyCompanionUITests`), with the synthetic preview vault only:
+
+```
+cd ios/ApassyCompanion
+xcodebuild test -project ApassyCompanion.xcodeproj -scheme ApassyCompanion \
+  -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath /tmp/apassy-dd-app
+```
 
 ### Run on an iPhone
 

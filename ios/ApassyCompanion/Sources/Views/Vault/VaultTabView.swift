@@ -27,8 +27,6 @@ struct VaultTabView: View {
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
-        // On the TabView, the field belongs to the search tab and shows in the tab bar.
-        .searchable(text: $ui.searchText, prompt: "Titles, usernames, tags, websites")
         .environment(ui)
         .sheet(item: $ui.sheet) { sheet in
             Group {
@@ -284,11 +282,15 @@ struct SearchView: View {
     @Environment(VaultUI.self) private var ui
 
     var body: some View {
+        @Bindable var ui = ui
         NavigationStack {
             results
                 .navigationTitle("Search")
                 .vaultDestinations()
         }
+        // Here, not on the TabView: there the field reached the stack of every tab, and on Vault,
+        // Decisions, and Agents it searched nothing.
+        .searchable(text: $ui.searchText, prompt: "Titles, usernames, tags, websites")
     }
 
     @ViewBuilder

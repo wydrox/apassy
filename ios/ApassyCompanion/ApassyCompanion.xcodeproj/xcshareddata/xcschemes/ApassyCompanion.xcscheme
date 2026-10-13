@@ -39,6 +39,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "213F6A1DDB534FB4A0956725"
+               BuildableName = "ApassyCompanionUITests.xctest"
+               BlueprintName = "ApassyCompanionUITests"
+               ReferencedContainer = "container:ApassyCompanion.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>
