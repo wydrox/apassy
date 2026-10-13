@@ -1,4 +1,4 @@
-//! Settings > Advanced > Updates, and the banner of a ready update (ADR 0015).
+//! Settings > Updates, and the banner of a ready update (ADR 0015).
 
 use eframe::egui;
 
@@ -21,11 +21,12 @@ enum Action {
     HideBanner,
 }
 
-const FOOTER: &str = "Apassy installs a new version from apassy.wyderka.cc only when Apple notarized it and the same Developer ID team signed it. It never installs an older version.";
+const FOOTER: &str =
+    "Apassy installs only a newer version that Apple notarized and the Apassy team signed.";
 const LINUX_NOTE: &str = "Updates are available only for the macOS app. On Linux, build the new version from the source.";
 
-/// Settings > Advanced > Updates: the version with "Check now", the state with its
-/// action, the two switches, and "What's new in Apassy".
+/// Settings > Updates: the version with "Check now", the state with its action, the two
+/// switches, and "What's new in Apassy".
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
@@ -222,10 +223,12 @@ fn image_note(version: &str) -> String {
     )
 }
 
-/// "Apassy X is ready" on top of each page but Settings > Advanced, which has the same
+/// "Apassy X is ready" on top of each page but Settings > Updates, which has the same
 /// buttons.
 pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if app.settings_open && app.ui.settings_tab == super::SettingsTab::Advanced {
+    if app.place == crate::desktop::Place::Settings
+        && app.ui.settings_section == super::SettingsSection::Updates
+    {
         return;
     }
     let view = app.updates.view();
@@ -366,7 +369,7 @@ mod tests {
     fn settings_show_the_updates_section() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = unlocked(&dir);
-        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsTab::Advanced);
+        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsSection::Updates);
         let text = draw(&mut app, TALL);
         assert!(text.contains("Updates"), "{text}");
         let version = app.updates.build().label();

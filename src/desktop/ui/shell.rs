@@ -62,10 +62,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if columns.sidebar == SidebarMode::Float {
         super::sidebar::draw_float(app, &ctx, &pending);
     }
-    // A sheet that opened in the Settings window shows there.
-    if !(app.settings_open && app.ui.settings_sheet && !ctx.embed_viewports()) {
-        sheets(app, &ctx);
-    }
+    sheets(app, &ctx);
 }
 
 /// The margin at the sides of the sidebar. On the rail, wide enough for the traffic
@@ -95,6 +92,7 @@ fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         Place::Folder(_) | Place::Shared(_) => super::items::list_column(app, ui),
         Place::Decisions => super::decisions::list_column(app, ui, pending),
         Place::Agents => super::agents::list_column(app, ui),
+        Place::Settings => super::settings_view::list_column(app, ui),
     }
     #[cfg(not(feature = "vault"))]
     {
@@ -103,6 +101,7 @@ fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
             Place::Folder(_) | Place::Shared(_) => super::demo::list_column(app, ui),
             Place::Decisions => super::demo::decisions_list(app, ui),
             Place::Agents => super::demo::agents_list(app, ui),
+            Place::Settings => super::settings_view::list_column(app, ui),
         }
     }
 }
@@ -114,6 +113,7 @@ fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         Place::Folder(_) | Place::Shared(_) => super::items::detail_column(app, ui, pending),
         Place::Decisions => super::decisions::detail_column(app, ui, pending),
         Place::Agents => super::agents::detail_column(app, ui, pending),
+        Place::Settings => super::settings_view::detail_column(app, ui),
     }
     #[cfg(not(feature = "vault"))]
     {
@@ -122,6 +122,7 @@ fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
             Place::Folder(_) | Place::Shared(_) => super::demo::detail_column(app, ui),
             Place::Decisions => super::demo::decisions_detail(app, ui),
             Place::Agents => super::demo::agents_detail(app, ui),
+            Place::Settings => super::settings_view::detail_column(app, ui),
         }
     }
 }
@@ -145,19 +146,15 @@ pub(super) fn banners(
 }
 
 /// Go to a place with the keyboard. The first control of its list takes the focus.
-fn go(app: &mut DesktopApp, ctx: &egui::Context, place: Place) {
+fn go(app: &mut DesktopApp, place: Place) {
     super::sidebar::navigate(app, place);
-    // Settings in place of the window gives way to the place.
-    if ctx.embed_viewports() {
-        app.settings_open = false;
-    }
     app.ui.focus.focus_page_start();
 }
 
 /// Window shortcuts. They act only when no sheet, alert, token, or owner check is open,
 /// except ⌘L.
 ///
-/// - ⌘1, ⌘2, ⌘3: All credentials, Decisions, Agents. ⌘,: the Settings window.
+/// - ⌘1, ⌘2, ⌘3: All credentials, Decisions, Agents. ⌘,: Settings.
 /// - ⌘[: back from a credential or an agent to nothing selected.
 /// - ⌘N: a new credential.
 /// - ⌘F: search the credentials.
@@ -201,12 +198,13 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
     ];
     for (key, place) in places {
         if kit::shortcut(ctx, Modifiers::COMMAND, key) {
-            go(app, ctx, place);
+            go(app, place);
             return;
         }
     }
     if kit::shortcut(ctx, Modifiers::COMMAND, Key::Comma) {
-        app.open_settings_window();
+        super::settings_view::show(app);
+        app.ui.focus.focus_page_start();
         return;
     }
     if kit::shortcut(ctx, Modifiers::COMMAND, Key::OpenBracket) {
@@ -219,6 +217,8 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
             app.owner_ui.selected_agent = None;
             app.ui.focus.focus_page_start();
         }
+        // The demo build has no shortcut after this one.
+        #[cfg_attr(not(feature = "vault"), allow(clippy::needless_return))]
         return;
     }
     #[cfg(feature = "vault")]

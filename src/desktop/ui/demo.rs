@@ -196,13 +196,6 @@ pub(super) fn agents_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     columns::detail_body(ui, "demo-agents-detail", |ui| draw_agents(app, ui));
 }
 
-/// The Settings window of the demo: the fixture rule interpreter, under Advanced
-/// (ADR 0026 §2).
-pub(super) fn draw_settings(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    kit::page_header(ui, "Settings", Some("Advanced"), |_| {});
-    draw_rules(app, ui);
-}
-
 fn selected(app: &DesktopApp) -> Option<(String, ItemDetails)> {
     let id = app.selected_item_id.clone()?;
     let details = app.model.item_details(&id).ok()?;

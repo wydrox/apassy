@@ -1253,8 +1253,7 @@ fn notifications_footer(app: &mut DesktopApp, ui: &mut egui::Ui, rect: Rect, sum
         },
     );
     if open {
-        app.open_settings_window();
-        app.ui.settings_tab = super::settings::SettingsTab::Notifications;
+        super::settings_view::open(app, super::SettingsSection::Devices);
     }
 }
 

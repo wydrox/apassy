@@ -58,8 +58,7 @@ pub use model::{
 };
 
 /// A place in the sidebar of the desktop shell (ADR 0026): what the list column and the
-/// detail column show. Settings is not a place: it is its own window
-/// ([`DesktopApp::settings_open`]).
+/// detail column show.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Place {
     /// The credentials of the personal vault: every one (`None`), or one folder with its
@@ -71,6 +70,9 @@ pub enum Place {
     Decisions,
     /// The connected agents.
     Agents,
+    /// Settings (ADR 0026 §3): its sections in the list column, the selected one in the
+    /// detail column. The gear at the bottom of the sidebar and ⌘, open it.
+    Settings,
 }
 
 impl Place {
@@ -88,6 +90,7 @@ impl Place {
             Self::Folder(_) | Self::Shared(_) => "Credentials",
             Self::Decisions => "Decisions",
             Self::Agents => "Agents",
+            Self::Settings => "Settings",
         }
     }
 }
@@ -105,8 +108,6 @@ pub struct DesktopApp {
     pub(crate) model: DesktopModel,
     /// The place of the sidebar that the window shows.
     pub(crate) place: Place,
-    /// The Settings window is open (⌘, or the gear at the bottom of the sidebar).
-    pub(crate) settings_open: bool,
     pub(crate) selected_item_id: Option<String>,
     pub(crate) search: String,
     pub(crate) status_text: String,
@@ -194,7 +195,6 @@ impl DesktopApp {
         Self {
             model: DesktopModel::new(),
             place: Place::CREDENTIALS,
-            settings_open: false,
             selected_item_id: None,
             search: String::new(),
             status_text: String::new(),
@@ -315,12 +315,6 @@ impl DesktopApp {
         }
     }
 
-    /// Open the Settings window, or bring it to the front.
-    pub(crate) fn open_settings_window(&mut self) {
-        self.settings_open = true;
-        self.ui.raise_settings = true;
-    }
-
     pub(crate) fn set_ok(&mut self, message: impl Into<String>) {
         self.set_status(message.into(), StatusKind::Ok);
     }
@@ -434,7 +428,6 @@ impl DesktopApp {
             .is_some()
         {
             self.place = Place::CREDENTIALS;
-            self.settings_open = false;
             self.selected_item_id = None;
             self.search.clear();
             self.add_form = ItemDraft::default();

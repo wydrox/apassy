@@ -25,9 +25,9 @@
 #   ui-all-credentials.png ui-folder.png ui-credential.png ui-credential-options.png
 #   ui-new-credential.png ui-decisions-question.png ui-decisions-request.png
 #   ui-decisions-suggestion.png ui-agents.png ui-sidebar-collapsed.png ui-narrow.png
-#   ui-narrow-float.png ui-settings-window.png ui-settings-general.png
-#   ui-settings-devices.png ui-settings-security.png ui-settings-advanced.png
-#   ui-first-steps.png
+#   ui-narrow-float.png ui-settings-vault.png ui-settings-security.png
+#   ui-settings-devices.png ui-settings-bouncer.png ui-settings-tools.png
+#   ui-settings-updates.png ui-first-steps.png
 #   app-vault.png app-credential.png app-agent.png app-requests.png app-activity.png
 #   app-learning.png (copies of ui-* images, for the README and the site)
 set -euo pipefail
@@ -156,19 +156,10 @@ tour() {
         wid=""
         sleep 0.5
         file="$OUT/ui-$name.png"
-        if [ "$name" = "settings-window" ]; then
-          # The second window can take a moment to show.
-          for _ in 1 2 3 4 5 6 7 8 9 10; do
-            wid="$("$WORK/winid" "$APP_PID" Settings)" && break
-            sleep 0.5
-          done
-          [ -n "$wid" ] || fail "no Settings window"
-          screencapture -x -o -l "$wid" "$file"
-        else
-          wid="$("$WORK/winid" "$APP_PID")" || fail "no window for the app"
-          screencapture -x -o -l "$wid" "$file"
-          "$WORK/lights" "$file" "$LIGHTS_Y" "$LIGHTS_X" || fail "cannot paint the traffic lights"
-        fi
+        wid="$("$WORK/winid" "$APP_PID")" || fail "no window for the app"
+        screencapture -x -o -l "$wid" "$file"
+        "$WORK/lights" "$file" "$LIGHTS_Y" "$LIGHTS_X" || fail "cannot paint the traffic lights"
+
         echo "captured $file"
         COUNT=$((COUNT + 1))
         touch "$WORK/$name.done"

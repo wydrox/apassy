@@ -3,7 +3,7 @@
 //! fine-tune with its gate, the agreement of a candidate model in shadow mode, and the
 //! promotion and rollback of a model.
 //!
-//! ADR 0026 takes the Learning view out of the navigation. Settings > Advanced keeps a
+//! ADR 0026 takes the Learning view out of the navigation. Settings > Bouncer keeps a
 //! compact panel ([`settings_panel`]): the figures of the week, the calibration, and
 //! the candidate model.
 //!
@@ -205,7 +205,7 @@ mod vault_view {
     const DAY: u64 = 86_400;
     /// The disclosure key of the calibration and model sections.
     const ADVANCED: &str = "learning-advanced";
-    /// The same disclosure in Settings > Advanced.
+    /// The same disclosure in Settings > Bouncer.
     const SETTINGS_ADVANCED: &str = "settings-learning-advanced";
     /// The disclosure key of the ask rate table.
     const TABLE: &str = "learning-ask-rate-table";
@@ -391,23 +391,10 @@ mod vault_view {
         }
     }
 
-    /// Runs that waited for the owner in the last 7 days. `None` while the vault is
-    /// locked or does not answer.
-    pub(crate) fn asked_this_week(app: &DesktopApp) -> Option<u32> {
-        let now = learning::now();
-        let shared = app.owner_ui.session.shared_vault();
-        let guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        let vault = guard.as_ref().filter(|vault| !vault.is_locked())?;
-        let days = vault
-            .ask_rate_by_day((now / DAY).saturating_sub(6) * DAY)
-            .ok()?;
-        Some(week(&days, now).asked)
-    }
-
-    /// Settings > Advanced > Calibration and learning (ADR 0026 §2: the Learning view
+    /// Settings > Bouncer > Calibration and learning (ADR 0026 §2: the Learning view
     /// leaves the navigation). The figures of the week, then the threshold calibration
-    /// and the candidate model behind a disclosure. The bouncer section above it says
-    /// how often Apassy asked you.
+    /// and the candidate model behind a disclosure. Decisions says how often Apassy asked
+    /// you.
     pub(crate) fn settings_panel(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let now = learning::now();
         poll_training(app);
@@ -420,12 +407,11 @@ mod vault_view {
             Some(Ok(loaded)) => loaded,
         };
         let empty = loaded.is_empty();
-        kit::section(
+        // The grouped rows of Settings, as the groups above it.
+        super::super::ui::settings_rows::section(
             ui,
             Some("Calibration and learning"),
-            Some(
-                "Apassy learns from your answers. A remembered pattern and a calibrated level act only at the model step. They never change the hard rules or the production rule.",
-            ),
+            Some("Learning never changes the hard rules or the production rule."),
             |s| {
                 if empty {
                     s.row(|ui| {
@@ -439,25 +425,19 @@ mod vault_view {
                 let week = week(&loaded.days, now);
                 s.labeled(
                     "Ran without you",
-                    kit::text(
-                        format!(
-                            "{} this week · model {} · pattern {}",
-                            week.by_model + week.by_pattern,
-                            week.by_model,
-                            week.by_pattern
-                        ),
-                        Font::Callout,
-                    )
-                    .color(kit::SECONDARY),
+                    super::super::ui::settings_rows::value(format!(
+                        "{} this week · model {} · pattern {}",
+                        week.by_model + week.by_pattern,
+                        week.by_model,
+                        week.by_pattern
+                    )),
                 );
                 let (active, learning) = pattern_counts(&loaded.patterns, now);
                 s.labeled(
                     "Remembered patterns",
-                    kit::text(
-                        format!("{active} active · {learning} still learning"),
-                        Font::Callout,
-                    )
-                    .color(kit::SECONDARY),
+                    super::super::ui::settings_rows::value(format!(
+                        "{active} active · {learning} still learning"
+                    )),
                 );
             },
         );
@@ -1413,8 +1393,7 @@ mod vault_view {
 }
 
 pub(crate) use vault_view::{
-    LearningUiState, apply_calibration, asked_this_week, promote_model, roll_back_model,
-    settings_panel,
+    LearningUiState, apply_calibration, promote_model, roll_back_model, settings_panel,
 };
 
 #[cfg(test)]
@@ -1568,9 +1547,8 @@ mod tests {
         text
     }
 
-    /// Settings > Advanced: the compact panel shows the figures of the week, and the
-    /// calibration and the models behind its disclosure. `asked_this_week` counts the
-    /// runs that waited for the owner, for the bouncer row.
+    /// Settings > Bouncer: the compact panel shows the figures of the week, and the
+    /// calibration and the models behind its disclosure.
     #[test]
     fn the_settings_panel_shows_the_week_and_the_calibration() {
         use crate::broker::learning::now;
@@ -1588,7 +1566,6 @@ mod tests {
         assert!(text.contains("Calibration and learning"), "{text}");
         assert!(text.contains("Nothing to learn from yet."), "{text}");
         assert!(!text.contains("Calibration and models"), "{text}");
-        assert_eq!(asked_this_week(&app), Some(0));
 
         let entry = |asked: bool, decided_by: DecidedBy| DecisionEntry {
             at: now(),
@@ -1629,7 +1606,6 @@ mod tests {
                     .expect("owner decision");
             }
         }
-        assert_eq!(asked_this_week(&app), Some(2));
         let text = draw_with(&mut app, settings_panel);
         for expected in [
             "Ran without you",
@@ -1655,7 +1631,6 @@ mod tests {
         assert!(!text.contains("Automatic decisions"), "{text}");
 
         app.owner_ui.session.lock().expect("lock");
-        assert_eq!(asked_this_week(&app), None);
         assert!(!draw_with(&mut app, settings_panel).contains("Calibration and learning"));
     }
 

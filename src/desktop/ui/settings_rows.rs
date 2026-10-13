@@ -1,4 +1,4 @@
-//! The grouped rows of the Settings window, as in the mockup (ADR 0026 §3): a gray
+//! The grouped rows of Settings, as in the mockup (ADR 0026 §3): a gray
 //! group label, a white rounded group, and rows with the label on the left and the value
 //! or the control on the right. A short footnote can follow a group.
 //!
@@ -183,12 +183,22 @@ impl Group<'_> {
     }
 
     /// A form row with a switch on the right, and an optional note under the title.
+    /// Without a note, the title and the switch share the middle line of the row.
     pub(crate) fn toggle(
         &mut self,
         title: &str,
         subtitle: Option<&str>,
         on: &mut bool,
     ) -> Response {
+        let Some(subtitle) = subtitle else {
+            return self.row(|ui| {
+                let mut response = None;
+                one_line(ui, label_text(title).into(), None, |ui| {
+                    response = Some(kit::toggle(ui, on, title));
+                });
+                response.expect("the switch is drawn")
+            });
+        };
         self.row(|ui| {
             egui::Sides::new()
                 .shrink_left()
@@ -200,9 +210,7 @@ impl Group<'_> {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.label(label_text(title));
-                            if let Some(subtitle) = subtitle {
-                                ui.add(Label::new(note(subtitle)).wrap());
-                            }
+                            ui.add(Label::new(note(subtitle)).wrap());
                         });
                     },
                     |ui| kit::toggle(ui, on, title),

@@ -1,6 +1,6 @@
 //! Several vaults, one open at a time (ADR 0013): the vault list in the app, the
 //! switch, the switcher at the top of the sidebar, the vault picker of the start
-//! screens, and Settings > General > Vaults.
+//! screens, and Settings > Vault.
 //!
 //! A switch locks the open vault first. Each run that waits in it ends with
 //! [`ENDED_BY_SWITCH`]. Then every piece of state of that vault goes: typed secrets,
@@ -757,7 +757,7 @@ enum RowAction {
     Leave(Step),
 }
 
-/// Settings > General > Vault: one row for each vault with its name and where it lives,
+/// Settings > Vault: one row for each vault with its name and where it lives,
 /// in short words (the whole path on hover), as in the mockup. Its menu has "Show in
 /// Finder", "Rename…", "Lock now" or "Open", "Remove from list…", "New vault…", and
 /// "Open vault file…". Another vault also has "Open" on its row. The sync controls are

@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use super::start::{self, Step};
 use super::vaults::VaultSheet;
-use super::{SettingsTab, Sheet, draw};
+use super::{SettingsSection, Sheet, draw};
 use crate::agent::client;
 use crate::agent::wire::Action;
 use crate::broker::approvals::{ApprovalOutcome, OwnerAction, OwnerCheck, PendingRun};
@@ -199,68 +199,76 @@ fn create_asks_for_a_name_and_lists_the_vault() {
     // The sidebar shows the open vault. Settings lists each vault with its file.
     let text = frames(&mut app);
     assert!(text.contains("Client Work"), "{text}");
-    app.settings_open = true;
+    super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
     for expected in ["Vaults", "Personal", "Client Work", "Open"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
 }
 
-/// Settings has four tabs (ADR 0026 §3). Only the sections of the selected tab show.
+/// Settings is a view with six sections (ADR 0026 §3). The list column names each one;
+/// the detail column shows the groups of the selected section only.
 #[test]
-fn settings_show_the_sections_of_the_selected_tab_only() {
+fn settings_show_the_groups_of_the_selected_section_only() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
-    app.settings_open = true;
+    super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
-    for tab in ["General", "Devices", "Security", "Advanced"] {
-        assert!(text.contains(tab), "tab {tab}: {text}");
+    for section in SettingsSection::ALL {
+        assert!(text.contains(section.label()), "{section:?}: {text}");
     }
     let cases = [
         (
-            SettingsTab::General,
-            &["Vault", "Personal", "Import…"][..],
-            &["Keyboard shortcuts", "Back up now", "Bouncer"][..],
+            SettingsSection::Vault,
+            &["Personal", "Back up now…", "Restore…", "Import…"][..],
+            &["Change passphrase…", "Install tools…", "Keyboard shortcuts"][..],
         ),
         (
-            SettingsTab::Devices,
-            &["Questions go to every device", "This Mac", "Notifications"][..],
-            &["Lock now", "Back up now", "Keyboard shortcuts"][..],
+            SettingsSection::Security,
+            &["Touch ID", "Change passphrase…"][..],
+            &["Back up now…", "Token lifetime", "Owner checks\n"][..],
         ),
         (
-            SettingsTab::Security,
-            &["Change passphrase", "Back up now"][..],
-            &["Lock now", "Token lifetime", "Updates"][..],
+            SettingsSection::Devices,
+            &["This Mac", "Allow the iPhone app on this network", "Relay"][..],
+            &["Back up now…", "Change passphrase…", "Other Macs"][..],
         ),
         (
-            SettingsTab::Advanced,
-            &[
-                "Bouncer",
-                "Command line",
-                "Updates",
-                "Keyboard shortcuts",
-                "Contract",
-            ][..],
-            &["Lock now", "Back up now", "Token lifetime"][..],
+            SettingsSection::Bouncer,
+            &["Calibration and learning"][..],
+            &["Back up now…", "Asked you", "Address", "Install tools…"][..],
+        ),
+        (
+            SettingsSection::Tools,
+            &["Command line", "Install tools…", "Browser extension"][..],
+            &["Back up now…", "Socket", "Sessions"][..],
+        ),
+        (
+            SettingsSection::Updates,
+            &["Version", "Keyboard shortcuts"][..],
+            &["Back up now…", "Contract", "Install tools…"][..],
         ),
     ];
-    for (tab, shown, hidden) in cases {
-        app.ui.settings_tab = tab;
+    for (section, shown, hidden) in cases {
+        super::open_settings(&mut app, section);
         let text = frames(&mut app);
         for expected in shown {
-            assert!(text.contains(expected), "{tab:?} shows {expected}: {text}");
+            assert!(
+                text.contains(expected),
+                "{section:?} shows {expected}: {text}"
+            );
         }
         for unexpected in hidden {
             assert!(
                 !text.contains(unexpected),
-                "{tab:?} hides {unexpected}: {text}"
+                "{section:?} hides {unexpected}: {text}"
             );
         }
     }
 }
 
-/// Settings > Agents: how the bouncer model starts. "When a run needs it" is the
+/// Settings > Bouncer: how the bouncer model starts. "When a run needs it" is the
 /// default (ADR 0024) and starts nothing before a run. Each mode shows its label, its
 /// status, and its actions, and a missing start script shows the install commands.
 #[test]
@@ -286,8 +294,7 @@ fn settings_show_how_the_bouncer_model_starts() {
         Host::none(),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Advanced;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
     let text = frames(&mut app);
     for expected in ["Bouncer", "Model", "Start the model", "When a run needs it"] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -364,7 +371,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     server.shutdown();
 }
 
-/// Settings > Agents: "Install the model" shows only in a managed mode while the Laya
+/// Settings > Bouncer: "Install the model" shows only in a managed mode while the Laya
 /// environment is missing. A LaunchAgent that runs start.sh with a missing model, or
 /// in a mode where Apassy starts the server, gets a note with the commands that remove
 /// it. The test does not run the install.
@@ -424,8 +431,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         std::thread::sleep(Duration::from_millis(20));
     }
     app.model_server = Some(Arc::clone(&server));
-    app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Advanced;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
     let remove = format!(
         "launchctl bootout gui/$(id -u)/com.example.bouncer\nrm {}",
         plist.display()
@@ -521,7 +527,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     server.shutdown();
 }
 
-/// Settings > Agents: "Start now" shows only when the server can start. A first start
+/// Settings > Bouncer: "Start now" shows only when the server can start. A first start
 /// without the base weights in the Hugging Face cache says that it downloads them.
 #[test]
 fn settings_show_start_now_and_the_first_start_download() {
@@ -567,8 +573,7 @@ fn settings_show_start_now_and_the_first_start_download() {
         Duration::from_secs(1),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Advanced;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
 
     // laya-serve is missing: "Cannot start" and no "Start now".
     let text = frames(&mut app);
@@ -600,7 +605,7 @@ fn settings_show_start_now_and_the_first_start_download() {
     server.shutdown();
 }
 
-/// Settings > Agents: when only the download of the weights failed, the environment is
+/// Settings > Bouncer: when only the download of the weights failed, the environment is
 /// there. The status does not say that it is missing, and "Install the model" tries the
 /// download again.
 #[test]
@@ -653,8 +658,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
         Duration::from_secs(1),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Advanced;
+    super::open_settings(&mut app, SettingsSection::Bouncer);
     // A run finds no environment.
     assert!(crate::broker::model_server::ModelGate::before_model(&*server).is_err());
     assert!(matches!(server.state(), ServerState::Failed { .. }));
@@ -680,7 +684,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
     server.shutdown();
 }
 
-/// Settings > General shows where the open vault lives in short words, not its whole
+/// Settings > Vault shows where the open vault lives in short words, not its whole
 /// path (that is the hover text). "Lock now" is on its row, and About has no second
 /// version row.
 #[test]
@@ -689,8 +693,7 @@ fn settings_show_the_vault_file_one_time() {
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
     let path = path_of(&app, "Personal").display().to_string();
-    app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::General;
+    super::open_settings(&mut app, SettingsSection::Vault);
     let text = frames(&mut app);
     assert_eq!(text.matches(path.as_str()).count(), 0, "{path}: {text}");
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -701,7 +704,7 @@ fn settings_show_the_vault_file_one_time() {
     );
     assert!(text.contains(&place), "{place}: {text}");
 
-    app.ui.settings_tab = SettingsTab::Advanced;
+    super::open_settings(&mut app, SettingsSection::Updates);
     let text = frames(&mut app);
     assert_eq!(
         text.lines().filter(|line| *line == "Version").count(),
@@ -968,7 +971,7 @@ fn remove_from_list_keeps_the_file_and_rename_checks_the_name() {
         app.status_text
     );
 
-    app.settings_open = true;
+    super::open_settings(&mut app, SettingsSection::Vault);
     app.ui.sheet = Some(Sheet::Vault(VaultSheet::Remove { id: alpha.clone() }));
     let text = frames(&mut app);
     assert!(text.contains("Remove “Alpha” from the list?"), "{text}");
@@ -1806,7 +1809,7 @@ fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
     assert!(!text.contains("Is this a development key?"), "{text}");
 }
 
-/// Settings > General says where a vault lives in short words: the place, and the last
+/// Settings > Vault says where a vault lives in short words: the place, and the last
 /// two folders under it.
 #[test]
 fn the_vault_place_reads_in_short_words() {

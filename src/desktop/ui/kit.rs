@@ -1775,15 +1775,28 @@ fn put_left(ui: &mut Ui, rect: Rect, widget: impl egui::Widget) -> Response {
 /// A borderless 28-point icon button of a toolbar or a footer. `name` is its name for
 /// VoiceOver and its tooltip.
 pub(crate) fn plain_icon_button(ui: &mut Ui, icon: Icon, name: &str) -> Response {
+    plain_icon_toggle(ui, icon, name, false)
+}
+
+/// A [`plain_icon_button`] that can show as selected, as the gear of the sidebar while
+/// Settings shows: the gray fill of a selected sidebar row, and the icon in the label
+/// color.
+pub(crate) fn plain_icon_toggle(ui: &mut Ui, icon: Icon, name: &str, selected: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
     let enabled = ui.is_enabled();
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    if selected {
+        response.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, true, name));
+    } else {
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    }
     if response.gained_focus() {
         response.scroll_to_me(None);
     }
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        if response.is_pointer_button_down_on() {
+        if selected {
+            painter.rect_filled(rect, ROW_RADIUS, Color32::from_black_alpha(23));
+        } else if response.is_pointer_button_down_on() {
             painter.rect_filled(rect, ROW_RADIUS, FILL_PRESSED);
         } else if response.hovered() {
             painter.rect_filled(rect, ROW_RADIUS, FILL2);
@@ -1791,10 +1804,12 @@ pub(crate) fn plain_icon_button(ui: &mut Ui, icon: Icon, name: &str) -> Response
         if response.has_focus() {
             inner_focus_ring(painter, rect, ROW_RADIUS);
         }
-        let color = if enabled {
-            SECONDARY
-        } else {
+        let color = if !enabled {
             SECONDARY.gamma_multiply(0.45)
+        } else if selected {
+            LABEL
+        } else {
+            SECONDARY
         };
         paint_icon(painter, rect.shrink(6.0), icon, color);
     }
@@ -2831,6 +2846,12 @@ pub(crate) enum Icon {
     More,
     /// An arrow out of a box.
     Share,
+    /// A laptop: Settings > Devices.
+    #[cfg(feature = "vault")]
+    Laptop,
+    /// An arrow down in a circle: Settings > Updates.
+    #[cfg(feature = "vault")]
+    Download,
 }
 
 /// An icon in a rounded color tile, as in System Settings.
@@ -3063,6 +3084,22 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
                 (0.82, 0.42),
                 (0.68, 0.42),
             ]);
+        }
+        #[cfg(feature = "vault")]
+        Icon::Laptop => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.2, 0.22), p(0.8, 0.66)),
+                size * 0.06,
+                stroke,
+                StrokeKind::Middle,
+            );
+            line(&[(0.06, 0.8), (0.94, 0.8)]);
+        }
+        #[cfg(feature = "vault")]
+        Icon::Download => {
+            circle(0.5, 0.5, 0.4);
+            line(&[(0.5, 0.28), (0.5, 0.7)]);
+            line(&[(0.33, 0.54), (0.5, 0.7), (0.67, 0.54)]);
         }
     }
 }
