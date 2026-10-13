@@ -1436,6 +1436,47 @@ fn an_approval_by_the_phone_ends_a_waiting_run_as_approved() {
     assert_eq!((reply.status, reply.code().as_str()), (404, "not_waiting"));
 }
 
+/// Two iPhones paired with one Mac (B2): each inbox lists the run that waits; the first
+/// approval settles it, the second phone's approval finds no waiting run, and both
+/// inboxes are empty after. Each phone signs with its own approval key.
+#[test]
+fn two_paired_phones_see_one_run_and_the_first_approval_settles_it() {
+    let env = env();
+    let first = Phone::paired(&env, DEVICE);
+    let second = Phone::paired(&env, OTHER_DEVICE);
+    assert_eq!(
+        env.fx
+            .with(|vault| vault.companion_devices())
+            .unwrap()
+            .len(),
+        2
+    );
+    let (waiting, waiter) = env.wait(run(false));
+    for phone in [&first, &second] {
+        let inbox = env.get(phone, "/v1/inbox").json();
+        let runs = inbox["runs"].as_array().expect("runs");
+        assert_eq!(runs.len(), 1, "{inbox}");
+        assert_eq!(runs[0]["id"], waiting.id.to_string());
+    }
+    // The approval key of one phone does not approve for the other.
+    let mut borrowed = Approval::new(&second, &waiting, false);
+    borrowed.key = &first.approval;
+    let reply = send_approval(&env, &second, &borrowed);
+    assert_eq!(reply.code(), "owner_check_failed", "{}", reply.body);
+    let reply = approve(&env, &second, &waiting, false);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(join(waiter), ApprovalOutcome::Approved);
+    let reply = approve(&env, &first, &waiting, false);
+    assert_eq!((reply.status, reply.code().as_str()), (404, "not_waiting"));
+    for phone in [&first, &second] {
+        let inbox = env.get(phone, "/v1/inbox").json();
+        assert!(
+            inbox["runs"].as_array().expect("runs").is_empty(),
+            "{inbox}"
+        );
+    }
+}
+
 #[test]
 fn approve_and_remember_ends_a_run_with_an_offer() {
     let env = env();
