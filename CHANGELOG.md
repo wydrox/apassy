@@ -70,7 +70,7 @@ One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. 
 
 ### Fixed
 
-- Sync through iCloud Drive runs on its own again on the Mac. Apassy asks iCloud again every 30 seconds for a synced file that stays in iCloud, and a question that waits for you no longer stops sync. A run whose credential changed while it waited is refused after your answer, and the agent asks again.
+- Sync through iCloud Drive runs on its own again on the Mac. Apassy asks iCloud again every 30 seconds for a synced file that stays in iCloud, and a question that waits for you no longer stops sync. A run whose credential changed while it waited (your edit, or a sync from another Mac) is refused after your answer. The same request after such a change does not join the old question: that question ends and a new one shows, so your answer always covers the credential as it was when the question showed.
 - On the iPhone, a vault in iCloud Drive syncs on its own while the app is open and unlocked. Changes from the Mac show without "Sync now", and a push of an iPhone change that failed is tried again.
 
 ### Security
