@@ -27,7 +27,7 @@
   // PUSH_SECRET, and APNS_KEY: set them with `wrangler secret put`, never in this file.
   "vars": {
     "RELAY_ORIGIN": "https://replace-me.trycloudflare.com",
-    "APNS_KEY_ID": "",
+    "APNS_KEY_ID": "2549AX5SGX",
     "APNS_TEAM_ID": "7S3F9767BM",
     "APNS_TOPIC": "com.wydrox.apassy.companion"
   },
