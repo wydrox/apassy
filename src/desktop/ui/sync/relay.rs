@@ -57,8 +57,8 @@ use crate::desktop::{DesktopApp, Place};
 use crate::questions::device_link::{shown_link_name, split_link_device_name};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
-    DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, LinkRoute,
-    PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayConfig, RelayDownload,
+    DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, LinkPayloadError,
+    LinkRoute, PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayConfig, RelayDownload,
     RelayEnableReport, RelayLinkPayload, RelayRefusal, RelaySync, RelayUrl, SyncError, SyncOutcome,
     VaultSync, device_name, valid_team_code,
 };
@@ -210,8 +210,11 @@ enum Reply {
     TurnedOn(Box<TurnedOn>),
     Link(Result<LinkCode, SyncError>),
     Links(Result<Vec<PendingLink>, SyncError>),
+    /// A confirmed link of the team `team_id`, as it was when the owner confirmed it.
     Confirmed {
         link: PendingLink,
+        team_id: String,
+        questions: bool,
         result: Result<DeviceView, SyncError>,
     },
     Refused {
@@ -467,6 +470,7 @@ impl RelayUi {
         self.devices = None;
         self.turn_off = None;
         self.switch_to = None;
+        self.questions.forget_vault();
     }
 
     /// The vault `id` pushed a version that no other Mac has received yet.
@@ -685,6 +689,10 @@ pub(super) fn call_error(error: SyncError) -> String {
     }
 }
 
+/// A link of Apassy Connect (`r=connect`) pasted where a Mac joins relay sync: it
+/// carries no copy of the vault, so this Mac gets the vault another way first.
+pub(crate) const CONNECT_LINK_IN_SYNC: &str = "This link is for approvals only (Apassy Connect): it does not bring the vault. Open the vault on this Mac from iCloud Drive first, then select Settings > Devices > Approve here… and paste the link there.";
+
 /// The text of a failed join (contract section 7.2).
 fn join_error(error: SyncError) -> String {
     match error {
@@ -881,6 +889,10 @@ impl DesktopApp {
                 relay.forget();
             }
         }
+        // A lock forgets what the relay said of the questions team.
+        if open.is_none() {
+            self.sync.relay.questions.forget_vault();
+        }
     }
 
     /// Each frame: take the answers of the relay calls that ended.
@@ -974,7 +986,12 @@ impl DesktopApp {
                     }
                 }
             }
-            Reply::Confirmed { link, result } => self.relay_confirmed(id, &link, result),
+            Reply::Confirmed {
+                link,
+                team_id,
+                questions,
+                result,
+            } => self.relay_confirmed(id, &link, &team_id, questions, result),
             Reply::Refused {
                 link_id,
                 name,
@@ -1249,6 +1266,14 @@ impl DesktopApp {
                     }
                 };
                 self.relay_linked(id, relay, report.link, &report.outcome);
+                // A vault whose questions go through another team: the row of this Mac
+                // names its sync device too, so removing this Mac revokes both.
+                if self.relay_open(id) {
+                    let _ = self
+                        .owner_ui
+                        .session
+                        .with_vault(crate::relay::membership::note_sync_device);
+                }
                 if !joined {
                     self.sync.relay.team_code.zeroize();
                 }
@@ -2174,9 +2199,10 @@ impl DesktopApp {
         else {
             return;
         };
-        let request = if add.via.is_some() {
+        let request = if let Some(client) = &add.via {
             OwnerRequest::ConfirmQuestionsDevice {
                 vault: add.id.clone(),
+                team_id: client.team_id().to_owned(),
                 link_id,
                 device_name: link.device_name.clone(),
                 public_key: link.public_key.clone(),
@@ -2192,10 +2218,19 @@ impl DesktopApp {
         self.ask_owner(request, ctx);
     }
 
-    /// After the owner check: confirm the Mac of `link_id` for the vault `id` with the
-    /// safety words of this Mac, on its own thread. `proof` must name this link exactly
+    /// After the owner check: confirm the device of `link_id` for the vault `id` with the
+    /// safety words of this Mac, on its own thread. `questions_team` is the team that the
+    /// approved request named: `Some` for the questions team of the sheet
+    /// (`ConfirmQuestionsDevice`), `None` for the relay sync team (`ConfirmSyncDevice`).
+    /// The sheet must still add through that team, and `proof` must name this link exactly
     /// as the sheet showed it, in this vault session.
-    pub(crate) fn relay_confirm_link(&mut self, id: &str, link_id: u64, proof: OwnerProof) {
+    pub(crate) fn relay_confirm_link(
+        &mut self,
+        id: &str,
+        link_id: u64,
+        questions_team: Option<String>,
+        proof: OwnerProof,
+    ) {
         let add = self.sync.relay.add.as_ref().filter(|add| add.id == id);
         let via = add.and_then(|add| add.via.clone());
         let link = add
@@ -2205,10 +2240,23 @@ impl DesktopApp {
             self.set_err("The “Add a device” sheet is closed. Nothing was added.");
             return;
         };
-        let expected = OwnerAction::ConfirmSyncDevice {
-            link_id,
-            device_name: link.device_name.clone(),
-            public_key: link.public_key.clone(),
+        // The sheet must add through the team that the owner approved.
+        if via.as_ref().map(|client| client.team_id()) != questions_team.as_deref() {
+            self.set_err("The “Add a device” sheet changed its team. Nothing was added.");
+            return;
+        }
+        let expected = match &questions_team {
+            Some(team_id) => OwnerAction::ConfirmQuestionsDevice {
+                team_id: team_id.clone(),
+                link_id,
+                device_name: link.device_name.clone(),
+                public_key: link.public_key.clone(),
+            },
+            None => OwnerAction::ConfirmSyncDevice {
+                link_id,
+                device_name: link.device_name.clone(),
+                public_key: link.public_key.clone(),
+            },
         };
         let relay = match via {
             Some(_) => None,
@@ -2220,12 +2268,22 @@ impl DesktopApp {
                 }
             },
         };
-        let checked = self
-            .owner_ui
-            .session
-            .with_vault(|vault| proof.check(&expected, &vault.epoch()));
-        match checked {
-            Some(Ok(())) => {}
+        // The team of the device, fixed now: the row of an iPhone is written in it even
+        // when the answer comes after the sheet closed.
+        let checked = self.owner_ui.session.with_vault(|vault| {
+            proof.check(&expected, &vault.epoch())?;
+            Ok::<_, crate::broker::approvals::ProofRefusal>(match &questions_team {
+                Some(team) => team.clone(),
+                None => vault
+                    .relay_device()
+                    .ok()
+                    .flatten()
+                    .map(|device| device.team_id)
+                    .unwrap_or_default(),
+            })
+        });
+        let team_id = match checked {
+            Some(Ok(team_id)) => team_id,
             Some(Err(refusal)) => {
                 self.set_err(refusal.message());
                 return;
@@ -2234,14 +2292,20 @@ impl DesktopApp {
                 self.set_err("Unlock the vault first. Nothing was added.");
                 return;
             }
-        }
+        };
+        let questions = questions_team.is_some();
         self.relay_spawn(id, Job::Confirm, move || {
             let result = match (relay, via) {
                 (Some(relay), _) => relay.confirm_link(KeySource::Memory, &link),
                 (None, Some(client)) => client.confirm_link(&link).map(team_device_view),
                 (None, None) => Err(SyncError::NotEnabled),
             };
-            Reply::Confirmed { link, result }
+            Reply::Confirmed {
+                link,
+                team_id,
+                questions,
+                result,
+            }
         });
     }
 
@@ -2250,6 +2314,8 @@ impl DesktopApp {
         &mut self,
         id: &str,
         link: &PendingLink,
+        team_id: &str,
+        questions: bool,
         result: Result<DeviceView, SyncError>,
     ) {
         let link_id = link.id;
@@ -2260,17 +2326,11 @@ impl DesktopApp {
         };
         match result {
             Ok(device) => {
-                let questions = self
-                    .sync
-                    .relay
-                    .add
-                    .as_ref()
-                    .is_some_and(|add| add.id == id && add.via.is_some());
                 let name = shown_link_name(&device.name);
                 // The owner check of this confirmation covers the keys of the link: the
                 // row of an iPhone is written here, from them (relay-questions-v1
                 // section 5.2). A Mac writes its own row after its own owner check.
-                let iphone = self.relay_register_linked(id, link, device.id);
+                let iphone = self.relay_register_linked(id, link, team_id, device.id);
                 let text = match iphone {
                     Some(Err(error)) => format!(
                         "{name} joined, but the vault did not keep its keys: {}",
@@ -2305,35 +2365,24 @@ impl DesktopApp {
     }
 
     /// The row of a device that this Mac confirmed: an iPhone whose link carries its
-    /// answer key, in the questions team (the team of "Add a device", or the
-    /// sync team). `None` for a link without an answer key (a Mac) or a vault that is not
-    /// open here.
+    /// answer key, in the team `team_id` of the confirmation (the questions team of "Add a
+    /// device", or the sync team), never in the team of whatever sheet is open now.
+    /// `None` for a link without an answer key (a Mac) or a vault that is not open here.
     fn relay_register_linked(
         &mut self,
         id: &str,
         link: &PendingLink,
+        team_id: &str,
         device_id: u64,
     ) -> Option<Result<(), SyncError>> {
         split_link_device_name(&link.device_name).1?;
-        let via_team = self
-            .sync
-            .relay
-            .add
-            .as_ref()
-            .filter(|add| add.id == id)
-            .and_then(|add| add.via.as_ref())
-            .map(|client| client.team_id().to_owned());
         if !self.relay_open(id) {
             return Some(Err(SyncError::Vault(VaultErrorKind::Locked)));
         }
         let written = self.owner_ui.session.with_vault(|vault| {
-            let team = match via_team {
-                Some(team) => team,
-                None => vault.relay_device()?.ok_or(SyncError::NotEnabled)?.team_id,
-            };
             crate::relay::membership::register_linked_device(
                 vault,
-                &team,
+                team_id,
                 device_id,
                 &link.device_name,
                 &link.public_key,
@@ -2437,6 +2486,12 @@ impl DesktopApp {
             .and_then(|devices| devices.list.clone())
     }
 
+    /// The relay sync of the open vault `id` with its key in memory, for a call on a thread
+    /// of its own.
+    pub(crate) fn relay_sync_of_open(&self, id: &str) -> Result<RelaySync, SyncError> {
+        self.relay_ready(id)
+    }
+
     /// Remove another device from the relay sync team, after the confirmation of
     /// "Remove…" in Settings > Devices. It needs no owner check: it only takes authority
     /// away (contract section 9).
@@ -2496,10 +2551,19 @@ impl DesktopApp {
             "" => DEFAULT_RELAY_URL.to_owned(),
             typed => typed.to_owned(),
         };
-        let (url, code) = match PendingJoin::parse_link(&text, &url_field) {
-            Ok((url, code)) => (url.as_str().to_owned(), code),
+        // The link says what it joins (`r`, contract relay-connect-v1 section 7.2).
+        let (url, code) = match RelayLinkPayload::parse(&text, &url_field) {
+            Ok(payload) if payload.route == LinkRoute::Connect => {
+                relay.join_error = Some(CONNECT_LINK_IN_SYNC.to_owned());
+                return;
+            }
+            Ok(payload) => (payload.relay.as_str().to_owned(), payload.code),
+            Err(LinkPayloadError::UnknownRoute) => {
+                relay.join_error = Some(sentence(&LinkPayloadError::UnknownRoute.to_string()));
+                return;
+            }
             Err(error) => {
-                relay.join_error = Some(join_error(error));
+                relay.join_error = Some(join_error(error.into()));
                 return;
             }
         };

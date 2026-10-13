@@ -33,8 +33,16 @@
 //! device on the relay when this Mac can.
 //!
 //! A Connect team that the relay deleted after 30 days without use answers `401` at the
-//! sign-in: Settings > Devices says so, and "Add a device" connects the vault again with
-//! a new team.
+//! sign-in (relay SPEC §26.5; a suspended team answers so too until a sign-in wakes it).
+//! Each read of the device list is tagged with its vault and team, and an answer for
+//! another vault or team is dropped. Settings > Devices says the team is gone and keeps
+//! asking, less often, so a `401` that passes heals by itself; a lock or another vault
+//! forgets it. Nothing is deleted on a `401`: "Add a device" asks the relay once more,
+//! then asks the owner "Connect again?". Only after that and the owner check does the
+//! vault get a new Connect team, which takes the place of the old one in one vault
+//! transaction ([`reconnect_questions_team`]). The same question comes when no Mac is
+//! left in the questions team of the vault ("Stop approvals here" on the only Mac): no
+//! device could add this Mac back.
 //!
 //! The team code and a pasted link stay in memory only from "Turn On…" or "Join…" to the
 //! relay call. A lock, another sync sheet, and the end of the try erase them.
@@ -57,18 +65,20 @@ use crate::desktop::owner_store::Ephemeral;
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::relay::membership::{
     QuestionsAvailability, adopt_questions_team, create_connect_team, disable_questions,
-    enable_questions, join_questions_team, new_questions_team, questions_availability,
-    questions_membership, questions_only, this_device,
+    enable_questions, join_questions_team, mac_in_team, new_questions_team, questions_availability,
+    questions_membership, questions_only, reconnect_questions_team, this_device,
 };
 use crate::sync::{
-    DEFAULT_RELAY_URL, DeviceKey, JoinedDevice, PendingJoin, RelayRefusal, RelayUrl, SyncError,
-    device_name, link_code_team, valid_team_code,
+    DEFAULT_RELAY_URL, DeviceKey, JoinedDevice, LinkPayloadError, PendingJoin, RelayLinkPayload,
+    RelayRefusal, RelayUrl, SyncError, device_name, link_code_team, valid_team_code,
 };
 use crate::vault::{MembershipPurpose, RelayMembership, TrustedDeviceKind, VaultErrorKind};
 use crate::vaults::VaultEntry;
 
 /// How often Devices asks the relay for the push state of the devices.
 const DEVICES_EVERY: Duration = Duration::from_secs(30);
+/// The longest wait between two reads of a team that the relay no longer knows.
+const GONE_EVERY_MAX: Duration = Duration::from_secs(600);
 /// How often a Mac that joins the questions team asks whether the other Mac confirmed.
 const JOIN_POLL_EVERY: Duration = Duration::from_secs(2);
 /// The note of a Mac whose relay sync key was removed from the questions.
@@ -82,6 +92,13 @@ pub(crate) const CONNECT_BUSY: &str =
 pub(crate) const CONNECT_UNREACHABLE: &str = "Can't reach Apassy Connect.";
 /// The Connect team of the vault is gone: the relay deleted it after 30 days without use.
 pub(crate) const CONNECT_GONE: &str = "Apassy Connect no longer knows this vault: it was not used for 30 days. Add a device to connect again.";
+/// The question before a new Connect team takes the place of one that the relay forgot.
+pub(crate) const CONNECT_AGAIN: &str =
+    "Apassy Connect no longer knows this vault's team. Connect again?";
+/// The same question when no Mac is left in the questions team of the vault.
+pub(crate) const CONNECT_AGAIN_NO_MAC: &str = "No Mac of this vault is in its Apassy Connect team now, so no device can add this Mac back. Connect again?";
+/// What connecting again does.
+pub(crate) const CONNECT_AGAIN_NOTE: &str = "Apassy makes a new team for this vault. Your iPhones and your other Macs connect again with a new code from Add a device. Connecting needs Touch ID or your passphrase.";
 
 /// A join of the questions team that waits for the owner check. Debug shows no link.
 struct JoinRequest {
@@ -111,10 +128,17 @@ struct Joining {
     phase: JoinPhase,
 }
 
-/// A removal of a trusted device whose relay device this Mac revokes.
+/// A removal of a trusted device whose relay devices this Mac revokes: in the questions
+/// team, and in the relay sync team when that is another team.
 struct Removing {
     name: String,
-    task: Task<Result<(), SyncError>>,
+    task: Task<Revoked>,
+}
+
+/// What the relay said to each revocation of a removal; `None`: none was asked.
+struct Revoked {
+    questions: Option<Result<(), SyncError>>,
+    sync: Option<Result<(), SyncError>>,
 }
 
 /// A team for the questions only that waits for the owner check. Debug shows no code.
@@ -127,6 +151,8 @@ struct NewTeam {
     /// with no code (`POST /v1/connect`).
     code: Option<Zeroizing<String>>,
     device: String,
+    /// "Connect again": the questions team that the new team takes the place of.
+    replaces: Option<String>,
 }
 
 /// The relay call that makes a team for the questions only.
@@ -135,7 +161,23 @@ struct Creating {
     device: String,
     /// An Apassy Connect team of "Add a device".
     connect: bool,
+    replaces: Option<String>,
     task: Task<Result<RelayMembership, SyncError>>,
+}
+
+/// A read of the devices of the questions team `team` of the vault `vault` (list ID).
+/// Its answer counts only while that vault is open with that team.
+struct DevicesRead {
+    vault: String,
+    team: String,
+    task: Task<Result<Vec<TeamDevice>, SyncError>>,
+}
+
+/// A questions team that the relay no longer knows: the vault (list ID) and the team.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Gone {
+    vault: String,
+    team: String,
 }
 
 /// The state of "Send questions through the relay" in the window.
@@ -146,8 +188,13 @@ pub(crate) struct QuestionsUi {
     /// Why the last try of the team sheet failed.
     pub(crate) error: Option<String>,
     /// The devices of the questions team on the relay, while the relay answers.
-    devices: Option<Task<Result<Vec<TeamDevice>, SyncError>>>,
+    devices: Option<DevicesRead>,
     devices_read: Option<Instant>,
+    /// The wait before the next read while the team is gone: it doubles up to
+    /// [`GONE_EVERY_MAX`], and a read that works sets it back.
+    gone_every: Option<Duration>,
+    /// "Add a device" asked the relay once more before "Connect again?".
+    pub(crate) rechecking: bool,
     /// The devices of the team `push_team` as the relay said last, by relay device
     /// number: when it last saw each one, and its push state.
     team: BTreeMap<u64, TeamDevice>,
@@ -155,8 +202,8 @@ pub(crate) struct QuestionsUi {
     /// The last answer of the relay about the devices failed: it does not answer.
     unreachable: bool,
     /// The relay answered `401` to the sign-in of a Connect team whose key was not
-    /// removed: the relay deleted the team (relay SPEC §26.5).
-    gone: Option<String>,
+    /// removed: the relay deleted or suspended the team (relay SPEC §26.5).
+    gone: Option<Gone>,
     /// The relay of Apassy Connect when it is not the Apassy relay: a fake relay on this
     /// computer, for the tests and the screenshot tour only.
     connect_url: Option<String>,
@@ -214,6 +261,26 @@ impl QuestionsUi {
             .as_ref()
             .is_some_and(|creating| creating.vault == id)
     }
+
+    /// Whether the relay no longer knows the questions team `team` of the vault `id`.
+    pub(crate) fn gone(&self, id: &str, team: &str) -> bool {
+        self.gone
+            .as_ref()
+            .is_some_and(|gone| gone.vault == id && gone.team == team)
+    }
+
+    /// The open vault changed or locked: what the relay said of its team goes, and a read
+    /// that runs no longer counts.
+    pub(crate) fn forget_vault(&mut self) {
+        self.team.clear();
+        self.push_team = None;
+        self.devices = None;
+        self.devices_read = None;
+        self.gone_every = None;
+        self.rechecking = false;
+        self.unreachable = false;
+        self.gone = None;
+    }
 }
 
 /// What Settings > Devices knows of the questions team of the open vault.
@@ -263,17 +330,26 @@ impl DesktopApp {
     }
 
     /// Make Apassy Connect use the relay at `url` on this computer (`http://127.0.0.1:…`
-    /// or `http://localhost:…`): the fake relay of the screenshot tour. The app itself
-    /// never calls it. Any other address is refused, so the setting cannot send the
-    /// devices of a vault to another server. Returns whether it took the address.
+    /// or `http://localhost:…`): the fake relay of the tests and of the screenshot tour
+    /// (`examples/screenshots.rs`), its only callers. No path of the app calls it. Any
+    /// other address is refused, so it cannot send the devices of a vault to another
+    /// server. Returns whether it took the address.
+    #[doc(hidden)]
     pub fn set_connect_relay_url(&mut self, url: &str) -> bool {
-        let local = ["http://127.0.0.1:", "http://localhost:"]
-            .iter()
-            .any(|prefix| url.starts_with(prefix));
-        if local && RelayUrl::parse(url).is_ok() {
-            self.sync.relay.questions.connect_url = Some(url.to_owned());
-        }
-        local
+        let local = |url: &str| {
+            ["http://127.0.0.1:", "http://localhost:"]
+                .iter()
+                .any(|prefix| url.starts_with(prefix))
+        };
+        // The address as the relay client reads it must be on this computer too.
+        let Some(parsed) = RelayUrl::parse(url)
+            .ok()
+            .filter(|parsed| local(url) && local(parsed.as_str()))
+        else {
+            return false;
+        };
+        self.sync.relay.questions.connect_url = Some(parsed.as_str().to_owned());
+        true
     }
 
     pub(crate) fn wake_questions(&self) {
@@ -296,15 +372,23 @@ impl DesktopApp {
                 .ok()
                 .flatten()
                 .map(|device| device.relay_url);
-            Some((availability, url))
+            // No Mac is left in the team to add this one back.
+            let no_mac = match &availability {
+                QuestionsAvailability::JoinTeam { team_id } => !mac_in_team(vault, team_id).ok()?,
+                _ => false,
+            };
+            Some((availability, url, no_mac))
         });
         match state.flatten() {
             None => self.set_err("Unlock the vault first."),
-            Some((QuestionsAvailability::On { .. }, _)) => {}
-            Some((QuestionsAvailability::Removed { sync: true, .. }, _)) => {
+            Some((QuestionsAvailability::JoinTeam { team_id }, _, true)) => {
+                self.devices_offer_connect_again(&team_id, false);
+            }
+            Some((QuestionsAvailability::On { .. }, _, _)) => {}
+            Some((QuestionsAvailability::Removed { sync: true, .. }, _, _)) => {
                 self.set_err(REMOVED_SYNC);
             }
-            Some((QuestionsAvailability::Removed { sync: false, .. }, _)) => {
+            Some((QuestionsAvailability::Removed { sync: false, .. }, _, _)) => {
                 // The removed key goes; this Mac joins the team again with a new one.
                 let dropped = self
                     .owner_ui
@@ -316,7 +400,7 @@ impl DesktopApp {
                 self.wake_questions();
                 self.questions_open_team_sheet(ctx);
             }
-            Some((QuestionsAvailability::CanTurnOn { team_id }, Some(relay_url))) => self
+            Some((QuestionsAvailability::CanTurnOn { team_id }, Some(relay_url), _)) => self
                 .ask_owner(
                     OwnerRequest::EnableRelayQuestions {
                         relay_url,
@@ -351,11 +435,7 @@ impl DesktopApp {
         match result.unwrap_or_else(|| Err("Unlock the vault first.".to_owned())) {
             Ok(()) => {
                 self.wake_questions();
-                let questions = &mut self.sync.relay.questions;
-                questions.team.clear();
-                questions.push_team = None;
-                questions.devices_read = None;
-                questions.gone = None;
+                self.sync.relay.questions.forget_vault();
                 self.set_note(
                     "Approvals stop here. Questions stay on this Mac and the iPhones on this Wi-Fi.",
                 );
@@ -379,6 +459,35 @@ impl DesktopApp {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Take an answer of a read of the devices of the team `team` of the vault `vault`, as
+    /// if the relay gave it, for a test.
+    #[cfg(test)]
+    pub(crate) fn questions_answer_for_test(
+        &mut self,
+        vault: &str,
+        team: &str,
+        answer: Result<Vec<TeamDevice>, SyncError>,
+    ) {
+        let read = DevicesRead {
+            vault: vault.to_owned(),
+            team: team.to_owned(),
+            task: Task::spawn(None, || Ok(Vec::new())),
+        };
+        self.questions_devices_read(&read, Some(answer));
+    }
+
+    /// The message of a removal whose revocations ended with `questions` and `sync`, for
+    /// a test.
+    #[cfg(test)]
+    pub(crate) fn questions_revoked_for_test(
+        &mut self,
+        name: &str,
+        questions: Option<Result<(), SyncError>>,
+        sync: Option<Result<(), SyncError>>,
+    ) {
+        self.questions_revoked(name, Some(Revoked { questions, sync }));
     }
 
     /// "Turn On…" of the team sheet: the fields are checked, then the owner check. The
@@ -416,6 +525,7 @@ impl DesktopApp {
             url: url.clone(),
             code: Some(code),
             device,
+            replaces: None,
         });
         self.ask_owner(
             OwnerRequest::EnableRelayQuestions {
@@ -444,36 +554,45 @@ impl DesktopApp {
             url: relay_url.to_owned(),
             code: None,
             device: device_name(),
+            replaces: None,
         });
         self.ask_owner(
-            OwnerRequest::EnableRelayQuestions {
+            OwnerRequest::ConnectVault {
                 relay_url: relay_url.to_owned(),
-                team_id: None,
             },
             ctx,
         );
     }
 
-    /// The Connect team of the open vault is gone on the relay: its membership goes, so
-    /// that "Add a device" makes a new team. The trusted rows stay: the other devices
-    /// join the new team with a new link.
-    pub(crate) fn questions_forget_gone_team(&mut self) -> bool {
-        let Some(team) = self.sync.relay.questions.gone.take() else {
-            return false;
-        };
-        let dropped = self.owner_ui.session.with_vault(|vault| {
-            questions_membership(vault)
-                .ok()
-                .flatten()
-                .filter(|membership| membership.team_id == team && questions_only(membership))
-                .is_some_and(|_| disable_questions(vault).is_ok())
+    /// "Connect again" after its question: the owner check for a new Apassy Connect team
+    /// that takes the place of the questions team `team_id`. Nothing changes before the
+    /// check, and the old membership goes only when the vault keeps the new one.
+    pub(crate) fn questions_ask_connect_again(
+        &mut self,
+        entry: &VaultEntry,
+        team_id: &str,
+        ctx: Option<&egui::Context>,
+    ) {
+        let relay_url = self.connect_relay_url();
+        self.sync.relay.questions.error = None;
+        self.sync.relay.questions.pending = Some(NewTeam {
+            vault: entry.id.clone(),
+            name: entry.name.clone(),
+            url: relay_url.clone(),
+            code: None,
+            device: device_name(),
+            replaces: Some(team_id.to_owned()),
         });
+        self.ask_owner(OwnerRequest::ConnectVault { relay_url }, ctx);
+    }
+
+    /// Ask the relay once more for the devices of the questions team of the open vault:
+    /// a fresh sign-in before "Connect again?".
+    pub(crate) fn questions_recheck(&mut self) {
         let questions = &mut self.sync.relay.questions;
-        questions.team.clear();
-        questions.push_team = None;
         questions.devices_read = None;
-        self.wake_questions();
-        dropped == Some(true)
+        questions.gone_every = None;
+        questions.rechecking = true;
     }
 
     /// After the owner check of "Send questions through the relay": `proof` must name
@@ -533,8 +652,18 @@ impl DesktopApp {
         if link.is_empty() {
             return Err("Paste the link from a Mac that has the questions on.".to_owned());
         }
-        let (url, code) = PendingJoin::parse_link(&link, DEFAULT_RELAY_URL)
-            .map_err(|_| "This is not a device link of the Apassy relay.".to_owned())?;
+        // The parameters of the link only word the screens; an `r` that this version does
+        // not know refuses the link (contract relay-connect-v1 section 7.2).
+        let (url, code) = match RelayLinkPayload::parse(&link, DEFAULT_RELAY_URL) {
+            Ok(payload) => (payload.relay, payload.code),
+            Err(LinkPayloadError::UnknownRoute) => {
+                return Err(
+                    "This link needs a newer version of Apassy. Update Apassy, then try again."
+                        .to_owned(),
+                );
+            }
+            Err(_) => return Err("This is not a device link of the Apassy relay.".to_owned()),
+        };
         if link_code_team(&code) != Some(team_id) {
             return Err(
                 "This link is of another team. Make the link on a Mac that has the questions of this vault on."
@@ -787,6 +916,7 @@ impl DesktopApp {
             url,
             code,
             device,
+            replaces,
         } = new;
         let team_device = device.clone();
         let connect = code.is_none();
@@ -801,6 +931,7 @@ impl DesktopApp {
             vault,
             device,
             connect,
+            replaces,
             task,
         });
     }
@@ -828,19 +959,7 @@ impl DesktopApp {
         if let Some(result) = removed
             && let Some(removing) = self.sync.relay.questions.removing.take()
         {
-            let name = removing.name;
-            match result {
-                Some(Ok(())) => self.set_ok(format!(
-                    "“{name}” is removed. It can no longer answer, and the relay removed its device."
-                )),
-                Some(Err(error)) => self.set_note(format!(
-                    "“{name}” can no longer answer. The relay did not remove its device: {}",
-                    call_error(error)
-                )),
-                None => self.set_note(format!(
-                    "“{name}” can no longer answer. The relay did not answer about its device."
-                )),
-            }
+            self.questions_revoked(&removing.name, result);
         }
         let done = match self
             .sync
@@ -863,25 +982,115 @@ impl DesktopApp {
         {
             self.questions_team_made(&creating, result);
         }
-        let devices = match self.sync.relay.questions.devices.as_ref().map(Task::poll) {
+        let devices = match self
+            .sync
+            .relay
+            .questions
+            .devices
+            .as_ref()
+            .map(|read| read.task.poll())
+        {
             Some(TaskPoll::Done(result)) => Some(Some(result)),
             Some(TaskPoll::Lost) => Some(None),
             _ => None,
         };
-        if let Some(answer) = devices {
-            let questions = &mut self.sync.relay.questions;
-            questions.devices = None;
-            questions.unreachable = false;
-            match answer {
-                Some(Ok(devices)) => {
-                    questions.team = devices
-                        .into_iter()
-                        .map(|device| (device.id, device))
-                        .collect();
-                }
-                Some(Err(SyncError::RemovedFromRelay)) => self.questions_check_gone(),
-                Some(Err(_)) | None => questions.unreachable = true,
+        if let Some(answer) = devices
+            && let Some(read) = self.sync.relay.questions.devices.take()
+        {
+            self.questions_devices_read(&read, answer);
+        }
+    }
+
+    /// The answer of a read of the devices: it counts only for the vault and the team that
+    /// it was asked for, while that vault is open with that team.
+    fn questions_devices_read(
+        &mut self,
+        read: &DevicesRead,
+        answer: Option<Result<Vec<TeamDevice>, SyncError>>,
+    ) {
+        if self.questions_open_team().as_ref() != Some(&(read.vault.clone(), read.team.clone())) {
+            return;
+        }
+        let gone = match &answer {
+            Some(Err(SyncError::RemovedFromRelay)) => self.questions_team_forgotten(&read.team),
+            _ => false,
+        };
+        let questions = &mut self.sync.relay.questions;
+        questions.rechecking = false;
+        questions.unreachable = false;
+        match answer {
+            Some(Ok(devices)) => {
+                // A 401 that passed (a suspended team that a sign-in woke): the team is
+                // back.
+                questions.gone = None;
+                questions.gone_every = None;
+                questions.team = devices
+                    .into_iter()
+                    .map(|device| (device.id, device))
+                    .collect();
             }
+            Some(Err(SyncError::RemovedFromRelay)) if gone => {
+                questions.gone = Some(Gone {
+                    vault: read.vault.clone(),
+                    team: read.team.clone(),
+                });
+                questions.gone_every = Some(
+                    questions
+                        .gone_every
+                        .map_or(DEVICES_EVERY, |every| every * 2)
+                        .min(GONE_EVERY_MAX),
+                );
+            }
+            Some(Err(_)) | None => questions.unreachable = true,
+        }
+    }
+
+    /// The list ID of the open, unlocked vault and its questions team.
+    fn questions_open_team(&self) -> Option<(String, String)> {
+        let vault = self.vault_list.current.clone()?;
+        let team = self
+            .owner_ui
+            .session
+            .with_vault(|vault| {
+                if vault.is_locked() {
+                    return None;
+                }
+                questions_membership(vault).ok()?.map(|team| team.team_id)
+            })
+            .flatten()?;
+        Some((vault, team))
+    }
+
+    /// The answer of the revocations of a removed device, in one message: a failure of
+    /// either one is never hidden by the success of the other.
+    fn questions_revoked(&mut self, name: &str, result: Option<Revoked>) {
+        let Some(Revoked { questions, sync }) = result else {
+            return self.set_note(format!(
+                "“{name}” can no longer answer. The relay did not answer about its device."
+            ));
+        };
+        if sync.is_some() {
+            self.relay_refresh_devices();
+        }
+        match (questions, sync) {
+            (_, Some(Err(error))) => self.set_err(format!(
+                "“{name}” can no longer answer, but it is not removed from the sync. {}",
+                call_error(error)
+            )),
+            (Some(Err(error)), _) => self.set_note(format!(
+                "“{name}” can no longer answer. The relay did not remove its device: {}",
+                call_error(error)
+            )),
+            (Some(Ok(())), Some(Ok(()))) => self.set_ok(format!(
+                "“{name}” is removed. It can no longer sync or answer, and the relay removed its devices."
+            )),
+            (None, Some(Ok(()))) => self.set_ok(format!(
+                "“{name}” is removed. It can no longer sync or answer."
+            )),
+            (Some(Ok(())), None) => self.set_ok(format!(
+                "“{name}” is removed. It can no longer answer, and the relay removed its device."
+            )),
+            (None, None) => self.set_ok(format!("“{name}” is removed. It can no longer answer.")),
         }
     }
 
@@ -903,10 +1112,18 @@ impl DesktopApp {
             Some(Ok(membership)) if open => self
                 .owner_ui
                 .session
-                .with_vault(|vault| adopt_questions_team(vault, &membership, &creating.device))
+                .with_vault(|vault| match &creating.replaces {
+                    Some(old_team) => {
+                        reconnect_questions_team(vault, old_team, &membership, &creating.device)
+                    }
+                    None => adopt_questions_team(vault, &membership, &creating.device),
+                })
                 .unwrap_or(Err(SyncError::Vault(VaultErrorKind::Locked)))
                 .map(|_| ())
                 .map_err(|error| match error {
+                    SyncError::AlreadyEnabled if creating.replaces.is_some() => {
+                        "Another Mac connected this vault again. Add this Mac with a link from that Mac.".to_owned()
+                    }
                     SyncError::AlreadyEnabled => {
                         "This vault sends its questions through the relay already.".to_owned()
                     }
@@ -920,12 +1137,19 @@ impl DesktopApp {
         match outcome {
             Ok(()) => {
                 self.wake_questions();
+                self.sync.relay.questions.forget_vault();
                 if let Some(super::super::Sheet::Vault(super::super::vaults::VaultSheet::Sync(
                     SyncSheet::QuestionsTeam { id },
                 ))) = &self.ui.sheet
                     && *id == creating.vault
                 {
                     self.ui.sheet = None;
+                }
+                // "Connect again" goes on as "Add a device", with the link of the new team.
+                if super::super::devices::connecting_again(self) {
+                    self.ui.sheet = Some(super::super::Sheet::Devices(
+                        super::super::devices::DevicesSheet::AddDevice,
+                    ));
                 }
                 // "Add a device" goes on with the link of the new team.
                 if super::super::devices::adding(self) {
@@ -947,22 +1171,21 @@ impl DesktopApp {
         self.sync.relay.questions.devices_read = None;
     }
 
-    /// The relay refused the sign-in of the questions team (`401`). For a team of the
-    /// questions only whose key the owner did not remove, the relay deleted the team
-    /// after 30 days without use: Settings > Devices says so.
-    fn questions_check_gone(&mut self) {
-        let gone = self
-            .owner_ui
+    /// Whether a `401` at the sign-in of the questions team `team` means the relay forgot
+    /// it: the team of the questions only, whose key the owner did not remove (relay SPEC
+    /// §26.5: deleted after 30 days without use, or suspended until a sign-in).
+    fn questions_team_forgotten(&self, team: &str) -> bool {
+        self.owner_ui
             .session
             .with_vault(|vault| {
                 let membership = questions_membership(vault).ok()??;
                 let removed = vault
                     .trusted_key_removed(&membership.public_key)
                     .unwrap_or(true);
-                (questions_only(&membership) && !removed).then_some(membership.team_id)
+                Some(membership.team_id == team && questions_only(&membership) && !removed)
             })
-            .flatten();
-        self.sync.relay.questions.gone = gone;
+            .flatten()
+            .unwrap_or(false)
     }
 
     /// What Settings > Devices shows of the questions team of the open vault: its
@@ -977,7 +1200,12 @@ impl DesktopApp {
             let me = this_device(vault, &membership).ok().flatten();
             Some((membership, me))
         });
-        let (membership, me) = found.flatten()?;
+        let Some((membership, me)) = found.flatten() else {
+            // A lock forgets what the relay said.
+            self.sync.relay.questions.gone = None;
+            return None;
+        };
+        let vault_id = self.vault_list.current.clone().unwrap_or_default();
         let questions = &mut self.sync.relay.questions;
         if questions.push_team.as_deref() != Some(membership.team_id.as_str()) {
             questions.team.clear();
@@ -985,17 +1213,32 @@ impl DesktopApp {
             questions.devices_read = None;
             questions.unreachable = false;
         }
-        let gone = questions.gone.as_deref() == Some(membership.team_id.as_str());
+        // A team that is gone for another vault or team counts no more.
+        if questions
+            .gone
+            .as_ref()
+            .is_some_and(|gone| gone.vault != vault_id || gone.team != membership.team_id)
+        {
+            questions.gone = None;
+            questions.gone_every = None;
+        }
+        let gone = questions.gone(&vault_id, &membership.team_id);
+        // A team that is gone is asked again, less often each time.
+        let every = questions
+            .gone_every
+            .filter(|_| gone)
+            .unwrap_or(DEVICES_EVERY);
         let due = questions.devices.is_none()
-            && !gone
             && questions
                 .devices_read
-                .is_none_or(|at| at.elapsed() >= DEVICES_EVERY);
+                .is_none_or(|at| at.elapsed() >= every);
         if due && let Ok(client) = QuestionsClient::from_membership(&membership) {
             questions.devices_read = Some(Instant::now());
-            questions.devices = Some(Task::spawn(questions.repaint.clone(), move || {
-                client.devices()
-            }));
+            questions.devices = Some(DevicesRead {
+                vault: vault_id,
+                team: membership.team_id.clone(),
+                task: Task::spawn(questions.repaint.clone(), move || client.devices()),
+            });
         }
         Some(QuestionsTeamView {
             questions_only: questions_only(&membership),
@@ -1072,29 +1315,33 @@ impl DesktopApp {
         };
         self.wake_questions();
         self.sync.relay.questions.devices_read = None;
-        if let Some(device_id) = sync
-            && let Some(id) = self.vault_list.current.clone()
-        {
-            self.relay_remove_device(&id, device_id, &name);
-        }
-        let Some((membership, device_id)) = revoke else {
-            if sync.is_none() {
-                self.set_ok(format!("“{name}” is removed. It can no longer answer."));
-            }
-            return;
+        // Both revocations run on one thread and end in one message.
+        let questions = match revoke {
+            Some((membership, device_id)) => match QuestionsClient::from_membership(&membership) {
+                Ok(client) => Some(Ok((client, device_id))),
+                Err(error) => Some(Err(error)),
+            },
+            None => None,
         };
-        match QuestionsClient::from_membership(&membership) {
-            Ok(client) => {
-                let task = Task::spawn(self.sync.relay.questions.repaint.clone(), move || {
-                    client.remove_device(device_id)
-                });
-                self.sync.relay.questions.removing = Some(Removing { name, task });
+        let sync = match (sync, self.vault_list.current.clone()) {
+            (Some(device_id), Some(id)) => {
+                Some(self.relay_sync_of_open(&id).map(|relay| (relay, device_id)))
             }
-            Err(error) => self.set_note(format!(
-                "“{name}” can no longer answer. The relay did not remove its device: {}",
-                call_error(error)
-            )),
+            _ => None,
+        };
+        if questions.is_none() && sync.is_none() {
+            return self.set_ok(format!("“{name}” is removed. It can no longer answer."));
         }
+        let task = Task::spawn(self.sync.relay.questions.repaint.clone(), move || Revoked {
+            questions: questions
+                .map(|asked| asked.and_then(|(client, device_id)| client.remove_device(device_id))),
+            sync: sync.map(|asked| {
+                asked.and_then(|(relay, device_id)| {
+                    relay.remove_device(crate::sync::KeySource::Memory, device_id)
+                })
+            }),
+        });
+        self.sync.relay.questions.removing = Some(Removing { name, task });
     }
 
     /// Remove the device `device_id` of the questions team `team_id` of the open vault
@@ -1123,9 +1370,11 @@ impl DesktopApp {
         let name = name.to_owned();
         match QuestionsClient::from_membership(&membership) {
             Ok(client) => {
-                let task = Task::spawn(self.sync.relay.questions.repaint.clone(), move || {
-                    client.remove_device(device_id)
-                });
+                let task =
+                    Task::spawn(self.sync.relay.questions.repaint.clone(), move || Revoked {
+                        questions: Some(client.remove_device(device_id)),
+                        sync: None,
+                    });
                 self.sync.relay.questions.removing = Some(Removing { name, task });
             }
             Err(error) => self.set_err(format!("“{name}” is not removed. {}", call_error(error))),

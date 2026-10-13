@@ -757,6 +757,11 @@ enum Step {
     /// An iPhone asks to join with the code that "Add a device" shows, through the
     /// fake relay ([`TourRelay::phone_asks`]).
     PhoneAsks,
+    /// The fake relay forgets the Connect team of the vault, as after 30 days without use,
+    /// and Settings > Devices asks it again (`forget-team`).
+    ForgetTeam,
+    /// "Add a device…" of Settings > Devices, as its button (`add-device`).
+    AddDevice,
     Quit,
 }
 
@@ -1141,6 +1146,8 @@ fn parse_steps(text: &str) -> Vec<Step> {
             Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
             Some("ask") => steps.push(Ask),
             Some("phone-asks") => steps.push(PhoneAsks),
+            Some("forget-team") => steps.push(ForgetTeam),
+            Some("add-device") => steps.push(AddDevice),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
             Some("restore") => steps.push(Minimize(false)),
@@ -1325,6 +1332,15 @@ impl Tour {
                     relay.phone_asks();
                 }
             }
+            Step::ForgetTeam => {
+                if let Some(relay) = self.relay.as_ref() {
+                    for team in relay.relay.team_ids() {
+                        relay.relay.delete_team(&team);
+                    }
+                }
+                self.app.tour_add_device(ctx, false);
+            }
+            Step::AddDevice => self.app.tour_add_device(ctx, true),
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
         self.next_at = Instant::now() + Duration::from_secs_f64(pause);

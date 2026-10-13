@@ -501,17 +501,25 @@ pub enum OwnerRequest {
         device_name: String,
         public_key: Vec<u8>,
     },
-    /// Add an iPhone or a Mac to the notifications-only questions team of the vault
-    /// `vault` (plan §A7): the same proof as [`OwnerRequest::ConfirmSyncDevice`] for the
-    /// link exactly as the sheet showed it with its safety words. The `device_name` of an
-    /// iPhone carries its answer key (`questions::device_link`), so the proof covers it,
-    /// and the confirmation writes the row of the iPhone from the keys of the link. The
-    /// device gets the questions and can answer them; it gets no vault.
+    /// Add an iPhone or a Mac to the notifications-only questions team `team_id` of the
+    /// vault `vault` (plan §A7): the proof names the team and the link exactly as the sheet
+    /// showed it with its safety words (`OwnerAction::ConfirmQuestionsDevice`), so it never
+    /// confirms a device of the sync team. The `device_name` of an iPhone carries its
+    /// answer key (`questions::device_link`), so the proof covers it, and the confirmation
+    /// writes the row of the iPhone from the keys of the link. The device gets the
+    /// questions and can answer them; it gets no vault.
     ConfirmQuestionsDevice {
         vault: String,
+        team_id: String,
         link_id: u64,
         device_name: String,
         public_key: Vec<u8>,
+    },
+    /// Connect the vault to Apassy Connect on `relay_url` (ADR 0027 §4): a new team with
+    /// no code. The proof is the one of [`OwnerRequest::EnableRelayQuestions`] with no
+    /// team; only the words of the dialog differ.
+    ConnectVault {
+        relay_url: String,
     },
     /// Turn "Send questions through the relay" on (relay-questions-v1): through the relay
     /// sync team `team_id` of the vault, or through a new notifications-only team on
@@ -815,16 +823,26 @@ impl OwnerRequest {
                 device_name,
                 public_key,
                 ..
-            }
-            | Self::ConfirmQuestionsDevice {
-                link_id,
-                device_name,
-                public_key,
-                ..
             } => OwnerAction::ConfirmSyncDevice {
                 link_id: *link_id,
                 device_name: device_name.clone(),
                 public_key: public_key.clone(),
+            },
+            Self::ConfirmQuestionsDevice {
+                team_id,
+                link_id,
+                device_name,
+                public_key,
+                ..
+            } => OwnerAction::ConfirmQuestionsDevice {
+                team_id: team_id.clone(),
+                link_id: *link_id,
+                device_name: device_name.clone(),
+                public_key: public_key.clone(),
+            },
+            Self::ConnectVault { relay_url } => OwnerAction::EnableRelayQuestions {
+                relay_url: relay_url.clone(),
+                team_id: None,
             },
             Self::EnableRelayQuestions { relay_url, team_id } => {
                 OwnerAction::EnableRelayQuestions {
@@ -1147,6 +1165,7 @@ impl OwnerRequest {
                     )
                 }
             }
+            Self::ConnectVault { .. } => "Connect this vault to Apassy Connect. Your other devices of this vault can then answer its questions, and an Allow there needs Face ID or Touch ID. Apassy Connect sees no command and no credential.".to_owned(),
             Self::EnableRelayQuestions {
                 relay_url,
                 team_id: Some(_),
@@ -1902,12 +1921,22 @@ impl DesktopApp {
             OwnerRequest::OpenCliSession => self.open_cli_session(proof),
             OwnerRequest::BindVariables { variables } => self.bind_variables(variables, proof),
             OwnerRequest::PairCompanion { .. } => self.complete_pairing(proof),
-            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. }
-            | OwnerRequest::ConfirmQuestionsDevice { vault, link_id, .. } => {
-                self.relay_confirm_link(&vault, link_id, proof);
+            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. } => {
+                self.relay_confirm_link(&vault, link_id, None, proof);
+            }
+            OwnerRequest::ConfirmQuestionsDevice {
+                vault,
+                team_id,
+                link_id,
+                ..
+            } => {
+                self.relay_confirm_link(&vault, link_id, Some(team_id), proof);
             }
             OwnerRequest::EnableRelayQuestions { relay_url, team_id } => {
                 self.questions_enable_with(relay_url, team_id, proof);
+            }
+            OwnerRequest::ConnectVault { relay_url } => {
+                self.questions_enable_with(relay_url, None, proof);
             }
             OwnerRequest::AnswerRemoteQuestion {
                 remote_id, choice, ..

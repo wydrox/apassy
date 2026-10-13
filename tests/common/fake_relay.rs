@@ -299,6 +299,12 @@ impl FakeRelay {
         lock(&self.shared.0).last_code.clone()
     }
 
+    /// The relay forgets the team `team_id`, as after 30 days without use: each sign-in
+    /// of its devices answers `401`.
+    pub fn delete_team(&self, team_id: &str) {
+        lock(&self.shared.0).teams.remove(team_id);
+    }
+
     /// The ids of all teams, in order.
     pub fn team_ids(&self) -> Vec<String> {
         lock(&self.shared.0).teams.keys().cloned().collect()

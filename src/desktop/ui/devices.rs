@@ -24,6 +24,11 @@
 //! A vault with no team gets an Apassy Connect team at its first "Add a device", with no
 //! code and no relay address, after the owner check that turns approvals on here. The
 //! relay address and an operator team code live only under "Use another relay…" (L3).
+//!
+//! A vault whose Connect team the relay forgot, or whose team has no Mac left, gets the
+//! question "Connect again?" ([`DevicesSheet::ConnectAgain`]) before anything changes:
+//! the relay is asked once more first, and only the owner's answer and owner check make
+//! a new team.
 
 use std::collections::BTreeSet;
 
@@ -33,7 +38,9 @@ use super::companion;
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::settings::rows;
 use super::sync::SyncSheet;
-use super::sync::questions::{CONNECT_GONE, REMOVED_SYNC};
+use super::sync::questions::{
+    CONNECT_AGAIN, CONNECT_AGAIN_NO_MAC, CONNECT_AGAIN_NOTE, CONNECT_GONE, REMOVED_SYNC,
+};
 use super::{Sheet, close_sheet};
 use crate::companion::pairing::PairingView;
 use crate::desktop::DesktopApp;
@@ -86,6 +93,10 @@ pub(crate) enum DevicesSheet {
     },
     /// "Remove…" of an iPhone paired on this Wi-Fi: its confirmation.
     RemoveWifi { device_id: String, name: String },
+    /// "Connect again?": a new Apassy Connect team in place of the questions team
+    /// `team_id`. `gone`: the relay answered `401` (it forgot the team), so it is asked
+    /// once more first; else no Mac is left in the team.
+    ConnectAgain { team_id: String, gone: bool },
 }
 
 /// The kind of a device, for its tile.
@@ -153,6 +164,14 @@ pub(crate) struct Hub {
 /// Whether the "Add a device" sheet is open.
 pub(crate) fn adding(app: &DesktopApp) -> bool {
     matches!(app.ui.sheet, Some(Sheet::Devices(DevicesSheet::AddDevice)))
+}
+
+/// Whether the "Connect again?" sheet is open.
+pub(crate) fn connecting_again(app: &DesktopApp) -> bool {
+    matches!(
+        app.ui.sheet,
+        Some(Sheet::Devices(DevicesSheet::ConnectAgain { .. }))
+    )
 }
 
 /// The status line of Devices in the list of Settings: "Only this Mac", or "3 devices ·
@@ -450,8 +469,22 @@ impl DesktopApp {
         if self.owner_ui.session.is_locked() {
             return self.set_err("Unlock the vault first.");
         }
-        // A Connect team that the relay deleted: its membership goes, and a new team comes.
-        self.questions_forget_gone_team();
+        // A Connect team that the relay forgot: nothing is dropped here. The owner is asked
+        // "Connect again?" after one more try of the relay.
+        let gone = self
+            .owner_ui
+            .session
+            .with_vault(|vault| {
+                crate::relay::membership::questions_membership(vault)
+                    .ok()
+                    .flatten()
+                    .map(|membership| membership.team_id)
+            })
+            .flatten()
+            .filter(|team| self.sync.relay.questions.gone(&entry.id, team));
+        if let Some(team) = gone {
+            return self.devices_offer_connect_again(&team, true);
+        }
         let state = self.owner_ui.session.with_vault(|vault| {
             let availability = questions_availability(vault).ok()?;
             let membership = crate::relay::membership::questions_membership(vault)
@@ -527,6 +560,41 @@ impl DesktopApp {
                 super::settings::add_an_iphone(self, ctx);
             }
         }
+    }
+
+    /// The screenshot tour (`examples/screenshots.rs`): "Add a device…" as its button
+    /// (`add`), or a new read of the devices of the team. No path of the app calls it.
+    #[doc(hidden)]
+    pub fn tour_add_device(&mut self, ctx: &egui::Context, add: bool) {
+        if add {
+            self.devices_add(Some(ctx));
+        } else {
+            self.questions_refresh_devices();
+        }
+    }
+
+    /// "Connect again?" for the questions team `team_id` of the open vault: the relay
+    /// forgot it (`gone`: it is asked once more first), or no Mac is left in it. Nothing
+    /// changes before the owner's answer and owner check.
+    pub(crate) fn devices_offer_connect_again(&mut self, team_id: &str, gone: bool) {
+        self.devices_close_add();
+        cancel_unused_pairing(self);
+        if gone {
+            self.questions_recheck();
+        }
+        self.ui.sheet = Some(Sheet::Devices(DevicesSheet::ConnectAgain {
+            team_id: team_id.to_owned(),
+            gone,
+        }));
+    }
+
+    /// "Use another relay…" of "Add a device": the sheet of a self-hosted relay. As with Done
+    /// and Escape, the devices that wait are refused and a pairing window that nobody used
+    /// closes.
+    pub(crate) fn devices_use_other_relay(&mut self, id: &str, ctx: Option<&egui::Context>) {
+        self.devices_close_add();
+        cancel_unused_pairing(self);
+        self.sync_open_sheet(SyncSheet::QuestionsTeam { id: id.to_owned() }, ctx);
     }
 
     /// The "Add a device" sheet goes: the devices that wait are refused, the link and an
@@ -851,7 +919,115 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &DevicesSh
         DevicesSheet::RemoveWifi { device_id, name } => {
             remove_wifi_sheet(app, ctx, device_id, name)
         }
+        DevicesSheet::ConnectAgain { team_id, gone } => {
+            connect_again_sheet(app, ctx, team_id, *gone)
+        }
     }
+}
+
+/// "Connect again?" (P1 of the Connect review): the relay forgot the team of the vault,
+/// or no Mac is left in it. A forgotten team is asked once more first; a team that
+/// answers again goes on to "Add a device". Only "Connect with Touch ID" and the owner
+/// check make a new team, and the old membership goes only when the vault keeps the new
+/// one. Returns true on Escape.
+fn connect_again_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    team_id: &str,
+    gone: bool,
+) -> bool {
+    let Some(entry) = app.current_vault().cloned() else {
+        close_sheet(app, ctx);
+        return false;
+    };
+    // The list of the team: it asks the relay again, and says whether it still refuses.
+    let view = app.questions_team_view();
+    let questions = &app.sync.relay.questions;
+    let checking = gone && questions.rechecking;
+    let healed = gone
+        && !checking
+        && view
+            .as_ref()
+            .is_some_and(|view| view.team_id == team_id && !view.gone && !view.unreachable);
+    let unreachable = gone
+        && !checking
+        && view
+            .as_ref()
+            .is_some_and(|view| view.team_id == team_id && view.unreachable);
+    if healed {
+        // The team answers again: nothing to connect.
+        app.ui.sheet = None;
+        app.devices_add(Some(ctx));
+        return false;
+    }
+    let asked = questions.connect_asked(&entry.id);
+    let creating = questions.creating(&entry.id);
+    let error = questions.error.clone();
+    let owner_check = app.owner.check.is_some();
+    let mut connect = false;
+    let mut retry = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "devices-connect-again", 480.0, |ui| {
+        kit::sheet_title(ui, &format!("Connect “{}” again?", entry.name), None);
+        if checking {
+            waiting_line(ui, "Apassy asks Apassy Connect once more…");
+        } else if unreachable {
+            kit::notice(
+                ui,
+                Tone::Warning,
+                UNREACHABLE,
+                Some("Nothing changed. Try again when this Mac is online."),
+                |ui| {
+                    retry = kit::small_button(ui, "Try again", Style::Bordered).clicked();
+                },
+            );
+        } else {
+            kit::paragraph(
+                ui,
+                if gone {
+                    CONNECT_AGAIN
+                } else {
+                    CONNECT_AGAIN_NO_MAC
+                },
+                Font::Body,
+                kit::LABEL,
+            );
+            ui.add_space(6.0);
+            kit::paragraph(ui, CONNECT_AGAIN_NOTE, Font::Callout, kit::SECONDARY);
+            ui.add_space(8.0);
+            if creating {
+                waiting_line(ui, "Apassy connects this vault…");
+            } else if asked && owner_check {
+                waiting_line(ui, "Confirm with Touch ID to connect this vault…");
+            }
+            if let Some(error) = &error {
+                kit::tone_note(ui, error, Tone::Critical);
+            }
+        }
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                let ready = !checking && !unreachable && !creating && !(asked && owner_check);
+                ui.add_enabled_ui(ready, |ui| {
+                    connect = kit::button(ui, "Connect with Touch ID", Style::Prominent).clicked();
+                });
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    if connect {
+        app.questions_ask_connect_again(&entry, team_id, Some(ctx));
+    } else if retry {
+        app.questions_recheck();
+    } else if cancel || response.escape {
+        app.sync.relay.questions.forget_connect();
+        app.sync.relay.questions.error = None;
+        if cancel {
+            close_sheet(app, ctx);
+        }
+    }
+    response.escape
 }
 
 /// What the owner did in the "Add a device" sheet.
@@ -988,8 +1164,7 @@ fn add_device_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         }
         Some(AddAction::PairHere) => app.devices_pair_here(Some(ctx)),
         Some(AddAction::OtherRelay) => {
-            app.devices_close_add();
-            app.sync_open_sheet(SyncSheet::QuestionsTeam { id: entry.id }, Some(ctx));
+            app.devices_use_other_relay(&entry.id, Some(ctx));
         }
         Some(AddAction::PairCode) => app.submit_pairing_code(ctx),
         Some(AddAction::Done) => close_add(app, ctx),

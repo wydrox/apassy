@@ -445,6 +445,84 @@ pub fn join_questions_team(
     keep_questions_membership(vault, membership, device_name)
 }
 
+/// Connect the vault again with a new Apassy Connect team (`membership`, from
+/// [`create_connect_team`]) in place of the questions team `old_team`. The caller checked
+/// the owner on this Mac for `OwnerAction::EnableRelayQuestions` with no team, after the
+/// owner confirmed it: the relay no longer knows `old_team` (a `401` at each sign-in,
+/// relay SPEC §26.5), or no Mac is left in it after "Stop approvals here" on the only Mac
+/// ([`mac_in_team`]).
+///
+/// In one vault transaction the membership of `old_team` goes with its key, the new one
+/// comes, and the vault names the new team ([`Vault::replace_questions_membership`]), so
+/// no stale `questions-team-v1` stays. Then the question key, and the row of this Mac,
+/// which keeps its UUID, takes the new key, and leaves `old_team`. `AlreadyEnabled`: the
+/// vault names another team now, or this Mac is in another questions team (another Mac
+/// connected the vault again first); the new team then stays unused on the relay.
+pub fn reconnect_questions_team(
+    vault: &mut Vault,
+    old_team: &str,
+    membership: &RelayMembership,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if vault.questions_team()?.is_some_and(|team| team != old_team) {
+        return Err(SyncError::AlreadyEnabled);
+    }
+    let current = questions_membership(vault)?;
+    if current
+        .as_ref()
+        .is_some_and(|current| current.team_id != old_team || !questions_only(current))
+    {
+        return Err(SyncError::AlreadyEnabled);
+    }
+    if vault.trusted_key_removed(&membership.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
+    // The row of this Mac: by the key of its old membership, else the one Mac row that is
+    // left in the old team.
+    let row = match &current {
+        Some(current) => this_device(vault, current)?,
+        None => {
+            let mut macs = macs_in_team(vault, old_team)?;
+            if macs.len() == 1 { macs.pop() } else { None }
+        }
+    };
+    vault.replace_questions_membership(current.as_ref().map(|_| old_team), membership)?;
+    vault.ensure_question_key()?;
+    if let Some(row) = &row {
+        vault.register_trusted_device(
+            &row.uuid,
+            &clean_name(device_name, "Mac"),
+            TrustedDeviceKind::Mac,
+            &membership.public_key,
+            None,
+        )?;
+        vault.clear_trusted_device_relay_id(&row.uuid, old_team)?;
+    }
+    Ok(register_this_device(vault, membership, device_name)?)
+}
+
+/// The live Mac rows with a device number in the team `team_id`.
+fn macs_in_team(vault: &Vault, team_id: &str) -> VaultResult<Vec<TrustedDevice>> {
+    Ok(vault
+        .trusted_devices()?
+        .into_iter()
+        .filter(|device| {
+            device.kind == TrustedDeviceKind::Mac && device.relay_devices.contains_key(team_id)
+        })
+        .collect())
+}
+
+/// Whether a Mac of the vault is in the team `team_id`: a live Mac row with a device
+/// number there. Only such a Mac can confirm a link of the team, so a vault whose
+/// questions team has no Mac connects again ([`reconnect_questions_team`]) instead of
+/// waiting for a link that no device can make.
+pub fn mac_in_team(vault: &Vault, team_id: &str) -> VaultResult<bool> {
+    Ok(!macs_in_team(vault, team_id)?.is_empty())
+}
+
 fn keep_questions_membership(
     vault: &mut Vault,
     membership: &RelayMembership,
@@ -521,8 +599,10 @@ pub fn questions_only(membership: &RelayMembership) -> bool {
 
 /// Turn the questions off on this Mac: the membership loses the purpose `questions`; a
 /// notifications-only membership goes with its key. Relay sync is never touched. The
-/// trusted device row stays, so an answer that is on its way still verifies. Returns
-/// whether they were on.
+/// trusted device row stays while another Mac is in the team, so an answer that is on
+/// its way still verifies there. The row of the only Mac of a notifications-only team
+/// goes with the key: no Mac is then left to confirm a link, so "Approve here…" connects
+/// the vault again ([`mac_in_team`]). Returns whether they were on.
 pub fn disable_questions(vault: &mut Vault) -> VaultResult<bool> {
     let Some(membership) = questions_membership(vault)? else {
         return Ok(false);
@@ -530,7 +610,14 @@ pub fn disable_questions(vault: &mut Vault) -> VaultResult<bool> {
     let mut rest = membership.purposes.clone();
     rest.remove(&MembershipPurpose::Questions);
     if rest.is_empty() {
+        let me = this_device(vault, &membership)?;
+        let alone = macs_in_team(vault, &membership.team_id)?
+            .iter()
+            .all(|mac| me.as_ref().is_some_and(|me| me.uuid == mac.uuid));
         vault.remove_relay_membership(&membership.team_id)?;
+        if let Some(me) = me.filter(|_| alone) {
+            vault.remove_trusted_device(&me.uuid)?;
+        }
     } else {
         vault.set_membership_purposes(&membership.team_id, &rest)?;
     }
@@ -584,9 +671,42 @@ pub fn register_this_device(
         }
     };
     vault.set_trusted_device_relay_id(&uuid, &membership.team_id, membership.device_id)?;
+    // A vault with a relay sync team of its own (two teams, from before ADR 0027): the row
+    // also names the sync device of this Mac, so a removal of this Mac revokes both.
+    if let Some(sync) = vault
+        .relay_device()?
+        .filter(|sync| sync.team_id != membership.team_id)
+    {
+        // Best effort: a stale row that holds the number keeps it.
+        let _ = vault.set_trusted_device_relay_id(&uuid, &sync.team_id, sync.device_id);
+    }
     vault
         .trusted_device(&uuid)?
         .ok_or_else(|| crate::vault::VaultError::new(VaultErrorKind::Storage))
+}
+
+/// The row of this Mac names its relay sync device too, when the vault syncs through a
+/// team other than its questions team (a vault from before ADR 0027). For a Mac that
+/// turned relay sync on after the questions. No relay call; nothing for a Mac without a
+/// row.
+pub fn note_sync_device(vault: &mut Vault) -> VaultResult<()> {
+    let (Some(membership), Some(sync)) = (questions_membership(vault)?, vault.relay_device()?)
+    else {
+        return Ok(());
+    };
+    if sync.team_id == membership.team_id {
+        return Ok(());
+    }
+    if let Some(me) = this_device(vault, &membership)?
+        && me.relay_devices.get(&sync.team_id) != Some(&sync.device_id)
+    {
+        match vault.set_trusted_device_relay_id(&me.uuid, &sync.team_id, sync.device_id) {
+            // A stale row that holds the number keeps it.
+            Err(error) if error.kind() == VaultErrorKind::AlreadyExists => {}
+            other => other?,
+        }
+    }
+    Ok(())
 }
 
 /// A random UUID (version 4) in the form of the contract: 36 lowercase characters
@@ -638,6 +758,99 @@ mod tests {
         ] {
             assert!(!valid_device_uuid(bad), "{bad}");
         }
+    }
+
+    /// A vault with a sync team and another questions team (from before ADR 0027): the row
+    /// of this Mac names both of its devices, so a removal of this Mac revokes both. A Mac
+    /// that turned relay sync on after the questions gets the sync device too.
+    #[test]
+    fn the_row_of_a_mac_of_two_teams_names_its_sync_device() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("t.db"), "synthetic-two-pass").unwrap();
+        vault.unlock("synthetic-two-pass").unwrap();
+        let questions_key = DeviceKey::generate().unwrap();
+        let membership = RelayMembership {
+            team_id: "t_aaaaaaaaaa".to_owned(),
+            relay_url: "https://relay.example.test".to_owned(),
+            device_id: 5,
+            public_key: questions_key.public_key().to_vec(),
+            key_pkcs8: questions_key.pkcs8().unwrap().clone(),
+            purposes: BTreeSet::from([MembershipPurpose::Questions]),
+            created_at: 0,
+        };
+        let row = adopt_questions_team(&mut vault, &membership, "Synthetic Mac").unwrap();
+        assert_eq!(row.relay_devices.len(), 1);
+        // Relay sync comes later, through another team.
+        let sync_key = DeviceKey::generate().unwrap();
+        vault
+            .set_relay_device(&crate::vault::RelayDevice {
+                relay_url: "https://relay.example.test".to_owned(),
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                device_id: 2,
+                public_key: sync_key.public_key().to_vec(),
+                key_pkcs8: sync_key.pkcs8().unwrap().clone(),
+                created_at: 0,
+            })
+            .unwrap();
+        note_sync_device(&mut vault).unwrap();
+        let row = vault.trusted_device(&row.uuid).unwrap().unwrap();
+        assert_eq!(row.relay_devices.get("t_aaaaaaaaaa"), Some(&5));
+        assert_eq!(row.relay_devices.get("t_7k2m5q4x3c"), Some(&2));
+        // Registering again keeps both.
+        let again = register_this_device(&mut vault, &membership, "Synthetic Mac").unwrap();
+        assert_eq!(again.relay_devices.len(), 2);
+    }
+
+    /// "Connect again" replaces the questions team in one step: the old membership and its
+    /// key go, the vault names the new team, and the row of this Mac keeps its UUID with
+    /// the new key. A vault that names another team now refuses.
+    #[test]
+    fn a_new_connect_team_takes_the_place_of_the_old_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("r.db"), "synthetic-again-pass").unwrap();
+        vault.unlock("synthetic-again-pass").unwrap();
+        let team = |team_id: &str, device_id: u64| {
+            let key = DeviceKey::generate().unwrap();
+            RelayMembership {
+                team_id: team_id.to_owned(),
+                relay_url: "https://relay.example.test".to_owned(),
+                device_id,
+                public_key: key.public_key().to_vec(),
+                key_pkcs8: key.pkcs8().unwrap().clone(),
+                purposes: BTreeSet::from([MembershipPurpose::Questions]),
+                created_at: 0,
+            }
+        };
+        let old = team("t_aaaaaaaaaa", 1);
+        let row = adopt_questions_team(&mut vault, &old, "Synthetic Mac").unwrap();
+        let new = team("t_bbbbbbbbbb", 1);
+        assert!(matches!(
+            adopt_questions_team(&mut vault, &new, "Synthetic Mac"),
+            Err(SyncError::AlreadyEnabled)
+        ));
+        let moved =
+            reconnect_questions_team(&mut vault, "t_aaaaaaaaaa", &new, "Synthetic Mac").unwrap();
+        assert_eq!(moved.uuid, row.uuid);
+        assert_eq!(moved.sign_key, new.public_key);
+        assert_eq!(
+            moved.relay_devices,
+            BTreeMap::from([("t_bbbbbbbbbb".to_owned(), 1)])
+        );
+        assert_eq!(
+            vault.questions_team().unwrap().as_deref(),
+            Some("t_bbbbbbbbbb")
+        );
+        let memberships = vault.relay_memberships().unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].team_id, "t_bbbbbbbbbb");
+        assert_eq!(vault.trusted_devices().unwrap().len(), 1);
+        // The old team is no longer the team of the vault.
+        let third = team("t_cccccccccc", 1);
+        assert!(matches!(
+            reconnect_questions_team(&mut vault, "t_aaaaaaaaaa", &third, "Synthetic Mac"),
+            Err(SyncError::AlreadyEnabled)
+        ));
+        assert_eq!(vault.relay_memberships().unwrap().len(), 1);
     }
 
     #[test]

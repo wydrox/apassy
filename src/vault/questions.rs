@@ -102,7 +102,7 @@ fn write_key(conn: &Connection, key: &QuestionKey, previous: Option<i64>) -> Vau
 }
 
 /// Write the `vault_secret` row `name` as a new version after `previous`, by this device.
-fn write_secret(
+pub(super) fn write_secret(
     conn: &Connection,
     name: &str,
     value: &[u8],

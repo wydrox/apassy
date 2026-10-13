@@ -725,3 +725,119 @@ fn event_and_decision_envelopes_are_bounded() {
         ErrorCode::InvalidTimeOrdering,
     );
 }
+
+// Test vectors of docs/contracts/relay-connect-v1.md section 7.3. The link parser is part
+// of sync, which needs the vault.
+#[cfg(feature = "vault")]
+mod connect_vectors {
+    use apassy::sync::{LinkRoute, RelayLinkPayload, decode_b64u, link_code_team};
+
+    const CONNECT_RELAY: &str = "https://apassy-relay.wyderka.cc";
+    const CONNECT_CODE: &str =
+        "apassy_lnk_t_7k2m5q4x3c_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const CONNECT_TEAM: &str = "t_7k2m5q4x3c";
+    const CONNECT_VECTOR_1: &str = "https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const CONNECT_VECTOR_2: &str = "https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&r=connect&n=Mac%20mini&e=1790000600&p=YXBhc3N5Oi8vcGFpcj92PTEmaD0xOTIuMC4yLjEwJnA9NDg2MjAmYz1BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBJnM9QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQSZuPU1hYyUyMG1pbmkmZT0xNzkwMDAwMzAw";
+    const CONNECT_VECTOR_3: &str =
+        "apassy_lnk_t_7k2m5q4x3c_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const CONNECT_VECTOR_2_PAIRING: &str = "apassy://pair?v=1&h=192.0.2.10&p=48620&c=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&s=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA&n=Mac%20mini&e=1790000300";
+
+    /// Decode `%XX` escapes as UTF-8; `None` on a bad escape.
+    fn percent_decode(text: &str) -> Option<String> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hex = text.get(i + 1..i + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
+    /// Check a pairing link the way the Mac and the iPhone read it.
+    /// Returns the host, the port, the name and the expiry time.
+    fn parse_pairing_link(link: &str) -> (String, u16, String, u64) {
+        let query = link
+            .strip_prefix("apassy://pair?")
+            .expect("pairing link starts with apassy://pair?");
+        let mut fields = std::collections::HashMap::new();
+        for part in query.split('&') {
+            let (key, value) = part.split_once('=').expect("every field has a value");
+            fields.entry(key).or_insert(value);
+        }
+        assert_eq!(fields.get("v"), Some(&"1"));
+        let host = fields.get("h").expect("h is present");
+        assert!(!host.is_empty());
+        let port: u16 = fields["p"].parse().expect("p is a u16");
+        assert!(port > 0);
+        for key in ["c", "s"] {
+            let bytes = decode_b64u(fields[key]).expect("c and s are b64u");
+            assert_eq!(bytes.len(), 32, "{key} is 32 bytes");
+        }
+        let name = percent_decode(fields["n"]).expect("n is percent-encoded UTF-8");
+        let expires: u64 = fields["e"].parse().expect("e is a u64");
+        (host.to_string(), port, name, expires)
+    }
+
+    #[test]
+    fn connect_link_vector_1_old_form_parses_as_sync() {
+        let payload = RelayLinkPayload::parse(CONNECT_VECTOR_1, "").expect("vector 1 parses");
+        assert_eq!(payload.relay.as_str(), CONNECT_RELAY);
+        assert_eq!(payload.code.as_str(), CONNECT_CODE);
+        assert_eq!(link_code_team(&payload.code), Some(CONNECT_TEAM));
+        assert_eq!(payload.route, LinkRoute::Sync);
+        assert_eq!(payload.mac_name, None);
+        assert_eq!(payload.expires_at, None);
+        assert!(payload.pairing.is_none());
+    }
+
+    #[test]
+    fn connect_link_vector_2_new_form_parses_every_field() {
+        let payload = RelayLinkPayload::parse(CONNECT_VECTOR_2, "").expect("vector 2 parses");
+        assert_eq!(payload.relay.as_str(), CONNECT_RELAY);
+        assert_eq!(payload.code.as_str(), CONNECT_CODE);
+        assert_eq!(link_code_team(&payload.code), Some(CONNECT_TEAM));
+        assert_eq!(payload.route, LinkRoute::Connect);
+        assert_eq!(payload.mac_name.as_deref(), Some("Mac mini"));
+        assert_eq!(payload.expires_at, Some(1_790_000_600));
+        let pairing = payload.pairing.as_ref().expect("p is present");
+        assert_eq!(pairing.as_str(), CONNECT_VECTOR_2_PAIRING);
+
+        // The raw `p=` of the literal decodes to the pairing link of the table.
+        let raw = CONNECT_VECTOR_2
+            .rsplit_once("&p=")
+            .expect("vector 2 has a p field")
+            .1;
+        let decoded = decode_b64u(raw).expect("p is b64u");
+        assert_eq!(
+            std::str::from_utf8(&decoded).expect("p is UTF-8"),
+            pairing.as_str()
+        );
+
+        // The pairing link is a valid pairing link.
+        let (host, port, name, expires) = parse_pairing_link(pairing);
+        assert_eq!(host, "192.0.2.10");
+        assert_eq!(port, 48620);
+        assert_eq!(name, "Mac mini");
+        assert_eq!(expires, 1_790_000_300);
+    }
+
+    #[test]
+    fn connect_link_vector_3_bare_code_takes_the_relay_of_the_field() {
+        let payload =
+            RelayLinkPayload::parse(CONNECT_VECTOR_3, CONNECT_RELAY).expect("vector 3 parses");
+        assert_eq!(payload.relay.as_str(), CONNECT_RELAY);
+        assert_eq!(payload.code.as_str(), CONNECT_CODE);
+        assert_eq!(link_code_team(&payload.code), Some(CONNECT_TEAM));
+        assert_eq!(payload.route, LinkRoute::Sync);
+        assert_eq!(payload.mac_name, None);
+        assert_eq!(payload.expires_at, None);
+        assert!(payload.pairing.is_none());
+    }
+}

@@ -3268,7 +3268,8 @@ fn the_first_add_a_device_connects_the_vault_and_adds_an_iphone_after_the_owner_
     );
     assert_eq!(
         request.action(),
-        OwnerAction::ConfirmSyncDevice {
+        OwnerAction::ConfirmQuestionsDevice {
+            team_id: membership.team_id.clone(),
             link_id: links[0].id,
             // The proof covers the answer key in the name.
             device_name: link_name.clone(),
@@ -3277,7 +3278,7 @@ fn the_first_add_a_device_connects_the_vault_and_adds_an_iphone_after_the_owner_
     );
     assert_eq!(
         request.action().reason(),
-        "add the device \"Test iPhone\" to the sync of this vault"
+        "let the device \"Test iPhone\" answer the questions of this vault"
     );
     assert!(
         request

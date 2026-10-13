@@ -264,6 +264,16 @@ pub enum OwnerAction {
         device_name: String,
         public_key: Vec<u8>,
     },
+    /// Add a device (an iPhone or a Mac) to the questions team `team_id` of the open vault
+    /// (ADR 0027, plan §A7). The proof names the team and the link exactly as the owner
+    /// confirmed it, so a proof for the sync team never confirms a device here, and the
+    /// other way round. The `device_name` of an iPhone carries its answer key.
+    ConfirmQuestionsDevice {
+        team_id: String,
+        link_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+    },
     /// Answer a question of another Mac through the relay (relay-questions-v1 section
     /// 5.3): the Touch ID on this Mac before it signs an approving answer with its relay
     /// key. `answer` is the action of the matching local answer for the run as the card
@@ -412,6 +422,10 @@ impl OwnerAction {
             }
             Self::ConfirmSyncDevice { device_name, .. } => format!(
                 "add the device \"{}\" to the sync of this vault",
+                short_device_name(&crate::questions::device_link::shown_link_name(device_name))
+            ),
+            Self::ConfirmQuestionsDevice { device_name, .. } => format!(
+                "let the device \"{}\" answer the questions of this vault",
                 short_device_name(&crate::questions::device_link::shown_link_name(device_name))
             ),
             Self::AnswerRemoteQuestion { asker, answer, .. } => {
