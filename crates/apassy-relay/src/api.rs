@@ -27,9 +27,13 @@ pub use apassy::agent::wire::{WireError, WireResponse as Envelope};
 pub const EDGE_HEADER: &str = "X-Apassy-Edge";
 /// The coarse prefix of the client (an IPv6 /48 or an IPv4 /24) that the Worker adds to
 /// `POST /v1/connect`, after it removed any copy of the client. The relay reads it only
-/// on that route, behind the edge secret, and keeps only a salted hash of it in memory
+/// on that route, behind the edge secret, with `CLIENT_PREFIX_MAC_HEADER`, and keeps only
+/// a salted hash of it in memory
 /// (docs/SPEC.md section 26).
 pub const CLIENT_PREFIX_HEADER: &str = "X-Apassy-Client-Prefix";
+/// The Worker's HMAC of `CLIENT_PREFIX_HEADER` under the edge secret
+/// (`server::connect::prefix_mac`). Without it the prefix is not taken.
+pub const CLIENT_PREFIX_MAC_HEADER: &str = "X-Apassy-Client-Prefix-Mac";
 /// Set on every response that the relay itself makes on the proxy path:
 /// `refused` (403, 413, 501) or `upstream-error` (502).
 pub const RELAY_HEADER: &str = "X-Apassy-Relay";

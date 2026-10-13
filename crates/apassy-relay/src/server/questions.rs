@@ -1041,36 +1041,10 @@ pub fn push_token_delete(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<
 /// again); questions posted more than 24 hours ago go with their answers. Wakes the
 /// long polls on an expiry or a deletion.
 pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
-    let changed = core.store.tx(|tx| {
-        let expired: Vec<(String, i64)> = {
-            let mut statement = tx
-                .prepare(
-                    "SELECT qid, device_id FROM question WHERE state = 'open' AND expires_at <= ?1 \
-                     ORDER BY seq",
-                )
-                .map_err(db)?;
-            statement
-                .query_map(params![to_i(now)], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(db)?
-                .collect::<rusqlite::Result<_>>()
-                .map_err(db)?
-        };
-        for (qid, device) in &expired {
-            let seq = next_seq(tx)?;
-            tx.execute(
-                "UPDATE question SET state = 'expired', seq = ?2 WHERE qid = ?1",
-                params![qid, to_i(seq)],
-            )
-            .map_err(db)?;
-            core.audit.write_on(
-                tx,
-                now,
-                RELAY_ACTOR,
-                "question_expired",
-                None,
-                &json!({"device_id": to_u(*device)}),
-            )?;
-        }
+    // The deletions first, in a transaction of their own that writes no row: a Connect
+    // team at its file cap (section 26.4) still frees the pages of its old questions,
+    // even when the expiry rows below no longer fit.
+    let deleted = core.store.tx(|tx| {
         // Ten minutes after a question ended, only its metadata stays: the answers go,
         // and so do the card and the settle (an empty card marks the question purged).
         let ended = "(state = 'settled' AND settled_at <= ?1) OR (state <> 'settled' AND expires_at <= ?1)";
@@ -1102,12 +1076,44 @@ pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
                 params![cutoff],
             )
             .map_err(db)?;
-        Ok(!expired.is_empty() || deleted > 0)
+        Ok(deleted)
     })?;
-    if changed {
+    let expired = core.store.tx(|tx| {
+        let expired: Vec<(String, i64)> = {
+            let mut statement = tx
+                .prepare(
+                    "SELECT qid, device_id FROM question WHERE state = 'open' AND expires_at <= ?1 \
+                     ORDER BY seq",
+                )
+                .map_err(db)?;
+            statement
+                .query_map(params![to_i(now)], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(db)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(db)?
+        };
+        for (qid, device) in &expired {
+            let seq = next_seq(tx)?;
+            tx.execute(
+                "UPDATE question SET state = 'expired', seq = ?2 WHERE qid = ?1",
+                params![qid, to_i(seq)],
+            )
+            .map_err(db)?;
+            core.audit.write_on(
+                tx,
+                now,
+                RELAY_ACTOR,
+                "question_expired",
+                None,
+                &json!({"device_id": to_u(*device)}),
+            )?;
+        }
+        Ok(expired.len())
+    });
+    if deleted > 0 || expired.as_ref().is_ok_and(|expired| *expired > 0) {
         core.notify.notify();
     }
-    Ok(())
+    expired.map(drop)
 }
 
 /// The counts that the operator sees for a team: open questions and push tokens.

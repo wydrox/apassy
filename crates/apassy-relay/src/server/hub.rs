@@ -228,6 +228,40 @@ fn finish_migration(config: &RelayConfig, rows: &[TeamRow]) {
     }
 }
 
+/// Removes, at start, every team file that no row of `relay.db` names: a team whose
+/// creation stopped between its file and the commit of its row (a crash, a kill). The key
+/// of such a file was only in the row that never committed, so nothing can open it. Only
+/// `teams/<team id>.db` of a well-formed id counts, with its journal, its `.pre-v*`
+/// copies, and its snapshots (`remove_team_file`); other names stay. Each removal is
+/// logged.
+fn sweep_orphans(config: &RelayConfig, rows: &[TeamRow]) {
+    let Ok(entries) = std::fs::read_dir(config.teams_dir()) else {
+        return;
+    };
+    let known: std::collections::HashSet<&TeamId> = rows.iter().map(|row| &row.id).collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".db"))
+            .and_then(TeamId::parse)
+        else {
+            continue;
+        };
+        if known.contains(&id) {
+            continue;
+        }
+        match remove_team_file(config, &id) {
+            Ok(()) => eprintln!(
+                "apassy-relay: removed the file of team {id}: relay.db has no row for it (its creation stopped before the commit), so no key opens it"
+            ),
+            Err(_) => eprintln!(
+                "apassy-relay: the file of team {id} has no row in relay.db and could not be removed"
+            ),
+        }
+    }
+}
+
 /// The threads that open the team files at start, at most.
 const OPEN_THREADS: usize = 8;
 
@@ -278,6 +312,15 @@ pub struct TeamInfo {
     /// Open questions and push tokens (counts). `None` while the team is not open.
     pub open_questions: Option<u64>,
     pub push_tokens: Option<u64>,
+    /// The bytes of the team file in use. `None` while the team is not open.
+    pub file_bytes: Option<u64>,
+    /// The cap of the team file in bytes (a Connect team, docs/SPEC.md section 26.4);
+    /// `None` without a cap (an operator team) or while the team is not open.
+    pub file_cap: Option<u64>,
+    /// How full a capped file is: `ok`, `near` (about 90 %), or `full` (about 100 %: its
+    /// writes are refused with 403 `team_limit`, nothing is deleted). `None` without a
+    /// cap or while the team is not open.
+    pub file_level: Option<crate::server::audit::CapLevel>,
 }
 
 /// The teams of the relay.
@@ -339,6 +382,7 @@ impl Hub {
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
+        sweep_orphans(&hub.config, &rows);
         for row in &rows {
             if row.legacy {
                 *hub.legacy.write().unwrap_or_else(PoisonError::into_inner) = Some(row.id.clone());
@@ -378,21 +422,40 @@ impl Hub {
     /// a run that was `ready` becomes `ended`.
     fn open_team(&self, row: &TeamRow) -> RelayResult<Arc<Core>> {
         let store = Store::open_team(&self.config.team_path(&row.id), &row.file_key)?;
-        Ok(self.register(row.id.clone(), store, row.limits, row.kind))
+        self.register(row.id.clone(), store, row.limits, row.kind)
     }
 
+    /// Serves an open team file. A Connect team's file gets its cap
+    /// (`TeamLimits::file_bytes`), so one anonymous team cannot fill the disk, and a small
+    /// page cache (`connect::CACHE_KIB`), so a hundred of them fit the container. A cap
+    /// that cannot be set after a second try refuses the team: it is not served without
+    /// one. An operator team has no cap; a failure to lift one is only logged, as before.
     fn register(
         &self,
         id: TeamId,
         store: Store,
         team_limits: TeamLimits,
         kind: TeamKind,
-    ) -> Arc<Core> {
+    ) -> RelayResult<Arc<Core>> {
         let store = Arc::new(store);
-        // A Connect team's file has a cap (`TeamLimits::file_bytes`), so one anonymous
-        // team cannot fill the disk.
-        if store.set_max_bytes(team_limits.file_bytes(kind)).is_err() {
-            eprintln!("apassy-relay: the file cap of team {id} could not be set");
+        let cap = team_limits.file_bytes(kind);
+        if store
+            .set_max_bytes(cap)
+            .or_else(|_| store.set_max_bytes(cap))
+            .is_err()
+        {
+            if cap.is_some() {
+                eprintln!(
+                    "apassy-relay: the file cap of team {id} could not be set: the team is not served"
+                );
+                return Err(RelayError::internal(
+                    "The file cap of the team could not be set.",
+                ));
+            }
+            eprintln!("apassy-relay: the file cap of team {id} could not be lifted");
+        }
+        if kind == TeamKind::Connect && store.set_cache_kib(connect::CACHE_KIB).is_err() {
+            eprintln!("apassy-relay: the page cache of team {id} could not be bounded");
         }
         let audit = Audit::new();
         if end_ready_runs(&store, &audit, crate::now_unix()).is_err() {
@@ -427,6 +490,9 @@ impl Hub {
             request_rate: connect::RequestRate::default(),
             last_request: AtomicU64::new(0),
             maintained_at: AtomicU64::new(0),
+            relay_store: self.directory.store.clone(),
+            relay_audit: self.directory.audit.clone(),
+            cap_warning: Mutex::new((crate::server::audit::CapLevel::Ok, 0)),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
             team_limits: RwLock::new(team_limits),
@@ -437,7 +503,7 @@ impl Hub {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, core.clone());
-        core
+        Ok(core)
     }
 
     /// An active team.
@@ -559,7 +625,7 @@ impl Hub {
             .map(|id| DeviceId(to_u(id)))
             .map_err(db)
         })?;
-        self.register(id.clone(), store, TeamLimits::default(), TeamKind::Operator);
+        self.register(id.clone(), store, TeamLimits::default(), TeamKind::Operator)?;
         Ok((id, owner_id, device_id))
     }
 
@@ -665,7 +731,9 @@ impl Hub {
             .map(|id| DeviceId(to_u(id)))
             .map_err(db)
         })?;
-        self.register(id.clone(), store, TeamLimits::connect(), TeamKind::Connect);
+        // A team that cannot be served (its cap) stays in `relay.db`, out of service like
+        // a team that fails to open at start: the call answers 500.
+        self.register(id.clone(), store, TeamLimits::connect(), TeamKind::Connect)?;
         Ok((id, owner_id, device_id))
     }
 
@@ -824,6 +892,9 @@ impl Hub {
         let mut infos = Vec::new();
         let now = crate::now_unix();
         for row in self.directory.teams()? {
+            let file = self
+                .team(&row.id)
+                .and_then(|core| crate::server::audit::file_use(&core).ok());
             let counts = self.team(&row.id).and_then(|core| {
                 core.store
                     .with(|conn| {
@@ -881,6 +952,9 @@ impl Hub {
                 sync_size: counts.map(|c| c.5),
                 open_questions: counts.map(|c| c.6.0),
                 push_tokens: counts.map(|c| c.6.1),
+                file_bytes: file.map(|f| f.0),
+                file_cap: file.and_then(|f| f.1),
+                file_level: file.and_then(|f| f.2),
             });
         }
         Ok(infos)

@@ -244,13 +244,9 @@ pub fn token(core: &Core, request: &TokenRequest, now: u64) -> RelayResult<Value
         .as_ref()
         .is_err_and(|e| e.code == codes::UNAUTHENTICATED)
     {
-        core.audit.refusal(
-            &core.store,
-            now,
-            "device_sign_in",
-            "device_sign_in_refused",
-            &json!({}),
-        );
+        // Anyone can call this with the team's id: for a Connect team the row goes to
+        // the relay audit (`Core::outside_refusal`).
+        core.outside_refusal(now, "device_sign_in", "device_sign_in_refused", &json!({}));
     }
     result
 }

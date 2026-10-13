@@ -4,8 +4,9 @@
 //! that live sessions hold and every placeholder become `[apassy:<ENV_NAME>]`, and
 //! every token form becomes `[apassy:token]`. The relay holds an item value only
 //! while a session lives, so it masks the value only for that time. No endpoint
-//! changes or deletes a row. The one exception is `bound`: a Connect team's file has a
-//! cap, and near it the oldest quarter of its audit goes (docs/SPEC.md section 26).
+//! changes or deletes a row, in any team. A Connect team's file has a cap: near it the
+//! relay warns the operator (`watch_cap`), and at it the team's writes are refused with
+//! 403 `team_limit` until the operator raises its limits (docs/SPEC.md section 26.4).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -235,51 +236,89 @@ impl Audit {
     }
 }
 
-/// The share of a capped file in use above which `bound` drops old audit rows: 3/4.
-const BOUND_NUMERATOR: u64 = 3;
-const BOUND_DENOMINATOR: u64 = 4;
-/// `bound` leaves an audit of fewer rows alone.
-const BOUND_MIN_ROWS: u64 = 100;
+/// How full a team file with a cap is (`watch_cap`, `admin teams`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapLevel {
+    /// Under `CAP_NEAR_PERCENT`.
+    #[default]
+    Ok,
+    /// At `CAP_NEAR_PERCENT` or more: about 90 %.
+    Near,
+    /// At `CAP_FULL_PERCENT` or more: about 100 %; most writes no longer fit.
+    Full,
+}
 
-/// Keeps the audit of a team whose file has a cap (a Connect team,
-/// `TeamLimits::file_bytes`) from filling it: when more than 3/4 of the cap is in use,
-/// the oldest quarter of the audit rows goes, and one `audit_trimmed` row says how many.
-/// The freed pages are reused. A team without a cap is never touched.
-pub fn bound(core: &crate::server::Core, now: u64) -> RelayResult<()> {
-    if core.limits().file_bytes(core.kind).is_none() {
-        return Ok(());
-    }
-    let (used, max) = core.store.pages()?;
-    if used.saturating_mul(BOUND_DENOMINATOR) <= max.saturating_mul(BOUND_NUMERATOR) {
-        return Ok(());
-    }
-    core.store.tx(|tx| {
-        let rows: i64 = tx
-            .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
-            .map_err(db)?;
-        let drop = to_u(rows) / 4;
-        if to_u(rows) < BOUND_MIN_ROWS {
-            return Ok(());
+/// The share of the cap in use from which a file is `Near` its cap.
+pub const CAP_NEAR_PERCENT: u64 = 90;
+/// The share of the cap in use from which a file is `Full`. A write that needs more
+/// pages than are left is refused before 100 %.
+pub const CAP_FULL_PERCENT: u64 = 98;
+/// Seconds between two warnings of one team at the same level.
+pub const CAP_WARNING_SECS: u64 = 3600;
+
+impl CapLevel {
+    /// The level of a file that uses `used` of `max` pages (or bytes).
+    pub fn of(used: u64, max: u64) -> Self {
+        let percent = used.saturating_mul(100) / max.max(1);
+        if percent >= CAP_FULL_PERCENT {
+            Self::Full
+        } else if percent >= CAP_NEAR_PERCENT {
+            Self::Near
+        } else {
+            Self::Ok
         }
-        let last: i64 = tx
-            .query_row(
-                "SELECT id FROM audit ORDER BY id LIMIT 1 OFFSET ?1",
-                params![to_i(drop - 1)],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
-        tx.execute("DELETE FROM audit WHERE id <= ?1", params![last])
-            .map_err(db)?;
-        core.audit.write_on(
-            tx,
-            now,
-            RELAY_ACTOR,
-            "audit_trimmed",
-            None,
-            &serde_json::json!({"rows": drop, "through_id": last}),
-        )?;
-        Ok(())
-    })
+    }
+}
+
+/// The file of a team: the bytes in use, its cap (`None`: no cap, an operator team),
+/// and how full it is (`None` without a cap).
+pub fn file_use(core: &crate::server::Core) -> RelayResult<(u64, Option<u64>, Option<CapLevel>)> {
+    let (used, max) = core.store.pages()?;
+    let bytes = used.saturating_mul(crate::server::store::PAGE_BYTES);
+    if core.limits().file_bytes(core.kind).is_none() {
+        return Ok((bytes, None, None));
+    }
+    Ok((
+        bytes,
+        Some(max.saturating_mul(crate::server::store::PAGE_BYTES)),
+        Some(CapLevel::of(used, max)),
+    ))
+}
+
+/// Whether a warning of `level` is due after the last one, `last` (its level and time):
+/// when the level rose, or `CAP_WARNING_SECS` after the last warning.
+pub fn cap_warning_due(last: (CapLevel, u64), level: CapLevel, now: u64) -> bool {
+    level > CapLevel::Ok && (level > last.0 || now >= last.1.saturating_add(CAP_WARNING_SECS))
+}
+
+/// Watches the file of a team with a cap (a Connect team, `TeamLimits::file_bytes`): at
+/// about 90 % and about 100 % of the cap, one warning line in the log, at most one an
+/// hour for each team unless the level rises. Nothing is deleted (owner decision of
+/// 2026-10-13): a full team's writes are 403 `team_limit` until the operator raises its
+/// limits or deletes it. A team without a cap is never read. Returns the level.
+pub fn watch_cap(core: &crate::server::Core, now: u64) -> RelayResult<CapLevel> {
+    let (bytes, Some(cap), Some(level)) = file_use(core)? else {
+        return Ok(CapLevel::Ok);
+    };
+    let mut last = core
+        .cap_warning
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if cap_warning_due(*last, level, now) {
+        *last = (level, now);
+        let percent = bytes.saturating_mul(100) / cap.max(1);
+        let state = if level == CapLevel::Full {
+            "is full: its writes are refused with 403 team_limit"
+        } else {
+            "is near its cap"
+        };
+        eprintln!(
+            "apassy-relay: warning: the file of Connect team {} {state} ({bytes} of {cap} bytes, {percent}%). Nothing is deleted. Raise its cap with `apassy-relay admin limits {} --question-bytes <bytes>` (each byte more is a byte more of file), or delete the team.",
+            core.team, core.team
+        );
+    }
+    Ok(level)
 }
 
 /// `GET /v1/audit`: rows with an id above `after`, ascending.
@@ -373,6 +412,30 @@ mod tests {
             !after.contains("Placeholder"),
             "a placeholder stays masked: {after}"
         );
+    }
+
+    #[test]
+    fn the_cap_levels_and_their_warnings() {
+        assert_eq!(CapLevel::of(0, 2560), CapLevel::Ok);
+        assert_eq!(CapLevel::of(2303, 2560), CapLevel::Ok);
+        assert_eq!(CapLevel::of(2304, 2560), CapLevel::Near);
+        assert_eq!(CapLevel::of(2508, 2560), CapLevel::Near);
+        assert_eq!(CapLevel::of(2509, 2560), CapLevel::Full);
+        assert_eq!(CapLevel::of(2560, 2560), CapLevel::Full);
+        assert_eq!(CapLevel::of(1, 0), CapLevel::Full);
+        let never = (CapLevel::Ok, 0);
+        assert!(!cap_warning_due(never, CapLevel::Ok, 1000));
+        assert!(cap_warning_due(never, CapLevel::Near, 1000));
+        // The same level again: once an hour.
+        let near = (CapLevel::Near, 1000);
+        assert!(!cap_warning_due(near, CapLevel::Near, 1000 + 3599));
+        assert!(cap_warning_due(near, CapLevel::Near, 1000 + 3600));
+        // A rise: at once. A fall: no warning sooner.
+        assert!(cap_warning_due(near, CapLevel::Full, 1001));
+        let full = (CapLevel::Full, 1000);
+        assert!(!cap_warning_due(full, CapLevel::Near, 1001));
+        assert!(!cap_warning_due(full, CapLevel::Ok, 9999));
+        assert!(cap_warning_due(full, CapLevel::Near, 1000 + 3600));
     }
 
     #[test]

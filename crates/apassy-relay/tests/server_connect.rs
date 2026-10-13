@@ -124,11 +124,26 @@ fn post_connect(relay: &TestRelay, body: &Value) -> Answer {
     post_connect_from(relay, body, Some(&next_prefix()))
 }
 
-/// `POST /v1/connect` from `prefix` (`X-Apassy-Client-Prefix`), or without the header.
+/// `POST /v1/connect` from `prefix` (`X-Apassy-Client-Prefix` with the Worker's proof,
+/// `X-Apassy-Client-Prefix-Mac`), or without the headers.
 fn post_connect_from(relay: &TestRelay, body: &Value, prefix: Option<&str>) -> Answer {
+    let mac = prefix.map(|prefix| apassy_relay::server::connect::prefix_mac(EDGE_SECRET, prefix));
+    post_connect_with(relay, body, prefix, mac.as_deref())
+}
+
+/// `POST /v1/connect` with these prefix and proof headers, each when given.
+fn post_connect_with(
+    relay: &TestRelay,
+    body: &Value,
+    prefix: Option<&str>,
+    mac: Option<&str>,
+) -> Answer {
     let mut headers = vec![("Content-Type", "application/json".to_string())];
     if let Some(prefix) = prefix {
         headers.push(("X-Apassy-Client-Prefix", prefix.to_string()));
+    }
+    if let Some(mac) = mac {
+        headers.push(("X-Apassy-Client-Prefix-Mac", mac.to_string()));
     }
     send(
         &relay.url,
@@ -1258,6 +1273,54 @@ fn one_client_prefix_makes_few_connect_teams_a_day_and_is_kept_in_memory_only() 
 }
 
 #[test]
+fn a_client_prefix_counts_only_with_the_proof_of_the_worker() {
+    // A Worker from before the proof forwarded a client's own prefix header: without a
+    // valid HMAC under the edge secret, every call counts as the one prefix `unknown`.
+    let relay = start(UpstreamOptions::default());
+    let wrong = apassy_relay::server::connect::prefix_mac(
+        "another-edge-secret-0123456789abcdef0123",
+        "198.51.100.0/24",
+    );
+    let other = apassy_relay::server::connect::prefix_mac(EDGE_SECRET, "198.51.101.0/24");
+    let unproved: [(String, Option<String>); 5] = [
+        ("198.51.100.0/24".into(), None),
+        ("198.51.100.0/24".into(), Some(wrong)),
+        ("198.51.100.0/24".into(), Some(other)),
+        ("203.0.113.0/24".into(), Some("ab".repeat(32))),
+        ("2001:db8:77::/48".into(), Some("not hex".into())),
+    ];
+    for (n, (prefix, mac)) in unproved.iter().enumerate() {
+        let key = DeviceKey::generate().unwrap();
+        let answer = post_connect_with(
+            &relay,
+            &connect_body(&relay, &format!("U{n}"), "Mac", &key),
+            Some(prefix),
+            mac.as_deref(),
+        );
+        assert_eq!(answer.status, 200, "{}", answer.body);
+    }
+    // Five forged prefixes used up the count of `unknown`: a call without any header is
+    // refused, and a sixth forged prefix too.
+    let key = DeviceKey::generate().unwrap();
+    let limited = post_connect_from(&relay, &connect_body(&relay, "N", "Mac", &key), None);
+    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
+    let forged = post_connect_with(
+        &relay,
+        &connect_body(&relay, "F", "Mac", &DeviceKey::generate().unwrap()),
+        Some("192.0.2.0/24"),
+        None,
+    );
+    assert_eq!((forged.status, forged.code()), (429, "rate_limited"));
+    // The same network with the Worker's proof has its own count.
+    let proved = post_connect_from(
+        &relay,
+        &connect_body(&relay, "P", "Mac", &key),
+        Some("198.51.100.0/24"),
+    );
+    assert_eq!(proved.status, 200, "{}", proved.body);
+}
+
+#[test]
 fn a_prefix_takes_at_most_a_tenth_of_the_daily_cap() {
     let relay = start_with(
         |config| config.connect_teams_per_day = 20,
@@ -1477,7 +1540,8 @@ fn expired_device_links_go_after_a_week_and_at_most_a_hundred_stay() {
 }
 
 #[test]
-fn a_connect_team_file_has_a_cap_and_its_audit_stays_under_it() {
+fn a_connect_team_file_has_a_cap_and_a_full_team_is_refused_without_losing_its_audit() {
+    use apassy_relay::server::audit::{CapLevel, watch_cap};
     let relay = start(UpstreamOptions::default());
     let (team, mac) = connect(&relay, "Rafal");
     let hub = relay.hub();
@@ -1485,9 +1549,27 @@ fn a_connect_team_file_has_a_cap_and_its_audit_stays_under_it() {
     // question_bytes (2 MiB) and 8 MiB, in pages of 4 KiB.
     let (_, max) = core.store.pages().unwrap();
     assert_eq!(max, (2 * 1_048_576 + 8 * 1_048_576) / 4096);
-    // An operator team has no cap of its own.
+    // A small page cache for each Connect team; an operator team keeps the default.
+    assert_eq!(
+        core.store.cache_kib().unwrap(),
+        Some(apassy_relay::server::connect::CACHE_KIB)
+    );
     let operator = hub.team(&relay.team_id).unwrap();
+    assert_ne!(
+        operator.store.cache_kib().unwrap(),
+        Some(apassy_relay::server::connect::CACHE_KIB)
+    );
+    // An operator team has no cap of its own.
     assert!(operator.store.pages().unwrap().1 >= 1_073_741_823);
+    let info = team_info(&relay, &relay.team_id);
+    assert!(info["file_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        (&info["file_cap"], &info["file_level"]),
+        (&Value::Null, &Value::Null)
+    );
+    let info = team_info(&relay, &team);
+    assert_eq!(info["file_cap"], max * 4096);
+    assert_eq!(info["file_level"], "ok");
     // A plan that gives items gives room for them.
     relay
         .operator(Command::Limits {
@@ -1499,6 +1581,13 @@ fn a_connect_team_file_has_a_cap_and_its_audit_stays_under_it() {
         })
         .unwrap();
     assert_eq!(core.store.pages().unwrap().1, max + 10 * 16 * 1024 / 4096);
+    // A question of yesterday, which the maintenance pass deletes.
+    relay.ok(
+        "POST",
+        "/v1/questions",
+        &mac.token,
+        Some(&card(&encode_b64(&[7; 16]))),
+    );
     // A full file: a write is 403 team_limit, and nothing is half written.
     core.store
         .with(|conn| {
@@ -1512,8 +1601,26 @@ fn a_connect_team_file_has_a_cap_and_its_audit_stays_under_it() {
             Ok(())
         })
         .unwrap();
+    let audit_count = || {
+        open_team_file(&relay.config, &team)
+            .query_row("SELECT count(*), max(id) FROM audit", [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+    };
+    // About 90 %: a warning, once.
     let (used, _) = core.store.pages().unwrap();
+    core.store
+        .set_max_bytes(Some(used * 100 / 92 * 4096))
+        .unwrap();
+    // (The relay's own maintenance thread may warn first: only the level is certain.)
+    let now = now_unix();
+    assert_eq!(watch_cap(&core, now).unwrap(), CapLevel::Near);
+    assert_eq!(core.cap_warning().0, CapLevel::Near);
+    assert_eq!(team_info(&relay, &team)["file_level"], "near");
+    // At the cap.
     core.store.set_max_bytes(Some((used + 2) * 4096)).unwrap();
+    let before = audit_count();
     let mut body = card(&encode_b64(&[42; 16]));
     body["ciphertext"] = json!(encode_b64(&[1u8; 30_000]));
     let (status, value) = relay.call("POST", "/v1/questions", Some(&mac.token), Some(&body));
@@ -1522,24 +1629,184 @@ fn a_connect_team_file_has_a_cap_and_its_audit_stays_under_it() {
         (403, Some("team_limit")),
         "{value}"
     );
-    assert_eq!(
+    let questions = || {
         open_team_file(&relay.config, &team)
-            .query_row("SELECT count(*) FROM question", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    // Near the cap, the oldest quarter of the audit goes, and the write fits again.
-    apassy_relay::server::audit::bound(&core, now_unix()).unwrap();
-    let trimmed = audit_rows(&relay, &team, "audit_trimmed");
-    assert_eq!(trimmed.len(), 1);
-    let detail: Value = serde_json::from_str(&trimmed[0]).unwrap();
-    assert!(detail["rows"].as_u64().unwrap() >= 100, "{detail}");
+            .query_row("SELECT count(*) FROM question", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(questions(), 1, "only the question of yesterday");
+    // The maintenance pass warns (a rise: at once) and deletes no audit row: the owner
+    // chose a refused write over a lost audit. A full team still frees its old questions.
+    core.store
+        .with(|conn| {
+            conn.execute(
+                "UPDATE question SET created_at = ?1, expires_at = ?1",
+                [i64::try_from(now - 2 * DAY).unwrap()],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    apassy_relay::server::http::maintain(&hub, now + 1);
+    assert_eq!(questions(), 0);
+    let warned = core.cap_warning();
+    assert_eq!(warned.0, CapLevel::Full);
+    assert_eq!(audit_count(), before);
+    assert!(audit_rows(&relay, &team, "audit_trimmed").is_empty());
+    let info = team_info(&relay, &team);
+    assert_eq!(info["file_level"], "full");
+    assert_eq!(info["file_cap"], (used + 2) * 4096);
+    assert!(info["file_bytes"].as_u64().unwrap() >= used * 4096);
+    // Again within the hour: no new warning.
+    apassy_relay::server::http::maintain(&hub, now + 120);
+    assert_eq!(core.cap_warning(), warned);
+    let (status, _) = relay.call("POST", "/v1/questions", Some(&mac.token), Some(&body));
+    assert_eq!(status, 403);
+    assert_eq!(audit_count(), before);
+    // The operator raises the limits: the cap follows them, and the write passes.
+    relay
+        .operator(Command::Limits {
+            team: team.clone(),
+            set: Some(TeamLimitsUpdate {
+                question_bytes: Some(4 * 1_048_576),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
     relay.ok("POST", "/v1/questions", &mac.token, Some(&body));
-    // Far from the cap, nothing goes.
-    core.store.set_max_bytes(Some(64 * 1_048_576)).unwrap();
-    apassy_relay::server::audit::bound(&core, now_unix()).unwrap();
-    assert_eq!(audit_rows(&relay, &team, "audit_trimmed").len(), 1);
+    assert_eq!(team_info(&relay, &team)["file_level"], "ok");
+    let after = audit_count();
+    assert!(after.0 > before.0 && after.1 > before.1, "{after:?}");
+}
+
+#[test]
+fn an_outsider_who_knows_a_connect_team_id_cannot_grow_its_file() {
+    let relay = start(UpstreamOptions::default());
+    let (team, mac) = connect(&relay, "Rafal");
+    // The team id is in every device link code.
+    let link = relay.ok("POST", "/v1/devices/links", &mac.token, None);
+    assert!(link["secret"].as_str().unwrap().contains(team.as_str()));
+    let rows = || {
+        open_team_file(&relay.config, &team)
+            .query_row(
+                "SELECT count(*), coalesce(max(id), 0) FROM audit",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+    };
+    let before = rows();
+    let pages = relay.hub().team(&team).unwrap().store.pages().unwrap().0;
+    let key = DeviceKey::generate().unwrap();
+    for n in 0..5 {
+        // A forged access token, member token, and session key with the team's id.
+        for kind in ["apassy_acc_", "apassy_mbr_", "apassy_ses_", "apassy_tagt_"] {
+            let forged = format!("{kind}{team}_{:064x}", n);
+            let (status, _) = relay.call("GET", "/v1/me", Some(&forged), None);
+            assert_eq!(status, 401, "{forged}");
+        }
+        // A sign-in without a challenge, and one with a wrong signature.
+        let (status, _) = relay.call(
+            "POST",
+            "/v1/auth/token",
+            None,
+            Some(&json!({"team_id": team, "public_key": key.public_key_b64(),
+                "nonce": format!("{n:032x}"), "signature": "AAAA"})),
+        );
+        assert_eq!(status, 401);
+        let (status, _) = relay.call(
+            "POST",
+            "/v1/auth/token",
+            None,
+            Some(
+                &json!({"team_id": team, "public_key": mac.key.public_key_b64(),
+                "nonce": challenge(&relay, &team, &mac.key), "signature": "AAAA"}),
+            ),
+        );
+        assert_eq!(status, 401);
+        // The proxy path with a session key of the team.
+        let (status, _) = relay.call(
+            "GET",
+            &format!("/p/apassy_ses_{team}_{:064x}/example.com/", n),
+            None,
+            None,
+        );
+        assert!(status >= 400, "{status}");
+    }
+    // Not one row in the team's file, and the file did not grow.
+    assert_eq!(rows(), before);
+    assert_eq!(
+        relay.hub().team(&team).unwrap().store.pages().unwrap().0,
+        pages
+    );
+    // The refusals are in the relay audit, with the team id, at most one per kind and
+    // ten seconds for all Connect teams.
+    let audit = relay.relay_audit();
+    let named: Vec<_> = audit
+        .iter()
+        .filter(|(_, _, detail)| detail.contains(team.as_str()))
+        .map(|(actor, action, _)| (actor.as_str(), action.as_str()))
+        .collect();
+    assert!(named.contains(&("edge", "auth_failed")), "{audit:?}");
+    assert!(
+        named.contains(&("edge", "device_sign_in_refused")),
+        "{audit:?}"
+    );
+    assert!(named.len() <= 3, "{audit:?}");
+    // The team's own device still works.
+    relay.ok("GET", "/v1/me", &mac.token, None);
+    // An operator team keeps such rows in its own audit, as before.
+    let forged = format!("apassy_acc_{}_{:064x}", relay.team_id, 7);
+    let (status, _) = relay.call("GET", "/v1/me", Some(&forged), None);
+    assert_eq!(status, 401);
+    let own = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
+    assert!(
+        own.as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["action"] == "auth_failed"),
+        "{own}"
+    );
+}
+
+/// A sign-in challenge of `key` in `team`: its nonce.
+fn challenge(relay: &TestRelay, team: &TeamId, key: &DeviceKey) -> String {
+    let answer = relay.ok(
+        "POST",
+        "/v1/auth/challenge",
+        "",
+        Some(&json!({"team_id": team, "public_key": key.public_key_b64()})),
+    );
+    answer["nonce"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn orphan_team_files_are_removed_at_start() {
+    let mut relay = start(UpstreamOptions::default());
+    let (team, mac) = connect(&relay, "Kept");
+    // A file of a team whose row never committed (a crash between the file and the
+    // commit), with its journal, and files that are not team files.
+    let orphan = TeamId::parse("t_orphan2345").unwrap();
+    let teams = relay.config.teams_dir();
+    let names = [
+        format!("{orphan}.db"),
+        format!("{orphan}.db-journal"),
+        format!("{orphan}.db.migrating"),
+        "notes.db".to_string(),
+    ];
+    relay.edit_offline(|_| {
+        for name in &names {
+            std::fs::write(teams.join(name), b"x").unwrap();
+        }
+    });
+    assert!(!teams.join(&names[0]).exists());
+    assert!(!teams.join(&names[1]).exists());
+    assert!(teams.join(&names[2]).exists());
+    assert!(teams.join(&names[3]).exists());
+    assert!(teams.join(format!("{team}.db")).exists());
+    relay.ok("GET", "/v1/me", &relay.sign_in(&team, &mac.key), None);
 }
 
 #[test]
@@ -1627,6 +1894,37 @@ fn connect_teams_hold_at_most_connect_long_polls() {
 }
 
 #[test]
+fn a_connect_team_holds_two_question_polls_and_a_third_answers_at_once() {
+    let relay = start(UpstreamOptions::default());
+    let (_, mac) = connect(&relay, "Rafal");
+    let phone = add_device(&relay, &mac, "iPhone");
+    let tablet = add_device(&relay, &mac, "iPad");
+    std::thread::scope(|scope| {
+        let held: Vec<_> = [&mac, &phone]
+            .into_iter()
+            .map(|device| {
+                let relay = &relay;
+                scope.spawn(move || {
+                    let started = Instant::now();
+                    relay.ok("GET", "/v1/questions?since=0&wait=3", &device.token, None);
+                    started.elapsed()
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(500));
+        // The team's two seats are held: a third device's poll answers at once, and the
+        // client backs off (docs/SPEC.md section 26.4).
+        let started = Instant::now();
+        relay.ok("GET", "/v1/questions?since=0&wait=3", &tablet.token, None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        for poll in held {
+            assert!(poll.join().unwrap() >= Duration::from_secs(3));
+        }
+    });
+    assert_eq!(apassy_relay::server::connect::TEAM_QUESTION_POLLS, 2);
+}
+
+#[test]
 fn the_sweep_leaves_plan_teams_and_synced_teams() {
     let mut relay = start(UpstreamOptions::default());
     let (idle, _) = connect(&relay, "Idle");
@@ -1684,4 +1982,78 @@ fn the_sweep_leaves_plan_teams_and_synced_teams() {
     for team in [&lifted, &synced] {
         assert_eq!(team_info(&relay, team)["state"], "active");
     }
+}
+
+/// The resident memory (KiB) and the open files of this process. Linux only.
+fn process_use() -> Option<(u64, usize)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let rss = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    let files = std::fs::read_dir("/proc/self/fd").ok()?.count();
+    Some((rss, files))
+}
+
+/// Not a check: what each Connect team costs the relay (memory, open files, start time),
+/// for docs/OPERATIONS.md section 20.5. Linux only (it reads `/proc`). Run it on the
+/// devbox, never on the VPS:
+/// `APASSY_MEASURE_TEAMS=100 cargo test --release --test server_connect measure_connect_teams -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement for OPERATIONS 20.5, run by hand on the devbox"]
+fn measure_connect_teams() {
+    let teams: u64 = std::env::var("APASSY_MEASURE_TEAMS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(100);
+    let Some(empty) = process_use() else {
+        println!("measure_connect_teams: Linux only (/proc)");
+        return;
+    };
+    let relay = start_with(
+        |config| {
+            config.connect_teams_per_day = teams + 1;
+            config.connect_teams_max = teams + 1;
+        },
+        UpstreamOptions::default(),
+    );
+    let started = process_use().unwrap();
+    let mut body = card(&encode_b64(&[42; 16]));
+    body["ciphertext"] = json!(encode_b64(&[1u8; 30_000]));
+    for n in 0..teams {
+        let (_, mac) = connect(&relay, &format!("M{n}"));
+        relay.ok("POST", "/v1/questions", &mac.token, Some(&body));
+        relay.ok("GET", "/v1/questions?since=0", &mac.token, None);
+    }
+    let made = process_use().unwrap();
+    let clock = Instant::now();
+    let relay = relay.restart();
+    let start_secs = clock.elapsed().as_secs_f64();
+    let reopened = process_use().unwrap();
+    let per_team = |after: (u64, usize)| {
+        (
+            after.0.saturating_sub(started.0) / teams.max(1),
+            after.1.saturating_sub(started.1) as f64 / teams.max(1) as f64,
+        )
+    };
+    println!(
+        "measure_connect_teams: {teams} teams; empty relay {} KiB, {} files; after the teams {} KiB, {} files ({:?} KiB and files per team); after a restart {} KiB, {} files ({:?} per team), start {start_secs:.1} s",
+        started.0,
+        started.1,
+        made.0,
+        made.1,
+        per_team(made),
+        reopened.0,
+        reopened.1,
+        per_team(reopened),
+    );
+    println!(
+        "measure_connect_teams: the test process before the relay: {} KiB, {} files",
+        empty.0, empty.1
+    );
+    drop(relay);
 }

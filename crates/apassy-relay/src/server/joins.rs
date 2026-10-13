@@ -205,6 +205,7 @@ pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> 
     check_code(core, code, TokenKind::Invite, invite_invalid)?;
     let hash = token_hash(code);
     let mut reused = None;
+    let mut members_full = false;
     let result = core.store.tx(|tx| {
         let invite = tx.query_row(&format!("SELECT {INVITE_COLUMNS} FROM invite i JOIN member m ON m.id = i.created_by WHERE i.code_hash = ?1"),
             params![hash.0.as_slice()], invite_row).optional().map_err(db)?.ok_or_else(invite_invalid)?;
@@ -231,6 +232,10 @@ pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> 
         key_free(tx, &key)?;
         let members: i64 = tx.query_row("SELECT count(*) FROM member WHERE revoked_at IS NULL", [], |row| row.get(0)).map_err(db)?;
         if to_u(members) >= core.limits().members {
+            if core.kind == crate::api::TeamKind::Connect {
+                members_full = true;
+                return Ok(Err(Core::limit_error("members")));
+            }
             return Ok(Err(core.limit_error_on(tx, now, "members")?));
         }
         let safety = safety_words(&core.team, code, &key);
@@ -241,14 +246,18 @@ pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> 
         tx.execute("UPDATE invite SET used_at = ?1 WHERE id = ?2", params![to_i(now), invite.id]).map_err(db)?;
         Ok(pending(core, tx, id, safety, expires, invite.maker_name))
     });
+    // The caller has a code, not a device of the team: for a Connect team the rows go
+    // to the relay audit (`Core::outside_refusal`).
     if let Some(id) = reused {
-        core.audit.refusal(
-            &core.store,
+        core.outside_refusal(
             now,
             "invite_reused",
             "invite_reused",
             &json!({"invite_id": id}),
         );
+    }
+    if members_full {
+        core.outside_limit(now, "members");
     }
     result?
 }

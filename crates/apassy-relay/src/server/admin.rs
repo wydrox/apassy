@@ -116,8 +116,9 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
 /// 403 `team_limit` for a write that the team's limits leave no use for (a Connect
 /// team: one member, no items), with a `limit_reached` row at most once per kind and ten
 /// seconds: an invite when one member is the limit; a collection, a policy, or a grant
-/// when items are 0, and a grant when one member is the limit. Checked before any row
-/// is written, so such a team cannot grow its file with them.
+/// when items are 0. Checked before any row is written, so such a team cannot grow its
+/// file with them. A grant with items is allowed in a team of one member: its owner
+/// needs a grant of its own to run anything (`decide`, `access`).
 fn refuse_unused(core: &Core, now: u64, kinds: &[&'static str]) -> RelayResult<()> {
     let limits = core.limits();
     for kind in kinds {
@@ -947,7 +948,7 @@ pub fn grant_create(
     request: &GrantCreate,
     now: u64,
 ) -> RelayResult<Value> {
-    refuse_unused(core, now, &["items", "members"])?;
+    refuse_unused(core, now, &["items"])?;
     let id = core.store.tx(|tx| {
         let collection = collection_view(tx, request.collection_id)?
             .ok_or_else(|| RelayError::not_found("collection"))?;

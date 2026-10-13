@@ -6,6 +6,11 @@
 //! the Worker's `X-Apassy-Client-Prefix`) is kept only as an HMAC-SHA256 under a random
 //! salt that is made in memory and replaced at each UTC day; the counters go with it. A
 //! restart forgets everything, and no audit row names a prefix.
+//!
+//! The relay takes the prefix only with the Worker's proof, `X-Apassy-Client-Prefix-Mac`:
+//! an HMAC-SHA256 of the prefix under the edge secret (`verified_prefix`). A Worker from
+//! before it forwarded a client's own copy of the prefix header, so without the proof
+//! the call counts as `UNKNOWN_PREFIX`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,16 +27,25 @@ pub const PREFIX_TEAMS_PER_DAY: u64 = 5;
 pub const PREFIX_SHARE_DIVISOR: u64 = 10;
 /// Prefixes counted at once. A new prefix beyond it gets 503 `busy` until the day ends.
 pub const MAX_PREFIXES: usize = 65_536;
-/// The prefix of a request without `X-Apassy-Client-Prefix` (a Worker from before it):
-/// all such requests share one count.
+/// The prefix of a request without `X-Apassy-Client-Prefix` and its proof (a Worker
+/// from before them): all such requests share one count.
 pub const UNKNOWN_PREFIX: &str = "unknown";
 /// The longest prefix text that is read; a longer one counts as `UNKNOWN_PREFIX`.
 pub const MAX_PREFIX_LEN: usize = 64;
 /// Requests of a Connect team in one minute, for each member its limits allow.
 pub const REQUESTS_PER_MINUTE: u64 = 300;
 /// The question long polls of one Connect team at once, out of
-/// `Limits::question_long_polls_per_team`.
-pub const TEAM_QUESTION_POLLS: usize = 8;
+/// `Limits::question_long_polls_per_team`: its Mac and one other device. A third poll
+/// answers at once, as with `wait=0`.
+pub const TEAM_QUESTION_POLLS: usize = 2;
+/// The page cache of a Connect team's connection, in KiB (`Store::set_cache_kib`).
+/// SQLite's default is 2 MiB a connection; at 100 Connect teams in a container of 512
+/// MiB that would be 200 MiB. Operator teams keep the default.
+pub const CACHE_KIB: u64 = 64;
+/// The domain of the Worker's HMAC of a client prefix (`prefix_mac`).
+const PREFIX_MAC_DOMAIN: &[u8] = b"apassy-relay client prefix v1\0";
+/// The length of `X-Apassy-Client-Prefix-Mac`: the hex of an HMAC-SHA256.
+const PREFIX_MAC_HEX_LEN: usize = 64;
 
 const DAY: u64 = 86_400;
 
@@ -166,6 +180,41 @@ impl PrefixLimiter {
             kept: false,
         })
     }
+}
+
+/// The proof of the Worker for a client prefix (`X-Apassy-Client-Prefix-Mac`): the
+/// lowercase hex of HMAC-SHA256 under the edge secret of
+/// `"apassy-relay client prefix v1" 0x00 prefix`.
+pub fn prefix_mac(edge_secret: &str, prefix: &str) -> String {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, edge_secret.as_bytes());
+    let mut context = hmac::Context::with_key(&key);
+    context.update(PREFIX_MAC_DOMAIN);
+    context.update(prefix.as_bytes());
+    crate::sync_head::hex(context.sign().as_ref())
+}
+
+/// The client prefix of `POST /v1/connect` when the Worker proved it: `prefix` when `mac`
+/// is its HMAC under the edge secret (compared in constant time), else `None`, and the
+/// call counts as `UNKNOWN_PREFIX`.
+pub fn verified_prefix<'a>(
+    edge_secret: &str,
+    prefix: Option<&'a str>,
+    mac: Option<&str>,
+) -> Option<&'a str> {
+    let (prefix, mac) = (prefix?, mac?.trim());
+    if mac.len() != PREFIX_MAC_HEX_LEN {
+        return None;
+    }
+    let mut tag = [0u8; PREFIX_MAC_HEX_LEN / 2];
+    for (byte, pair) in tag.iter_mut().zip(mac.as_bytes().chunks(2)) {
+        let text = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(text, 16).ok()?;
+    }
+    let key = hmac::Key::new(hmac::HMAC_SHA256, edge_secret.as_bytes());
+    let mut message = Vec::with_capacity(PREFIX_MAC_DOMAIN.len() + prefix.len());
+    message.extend_from_slice(PREFIX_MAC_DOMAIN);
+    message.extend_from_slice(prefix.as_bytes());
+    hmac::verify(&key, &message, &tag).ok().map(|()| prefix)
 }
 
 /// The prefix as it is counted: the Worker's text, or `UNKNOWN_PREFIX` when there is
@@ -354,6 +403,68 @@ mod tests {
         }
         let full = limiter.reserve("192.0.2.0/24", 200, NOON).err().unwrap();
         assert_eq!(full.code, codes::BUSY);
+    }
+
+    #[test]
+    fn the_prefix_is_taken_only_with_the_proof_of_the_edge() {
+        const EDGE: &str = "edge-secret-synthetic-0123456789abcdef0123";
+        // The vectors of the Worker's tests (deploy/worker/test/index.test.ts).
+        for (prefix, mac) in [
+            (
+                "198.51.100.0/24",
+                "554af02c577b0770299175aff6f2a86f7082585a1abab1dcabcce44a54549490",
+            ),
+            (
+                "2001:db8:1::/48",
+                "a5fd13e4d4baf530dab6b69b5893250bc1fd59e1959799b6c3ef27afd11bf3c7",
+            ),
+            (
+                "unknown",
+                "c911db78ab276b0c75ee2abe45235ae0d275e3032609166865a198d978e42279",
+            ),
+        ] {
+            assert_eq!(prefix_mac(EDGE, prefix), mac);
+            assert_eq!(verified_prefix(EDGE, Some(prefix), Some(mac)), Some(prefix));
+            assert_eq!(
+                verified_prefix(EDGE, Some(prefix), Some(&mac.to_uppercase())),
+                Some(prefix)
+            );
+        }
+        let mac = prefix_mac(EDGE, "198.51.100.0/24");
+        // Another prefix, another secret, no proof, a cut or bad proof: not taken.
+        assert_eq!(
+            verified_prefix(EDGE, Some("198.51.101.0/24"), Some(&mac)),
+            None
+        );
+        assert_eq!(
+            verified_prefix(
+                "another-edge-secret-0123456789abcdef",
+                Some("198.51.100.0/24"),
+                Some(&mac)
+            ),
+            None
+        );
+        assert_eq!(verified_prefix(EDGE, Some("198.51.100.0/24"), None), None);
+        assert_eq!(verified_prefix(EDGE, None, Some(&mac)), None);
+        assert_eq!(
+            verified_prefix(EDGE, Some("198.51.100.0/24"), Some(&mac[..62])),
+            None
+        );
+        let mut flipped = mac.clone().into_bytes();
+        flipped[0] = if flipped[0] == b'0' { b'1' } else { b'0' };
+        let flipped = String::from_utf8(flipped).unwrap();
+        assert_eq!(
+            verified_prefix(EDGE, Some("198.51.100.0/24"), Some(&flipped)),
+            None
+        );
+        assert_eq!(
+            verified_prefix(EDGE, Some("198.51.100.0/24"), Some(&"zz".repeat(32))),
+            None
+        );
+        assert_eq!(
+            verified_prefix(EDGE, Some("198.51.100.0/24"), Some(&"é".repeat(32))),
+            None
+        );
     }
 
     #[test]

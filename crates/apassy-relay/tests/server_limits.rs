@@ -817,3 +817,52 @@ fn concurrent_agent_creation_cannot_exceed_the_team_limit() {
         1
     );
 }
+
+#[test]
+fn a_team_of_one_member_with_items_grants_and_runs() {
+    // A solo operator team: its owner needs a grant of its own to run anything, so a
+    // grant is refused only when `items` is 0, not when `members` is 1.
+    let relay = start(UpstreamOptions::default());
+    set(&relay, json!({"members":1,"items":5}));
+    let collection = relay.add_collection("payments", json!({}));
+    let item = relay.add_item(
+        collection,
+        "STRIPE_API_KEY",
+        CANARY,
+        json!({"provider":"stripe","environment":"staging"}),
+    );
+    let owner = relay.ok("GET", "/v1/me", &relay.owner_token, None)["member_id"]
+        .as_u64()
+        .unwrap();
+    let grant = relay.ok(
+        "POST",
+        "/v1/grants",
+        &relay.owner_token,
+        Some(&json!({"collection_id": collection, "member_id": owner})),
+    );
+    let made = agent(&relay, "solo-agent");
+    let team = relay::Team {
+        collection,
+        item,
+        member_id: owner,
+        member_token: relay.owner_token.clone(),
+        grant: grant["id"].as_u64().unwrap(),
+        agent_id: made["id"].as_u64().unwrap(),
+        agent_token: made["secret"].as_str().unwrap().to_string(),
+    };
+    let ready = relay.run_released(
+        &team.agent_token,
+        &team.request(&["git", "status"], Some("go")),
+    );
+    assert_eq!(ready["status"], "ready", "{ready}");
+    // With no items, a grant has no use and is refused.
+    set(&relay, json!({"items":0}));
+    relay.fails(
+        "POST",
+        "/v1/grants",
+        Some(&relay.owner_token),
+        Some(&json!({"collection_id": collection, "member_id": owner})),
+        403,
+        "team_limit",
+    );
+}

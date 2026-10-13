@@ -111,6 +111,13 @@ pub struct Core {
     /// pass: an idle Connect team is maintained less often (`http::maintain`).
     pub last_request: AtomicU64,
     pub maintained_at: AtomicU64,
+    /// The relay's own store and audit (`relay.db`): a Connect team's refusals of callers
+    /// that are not its devices go there (`outside_refusal`).
+    pub(crate) relay_store: Arc<Store>,
+    pub(crate) relay_audit: Arc<Audit>,
+    /// The last warning about the file cap of a Connect team (`audit::watch_cap`): the
+    /// level logged and when.
+    pub(crate) cap_warning: Mutex<(audit::CapLevel, u64)>,
     stop: Arc<AtomicBool>,
     /// Set when the team is suspended or the relay stops.
     closed: AtomicBool,
@@ -147,10 +154,81 @@ impl Core {
             )?;
             last.insert(kind, now);
         }
-        Ok(RelayError::new(
+        Ok(Self::limit_error(kind))
+    }
+
+    /// The last warning about this team's file cap (`audit::watch_cap`): its level and
+    /// time, `(Ok, 0)` before any.
+    pub fn cap_warning(&self) -> (audit::CapLevel, u64) {
+        *self
+            .cap_warning
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 403 `team_limit` for the limit `kind`, without an audit row.
+    pub fn limit_error(kind: &str) -> RelayError {
+        RelayError::new(
             codes::TEAM_LIMIT,
             format!("The team's {kind} limit is reached."),
-        ))
+        )
+    }
+
+    /// A refusal of a call that no device of this team made: a token that is not one of
+    /// the team's, a failed sign-in, a used invite, a proxy request over the team's slots
+    /// before its session is checked, a join over the member limit. Anyone who knows
+    /// the team id (it is in every code of the team) can cause one. An operator team
+    /// writes it to its own audit, at most one row per kind and ten seconds, as before.
+    /// A Connect team's file has a cap and its audit is never trimmed, so such rows
+    /// would let an outsider fill it and block the team: they go to the relay audit
+    /// instead, with the team id, at most one row per kind and ten seconds for all
+    /// Connect teams together (docs/SPEC.md section 26.7). Call it with no lock of the
+    /// team's store held: `relay.db` is locked before a team file, never after.
+    pub fn outside_refusal(
+        &self,
+        now: u64,
+        kind: &'static str,
+        action: &str,
+        detail: &serde_json::Value,
+    ) {
+        if self.kind != crate::api::TeamKind::Connect {
+            self.audit.refusal(&self.store, now, kind, action, detail);
+            return;
+        }
+        let relay_kind = match kind {
+            "token" => "connect_token",
+            "device_sign_in" => "connect_device_sign_in",
+            "invite_reused" => "connect_invite_reused",
+            "agent_requests" => "connect_agent_requests",
+            "members" => "connect_members",
+            _ => "connect_other",
+        };
+        let mut detail = detail.clone();
+        if let Some(fields) = detail.as_object_mut() {
+            fields.insert("team_id".to_string(), serde_json::json!(self.team));
+        }
+        self.relay_audit
+            .refusal(&self.relay_store, now, relay_kind, action, &detail);
+    }
+
+    /// 403 `team_limit` for a limit that a caller who is not a device of the team
+    /// reached: for an operator team with its `limit_reached` row in the team audit
+    /// (`limit_error_on`), for a Connect team with that row in the relay audit
+    /// (`outside_refusal`). Call it with no lock of the team's store held.
+    pub fn outside_limit(&self, now: u64, kind: &'static str) -> RelayError {
+        if self.kind != crate::api::TeamKind::Connect {
+            return self
+                .store
+                .with(|conn| self.limit_error_on(conn, now, kind))
+                .unwrap_or_else(|error| error);
+        }
+        self.outside_refusal(
+            now,
+            kind,
+            "limit_reached",
+            &serde_json::json!({"limit": kind}),
+        );
+        Self::limit_error(kind)
     }
 
     /// A seat for one long poll: always for an operator team; for a Connect team one of

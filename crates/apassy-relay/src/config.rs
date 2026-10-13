@@ -15,8 +15,9 @@
 //! | `APASSY_RELAY_PUSH_TOPIC` | The bundle id of the iPhone app, such as `com.wydrox.apassy.companion` | none: push is off |
 //! | `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` | The secret the relay sends to the push route as `X-Apassy-Push` (the Worker's `PUSH_SECRET`); at least 32 bytes | none: push is off |
 //! | `APASSY_RELAY_QUESTIONS_TO_APPROVERS` | `1`: take questions with `to: "approvers"`; `0`: refuse them with 403 `not_routed` (until shared vaults) | `0` |
-//! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `200` |
-//! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `1000` |
+//! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `50` |
+//! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `100` |
+//! | `APASSY_RELAY_CONNECT_LONG_POLLS` | Long polls that all Connect teams hold at once, 0 to 1024; a poll over it answers at once; `0`: every Connect poll answers at once | `96` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -38,13 +39,20 @@ pub const DEFAULT_SESSION_TTL_SECS: u64 = 900;
 pub const MAX_SESSION_TTL_SECS: u64 = 3600;
 pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 /// Connect teams of the whole relay in 24 hours (docs/SPEC.md section 26).
-pub const DEFAULT_CONNECT_TEAMS_PER_DAY: u64 = 200;
+pub const DEFAULT_CONNECT_TEAMS_PER_DAY: u64 = 50;
 pub const MAX_CONNECT_TEAMS_PER_DAY: u64 = 100_000;
 /// Connect teams the relay holds at once, active or suspended (docs/SPEC.md section 26).
-/// Each costs one open file and its connection, and up to `TeamLimits::file_bytes` of
-/// disk, so this bounds both.
-pub const DEFAULT_CONNECT_TEAMS_MAX: u64 = 1000;
+/// Each costs one open file and its connection (with a page cache of
+/// `server::connect::CACHE_KIB`), and up to `TeamLimits::file_bytes` of disk, so this bounds
+/// them. The default fits the production container (2 cores, 512 MiB, docs/OPERATIONS.md
+/// section 20.5).
+pub const DEFAULT_CONNECT_TEAMS_MAX: u64 = 100;
 pub const MAX_CONNECT_TEAMS_MAX: u64 = 1_000_000;
+/// The long polls that all Connect teams hold at once (`Limits::connect_long_polls`): the
+/// 128 threads of the question lane less the 32 of one team's share, so Connect teams
+/// always leave an operator team its share of the lane, and well under the member lane.
+pub const DEFAULT_CONNECT_LONG_POLLS: usize = 96;
+pub const MAX_CONNECT_LONG_POLLS: usize = 1024;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
 /// The folder of the team files in the data directory.
@@ -132,7 +140,8 @@ impl IpNet {
     }
 }
 
-/// The limits of the HTTP layer. Not read from the environment. Tests set small ones.
+/// The limits of the HTTP layer. Only `connect_long_polls` is read from the environment
+/// (`APASSY_RELAY_CONNECT_LONG_POLLS`). Tests set small ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// The most requests handled at once. More get 503 `busy`.
@@ -173,7 +182,7 @@ impl Default for Limits {
             sync_transfers_total: 16,
             question_long_polls: 128,
             question_long_polls_per_team: 32,
-            connect_long_polls: 64,
+            connect_long_polls: DEFAULT_CONNECT_LONG_POLLS,
         }
     }
 }
@@ -304,6 +313,13 @@ impl RelayConfig {
             0,
             MAX_CONNECT_TEAMS_MAX,
         )?;
+        let connect_long_polls = number(
+            &lookup,
+            "APASSY_RELAY_CONNECT_LONG_POLLS",
+            DEFAULT_CONNECT_LONG_POLLS as u64,
+            0,
+            MAX_CONNECT_LONG_POLLS as u64,
+        )?;
         let mut upstream = UpstreamOptions::default();
         if let Some(text) = lookup("APASSY_RELAY_BLOCKED_ADDRESSES") {
             for part in text.split(',').filter(|part| !part.trim().is_empty()) {
@@ -323,7 +339,11 @@ impl RelayConfig {
             session_ttl_secs,
             approval_timeout_secs,
             upstream,
-            limits: Limits::default(),
+            limits: Limits {
+                connect_long_polls: usize::try_from(connect_long_polls)
+                    .unwrap_or(DEFAULT_CONNECT_LONG_POLLS),
+                ..Limits::default()
+            },
             backup_dir: PathBuf::from(
                 lookup("APASSY_RELAY_BACKUP_DIR").unwrap_or_else(|| "/backups".to_string()),
             ),
@@ -504,6 +524,39 @@ mod tests {
         assert_eq!(config.edge_secret.expose(), EDGE);
         assert_eq!(config.connect_teams_per_day, DEFAULT_CONNECT_TEAMS_PER_DAY);
         assert_eq!(config.connect_teams_max, DEFAULT_CONNECT_TEAMS_MAX);
+        assert_eq!(
+            (config.connect_teams_per_day, config.connect_teams_max),
+            (50, 100)
+        );
+        assert_eq!(config.limits.connect_long_polls, DEFAULT_CONNECT_LONG_POLLS);
+        assert_eq!(config.limits, Limits::default());
+    }
+
+    #[test]
+    fn connect_long_polls_is_0_to_1024() {
+        let with = |value: &str| {
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                ("APASSY_RELAY_CONNECT_LONG_POLLS", value),
+            ]))
+            .map(|config| config.limits)
+        };
+        assert_eq!(with("0").unwrap().connect_long_polls, 0);
+        let most = with("1024").unwrap();
+        assert_eq!(most.connect_long_polls, 1024);
+        // Only this field of the limits comes from the environment.
+        assert_eq!(
+            Limits {
+                connect_long_polls: DEFAULT_CONNECT_LONG_POLLS,
+                ..most
+            },
+            Limits::default()
+        );
+        assert!(with("1025").is_err());
+        assert!(with("-1").is_err());
+        assert!(with("some").is_err());
     }
 
     #[test]

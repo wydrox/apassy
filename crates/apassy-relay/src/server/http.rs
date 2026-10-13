@@ -18,9 +18,9 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Request, Response};
 
 use crate::api::{
-    self, CLIENT_PREFIX_HEADER, ChallengeRequest, ConnectCreate, DecisionRequest, EDGE_HEADER,
-    Envelope, JoinRequest, LinkCancel, LinkRequest, NewItem, Policy, ReleaseRequest, RunRequest,
-    TeamCreate, TeamCreatedRef, TeamKind, TokenRequest, paths,
+    self, CLIENT_PREFIX_HEADER, CLIENT_PREFIX_MAC_HEADER, ChallengeRequest, ConnectCreate,
+    DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkCancel, LinkRequest, NewItem, Policy,
+    ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef, TeamKind, TokenRequest, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
@@ -359,7 +359,10 @@ struct TeamSlotGuard {
 }
 
 impl TeamSlotGuard {
-    fn take(core: &Arc<Core>, now: u64) -> Option<Self> {
+    /// One agent slot of the team. Over `agent_requests`: `None`, and a `limit_reached`
+    /// row. `checked`: the caller's token was checked. On the proxy path it was not (the
+    /// session is found later), so the row is one of `Core::outside_limit`.
+    fn take(core: &Arc<Core>, now: u64, checked: bool) -> Option<Self> {
         let limits = core
             .team_limits
             .read()
@@ -374,9 +377,13 @@ impl TeamSlotGuard {
         if acquired {
             Some(Self { core: core.clone() })
         } else {
-            let _ = core
-                .store
-                .with(|conn| core.limit_error_on(conn, now, "agent_requests"));
+            if checked {
+                let _ = core
+                    .store
+                    .with(|conn| core.limit_error_on(conn, now, "agent_requests"));
+            } else {
+                core.outside_limit(now, "agent_requests");
+            }
             None
         }
     }
@@ -487,10 +494,10 @@ pub fn serve(serving: Serving) {
 }
 
 /// One maintenance pass over every team: timed out runs, expired sessions, joins,
-/// links, and questions, old sync heads, and the audit of a Connect team near its file
-/// cap. A Connect team with no request since its last pass is passed over until
-/// `IDLE_MAINTENANCE_SECS` went by: its expiries are read at request time too, so the
-/// pass only writes them down.
+/// links, and questions, old sync heads, and a warning for a Connect team near or at its
+/// file cap (`audit::watch_cap`; nothing is deleted). A Connect team with no request
+/// since its last pass is passed over until `IDLE_MAINTENANCE_SECS` went by: its expiries
+/// are read at request time too, so the pass only writes them down.
 pub fn maintain(hub: &Hub, now: u64) {
     for core in hub.all() {
         let last_pass = core.maintained_at.load(Ordering::Relaxed);
@@ -500,13 +507,18 @@ pub fn maintain(hub: &Hub, now: u64) {
             continue;
         }
         core.maintained_at.store(now, Ordering::Relaxed);
-        if approvals::maintenance(&core, now)
+        // First, so a failed sweep below does not hide a full file.
+        let level = crate::server::audit::watch_cap(&core, now)
+            .unwrap_or(crate::server::audit::CapLevel::Ok);
+        let swept = approvals::maintenance(&core, now)
             .and_then(|()| devices::maintenance(&core, now))
             .and_then(|()| joins::expire(&core, now))
             .and_then(|()| sync::maintenance(&core, now))
-            .and_then(|()| questions::maintenance(&core, now))
-            .and_then(|()| crate::server::audit::bound(&core, now))
-            .is_err()
+            .and_then(|()| questions::maintenance(&core, now));
+        // A full file refuses the rows of a sweep too: `watch_cap` warned about it, at
+        // most once an hour, so the pass does not log it again every few seconds.
+        if let Err(error) = swept
+            && !(error.code == codes::TEAM_LIMIT && level != crate::server::audit::CapLevel::Ok)
         {
             eprintln!(
                 "apassy-relay: the maintenance sweep of team {} failed",
@@ -637,7 +649,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             .and_then(|parsed| parsed.team)
             .and_then(|team| hub.team(&team));
         let _guard = if let Some(core) = core {
-            match TeamSlotGuard::take(&core, now) {
+            match TeamSlotGuard::take(&core, now, false) {
                 Some(guard) => Some(guard),
                 None => {
                     respond_busy(request);
@@ -680,12 +692,23 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
                 return;
             }
         };
-        // Only the Worker sets the client prefix, and only on `POST /v1/connect`; the
-        // edge secret above proves the request came through it.
-        let prefix = (endpoint == Endpoint::Connect)
-            .then(|| header_value(&request, CLIENT_PREFIX_HEADER))
-            .flatten();
-        let result = dispatch_edge(hub, endpoint, &body, prefix.as_deref(), now);
+        // Only the Worker sets the client prefix, and only on `POST /v1/connect`. A
+        // Worker from before its proof forwarded a client's copy, so the edge secret alone
+        // does not prove it: the prefix counts only with the Worker's HMAC of it.
+        let (prefix, mac) = if endpoint == Endpoint::Connect {
+            (
+                header_value(&request, CLIENT_PREFIX_HEADER),
+                header_value(&request, CLIENT_PREFIX_MAC_HEADER),
+            )
+        } else {
+            (None, None)
+        };
+        let prefix = connect::verified_prefix(
+            hub.config.edge_secret.expose(),
+            prefix.as_deref(),
+            mac.as_deref(),
+        );
+        let result = dispatch_edge(hub, endpoint, &body, prefix, now);
         match result {
             Ok(result) => respond_ok(request, result),
             // The caps of Connect teams last longer than a busy moment: the daily caps an
@@ -745,9 +768,10 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     let principal = match authenticate(&core, need, token, now) {
         Ok(principal) => principal,
         Err(error) => {
+            // Anyone can send a token with the team's id: for a Connect team the row
+            // goes to the relay audit, not the team's capped file.
             if error.code == codes::UNAUTHENTICATED || error.code == codes::TOKEN_EXPIRED {
-                core.audit.refusal(
-                    &core.store,
+                core.outside_refusal(
                     now,
                     "token",
                     "auth_failed",
@@ -773,7 +797,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         return;
     }
     let _guard = if is_agent_path(&path) {
-        match TeamSlotGuard::take(&core, now) {
+        match TeamSlotGuard::take(&core, now, true) {
             Some(guard) => Some(guard),
             None => {
                 respond_busy(request);
@@ -1035,8 +1059,8 @@ fn team_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
     })
 }
 
-/// `POST /v1/connect` (docs/SPEC.md section 26). Without the Worker's prefix header
-/// the request counts as the prefix `unknown`.
+/// `POST /v1/connect` (docs/SPEC.md section 26). Without the Worker's prefix header and
+/// its proof the request counts as the prefix `unknown`.
 fn connect_create(hub: &Hub, body: &[u8], prefix: Option<&str>, now: u64) -> RelayResult<Value> {
     let request: ConnectCreate = parse_body(body)?;
     let prefix = prefix.unwrap_or(connect::UNKNOWN_PREFIX);
@@ -1418,7 +1442,7 @@ mod tests {
                 slots: slots.clone(),
                 lane: Lane::Agent,
             };
-            let _team = TeamSlotGuard::take(&core, now_unix()).unwrap();
+            let _team = TeamSlotGuard::take(&core, now_unix(), true).unwrap();
             assert_eq!(core.agent_requests.load(Ordering::Relaxed), 1);
             panic!("synthetic handler panic");
         }));
@@ -1426,7 +1450,7 @@ mod tests {
         assert_eq!(slots.all.load(Ordering::Relaxed), 0);
         assert_eq!(slots.agent.load(Ordering::Relaxed), 0);
         assert_eq!(core.agent_requests.load(Ordering::Relaxed), 0);
-        assert!(TeamSlotGuard::take(&core, now_unix()).is_some());
+        assert!(TeamSlotGuard::take(&core, now_unix(), true).is_some());
         assert_eq!(core.agent_requests.load(Ordering::Relaxed), 0);
     }
 

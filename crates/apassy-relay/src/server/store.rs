@@ -32,6 +32,8 @@ pub const SCHEMA_VERSION: i64 = 5;
 const NO_PAGE_CAP: u64 = 4_294_967_294;
 const KDF_ITER: i64 = 256_000;
 const PAGE_SIZE: i64 = 4096;
+/// The bytes of one page of every file (`PAGE_SIZE`).
+pub const PAGE_BYTES: u64 = PAGE_SIZE as u64;
 const HMAC: &str = "HMAC_SHA512";
 const KDF: &str = "PBKDF2_HMAC_SHA512";
 
@@ -452,6 +454,23 @@ impl Store {
             .map(drop)
             .map_err(db)
         })
+    }
+
+    /// Bounds the page cache of the connection at `kib` KiB (`PRAGMA cache_size`, a
+    /// negative value is KiB). It lives on the connection, so it is set again after
+    /// each open.
+    pub fn set_cache_kib(&self, kib: u64) -> RelayResult<()> {
+        self.with(|conn| {
+            conn.pragma_update(None, "cache_size", -to_i(kib.max(1)))
+                .map_err(db)
+        })
+    }
+
+    /// The page cache of the connection in KiB, as `set_cache_kib` set it (`None` when
+    /// it is set in pages).
+    pub fn cache_kib(&self) -> RelayResult<Option<u64>> {
+        let size = self.with(|conn| pragma_i64(conn, "cache_size"))?;
+        Ok((size < 0).then(|| to_u(-size)))
     }
 
     /// The pages in use (`page_count` without `freelist_count`) and the cap
