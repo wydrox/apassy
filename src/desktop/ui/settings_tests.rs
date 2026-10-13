@@ -207,7 +207,8 @@ fn each_section_shows_its_groups() {
     for (section, shown, hidden) in cases() {
         super::super::open_settings(&mut app, section);
         let (text, _) = frames(&mut app, TALL);
-        for listed in SettingsSection::ALL {
+        // Plan shows only with an offer, and this app has none.
+        for listed in SettingsSection::listed_all(&app) {
             assert!(
                 text.contains(listed.label()),
                 "{section:?}: the list has {listed:?}: {text}"
