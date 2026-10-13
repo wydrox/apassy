@@ -4,7 +4,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-Plans and Apassy Connect ([ADR 0027](docs/adr/0027-plans-and-connect.md)): Free syncs through iCloud Drive and approves on every device; Personal and Team (paid) sync through Apassy and get shared vaults. Not released: the relay part (`POST /v1/connect`) and the account service are not deployed, and no plan is on sale yet.
+Planned for 0.6.0 (Mac, iPhone, and browser extension carry version 0.6.0 on this branch). Plans and Apassy Connect ([ADR 0027](docs/adr/0027-plans-and-connect.md)): Free syncs through iCloud Drive and approves on every device; Personal (€1 a month) and Team (€2 a member a month) sync through Apassy and get shared vaults. Not released yet: the account service and the checkout are not built, and no plan is on sale. When 0.6.0 is ready, this section becomes `## [0.6.0] - DATE`.
 
 ### Added
 
