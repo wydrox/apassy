@@ -37,6 +37,12 @@
 //! confirms an iPhone whose key is gone.
 //!
 //! The relay calls run without the vault mutex. A lock ends them ([`Core::close`]).
+//!
+//! The iPhone holds one question poll, the list (`questions_wait`); it reads no answers.
+//! A list poll that comes back early with nothing new (a Connect team holds at most 2
+//! waiting question polls, relay-connect-v1 section 5) starts a pause of 5 s, doubling to
+//! 60 s, ±20% ([`PollBackoff`]): `questions_wait` then waits without a relay call, at most
+//! its `timeout` each time, and answers "no change". Swift needs no delay of its own.
 
 mod envelope;
 
@@ -48,6 +54,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::Zeroizing;
 
+use apassy::questions::PollBackoff;
+use apassy::questions::backoff::random_jitter;
 use apassy::sync::{
     DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
     encode_b64u, link_code_team, verify_signature,
@@ -77,6 +85,8 @@ const SHOWN_NAME: usize = 64;
 const MAX_CANCELS: usize = 8;
 /// The least time between two tries of the cancels that wait.
 const RETRY_CANCELS_EVERY: Duration = Duration::from_secs(10);
+/// A pause of `questions_wait` looks this often whether a lock or another vault ended it.
+const PAUSE_SLICE: Duration = Duration::from_millis(250);
 /// A link whose team is not the questions team that the vault names.
 const OTHER_VAULT_LINK: &str = "This code is for another vault's devices. On your Mac, open Settings > Devices > Add a device.";
 
@@ -101,6 +111,8 @@ pub struct State {
     cancels: Vec<PendingJoin>,
     /// When those cancels were last tried again.
     cancels_tried: Option<Instant>,
+    /// The pause of the list poll after an early empty answer.
+    pace: PollBackoff,
 }
 
 /// A question as the relay returned it.
@@ -627,7 +639,7 @@ impl Core {
                     timeout: u64,
                 }
                 let Wait { timeout } = params(request)?;
-                let changed = self.questions_fetch(Duration::from_secs(timeout.clamp(1, 25)))?;
+                let changed = self.questions_wait(Duration::from_secs(timeout.clamp(1, 25)))?;
                 Ok(ok(&Waited { changed }))
             }
             "question_open" => {
@@ -835,6 +847,7 @@ impl Core {
         state.member = None;
         state.since = 0;
         state.records.clear();
+        state.pace.reset();
         Ok(())
     }
 
@@ -874,6 +887,50 @@ impl Core {
                 device_id: membership.device_id,
             }))
         })
+    }
+
+    /// `questions_wait`: one long poll of the list of `wait`, or, after an early empty
+    /// answer, the pause before the next poll (relay-connect-v1 section 5). A pause waits
+    /// at most `wait` in one call and answers "no change"; the next call goes on with it.
+    /// A full poll or one that brought a question ends the pause.
+    fn questions_wait(&self, wait: Duration) -> CoreResult<bool> {
+        let (member, left) = {
+            let state = guard(&self.questions);
+            (state.member.clone(), state.pace.left(Instant::now()))
+        };
+        if !left.is_zero() {
+            self.questions_pause(member.as_ref(), left.min(wait));
+            return Ok(false);
+        }
+        let started = Instant::now();
+        let changed = self.questions_fetch(wait)?;
+        let took = started.elapsed();
+        guard(&self.questions)
+            .pace
+            .polled(Instant::now(), wait, took, changed, random_jitter());
+        Ok(changed)
+    }
+
+    /// Sleep `pause`, or less when a lock, a suspend, or another vault changes the device
+    /// of the questions (`member`, as it was before the pause).
+    fn questions_pause(&self, member: Option<&Arc<RelayMember>>, pause: Duration) {
+        let end = Instant::now() + pause;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            std::thread::sleep(left.min(PAUSE_SLICE));
+            let state = guard(&self.questions);
+            let same = match (state.member.as_ref(), member) {
+                (Some(held), Some(member)) => Arc::ptr_eq(held, member),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                return;
+            }
+        }
     }
 
     /// `GET /v1/questions` from the last sequence: the new and changed questions go into
@@ -1381,6 +1438,7 @@ impl Core {
         state.member = Some(Arc::new(member));
         state.since = 0;
         state.records.clear();
+        state.pace.reset();
         Ok(attaching.view("attached"))
     }
 }

@@ -248,6 +248,12 @@ impl QuestionsClient {
         self.member.public_key()
     }
 
+    /// Whether the team is a Connect team (relay-connect-v1 section 5), as the last
+    /// sign-in said it. False before the first sign-in and from an older relay.
+    pub fn is_connect(&self) -> bool {
+        self.member.team_kind().as_deref() == Some("connect")
+    }
+
     /// A signature with the relay key of this device (DER): the `sign_key` of a Mac.
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SyncError> {
         self.member.sign(message)
@@ -281,9 +287,19 @@ impl QuestionsClient {
 
     /// `GET /v1/questions?since=N&wait=S`: the questions for this device after `since`.
     pub fn list(&self, since: u64, wait: Duration) -> Result<QuestionList, QuestionsError> {
+        self.list_with(since, wait, None)
+    }
+
+    /// [`Self::list`] that `cancel` ends ([`RelayMember::call_until`]).
+    pub(crate) fn list_with(
+        &self,
+        since: u64,
+        wait: Duration,
+        cancel: Option<&Cancel>,
+    ) -> Result<QuestionList, QuestionsError> {
         let seconds = wait.min(MAX_WAIT).as_secs();
         let path = format!("/v1/questions?since={since}&wait={seconds}");
-        self.call("GET", &path, None, Duration::from_secs(seconds), None)
+        self.call("GET", &path, None, Duration::from_secs(seconds), cancel)
     }
 
     /// `POST /v1/questions/{qid}/answers` with a sealed answer.

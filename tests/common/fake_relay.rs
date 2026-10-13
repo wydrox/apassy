@@ -163,6 +163,8 @@ struct Relay {
     failures: Vec<(String, usize, u16)>,
     /// A long poll answers at once, as a second poll of one device does.
     polls_at_once: bool,
+    /// The `wait` of each `GET /v1/questions`, in order.
+    list_waits: Vec<u64>,
     /// The `since` of the last head request.
     last_since: Option<u64>,
     /// The next requests that start with the prefix get no answer after the relay did
@@ -353,6 +355,11 @@ impl FakeRelay {
     /// device or while it stops.
     pub fn answer_polls_at_once(&self, at_once: bool) {
         lock(&self.shared.0).polls_at_once = at_once;
+    }
+
+    /// The `wait` of each `GET /v1/questions` so far, in order.
+    pub fn list_waits(&self) -> Vec<u64> {
+        lock(&self.shared.0).list_waits.clone()
     }
 
     /// Damage the stored bytes of `version`: its head no longer matches them.
@@ -1559,6 +1566,7 @@ fn list_questions<'a>(
     if wait > 25 {
         return fail(400, "invalid_request");
     }
+    relay.list_waits.push(wait);
     if let Some(team) = relay.teams.get_mut(team_id) {
         expire_due(team);
     }

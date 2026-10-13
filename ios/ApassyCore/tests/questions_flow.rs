@@ -8,7 +8,7 @@
 mod questions_relay;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apassy::sync::{DeviceKey, decode_b64u, encode_b64u, verify_signature};
 use apassy::vault::{TrustedDeviceKind, Vault};
@@ -624,6 +624,61 @@ fn the_long_poll_wakes_on_a_new_question_and_push_tokens_reach_the_relay() {
         fails(&setup.core, json!({"op": "questions_list"})),
         "locked"
     );
+}
+
+/// The list polls of `GET /v1/questions` in the log of the relay.
+fn list_polls(relay: &QuestionsRelay) -> usize {
+    relay
+        .log()
+        .iter()
+        .filter(|line| *line == "GET /v1/questions")
+        .count()
+}
+
+/// A list poll that comes back early with nothing new starts a pause (relay-connect-v1
+/// section 5): `questions_wait` then waits without a relay call and answers "no change".
+/// A poll that waited its full time does not.
+#[test]
+fn an_early_empty_list_poll_pauses_the_next_one() {
+    let setup = setup();
+    attach(&setup);
+    call(&setup.core, json!({"op": "questions_list"}));
+
+    // A full poll: the next one goes at once.
+    let started = Instant::now();
+    let waited = call(&setup.core, json!({"op": "questions_wait", "timeout": 2}));
+    assert_eq!(waited["changed"], false);
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    let before = list_polls(&setup.relay);
+    call(&setup.core, json!({"op": "questions_wait", "timeout": 2}));
+    assert_eq!(list_polls(&setup.relay), before + 1);
+
+    // An early empty answer: the next call pauses for its timeout and asks nothing.
+    setup.relay.answer_polls_at_once(true);
+    let started = Instant::now();
+    let waited = call(&setup.core, json!({"op": "questions_wait", "timeout": 10}));
+    assert_eq!(waited["changed"], false);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let before = list_polls(&setup.relay);
+    let started = Instant::now();
+    let waited = call(&setup.core, json!({"op": "questions_wait", "timeout": 1}));
+    assert_eq!(waited["changed"], false);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(list_polls(&setup.relay), before);
+
+    // A lock ends a pause at once.
+    let before = list_polls(&setup.relay);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            call(&setup.core, json!({"op": "lock"}));
+        });
+        let started = Instant::now();
+        let waited = call(&setup.core, json!({"op": "questions_wait", "timeout": 10}));
+        assert_eq!(waited["changed"], false);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    });
+    assert_eq!(list_polls(&setup.relay), before);
 }
 
 /// The iPhone sends its answer key with the link and writes no row; an attach without it
