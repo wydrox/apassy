@@ -93,6 +93,10 @@ struct Team {
     receipts: BTreeMap<u64, u64>,
     questions: Vec<FakeQuestion>,
     question_seq: u64,
+    /// A team made by `POST /v1/connect` (a Connect team), not by a team code.
+    connect: bool,
+    /// The limits of a Connect team are lifted: its first snapshot push is allowed.
+    plan_lifted: bool,
 }
 
 /// One answer to a question: the envelope as the text that came.
@@ -170,6 +174,16 @@ struct Relay {
     next_answer: u64,
     /// The body of each request that had one, as text.
     bodies: Vec<String>,
+    /// The public keys (their bytes) that made a Connect team: one team for each key, ever.
+    connect_keys: Vec<Vec<u8>>,
+    /// `POST /v1/connect` is missing: an old relay answers 404.
+    connect_missing: bool,
+    /// The daily cap of Connect teams is reached: 503 `busy`, `Retry-After: 3600`.
+    connect_busy: bool,
+    /// The next Connect calls that answer 409 `connect_key_used` (the key counts as used).
+    refuse_connect_keys: usize,
+    /// The link code that `POST /v1/devices/links` made last.
+    last_code: Option<String>,
 }
 
 /// A running fake relay. It stops when dropped.
@@ -244,6 +258,50 @@ impl FakeRelay {
     /// The origin that the challenge reports (a relay behind another address).
     pub fn set_origin(&self, origin: &str) {
         lock(&self.shared.0).origin = origin.to_owned();
+    }
+
+    /// Whether `POST /v1/connect` exists (default); `false` is an old relay that answers 404.
+    pub fn set_connect_available(&self, available: bool) {
+        lock(&self.shared.0).connect_missing = !available;
+    }
+
+    /// The daily cap of Connect teams is reached (or not): `POST /v1/connect` answers 503
+    /// `busy` with `Retry-After: 3600`.
+    pub fn set_connect_busy(&self, busy: bool) {
+        lock(&self.shared.0).connect_busy = busy;
+    }
+
+    /// Answer the next `count` Connect calls with 409 `connect_key_used`, as if their keys
+    /// had made a Connect team before.
+    pub fn refuse_next_connect_keys(&self, count: usize) {
+        lock(&self.shared.0).refuse_connect_keys = count;
+    }
+
+    /// Lift the limits of the Connect team `team_id`: its first snapshot push is allowed.
+    pub fn lift_plan(&self, team_id: &str) {
+        lock(&self.shared.0)
+            .teams
+            .get_mut(team_id)
+            .expect("team")
+            .plan_lifted = true;
+    }
+
+    /// The kind of the team `team_id`: `connect` or `operator` (`None` for an unknown team).
+    pub fn team_kind(&self, team_id: &str) -> Option<String> {
+        lock(&self.shared.0)
+            .teams
+            .get(team_id)
+            .map(|team| if team.connect { "connect" } else { "operator" }.to_owned())
+    }
+
+    /// The link code that `POST /v1/devices/links` made last, as a device would scan it.
+    pub fn last_link_code(&self) -> Option<String> {
+        lock(&self.shared.0).last_code.clone()
+    }
+
+    /// The ids of all teams, in order.
+    pub fn team_ids(&self) -> Vec<String> {
+        lock(&self.shared.0).teams.keys().cloned().collect()
     }
 
     /// The seconds that each new access token lasts (the relay's: 900).
@@ -739,6 +797,76 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             );
             ok(json!({"team_id": team_id, "member_id": 1, "device_id": device_id}))
         }
+        ("POST", ["v1", "connect"]) => {
+            if request.header("authorization").is_some() {
+                return fail(401, "unauthenticated");
+            }
+            let mut relay = lock(mutex);
+            if relay.connect_missing {
+                return fail(404, "not_found");
+            }
+            let Some(map) = exact_object(request, &["v", "team", "device_name", "public_key"])
+            else {
+                return fail(400, "invalid_request");
+            };
+            let Some(public_key) = map["public_key"]
+                .as_str()
+                .and_then(decode_b64u)
+                .filter(|key| key.len() == 65 && key[0] == 0x04)
+            else {
+                return fail(400, "invalid_request");
+            };
+            if map["v"].as_u64() != Some(1)
+                || !map["team"].is_string()
+                || !map["device_name"].is_string()
+            {
+                return fail(400, "invalid_request");
+            }
+            if relay.refuse_connect_keys > 0 {
+                relay.refuse_connect_keys -= 1;
+                relay.connect_keys.push(public_key);
+                return fail(409, "connect_key_used");
+            }
+            if relay.connect_keys.contains(&public_key) {
+                return fail(409, "connect_key_used");
+            }
+            if relay.connect_busy {
+                let mut answer = fail(503, "busy");
+                answer
+                    .headers
+                    .push(("Retry-After".to_owned(), "3600".to_owned()));
+                return answer;
+            }
+            relay.connect_keys.push(public_key.clone());
+            relay.next_team += 1;
+            let team_id: String = format!("t_fake{:06}", relay.next_team)
+                .chars()
+                .map(|ch| match ch.to_digit(10) {
+                    Some(digit) => char::from(b'a' + digit as u8),
+                    None => ch,
+                })
+                .collect();
+            let device_id = relay.next_device;
+            relay.next_device += 1;
+            relay.teams.insert(
+                team_id.clone(),
+                Team {
+                    name: map["team"].as_str().unwrap_or_default().to_owned(),
+                    devices: vec![Device {
+                        id: device_id,
+                        name: map["device_name"].as_str().unwrap_or_default().to_owned(),
+                        public_key,
+                        live: true,
+                    }],
+                    connect: true,
+                    ..Team::default()
+                },
+            );
+            ok(
+                json!({"team_id": team_id, "member_id": 1, "device_id": device_id,
+                      "kind": "connect"}),
+            )
+        }
         ("POST", ["v1", "auth", "challenge"]) => {
             if request.header("authorization").is_some() {
                 return fail(401, "unauthenticated");
@@ -804,6 +932,11 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 .tokens
                 .insert(token.clone(), (team_id.clone(), device_id));
             let team = relay.teams[&team_id].name.clone();
+            let team_kind = if relay.teams[&team_id].connect {
+                "connect"
+            } else {
+                "operator"
+            };
             let lifetime = match relay.token_seconds {
                 0 => 900,
                 seconds => seconds,
@@ -811,7 +944,8 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             ok(
                 json!({"token": token, "expires_at": now() + lifetime, "team_id": team_id,
                       "team": team, "member_id": 1, "member_name": "owner", "role": "owner",
-                      "device_id": device_id, "key_holder": device_id == 1}),
+                      "device_id": device_id, "key_holder": device_id == 1,
+                      "team_kind": team_kind}),
             )
         }
         ("POST", ["v1", "devices", "link"]) => {
@@ -941,6 +1075,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .expect("team")
                         .codes
                         .push(code.clone());
+                    relay.last_code = Some(code.clone());
                     ok(json!({"secret": code, "expires_at": now() + 600}))
                 }
                 ("GET", ["devices", "links"]) => {
@@ -1115,6 +1250,10 @@ fn put(
     changed: &Condvar,
 ) -> Outgoing {
     let length = request.body.len() as u64;
+    let team = &relay.teams[team_id];
+    if team.connect && !team.plan_lifted {
+        return fail(403, "plan_required");
+    }
     if length > relay.max_bytes {
         return fail(413, "payload_too_large");
     }

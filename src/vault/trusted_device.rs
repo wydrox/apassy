@@ -240,12 +240,32 @@ pub(super) fn load_memberships(
     Ok(out)
 }
 
-/// The team that has the purpose `sync`, other than `except`.
-fn other_sync_team(conn: &Connection, except: &str) -> VaultResult<Option<String>> {
+/// The team other than `except` whose membership has `purpose`, or `None`. A vault has
+/// at most one membership with `sync` and at most one with `questions` (ADR 0027 §5).
+fn other_team_with(
+    conn: &Connection,
+    except: &str,
+    purpose: MembershipPurpose,
+) -> VaultResult<Option<String>> {
     Ok(load_memberships(conn, None)?
         .into_iter()
-        .find(|m| m.team_id != except && m.purposes.contains(&MembershipPurpose::Sync))
+        .find(|m| m.team_id != except && m.purposes.contains(&purpose))
         .map(|m| m.team_id))
+}
+
+/// Whether `purposes` on the team `team_id` would give the vault a second team for
+/// `sync` or for `questions`.
+fn second_team(
+    conn: &Connection,
+    team_id: &str,
+    purposes: &BTreeSet<MembershipPurpose>,
+) -> VaultResult<bool> {
+    for purpose in [MembershipPurpose::Sync, MembershipPurpose::Questions] {
+        if purposes.contains(&purpose) && other_team_with(conn, team_id, purpose)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A device UUID, a shared vault UUID, or a home UUID: 1 to [`MAX_UUID_BYTES`] ASCII
@@ -652,8 +672,8 @@ impl Vault {
     ///
     /// - `InvalidInput`: a value of a bad shape (the checks of
     ///   [`Vault::set_relay_device`]), or no purpose.
-    /// - `AlreadyExists`: the team has a membership, or the purpose `sync` is on another
-    ///   team.
+    /// - `AlreadyExists`: the team has a membership, or the purpose `sync` or
+    ///   `questions` is on another team (one team of each per vault).
     pub fn add_relay_membership(&mut self, membership: &RelayMembership) -> VaultResult<()> {
         if !membership.is_valid() || membership.purposes.is_empty() {
             return Err(err(VaultErrorKind::InvalidInput));
@@ -666,8 +686,7 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         if !load_memberships(&tx, Some(&membership.team_id))?.is_empty()
-            || (membership.purposes.contains(&MembershipPurpose::Sync)
-                && other_sync_team(&tx, &membership.team_id)?.is_some())
+            || second_team(&tx, &membership.team_id, &membership.purposes)?
         {
             return Err(err(VaultErrorKind::AlreadyExists));
         }
@@ -691,7 +710,7 @@ impl Vault {
 
     /// Set the purposes of the membership of `team_id`. `InvalidInput`: no purpose (use
     /// [`Vault::remove_relay_membership`]). `NotFound`: no membership. `AlreadyExists`:
-    /// the purpose `sync` is on another team.
+    /// the purpose `sync` or `questions` is on another team.
     pub fn set_membership_purposes(
         &mut self,
         team_id: &str,
@@ -707,7 +726,7 @@ impl Vault {
         if load_memberships(&tx, Some(team_id))?.is_empty() {
             return Err(err(VaultErrorKind::NotFound));
         }
-        if purposes.contains(&MembershipPurpose::Sync) && other_sync_team(&tx, team_id)?.is_some() {
+        if second_team(&tx, team_id, purposes)? {
             return Err(err(VaultErrorKind::AlreadyExists));
         }
         tx.execute(

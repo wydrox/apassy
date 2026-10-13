@@ -326,7 +326,9 @@ pub enum RelayRefusal {
     JoinRefused,
     /// `403 sync_head_invalid`: the relay refused the head of a push.
     HeadInvalid,
-    /// `403 team_limit`: the pushes of this hour are used up.
+    /// `403 team_limit`: the pushes of this hour are used up; or `403 plan_required`:
+    /// the plan of the team has no sync through the relay (a Connect team on Free,
+    /// contract relay-connect-v1 section 5). Nothing was stored.
     TeamLimit,
     /// `404 not_found`.
     NotFound,
