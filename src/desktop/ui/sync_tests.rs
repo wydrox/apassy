@@ -13,6 +13,7 @@ use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
+use super::devices::DevicesSheet;
 use super::start::{self, Step};
 use super::sync::{SyncSheet, UiStatus};
 use super::vaults::VaultSheet;
@@ -1071,6 +1072,14 @@ fn settled_frames(app: &mut DesktopApp) -> String {
     frames(app)
 }
 
+/// "Add a device" of the vault `id` on `app` with the link of its relay sync team, as
+/// the sheet of Settings > Devices opens it (without the owner check that turns the
+/// approvals of this Mac on).
+fn open_add_device(app: &mut DesktopApp, id: &str) {
+    app.relay_add_device_start(id, false);
+    app.ui.sheet = Some(Sheet::Devices(DevicesSheet::AddDevice));
+}
+
 /// The words of the open "Add a device…" sheet of Mac A, after Mac B sent `link`.
 fn send_link(b: &mut DesktopApp, link: &str) -> String {
     b.sync.relay.link_input = link.to_owned();
@@ -1107,17 +1116,45 @@ fn add_a_device_shows_the_link_as_a_qr_code_for_the_iphone() {
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
-    super::open_settings(&mut a, super::SettingsSection::Vault);
-    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
+    open_add_device(&mut a, &id);
     let text = settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");
     assert!(
         link.starts_with(&format!("{}/link#apassy_lnk_", relay.url)),
         "{link}"
     );
+    // The link of the sync team says so, with the name of this Mac and its end.
+    assert!(link.contains("&r=sync&n="), "{link}");
+    assert!(link.contains("&e="), "{link}");
     assert!(text.contains(&link), "the link as text: {text}");
-    let qr = a.relay_add_mac_qr_for_test().expect("a QR code");
+    let (qr, encoded) = a.relay_add_mac_qr_for_test(None).expect("a QR code");
+    assert_eq!(
+        encoded, link,
+        "without a pairing window, the QR code is the link"
+    );
+    let qr = &qr;
     assert_qr_encodes(qr, &link);
+    // With a pairing window of this network, the QR code carries its link too; the
+    // text and "Copy link" never do (ADR 0020).
+    let pairing = "apassy://pair?v=1&h=192.0.2.10&p=48620&c=AAAA&s=BBBB&n=Mac&e=1790000300";
+    let (_, with_pairing) = a
+        .relay_add_mac_qr_for_test(Some(pairing))
+        .expect("a QR code");
+    assert!(
+        with_pairing.starts_with(&link) && with_pairing.contains("&p="),
+        "{with_pairing}"
+    );
+    let parsed = crate::sync::RelayLinkPayload::parse(&with_pairing, "").expect("parse");
+    assert_eq!(
+        parsed.pairing.as_deref().map(|text| text.as_str()),
+        Some(pairing)
+    );
+    assert!(!frames(&mut a).contains("apassy://pair"));
+    assert_eq!(
+        a.relay_add_mac_link_for_test().as_deref(),
+        Some(link.as_str())
+    );
 
     // The sheet draws it on white, about 180 points wide, with the quiet zone.
     let total = (qr.width() + 2 * crate::desktop::companion::QUIET_ZONE) as f32;
@@ -1156,14 +1193,13 @@ fn add_a_device_shows_the_link_as_a_qr_code_for_the_iphone() {
         "{sides:?} for {total} modules"
     );
 
-    // A new link makes a new QR code of the new link.
-    a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
-    let _ = settled_frames(&mut a);
-    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    // "New code" makes a new QR code of the new link.
+    a.relay_add_device_again();
     let _ = settled_frames(&mut a);
     let second = a.relay_add_mac_link_for_test().expect("a new link");
     assert_ne!(second, link);
-    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &second);
+    let (qr, _) = a.relay_add_mac_qr_for_test(None).expect("a QR code");
+    assert_qr_encodes(&qr, &second);
 }
 
 #[test]
@@ -1295,14 +1331,12 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     let (mut a, id) = relay_mac_a(&folders, &relay);
     super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
-    for expected in [
-        "Saved to the relay",
-        "Apassy relay",
-        "Sync now",
-        "Add a device…",
-        "Devices…",
-    ] {
+    for expected in ["Saved to the relay", "Apassy relay", "Sync now"] {
         assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // One place adds devices: Settings > Devices.
+    for gone in ["Add a device…", "Devices…"] {
+        assert!(!text.contains(gone), "{gone}: {text}");
     }
     assert_eq!(
         super::sync::sidebar_status(&a).0,
@@ -1310,7 +1344,8 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     );
 
     // Mac A: the link, and nobody asks yet.
-    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
+    open_add_device(&mut a, &id);
     let text = settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");
     assert!(
@@ -1318,15 +1353,17 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
         "{link}"
     );
     for expected in [
-        "Add a device to “Personal”",
-        "On an iPhone, open Apassy, select “Add your vault”, and scan this code.",
+        "Add a device",
+        "On your iPhone, open Apassy and select Connect to your Mac.",
         "/link#apassy_lnk_",
         "Copy link",
+        "Works once, for 10 minutes. Nothing is shared until you confirm here.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert!(text.contains("Waiting for the other device…"), "{text}");
-    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
+    assert!(text.contains("Waiting for your device…"), "{text}");
+    let (qr, _) = a.relay_add_mac_qr_for_test(None).expect("a QR code");
+    assert_qr_encodes(&qr, &link);
 
     // Mac B pastes the link and shows its words.
     let mut b = folders.mac("mac-b");
@@ -1351,10 +1388,13 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     assert_eq!(links[0].safety.as_deref(), Some(words.as_str()));
     let text = frames(&mut a);
     assert!(
-        text.contains("“Synthetic Mac mini” asks to sync “Personal”. Both devices show:"),
+        text.contains("Synthetic Mac mini wants to connect. Both show:"),
         "{text}"
     );
-    assert!(text.contains(&words) && text.contains("Confirm…"), "{text}");
+    assert!(
+        text.contains(&words) && text.contains("Confirm with Touch ID"),
+        "{text}"
+    );
 
     // Confirm opens the owner check for exactly this Mac; a wrong passphrase adds nothing.
     a.relay_ask_confirm_for_test(links[0].id);
@@ -1393,45 +1433,56 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
         .expect("owner check");
     a.relay_settle_for_test();
     assert_eq!(
-        a.status_text, "Added. Synthetic Mac mini receives the vault now.",
+        a.status_text, "Synthetic Mac mini is connected. It gets the vault now.",
         "{}",
         a.status_text
     );
     let text = frames(&mut a);
-    assert!(text.contains("Added. Synthetic Mac mini"), "{text}");
-    // Only the result and Done: the used link and the wait are gone.
+    assert!(
+        text.contains("Synthetic Mac mini is connected. It gets the vault now."),
+        "{text}"
+    );
+    // Only the result, "Add another device", and "Done": the used link and the wait are
+    // gone.
     for gone in [
-        "Waiting for the other device…",
+        "Waiting for your device…",
         "/link#apassy_lnk_",
         "Copy link",
-        "asks to sync",
-        "scan this code",
-        "paste the link",
+        "wants to connect",
+        "Connect to your Mac",
     ] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
-    assert!(text.contains("Done"), "{text}");
+    assert!(
+        text.contains("Done") && text.contains("Add another device"),
+        "{text}"
+    );
     assert!(
         a.relay_add_mac_link_for_test().is_none(),
         "the code is gone"
     );
     assert!(
-        a.relay_add_mac_qr_for_test().is_none(),
+        a.relay_add_mac_qr_for_test(None).is_none(),
         "the QR code is gone"
     );
 
-    // "Devices…" lists both Macs.
-    a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
-    let text = settled_frames(&mut a);
-    for expected in [
-        "Synthetic MacBook",
-        "This Mac",
-        "Synthetic Mac mini",
-        "Remove",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
+    // Settings > Devices lists the other Mac, which syncs and can be removed.
     a.ui.sheet = None;
+    let _ = settled_frames(&mut a);
+    let hub = a.devices_hub();
+    let mini = hub
+        .rows
+        .iter()
+        .find(|row| row.name == "Synthetic Mac mini")
+        .unwrap_or_else(|| panic!("{hub:?}"));
+    assert_eq!(mini.does, "Syncs through Apassy");
+    assert!(mini.seen.is_some(), "the relay saw it");
+    assert!(matches!(
+        mini.remove,
+        Some(super::devices::Removal::TeamDevice { .. })
+    ));
+    let text = frames(&mut a);
+    assert!(text.contains("Synthetic Mac mini"), "{text}");
 
     // Mac B downloads the copy, and its passphrase adopts it.
     b.relay_join_poll_now_for_test();
@@ -1651,9 +1702,7 @@ fn a_removed_mac_offers_only_turning_relay_sync_off() {
     let (mut b, id_b) = join_b(&folders, &mut a, &id);
     super::open_settings(&mut b, super::SettingsSection::Vault);
     let text = settled_frames(&mut b);
-    for expected in ["Sync now", "Add a device…", "Devices…"] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
+    assert!(text.contains("Sync now"), "{text}");
     let device_b = b
         .vault_list
         .registry
@@ -1673,28 +1722,26 @@ fn a_removed_mac_offers_only_turning_relay_sync_off() {
         text.contains("Turn relay sync off, then join again"),
         "{text}"
     );
-    for gone in ["Sync now", "Add a device…", "Devices…"] {
-        assert!(!text.contains(gone), "{gone}: {text}");
-    }
+    assert!(!text.contains("Sync now"), "{text}");
     // The sync menu stays: "Off" is the way back.
     assert!(text.contains("Apassy relay"), "{text}");
 
     let calls = relay.log().len();
-    b.sync_open_sheet(SyncSheet::AddMac { id: id_b.clone() }, None);
+    super::open_settings(&mut b, super::SettingsSection::Devices);
+    open_add_device(&mut b, &id_b);
     let text = settled_frames(&mut b);
-    assert!(text.contains("Add a device to “Personal”"), "{text}");
-    assert!(text.contains("Removed from the relay."), "{text}");
-    for gone in ["Check again", "New link", "Copy link", "/link#apassy_lnk_"] {
+    assert!(text.contains("Add a device"), "{text}");
+    assert!(
+        text.contains("This Mac was removed from the relay team of this vault"),
+        "{text}"
+    );
+    for gone in ["Try again", "New code", "Copy link", "/link#apassy_lnk_"] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
     assert!(text.contains("Done"), "{text}");
     b.ui.sheet = None;
-
-    b.sync_open_sheet(SyncSheet::Devices { id: id_b.clone() }, None);
-    let text = settled_frames(&mut b);
-    assert!(text.contains("Removed from the relay."), "{text}");
-    assert!(!text.contains("Refresh"), "{text}");
-    assert!(text.contains("Done"), "{text}");
+    // The list of Settings > Devices asks nothing either.
+    let _ = settled_frames(&mut b);
     b.ui.sheet = None;
     assert_eq!(
         relay.log().len(),
@@ -1783,7 +1830,7 @@ fn confirm_waiting_mac(a: &mut DesktopApp) {
 
 /// A new link of Mac A for the vault `id`.
 fn new_link(a: &mut DesktopApp, id: &str) -> String {
-    a.sync_open_sheet(SyncSheet::AddMac { id: id.to_owned() }, None);
+    open_add_device(a, id);
     let _ = settled_frames(a);
     a.relay_add_mac_link_for_test().expect("a link")
 }
@@ -2000,8 +2047,9 @@ fn the_team_code_field_is_masked_and_erased_after_each_try() {
     assert!(a.sync.relay.team_code.is_empty(), "erased after the try");
 }
 
-/// "Remove" in "Devices…" asks first. Cancel has the focus for the keyboard, so Return
-/// keeps the Mac; "Remove" in the alert removes it.
+/// "Remove…" of a Mac in Settings > Devices asks first. Cancel has the focus for the
+/// keyboard, so Return keeps the Mac; "Remove" in the alert removes it from the
+/// questions and from the relay sync team.
 #[test]
 fn removing_a_mac_asks_first_and_return_keeps_it() {
     let folders = folders();
@@ -2044,21 +2092,41 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
             .expect("number of B");
         vault.ensure_question_key().expect("key").key_id()
     };
-    super::open_settings(&mut a, super::SettingsSection::Vault);
-    a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     let _ = settled_frames(&mut a);
+    let removal = a
+        .devices_hub()
+        .rows
+        .into_iter()
+        .find(|row| row.name == "Synthetic Mac mini")
+        .and_then(|row| row.remove)
+        .expect("Remove… of B");
+    assert_eq!(
+        removal,
+        super::devices::Removal::Trusted {
+            uuid: B_UUID.to_owned()
+        }
+    );
     let ctx = egui::Context::default();
     super::kit::set_keyboard_mode(&ctx, true);
     let _ = frames_in(&ctx, &mut a, Vec::new());
-    a.relay_ask_remove_for_test(device_b, "Synthetic Mac mini");
+    a.devices_ask_remove(removal.clone(), None);
     let text = frames_in(&ctx, &mut a, Vec::new());
     for expected in [
-        "Remove “Synthetic Mac mini” from the relay?",
-        "It keeps its vault but stops syncing, and it can no longer answer the questions of this vault: Apassy makes a new question key. To add it again you need a new link and the owner check.",
+        "Remove “Synthetic Mac mini” from “Personal”?",
+        "It can no longer answer the questions of this vault",
         "Cancel",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    let asked = |a: &DesktopApp| {
+        matches!(
+            a.ui.sheet,
+            Some(Sheet::Vault(VaultSheet::Sync(
+                SyncSheet::RemoveQuestionsDevice { .. }
+            )))
+        )
+    };
     let key = |key, modifiers| egui::Event::Key {
         key,
         physical_key: None,
@@ -2072,26 +2140,22 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
     a.relay_settle_for_test();
-    assert!(!a.relay_remove_asked_for_test(), "Return pressed Cancel");
+    assert!(!asked(&a), "Return pressed Cancel");
     assert_eq!(relay.devices().len(), 2, "nothing removed");
-    assert!(matches!(
-        a.ui.sheet,
-        Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::Devices { .. })))
-    ));
 
-    // Escape closes the alert only.
-    a.relay_ask_remove_for_test(device_b, "Synthetic Mac mini");
+    // Escape closes the alert.
+    a.devices_ask_remove(removal.clone(), None);
     let _ = frames_in(&ctx, &mut a, Vec::new());
     let _ = frames_in(
         &ctx,
         &mut a,
         vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
     );
-    assert!(!a.relay_remove_asked_for_test());
+    assert!(!asked(&a));
     assert_eq!(relay.devices().len(), 2);
 
     // Shift-Tab to "Remove", then Return: the Mac leaves the relay team.
-    a.relay_ask_remove_for_test(device_b, "Synthetic Mac mini");
+    a.devices_ask_remove(removal, None);
     let _ = frames_in(&ctx, &mut a, Vec::new());
     let _ = frames_in(
         &ctx,
@@ -2104,10 +2168,10 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
     a.relay_settle_for_test();
-    assert!(!a.relay_remove_asked_for_test());
+    assert!(!asked(&a));
     assert_eq!(relay.devices().len(), 1, "{}", a.status_text);
     assert!(
-        a.status_text.contains("is removed from the relay"),
+        a.status_text.contains("“Synthetic Mac mini” is removed."),
         "{}",
         a.status_text
     );
@@ -2160,7 +2224,7 @@ fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
-    super::open_settings(&mut a, super::SettingsSection::Vault);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     let link = new_link(&mut a, &id);
     let mut b = folders.mac("mac-b");
     super::sync::begin_open(&mut b);
@@ -2205,7 +2269,7 @@ fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
         texts = frame(&mut a, Vec::new());
     }
     for round in 1..=2 {
-        let confirm = at(&texts, "Confirm…");
+        let confirm = at(&texts, "Confirm with Touch ID");
         let _ = frame(&mut a, vec![egui::Event::PointerMoved(confirm)]);
         let _ = frame(&mut a, quick_click(confirm));
         for _ in 0..4 {
@@ -2229,7 +2293,7 @@ fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
             let _ = frame(&mut a, vec![key(egui::Key::Escape)]);
             texts = frame(&mut a, Vec::new());
             assert!(a.owner.check.is_none());
-            let title = at(&texts, "Add a device to “Personal”");
+            let title = at(&texts, "Add a device");
             let _ = frame(&mut a, vec![egui::Event::PointerMoved(title)]);
             let _ = frame(&mut a, quick_click(title));
             for _ in 0..4 {
@@ -2271,23 +2335,33 @@ fn return_on_a_relay_alert_opened_with_the_pointer_cancels() {
         repeat: false,
         modifiers: egui::Modifiers::NONE,
     };
-    super::open_settings(&mut a, super::SettingsSection::Vault);
-    a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     let _ = settled_frames(&mut a);
     let ctx = egui::Context::default();
     let _ = frames_in(&ctx, &mut a, Vec::new());
-    a.relay_ask_remove_for_test(device_b, "Synthetic Mac mini");
-    let text = frames_in(&ctx, &mut a, Vec::new());
-    assert!(
-        text.contains("Remove “Synthetic Mac mini” from the relay?"),
-        "{text}"
+    a.devices_ask_remove(
+        super::devices::Removal::TeamDevice {
+            team_id: a
+                .vault_list
+                .registry
+                .get(&id)
+                .and_then(|entry| entry.sync_relay())
+                .expect("relay link")
+                .team_id
+                .clone(),
+            device_id: device_b,
+            name: "Synthetic Mac mini".to_owned(),
+        },
+        None,
     );
+    let text = frames_in(&ctx, &mut a, Vec::new());
+    assert!(text.contains("Remove “Synthetic Mac mini”?"), "{text}");
     assert!(!super::kit::keyboard_mode(&ctx), "a pointer user");
     assert_eq!(ctx.memory(|memory| memory.focused()), None, "no focus ring");
     let _ = frames_in(&ctx, &mut a, vec![enter.clone()]);
     a.relay_settle_for_test();
     assert_eq!(relay.devices().len(), 2, "nothing removed");
-    assert!(!a.relay_remove_asked_for_test(), "Return pressed Cancel");
+    assert!(a.ui.sheet.is_none(), "Return pressed Cancel");
 
     a.ui.sheet = None;
     a.sync_open_sheet(SyncSheet::TurnOff { id: id.clone() }, None);
@@ -2362,37 +2436,34 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     assert_eq!(a.status_text, "Saved to the relay.");
     assert_eq!(relay.version(), 2, "the change made during the upload");
 
-    // "Add a device…" and "Devices…" with a slow relay.
+    // "Add a device" and the list of Settings > Devices with a slow relay.
     relay.delay("POST /v1/devices/links", SLOW);
     relay.delay("GET /v1/devices", SLOW);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     let started = Instant::now();
-    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    open_add_device(&mut a, &id);
     let text = frames(&mut a);
     assert!(
         started.elapsed() < QUICK,
         "the window waited for the relay: {:?}",
         started.elapsed()
     );
-    assert!(text.contains("Apassy asks the relay for a link…"), "{text}");
+    assert!(text.contains("Apassy makes a code…"), "{text}");
     a.relay_settle_for_test();
     assert!(a.relay_add_mac_link_for_test().is_some());
     a.ui.sheet = None;
     let started = Instant::now();
-    a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
     let text = frames(&mut a);
     assert!(
         started.elapsed() < QUICK,
         "the window waited for the relay: {:?}",
         started.elapsed()
     );
+    assert!(text.contains("This Mac"), "{text}");
+    let _ = settled_frames(&mut a);
     assert!(
-        text.contains("Apassy asks the relay for the Macs…"),
-        "{text}"
-    );
-    let text = settled_frames(&mut a);
-    assert!(
-        text.contains("Synthetic MacBook") && text.contains("This Mac"),
-        "{text}"
+        relay.count("GET /v1/devices") >= 1,
+        "the list asked the relay"
     );
 }
 
@@ -2897,13 +2968,14 @@ fn questions_of(app: &DesktopApp) -> Option<crate::vault::RelayMembership> {
         .flatten()
 }
 
-/// A vault that syncs through iCloud Drive, not the relay: "Send questions through the
-/// relay" opens the sheet of a notifications-only team. Its "Turn On…" runs the owner
-/// check before any relay call; then the relay makes the team, and the vault keeps a
-/// membership for the questions only, the question key, and this Mac as a trusted device.
-/// Relay sync stays off. Off needs no check.
+/// "Use another relay…" of a vault that syncs through iCloud Drive: the sheet of a team
+/// for the questions only on a self-hosted relay, with its address and an operator team
+/// code. Its "Connect…" runs the owner check before any relay call; then the relay makes
+/// the team, and the vault keeps a membership for the questions only, the question key,
+/// and this Mac as a trusted device. Relay sync stays off. "Stop approvals here" needs no
+/// check.
 #[test]
-fn questions_through_a_notifications_only_team_need_the_owner_check() {
+fn use_another_relay_makes_a_team_with_the_operator_code_after_the_owner_check() {
     use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
     use crate::desktop::owner_check::OwnerRequest;
     use crate::vault::{MembershipPurpose, TrustedDeviceKind};
@@ -2926,11 +2998,11 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     );
     let text = frames(&mut a);
     for expected in [
-        "Questions of “Personal” through the Apassy relay",
+        "Use another relay",
         "Relay address",
         "Team code",
         "Name of this Mac",
-        "Turn On…",
+        "Connect…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -3003,14 +3075,17 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     a.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
     a.questions_settle_for_test();
-    assert!(
-        a.status_text
-            .starts_with("Questions now also go to your other devices through the relay."),
-        "{}",
-        a.status_text
+    assert_eq!(
+        a.status_text,
+        "This vault is connected. Add a device in Settings > Devices."
     );
     assert!(a.ui.sheet.is_none(), "the sheet closes");
     let membership = questions_of(&a).expect("a questions membership");
+    assert_eq!(
+        relay.team_kind(&membership.team_id).as_deref(),
+        Some("operator"),
+        "a team code makes an operator team"
+    );
     assert_eq!(
         membership.purposes,
         std::collections::BTreeSet::from([MembershipPurpose::Questions]),
@@ -3037,10 +3112,11 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
         devices[0].relay_devices.get(&membership.team_id),
         Some(&membership.device_id)
     );
-    let text = frames(&mut a);
-    assert!(text.contains("Add an iPhone or a Mac…"), "{text}");
+    let hub = a.devices_hub();
+    assert!(hub.approvals && hub.rows[0].stop_here, "{hub:?}");
 
-    // Off: no check; the membership and its key go, and the vault keeps its sync.
+    // "Stop approvals here": no check; the membership and its key go, and the vault
+    // keeps its sync.
     a.questions_turn_off();
     assert!(a.owner.check.is_none(), "off needs no owner check");
     assert!(questions_of(&a).is_none());
@@ -3054,12 +3130,15 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     );
 }
 
-/// "Add an iPhone…" of a notifications-only team shows the link as a QR code. The
-/// iPhone that joins with it (`join_attach`) shows the safety words; "Confirm…" needs the
-/// owner check for exactly that iPhone, and a wrong passphrase adds nothing. After the
-/// check, the iPhone is in the team; once its own row syncs, Devices lists it.
+/// The first "Add a device" of a vault in iCloud Drive with no team makes an Apassy
+/// Connect team (`POST /v1/connect`, no code, no relay address) after the owner check
+/// that turns approvals on here, then shows its link (`r=connect`) as a QR code. The
+/// iPhone that joins with it (`join_attach`) shows the safety words; "Confirm with Touch
+/// ID" needs the owner check `ConfirmQuestionsDevice` for exactly that iPhone, with its
+/// answer key in the name, and a wrong passphrase adds nothing. After the check, the
+/// iPhone is in the team and in the list of Settings > Devices.
 #[test]
-fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
+fn the_first_add_a_device_connects_the_vault_and_adds_an_iphone_after_the_owner_check() {
     use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
     use crate::desktop::owner_check::OwnerRequest;
     use crate::sync::PendingJoin;
@@ -3070,29 +3149,72 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     create(&mut a, "Personal", PASS, Some(&folders.icloud));
     let id = current_id(&a);
     super::open_settings(&mut a, super::SettingsSection::Devices);
-    let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
-    a.questions_ask_new_team(
-        &entry,
-        &relay.url,
-        Zeroizing::new(relay.team_code()),
-        "Synthetic MacBook",
-        None,
-    )
-    .expect("fields");
+    assert!(
+        a.set_connect_relay_url(&relay.url),
+        "a relay on this computer"
+    );
+    assert!(
+        !a.set_connect_relay_url("https://relay.example.test"),
+        "never another server"
+    );
+
+    // "Add a device…": the owner check comes first, and nothing changes before it.
+    a.devices_add(None);
+    assert!(
+        matches!(&a.ui.sheet, Some(Sheet::Devices(DevicesSheet::AddDevice))),
+        "{:?}",
+        a.ui.sheet
+    );
+    let request = a.owner.check.as_ref().expect("owner check").request.clone();
+    assert_eq!(
+        request.action(),
+        OwnerAction::EnableRelayQuestions {
+            relay_url: relay.url.clone(),
+            team_id: None,
+        }
+    );
+    let text = frames(&mut a);
+    for expected in [
+        "Add a device",
+        "Pair on this network instead",
+        "Use another relay…",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    for gone in ["Relay address", "Team code", "apassy_tcd_"] {
+        assert!(!text.contains(gone), "{gone}: {text}");
+    }
+    assert_eq!(
+        a.confirm_owner_now(OwnerCheck::passphrase(OTHER_PASS)),
+        Err(OwnerAuthError::WrongPassphrase)
+    );
+    a.questions_settle_for_test();
+    assert!(questions_of(&a).is_none(), "no team without the check");
+    assert!(relay.team_ids().is_empty(), "the relay was not asked");
+    a.devices_add(None);
     a.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
     a.questions_settle_for_test();
     let membership = questions_of(&a).expect("on");
-
-    a.questions_add_iphone(None);
-    assert!(
-        matches!(
-            &a.ui.sheet,
-            Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::AddIphone { .. })))
-        ),
-        "{:?}",
-        a.ui.sheet
+    assert_eq!(
+        membership.purposes,
+        std::collections::BTreeSet::from([crate::vault::MembershipPurpose::Questions]),
+        "the questions only"
     );
+    assert_eq!(
+        relay.team_kind(&membership.team_id).as_deref(),
+        Some("connect")
+    );
+    assert!(
+        relay
+            .request_bodies()
+            .iter()
+            .filter(|body| body.contains("\"device_name\""))
+            .all(|body| !body.contains("apassy_tcd_") && !body.contains("\"code\"")),
+        "no team code"
+    );
+
+    // The sheet goes on with the link of the new team.
     let text = settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");
     assert!(
@@ -3102,15 +3224,17 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         )),
         "{link}"
     );
+    assert!(link.contains("&r=connect&n="), "{link}");
     for expected in [
-        "Add a device to the questions of “Personal”",
-        "On the iPhone, open Apassy, select Questions, and scan this code",
+        "Add a device",
+        "On your iPhone, open Apassy and select Connect to your Mac.",
         "Copy link",
-        "Waiting for the other device…",
+        "Waiting for your device…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
+    let (qr, _) = a.relay_add_mac_qr_for_test(None).expect("a QR code");
+    assert_qr_encodes(&qr, &link);
 
     // The iPhone scans the code and asks, as `join_attach` does: its link carries its
     // answer key.
@@ -3126,13 +3250,16 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     assert_eq!(links[0].safety.as_deref(), Some(pending.safety.as_str()));
     let text = frames(&mut a);
     assert!(
-        text.contains("“Test iPhone” (an iPhone that answers with Face ID) asks for the questions of “Personal”. Both devices show:"),
+        text.contains("Test iPhone wants to connect. Both show:"),
         "{text}"
     );
     assert!(!text.contains(&link_name), "the key is not shown: {text}");
     assert!(text.contains(&pending.safety), "{text}");
+    let view = a.relay_add_device_view_for_test().expect("the sheet");
+    assert!(view.asking[0].iphone, "an iPhone with an answer key");
 
-    // "Confirm…" opens the owner check for exactly this iPhone.
+    // "Confirm with Touch ID" opens the owner check for exactly this iPhone, by the
+    // purpose of the team: the questions.
     a.relay_ask_confirm_for_test(links[0].id);
     let request = a.owner.check.as_ref().expect("owner check").request.clone();
     assert!(
@@ -3184,10 +3311,15 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         .expect("owner check");
     a.relay_settle_for_test();
     assert_eq!(
-        a.status_text,
-        "Added. Test iPhone gets the questions of this vault and answers with Face ID once this vault syncs to it.",
+        a.status_text, "Test iPhone is connected. It approves with Face ID.",
         "{}",
         a.status_text
+    );
+    let text = frames(&mut a);
+    assert!(
+        text.contains("Test iPhone is connected. It approves with Face ID.")
+            && text.contains("Add another device"),
+        "{text}"
     );
     let joined = pending.poll().expect("poll").expect("confirmed");
     assert_eq!(joined.member().team_id(), membership.team_id);
@@ -3214,24 +3346,30 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         Some(&joined.device_id())
     );
     a.ui.sheet = None;
-    let text = frames(&mut a);
+    let _ = frames(&mut a);
     a.questions_settle_for_test();
-    for expected in [
-        "Synthetic MacBook",
-        "This Mac",
-        "Test iPhone",
-        "iPhone · answers with Face ID",
-        "Remove…",
-    ] {
+    let text = frames(&mut a);
+    for expected in ["This Mac", "Test iPhone", "Approves with Face ID"] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    let rows = a.questions_devices();
+    let hub = a.devices_hub();
     assert_eq!(
-        rows.iter()
-            .map(|row| (row.name.as_str(), row.removable))
+        hub.rows
+            .iter()
+            .map(|row| (row.kind, row.remove.is_some()))
             .collect::<Vec<_>>(),
-        [("Synthetic MacBook", false), ("Test iPhone", true)]
+        [
+            (super::devices::DeviceKind::ThisMac, false),
+            (super::devices::DeviceKind::Iphone, true)
+        ],
+        "{hub:?}"
     );
+    assert!(
+        hub.rows[1].does.starts_with("Approves with Face ID"),
+        "{hub:?}"
+    );
+    assert!(hub.rows[1].seen.is_some(), "the relay saw it: {hub:?}");
+    assert!(hub.approvals && hub.rows[0].stop_here);
 
     // "Remove…": a confirmation that says what removal means for an iCloud vault, then
     // no owner check. The row is removed, the question key is new, and the relay
@@ -3254,7 +3392,7 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     );
     let text = frames(&mut a);
     for expected in [
-        "Remove “Test iPhone” from the questions of “Personal”?",
+        "Remove “Test iPhone” from “Personal”?",
         "It can no longer answer the questions of this vault",
         "the device keeps its copy of the vault until you remove the vault from it or from iCloud Drive",
     ] {
@@ -3332,20 +3470,21 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
         }
     );
     super::open_settings(&mut b, super::SettingsSection::Devices);
-    let text = frames(&mut b);
     assert!(
-        text.contains(super::settings::RELAY_QUESTIONS_JOIN),
-        "{text}"
+        b.devices_hub().rows[0].approve_here,
+        "B can approve after a join"
     );
-    super::settings::set_relay_questions(&mut b, true, None);
+    // "Add a device…" on B joins the team of the vault; it never makes another one.
+    b.devices_add(None);
     let text = frames(&mut b);
-    for expected in ["Join the questions of “Personal”", "Join…"] {
+    for expected in ["Connect this Mac to “Personal”", "Join…"] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
 
     // Mac A makes a link; B pastes it. A link of another team is refused at once.
     super::open_settings(&mut a, super::SettingsSection::Devices);
-    a.questions_add_iphone(None);
+    a.devices_add(None);
+    assert!(a.owner.check.is_none(), "A's team exists: no check to add");
     let _ = settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");
     let id_b = current_id(&b);
@@ -3411,7 +3550,7 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
         .expect("owner check");
     a.relay_settle_for_test();
     assert_eq!(
-        a.status_text, "Added. Synthetic Mac mini gets the questions of this vault now.",
+        a.status_text, "Synthetic Mac mini is connected. It approves after Touch ID.",
         "{}",
         a.status_text
     );

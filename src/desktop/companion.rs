@@ -113,6 +113,9 @@ pub struct CompanionFlows {
     /// The QR code of the open pairing window. The end of the window is in the view of the
     /// controller.
     pub(crate) invite: Option<QrModules>,
+    /// The pairing link of the open window, for the QR code of "Add a device" only: it
+    /// never shows as text and never goes on the pasteboard. It goes with `invite`.
+    pub(crate) invite_link: Option<Zeroizing<String>>,
     opening: Option<Task<Result<PairingInvite, OpenPairingError>>>,
     /// The code that the owner types. The app erases it after each try.
     pub(crate) code: String,
@@ -254,6 +257,7 @@ impl DesktopApp {
         }
         let flows = &mut self.companion;
         flows.invite = None;
+        flows.invite_link = None;
         flows.opening = None;
         flows.code.zeroize();
         flows.notice = None;
@@ -315,6 +319,7 @@ impl DesktopApp {
         }
         let flows = &mut self.companion;
         flows.invite = None;
+        flows.invite_link = None;
         flows.opening = None;
         flows.code.zeroize();
         flows.notice = None;
@@ -366,6 +371,7 @@ impl DesktopApp {
             Err(error) => {
                 if error == CodeError::Closed {
                     self.companion.invite = None;
+                    self.companion.invite_link = None;
                     self.companion.window_seen = false;
                 }
                 self.companion.say(error.message(), true);
@@ -384,6 +390,7 @@ impl DesktopApp {
             Ok(device) => {
                 let flows = &mut self.companion;
                 flows.invite = None;
+                flows.invite_link = None;
                 flows.code.zeroize();
                 flows.notice = None;
                 flows.window_seen = false;
@@ -436,6 +443,7 @@ impl DesktopApp {
         match view {
             PairingView::Closed => {
                 flows.invite = None;
+                flows.invite_link = None;
                 if flows.window_seen {
                     flows.window_seen = false;
                     if flows.notice.is_none() {
@@ -450,6 +458,7 @@ impl DesktopApp {
             PairingView::Waiting { .. } => {
                 // A phone used the link. It is used up, so the code goes.
                 flows.invite = None;
+                flows.invite_link = None;
                 flows.window_seen = true;
             }
         }
@@ -476,6 +485,7 @@ impl DesktopApp {
             Ok(invite) => match QrModules::new(&invite.link) {
                 Some(qr) => {
                     self.companion.invite = Some(qr);
+                    self.companion.invite_link = Some(invite.link);
                     self.companion.window_seen = true;
                 }
                 None => {

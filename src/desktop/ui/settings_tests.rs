@@ -1,18 +1,19 @@
 //! Headless tests of Settings as a view of the window (ADR 0026 §3): the gear and ⌘,
 //! open it, the list column names each section, a click selects one, a sidebar click
 //! leaves; each section shows its groups at a tall and at the minimum window size; the
-//! relay row of Devices with its owner check; and a sheet of Settings over the window.
+//! hub of Devices, "Approve here…" with its owner check, and the rows of each kind of
+//! device; and a sheet of Settings over the window.
 //! Synthetic values only; the relay is the in-process fake relay on 127.0.0.1.
 
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
+use super::super::devices::{
+    ADD_DEVICE, DeviceKind, DevicesSheet, EMPTY_MESSAGE, EMPTY_TITLE, PAIR_HERE, Removal,
+    TRUST_LINE, WIFI_ONLY,
+};
 use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_view::SettingsSection;
-use super::{
-    ADD_IPHONE, RELAY_QUESTIONS, RELAY_QUESTIONS_NEW_TEAM, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
-    RELAY_ROW,
-};
 use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, Place};
@@ -152,21 +153,14 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Devices,
-            &[
-                "This Mac",
-                "Notifications",
-                "iPhone",
-                "Allow the iPhone app on this network",
-                "Pair an iPhone",
-                RELAY_ROW,
-                "Questions reach every device.",
-            ],
+            &[EMPTY_TITLE, ADD_DEVICE, TRUST_LINE, "This Mac", PAIR_HERE],
             &[
                 "Back up now…",
                 "Questions go to every device",
                 "Add device…",
                 "None paired",
                 "Not synced",
+                "Questions through the relay",
             ],
         ),
         (
@@ -325,64 +319,82 @@ fn a_sheet_of_settings_shows_over_the_window() {
     assert_eq!(app.place, Place::Settings, "Esc does not leave a view");
 }
 
-/// The state of the relay switch in the AccessKit tree of three frames: disabled, and
-/// toggled.
-fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>) {
-    let ctx = egui::Context::default();
-    ctx.enable_accesskit();
-    let mut switch = None;
-    for _ in 0..3 {
-        let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL)),
-            ..Default::default()
-        };
-        let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
-        if let Some(update) = &output.platform_output.accesskit_update {
-            for (_, node) in &update.nodes {
-                if node.label() == Some(RELAY_QUESTIONS) {
-                    switch = Some((node.is_disabled(), node.toggled()));
-                }
-            }
-        }
-        output.drop_without_applying_deltas();
-    }
-    switch.expect("the relay switch is in the AccessKit tree")
-}
-
-/// "Send questions through the relay" is in Settings > Devices and off by default. A vault
-/// that is not on the relay can turn it on too: through a notifications-only team, so
-/// the switch says so. A locked vault cannot change it.
+/// Settings > Devices of a vault with no team: only this Mac, the hero with "Add a
+/// device…" and its trust line, and the L3 fallback. No relay address, no team code,
+/// and no switch: the relay is invisible (flow spec §2).
 #[test]
-fn the_relay_questions_switch_offers_a_team_without_relay_sync() {
+fn the_devices_hub_starts_with_this_mac_and_add_a_device() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     super::super::open_settings(&mut app, SettingsSection::Devices);
-    let (disabled, toggled) = relay_switch(&mut app);
-    assert!(!disabled, "the relay switch is enabled");
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
-    let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_NEW_TEAM), "{text}");
+    let hub = app.devices_hub();
+    assert_eq!(hub.rows.len(), 1, "{hub:?}");
+    assert_eq!(hub.rows[0].kind, DeviceKind::ThisMac);
+    assert_eq!(hub.rows[0].does, "This Mac");
+    assert!(!hub.rows[0].stop_here && !hub.rows[0].approve_here);
     assert!(
-        !text.contains(ADD_IPHONE),
-        "no iPhone before it is on: {text}"
+        hub.rows[0].remove.is_none(),
+        "this Mac is never removed here"
+    );
+    assert!(!hub.approvals);
+    assert_eq!(hub.problem, None);
+    let (text, _) = frames(&mut app, TALL);
+    for shown in [
+        EMPTY_TITLE,
+        EMPTY_MESSAGE,
+        ADD_DEVICE,
+        TRUST_LINE,
+        "This Mac",
+        PAIR_HERE,
+    ] {
+        assert!(text.contains(shown), "{shown}: {text}");
+    }
+    for gone in [
+        "Relay address",
+        "Team code",
+        "Send questions through the relay",
+        "Questions through the relay",
+        "Other Macs",
+        "Add an iPhone or a Mac…",
+        "Devices…",
+        "Allow the iPhone app on this network",
+    ] {
+        assert!(!text.contains(gone), "{gone}: {text}");
+    }
+    assert_eq!(
+        super::status_line(&app, SettingsSection::Devices),
+        "Only this Mac"
     );
 
-    // A lock leaves Settings, and a locked vault has no relay state to change.
+    // "Pair on this network" opens the listener group (L3).
+    app.ui.sheet = None;
+    let ctx = egui::Context::default();
+    let texts = frame(&ctx, &mut app, TALL, Vec::new());
+    let at = center_of(&texts, PAIR_HERE, TALL.x).expect("the L3 link");
+    click(&ctx, &mut app, TALL, at);
+    let texts = frame(&ctx, &mut app, TALL, Vec::new());
+    assert!(
+        texts
+            .iter()
+            .any(|(text, _)| text == "Allow the iPhone app on this network"),
+        "{texts:?}"
+    );
+
+    // A lock leaves Settings.
     app.owner_ui.session.lock().expect("lock");
-    assert_eq!(super::relay_questions_state(&app), None);
     frames(&mut app, TALL);
     assert!(app.place.is_credentials(), "a lock leaves Settings");
 }
 
-/// With relay sync, the switch is enabled and still off by default. On is a new channel
-/// that can approve runs: it opens the owner check for exactly the sync team, and nothing
-/// changes before it passes. Then the sync membership has the purpose `questions`, the
-/// vault has its question key, and this Mac is a trusted device. Off needs no check,
-/// takes the purpose away, and keeps relay sync.
+/// "Approve here…" of this Mac in a vault that syncs through the relay: a new channel
+/// that can approve runs, so it opens the owner check for exactly the sync team, and
+/// nothing changes before it passes. Then the sync membership has the purpose
+/// `questions`, the vault has its question key, and this Mac is a trusted device; its
+/// row offers "Stop approvals here", which needs no check and keeps relay sync.
 #[test]
-fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
+fn approve_here_needs_the_owner_check_and_stop_approvals_does_not() {
     use crate::relay::membership::{QuestionsAvailability, questions_availability};
-    // The device list of Devices goes to this relay on 127.0.0.1, never to the network.
+    // The device list goes to this relay on 127.0.0.1, never to the network.
     let relay = fake_relay::FakeRelay::start();
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
@@ -403,11 +415,12 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
             created_at: 0,
         })
         .expect("relay row");
-    let (disabled, toggled) = relay_switch(&mut app);
-    assert!(!disabled, "the relay switch is enabled");
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
-    let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_OFF), "{text}");
+    let hub = app.devices_hub();
+    assert!(
+        hub.rows[0].approve_here && !hub.rows[0].stop_here,
+        "{hub:?}"
+    );
+    assert!(!hub.approvals);
 
     let unchanged = |app: &DesktopApp| {
         let shared = app.owner_ui.session.shared_vault();
@@ -422,7 +435,7 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
         assert!(open.question_key().unwrap().is_none());
         assert!(open.trusted_devices().unwrap().is_empty());
     };
-    super::set_relay_questions(&mut app, true, None);
+    app.questions_turn_on(None);
     let request = app
         .owner
         .check
@@ -436,17 +449,6 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
     };
     assert_eq!(request.action(), expected);
     assert!(matches!(request, OwnerRequest::EnableRelayQuestions { .. }));
-    assert_eq!(
-        expected.reason(),
-        "send the questions of this vault through the relay"
-    );
-    assert!(
-        request
-            .describe()
-            .starts_with("Send the questions of this vault through the Apassy relay"),
-        "{}",
-        request.describe()
-    );
     unchanged(&app);
     assert_eq!(
         app.confirm_owner_now(OwnerCheck::passphrase(WRONG)),
@@ -464,15 +466,13 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
             OwnerCheck::passphrase(PASS),
         )
         .expect("proof");
-    super::set_relay_questions(&mut app, true, None);
+    app.questions_turn_on(None);
     app.finish_owner_check_with(other);
     unchanged(&app);
 
-    super::set_relay_questions(&mut app, true, None);
+    app.questions_turn_on(None);
     app.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
-    let (_, toggled) = relay_switch(&mut app);
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::True));
     {
         let guard = vault.lock().unwrap();
         let open = guard.as_ref().expect("open vault");
@@ -487,18 +487,14 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].sign_key, key.public_key());
     }
-    let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_ON), "{text}");
-    assert!(
-        text.contains("This Mac") && text.contains(ADD_IPHONE),
-        "{text}"
-    );
+    let hub = app.devices_hub();
+    assert!(hub.approvals);
+    assert_eq!(hub.rows.len(), 1, "this Mac is one row: {hub:?}");
+    assert!(hub.rows[0].stop_here && !hub.rows[0].approve_here);
 
-    // Off: stricter, no check.
-    super::set_relay_questions(&mut app, false, None);
+    // "Stop approvals here": stricter, no check.
+    app.questions_turn_off();
     assert!(app.owner.check.is_none(), "off needs no owner check");
-    let (_, toggled) = relay_switch(&mut app);
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
     let guard = vault.lock().unwrap();
     let open = guard.as_ref().expect("open vault");
     assert_eq!(
@@ -516,45 +512,121 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
     );
 }
 
-/// What Devices says of each device of the questions: its kind, how it answers, and the
-/// push state of an iPhone only when the relay tells it.
+/// One list: the trusted devices of the vault say how they approve, an iPhone paired on
+/// this Wi-Fi says "Approves on this Wi-Fi only", and each other device offers
+/// "Remove…". The status line counts them.
 #[test]
-fn device_rows_say_how_each_device_answers() {
-    use super::super::sync::questions::device_words;
-    use crate::vault::{TrustedDevice, TrustedDeviceKind};
-    let device = |kind, answer_key: Option<Vec<u8>>| TrustedDevice {
-        uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
-        name: "Synthetic device".to_owned(),
-        kind,
-        relay_devices: Default::default(),
-        sign_key: vec![4; 65],
-        answer_key,
-        created_at: 0,
-        updated_at: 0,
-        updated_by: String::new(),
+fn device_rows_say_what_each_device_does() {
+    use crate::vault::TrustedDeviceKind;
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let point = || {
+        crate::sync::DeviceKey::generate()
+            .expect("key")
+            .public_key()
+            .to_vec()
     };
-    let mac = device(TrustedDeviceKind::Mac, None);
-    assert_eq!(device_words(&mac, true, None), "This Mac");
+    let (mac, phone, waiting) = (point(), point(), point());
+    let answer = point();
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .register_trusted_device(
+                    "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+                    "Synthetic Mac mini",
+                    TrustedDeviceKind::Mac,
+                    &mac,
+                    None,
+                )
+                .expect("mac");
+            vault
+                .register_trusted_device(
+                    "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+                    "Synthetic iPhone",
+                    TrustedDeviceKind::Iphone,
+                    &phone,
+                    Some(&answer),
+                )
+                .expect("iphone");
+            vault
+                .register_trusted_device(
+                    "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+                    "Synthetic iPad",
+                    TrustedDeviceKind::Iphone,
+                    &waiting,
+                    None,
+                )
+                .expect("waiting iphone");
+        })
+        .expect("open vault");
+    let (request_key, approval_key) = (point(), point());
+    let device_id = "00112233445566778899aabbccddeeff";
+    let proof = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::PairCompanion {
+                device_id: device_id.to_owned(),
+                device_name: "Synthetic Wi-Fi iPhone".to_owned(),
+                request_key: request_key.clone(),
+                approval_key: approval_key.clone(),
+            },
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("proof");
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .add_companion_device(
+                    proof,
+                    device_id,
+                    "Synthetic Wi-Fi iPhone",
+                    &request_key,
+                    &approval_key,
+                )
+                .expect("paired")
+        })
+        .expect("open vault");
+    let hub = app.devices_hub();
+    let row = |name: &str| {
+        hub.rows
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("{name}: {hub:?}"))
+            .clone()
+    };
+    assert_eq!(hub.rows.len(), 5, "{hub:?}");
+    assert_eq!(hub.rows[0].kind, DeviceKind::ThisMac);
+    let mac = row("Synthetic Mac mini");
     assert_eq!(
-        device_words(&mac, false, None),
-        "Mac · answers after Touch ID"
+        (mac.kind, mac.does.as_str()),
+        (DeviceKind::Mac, "Approves with Touch ID")
     );
-    let phone = device(TrustedDeviceKind::Iphone, Some(vec![4; 65]));
+    assert!(matches!(mac.remove, Some(Removal::Trusted { .. })));
+    let phone = row("Synthetic iPhone");
     assert_eq!(
-        device_words(&phone, false, None),
-        "iPhone · answers with Face ID"
-    );
-    assert_eq!(
-        device_words(&phone, false, Some(true)),
-        "iPhone · answers with Face ID · Push on"
+        (phone.kind, phone.does.as_str()),
+        (DeviceKind::Iphone, "Approves with Face ID")
     );
     assert_eq!(
-        device_words(&phone, false, Some(false)),
-        "iPhone · answers with Face ID · Push off"
+        row("Synthetic iPad").does,
+        "Its Face ID key has not synced yet"
     );
-    let waiting = device(TrustedDeviceKind::Iphone, None);
+    let wifi = row("Synthetic Wi-Fi iPhone");
+    assert_eq!(wifi.does, WIFI_ONLY);
+    assert!(matches!(wifi.remove, Some(Removal::Wifi { .. })));
     assert_eq!(
-        device_words(&waiting, false, None),
-        "iPhone · its Face ID key has not synced yet"
+        super::status_line(&app, SettingsSection::Devices),
+        "5 devices"
     );
+
+    // "Remove…" of the Wi-Fi iPhone asks first; Cancel keeps it.
+    app.devices_ask_remove(wifi.remove.clone().expect("removal"), None);
+    assert!(matches!(
+        app.ui.sheet,
+        Some(super::Sheet::Devices(DevicesSheet::RemoveWifi { .. }))
+    ));
+    let (text, _) = frames(&mut app, DEFAULT);
+    assert!(text.contains("Remove “Synthetic Wi-Fi iPhone”?"), "{text}");
 }

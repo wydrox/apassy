@@ -192,17 +192,9 @@ pub(crate) enum SyncSheet {
     /// "Apassy relay": the relay address, the team code, and the name of this Mac; or a
     /// link from another Mac for a vault that is on the relay already.
     RelaySetup { id: String },
-    /// "Add a device…": the link for another Mac or an iPhone, and its safety words to
-    /// confirm.
-    AddMac { id: String },
-    /// "Devices…": the Macs of the relay team.
-    Devices { id: String },
     /// "Send questions through the relay" for a vault that does not sync through the
     /// relay: a notifications-only team with the relay address and a team code.
     QuestionsTeam { id: String },
-    /// "Add an iPhone…" of a notifications-only team: the link as a QR code, then the
-    /// safety words and the owner check, as "Add a device…".
-    AddIphone { id: String },
     /// "Remove…" of a device of the questions in Devices: its confirmation.
     RemoveQuestionsDevice { id: String, uuid: String },
 }
@@ -216,10 +208,7 @@ impl SyncSheet {
         | Self::ReplaceDamaged { id }
         | Self::UseRelayCopy { id }
         | Self::RelaySetup { id }
-        | Self::AddMac { id }
-        | Self::Devices { id }
         | Self::QuestionsTeam { id }
-        | Self::AddIphone { id }
         | Self::RemoveQuestionsDevice { id, .. }) = self;
         id
     }
@@ -1656,19 +1645,6 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             {
                                 sync_now = true;
                             }
-                            if on_relay && !removed {
-                                if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
-                                {
-                                    sheet = Some(SyncSheet::AddMac {
-                                        id: entry.id.clone(),
-                                    });
-                                }
-                                if kit::small_button(ui, "Devices…", Style::Bordered).clicked() {
-                                    sheet = Some(SyncSheet::Devices {
-                                        id: entry.id.clone(),
-                                    });
-                                }
-                            }
                         });
                     }
                 });
@@ -1735,10 +1711,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
     | SyncSheet::ReplaceDamaged { id }
     | SyncSheet::UseRelayCopy { id }
     | SyncSheet::RelaySetup { id }
-    | SyncSheet::AddMac { id }
-    | SyncSheet::Devices { id }
     | SyncSheet::QuestionsTeam { id }
-    | SyncSheet::AddIphone { id }
     | SyncSheet::RemoveQuestionsDevice { id, .. }) = sheet;
     let Some(entry) = app.vault_list.registry.get(id).cloned() else {
         close_sheet(app, ctx);
@@ -1754,13 +1727,10 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
         SyncSheet::ReplaceDamaged { .. } => replace_sheet(app, ctx, &entry),
         SyncSheet::UseRelayCopy { .. } => relay::use_copy_sheet(app, ctx, &entry),
         SyncSheet::RelaySetup { .. } => relay::setup_sheet(app, ctx, &entry),
-        SyncSheet::AddMac { .. } => relay::add_mac_sheet(app, ctx, &entry, false),
-        SyncSheet::AddIphone { .. } => relay::add_mac_sheet(app, ctx, &entry, true),
         SyncSheet::QuestionsTeam { .. } => questions::team_sheet(app, ctx, &entry),
         SyncSheet::RemoveQuestionsDevice { uuid, .. } => {
             questions::remove_device_sheet(app, ctx, &entry, uuid)
         }
-        SyncSheet::Devices { .. } => relay::devices_sheet(app, ctx, &entry),
     };
     if escape {
         app.relay_sheet_closed();

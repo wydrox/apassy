@@ -2849,6 +2849,9 @@ pub(crate) enum Icon {
     /// A laptop: Settings > Devices.
     #[cfg(feature = "vault")]
     Laptop,
+    /// An iPhone: a device in Settings > Devices.
+    #[cfg(feature = "vault")]
+    Phone,
     /// An arrow down in a circle: Settings > Updates.
     #[cfg(feature = "vault")]
     Download,
@@ -3094,6 +3097,16 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
                 StrokeKind::Middle,
             );
             line(&[(0.06, 0.8), (0.94, 0.8)]);
+        }
+        #[cfg(feature = "vault")]
+        Icon::Phone => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.28, 0.08), p(0.72, 0.92)),
+                size * 0.1,
+                stroke,
+                StrokeKind::Middle,
+            );
+            line(&[(0.43, 0.8), (0.57, 0.8)]);
         }
         #[cfg(feature = "vault")]
         Icon::Download => {

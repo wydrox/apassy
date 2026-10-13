@@ -1,6 +1,7 @@
-//! The first steps of a new vault (ADR 0026 §7): paste the first credential, and
-//! connect an agent. Each step reads its state from the vault, so a step shows done
-//! once it is true, and the steps go away when both are done. A vault from another Mac
+//! The first steps of a new vault (ADR 0026 §7): paste the first credential, connect an
+//! agent, and, as an optional third step, approve on your iPhone (flow spec finding 9).
+//! Each step reads its state from the vault, so a step shows done once it is true, and
+//! the steps go away when the first two are done. A vault from another Mac
 //! has its own panel (`agents::next_steps_panel`), so the steps wait until that closes.
 
 use eframe::egui;
@@ -8,6 +9,7 @@ use eframe::egui;
 use super::Sheet;
 use super::kit::{self, Font, Icon, Style, Tone};
 use crate::desktop::DesktopApp;
+use crate::vault::TrustedDeviceKind;
 
 /// What the vault already has.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,9 @@ pub(super) struct Progress {
     pub credential: bool,
     /// An agent is connected: a registered agent that is not disconnected.
     pub agent: bool,
+    /// A device that is not a Mac approves: an iPhone with its answer key in the vault,
+    /// or an iPhone paired on this Wi-Fi. Optional: it never keeps the steps.
+    pub device: bool,
 }
 
 impl Progress {
@@ -26,6 +31,19 @@ impl Progress {
             agent: session
                 .agents()
                 .is_ok_and(|agents| agents.iter().any(|agent| !agent.revoked)),
+            device: session
+                .companion_devices()
+                .is_ok_and(|devices| !devices.is_empty())
+                || session
+                    .with_vault(|vault| {
+                        vault.trusted_devices().is_ok_and(|devices| {
+                            devices.iter().any(|device| {
+                                device.kind == TrustedDeviceKind::Iphone
+                                    && device.answer_key.is_some()
+                            })
+                        })
+                    })
+                    .unwrap_or(false),
         }
     }
 
@@ -39,6 +57,7 @@ impl Progress {
 enum Go {
     Paste,
     Connect,
+    AddDevice,
 }
 
 /// Draw the steps when the vault needs them. Returns true when they showed. With no
@@ -86,9 +105,18 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
                 "Connect…",
                 Go::Connect,
             ),
+            (
+                progress.device,
+                "Approve on your iPhone",
+                "Optional. Each question also goes to your iPhone, and Face ID answers it.",
+                "Add a device…",
+                Go::AddDevice,
+            ),
         ];
-        // The first open step is the main action.
-        let next = rows.iter().position(|(done, ..)| !done);
+        // The first open step is the main action; the optional one never is.
+        let next = rows
+            .iter()
+            .position(|(done, .., go)| !done && *go != Go::AddDevice);
         for (index, (done, title, note, action, target)) in rows.into_iter().enumerate() {
             s.row(|ui| {
                 egui::Sides::new().shrink_left().show(
@@ -144,6 +172,7 @@ fn act(app: &mut DesktopApp, go: Go) {
     match go {
         Go::Paste => app.ui.sheet = Some(Sheet::NewCredential),
         Go::Connect => super::agent_onboarding::open(app),
+        Go::AddDevice => app.devices_add(None),
     }
 }
 
