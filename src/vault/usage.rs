@@ -172,8 +172,9 @@ impl InteractionKind {
     }
 }
 
-/// Printable text without control characters, cut at `max` bytes.
-fn clean(text: &str, max: usize) -> String {
+/// Printable text without control characters, cut at `max` bytes. The feed of the
+/// agents (`questions::feed`) cleans its text with it too.
+pub(crate) fn clean(text: &str, max: usize) -> String {
     let clean: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })

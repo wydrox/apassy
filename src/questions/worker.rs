@@ -1,6 +1,6 @@
 //! The asker (contract relay-questions-v1, section 12): the questions waiter of this Mac.
 //!
-//! Three threads, apart from the sync waiter:
+//! Three threads for the questions, apart from the sync waiter:
 //!
 //! - The poster watches the approval queue (a wake from the queue notifier, and every
 //!   [`QuestionsConfig::tick`]). When the open vault is unlocked and has a membership
@@ -20,6 +20,11 @@
 //!   questions of this Mac. [`QuestionsWorker::answering`] gives what it takes to answer
 //!   one from this Mac ([`RemoteAnswering::send`], signed with the relay key of this Mac,
 //!   an approving answer only with a fresh owner check).
+//!
+//! Two more threads carry the feed of the agents of this Mac for the iPhone (contract
+//! relay-feed-v1, `super::feed`): the publisher, which puts the sealed feed on the relay
+//! after a change and at the beat, and the action handler, which long-polls the
+//! removals of exceptions that an iPhone sends and applies the ones that pass.
 //!
 //! The local card and the local-network companion are unchanged: the card shows at once,
 //! and whichever answer the queue takes first counts. A lock drops the relay token and
@@ -43,6 +48,7 @@ use super::envelope::{
     AnswerBody, Card, CardError, Choice, RemoteEnvironment, Sealed, SettleBody, SettleOutcome,
     TO_APPROVERS, TO_MEMBER, VERSION, answer_aad, card_aad, new_qid, settle_aad,
 };
+use super::feed::FeedState;
 use crate::broker::SharedVault;
 use crate::broker::approvals::{
     ApprovalOutcome, ApprovalQueue, ApprovalRefusal, CheckMethod, OwnerAction, OwnerAuthError,
@@ -93,11 +99,11 @@ pub const TEAM_PRODUCTION: &str =
 /// hold the long poll is not asked in a loop.
 const LIST_AT_LEAST: Duration = Duration::from_secs(1);
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
@@ -112,6 +118,13 @@ pub struct QuestionsConfig {
     pub tick: Duration,
     /// The name of this Mac for its trusted device row.
     pub device_name: String,
+    /// Publish the feed of the agents for the iPhone and take its actions
+    /// (relay-feed-v1, "Show agents on the iPhone"). On by default.
+    pub feed: bool,
+    /// The shortest time between two feeds (relay-feed-v1 section 8): 10 s.
+    pub feed_every: Duration,
+    /// A new feed this often while nothing changes: 15 minutes.
+    pub feed_beat: Duration,
 }
 
 impl Default for QuestionsConfig {
@@ -120,6 +133,9 @@ impl Default for QuestionsConfig {
             question_wait: QUESTION_WAIT,
             tick: Duration::from_millis(250),
             device_name: crate::sync::device_name(),
+            feed: true,
+            feed_every: Duration::from_secs(10),
+            feed_beat: Duration::from_secs(15 * 60),
         }
     }
 }
@@ -176,6 +192,10 @@ pub struct QuestionsView {
     /// The relay answered `404` to the questions routes ([`UNSUPPORTED`]); the loops
     /// wait some minutes before they ask it again.
     pub unsupported: bool,
+    /// The `seq` of the last feed of the agents that the relay took (relay-feed-v1).
+    pub feed_seq: Option<u64>,
+    /// A problem of the feed for Settings > Devices, in words.
+    pub feed_problem: Option<String>,
 }
 
 /// A question of another device of the vault, opened and checked (section 13): it shows
@@ -282,13 +302,13 @@ impl RemoteAnswering {
 
 /// The session of the open vault: its relay client, its team, and this Mac.
 #[derive(Clone)]
-struct Active {
-    client: QuestionsClient,
-    team_id: String,
-    path: PathBuf,
-    epoch: [u8; 32],
+pub(super) struct Active {
+    pub(super) client: QuestionsClient,
+    pub(super) team_id: String,
+    pub(super) path: PathBuf,
+    pub(super) epoch: [u8; 32],
     /// The trusted device of this Mac.
-    me: TrustedDevice,
+    pub(super) me: TrustedDevice,
 }
 
 /// A waiting run that this Mac asks through the relay.
@@ -337,8 +357,8 @@ struct EnvironmentMark {
 }
 
 #[derive(Default)]
-struct State {
-    active: Option<Active>,
+pub(super) struct State {
+    pub(super) active: Option<Active>,
     checked_at: Option<Instant>,
     asked: BTreeMap<u64, Asked>,
     local_only: BTreeMap<u64, String>,
@@ -350,22 +370,30 @@ struct State {
     unsupported_logged: Option<String>,
 }
 
-struct Shared {
+pub(super) struct Shared {
     queue: Arc<ApprovalQueue>,
-    vault: SharedVault,
-    gate: OwnerGate,
-    config: QuestionsConfig,
-    stop: AtomicBool,
+    pub(super) vault: SharedVault,
+    pub(super) gate: OwnerGate,
+    pub(super) config: QuestionsConfig,
+    pub(super) stop: AtomicBool,
     /// Counts the wakes of the poster and the changes of the open questions.
     wakes: Mutex<u64>,
     woken: Condvar,
-    state: Mutex<State>,
+    pub(super) state: Mutex<State>,
     /// Ends the long poll of the reader: a new question, a question that ended, a lock.
     poll: Mutex<Option<Arc<Cancel>>>,
-    view: Mutex<QuestionsView>,
+    pub(super) view: Mutex<QuestionsView>,
     on_change: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The questions of the other devices.
     remote: Mutex<Remote>,
+    /// The feed of the agents of this Mac and its actions (relay-feed-v1).
+    pub(super) feed: Mutex<FeedState>,
+    /// Ends the long poll of the actions: a lock, a stop.
+    pub(super) feed_poll: Mutex<Option<Arc<Cancel>>>,
+    /// One feed goes to the relay at a time.
+    pub(super) publishing: Mutex<()>,
+    /// "Show agents on the iPhone" at run time ([`QuestionsWorker::set_feed`]).
+    pub(super) feed_on: AtomicBool,
 }
 
 /// The questions waiter of the app. It stops when dropped.
@@ -402,12 +430,18 @@ impl QuestionsWorker {
             view: Mutex::new(QuestionsView::default()),
             on_change: Mutex::new(None),
             remote: Mutex::new(Remote::default()),
+            feed: Mutex::new(FeedState::default()),
+            feed_poll: Mutex::new(None),
+            publishing: Mutex::new(()),
+            feed_on: AtomicBool::new(true),
         });
         let mut threads = Vec::new();
         for (name, body) in [
             ("apassy-questions-post", poster as fn(&Shared)),
             ("apassy-questions-read", reader as fn(&Shared)),
             ("apassy-questions-list", lister as fn(&Shared)),
+            ("apassy-feed-publish", feed_publisher as fn(&Shared)),
+            ("apassy-feed-actions", feed_actions as fn(&Shared)),
         ] {
             let worker = Arc::clone(&shared);
             if let Ok(handle) = std::thread::Builder::new()
@@ -451,6 +485,18 @@ impl QuestionsWorker {
         self.shared.forget();
     }
 
+    /// "Show agents on the iPhone" (relay-feed-v1 section 8): off removes the feed of
+    /// this Mac from the relay (`DELETE /v1/feed`) and stops the actions; on publishes
+    /// again. It calls the relay: run it on a thread of its own.
+    pub fn set_feed(&self, on: bool) {
+        let was = self.shared.feed_on.swap(on, Ordering::SeqCst);
+        if was && !on {
+            self.shared.end_feed_poll();
+            self.shared.feed_off();
+        }
+        self.shared.wake();
+    }
+
     /// What it takes to answer the remote question `id` of the view from this Mac: the
     /// relay client of the session, this Mac's trusted device, the question key, and the
     /// vault session. It reads the vault for a moment, with no network; the answer goes
@@ -484,6 +530,7 @@ impl QuestionsWorker {
     pub fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
         self.shared.forget();
+        self.shared.end_feed_poll();
         self.shared.wake();
         for handle in self.threads.drain(..) {
             let _ = handle.join();
@@ -532,7 +579,7 @@ impl Shared {
     }
 
     /// Sleep up to `wait` or until a wake. False when the worker stops.
-    fn sleep(&self, wait: Duration) -> bool {
+    pub(super) fn sleep(&self, wait: Duration) -> bool {
         let wakes = lock(&self.wakes);
         let seen = *wakes;
         let _ = self
@@ -544,7 +591,7 @@ impl Shared {
         !self.stop.load(Ordering::SeqCst)
     }
 
-    fn changed(&self) {
+    pub(super) fn changed(&self) {
         if let Some(on_change) = lock(&self.on_change).as_ref() {
             on_change();
         }
@@ -572,6 +619,7 @@ impl Shared {
             active.client.close();
         }
         self.end_poll();
+        self.end_feed_poll();
         self.forget_remote();
         let mut view = lock(&self.view);
         if view.on || !view.posted.is_empty() || !view.local_only.is_empty() {
@@ -585,7 +633,7 @@ impl Shared {
     }
 
     /// The unlocked open vault, when it is the vault of `active`.
-    fn vault_of<'a>(
+    pub(super) fn vault_of<'a>(
         guard: &'a mut MutexGuard<'_, Option<Vault>>,
         active: &Active,
     ) -> Option<&'a mut Vault> {
@@ -1871,5 +1919,17 @@ fn reader(shared: &Shared) {
 fn lister(shared: &Shared) {
     while !shared.stop.load(Ordering::SeqCst) {
         shared.list_step();
+    }
+}
+
+fn feed_publisher(shared: &Shared) {
+    while !shared.stop.load(Ordering::SeqCst) {
+        shared.feed_step();
+    }
+}
+
+fn feed_actions(shared: &Shared) {
+    while !shared.stop.load(Ordering::SeqCst) {
+        shared.actions_step();
     }
 }

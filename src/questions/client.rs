@@ -355,6 +355,216 @@ impl QuestionsClient {
     }
 }
 
+// ---- The feed of the agents (contract relay-feed-v1, section 10). ----
+
+/// The answer of `PUT /v1/feed`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedReceipt {
+    pub device_id: u64,
+    pub seq: u64,
+    pub change: u64,
+    pub updated_at: u64,
+}
+
+/// One feed of `GET /v1/feed`, as the relay keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedRecord {
+    pub device_id: u64,
+    /// The relay's name of the device, for a log only.
+    #[serde(default)]
+    pub device_name: String,
+    pub seq: u64,
+    pub change: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub updated_at: u64,
+}
+
+impl FeedRecord {
+    pub fn sealed(&self) -> Sealed {
+        Sealed {
+            key_id: self.key_id.clone(),
+            nonce: self.nonce.clone(),
+            ciphertext: self.ciphertext.clone(),
+        }
+    }
+}
+
+/// The answer of `GET /v1/feed`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedList {
+    /// The team's current feed counter.
+    pub change: u64,
+    #[serde(default)]
+    pub more: bool,
+    /// Every device of the member that has a feed now.
+    #[serde(default)]
+    pub present: Vec<u64>,
+    pub feeds: Vec<FeedRecord>,
+}
+
+/// The answer of `POST /v1/feed/actions`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedActionPosted {
+    pub action_id: String,
+    pub seq: u64,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// One open action of `GET /v1/feed/actions`, with the sender that the relay stamped.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedActionRecord {
+    pub action_id: String,
+    pub seq: u64,
+    pub from_device_id: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+impl FeedActionRecord {
+    pub fn sealed(&self) -> Sealed {
+        Sealed {
+            key_id: self.key_id.clone(),
+            nonce: self.nonce.clone(),
+            ciphertext: self.ciphertext.clone(),
+        }
+    }
+}
+
+/// The answer of `GET /v1/feed/actions`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedActionList {
+    /// The team's current action sequence.
+    pub seq: u64,
+    pub actions: Vec<FeedActionRecord>,
+}
+
+/// The answer of `GET /v1/feed/actions/{action_id}`: the sender only.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeedActionStatus {
+    pub action_id: String,
+    pub to_device: u64,
+    /// `open`, `settled`, or `expired`.
+    pub state: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub settled_at: Option<u64>,
+    #[serde(default)]
+    pub settle: Option<WireSealed>,
+}
+
+impl QuestionsClient {
+    /// `PUT /v1/feed` with the sealed feed `seq` of this device.
+    pub fn put_feed(&self, seq: u64, feed: &Sealed) -> Result<FeedReceipt, QuestionsError> {
+        let body = serde_json::json!({
+            "v": VERSION,
+            "seq": seq,
+            "key_id": feed.key_id,
+            "nonce": feed.nonce,
+            "ciphertext": feed.ciphertext,
+        });
+        self.call("PUT", "/v1/feed", Some(&body), Duration::ZERO, None)
+    }
+
+    /// `GET /v1/feed?since=N&wait=S`: the feeds of the member after the change `since`.
+    pub fn feeds(&self, since: u64, wait: Duration) -> Result<FeedList, QuestionsError> {
+        let seconds = wait.min(MAX_WAIT).as_secs();
+        let path = format!("/v1/feed?since={since}&wait={seconds}");
+        self.call("GET", &path, None, Duration::from_secs(seconds), None)
+    }
+
+    /// `DELETE /v1/feed`: the feed of this device goes.
+    pub fn delete_feed(&self) -> Result<(), QuestionsError> {
+        self.call::<serde::de::IgnoredAny>("DELETE", "/v1/feed", None, Duration::ZERO, None)
+            .map(|_| ())
+    }
+
+    /// `POST /v1/feed/actions`: a sealed action to the device `to_device`.
+    pub fn post_feed_action(
+        &self,
+        action_id: &str,
+        to_device: u64,
+        action: &Sealed,
+    ) -> Result<FeedActionPosted, QuestionsError> {
+        feed_action_path(action_id, "")?;
+        let body = serde_json::json!({
+            "v": VERSION,
+            "action_id": action_id,
+            "to_device": to_device,
+            "key_id": action.key_id,
+            "nonce": action.nonce,
+            "ciphertext": action.ciphertext,
+        });
+        self.call(
+            "POST",
+            "/v1/feed/actions",
+            Some(&body),
+            Duration::ZERO,
+            None,
+        )
+    }
+
+    /// `GET /v1/feed/actions?after=N&wait=S`: the open actions to this device.
+    pub fn feed_actions(
+        &self,
+        after: u64,
+        wait: Duration,
+    ) -> Result<FeedActionList, QuestionsError> {
+        self.feed_actions_with(after, wait, None)
+    }
+
+    /// [`Self::feed_actions`] that `cancel` ends.
+    pub(crate) fn feed_actions_with(
+        &self,
+        after: u64,
+        wait: Duration,
+        cancel: Option<&Cancel>,
+    ) -> Result<FeedActionList, QuestionsError> {
+        let seconds = wait.min(MAX_WAIT).as_secs();
+        let path = format!("/v1/feed/actions?after={after}&wait={seconds}");
+        self.call("GET", &path, None, Duration::from_secs(seconds), cancel)
+    }
+
+    /// `POST /v1/feed/actions/{action_id}/settle`: the target only. The same body again
+    /// answers the same.
+    pub fn settle_feed_action(
+        &self,
+        action_id: &str,
+        outcome: &str,
+        settle: &Sealed,
+    ) -> Result<(), QuestionsError> {
+        let path = feed_action_path(action_id, "/settle")?;
+        let body = serde_json::json!({
+            "v": VERSION,
+            "outcome": outcome,
+            "key_id": settle.key_id,
+            "nonce": settle.nonce,
+            "ciphertext": settle.ciphertext,
+        });
+        self.call::<serde::de::IgnoredAny>("POST", &path, Some(&body), Duration::ZERO, None)
+            .map(|_| ())
+    }
+
+    /// `GET /v1/feed/actions/{action_id}?wait=S`: the sender only.
+    pub fn feed_action_status(
+        &self,
+        action_id: &str,
+        wait: Duration,
+    ) -> Result<FeedActionStatus, QuestionsError> {
+        let seconds = wait.min(MAX_WAIT).as_secs();
+        let path = format!("{}?wait={seconds}", feed_action_path(action_id, "")?);
+        self.call("GET", &path, None, Duration::from_secs(seconds), None)
+    }
+}
+
 /// A live device of the questions team (`GET /v1/devices`), with the push state when the
 /// relay tells it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -519,4 +729,14 @@ fn question_path(qid: &str, part: &str) -> Result<String, QuestionsError> {
         )));
     }
     Ok(format!("/v1/questions/{qid}/{part}"))
+}
+
+/// `/v1/feed/actions/{action_id}{rest}` for an `action_id` of the contract form.
+fn feed_action_path(action_id: &str, rest: &str) -> Result<String, QuestionsError> {
+    if !valid_qid(action_id) {
+        return Err(QuestionsError::Local(SyncError::Relay(
+            crate::sync::RelayRefusal::InvalidRequest,
+        )));
+    }
+    Ok(format!("/v1/feed/actions/{action_id}{rest}"))
 }
