@@ -487,7 +487,7 @@ A feed travels in the questions team of its vault, so the feeds use the question
 | --- | --- | --- |
 | `feed_list` | | `{"vaults": [FeedVault]}` |
 | `feed_wait` | `timeout` (1 to 25 s) | `{"changed": bool}` |
-| `feed_action_string` | `vault_id`, `mac_device`, `agent`, `item`, `kind`, `created_at`, `action_id`?, `time`? | `Prepared` |
+| `feed_action_string` | `vault_id`, `mac_device`, `agent`, `item`, `kind`, `created_at`, `feed_seq`, `action_id`?, `time`? | `Prepared` |
 | `feed_action` | the same, `action_id`, `time`, `signature`? | `{"action_id": "…", "seq": n\|null, "created_at": n\|null, "expires_at": n\|null}` |
 | `feed_action_wait` | `action_id`, `vault_id`?, `timeout`? (0 to 25 s, default 0) | `Outcome` |
 
@@ -502,7 +502,7 @@ A feed travels in the questions team of its vault, so the feeds use the question
    "macs": [
      {"device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", "relay_device_id": 2, "name": "MacBook Pro",
       "seq": 1790000040, "generated_at": 1790000040, "stale": false, "truncated": false,
-      "problem": null, "can_act": true, "week": {"by_you": 3, "automatic": 128},
+      "problem": null, "can_act": true, "checks_names": true, "week": {"by_you": 3, "automatic": 128},
       "agents": [
         {"id": "4", "name": "Claude Code", "host": "claude", "where": "mac", "revoked": false,
          "token_expires_at": 1797776000, "last_use_at": 1790000010, "uses_this_week": 12,
@@ -530,7 +530,7 @@ A feed travels in the questions team of its vault, so the feeds use the question
 
 **The high-water mark.** The core keeps the highest `seq` accepted of each Mac, by team and relay device id, in `feed-seq.json` in the data folder (`{"version": 1, "teams": {"t_7k2m5q4x3c": {"2": 1790000040}}}`, written as `phone.json` is). It holds no secret and stays after a lock and a restart, so a relay cannot bring back an older feed. A feed with a lower `seq` is ignored; a feed with the same `seq` shows only when this process does not show that Mac (after a lock or a restart: the AAD binds the `seq`, so it is the same feed).
 
-**The Macs that check the names** (added 2026-10-14, relay-feed-v1 sections 7.1 and 9.3). A feed whose plaintext ends in one line feed after the JSON object is of a Mac that checks the names of an action. When the core accepts such a feed, it adds the relay device id to `names` in the same file (`{"version": 1, "teams": {…}, "names": {"t_7k2m5q4x3c": [2]}}`; absent while empty, and the core of 0.5.2 ignores it) and sends that Mac v2 actions from then on, also when a later feed lacks the mark: a feed that a holder of the question key made cannot bring back actions without the names to a Mac that this iPhone saw check them. A missing or damaged file is no mark, as for the `seq`.
+**The Macs that check the names** (added 2026-10-14, relay-feed-v1 section 7.1). A feed whose plaintext ends in one line feed after the JSON object is of a Mac that checks the names of an action: `checks_names` of the Mac in `feed_list` says whether its last feed did. It is a hint for the screen only: the core keeps no memory of it and signs the names for every Mac. A Mac with `checks_names: false` runs an older Apassy (0.5.2), which refuses every action of this iPhone: the app offers no removal of `never` or `always_ask` there and says "Update Apassy on <Mac> to remove this from the iPhone."; an `only` removal may still go, and the Mac's answer `refused` with the reason "it has a bad form" shows the same text. `feed-seq.json` holds the `seq` marks only (a key it does not know, such as `names` of an earlier build, is ignored).
 
 **`feed_wait {timeout}`** runs one long poll of `GET /v1/feed` for each context at the same time and returns as soon as one brings news (a new feed, a removed one, a new problem); that ends the others. `changed: false` after the timeout. A `lock` or a `suspend` ends them all with `locked`. The app calls it only while the Agents tab or an agent page is on the screen, and `feed_list` after `changed: true`.
 
@@ -538,18 +538,21 @@ A feed travels in the questions team of its vault, so the feeds use the question
 
 ```json
 {"op": "feed_action_string", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
- "agent": "4", "item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "kind": "never", "created_at": 1789990000}
+ "agent": "4", "item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "kind": "never", "created_at": 1789990000,
+ "feed_seq": 1790000040}
 ```
 
 ```json
 {"vault_id": "4f1c0a2b-…", "team_id": "t_7k2m5q4x3c", "action_id": "sLGys7S1tre4ubq7vL2-vw",
  "time": 1790000060, "feed_seq": 1790000040,
- "action_string": "apassy-feed-action-v1\n6f1c0e2a-…\n0b7e5c3a-…\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060",
- "needs_face_id": true, "face_id_reason": "remove an exception of agent \"Claude Code\""}
+ "action_string": "apassy-feed-action-v2\n6f1c0e2a-…\n0b7e5c3a-…\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060\nnames:8ef3d412…",
+ "needs_face_id": true, "face_id_reason": "remove an exception of agent \"Claude Code\"",
+ "agent_name": "Claude Code", "credential_name": "Shop database", "mac_name": "MacBook Pro"}
 ```
 
 - `mac_device` is the `device` of the Mac in `feed_list`; `agent`, `item`, `kind`, and `created_at` are those of the exception in the list. `kind` is `never`, `always_ask`, or `only`. The core finds the exception in the last good feed of that Mac (it reads the relay once when it has none): an exception, an agent, or a Mac that is not there is `not_found` ("This list of the Mac changed. Look at it again."); a disconnected agent is `invalid_input`. The string has the device UUID of this iPhone's row (`by`), the Mac's UUID (`to`), the team, the `action_id`, the exception, the `seq` of that feed (`feed_seq`), and `time`.
-- **v1 or v2.** To a Mac that checks the names (its feed has the mark, now or before: "The Macs that check the names" above) the string is of v2: the first line is `apassy-feed-action-v2` and a ninth line `names:<64 lowercase hex>` follows, the SHA-256 of the three names that `feed_list` shows for this exception, joined with one zero byte: the agent's `name`; the credential, which is `title` when it is not null or empty, else `item_title`; and the Mac's `name`. These are the values of `feed_list` as they are (control and format characters already `?`), without the words the app puts around them ("not on this iPhone", "A credential"). To any other Mac it is the v1 string of eight lines. The app changes nothing: it signs `action_string` as it is, whichever version. The Mac rebuilds the names from its own rows and settles an action with other names `stale` (relay-feed-v1 section 9.5 step 7), so a feed with false names on real ids removes nothing.
+- **The names (v2).** The string is always of v2, for every kind and every Mac: the first line is `apassy-feed-action-v2` and a ninth line `names:<64 lowercase hex>` follows, the SHA-256 of the three names that `feed_list` shows for this exception, joined with one zero byte: the agent's `name`; the credential, which is `title` when it is not null or empty, else `item_title`; and the Mac's `name`. These are the values of `feed_list` as they are (control and format characters already `?`), without the words the app puts around them ("not on this iPhone", "A credential"). The answer returns them as `agent_name`, `credential_name`, and `mac_name`. The Mac rebuilds the names from its own rows and settles an action with other names `stale` (relay-feed-v1 section 9.5 steps 8a and 10), so a feed with false names on real ids does not count. The digest binds the labels to the Mac's rows as they are then: a holder of the vault who renames the item or the agent through sync can still mislead, because the vault is the trust root.
+- **The list that the owner confirmed.** `feed_seq` is the `seq` of the Mac in the `feed_list` whose list the confirmation showed. When the core shows another feed of that Mac now (one landed while the confirmation was up: a relay can swap one in), or `feed_seq` is missing, the answer is `not_found` ("The list on <Mac> changed. Look at it again."). The app keeps one snapshot of the exception, the agent, the Mac's name, and the `seq` when the owner taps "Remove", builds the confirmation from it only, sends its `feed_seq`, and sends nothing when `agent_name`, `credential_name`, or `mac_name` is not, byte for byte, the name its confirmation showed (the same text).
 - `action_id` is 16 random bytes of the core, b64u (22 characters), unless the request gives one (a retry); `time` is now unless the request gives one. The app keeps both for `feed_action`.
 - The core keeps the prepared action by `action_id` in the context of the vault (the string, its `feed_seq`, the target, and the answer key of the row then; at most 64; a `lock` drops them). The same `action_id` and `time` for the same exception answer the kept string again.
 - A Mac with `can_act: false` is refused (`invalid_input`, "Select this vault on this iPhone to act on the agents of its Macs.").
@@ -561,7 +564,7 @@ A feed travels in the questions team of its vault, so the feeds use the question
 
 ```json
 {"op": "feed_action", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-…", "agent": "4",
- "item": "3c9e1f7a…", "kind": "never", "created_at": 1789990000,
+ "item": "3c9e1f7a…", "kind": "never", "created_at": 1789990000, "feed_seq": 1790000040,
  "action_id": "sLGys7S1tre4ubq7vL2-vw", "time": 1790000060, "signature": "MEUCIQ…"}
 ```
 
@@ -569,10 +572,10 @@ A feed travels in the questions team of its vault, so the feeds use the question
 {"action_id": "sLGys7S1tre4ubq7vL2-vw", "seq": 9, "created_at": 1790000060, "expires_at": 1790000360}
 ```
 
-- The core sends the action that `feed_action_string` kept for this `action_id`, with its exact string and its `feed_seq`: a newer feed of the Mac that came during Face ID changes nothing (the Mac takes any `feed_seq` up to its last one, relay-feed-v1 section 9.5). An `action_id` it did not prepare (another session, after a lock) is `stale_action`; parameters other than the prepared ones are `invalid_input`. `time` more than 55 s old is `stale_action` (do it again, with Face ID again); more than 60 s ahead is `invalid_input`.
+- The core sends the action that `feed_action_string` kept for this `action_id`, with its exact string and its `feed_seq`: a newer feed of the Mac that came during Face ID changes nothing (the Mac takes any `feed_seq` up to its last one, relay-feed-v1 section 9.5). An `action_id` it did not prepare (another session, after a lock) is `stale_action`; parameters other than the prepared ones (`feed_seq` included) are `invalid_input`. `time` more than 55 s old is `stale_action` (do it again, with Face ID again); more than 60 s ahead is `invalid_input`.
 - It reads the relay once (no long poll; a failure keeps what it holds) and checks the newest feed of that Mac: the Mac is still a publisher of the vault, the agent is not disconnected (`invalid_input`), and the exception is still there and not hidden by an applied removal; else `not_found`, "The list on <Mac> changed. Try again.". A stale newest feed (24 hours) is `stale_feed`.
 - For `never` and `always_ask`, `signature` must verify with the answer key of this iPhone's row over the kept string: `invalid_input` without it or when it does not verify with an unchanged key ("Face ID did not sign this action, so nothing was sent. Try again."); `not_registered` only for a real change: the row has no answer key now, or another one than when the string was made. For `only`, `signature` must be absent (`invalid_input`); the core signs with the relay key, which must be the row's `sign_key`.
-- The core seals the plaintext of relay-feed-v1 section 9.2 (fields in the contract's order; `v` 2 with `names` before `signature` for a v2 string, `v` 1 without `names` for a v1 string) with the question key, a new random nonce, and the AAD `action` with this iPhone's device number as the sender and the Mac's `relay_device_id` as the target, and posts `POST /v1/feed/actions`. A retry after a network error sends the same `action_id`, `time`, and `signature` in a new envelope; a relay that has the action already answers `409 conflict`, and the core answers with `seq`, `created_at`, and `expires_at` null.
+- The core seals the plaintext of relay-feed-v1 section 9.2 (fields in the contract's order; `v` 2 with `names` before `signature`) with the question key, a new random nonce, and the AAD `action` with this iPhone's device number as the sender and the Mac's `relay_device_id` as the target, and posts `POST /v1/feed/actions`. A retry after a network error sends the same `action_id`, `time`, and `signature` in a new envelope; a relay that has the action already answers `409 conflict`, and the core answers with `seq`, `created_at`, and `expires_at` null.
 - Relay errors: `not_routed` (`403 not_routed`), `not_found` (`404`: the Mac has no feed on the relay now, it may be locked), `too_many_actions` (`403 too_many_actions`), `too_large`, `removed`, `rate_limited`, `relay_unreachable`.
 - The relay taking the action does not mean that it counted: the settle says that.
 
