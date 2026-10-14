@@ -517,7 +517,7 @@ The Worker, about 40 lines:
 - No logging of URLs (the path holds session keys). `observability.enabled: false`.
 - `/internal` and every path under `/internal/` are handled by the Worker itself (`apns.ts`, section 25.6) and never forwarded.
 - Per-IP limits (Workers Rate Limiting, keyed by `cf-connecting-ip`, fail open when the binding is missing or fails; over the limit: 429 `rate_limited` with `Retry-After: 60`, and the relay never sees the request): `CREATE_LIMITER` (10 a minute) for `POST /v1/join`, `/v1/teams`, `/v1/devices/link`, and `/v1/devices/link/cancel`; `AUTH_LIMITER` (60 a minute) for `POST /v1/auth/challenge` and `/v1/auth/token`; `SYNC_LIMITER` (60 a minute) for `PUT /v1/sync/snapshot`; `CONNECT_LIMITER` (1 a minute, keyed by the IPv4 address or the IPv6 /64) for `POST /v1/connect` (section 26.4).
-- Body length (24.5, 24.10): tiny_http reads the rest of a declared body after any early answer, on any path. So before the limiter and the relay, the Worker checks the `Content-Length` of every request other than GET and HEAD, by its exact method and path: `PUT /v1/sync/snapshot` up to 64 MiB plus 64 KiB (`MAX_SNAPSHOT_LENGTH`); a path under `/p/` up to 8 MiB plus 64 KiB (`MAX_PROXY_LENGTH`, the proxy's `MAX_REQUEST_BODY` plus the margin); every other path, including `PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and paths the relay does not route, up to 64 KiB plus 64 KiB (`MAX_JSON_LENGTH`). Above it: 413 `payload_too_large`. A `Content-Length` that is not 1 to 20 digits: 400 `invalid_request`. The push must also have a `Content-Length` and no `Transfer-Encoding` (else 400). Another request without `Content-Length` passes: it has no body or a chunked one, and tiny_http does not read the rest of a chunked body after an early answer, so the relay reads at most its own cap. The relay keeps its own checks (24.3, 12).
+- Body length (24.5, 24.10): tiny_http reads the rest of a declared body after any early answer, on any path. So before the limiter and the relay, the Worker checks the `Content-Length` of every request other than GET and HEAD, by its exact method and path: `PUT /v1/sync/snapshot` up to 64 MiB plus 64 KiB (`MAX_SNAPSHOT_LENGTH`); `PUT /v1/feed` up to 352 KiB (`MAX_FEED_LENGTH`, the relay's own limit, section 27.11), with a `Content-Length` and no `Transfer-Encoding` as a push; a path under `/p/` up to 8 MiB plus 64 KiB (`MAX_PROXY_LENGTH`, the proxy's `MAX_REQUEST_BODY` plus the margin); every other path, including `PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and paths the relay does not route, up to 64 KiB plus 64 KiB (`MAX_JSON_LENGTH`). Above it: 413 `payload_too_large`. A `Content-Length` that is not 1 to 20 digits: 400 `invalid_request`. The push must also have a `Content-Length` and no `Transfer-Encoding` (else 400). Another request without `Content-Length` passes: it has no body or a chunked one, and tiny_http does not read the rest of a chunked body after an early answer, so the relay reads at most its own cap. The relay keeps its own checks (24.3, 12).
 
 `wrangler.jsonc`:
 
@@ -1118,7 +1118,7 @@ New actions, all without the head text, the signature, or any snapshot byte: `sy
 
 ### 25.2 Schema version 5 (team file)
 
-`Store::open_team` migrates a version 4 file to version 5 with the copy rule of 23.2 and 24.2: copy to `<file>.pre-v5` (mode 0600, written as `.pre-v5.tmp`, synced, renamed; refuse to migrate when the copy cannot be made; keep it, the version 4 image refuses version 5), then in one `BEGIN IMMEDIATE` transaction add the column, create the tables, and set `PRAGMA user_version = 5`. The migration is additive: no table is rebuilt, and the sync tables and rows are untouched. A version 3 file goes through 4 to 5 in one start, with both copies. A new team file is made at version 5. Version 1 and versions above 5 are refused. `remove_team_file` also removes `.pre-v5` and `.pre-v5.tmp`.
+`Store::open_team` migrates a version 4 file to version 5 with the copy rule of 23.2 and 24.2: copy to `<file>.pre-v5` (mode 0600, written as `.pre-v5.tmp`, synced, renamed; refuse to migrate when the copy cannot be made; keep it, the version 4 image refuses version 5), then in one `BEGIN IMMEDIATE` transaction add the column, create the tables, and set `PRAGMA user_version = 5`. The migration is additive: no table is rebuilt, and the sync tables and rows are untouched. A version 3 file goes through 4 to 5 in one start, with both copies. A new team file was made at version 5 until section 27 (now version 6, 27.2). Version 1 and versions above the current one are refused. `remove_team_file` also removes `.pre-v5` and `.pre-v5.tmp`.
 
 ```sql
 ALTER TABLE team ADD COLUMN question_seq INTEGER NOT NULL DEFAULT 0;
@@ -1282,7 +1282,7 @@ New actions, with device ids and counts only: no `qid`, no `key_id`, no nonce, n
 - The question lane: with `max_active` 2 and two question polls held, `GET /v1/me` still answers 200 and a third poll is answered at once; a version that counts question polls in `max_active` fails this test.
 - Push: with a mock Worker, a post sends one call per environment with the tokens of the routing set only (not the asker's, not another member's, not failed ones), the push secret, the constant collapse id, and `expires_at`; a 410 result marks the token failed and the next post skips it; `PUT` clears it; revoking a device or a member removes its token; a Worker that does not answer delays no post. Without push config, `PUT /v1/push/token` is 409 and nothing is sent. Config: all three values or none.
 - The Worker: `/internal/push` without the secret, with a wrong one, with another method, `/internal/x`, and `/internal/push/` are 404 with the same body and never reach the relay; a valid call with a mock `fetch` sends one APNs request per token with the headers and the payload above, to the sandbox host for `development`; the JWT has `kid`, `iss`, `iat`, verifies with the public key of a test key, is reused within 50 minutes and renewed after; 410 and `BadDeviceToken` come back in the results; malformed bodies are 400, large ones 413, a missing APNs config 503.
-- Migration: a version 4 file opens as version 5 with `.pre-v5` next to it; a failed copy leaves version 4 without the new tables; the sync tables and rows are untouched; version 6 is refused.
+- Migration: a version 4 file opens as version 5 with `.pre-v5` next to it; a failed copy leaves version 4 without the new tables; the sync tables and rows are untouched; a version above the current one (now 7, 27.2) is refused.
 - Separation: the access token of team A gets nothing of team B's questions and 404 for its `qid` on every question route; the same `qid` is free in another team.
 - No audit row holds a `qid`, a `key_id`, a nonce, a ciphertext, a push token, the bundle id, or the push secret.
 
@@ -1399,6 +1399,7 @@ The bindings count only per 10 or 60 seconds, so a daily limit cannot be set at 
 | `agents` | 0 | 100 |
 | `sync_bytes` | 0 | 67108864 |
 | `question_bytes` | 2097152 (2 MiB) | 8388608 |
+| `feed_bytes` | 1048576 (1 MiB, section 27; not stored, 27.8) | 4194304 |
 | every other field | the default | |
 
 - `members` 1: `POST /v1/invites` is 403 `team_limit` (no join could use the invite), and so is a join of an invite made before. Devices of the owner come by device links with safety words (section 23.5), up to 10.
@@ -1410,7 +1411,7 @@ The bindings count only per 10 or 60 seconds, so a daily limit cannot be set at 
 
 **Rows written only on a change.** `POST /v1/sync/receipt` writes `sync_received` only when the device's version changes, and `PUT /v1/push/token` writes `push_token_set` only when the token, the environment, or the bundle id changes; the same call again moves only the row's time. An expired or refused device link stays 7 days (a sign-in of its key reads `join_refused`), and at most 100 of them stay in a team; then the maintenance pass deletes the row. These hold for every team.
 
-**The file cap.** A Connect team's file has `PRAGMA max_page_count` set from its limits (`TeamLimits::file_bytes`): `question_bytes` + 8 MiB, plus 16 KiB for each item and 1 MiB for each member beyond the first that a plan gives it (10 MiB, 2560 pages, for the preset). It is set at each open and at each `admin limits`. A write past it is refused by SQLite and answered 403 `team_limit` ("The team's storage limit is reached."); the transaction rolls back. An operator team has no cap: the operator made it with a code and watches it.
+**The file cap.** A Connect team's file has `PRAGMA max_page_count` set from its limits (`TeamLimits::file_bytes`): `question_bytes` + `feed_bytes` (section 27) + 8 MiB, plus 16 KiB for each item and 1 MiB for each member beyond the first that a plan gives it (11 MiB, 2816 pages, for the preset; 10 MiB before section 27). It is set at each open and at each `admin limits`. A write past it is refused by SQLite and answered 403 `team_limit` ("The team's storage limit is reached."); the transaction rolls back. An operator team has no cap: the operator made it with a code and watches it.
 
 No audit row is ever deleted to stay under the cap (owner decision, 2026-10-13): a Connect team at its cap gets 403 `team_limit` for every write that needs a new page, including the hourly `device_signed_in` row of a sign-in, until the operator raises its limits (`admin limits --question-bytes`, which raises the cap byte for byte) or deletes the team. The maintenance pass deletes old answers, cards, and questions (section 25.8) in a transaction of its own that writes no row, before the transaction that writes the `question_expired` rows, so a full team still frees those pages. The operator sees it:
 
@@ -1425,7 +1426,7 @@ No audit row is ever deleted to stay under the cap (owner decision, 2026-10-13):
 
 **The request rate.** A Connect team makes at most 300 authenticated requests a minute (fixed windows of the UTC minute) for each member its limits allow; over it 429 `rate_limited` with `Retry-After` the seconds to the next minute, and one `limit_reached {limit: "requests_per_minute"}` row at most every ten seconds. The count is in memory. Operator teams have no such rate. The sign-in routes (section 23) are not counted: they name a team in their body and have no token.
 
-**Long polls.** All Connect teams together hold at most `Limits::connect_long_polls` long polls at once, in any lane: `GET /v1/questions`, `GET /v1/questions/{qid}/answers`, `GET /v1/sync/head`, `GET /v1/host/requests`, and `GET /v1/runs/{id}`. It is `APASSY_RELAY_CONNECT_LONG_POLLS` (section 6), default 96: the 128 threads of the question lane less one team's share of 32, so an operator team always finds its share of the lane, and well under the 224 threads of the member lane that are not the reserve. A Connect team's question polls also take at most 2 of the question lane (`connect::TEAM_QUESTION_POLLS`: its Mac and one other device; section 25.5), not 32. A poll over a bound is answered at once, as with `wait=0`. So Connect teams can fill neither the member lane (256 threads) nor the question lane (128).
+**Long polls.** All Connect teams together hold at most `Limits::connect_long_polls` long polls at once, in any lane: `GET /v1/questions`, `GET /v1/questions/{qid}/answers`, `GET /v1/sync/head`, `GET /v1/host/requests`, and `GET /v1/runs/{id}`. It is `APASSY_RELAY_CONNECT_LONG_POLLS` (section 6), default 96: the 128 threads of the question lane less one team's share of 32, so an operator team always finds its share of the lane, and well under the 224 threads of the member lane that are not the reserve. A Connect team's question polls also take at most 2 of the question lane (`connect::TEAM_QUESTION_POLLS`: its Mac and one other device; section 25.5), not 32, and its feed polls (`GET /v1/feed`, `GET /v1/feed/actions`, `GET /v1/feed/actions/{id}`) at most 2 more (`connect::TEAM_FEED_POLLS`, section 27.7); both count in `connect_long_polls`. A poll over a bound is answered at once, as with `wait=0`. So Connect teams can fill neither the member lane (256 threads) nor the question lane (128).
 
 **A Connect team's question poll can return early.** `GET /v1/questions?wait=S` and `GET /v1/questions/{qid}/answers?wait=S` of a Connect team may answer at once with what there is (often nothing) although `S` is above 0: when the team holds its 2 seats, when all Connect teams hold their seats, or when the question lane is full. The answer looks like a poll that timed out. A client must not poll again at once: after an answer that came back sooner than it asked and brought nothing new, it waits before the next poll (for example 5 s, doubling to 60 s while that goes on, with some random jitter), and goes back to its normal long poll after an answer that waited or brought something. It also keeps one question poll per device: a second poll of the same device answers at once too (section 25.5).
 
@@ -1494,3 +1495,169 @@ Relay audit: `team_created {team_id, kind: "connect"}` (no key, no key hash, no 
 - A Connect team is as separate from other teams as any team (section 22). The relay sees the same metadata as for any team; the questions stay sealed (section 25.12).
 - The 409 tells the holder of a device key that it made a Connect team. A public key is not a secret, but the proof of key means only its holder gets this answer, and it names no team.
 - An account or an entitlement never adds a device: a device of a Connect team is the one that made it or one confirmed with safety words by a device of the owner (section 23).
+
+## 27. The feed of a Mac
+
+**Status: built (branch `feat/feed`), not deployed.** Contract `docs/contracts/relay-feed-v1.md` of the core (section D of the stage 5 plan, "The Mac feed"). Each Mac of a vault keeps one sealed **feed** of its agents on the relay; the other live devices of the same member (the iPhones) read it and send one kind of sealed **action** back to that Mac, which settles it once. The relay never opens a feed, an action, or a settle: they are ChaCha20-Poly1305 envelopes under the question key of the vault (contract sections 5 and 6), which never reaches the relay. It checks forms, sizes, routing, and limits, stamps the sender, and stores every envelope byte for byte. Both documents describe one wire; this section takes precedence for the relay, and the plaintexts, the action string, the signatures, and the target's checks are in the contract only. Code: `src/server/feed.rs` (routes, routing, limits, maintenance), `src/server/store.rs` (schema 6), `src/server/directory.rs` (`feed_bytes`, `feed_actions_per_hour`), `src/server/http.rs` (routes, the body cap), `deploy/worker/src/index.ts` (the edge body cap).
+
+### 27.1 Words and limits
+
+| Thing | Rule |
+| --- | --- |
+| Feed | one sealed envelope of one device: `seq`, `key_id`, `nonce`, `ciphertext`, at most one per device (`feed.device_id` is the key), replaced whole by each `PUT` |
+| `seq` | a JSON number from 1 to 2^53 − 1, chosen by the publisher, above the stored `seq` of the device (409 `seq_not_newer` otherwise). The relay stores and returns it as given: the feed's AAD binds it |
+| Feed counter | `team.feed_change`, a counter of the team that only grows: each accepted feed takes the next value (`feed.change_seq`, `change` on the wire), and so does each deletion of one or more feeds. Readers poll with it. It is not `seq` |
+| Action | one sealed envelope of one sending device to one target device: `action_id`, `to_device`, `key_id`, `nonce`, `ciphertext`; a state `open`, `settled`, or `expired`; stamped with the sender's device and member |
+| `action_id` | the form of a `qid` (25.1): 22 base64url characters of 16 bytes, made by the sender, unique in the team (409 `conflict`). In a path, out of its form: 400 |
+| Action sequence | `team.feed_action_seq`: an action takes the next value when it is posted (`feed_action.seq`). Targets poll with it |
+| Settle | the clear `outcome` (`applied`, `refused`, or `stale`) and one sealed envelope of the target. Its `key_id` is any 16-hex form: a target that cannot open an action settles it under its current key (contract 9.5) |
+| `key_id`, `nonce`, `v` | as 25.1: 16 lowercase hex characters, base64url of 12 bytes, `v` 1 in every body |
+| Ciphertext | base64url, not empty (400); a feed at most 262144 bytes, an action at most 4112, a settle at most 1040 (decoded); over: 413 `payload_too_large` |
+| Body of `PUT /v1/feed` | at most 360448 bytes (352 KiB: the base64url of a 256 KiB feed is 349526 characters), with `Content-Length` and without `Transfer-Encoding` (400 otherwise), checked from the headers before the token; over: 413. Every other body keeps 64 KiB (section 9) |
+| Pace | one accepted feed per device per 10 s on the relay clock (`feed.updated_at`, and in memory `Core::feed_times`, so a `DELETE` does not lift it); sooner: 403 `feed_limit` |
+| `feed_bytes` | per team, default 4194304 (4 MiB), 1048576 to 67108864; 1048576 (1 MiB) in the `connect` preset: the bytes of feed ciphertext that the team file holds at once. A feed whose ciphertext, with every other device's feed (not the caller's own old one), would pass it: 403 `feed_limit`. Its own budget: it never counts in `question_bytes`, and questions never count in it |
+| `feed_actions_per_hour` | per team, default 60, 1 to 1000000: actions with `created_at` in the last 3600 seconds (purged ones count until they are deleted). Over: 403 `too_many_actions` |
+| Open actions | 20 of the team and 10 of one sending device, fixed (state `open`, `expires_at > now`). Over: 403 `too_many_actions` |
+| Action lifetime | `expires_at = created_at + 300`. An `open` action with `expires_at <= now` is `expired` at once in every answer and check. The target's 60 s window of the action's `time` is the app's (contract 9.4) |
+| Answers | a feed list stops adding feeds once the base64url ciphertexts of its answer reach 1 MiB (it always adds one) and sets `more: true`; an action list holds at most 20 |
+| Feed long polls | 1 per device for the feed list (`feed_polls`), 1 for the action list (`feed_action_polls`), 1 for an action status (`feed_status_polls`), each `LongPolls::new(1)`, apart from the question and sync polls; `wait` 0 to 25 (27.7) |
+| Purge | 10 minutes after an action was settled or expired, maintenance empties its `nonce` and `ciphertext` and drops its settle envelope; it is then unknown (404) on every route, and its `action_id` stays taken |
+| Retention | an action is deleted 24 hours after `created_at`; a feed 30 days after `updated_at`, by `DELETE /v1/feed`, and at the revocation of its device or member |
+| Auth | an access token of a live device (`Need::Member`, then `MemberAuth.device`, as 25.1). A member token is 401 `unauthenticated` on every feed route |
+
+### 27.2 Schema version 6 (team file)
+
+`Store::open_team` migrates a version 5 file to version 6 with the copy rule of 23.2: copy to `<file>.pre-v6` (mode 0600, written as `.pre-v6.tmp`, synced, renamed; refuse to migrate when the copy cannot be made: the team stays at version 5 and does not open), then in one `BEGIN IMMEDIATE` transaction run the statements below and set `PRAGMA user_version = 6` (`migrate_v6`). The change is additive: no table is rebuilt, and the question, sync, push, and device rows are untouched. A version 2 to 4 file goes on to 6 in one start, with each copy. A new team file is made at version 6. Version 1 and versions above 6 are refused, and the version 5 image refuses a version 6 file (its `open_team` accepts 3 to 5 only). `relay.db` does not change version (1003). `remove_team_file` also removes `.pre-v6` and `.pre-v6.tmp`.
+
+```sql
+ALTER TABLE team ADD COLUMN feed_change INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE team ADD COLUMN feed_action_seq INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE feed (
+  device_id INTEGER PRIMARY KEY REFERENCES device(id),
+  member_id INTEGER NOT NULL REFERENCES member(id),
+  seq INTEGER NOT NULL CHECK (seq >= 1),
+  key_id TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL,
+  change_seq INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX feed_change ON feed(change_seq);
+CREATE TABLE feed_action (
+  action_id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  from_device INTEGER NOT NULL REFERENCES device(id),
+  to_device INTEGER NOT NULL REFERENCES device(id),
+  member_id INTEGER NOT NULL REFERENCES member(id),
+  key_id TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open','settled','expired')),
+  outcome TEXT CHECK (outcome IN ('applied','refused','stale')),
+  settled_at INTEGER, settle_key_id TEXT, settle_nonce BLOB, settle_ciphertext BLOB);
+CREATE INDEX feed_action_to ON feed_action(to_device, seq);
+CREATE INDEX feed_action_created ON feed_action(created_at);
+```
+
+`feed.change_seq` is the `change` of the wire (the column avoids the word). `feed.created_at` is the time of the device's first feed since its last deletion; a replacement keeps it.
+
+### 27.3 Routing
+
+Same-member routing, read from the file at each request and at each turn of a long poll: the live devices (not revoked, member not revoked) of the caller's member.
+
+- A device lists the feeds of the live devices of its own member, its own included, and `present` names every one of them that has a feed now. Other members' devices never see a feed, its `change`, or that it exists; the top-level `change` is the team's counter, as the question sequence is (25.12).
+- An action goes to a live device of the caller's member that is not the caller (403 `not_routed` otherwise, also for an unknown id). The target must have a feed (404 `not_found`).
+- Only the target lists and settles an action; only the sender reads its status. Any other device gets nothing in its list and 404 on the action's routes, as an unknown `action_id`.
+- There is no `approvers` routing: a feed holds one member's agents.
+
+### 27.4 Endpoints
+
+Routes: `["v1","feed"]` PUT, GET, DELETE; `["v1","feed","actions"]` POST, GET; `["v1","feed","actions",id]` GET; `["v1","feed","actions",id,"settle"]` POST. `Need::Member` for all, then the handler requires `MemberAuth.device`. A POST or PUT reads the token again after its body (23.5), and its request time is taken after the body (25.4). A request without a valid token is 401 before its body is read, as everywhere; `PUT /v1/feed` checks its `Content-Length` and `Transfer-Encoding` before that (400, then 413), as a snapshot push does.
+
+| Method and path | Auth | Body | Result |
+| --- | --- | --- | --- |
+| `PUT /v1/feed` | device | `FeedPut {v, seq, key_id, nonce, ciphertext}` | `{device_id, seq, change, updated_at}`. 400 (headers, then shape and forms) → 413 → 401 → in one transaction: 409 `seq_not_newer` (a `seq` at or below the stored one; before the pace, so a retry of a feed that landed gets 409) → 403 `feed_limit` (the pace, then `feed_bytes` with a `limit_reached` row) → the caller's row replaced, `change = ++team.feed_change`, `feed_started` only when the device had no feed. The notifier wakes the polls. |
+| `GET /v1/feed?since=N&wait=S` | device | | `FeedList {change, more, present, feeds: [FeedView]}`: the member's feeds with `change > since`, oldest `change` first, paged at 1 MiB of ciphertext text (27.1). `FeedView` = `{device_id, device_name, seq, change, key_id, nonce, ciphertext, updated_at}` (`device_name` for a log only). `wait`: while there is no such feed, hold; a feed of the member that leaves (`present` changes) or a top-level `change` below `since` (a restored relay) answers at once. |
+| `DELETE /v1/feed` | device | | `{device_id, change}`; removes the caller's feed with `change = ++team.feed_change` and a `feed_deleted {device_id, reason: "deleted"}` row; the open actions to the device expire. No feed: the same answer with the counter as it is, and no row. |
+| `POST /v1/feed/actions` | device | `ActionPost {v, action_id, to_device, key_id, nonce, ciphertext}` | `{action_id, seq, created_at, expires_at}`. 400 → 413 → 401 → in one transaction: 403 `not_routed` → 404 (the target has no feed) → 409 `conflict` (the `action_id` exists in the team, also purged) → 403 `too_many_actions` (`feed_actions_per_hour`, then 20 open of the team, then 10 open of the sender, each with a `limit_reached` row) → the row with the caller's device and member, `seq = ++team.feed_action_seq`, `expires_at = now + 300`, `feed_action_posted`. The notifier wakes the target's poll. |
+| `GET /v1/feed/actions?after=N&wait=S` | the target | | `ActionList {seq, actions: [ActionView]}`: the open actions to the caller with `seq > after`, oldest first, at most 20. `ActionView` = `{action_id, seq, from_device_id, key_id, nonce, ciphertext, created_at, expires_at}`. `wait`: while there is none, hold; a top-level `seq` below `after` answers at once. |
+| `POST /v1/feed/actions/{id}/settle` | the target | `ActionSettle {v, outcome, key_id, nonce, ciphertext}` | `{action_id, state: "settled", outcome, settled_at}`. 400 → 413 → 404 (another device, an unknown or purged `id`). A settled action: the same outcome and envelope again answer the same (a retry, also after `expires_at`); another body is 409 `action_settled`. An expired one (state at now): 409 `action_expired`. Row `feed_action_settled`; the notifier wakes the sender's poll. |
+| `GET /v1/feed/actions/{id}?wait=S` | the sender | | `ActionStatus {action_id, to_device, state, created_at, expires_at}`, plus `outcome`, `settled_at`, and `settle {key_id, nonce, ciphertext}` when settled. 404 for another device or a purged action. `wait`: while it is `open`, hold. |
+
+New error codes in `src/error.rs`: `feed_limit` 403, `too_many_actions` 403, `seq_not_newer` 409, `action_settled` 409, `action_expired` 409 (`not_routed` 403 is 25.4's). `feed_limit` and `too_many_actions` are 403, not 429, so the app's other calls go on.
+
+### 27.5 Revocation
+
+Revoking a device (`DELETE /v1/devices/{id}`) or a member (`DELETE /v1/members/{id}`, `POST /v1/leave`) deletes the feeds of the removed devices in the same transaction, with one new feed counter value and a `feed_deleted {device_id, reason: "device_revoked" | "member_revoked"}` row each, and expires the open actions to them and from them (`expires_at` set to now). So a reader sees the device leave `present` at its next answer, and a revoked device's poll ends with 401 at its next turn.
+
+### 27.6 Maintenance
+
+Every 5 seconds, per team, after the sweeps of 25.8, in one transaction that writes no audit row (so a Connect team at its file cap still frees the pages; it also runs when an earlier sweep of the pass failed):
+
+- open actions with `expires_at <= now` become `expired` (no row, no sequence value);
+- the purge: an action settled with `settled_at <= now - 600`, or not settled with `expires_at <= now - 600`, gets an empty `nonce` and `ciphertext` and a NULL settle envelope; the row keeps its ids, times, state, and outcome until it is deleted, so its `action_id` stays taken and `feed_actions_per_hour` still counts it;
+- actions with `created_at <= now - 86400` are deleted;
+- feeds with `updated_at <= now - 30 days` are deleted with one new feed counter value, and the open actions to their devices expire;
+- one wake of the notifier when an action expired or a feed went.
+
+### 27.7 Long polls and the lane
+
+- `GET /v1/feed`, `GET /v1/feed/actions`, and `GET /v1/feed/actions/{id}` with a `wait` above 0 are question-lane polls (`http::is_question_poll`): they run on the 128 threads of the question lane (25.5), apart from `max_active`, and in the member lane, answered at once, when it is full.
+- An operator team's feed polls count in its share of the lane with its question polls (`Core::question_lane`, `question_long_polls_per_team`, 32).
+- A Connect team's feed polls take seats of their own, at most `connect::TEAM_FEED_POLLS` (2: the Mac's action poll and one reader's poll; `Core::feed_lane`), so they never take its 2 question seats (26.4). Each also takes a seat of `connect_long_polls` (26.4). A Connect team's feed poll can return early with nothing new, and the app backs off as for questions (contract 10.10).
+- A poll over a bound, or a second poll of one kind of one device, is answered at once, as with `wait=0`. Each turn (at least every 500 ms) reads the caller again: a device or member revoked since the request began ends the poll with 401. A role change does not: feeds route by member only.
+
+### 27.8 Limits in `relay.db`
+
+`TeamLimits` gets `feed_bytes` and `feed_actions_per_hour` (18 fields). The version 5 image reads the `limits` column with `deny_unknown_fields`, so `TeamLimits::stored_json(kind)` leaves each of the two out while it equals the preset of the team's kind (`TeamLimits::for_kind`: 4 MiB and 60 for an operator team, 1 MiB and 60 for a Connect team), and `TeamLimits::from_stored(text, kind)` fills a missing one from that preset. So the `connect` preset's 1 MiB is never stored, every column written by the version 5 image reads as before, and with the two limits at their preset a rollback reads `relay.db` as it is. A value set away from the preset is stored, and then the version 5 image refuses the column (docs/OPERATIONS.md 21.3).
+
+A Connect team's file cap (26.4) grows by its `feed_bytes`: `question_bytes` + `feed_bytes` + 8 MiB, plus the room for items and members (11 MiB, 2816 pages, at the preset).
+
+### 27.9 Audit
+
+No row per feed update (a Mac publishes up to every 10 s, and a Connect team never deletes audit rows), and no row for an expiry or a purge. Rows have device ids and the clear outcome only: no `seq`, `key_id`, nonce, ciphertext, or `action_id`.
+
+| Action | Detail |
+| --- | --- |
+| `feed_started` | `{device_id}`: the first feed of a device (again after a deletion) |
+| `feed_deleted` | `{device_id, reason}`: `deleted`, `device_revoked`, or `member_revoked` (not written for the 30-day retention, whose transaction writes no row) |
+| `feed_action_posted` | `{device_id, to_device_id}` |
+| `feed_action_settled` | `{device_id, from_device_id, outcome}` |
+
+`limit_reached` (section 22, at most one row per kind and ten seconds) names `feed_bytes`, `feed_actions_per_hour`, `open_feed_actions`, and `device_open_feed_actions`. The 10 s pace writes no row: it is a pace of one device, which a correct Mac never meets, and a row every ten seconds would grow a Connect team's file without end.
+
+### 27.10 Operator
+
+`admin limits ID` reads and sets `--feed-bytes N` (1048576 to 67108864) and `--feed-actions-per-hour N` (1 to 1000000); the result prints eighteen effective values. No command shows a feed or an action.
+
+### 27.11 The Worker
+
+`PUT /v1/feed` (exact method and path) may declare up to 360448 bytes (`MAX_FEED_LENGTH`, the relay's own limit, no margin), and must declare its length without `Transfer-Encoding` (400 `invalid_request` otherwise); above it 413 `payload_too_large`. Every other route keeps its cap of section 17 (`PUT /v1/feed/`, `POST /v1/feed`, and the action routes included: 128 KiB). The Worker has no limiter for the feed routes and forwards them as any route. An older Worker answers a feed body over 128 KiB with 413, and the app then fits its feed to 96 KiB of plaintext (contract 14.2).
+
+### 27.12 Tests
+
+`tests/server_feed.rs`, unit tests in `src/server/feed.rs`, `src/server/store.rs`, `src/server/directory.rs`, `src/server/http.rs`, `src/error.rs`, `src/bin/apassy-relay.rs`, and `deploy/worker/test/index.test.ts`:
+
+- The contract's vectors: the relay accepts the vector `action_id`, `key_id`, the three nonces, and the feed, action, and settle ciphertexts (943, 435, 130 bytes), with the Mac as device 2 and the iPhone as device 3; it returns them byte for byte and stores them as given; the feed, action, and settle AADs built from the clear values that the relay returns (`device_id`, `seq`, `key_id`, the stamped `from_device_id`, the target's id, `action_id`, `outcome`) with the vector team id equal the contract's hex (62, 78, 82 bytes); the sizes of contract 6.3.
+- Publish and read: every device of the member reads the feed, the publisher too; `present`, `change`, and `more`; a second device's feed takes the next counter value; a new feed replaces the old one (one row).
+- Routing: another member's devices see only their own member's feeds, get 403 `not_routed` for an action to the first member's devices, and 404 for its actions; an action to oneself or to an unknown device is 403; to a device without a feed 404; a member token is 401 on all seven routes; another team sees nothing.
+- `seq`: the same or a lower `seq` is 409 `seq_not_newer` (also within the pace); 0 and 2^53 are 400, 2^53 − 1 passes.
+- Sizes, pace, and budget: a feed of 262145 bytes is 413 and 262144 passes; a body over 360448 is 413 from `Content-Length` before the token; no `Content-Length` and `Transfer-Encoding` are 400; a 352 KiB body is read whole; other bodies over 64 KiB, an action of 4113 and a settle of 1041 bytes are 413; forms are 400; a second feed within 10 s is 403 `feed_limit`, also after a delete; with `feed_bytes` 1 MiB four full feeds pass and a fifth is 403 `feed_limit` naming `feed_bytes` with one `limit_reached` row, the caller's own old feed does not count, and questions still fit.
+- Actions: only the target lists and settles, only the sender reads the status; the settle retry, `action_settled`, a settle under another `key_id`; 10 open of a sender, 20 of the team, and `feed_actions_per_hour` refuse with their `limit_reached` rows; an action past `expires_at` is `expired` and refuses a settle with `action_expired`; maintenance marks expiries, purges 10 minutes after the end (404, `action_id` still taken), and deletes after 24 hours.
+- Feeds go: `DELETE /v1/feed`, the revocation of a device (its actions to and from it expire) and of a member, and 30 days without an update; each moves the counter.
+- Long polls: the feed list wakes on a feed and when a feed leaves, the action list on a post, the status on a settle and on an expiry; a second poll of one kind answers at once; the three kinds of one device do not take each other's place; a counter below `since` answers at once; a revoked device's poll ends with 401. With `question_long_polls_per_team` 2, one question poll and one feed poll of a team hold, and a third poll answers at once, in the question lane (`/v1/me` still answers with `max_active` 2).
+- Connect: the preset's 1 MiB of feeds is not stored, the file cap is 11 MiB, four full feeds fit and a fifth does not; two feed polls and two question polls hold at once while a third of each answers at once; `connect_long_polls` bounds feed polls too.
+- Schema 6: a version 5 file opens as version 6 with `.pre-v6` (mode 0600, encrypted, version 5) and keeps its rows; a failed copy leaves version 5 without the new tables; version 7 is refused; through the relay, a version 5 team keeps its question, then publishes, and copying `.pre-v6` back gives version 5 again.
+- Limits: the feed limits at the preset of each kind read in a copy of the version 5 image's `TeamLimits` (`deny_unknown_fields`), and each set away from its preset is written and refused by it; the CLI flags and their ranges.
+- The Worker: `PUT /v1/feed` of exactly 360448 bytes passes and of one more is 413 before the relay; a missing, non-numeric, or chunked length is 400; the raised cap holds for `PUT /v1/feed` only; the feed reads pass with path and query.
+- No audit row holds an `action_id`, a nonce, or a ciphertext; a second feed adds no row.
+
+### 27.13 Differences from the contract
+
+- **The order of 401.** The contract orders `PUT /v1/feed` as 400 → 413 → 401 and `POST /v1/feed/actions` the same. The relay checks the token before it reads any body, on every route (section 9: a caller without a valid token cannot hold a team's slots), so a body with a bad shape and a bad token gets 401. The header checks of `PUT /v1/feed` (`Content-Length`, `Transfer-Encoding`, the 352 KiB cap) come before the token, as the contract says.
+- **Connect feed seats.** The contract says the feed polls count in a team's share of the question lane. For an operator team they do. A Connect team's share is 2 question polls (26.4), which a Mac and an iPhone fill; feed polls in the same 2 seats would almost never wait. So a Connect team's feed polls have 2 seats of their own (27.7), still under the relay-wide `connect_long_polls`.
+- **No row for the pace.** The contract writes `limit_reached` "as in section 22"; the relay writes it for `feed_bytes` and the action limits, not for the 10 s pace (27.9).
+- **Purge.** The contract's "purged" action is unknown (404) at once; the relay keeps its metadata without envelopes until 24 hours after the post, as questions do (25.8), so its `action_id` stays taken (409 on a repost) and the hourly limit counts it.
+- **Revocation.** Besides the deletion of the feed, the open actions to and from a revoked device expire at once.
+
+### 27.14 What this does not protect
+
+- The relay sees what contract section 15 lists: the devices of the publisher, sender, and target and that they share a member; the size and time of each feed and action; each `seq` (which follows the Mac's clock), `key_id`, and the clear outcome. The operator, root, a disk snapshot, and a backup hold the last feed of each device until it is replaced or deleted (up to 30 days after its last update), and the action envelopes until 10 minutes after they ended. `secure_delete` overwrites a replaced or dropped ciphertext in the file; a backup made before keeps it. Cloudflare sees the same.
+- The relay can withhold, delay, or keep serving an old feed, refuse to route, or drop actions and settles. It cannot read, forge, roll back, or move a feed, an action, or a settle, or flip an outcome: the AADs and the action's signature bind them (contract 6.1, 9.3).
+- The team-wide `change` and action `seq` move for every member's feeds and actions: a member can see that another member's devices are active, not what they do (as the question sequence, 25.12).
+- A full feed budget refuses the next feed of a team; the Macs keep their last feed on the relay and their own Agents page.

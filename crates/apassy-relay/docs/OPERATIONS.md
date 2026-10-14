@@ -719,6 +719,8 @@ A code works once. A typo in a name does not use it. The owner then invites memb
 | `device_open_questions` | 10 |
 | `device_questions_per_hour` | 150 |
 | `question_bytes` | 8388608 (8 MiB) |
+| `feed_bytes` | 4194304 (4 MiB; 1 MiB in a Connect team, section 21) |
+| `feed_actions_per_hour` | 60 |
 
 Read all effective values:
 
@@ -734,11 +736,12 @@ docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --agents 40 --r
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --sync-bytes 33554432 --sync-pushes-per-hour 300 --sync-transfers 4
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --open-questions 40 --questions-per-hour 600
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --device-open-questions 20 --member-open-questions 30 --question-bytes 16777216
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --feed-bytes 8388608 --feed-actions-per-hour 120
 ```
 
-The command prints all sixteen effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000; `items` and `agents` may also be 0 (none, as in a Connect team, section 20). The `agent_requests` range is 1 to 224. The `sync_bytes` range is 0 (no vault sync: a push answers 403 `plan_required`) or 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once. The `open_questions` range is 1 to 1000 (questions that wait for an answer; over it, 403 `too_many_questions`, see section 19); `questions_per_hour` is 1 to 1000000. `member_open_questions` and `device_open_questions` (1 to 1000) and `member_questions_per_hour` and `device_questions_per_hour` (1 to 1000000) are the shares of one member and of one asking device, so one Mac cannot use the team's whole quota. `question_bytes` (1048576 to 268435456) bounds the sealed questions and answers that the team file holds at once.
+The command prints all eighteen effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000; `items` and `agents` may also be 0 (none, as in a Connect team, section 20). The `agent_requests` range is 1 to 224. The `sync_bytes` range is 0 (no vault sync: a push answers 403 `plan_required`) or 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once. The `open_questions` range is 1 to 1000 (questions that wait for an answer; over it, 403 `too_many_questions`, see section 19); `questions_per_hour` is 1 to 1000000. `member_open_questions` and `device_open_questions` (1 to 1000) and `member_questions_per_hour` and `device_questions_per_hour` (1 to 1000000) are the shares of one member and of one asking device, so one Mac cannot use the team's whole quota. `question_bytes` (1048576 to 268435456) bounds the sealed questions and answers that the team file holds at once. `feed_bytes` (1048576 to 67108864) bounds the sealed feeds of the Macs that the team file holds at once (403 `feed_limit` over it, section 21), apart from `question_bytes`; `feed_actions_per_hour` is 1 to 1000000.
 
-A question limit changed away from its default is stored in `relay.db` in a form the image before questions cannot read: a rollback to it then needs the backup of `relay.db` (section 19.3). Change question limits only when no rollback is planned, or note the change.
+A question limit changed away from its default is stored in `relay.db` in a form the image before questions cannot read: a rollback to it then needs the backup of `relay.db` (section 19.3). Change question limits only when no rollback is planned, or note the change. The same holds for a feed limit changed away from the preset of the team's kind and the image before feeds (section 21.3).
 
 Use the command for active or suspended teams. A change adds `limits_changed` with actor `operator` to the team audit and relay audit.
 
@@ -812,7 +815,7 @@ The installer refuses a binary whose checksum is not in `SHA256SUMS`. A missing 
 
 `POST /v1/join`, `POST /v1/teams`, `POST /v1/devices/link`, and `POST /v1/devices/link/cancel` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting, binding `CREATE_LIMITER`). `POST /v1/connect` has its own, 1 a minute per IPv4 address or IPv6 /64 (`CONNECT_LIMITER`, section 20). Device sign-in (`POST /v1/auth/challenge` and `/v1/auth/token`) has a looser one, about 60 a minute (`AUTH_LIMITER`), because a waiting CLI asks every 5 seconds and several people can share one address. Vault snapshot pushes (`PUT /v1/sync/snapshot`) have their own, about 60 a minute (`SYNC_LIMITER`). Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, or its binding is missing, requests go on: the relay checks every code itself. The four bindings are in `wrangler.jsonc`; a deploy creates them.
 
-The Worker also checks the declared length of every request body before it forwards it, because the relay reads every declared byte of a body even when it answers early, on any path (docs/SPEC.md section 24.10). A snapshot push (exactly `PUT /v1/sync/snapshot`) with `Transfer-Encoding` or with a missing or non-numeric `Content-Length` gets 400 `invalid_request`; one that declares more than 64 MiB plus 64 KiB gets 413 `payload_too_large`. A body under `/p/` (the agent proxy) may declare up to 8 MiB plus 64 KiB; every other body, on any other path or method (`PUT /v1/sync/snapshot/` or `POST /v1/sync/snapshot` included), up to 128 KiB. Above that: 413; a non-numeric length: 400. The relay keeps its own checks. This bounds bytes, not time: a client that sends a body slowly still holds a relay thread until the connection ends, and only pushes are rate-limited.
+The Worker also checks the declared length of every request body before it forwards it, because the relay reads every declared byte of a body even when it answers early, on any path (docs/SPEC.md section 24.10). A snapshot push (exactly `PUT /v1/sync/snapshot`) with `Transfer-Encoding` or with a missing or non-numeric `Content-Length` gets 400 `invalid_request`; one that declares more than 64 MiB plus 64 KiB gets 413 `payload_too_large`. A body under `/p/` (the agent proxy) may declare up to 8 MiB plus 64 KiB; a feed (exactly `PUT /v1/feed`, section 21) must declare its length as a push does, and may declare up to 352 KiB; every other body, on any other path or method (`PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and the other feed routes included), up to 128 KiB. Above that: 413; a non-numeric length: 400. The relay keeps its own checks. This bounds bytes, not time: a client that sends a body slowly still holds a relay thread until the connection ends, and only pushes are rate-limited.
 
 A workflow in `.github/workflows/health.yml` checks `/healthz` and `/v1/me` (401) every hour. A failed run is the alert: GitHub notifies the owner of the repository.
 
@@ -1180,3 +1183,124 @@ Each open team holds one SQLite connection for as long as the relay runs: one fi
 2. The room fits when the memory of all teams, plus the threads of the request and question lanes, stays well under 512 MiB, the open files under 65536, and the start time under the 300 s start period. Write the numbers in this section with the date, then raise the room, or raise the container's limits first.
 
 Opening Connect teams only when they are first used, and closing idle ones, would remove this cost. It is not built: `Hub::team` is how every request, the sweep, `admin teams`, and the backup find a team, and an open on first use would let an unauthenticated sign-in call with a known team id start a key derivation. Lower the room, or run the sweep, if the start grows too long.
+
+## 21. The feed of a Mac (team schema 6)
+
+Each Mac of a vault publishes a sealed list of its agents through the relay, so the Agents tab of the iPhone shows real data, and the iPhone sends back one kind of sealed action: remove an exception of an agent (docs/SPEC.md section 27; the app's contract is `docs/contracts/relay-feed-v1.md` of the core). The relay keeps the latest feed of each device and routes actions to their target Mac. It never reads either: both are sealed with the vault's question key.
+
+What changes at the first start of this version:
+
+- Each team file moves to schema version 6: the relay copies it to `teams/<id>.db.pre-v6` (the way back for the previous image, mode 0600, encrypted like the file), then adds the tables `feed` and `feed_action` and the columns `team.feed_change` and `team.feed_action_seq` in one transaction. The change is additive: no table is rebuilt; questions, push tokens, sync, and devices stay. A team whose copy cannot be made stays at version 5 and does not open; free disk space and start again. The previous image (`connect-3510b68`, schema 5) refuses a version 6 file. `relay.db` keeps version 1003.
+- New routes: `/v1/feed` (PUT, GET, DELETE), `/v1/feed/actions` (POST, GET), `/v1/feed/actions/{id}` (GET), `/v1/feed/actions/{id}/settle` (POST). They are for the access tokens of devices; only the devices of one member see each other's feeds and actions.
+- `PUT /v1/feed` takes a body of up to 352 KiB (the Worker and the relay); every other body keeps its cap. One feed per device, replaced by each `PUT`, at most one every 10 s (403 `feed_limit`).
+- New team limits, section 17: `feed_bytes` (4 MiB of sealed feeds at once; 1 MiB in a Connect team) and `feed_actions_per_hour` (60). An action is open for 300 s; 20 are open at once in a team, 10 of one iPhone. Over any: 403 `feed_limit` or `too_many_actions`. Feeds never count in `question_bytes`.
+- A Connect team's file cap grows by its `feed_bytes`: 11 MiB at the preset (was 10 MiB).
+- The three feed long polls run in the question lane: in an operator team within its share of 32, with its question polls; a Connect team has 2 seats for feed polls apart from its 2 question seats, and all count in `APASSY_RELAY_CONNECT_LONG_POLLS`.
+- An action leaves the Mac's list when it is settled or expires; 10 minutes later its sealed envelopes go; its row goes 24 hours after the post. A feed goes with `DELETE /v1/feed`, when its device or member is revoked, and 30 days after its last update.
+- The audit gets `feed_started`, `feed_deleted`, `feed_action_posted`, and `feed_action_settled` with device ids and the outcome only. **No row per feed update**: a Mac publishes up to every 10 s, and a Connect team never deletes audit rows.
+- `admin limits` takes `--feed-bytes` and `--feed-actions-per-hour` and prints eighteen values.
+
+### 21.1 What to watch
+
+- The relay log at the start: no `cannot be moved to schema version 6`.
+- `admin teams`: every team `"open": true`; Connect teams with `"file_cap": 11534336`, and their `file_level`.
+- The team audit: `limit_reached {"limit": "feed_bytes"}` means the Macs of a team publish more than its budget (many Macs, or many agents): raise `feed_bytes` for it. `open_feed_actions` or `feed_actions_per_hour` rows mean an iPhone sends actions in bulk.
+- Disk: each team holds at most its `feed_bytes` of feeds (4 MiB, or 1 MiB for a Connect team) and a few KiB of actions.
+
+### 21.2 Owner steps for the deploy
+
+The live relay runs `apassy-relay:connect-3510b68` (team schema 5, questions, Connect on, push on). This deploy brings one image built from `feat/feed` (team schema 6). Push and Connect stay as they are: change no `APASSY_RELAY_*` line.
+
+Run the steps in this order. **The Worker goes first**, and the image is built on GitHub, never on the VPS (the VPS is production).
+
+1. **The Worker.** It raises the body cap of `PUT /v1/feed` only and serves every other route as before. Test and deploy from the commit (section 7):
+
+   ```sh
+   cd deploy/worker && npm test && npm run typecheck && npx wrangler deploy
+   npx wrangler deployments list | head -20                                       # the new version has 100 %
+   curl -s https://apassy-relay.wyderka.cc/healthz                                  # ok
+   head -c 360449 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' -X PUT --data-binary @- https://apassy-relay.wyderka.cc/v1/feed   # 413: the Worker's cap
+   head -c 200000 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' -X PUT --data-binary @- https://apassy-relay.wyderka.cc/v1/feed   # 404: the old relay has no feed route
+   apassy-team me                                                                   # the old relay answers as before
+   ```
+
+   The new Worker in front of the old relay is harmless: the old relay answers 404 on `/v1/feed`, and the Macs stop publishing until the relay has it (contract 14.2).
+
+2. **The image, on GitHub.** Push a tag `image-*` on the commit; `.github/workflows/image.yml` builds the x86_64 image `apassy-relay:feed-<short commit>` and returns it as the artifact `relay-image` (kept 3 days):
+
+   ```sh
+   git tag image-feed-<short commit> <commit> && git push origin image-feed-<short commit>
+   gh run list --workflow image.yml --limit 3                                       # wait for the run to succeed
+   gh run download <run id> --name relay-image --dir /tmp/relay-image
+   cd /tmp/relay-image && shasum -a 256 -c relay-image.tar.gz.sha256 && cat relay-image.id   # OK, and amd64
+   scp relay-image.tar.gz ottervibe:/opt/apassy/relay-image.tar.gz
+   ssh ottervibe 'gunzip -c /opt/apassy/relay-image.tar.gz | docker load && rm /opt/apassy/relay-image.tar.gz'   # Loaded image: apassy-relay:feed-<short>
+   ```
+
+3. **The backup.** Note the image the relay runs now (the rollback target), then back up:
+
+   ```sh
+   ssh ottervibe 'grep "image: apassy-relay" /opt/apassy/compose.yaml'     # apassy-relay:connect-3510b68
+   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'
+   ```
+
+   Keep the folder name it prints (`/opt/apassy/backups/relay/<UTC time>`). Its `teams/` is the state of the `.pre-v6` copies of step 4, and its `relay.db` the directory as it was.
+
+4. **The relay.** In `/opt/apassy/compose.yaml` (and in `deploy/vps/compose.yaml`, committed with the deploy), service `relay`: `image: apassy-relay:feed-<short commit>`. Nothing else changes. Then:
+
+   ```sh
+   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
+   ```
+
+5. **Checks.**
+
+   ```sh
+   ssh ottervibe 'cd /opt/apassy && docker compose logs --tail 30 relay'            # no "cannot be moved to schema version 6", no "unknown schema version"
+   ssh ottervibe 'cd /opt/apassy && docker compose exec relay ls -l /data/teams'     # a .db.pre-v6 next to each .db
+   ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'   # every team "open": true; Connect teams "file_cap": 11534336
+   ssh ottervibe 'cd /opt/apassy && docker inspect --format "{{.State.Health.Status}}" apassy-relay'   # healthy
+   curl -s https://apassy-relay.wyderka.cc/healthz                                   # ok
+   curl -s -o /dev/null -w '%{http_code}\n' https://apassy-relay.wyderka.cc/v1/feed  # 401: the route exists
+   apassy-team me
+   ```
+
+   Then end to end with the apps: a Mac with the feed on publishes (`feed_started` in its team audit once), the iPhone of the same member shows its agents, and a removal of a "Not for this agent" exception from the iPhone shows `feed_action_posted` and `feed_action_settled {"outcome":"applied"}`. A question still goes from the Mac to the iPhone and back. If anything fails, 21.3 is the way back.
+
+6. **Later.** Delete the `.pre-v6` files when no rollback to schema 5 is needed any more (they hold each team as it was at the migration).
+
+### 21.3 Rollback
+
+- **The Worker.** `npx wrangler rollback` (to the previous version), or deploy the previous commit of `deploy/worker/`. The old Worker answers a feed body over 128 KiB with 413; the Mac then fits its feed to 96 KiB until its next start. Nothing else changes.
+- **The relay image, back to `connect-3510b68`.** The previous image refuses the version 6 team files, so the rollback puts the version 5 copies back. It also refuses a `limits` column in `relay.db` with a field it does not know: the new relay writes `feed_bytes` and `feed_actions_per_hour` there only when one differs from the preset of the team's kind (4 MiB and 60 for an operator team, 1 MiB and 60 for a Connect team). If any `admin limits` call changed a feed limit after the deploy, set it back to the preset with the new image still running before you stop it:
+
+  ```sh
+  docker compose exec relay apassy-relay admin limits <operator team id> --feed-bytes 4194304 --feed-actions-per-hour 60
+  docker compose exec relay apassy-relay admin limits <connect team id> --feed-bytes 1048576 --feed-actions-per-hour 60
+  ```
+
+  or restore `relay.db` from the backup of step 3 (which also undoes every other change of the directory since then: teams made, suspended, or deleted, other limits, as 19.3 says).
+
+  On the VPS (`ssh ottervibe`, then `cd /opt/apassy`):
+
+  ```sh
+  docker compose stop relay
+  docker compose run --rm --no-deps --entrypoint bash relay -c '
+    set -e
+    for j in /data/teams/*.db-journal /data/relay.db-journal; do
+      if [ -e "$j" ]; then echo "$j is left: the relay did not stop cleanly. Stop here." >&2; exit 1; fi
+    done
+    for f in /data/teams/*.db.pre-v6; do cp -p "$f" "${f%.pre-v6}"; done
+    ls -l /data/teams'
+  ```
+
+  A `*.db-journal` means a write was cut off: do as 19.3 says (start the new image once, stop it, run the step again; if the journal stays, restore the backup of step 3 instead).
+
+  Then set `image: apassy-relay:connect-3510b68` in `/opt/apassy/compose.yaml` (and `deploy/vps/compose.yaml`), change nothing else, and start:
+
+  ```sh
+  docker compose up -d --wait && docker compose exec relay apassy-relay admin teams
+  ```
+
+  Every team must be `"open": true`. If the relay does not start and the log names a team's limits, `relay.db` holds a feed limit (above): restore it from the backup of step 3.
+
+- **What it loses.** Everything since the migration in each team file: the feeds and the actions (harmless: the old image answers 404 on `/v1/feed`, the Macs stop publishing, and the iPhones keep their interim Agents screen), and also the questions, push tokens, devices, and sync heads made after it (19.3). The iPhones send their push tokens again at their next start. A team made after the migration has no `.pre-v6` and is version 6 from the start: the old image cannot open it; suspend it (`admin suspend <id>`) before the rollback, or restore the whole backup of step 3 instead (section 13: `relay.db` and `teams/` of that folder, with the relay stopped).
