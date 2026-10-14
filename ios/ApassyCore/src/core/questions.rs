@@ -36,7 +36,7 @@
 //!
 //! The relay calls run without the vault mutex. A lock ends them ([`Core::close`]).
 
-mod envelope;
+pub(super) mod envelope;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -85,26 +85,29 @@ const SYNC_FIRST: &str = "Sync this vault to read this question.";
 #[derive(Default)]
 pub struct State {
     /// By vault ID.
-    contexts: BTreeMap<String, Context>,
+    pub(super) contexts: BTreeMap<String, Context>,
     /// A join of a notifications-only team that waits for the Mac.
     attach: Option<Attaching>,
     /// The long polls of `questions_wait` over several contexts: a drop ends them.
-    waits: Vec<Arc<Cancel>>,
+    pub(super) waits: Vec<Arc<Cancel>>,
     /// Counts each drop of every context. A `questions_unlock` keeps its context only when
     /// no drop came during its key derivation.
-    drops: u64,
+    pub(super) drops: u64,
     /// The push token of `push_token_set` in this process: a context made later gets it.
     push: Option<PushToken>,
     /// The vaults of [`PUSH_FILE`].
     push_clear: BTreeSet<String>,
+    /// The highest feed `seq` accepted of each Mac (relay-feed-v1 section 8): no secret,
+    /// kept on disk, and not dropped with the contexts.
+    pub(super) feed_marks: super::feed::Marks,
 }
 
 /// What the questions of one vault need, kept while the app runs.
-struct Context {
+pub(super) struct Context {
     /// The device of the questions team, with its key in memory.
-    member: Arc<RelayMember>,
+    pub(super) member: Arc<RelayMember>,
     /// What the checks of the cards need, read from the vault.
-    keys: Arc<Keys>,
+    pub(super) keys: Arc<Keys>,
     /// The last question sequence seen (section 10.4).
     since: u64,
     /// The questions that the relay returned, by `qid`.
@@ -113,6 +116,8 @@ struct Context {
     push_due: Option<PushDue>,
     /// The code of the last failed relay call, until one works.
     error: Option<&'static str>,
+    /// The agent feeds of the Macs of this team (relay-feed-v1, `feed.rs`).
+    pub(super) feed: super::feed::Mirror,
 }
 
 #[derive(Clone)]
@@ -150,13 +155,14 @@ impl State {
             .unwrap_or_default();
         Self {
             push_clear: clear,
+            feed_marks: super::feed::Marks::load(data_dir),
             ..Self::default()
         }
     }
 
     /// The context of `vault_id` while it still has the device `member`: a drop or a new
     /// membership in between ends the call that used it.
-    fn context_mut(
+    pub(super) fn context_mut(
         &mut self,
         vault_id: &str,
         member: &Arc<RelayMember>,
@@ -204,6 +210,7 @@ impl State {
             records: BTreeMap::new(),
             push_due,
             error: None,
+            feed: super::feed::Mirror::default(),
         };
         if let Some(old) = self.contexts.insert(vault_id.to_owned(), context) {
             old.member.close();
@@ -252,14 +259,14 @@ impl Ended {
 }
 
 /// The selected vault, as the questions calls see it.
-enum Selected {
+pub(super) enum Selected {
     Unlocked(String),
     Locked(String),
     None,
 }
 
 impl Selected {
-    fn id(&self) -> Option<&str> {
+    pub(super) fn id(&self) -> Option<&str> {
         match self {
             Self::Unlocked(id) | Self::Locked(id) => Some(id),
             Self::None => None,
@@ -267,7 +274,7 @@ impl Selected {
     }
 
     /// Why a call that needs a context of the selected vault has none.
-    fn missing(&self) -> CoreError {
+    pub(super) fn missing(&self) -> CoreError {
         match self {
             Self::Unlocked(_) => no_questions(),
             Self::Locked(_) => CoreError::locked(),
@@ -717,12 +724,13 @@ fn question_key(vault: &Vault) -> CoreResult<Option<(String, Zeroizing<Vec<u8>>)
 
 /// What a check of the cards needs from the vault, read under the vault mutex and kept
 /// in the context of the vault.
-struct Keys {
-    team_id: String,
-    device_id: u64,
-    key: Option<(String, Zeroizing<Vec<u8>>)>,
-    devices: Vec<TrustedDevice>,
-    own: Option<TrustedDevice>,
+pub(super) struct Keys {
+    pub(super) team_id: String,
+    /// The device number of this iPhone in the questions team.
+    pub(super) device_id: u64,
+    pub(super) key: Option<(String, Zeroizing<Vec<u8>>)>,
+    pub(super) devices: Vec<TrustedDevice>,
+    pub(super) own: Option<TrustedDevice>,
     /// The key of the membership is the key of a removed device.
     removed: bool,
 }
@@ -730,12 +738,12 @@ struct Keys {
 impl Keys {
     /// The key of the membership belongs to a removed row: the owner took this iPhone
     /// out, and it asks the relay nothing.
-    fn is_removed(&self) -> bool {
+    pub(super) fn is_removed(&self) -> bool {
         self.own.is_none() && self.removed
     }
 
     /// This iPhone's row, or why it cannot answer.
-    fn own_row(&self) -> CoreResult<TrustedDevice> {
+    pub(super) fn own_row(&self) -> CoreResult<TrustedDevice> {
         match &self.own {
             Some(own) => Ok(own.clone()),
             None if self.removed => Err(removed()),
@@ -876,7 +884,7 @@ fn wrong_vault() -> CoreError {
 }
 
 /// A vault on this iPhone without a context: it was not unlocked in this session.
-fn not_open(known: bool) -> CoreError {
+pub(super) fn not_open(known: bool) -> CoreError {
     if known {
         CoreError::new(
             "locked",
@@ -1232,13 +1240,14 @@ impl Core {
         }
         let drops = guard(&self.questions).drops;
         let mut vault = Vault::open(&self.paths.vault_file(vault_id))?;
+        // The titles by item UUID go to the agent feeds of the vault (`feed.rs`).
         let read = vault
             .unlock(passphrase)
             .map_err(CoreError::from)
-            .and_then(|()| read_keys(&vault));
+            .and_then(|()| Ok((read_keys(&vault)?, super::feed::item_titles(&vault).ok())));
         let _ = vault.lock();
         drop(vault);
-        let read = read?;
+        let (read, titles) = read?;
         let member = match &read {
             Some((membership, _)) => Some(member_of(membership)?),
             None => None,
@@ -1263,6 +1272,9 @@ impl Core {
                 if let Some(unused) = member {
                     unused.close();
                 }
+                if let Some(context) = state.contexts.get_mut(vault_id) {
+                    context.feed.titles = titles;
+                }
             }
             _ => {
                 if state.forget(vault_id) {
@@ -1279,7 +1291,7 @@ impl Core {
     // ---- Reading the questions. ----
 
     /// The contexts that ask the relay: all but those of a removed iPhone.
-    fn fetch_targets(&self) -> Vec<(String, Arc<RelayMember>)> {
+    pub(super) fn fetch_targets(&self) -> Vec<(String, Arc<RelayMember>)> {
         guard(&self.questions)
             .contexts
             .iter()
