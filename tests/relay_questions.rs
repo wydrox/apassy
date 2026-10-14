@@ -540,6 +540,7 @@ fn world(enable: bool) -> World {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic MacBook".to_owned(),
+            ..QuestionsConfig::default()
         },
     );
     World {
@@ -1443,6 +1444,7 @@ fn a_question_of_mac_b_shows_on_mac_a_and_its_answers_reach_b() {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic Mac mini".to_owned(),
+            ..QuestionsConfig::default()
         },
     );
     let agent_b = world.with_b(|vault| vault.register_agent("claude-code").expect("agent").0.id);
@@ -1663,6 +1665,7 @@ fn a_removed_mac_does_not_register_again() {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(20),
             device_name: "Synthetic Mac mini".to_owned(),
+            ..QuestionsConfig::default()
         },
     );
     let start = Instant::now();
@@ -2025,6 +2028,7 @@ fn an_iphone_link_carries_its_answer_key_and_the_mac_writes_its_row() {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic MacBook".to_owned(),
+            ..QuestionsConfig::default()
         },
     );
     let (agent, items, epoch) = {
