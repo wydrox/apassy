@@ -1318,17 +1318,19 @@ fn the_keys_of_a_vault_that_is_not_selected_are_a_copy() {
     };
     publish(&b.relay, TEAM_B, &b.key, 2, &of_b(seq));
     fresh_feed(&setup);
-    let work_macs = |phone: &Core| -> Vec<Value> {
+    // The vaults are in the order of `vault_id`, a random UUID: find each by its id.
+    let macs_of = |phone: &Core, vault_id: &str| -> Vec<Value> {
         list(phone)["vaults"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|vault| vault["vault_id"] == b.vault_id.as_str())
+            .find(|vault| vault["vault_id"] == vault_id)
             .unwrap()["macs"]
             .as_array()
             .unwrap()
             .clone()
     };
+    let work_macs = |phone: &Core| macs_of(phone, &b.vault_id);
     let in_b = json!({"op": "feed_action_string", "vault_id": b.vault_id, "mac_device": MAC_B,
                       "agent": "4", "item": API_ITEM, "kind": "only", "created_at": 1_789_990_100u64});
 
@@ -1338,7 +1340,7 @@ fn the_keys_of_a_vault_that_is_not_selected_are_a_copy() {
     assert_eq!(work[0]["can_act"], false);
     assert_eq!(fails(&setup.phone, in_b.clone()), "invalid_input");
     // The selected vault reads its keys at each call: its Mac can act.
-    assert_eq!(macs(&setup.phone)[0]["can_act"], true);
+    assert_eq!(macs_of(&setup.phone, &setup.a.vault_id)[0]["can_act"], true);
 
     // Work opens again: its keys are read after the feed, so the feed can be acted on.
     call(&setup.phone, open_b.clone());
