@@ -288,6 +288,12 @@ import Testing
         #expect(parameters["created_at"] as? Int64 == 1_789_990_000)
     }
 
+    @Test func theFeedCodesOfTheCoreDecode() {
+        #expect(VaultError.Code(rawValue: "feed_unavailable") == .feedUnavailable)
+        #expect(VaultError.Code(rawValue: "feed_rate") == .feedRate)
+        #expect(VaultError.Code(rawValue: "too_many_actions") == .tooManyActions)
+    }
+
     @Test func onlyTheFaceIDKindsNeedFaceID() {
         #expect(FeedExceptionKind.never.needsFaceID)
         #expect(FeedExceptionKind.alwaysAsk.needsFaceID)

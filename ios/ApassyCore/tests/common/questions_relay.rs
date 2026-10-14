@@ -88,6 +88,8 @@ struct Relay {
     feed_change: u64,
     actions: Vec<StoredAction>,
     action_seq: u64,
+    /// The next feed reads that get `403 feed_rate` (a scripted answer).
+    feed_rate_next: usize,
 }
 
 /// The feed of a device as the relay stores it (relay-feed-v1 section 13.1).
@@ -389,6 +391,12 @@ impl QuestionsRelay {
         changed.notify_all();
     }
 
+    /// The next `count` feed reads (`GET /v1/feed`) get `403 feed_rate`, as from a relay
+    /// whose read budget of the minute the device used up (relay-feed-v1 section 10.2).
+    pub fn rate_feed_reads(&self, count: usize) {
+        lock(&self.shared.0).feed_rate_next = count;
+    }
+
     pub fn feeds(&self) -> BTreeMap<u64, StoredFeed> {
         lock(&self.shared.0).feeds.clone()
     }
@@ -523,6 +531,10 @@ fn feed_route(
             };
             if wait > 25 {
                 return Some(fail(400, "invalid_request"));
+            }
+            if relay.feed_rate_next > 0 {
+                relay.feed_rate_next -= 1;
+                return Some(fail(403, "feed_rate"));
             }
             long_poll(relay, changed, wait, |relay, done| {
                 let mut found: Vec<(u64, StoredFeed)> = relay

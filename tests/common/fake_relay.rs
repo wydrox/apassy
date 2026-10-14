@@ -44,6 +44,10 @@ pub const SYNC_BYTES: u64 = 67_108_864;
 
 type Hook = Box<dyn FnOnce() + Send>;
 
+/// The failure of a scripted `403 feed_rate` ([`FakeRelay::rate_feed_reads`]): no real
+/// status, so `fail_next` keeps its plain statuses.
+const FEED_RATE: u16 = 1403;
+
 #[derive(Clone)]
 struct Device {
     id: u64,
@@ -226,6 +230,8 @@ struct Relay {
     feed_page: Option<usize>,
     /// A relay that answers every `PUT /v1/feed` with `409 seq_not_newer`.
     feed_not_newer: bool,
+    /// The next feed reads (`GET /v1/feed`) get `403 feed_rate` (a scripted answer).
+    feed_rate_next: usize,
 }
 
 /// A running fake relay. It stops when dropped.
@@ -521,6 +527,12 @@ impl FakeRelay {
     /// bytes gets `413`.
     pub fn set_feed_body_limit(&self, limit: Option<usize>) {
         lock(&self.shared.0).feed_body_limit = limit;
+    }
+
+    /// The next `count` feed reads (`GET /v1/feed`) get `403 feed_rate`, as from a relay
+    /// whose read budget of the minute the device used up (relay-feed-v1 section 10.2).
+    pub fn rate_feed_reads(&self, count: usize) {
+        lock(&self.shared.0).feed_rate_next = count;
     }
 
     /// Act as a relay without team schema 6: every `/v1/feed` route answers `404`.
@@ -820,7 +832,7 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
             .iter()
             .find(|(prefix, _)| line.starts_with(prefix.as_str()))
             .map(|(_, delay)| *delay);
-        let failure = relay
+        let mut failure = relay
             .failures
             .iter_mut()
             .find(|(prefix, left, _)| *left > 0 && line.starts_with(prefix.as_str()))
@@ -828,6 +840,10 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
                 *left -= 1;
                 *status
             });
+        if failure.is_none() && line == "GET /v1/feed" && relay.feed_rate_next > 0 {
+            relay.feed_rate_next -= 1;
+            failure = Some(FEED_RATE);
+        }
         (delay, failure, lost)
     };
     if let Some(delay) = delay {
@@ -847,6 +863,7 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
             answer
         }
         Some(503) => fail(503, "busy"),
+        Some(FEED_RATE) => fail(403, "feed_rate"),
         Some(status) => fail(status, "relay_error"),
         None => route(shared, &request),
     };

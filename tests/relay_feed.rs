@@ -1729,6 +1729,50 @@ fn three_answers_seq_not_newer_make_the_mac_wait() {
     });
 }
 
+/// `403 feed_rate` (section 10.2): the read-back of the Mac's own feed at the start is a
+/// pause of a whole minute, not a loop of reads; then the feed goes out as before.
+#[test]
+fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
+    let mut world = world();
+    let phone = world.phone("Test iPhone", answer_key());
+    let reads = |world: &World| {
+        world
+            .relay
+            .log()
+            .iter()
+            .filter(|line| *line == "GET /v1/feed")
+            .count()
+    };
+    world.relay.rate_feed_reads(1);
+    let started = Instant::now();
+    world.start(config());
+    wait_until("the refused read-back", || {
+        (reads(&world) == 1).then_some(())
+    });
+    // A tick is 50 ms: a loop would have read about 60 times by now.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(reads(&world), 1, "one read, then the pause");
+    assert_eq!(world.feed_puts(), 0, "no feed before the read-back worked");
+    // The questions go on meanwhile.
+    assert!(world.relay.count("GET /v1/questions") > 0);
+    let put = {
+        let start = Instant::now();
+        loop {
+            if world.feed_puts() > 0 {
+                break started.elapsed();
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(90),
+                "the feed after the pause"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    assert!(put >= Duration::from_secs(60), "{put:?}");
+    assert_eq!(reads(&world), 2, "one read-back after the pause");
+    phone.wait_feed(&world, "the feed after the pause", |_| true);
+}
+
 /// Finding 7: a retry gets `seq_not_newer`, and the relay holds that `seq` with other
 /// bytes. That is not the feed the Mac sent: it publishes again with a higher `seq`.
 #[test]

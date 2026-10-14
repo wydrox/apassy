@@ -904,6 +904,87 @@ fn an_item_reference_has_one_form() {
     assert_eq!(recent["here"], false);
 }
 
+/// `403 feed_rate` (relay-feed-v1 section 10.2): no feed read for a minute. A read in
+/// that time answers `feed_rate` without the relay, and `feed_wait` waits within its time
+/// instead of answering at once, so the app's watch loop is no busy loop.
+#[test]
+fn a_feed_rate_answer_pauses_the_feed_reads_for_a_minute() {
+    let setup = setup();
+    let seq = fresh_feed(&setup);
+    assert_eq!(macs(&setup.phone)[0]["seq"], seq);
+    let reads = || {
+        setup
+            .a
+            .relay
+            .log()
+            .iter()
+            .filter(|line| *line == "GET /v1/feed")
+            .count()
+    };
+    setup.a.relay.rate_feed_reads(1);
+    publish(
+        &setup.a.relay,
+        TEAM,
+        &setup.a.key,
+        2,
+        &feed(seq + 1, seq + 1, |value| {
+            value["agents"][0]["note"] = json!("A new note.")
+        }),
+    );
+    let refused = Instant::now();
+    assert_eq!(
+        failure(&setup.phone, json!({"op": "feed_list"})),
+        (
+            "feed_rate".to_owned(),
+            "The relay asks this iPhone to wait a minute before it reads the agents again."
+                .to_owned()
+        )
+    );
+    let after = reads();
+    assert_eq!(fails(&setup.phone, json!({"op": "feed_list"})), "feed_rate");
+    let started = Instant::now();
+    let waited = call(&setup.phone, json!({"op": "feed_wait", "timeout": 2}));
+    assert_eq!(waited["changed"], false);
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert_eq!(reads(), after, "no read during the pause");
+
+    // After the minute the long poll reads again and brings the new feed.
+    loop {
+        assert!(
+            refused.elapsed() < Duration::from_secs(90),
+            "the feed after the pause"
+        );
+        if call(&setup.phone, json!({"op": "feed_wait", "timeout": 25}))["changed"] == true {
+            break;
+        }
+    }
+    assert!(refused.elapsed() >= Duration::from_secs(59));
+    assert_eq!(reads(), after + 1);
+    let mac = &macs(&setup.phone)[0];
+    assert_eq!(mac["seq"], seq + 1);
+    assert_eq!(mac["agents"][0]["note"], "A new note.");
+
+    // A lock ends a long poll that waits out the pause at once.
+    setup.a.relay.rate_feed_reads(1);
+    publish(
+        &setup.a.relay,
+        TEAM,
+        &setup.a.key,
+        2,
+        &feed(seq + 2, seq + 2, |_| {}),
+    );
+    assert_eq!(fails(&setup.phone, json!({"op": "feed_list"})), "feed_rate");
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        let waiting =
+            scope.spawn(|| fails(&setup.phone, json!({"op": "feed_wait", "timeout": 25})));
+        std::thread::sleep(Duration::from_millis(500));
+        call(&setup.phone, json!({"op": "lock"}));
+        assert_eq!(waiting.join().unwrap(), "locked");
+    });
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
 #[test]
 fn an_action_is_sealed_with_its_aad_and_reaches_the_relay() {
     let setup = setup();

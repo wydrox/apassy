@@ -105,6 +105,9 @@ const SOME_DEVICE: &str = "a device of this vault";
 /// After an early empty answer of the action long poll: 5 s, doubling to 60 s.
 const EARLY_WAIT_FIRST: Duration = Duration::from_secs(5);
 const EARLY_WAIT_MOST: Duration = Duration::from_secs(60);
+/// After a `403 feed_rate` of the read-back, the feed waits this long: the relay counts
+/// the reads of a minute of its clock, and a whole minute passes the next one.
+const FEED_RATE_WAIT: Duration = Duration::from_secs(60);
 /// After a `404` of the feed routes, the loops ask the relay again this much later.
 const UNSUPPORTED_WAIT: Duration = Duration::from_secs(5 * 60);
 /// `/v1/feed` answered `404`: the relay has no team schema 6 (section 14.2).
@@ -1342,6 +1345,13 @@ impl Shared {
     fn feed_error(&self, active: &Active, error: &QuestionsError) {
         if error.status() == Some(404) {
             self.feed_unsupported(active);
+        } else if error.code() == Some("feed_rate") {
+            // `403 feed_rate` (section 10.2): this Mac read its feed text of the relay's
+            // minute. No feed call before a whole minute passed, and the change waits.
+            let mut feed = lock(&self.feed);
+            let at = Instant::now() + FEED_RATE_WAIT;
+            feed.next_try = Some(feed.next_try.map_or(at, |next| next.max(at)));
+            feed.dirty = true;
         } else if error.can_pass() {
             back_off(&mut lock(&self.feed));
         }

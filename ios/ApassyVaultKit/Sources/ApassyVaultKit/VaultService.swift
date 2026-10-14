@@ -63,6 +63,8 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         /// The feed of the Mac is more than a day old: no action until it reports again.
         case staleFeed = "stale_feed"
         case tooManyActions = "too_many_actions"
+        /// The relay asks this iPhone to wait a minute before it reads the feeds again.
+        case feedRate = "feed_rate"
         /// The service has no such call (an older core; app side, not the core).
         case unsupported
     }

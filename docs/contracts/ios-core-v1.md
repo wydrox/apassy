@@ -585,7 +585,9 @@ A feed travels in the questions team of its vault, so the feeds use the question
 - The app shows "Removed on <Mac>." for a verified `applied`, "<Mac> did not accept it: the exception changed. Pull to refresh." for a verified `stale`, "<Mac> refused it: <reason>." for a verified `refused`, and "Not applied, or unknown. Check the list on <Mac>." for any settle with `verified: false`.
 - Without `vault_id` the core uses the context that posted the action. An action that this process does not know (another session, after a lock) is `not_found`, as is one the relay purged.
 
-Errors of these calls, besides those of section 4 and section 5.10: `feed_unavailable`, `not_found`, `stale_action`, `stale_feed`, `too_many_actions`, `not_routed`, `unreadable` (no question key to seal an action: sync the vault).
+Errors of these calls, besides those of section 4 and section 5.10: `feed_unavailable`, `not_found`, `stale_action`, `stale_feed`, `too_many_actions`, `not_routed`, `unreadable` (no question key to seal an action: sync the vault), `feed_rate`.
+
+**`feed_rate`.** A `403 feed_rate` of `GET /v1/feed` (relay-feed-v1 section 10.2: the iPhone read its 16 MiB of feed text of the relay's minute) is `feed_rate`, "The relay asks this iPhone to wait a minute before it reads the agents again." The core then reads no feed of that vault for 60 seconds (a whole minute always passes the relay's next one): in that time `feed_list` and the reads of the action calls answer `feed_rate` at once, without the relay, for that vault (the call fails only when every vault failed, as above), and `feed_wait` waits within its `timeout` instead of answering at once (it answers `changed: false` at the end of the timeout, or polls with the time left once the minute passed), so the app's watch loop polls again without a busy loop. A `lock` or a `suspend` ends that wait with `locked`, and drops the pause with the context.
 
 ## 6. `phone.json`
 

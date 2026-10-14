@@ -359,7 +359,7 @@ The settle is not signed: it is sealed with the question key, so only a device o
 - Auth: `Authorization: Bearer apassy_acc_…`, the access token of a **live device** of the questions team. The relay checks `Need::Member` and then requires `MemberAuth.device`; a member token gets `401 unauthenticated`. The device and its member are read again at each request and at each turn of a long poll.
 - The team comes from the token. No endpoint takes a team id.
 - **Same-member routing.** A device sees only the feeds of the live devices of its own member, its own included, and may send an action only to such a device, not to itself. Other members' devices never get a feed, its device, or an action, and cannot read one. They can see that feeds and actions change in the team: the team-wide `change` of `GET /v1/feed` and `seq` of `GET /v1/feed/actions` go up with every feed and action of any member, and the team-wide limits (`feed_bytes`, `feed_actions_per_hour`, open actions per team) refuse them too when another member used them up.
-- **Member shares.** The relay gives the feed and action budgets of a team member shares, so one member cannot use up a team's `feed_bytes` or actions, and it reserves a poll seat in the question lane for the Mac's action poll (`GET /v1/feed/actions`), so the feed long polls of other devices do not keep a Mac from its actions.
+- **Member shares.** The relay gives the feed and action budgets of a team member shares, so one member cannot use up a team's `feed_bytes` or actions, and it reserves a poll seat in the team's share of the feed lane (section 10.10) for the Mac's action poll (`GET /v1/feed/actions`), so the feed long polls of other devices do not keep a Mac from its actions.
 - Bodies: JSON, `deny_unknown_fields`, `v` must be `1`. At most 64 KiB, except `PUT /v1/feed`: at most 360448 bytes (352 KiB: the b64u of a 256 KiB ciphertext is 349526 characters), with `Content-Length` and without `Transfer-Encoding`.
 
 ### 10.2 Errors
@@ -369,8 +369,9 @@ The settle is not signed: it is sealed with the question key, so only a device o
 | 400 | `invalid_request` | Malformed JSON, an unknown field, `v` not 1; a `seq`, `key_id`, `nonce`, `ciphertext`, `action_id`, `to_device`, or `outcome` out of its form; an empty ciphertext; a settle whose `key_id` is not a 16-hex form; `since`, `after`, or `wait` not a number, `wait` over 25; `PUT /v1/feed` without `Content-Length` or with `Transfer-Encoding`. |
 | 401 | `unauthenticated` / `token_expired` | As relay-sync-v1 section 4. |
 | 403 | `not_routed` | An action to a device that is not a live device of the caller's member, or to the caller itself. |
-| 403 | `feed_limit` | A feed within 10 s of the device's last accepted feed (relay clock); a feed that would pass the team's `feed_bytes`. The message names the limit. Not `429`, so the app's other calls go on. |
-| 403 | `too_many_actions` | `feed_actions_per_hour` (60) of the team in the last hour, 20 open actions in the team, or 10 open actions of the sending device. |
+| 403 | `feed_limit` | A feed within 10 s of the device's last accepted feed (relay clock); a feed that would pass the team's `feed_bytes`. The message names the limit. A member's feeds and actions stay within three quarters of each team limit (the whole limit in a team of one member); the message then names `member_feed_bytes`, `member_feed_actions_per_hour`, or `member_open_feed_actions`. Not `429`, so the app's other calls go on. |
+| 403 | `feed_rate` | The device was given 16 MiB of feed text by `GET /v1/feed` in this minute (relay clock); it reads again at the next minute. Not `429`, so the app's other calls go on. |
+| 403 | `too_many_actions` | `feed_actions_per_hour` (60) of the team in the last hour, 20 open actions in the team, or 10 open actions of the sending device. A member's feeds and actions stay within three quarters of each team limit (the whole limit in a team of one member); the message then names `member_feed_bytes`, `member_feed_actions_per_hour`, or `member_open_feed_actions`. |
 | 404 | (any) | Any `/v1/feed` route on a relay without team schema 6. Section 14. |
 | 404 | `not_found` | An unknown `action_id` in this team (also after the purge, section 12); `GET /v1/feed/actions/{id}` by a device that is not the sender; `POST …/settle` by a device that is not the target; an action to a device that has no feed. |
 | 409 | `seq_not_newer` | `PUT /v1/feed` with a `seq` at or below the stored `seq` of the device. |
@@ -415,6 +416,7 @@ The feeds of the caller's member with `change > since`, oldest `change` first. `
 - `change` (top level) is the team's current feed counter. A top-level `change` below `since` (a relay restored from a backup) means: the device sets `since` to 0 and reads again.
 - `present` lists every device of the member that has a feed now, also those not in `feeds`. A reader drops the feed of a device that is not in `present`.
 - The relay stops adding feeds when the `ciphertext` texts of the answer reach 1 MiB (it always adds at least one), and then sets `more: true`; the device asks again at once with `since` = the `change` of the last entry. So an answer stays under the 2 MiB that the app reads (relay-sync-v1 section 3).
+- A `403 feed_rate` (section 10.2) means: no feed read of this device for a whole minute, which always passes the relay's next minute whatever the clocks say. The iPhone reads no feed and its long poll waits in that time; the Mac's read-back of section 10.3 waits too, and its feed waits with the change.
 - `device_name` is the relay's name of the device, for a log only. The reader takes the name from the plaintext and the `trusted_device` row.
 
 ### 10.5 `DELETE /v1/feed`
@@ -461,7 +463,7 @@ The sender only.
 
 ### 10.10 Long polls and the lane
 
-The three feed long polls (`GET /v1/feed`, `GET /v1/feed/actions`, `GET /v1/feed/actions/{id}`) with a `wait` above 0 run in the question lane (SPEC section 25.5) and count in a team's share of it (`question_long_polls_per_team`). When the lane or the share is full, they are answered at once, as with `wait=0`. In a Connect team they also count in the Connect bound (relay-connect-v1 section 5) and can answer early with nothing new. After an early empty answer the device waits before it polls again (5 s, doubling to 60 s, with jitter). The relay reserves a seat of the lane for the action poll of a Mac, so the feed polls of the iPhones cannot fill it. The iPhone polls the feed only while the Agents tab or an agent page is on the screen; there is no push for feeds or actions in v1.
+The three feed long polls (`GET /v1/feed`, `GET /v1/feed/actions`, `GET /v1/feed/actions/{id}`) with a `wait` above 0 run in a feed lane of their own on the relay, apart from the question lane: they never count in a team's share of the question lane or in the Connect bound of relay-connect-v1 section 5. When the feed lane or the team's feed share is full, they are answered at once, as with `wait=0`, so a poll can answer early with nothing new. After an early empty answer the device waits before it polls again (5 s, doubling to 60 s, with jitter). The relay reserves a seat of the team's feed share for the action poll of a Mac, so the feed polls of the iPhones cannot fill it. The iPhone polls the feed only while the Agents tab or an agent page is on the screen; there is no push for feeds or actions in v1.
 
 ## 11. Routing
 
@@ -475,10 +477,11 @@ The routing set of a feed and of an action is computed by the relay at each requ
 | Feed body | 360448 bytes | Worker and relay: `413` |
 | Feeds per device | 1, replaced by each `PUT` | relay |
 | Feed rate | 1 accepted feed per device per 10 s (relay clock) | relay: `403 feed_limit` |
-| Feed bytes of a team (`feed_bytes`) | 4 MiB by default (1 MiB to 64 MiB); 1 MiB in the `connect` preset | relay: `403 feed_limit` |
+| Feed bytes of a team (`feed_bytes`) | 4 MiB by default (1 MiB to 64 MiB); 1 MiB in the `connect` preset; one member at most three quarters of it | relay: `403 feed_limit` |
 | Action / settle ciphertext | 4112 / 1040 bytes | relay: `413` |
-| Actions | 60 per hour per team (`feed_actions_per_hour`); 20 open per team; 10 open per sending device | relay: `403 too_many_actions` |
+| Actions | 60 per hour per team (`feed_actions_per_hour`); 20 open per team; 15 open and 45 per hour per member; 10 open per sending device | relay: `403 too_many_actions` |
 | Action lifetime | 300 s on the relay (`expires_at`); 60 s window of `time` at the target | relay; app |
+| Feed reads | 16 MiB of text per device per minute | relay: `403 feed_rate` |
 | Feed long polls | 1 per device for the feeds, 1 for actions, 1 for an action status; `wait` 0 to 25 s | relay |
 | Feeds in one answer | until 1 MiB of ciphertext text, at least one | relay |
 | Actions in one answer | 20 | relay |
@@ -531,8 +534,8 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 
 - **The Worker.** `npx wrangler rollback`. The old Worker answers a feed body over 128 KiB (131072 bytes) with `413`; the app then fits to the old size, 95 KiB of plaintext (section 14.2).
 - **The relay image, back to schema 5.** Stop the relay, put the version 5 copies back (`for f in /data/teams/*.db.pre-v6; do cp -p "$f" "${f%.pre-v6}"; done`), and start the previous image. If an `admin limits` call changed `feed_bytes` or `feed_actions_per_hour` after the deploy, set them back to the default with the new image still running, or restore `relay.db` from the backup taken before the deploy (OPERATIONS section 19.3 has the same rule for question limits).
-- **What it loses.** Everything since the migration in each team file: the feeds and the actions, and also the questions, devices, and sync heads made after it (as 19.3).
-- **Revocations come back.** Putting the `.pre-v6` copies back also undoes every revocation of a device or a member made after the deploy: a removed device or member is live again on the relay. Before the rollback, list the revocations since the deploy (from the revocation rows of the relay's audit log); after it, either fix forward (deploy a fixed version 6 image instead of rolling back) or revoke each of them again at once. The feeds are harmless to lose: the previous image answers `404` on `/v1/feed`, the Macs stop publishing, and the iPhones keep their interim screen (section 14). A team made after the migration has no `.pre-v6` and is version 6 from the start: suspend it, or restore the backup instead.
+- **What it loses.** Everything since the migration in each team file: the feeds and the actions, and also the questions, devices, and sync heads made after it (as 19.3). A rollback also undoes every revocation and change of access since the migration (devices, members, agent tokens, grants, invites, roles, policies, the key holder), and drops the audit rows that recorded them; the operator runs `apassy-relay rollback-check` first and fixes forward when it lists any (relay OPERATIONS 21.3).
+- **The feeds, and new teams.** The feeds are harmless to lose: the previous image answers `404` on `/v1/feed`, the Macs stop publishing, and the iPhones keep their interim screen (section 14). A team made after the migration has no `.pre-v6` and is version 6 from the start: suspend it, or restore the backup instead.
 - Delete the `.pre-v6` files when no rollback to schema 5 is needed any more.
 
 ## 14. Versioning and compatibility

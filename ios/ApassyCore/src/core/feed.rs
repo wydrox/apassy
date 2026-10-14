@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -59,6 +59,12 @@ const ACTION_RETRY_SECONDS: u64 = 55;
 const ACTION_WINDOW_SECONDS: u64 = 60;
 /// A list call reads at most this many answers of `GET /v1/feed`.
 const MAX_PAGES: usize = 16;
+/// After a `403 feed_rate` the core reads no feed of that team for this long: the relay
+/// counts the read budget per minute of its clock, so a full minute always passes its
+/// next minute, whatever the clocks say (section 10.2).
+const FEED_RATE_PAUSE: Duration = Duration::from_secs(60);
+/// The step of a pause of a long poll: a lock or another context's news ends it at once.
+const PAUSE_STEP: Duration = Duration::from_millis(200);
 /// The actions of this process that a context remembers for `feed_action_wait`.
 const KEEP_ACTIONS: usize = 64;
 /// The Face ID prompt shows at most this many characters of the agent name (section 9.4).
@@ -102,6 +108,8 @@ pub(super) struct Mirror {
     hidden: Vec<Target>,
     /// The code of the last failed relay call, until one works.
     error: Option<&'static str>,
+    /// The relay answered `403 feed_rate`: no feed read of this team before then.
+    rate_until: Option<Instant>,
 }
 
 /// The highest feed `seq` accepted of each Mac, by team ID and relay device id (section 8).
@@ -859,6 +867,13 @@ fn feed_unavailable() -> CoreError {
     )
 }
 
+fn feed_rate() -> CoreError {
+    CoreError::new(
+        "feed_rate",
+        "The relay asks this iPhone to wait a minute before it reads the agents again.",
+    )
+}
+
 fn bad_item() -> CoreError {
     CoreError::invalid("The item reference is not valid.")
 }
@@ -937,6 +952,7 @@ fn call_error(error: RelayCallError) -> CoreError {
                 "not_routed",
                 "This Mac does not take actions from this iPhone.",
             ),
+            (403, "feed_rate") => feed_rate(),
             (403, "too_many_actions") => CoreError::new(
                 "too_many_actions",
                 "Too many actions in a short time. Try again later.",
@@ -1284,6 +1300,31 @@ impl Core {
         }
     }
 
+    /// Sleep until `until` in short steps. False when a lock, a suspend, a new membership,
+    /// or the news of another context (`cancel`) ended the wait first.
+    fn feed_pause(
+        &self,
+        vault_id: &str,
+        member: &Arc<RelayMember>,
+        until: Instant,
+        cancel: Option<&Cancel>,
+    ) -> bool {
+        loop {
+            let open = guard(&self.questions)
+                .contexts
+                .get(vault_id)
+                .is_some_and(|context| Arc::ptr_eq(&context.member, member));
+            if !open || cancel.is_some_and(Cancel::is_closed) {
+                return false;
+            }
+            let now = Instant::now();
+            if now >= until {
+                return true;
+            }
+            std::thread::sleep(PAUSE_STEP.min(until - now));
+        }
+    }
+
     /// The feeds of one context, as [`Self::feed_fetch`].
     fn feed_fetch_one(
         &self,
@@ -1294,16 +1335,43 @@ impl Core {
     ) -> CoreResult<bool> {
         let mut changed = false;
         let mut wait = wait;
-        for _ in 0..MAX_PAGES {
-            let (since, keys) = {
+        let deadline = Instant::now() + wait;
+        let mut pages = 0;
+        while pages < MAX_PAGES {
+            let (since, keys, rate_until) = {
                 let mut state = guard(&self.questions);
                 let context = state.context_mut(vault_id, member)?;
-                (context.feed.since, Arc::clone(&context.keys))
+                let rate_until = context.feed.rate_until.filter(|at| *at > Instant::now());
+                (context.feed.since, Arc::clone(&context.keys), rate_until)
             };
+            // After `403 feed_rate` no read until the pause ends: a read answers with the
+            // error, and a long poll waits the pause out within its own time, so the app
+            // that polls again at once does not loop.
+            if let Some(until) = rate_until {
+                if wait.is_zero() {
+                    return Err(feed_rate());
+                }
+                if !self.feed_pause(vault_id, member, until.min(deadline), cancel) {
+                    return Err(CoreError::locked());
+                }
+                wait = deadline.saturating_duration_since(Instant::now());
+                if wait.is_zero() {
+                    return Ok(changed);
+                }
+                continue;
+            }
+            pages += 1;
             let path = format!("/v1/feed?since={since}&wait={}", wait.as_secs());
-            let answer = member
-                .call_until("GET", &path, None, wait, cancel)
-                .map_err(call_error)?;
+            let answer = match member.call_until("GET", &path, None, wait, cancel) {
+                Err(RelayCallError::Relay { status: 403, code }) if code == "feed_rate" => {
+                    let mut state = guard(&self.questions);
+                    state.context_mut(vault_id, member)?.feed.rate_until =
+                        Some(Instant::now() + FEED_RATE_PAUSE);
+                    wait = deadline.saturating_duration_since(Instant::now());
+                    continue;
+                }
+                other => other.map_err(call_error)?,
+            };
             let answer: FeedAnswer = serde_json::from_value(answer)
                 .map_err(|_| CoreError::from(SyncError::RelayUnreachable))?;
             // The envelopes open without the mutex.
