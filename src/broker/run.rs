@@ -97,7 +97,9 @@ use crate::agent::wire::{WireResponse, codes};
 use crate::vault::answers::{AnswerScope, ProjectRef, normal_host};
 use crate::vault::exceptions::Standing;
 use crate::vault::providers;
-use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
+use crate::vault::usage::{
+    InteractionKind, MAX_COMMAND_SUMMARY_BYTES, NewItemUse, UseDecidedBy, UseOutcome,
+};
 use crate::vault::{
     ActivityDecision, AgentSummary, DecisionEntry, Declaration, DeclarationSource,
     DeclarationSources, EnvBinding, EnvDelivery, Environment, NewActivity, OwnerLabel, RealOutcome,
@@ -143,9 +145,14 @@ pub struct RunRequest<'a> {
 }
 
 impl RunRequest<'_> {
+    /// The whole command, as the use log masks and then cuts it.
+    fn command_text(&self) -> String {
+        format!("run {}", self.command.join(" "))
+    }
+
     /// Short text for the activity log. It has no secret value, because the agent does not have one.
     fn label(&self) -> String {
-        let mut text = format!("run {}", self.command.join(" "));
+        let mut text = self.command_text();
         if text.len() > 64 {
             let mut end = 61;
             while !text.is_char_boundary(end) {
@@ -1792,7 +1799,14 @@ fn store_uses(
     answered_on: &str,
 ) {
     let hosts = run_hosts(request.command);
-    let command_summary = request.label();
+    // The whole command, masked with the values of every item of the request, and only
+    // then cut: a value of one item never shows in the row of another, and a value at
+    // the cut never leaves a part (relay-feed-v1 section 7.2).
+    let Ok(mask) = vault.command_mask(request.items) else {
+        return;
+    };
+    let command_summary = mask.summary(&request.command_text(), MAX_COMMAND_SUMMARY_BYTES);
+    drop(mask);
     for item_id in request.items {
         // Only an item that exists gets a row.
         if vault.details(*item_id).is_err() {

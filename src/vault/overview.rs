@@ -440,4 +440,96 @@ mod tests {
         vault.set_agent_note(agent, "n").unwrap();
         assert!(vault.change_count().unwrap() > before);
     }
+
+    /// relay-feed-v1 section 7.2: the feed masks every command with the values of every
+    /// item of the vault, also those of an item whose UUID has another form (it has no
+    /// reference in the feed), and also in the rows of such an item.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn the_feed_masks_the_values_of_an_item_without_a_native_uuid() {
+        use crate::vault::usage::{NewItemUse, UseDecidedBy};
+        const SHOP: &str = "SYNTH-shop-value-1234";
+        const ODD: &str = "SYNTH-odd-uuid-value-5678";
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("feed.db"), "overview-unit-pass").expect("create");
+        vault.unlock("overview-unit-pass").expect("unlock");
+        let item = |vault: &mut Vault, title: &str, value: &str| {
+            vault
+                .add(crate::vault::ItemDraft {
+                    title: title.to_owned(),
+                    kind: crate::contracts::CredentialKind::ApiKey,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: vec![crate::vault::Field {
+                        name: "token".to_owned(),
+                        value: crate::vault::SecretValue::new(value.to_owned()),
+                        secret: true,
+                    }],
+                })
+                .unwrap()
+                .id
+        };
+        let shop = item(&mut vault, "Shop database", SHOP);
+        let odd = item(&mut vault, "Odd item", ODD);
+        // An item merged from a copy with an upper-case UUID: not the native form.
+        vault
+            .conn_mut()
+            .unwrap()
+            .execute(
+                "UPDATE item SET uuid = upper(uuid) WHERE id = ?1",
+                [to_sql_id(odd).unwrap()],
+            )
+            .unwrap();
+        assert!(!vault.item_refs().unwrap().contains_key(&odd));
+        let agent = vault.register_agent("Claude Code").unwrap().0.id;
+        // Each row is masked with the values of its own item when it is written: the value
+        // of the other item stays in it.
+        for (item_id, command) in [
+            (shop, format!("deploy --other {ODD}")),
+            (odd, format!("deploy --other {SHOP}")),
+        ] {
+            vault
+                .record_item_use(&NewItemUse {
+                    item_id,
+                    agent_id: Some(agent),
+                    agent_name: "Claude Code".to_owned(),
+                    project_key: String::new(),
+                    project_label: String::new(),
+                    action: ActionKind::Deploy,
+                    command_summary: command,
+                    hosts: Vec::new(),
+                    outcome: UseOutcome::Allowed,
+                    decided_by: UseDecidedBy::Bouncer,
+                    answered_on: String::new(),
+                    decision_log_id: None,
+                })
+                .unwrap();
+        }
+        let me = crate::vault::TrustedDevice {
+            uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+            name: "Synthetic Mac".to_owned(),
+            kind: crate::vault::TrustedDeviceKind::Mac,
+            relay_devices: std::collections::BTreeMap::new(),
+            sign_key: vec![4; 65],
+            answer_key: None,
+            created_at: 0,
+            updated_at: 0,
+            updated_by: String::new(),
+        };
+        let feed =
+            crate::questions::feed::build_feed(&vault, &me, 1, super::super::agents::now_unix())
+                .unwrap();
+        let recent = &feed.agents[0].recent;
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].item, None, "the odd item has no reference");
+        assert_eq!(recent[0].command, "deploy --other [apassy:secret]");
+        assert!(recent[1].item.is_some());
+        assert_eq!(recent[1].command, "deploy --other [apassy:secret]");
+        let plaintext = String::from_utf8(feed.to_plaintext().to_vec()).unwrap();
+        assert!(
+            !plaintext.contains(SHOP) && !plaintext.contains(ODD),
+            "{plaintext}"
+        );
+    }
 }
