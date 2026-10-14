@@ -38,7 +38,8 @@ use apassy::sync::{DeviceKey, PendingJoin, decode_b64u};
 use apassy::vault::exceptions::{AgentException, ExceptionKind};
 use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Field, ItemDraft, QuestionKey, SecretValue, TrustedDevice, TrustedDeviceKind, Vault,
+    ActivityDecision, Field, ItemDraft, QuestionKey, SecretValue, TrustedDevice, TrustedDeviceKind,
+    Vault,
 };
 use fake_relay::FakeRelay;
 use tempfile::TempDir;
@@ -1472,6 +1473,60 @@ fn run_commands_are_masked_with_every_item_before_the_cut() {
             );
         }
     }
+}
+
+/// The Activity text of a run is masked as the use rows are: the whole command with the
+/// values of every item of the request, and only then cut to 64 bytes. A value across
+/// the cut leaves no part, and the row of each item holds no value of the other.
+#[test]
+fn the_activity_text_of_a_run_is_masked_with_every_item_before_the_cut() {
+    let world = world();
+    let [shop, api] = world.items;
+    let (_broker, socket) = broker_of(&world);
+    // The API value is whole before the cut; the shop value crosses byte 61, where the
+    // text was cut before, also after the mask of the API value.
+    let script = format!("deploy --api {API_SECRET} --db {SHOP_SECRET} --now");
+    let text = format!("run /bin/sh -c {script}");
+    let at = text.find(SHOP_SECRET).unwrap();
+    assert!(at < 61 && at + SHOP_SECRET.len() > 61);
+    let masked = text.replace(API_SECRET, "[apassy:secret]");
+    let at = masked.find(SHOP_SECRET).unwrap();
+    assert!(at < 61 && at + SHOP_SECRET.len() > 61);
+    refused_run(&world, &socket, &[shop, api], &script);
+    let (newest, rows) = world.with(|vault| {
+        (
+            vault.recent_activity(1).unwrap().remove(0),
+            [shop, api].map(|item| vault.item_activity(item, 1).unwrap().remove(0)),
+        )
+    });
+    assert_eq!(newest.decision, ActivityDecision::Deny);
+    assert_eq!(
+        newest.operation,
+        "run /bin/sh -c deploy --api [apassy:secret] --db ..."
+    );
+    for row in &rows {
+        assert_eq!(row.operation, newest.operation);
+    }
+    for row in rows.iter().chain([&newest]) {
+        assert!(row.operation.len() <= 64, "{}", row.operation);
+        assert!(!row.operation.contains("SYNTH"), "{}", row.operation);
+        for secret in [SHOP_SECRET, API_SECRET] {
+            assert!(no_part_of(&row.operation, secret), "{}", row.operation);
+        }
+    }
+
+    // A short command is not cut; each value is masked.
+    refused_run(
+        &world,
+        &socket,
+        &[shop, api],
+        &format!("x {SHOP_SECRET} {API_SECRET}"),
+    );
+    let row = world.with(|vault| vault.recent_activity(1).unwrap().remove(0));
+    assert_eq!(
+        row.operation,
+        "run /bin/sh -c x [apassy:secret] [apassy:secret]"
+    );
 }
 
 /// Finding 2: a relay floods the Mac with thousands of actions that do not open. The Mac
