@@ -9,12 +9,14 @@
 //!
 //! The questions through the relay keep a context for each vault unlocked in this
 //! session (section 5.10, `questions.rs`): a selection keeps them, a `lock`, a
-//! `suspend`, and `remove_vault` drop them all.
+//! `suspend`, and `remove_vault` drop them all. The agent feeds of the Macs (section
+//! 5.12, `feed.rs`) live in the same contexts.
 
 mod autofill;
 mod config;
 mod credential_export;
 mod errors;
+mod feed;
 mod generate;
 mod icloud;
 mod items;
@@ -546,6 +548,12 @@ impl Core {
                 self.require_app()?;
                 self.questions_call(&op, request)
             }
+            // 5.12 The agent feeds of the Macs: the app only.
+            "feed_list" | "feed_wait" | "feed_action_string" | "feed_action"
+            | "feed_action_wait" | "feed_action_status" => {
+                self.require_app()?;
+                self.feed_call(&op, request)
+            }
             _ => Err(CoreError::invalid("This call is not known.")),
         }
     }
@@ -668,7 +676,9 @@ impl Core {
             return Err(CoreError::locked());
         }
         // The questions of this vault stay until a lock, even when another is selected.
-        let _ = self.questions_capture(slot.insert(vault));
+        let vault = slot.insert(vault);
+        let _ = self.questions_capture(vault);
+        self.feed_capture(vault);
         if keep {
             *guard(&self.kept) = Some(Zeroizing::new(passphrase.to_owned()));
         }
