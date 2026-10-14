@@ -28,6 +28,8 @@ cd ios/ApassyVaultKit
 swift test
 ```
 
+`CoreMultiVaultQuestionsTests` runs `ApassyCore/build/questions-macs` (from `examples/questions_macs.rs`, built with the `mac` slice): two fake Macs with two vaults on the fake relay. The iPhone joins both, lists and answers the questions of each with its `vault_id`, and opens the other vault again after a suspend with `questions_unlock`.
+
 ## The companion kit
 
 It needs Xcode 27 (Swift 6.4). It builds for iOS 26 and macOS 15, and its tests run on macOS. No iOS simulator and no Secure Enclave are needed.
@@ -77,7 +79,7 @@ The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Sear
 | All credentials | Every credential that is not archived, grouped by folder as on the Mac (A to Z inside), with filters by kind and tag and a sort. |
 | A folder | Its subfolders, then its credentials with provider tiles and a red dot for production. "⋯" or a swipe: new folder, rename, move, delete. Deleting a folder moves its credentials and subfolders to the parent; no credential is deleted. "+" adds a credential to the folder. |
 | New Credential | "+" opens it. Paste text or scan a QR code, then Add. The core detects what the text is (a key, a database URL, an `otpauth://` link, a `.env`), and the sheet shows masked previews only. A `.env` gives one row per line, each with a checkbox and an editable title. You can pick a folder. "Fill in by hand" opens the full editor for a kind. The paste is cleared when the app leaves the foreground, when you cancel, and when the vault locks. |
-| A credential | The header with the provider tile and the environment, then the fields in the Mac's order and labels. A secret shows as dots: reveal, copy, a one-time code, and large type each need Face ID or the passphrase. Then Variable (the name agents get; a tap copies it) and Folder (a tap moves the credential). "Agent use" and "Rules from your answers" show "Available when the Mac is connected". Options: "Always ask me" and Environment. Turning "Always ask me" off, choosing any environment other than production, or setting the first environment needs Face ID or the passphrase first; a stricter change does not. Then notes, tags, times, history, and a note on a conflict copy. Edit, favorite, archive, delete. A website opens in Safari. |
+| A credential | The header with the provider tile and the environment, then the fields in the Mac's order and labels. A secret shows as dots: reveal, copy, a one-time code, and large type each need Face ID or the passphrase. Then Variable (the name agents get; a tap copies it) and Folder (a tap moves the credential). "Agent use" and "Rules from your answers" say that they are on the Mac. Agent use offers "Open Decisions" when questions reach this iPhone, else "Connect this iPhone". Options: "Always ask me" and Environment. Turning "Always ask me" off, choosing any environment other than production, or setting the first environment needs Face ID or the passphrase first; a stricter change does not. Then notes, tags, times, history, and a note on a conflict copy. Edit, favorite, archive, delete. A website opens in Safari. |
 | Edit | The full form for each kind (login, API key, SSH key, database, other), a Folder row, custom details, tags, notes, the password generator, and a one-time password from its QR code. A secret left empty keeps its stored value. |
 | Generator | Random, memorable (the EFF word list), or a PIN, with the strength. |
 | Decisions tab | See "Decisions" below. |
@@ -104,12 +106,13 @@ The Decisions tab shows what blocks an agent now. Its badge counts the rows of W
 | Part | What it does |
 | --- | --- |
 | Waiting | The questions through the relay and the runs of the paired Mac on Wi-Fi, in one list, newest first. Each row has the agent, the credential, the project, a red dot for production, and a timer. A run that a question already shows counts once. |
-| Requests | "Available when the Mac is connected". When a Mac is paired: its open access requests, or "No requests". |
-| Suggestions | "Available when the Mac is connected". |
+| Locked vaults | A lock or a suspend drops the questions of every vault, and a resume opens the selected vault only. After an unlock and a resume, the app opens the questions of each other vault whose passphrase is stored behind Face ID ("Unlock with Face ID" on for it), with one Face ID for all of them, in the background (`questions_unlock`). A Face ID unlock of the selected vault reads them in the same prompt. Any other vault with questions shows one row: "<vault> is locked. Unlock to see its questions." Unlock uses Face ID when the passphrase is stored, else a passphrase sheet. The sheet opens the questions only; the vault on screen does not change. Its field is cleared when the app leaves the screen. |
+| Requests | When a Mac is paired on Wi-Fi: its open access requests, or "No requests". Else they are on the Mac, with "Pair with the Mac on Wi-Fi". |
+| Suggestions | "Suggestions come from your Mac. They show in Apassy on the Mac." |
 | Ended | Questions that expired or were answered elsewhere, with who answered. |
 | A question | The sentence, the facts, the command, and why the owner is asked. A fixed bar at the bottom has "Allow ACTION in PROJECT", "Deny", and "Allow Once". A production question shows a red "Allow production: ACTION in PROJECT". Its "⋯" menu holds the stricter answers and the environment of a credential. When the question has ended, the outcome takes the place of the bar. |
 | Face ID | An answer that gives authority asks for Face ID, as the core decides. The stricter answers go without it. A changed Face ID enrollment makes a new answer key; the Mac removes the old device, and the owner connects this iPhone again. |
-| Notification | A notification says only "A question is waiting". Opening one shows the newest waiting question. |
+| Notification | A notification says only "A question is waiting". Opening one shows the newest waiting question. It names no vault, so a locked vault opens first: with Face ID when its passphrase is stored, else with the passphrase sheet. |
 | "⋯" menu | "Notifications" (when the relay is connected), "Connect this iPhone" (when it is not), and "Mac on Wi-Fi" (pairing, Activity, Mac). |
 
 ### Mac on Wi-Fi (ADR 0020)
@@ -142,7 +145,7 @@ A Simulator build (never a device build) takes these development aids:
 | `-ApassyUnlockPassphrase <passphrase>` | Unlock once at launch. |
 | `-ApassyOpen <route>` | Open a screen. The routes are below. |
 | `-ApassyPasteDemo stripe\|env` | Fill New Credential with synthetic values that the preview vault detects: one Stripe key, or a `.env` with three lines. Use it with `-ApassyOpen newcredential`. |
-| `-ApassyPreviewDecisions list\|detail` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` also opens the newest one, as a notification would. |
+| `-ApassyPreviewDecisions list\|detail\|vaults\|locked` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` also opens the newest one, as a notification would. `vaults` adds the questions of a second vault, "Work". `locked` also adds a third vault, "Family", whose questions are locked; the preview passphrase opens them. |
 | `-ApassyPairingLink <link>` | The companion pairing, as below. |
 
 The `-ApassyOpen` routes:
