@@ -1195,19 +1195,19 @@ What changes at the first start of this version:
 - New routes: `/v1/feed` (PUT, GET, DELETE), `/v1/feed/actions` (POST, GET), `/v1/feed/actions/{id}` (GET), `/v1/feed/actions/{id}/settle` (POST). They are for the access tokens of devices; only the devices of one member see each other's feeds and actions.
 - `PUT /v1/feed` takes a body of up to 352 KiB (the Worker and the relay); every other body keeps its cap. One feed per device, replaced by each `PUT`, at most one every 10 s (403 `feed_limit`).
 - New team limits, section 17: `feed_bytes` (4 MiB of sealed feeds at once; 1 MiB in a Connect team) and `feed_actions_per_hour` (60). An action is open for 300 s; 20 are open at once in a team, 10 of one iPhone. One member gets at most three quarters of each (3 MiB, 45 an hour, 15 open), so one member cannot block the others; a Connect team has one member and gets all. Over any: 403 `feed_limit` or `too_many_actions`. Feeds never count in `question_bytes`.
-- A device reads all of its member's feeds again (`GET /v1/feed?since=0`, about 1.33 MiB at most) at most 6 times a minute; the seventh is 429 `rate_limited` with `Retry-After`. A correct app never meets it.
+- One device gets at most 16 MiB of feed text a minute from `GET /v1/feed` (a read of everything is up to 1 MiB a page, and up to about 4 MiB with its `more` pages at the default budget); after that its feed reads are 403 `feed_rate` until the next minute. Its other calls go on: a 403, not a 429.
 - A Connect team's file cap grows by its `feed_bytes`: 11 MiB at the preset (was 10 MiB).
 - The three feed long polls have a lane of their own, so question and answer polls keep all of their capacity (128 threads, 32 of a team, 2 of a Connect team, `APASSY_RELAY_CONNECT_LONG_POLLS`): 64 threads, 16 of an operator team, 2 of a Connect team, 48 of all Connect teams. Of a team's feed seats the iPhones' polls hold at most three quarters (1 of a Connect team's 2), so the Mac's action poll always finds one. Threads at most: 256 + 128 + 64 = 448, under the `pids_limit` of 512.
 - An action leaves the Mac's list when it is settled or expires; 10 minutes later its sealed envelopes go; its row goes 24 hours after the post. A feed goes with `DELETE /v1/feed`, when its device or member is revoked, and 30 days after its last update.
-- The audit gets `feed_started`, `feed_deleted`, `feed_action_posted`, and `feed_action_settled` with device ids and the outcome only. **No row per feed update**: a Mac publishes up to every 10 s, and a Connect team never deletes audit rows. For the same reason a device writes at most one `feed_started` and one `feed_deleted` (of its own `DELETE /v1/feed`) an hour; a revocation always writes its row.
+- The audit gets `feed_started`, `feed_deleted`, `feed_action_posted`, and `feed_action_settled` with device ids and the outcome only. **No row per feed update**: a Mac publishes up to every 10 s, and a Connect team never deletes audit rows. For the same reason a device writes at most one `feed_started` or `feed_deleted` (of its own `DELETE /v1/feed`) an hour; a change within the hour is written by maintenance once the hour has passed, if the feed is still so. A revocation always writes its row. `limit_reached` of the feed limits: at most one row per kind and hour for a team.
 - `admin limits` takes `--feed-bytes` and `--feed-actions-per-hour` and prints eighteen values.
-- New operator commands for the way back (21.3): `admin rollback-check` (reads only) and `admin delete <id> --free-connect-key`.
+- New commands for the way back (21.3): `apassy-relay rollback-check` (reads only, with or without a running relay) and `admin delete <id> --free-connect-key`.
 
 ### 21.1 What to watch
 
 - The relay log at the start: no `cannot be moved to schema version 6`.
 - `admin teams`: every team `"open": true`; Connect teams with `"file_cap": 11534336`, and their `file_level`.
-- The team audit: `limit_reached {"limit": "feed_bytes"}` means the Macs of a team publish more than its budget (many Macs, or many agents): raise `feed_bytes` for it. `member_feed_bytes` means one member's Macs do: raising `feed_bytes` raises the share too. `open_feed_actions`, `feed_actions_per_hour`, or their `member_` rows mean an iPhone sends actions in bulk.
+- The team audit: `limit_reached {"limit": "feed_bytes"}` means the Macs of a team publish more than its budget (many Macs, or many agents): raise `feed_bytes` for it. `member_feed_bytes` means one member's Macs do: raising `feed_bytes` raises the share too. `open_feed_actions`, `feed_actions_per_hour`, or their `member_` rows mean an iPhone sends actions in bulk. Each kind writes at most one row an hour.
 - Disk: each team holds at most its `feed_bytes` of feeds (4 MiB, or 1 MiB for a Connect team) and a few KiB of actions.
 
 ### 21.2 Owner steps for the deploy
@@ -1244,7 +1244,7 @@ Run the steps in this order. **The Worker goes first**, and the image is built o
 
    ```sh
    ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay du -sk /data/teams'      # KiB of the team files and snapshots
-   ssh ottervibe 'df -k /opt/apassy/backups /var/lib/docker'                              # KiB free where the backups and the volume are
+   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay df -k /data /backups'    # KiB free on the volume and where the backups go
    ```
 
    Go on only when every `Available` is at least twice the `du` figure plus 1 GiB (1048576 KiB). If not, stop: delete old backup folders under `/opt/apassy/backups/relay/` and old `.pre-v4` and `.pre-v5` copies (`docker compose exec relay sh -c 'ls -l /data/teams/*.pre-v*'`; keep the newest backup), and check again. A team whose `.pre-v6` copy cannot be made stays at version 5 and does not open (step 5 shows it), so a full disk fails safe, but every such team is out of service until there is room.
@@ -1288,22 +1288,25 @@ Run the steps in this order. **The Worker goes first**, and the image is built o
 - **The audit rows since the migration are gone,** also the `device_revoked`, `member_revoked`, `agent_revoked`, and `grant_revoked` rows that recorded those revocations.
 - The questions, push tokens, devices, members, and sync heads made since then are gone too (19.3), and the feeds and actions (harmless: the old image answers 404 on `/v1/feed`, the Macs stop publishing, and the iPhones keep their interim Agents screen).
 
-So the first step is a look, with the new image still up. Nothing is stopped yet.
+So the first steps are a look, with the new image still up. Nothing is stopped yet.
 
-1. **Check, with the new image still running.**
+1. **No new Connect teams, then check.** A Connect team made from now on would have no `.pre-v6` and would not be in the check. In `/opt/apassy/compose.yaml` set `APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "0"` (as 20.3 says for any rollback), then:
 
    ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin rollback-check' > rollback-check.json
-   jq '[.[] | select((.revocations | length) > 0 or (.pre_v6 == false and .schema == 6) or .error != null)]' rollback-check.json
+   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'                  # the new image again, with Connect off
+   (umask 077; ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay rollback-check' > rollback-check.json); echo "exit $?"
+   jq '[.[] | select(.error != null or (.revocations | length) > 0 or (.changes | length) > 0 or (.pre_v6 == false and .schema == 6))]' rollback-check.json > needs-decision.json
+   jq -e 'length == 0' needs-decision.json && echo "nothing to decide"
    ```
 
-   It reads only. For each team it prints `pre_v6` (whether the copy exists), `schema`, `revocations` (each device, member, agent, grant, or invite that is revoked now and live in the copy: `{kind, id, revoked_at}`, oldest first), and `audit_rows_lost`. The `jq` line keeps the teams that need a decision; `[]` means none. Keep `rollback-check.json` (mode 0600: it names team ids) until the rollback is over.
+   `rollback-check` reads `relay.db` and every team file read-only and needs no running relay: if the new image cannot serve, run it with the relay stopped, `docker compose run --rm --no-deps relay rollback-check`. It exits 0 when every team is clean and 1 otherwise (or when it cannot read `relay.db`; then `rollback-check.json` is empty and the `jq` lines fail). For each team it prints `pre_v6` (whether the copy exists), `schema`, `revocations` (each device, member, agent, grant, or invite revoked since the migration: `{kind, id, revoked_at}`, oldest first), `changes` (`member_role`, `member_token`, `collection_policy`, `key_holder`: `{kind, id}`), and `audit_lost` (the audit rows that go, by action). `needs-decision.json` keeps the teams that need a decision; `jq -e` prints `true` and "nothing to decide" only when it is `[]`, and exits 1 otherwise, also when a file is empty or not JSON. Keep both files (mode 0600: they name team ids) until the rollback is over.
 
 2. **Decide.**
-   - **Any revocation listed: fix forward** (a new image from `feat/feed` with the fix, built as step 2 of 21.2), and do not roll back, unless the new image cannot run at all.
-   - If the rollback is the only way, re-apply each listed revocation right after the old image starts (step 4 below), before you tell anyone the relay is back. In an operator team its owner does it with the ids of the list: `apassy-team device revoke <id>`, `apassy-team member revoke <id>` (it also revokes the member's devices and invites again), `apassy-team agent revoke <id>`, `apassy-team revoke --grant <id>`. An invite in the list goes again with its member. In a Connect team the operator cannot revoke for the owner: suspend that team after the start (`admin suspend <id>`); its devices then get 401, and the app offers its owner a new team (relay-connect-v1 section 6).
-   - **A team with `pre_v6: false` and `schema: 6`** was made after the migration. The old image cannot open it. With the new image still up: a Connect team, `admin suspend <id>` then `admin delete <id> --free-connect-key`: its file goes, and its device key may make a new team, so the Mac does not stay on 409 `connect_key_used` after the rollback (its next call gets 401, and the app connects again with the same key and a new team). An operator team: tell its owner, then `admin suspend <id>` (the old image leaves a suspended team closed; resume it after a later deploy of schema 6), or restore the whole backup of step 3 instead (section 13: `relay.db` and `teams/` of that folder, with the relay stopped), which also undoes every other change since then.
+   - **Any revocation or change listed: fix forward** (a new image from `feat/feed` with the fix, built as step 2 of 21.2), and do not roll back, unless the new image cannot run at all.
+   - If the rollback is the only way: suspend each listed **Connect** team now, with the new image still up (`admin suspend <id>`). The suspension is in `relay.db`, which the rollback keeps, so the old image never serves the undone revocations; its devices get 401, and the app offers its owner a new team (relay-connect-v1 section 6). The operator cannot revoke for a Connect team's owner. In each listed **operator** team its owner re-applies each listed change right after the old image starts (step 4), before you tell anyone the relay is back, with the ids of the list: `apassy-team device revoke <id>`, `apassy-team member revoke <id>` (it also revokes the member's devices and invites again), `apassy-team agent revoke <id>`, `apassy-team revoke --grant <id>`, `apassy-team member role <id> <role>` for `member_role`, `apassy-team collection policy <id> [policy flags]` with the policy it should have for `collection_policy`, `apassy-team device key-holder <id>` for `key_holder`, and for `member_token` a new device enrollment of that member (it ends the token again). An invite in the list goes again with its member.
+   - **A team with `pre_v6: false` and `schema: 6`** was made after the migration. The old image cannot open it. With the new image still up: a Connect team, `admin suspend <id>` then `admin delete <id> --free-connect-key` (the answer says `"connect_key": "freed"`): its file goes, and its device key may make a new team, so the Mac does not stay on 409 `connect_key_used` after the rollback (its next call gets 401, and once Connect is on again the app connects with the same key and a new team). An operator team: tell its owner, then `admin suspend <id>` (the old image leaves a suspended team closed; resume it after a later deploy of schema 6), or restore the whole backup of step 3 instead (section 13: `relay.db` and `teams/` of that folder, with the relay stopped), which also undoes every other change since then.
    - A team with an `error` could not be read: look at it before going on (`admin teams`).
+   - **Right before the stop of step 4,** run step 1's `rollback-check` and `jq` lines once more: revocations and teams may have come since. Go on only when every team in `needs-decision.json` is one you handled above.
 
 3. **The Worker.** `npx wrangler rollback` (to the previous version), or deploy the previous commit of `deploy/worker/`. The old Worker answers a feed body over 128 KiB with 413; the Mac then fits its feed to 96 KiB until its next start. Nothing else changes. The Worker alone can go back without the relay.
 
@@ -1329,12 +1332,12 @@ So the first step is a look, with the new image still up. Nothing is stopped yet
      ls -l /data/teams'
    ```
 
-   A `*.db-journal` means a write was cut off: do as 19.3 says (start the new image once, stop it, run the step again; if the journal stays, restore the backup of step 3 instead). Revocations made while the new image ran once more are undone too: run step 1 again before you stop it.
+   A `*.db-journal` means a write was cut off: do as 19.3 says (start the new image once, stop it, run the step again; if the journal stays, restore the backup of step 3 instead). Changes made while the new image ran once more are undone too: run step 1's check again, with the relay stopped (`docker compose run --rm --no-deps relay rollback-check`), before the copy.
 
-   Then set `image: apassy-relay:connect-3510b68` in `/opt/apassy/compose.yaml` (and `deploy/vps/compose.yaml`), change nothing else, and start:
+   Then set `image: apassy-relay:connect-3510b68` in `/opt/apassy/compose.yaml` (and `deploy/vps/compose.yaml`), change nothing else (Connect stays at `"0"` for now), and start:
 
    ```sh
    docker compose up -d --wait && docker compose exec relay apassy-relay admin teams
    ```
 
-   Every team must be `"open": true`, except the operator teams suspended in step 2. If the relay does not start and the log names a team's limits, `relay.db` holds a feed limit (above): restore it from the backup of step 3. Now re-apply the revocations of step 1, team by team (step 2), and only then tell the owners the relay is back. The iPhones send their push tokens again at their next start.
+   Every team must be `"open": true`, except the teams suspended in step 2. If the relay does not start and the log names a team's limits, `relay.db` holds a feed limit (above): restore it from the backup of step 3. Now the owners of the listed operator teams re-apply their changes (step 2), and only then tell the owners the relay is back. Then set `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` back to `"50"` and `docker compose up -d --wait`, so the Macs of deleted Connect teams can connect again. The iPhones send their push tokens again at their next start.
