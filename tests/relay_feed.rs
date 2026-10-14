@@ -27,8 +27,8 @@ use apassy::questions::device_link::link_device_name;
 use apassy::questions::envelope::{Sealed, new_qid};
 use apassy::questions::feed::{
     ActionBody, Feed, FeedActionUse, FeedAgent, FeedException, FeedMac, FeedUse, FeedWeek,
-    RemovalAction, SettleBody, Target, UNSUPPORTED, action_aad, build_feed, feed_aad, open_action,
-    settle_aad, still_shown,
+    RemovalAction, SettleBody, Target, UNSUPPORTED, action_aad, build_feed, feed_aad, names_digest,
+    names_here, open_action, settle_aad, still_shown,
 };
 use apassy::questions::{FeedActionRecord, QuestionsClient, QuestionsConfig, QuestionsWorker};
 use apassy::relay::membership::{
@@ -184,6 +184,7 @@ fn vector_removal() -> RemovalAction {
         created_at: 1_789_990_000,
         feed_seq: 1_790_000_040,
         time: 1_790_000_060,
+        names: None,
     }
 }
 
@@ -478,6 +479,155 @@ fn the_contract_test_vectors_reproduce_exactly() {
     }
 }
 
+/// The v2 signature of section 17.6, by the answer key.
+const SIGNATURE_V2: &str = "MEUCIDZe_XeIFZkGUQjDaJg3Z5bviGeoqBIc-8R8aaFyCBGXAiEA7dTFzS2hkSFmp8wVG1jQTJR3DqpJlwzqEPofgU_SbBs";
+
+/// Section 17.6: the feed of 17.1 with the mark of v2, the names, the action string of
+/// v2, its signature, and its envelope.
+#[test]
+fn the_v2_vectors_reproduce_exactly() {
+    let key = contract_key();
+    // The feed of a Mac that checks the names: 17.1 and one line feed.
+    let mut plaintext = vector_feed().to_plaintext().to_vec();
+    plaintext.push(b'\n');
+    assert_eq!(plaintext.len(), 920);
+    assert_eq!(
+        sha256(&plaintext),
+        "140fa142ad88453b65e512ad2715f425c0800b73f445d2faeeee896d220c42a7"
+    );
+    assert!(Feed::checks_names(&plaintext));
+    assert!(!Feed::checks_names(&vector_feed().to_plaintext()));
+    assert_eq!(Feed::parse(&plaintext), Some(vector_feed()));
+    let aad = feed_aad(TEAM, 2, 1_790_000_040, &key.key_id());
+    let sealed = Sealed::with_nonce(&key, &nonce(0x30), &aad, &plaintext);
+    let ciphertext = decode_b64u(&sealed.ciphertext).unwrap();
+    assert_eq!(ciphertext.len(), 936);
+    assert_eq!(
+        sha256(&ciphertext),
+        "86535f0d4be458344a31ac492dd860cae9698a5b3116bff239eddebb8c98d23e"
+    );
+
+    // The names: the agent, the credential, the Mac, joined with one zero byte.
+    let joined = b"Claude Code\0Shop database\0MacBook Pro";
+    assert_eq!(
+        hex(joined),
+        "436c6175646520436f64650053686f70206461746162617365004d6163426f6f6b2050726f"
+    );
+    let digest = names_digest("Claude Code", "Shop database", "MacBook Pro");
+    assert_eq!(
+        digest,
+        "8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6"
+    );
+    assert_eq!(sha256(joined), digest);
+    assert_eq!(
+        names_here("Claude Code", "Shop database", "MacBook Pro"),
+        vec![digest.clone()]
+    );
+
+    // The action string of v2: the tag of v2, lines 2 to 8 of 17.2, and the names.
+    let mut removal = vector_removal();
+    removal.names = Some(digest.clone());
+    let text = removal.string().unwrap();
+    assert_eq!(
+        text,
+        "apassy-feed-action-v2\n6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b\n0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060\nnames:8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6"
+    );
+    assert_eq!(text.len(), 293);
+    assert_eq!(
+        sha256(text.as_bytes()),
+        "faee55b8a1050aac2b18711bdc15869dd35f454293319bd516044e56a941345c"
+    );
+    let signature = decode_b64u(SIGNATURE_V2).unwrap();
+    assert_eq!(signature.len(), 71);
+    let answer_public = decode_b64u(ANSWER_PUBLIC).unwrap();
+    assert!(verifies(&answer_public, text.as_bytes(), &signature));
+    // The v1 signature of 17.2 is not one of v2, and the v2 one is not of v1, of other
+    // names, or of the device key.
+    let v1 = vector_removal().string().unwrap();
+    assert!(!verifies(
+        &answer_public,
+        text.as_bytes(),
+        &decode_b64u(SIGNATURE).unwrap()
+    ));
+    assert!(!verifies(&answer_public, v1.as_bytes(), &signature));
+    let mut other_names = removal.clone();
+    other_names.names = Some(names_digest("Scratch Bot", "Shop database", "MacBook Pro"));
+    assert!(!verifies(
+        &answer_public,
+        other_names.string().unwrap().as_bytes(),
+        &signature
+    ));
+    assert!(!verifies(
+        &decode_b64u(SYNC_PUBLIC).unwrap(),
+        text.as_bytes(),
+        &signature
+    ));
+    let now = 1_790_000_060;
+    let phone = vector_phone(&decode_b64u(SYNC_PUBLIC).unwrap(), &answer_public);
+    assert_eq!(
+        verify_remote_action(&phone, &removal, &signature, now),
+        Ok(())
+    );
+    assert_eq!(
+        verify_remote_action(&phone, &other_names, &signature, now),
+        Err(OwnerAuthError::RemoteRejected)
+    );
+
+    // The action envelope of v2: `v` 2 and `names` before the signature.
+    let body = ActionBody::new(&removal, &signature);
+    let action = body.to_plaintext().unwrap();
+    assert_eq!(
+        String::from_utf8(action.to_vec()).unwrap(),
+        format!(
+            r#"{{"v":2,"action_id":"{ACTION_ID}","by":"{PHONE_UUID}","to":"{MAC_UUID}","kind":"remove_exception","agent":"4","item":"{SHOP_UUID}","exception":{{"kind":"never","created_at":1789990000}},"feed_seq":1790000040,"time":1790000060,"names":"{digest}","signature":"{SIGNATURE_V2}"}}"#
+        )
+    );
+    assert_eq!(action.len(), 490);
+    assert_eq!(
+        sha256(&action),
+        "cde8c71bb7e7b61061fab82ec31a26718d0470539c5ccf6333d6bab1106b53c1"
+    );
+    assert_eq!(ActionBody::parse(&action), Some(body));
+    let aad = action_aad(TEAM, ACTION_ID, &key.key_id(), 3, 2);
+    let sealed_action = Sealed::with_nonce(&key, &nonce(0x40), &aad, &action);
+    let ciphertext = decode_b64u(&sealed_action.ciphertext).unwrap();
+    assert_eq!(ciphertext.len(), 506);
+    assert_eq!(
+        sha256(&ciphertext),
+        "6b66949004172f5791d6f9e42f60a2d70f0ff1cac2a76c8fc5732eae53403e44"
+    );
+
+    // The target opens it and gets the names; the names of its rows match.
+    let record = FeedActionRecord {
+        action_id: ACTION_ID.to_owned(),
+        seq: 9,
+        from_device_id: 3,
+        key_id: sealed_action.key_id.clone(),
+        nonce: sealed_action.nonce.clone(),
+        ciphertext: sealed_action.ciphertext.clone(),
+        created_at: 1_790_000_060,
+        expires_at: 1_790_000_360,
+    };
+    let target = Target {
+        team_id: TEAM.to_owned(),
+        me: TrustedDevice {
+            uuid: MAC_UUID.to_owned(),
+            name: "MacBook Pro".to_owned(),
+            kind: TrustedDeviceKind::Mac,
+            relay_devices: BTreeMap::from([(TEAM.to_owned(), 2)]),
+            sign_key: vec![4; 65],
+            answer_key: None,
+            created_at: 1_789_000_000,
+            updated_at: 0,
+            updated_by: String::new(),
+        },
+        device_id: 2,
+    };
+    let opened = open_action(&record, &target, Some(&key), &[phone], now).expect("it opens");
+    assert_eq!(opened.removal, removal);
+    assert_eq!(opened.removal.names.as_deref(), Some(digest.as_str()));
+}
+
 // ---- A Mac, its waiter, and an iPhone with the fake relay. ----
 
 fn secret_item(title: &str, token: &str) -> ItemDraft {
@@ -742,7 +892,21 @@ impl Phone {
             created_at: exception.created_at,
             feed_seq: feed.seq,
             time: now(),
+            names: None,
         }
+    }
+
+    /// The same removal in v2, as a new iPhone sends it to a Mac whose feed checks the
+    /// names (section 9.3): it signs the names it showed, the agent's and the title from
+    /// the feed (this iPhone holds no copy of the item), and the Mac's from its row.
+    fn removal_v2(&self, world: &World, feed: &Feed, exception: &FeedException) -> RemovalAction {
+        let mut removal = self.removal(world, feed, exception);
+        removal.names = Some(names_digest(
+            &feed.agents[0].name,
+            &exception.item_title,
+            &world.me().name,
+        ));
+        removal
     }
 
     /// The settle of `action_id`, opened: its clear outcome and its body.
@@ -1134,8 +1298,10 @@ fn a_face_id_removal_is_applied_settled_and_published() {
         feed.seq >= shown_at
     });
     assert_eq!(after.agents[0].exceptions.len(), 1);
+    // A v1 action signs ids only: Activity says that the names were not checked.
     assert!(world.activity().iter().any(|line| line
-        == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database"));
+        == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database. \
+            Test iPhone did not sign the names it showed: update Apassy on it"));
 
     // An "only these items" row goes with the relay key of the iPhone, no Face ID.
     let only = after.agents[0].exceptions[0].clone();
@@ -1146,6 +1312,189 @@ fn a_face_id_removal_is_applied_settled_and_published() {
     });
     assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
     assert!(world.exceptions().is_empty());
+}
+
+/// Section 9.3, v2: the feed of this Mac says that it checks the names (its plaintext
+/// ends in a line feed, which the strict reader of 0.5.2 skips), and a removal that signs
+/// the names the owner saw is applied for each kind, with no note in Activity.
+#[test]
+fn a_removal_that_signs_the_names_is_applied() {
+    let mut world = world();
+    let [shop, api] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+        vault
+            .add_agent_exception(world.agent, api, ExceptionKind::Only)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let feed = phone.wait_feed(&world, "the exceptions", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 2)
+    });
+    let stored = stored_plaintext(&world);
+    assert!(Feed::checks_names(stored.as_bytes()), "the mark of v2");
+    assert!(stored.ends_with("}\n") && !stored.ends_with("\n\n"));
+    assert_eq!(Feed::parse(stored.as_bytes()).unwrap().seq, feed.seq);
+    let never = feed.agents[0]
+        .exceptions
+        .iter()
+        .find(|exception| exception.kind == "never")
+        .unwrap()
+        .clone();
+    let removal = phone.removal_v2(&world, &feed, &never);
+    assert_eq!(
+        removal.names.as_deref(),
+        Some(names_digest("Claude Code", "Shop database", "Synthetic MacBook").as_str())
+    );
+    assert!(
+        removal
+            .string()
+            .unwrap()
+            .starts_with("apassy-feed-action-v2\n")
+    );
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.answer.sign(text).unwrap()
+    });
+    let (outcome, settle) = phone.settle(&world, &removal.action_id);
+    assert_eq!((outcome.as_str(), settle.reason.as_str()), ("applied", ""));
+    assert!(
+        world.activity().iter().any(|line| line
+            == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database"),
+        "{:?}",
+        world.activity()
+    );
+    // "Only these items": the same names, signed with the relay key.
+    let after = phone.wait_feed(&world, "the feed without the row", |feed| {
+        feed.agents[0].exceptions.len() == 1
+    });
+    let only = after.agents[0].exceptions[0].clone();
+    assert_eq!(only.kind, "only");
+    let removal = phone.removal_v2(&world, &after, &only);
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.client.sign(text).unwrap()
+    });
+    assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
+    assert!(world.exceptions().is_empty());
+}
+
+/// Section 15: a holder of the question key who works with the relay serves a feed that
+/// puts false names on real ids. The iPhone signs the names it showed; the Mac rebuilds
+/// its own and refuses the action as `stale`, and the row stays. For each kind.
+#[test]
+fn a_feed_that_lies_about_the_names_is_stale() {
+    let mut world = world();
+    let [shop, api] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+        vault
+            .add_agent_exception(world.agent, api, ExceptionKind::Only)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let feed = phone.wait_feed(&world, "the exceptions", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 2)
+    });
+    let rows = world.exceptions();
+    let pick = |kind: &str| {
+        feed.agents[0]
+            .exceptions
+            .iter()
+            .find(|exception| exception.kind == kind)
+            .unwrap()
+            .clone()
+    };
+    let mac = world.me().name;
+    for (exception, by_answer_key) in [(pick("never"), true), (pick("only"), false)] {
+        // The lying feed: the real agent id and item uuid, with other names.
+        let lies = [
+            ("Scratch Bot", exception.item_title.as_str(), mac.as_str()),
+            ("Claude Code", "Test DB", mac.as_str()),
+            ("Claude Code", exception.item_title.as_str(), "Scratch Mac"),
+        ];
+        for (agent, title, mac_name) in lies {
+            let mut removal = phone.removal(&world, &feed, &exception);
+            removal.names = Some(names_digest(agent, title, mac_name));
+            phone.send(&world, &removal, world.mac_id(), |text| {
+                if by_answer_key {
+                    phone.answer.sign(text).unwrap()
+                } else {
+                    phone.client.sign(text).unwrap()
+                }
+            });
+            let (outcome, settle) = phone.settle(&world, &removal.action_id);
+            assert_eq!(
+                (outcome.as_str(), settle.reason.as_str()),
+                ("stale", "the names on the iPhone did not match this Mac"),
+                "{agent} / {title} / {mac_name}"
+            );
+            assert_eq!(settle.feed_seq, None);
+            assert_eq!(world.exceptions(), rows, "the row stays");
+        }
+    }
+    assert!(world.activity().iter().any(|line| line
+        == "An action from Test iPhone did not count: the names on the iPhone did not match this Mac."));
+    // The true names still work.
+    let removal = phone.removal_v2(&world, &feed, &pick("never"));
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.answer.sign(text).unwrap()
+    });
+    assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
+}
+
+/// A title that the feed cleans (a control character becomes a space there, a `?` in an
+/// iPhone's list): an iPhone with its own copy of the item signs its own title, one
+/// without signs the feed's; the Mac takes either.
+#[test]
+fn a_title_matches_in_either_form_that_an_iphone_shows() {
+    let mut world = world();
+    let title = "Shop\tdatabase";
+    world.with(|vault| {
+        let item = vault
+            .add(secret_item(title, "SYNTH-tab-title-secret"))
+            .unwrap()
+            .id;
+        vault
+            .add_agent_exception(world.agent, item, ExceptionKind::Never)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let feed = phone.wait_feed(&world, "the exception", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 1)
+    });
+    let exception = feed.agents[0].exceptions[0].clone();
+    assert_eq!(exception.item_title, "Shop database");
+    let mac = world.me().name;
+    let here = names_here("Claude Code", title, &mac);
+    assert_eq!(
+        here,
+        vec![
+            names_digest("Claude Code", "Shop?database", &mac),
+            names_digest("Claude Code", "Shop database", &mac),
+        ]
+    );
+    // The feed's form, as an iPhone without the item signs it.
+    let from_feed = phone.removal_v2(&world, &feed, &exception);
+    assert_eq!(from_feed.names.as_ref(), Some(&here[1]));
+    // The own title, as an iPhone with its own copy of the item shows it.
+    let mut own = phone.removal(&world, &feed, &exception);
+    own.names = Some(here[0].clone());
+    phone.send(&world, &own, world.mac_id(), |text| {
+        phone.answer.sign(text).unwrap()
+    });
+    assert_eq!(phone.settle(&world, &own.action_id).0, "applied");
 }
 
 #[test]
@@ -1294,6 +1643,7 @@ fn the_gate_makes_a_remote_action_proof_only_for_its_removal() {
         created_at: world.exceptions()[0].created_at,
         feed_seq: 1,
         time: now(),
+        names: None,
     };
     let signature = answer_key()
         .sign(signed.string().unwrap().as_bytes())
@@ -1865,6 +2215,7 @@ fn the_gate_refuses_another_team_or_another_target() {
         created_at: world.exceptions()[0].created_at,
         feed_seq: 1,
         time: now(),
+        names: None,
     };
     let authorize = |signed: &RemovalAction| {
         // The iPhone signs exactly what the caller says, so only the gate's own team and
@@ -1900,6 +2251,23 @@ fn the_gate_refuses_another_team_or_another_target() {
         authorize(&signed).is_ok(),
         "the vault's own team and target"
     );
+    // v2: the gate rebuilds the names from the vault too, whatever its caller checked.
+    let mut named = signed.clone();
+    named.names = Some(names_digest("Claude Code", "Shop database", &me.name));
+    assert!(authorize(&named).is_ok(), "the vault's own names");
+    for (agent, title, mac) in [
+        ("Scratch Bot", "Shop database", me.name.as_str()),
+        ("Claude Code", "Test DB", me.name.as_str()),
+        ("Claude Code", "Shop database", "Scratch Mac"),
+    ] {
+        let mut lying = signed.clone();
+        lying.names = Some(names_digest(agent, title, mac));
+        assert_eq!(
+            authorize(&lying).unwrap_err(),
+            OwnerAuthError::RemoteRejected,
+            "{agent} / {title} / {mac}"
+        );
+    }
 }
 
 /// Section 9.4: the iPhone signs once with the `feed_seq` of the feed it showed. A newer

@@ -814,6 +814,181 @@ fn the_action_string_is_the_contract_vector() {
     );
 }
 
+/// The feed of the vectors with the mark of v2 (section 17.6): its ciphertext with the
+/// nonce of 17.1.
+const FEED_V2_CIPHERTEXT: &str = "2dd63c68fed0fbc70573da2e4fe30a66aeb5b976a8a32b0bac67d36775ac2786b3c33d810f960fecdfb645235a84123fc5efd943182bc2ec6862253cd5f918b6ce2b3f1b5baec9990a838d36008edbf9ce1294712bbe2dcf1a7db5c7268e61beb68f20a72bd99de63f88d774bf4121b9a766adade408521da5b3f36aa0b6b57f5e0fdd956a7fc7471bbb5ff39441703e59e76517dcb23d098944e744d4a4797fdf44a9143e5ab65e2474eada739bb1f83ba85ea8dfe4ed55fe9ef01f8007eb352b281f2fdb1db7f9164a2ac9856b9b943786ee6ffef7f962e6fa81deb8a2d999509e18d91b746984c550dd8fccca1fcb1ff803ca97e48d04a78b79695b98bcddc170f808894ef24bd3a890358075f9031cee5ddec1bd9490f4d3162b902c38fbfb69f3ff41fecafa48d111d253daaf23f447d5f9998406241c60a1110213e932690c93933f6e4c91cf52a37380b2a48749999519caed7b735c7395e8e58d8a9e664b16308ec8c502a185a13289e31a5ba84d5ced3a4de5bbcfca9c3bc3b22eb0077f5e1d21af4bfac786ca23eeecaeecdc8e64d59c7997832031134b6d6239dd0ecaf50de6611493b21406f6c780c167cf92edbfe4ee5bf5b87b8d795535ee3249b614a699776b884198a76e346fa239a0ea2e05f5a9b3bf90cb5f99c966486d90836d591637195412f2d114eabe41e6a8d8291012700aac012c1e139e109fc35a7bbd491fb67a9f933dfda4d978f867c6263c4c2d39efeee34636166fb40b147823542fec687577d784b540c818dd16bd10b7b1fb553c70ed0771ad73ffc0079fd8e8a85d2ee5e1bafb2ab2c8aa43dca3380a58325fa7845fe922cb3e7720b691ca4bc360a72785c8c2d0dacee22d7571a5c30702f251bf4115b38c9dbdfdba02646beed6ba2422efe9b9699139b1fb1f6b6533a886dcca81c5230497105c0bf5f1e3a6d09a0598cbef92449133560456bb0b6452e3bd385f849f524a89ea9cd406570f140b8b79797d8e77b9cf1bc9203221717017326b8af9c8b9ba1610b5343065ff48341baa61bc19816baabab6cd5fbf29fc9d7e86de309a9738b1d30ca6401f19cfd66ea1fcc28bee2954d264c1e61ef8c4677ab0ade0bd5043f4c50fb7d4ff7e5b407fbb82fad706ab491b1fd76e9e8e6a20817218377e2f481959ce0ea36c147ee182bc197e97b243eba96d8e1099dd67a695addb320b15f539ad1f938a1d2b78d3d2b54e581453f73b73ea6b0345f7df9305d8f181c9c492e376bd3560d39b303b82c88ddb5c5bbe525d130633465b5416783af50b1f81a29540b0e6ffd0e9e99373ba";
+const NAMES_V2: &str = "8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6";
+const SIGNATURE_V2: &str = "MEUCIDZe_XeIFZkGUQjDaJg3Z5bviGeoqBIc-8R8aaFyCBGXAiEA7dTFzS2hkSFmp8wVG1jQTJR3DqpJlwzqEPofgU_SbBs";
+
+fn names_digest(agent: &str, title: &str, mac: &str) -> String {
+    sha256([agent, title, mac].join("\0").as_bytes())
+}
+
+/// Section 17.6: the feed of the vectors with the mark of v2 makes the action string of
+/// v2, with the names that the list shows. A later feed of that Mac without the mark
+/// still gets v2: the iPhone remembers that the Mac checks the names.
+#[test]
+fn the_v2_action_string_is_the_contract_vector() {
+    let setup = setup();
+    let ciphertext = unhex(FEED_V2_CIPHERTEXT);
+    assert_eq!(ciphertext.len(), 936);
+    setup.a.relay.put_feed(
+        2,
+        1_790_000_040,
+        KEY_ID,
+        FEED_NONCE,
+        &encode_b64u(&ciphertext),
+    );
+    let mac = &macs(&setup.phone)[0];
+    assert_eq!(mac["seq"], 1_790_000_040u64);
+    assert_eq!(mac["agents"][0]["name"], "Claude Code");
+    assert_eq!(
+        mac["agents"][0]["exceptions"][0]["item_title"],
+        "Shop database"
+    );
+    assert_eq!(mac["agents"][0]["exceptions"][0]["title"], Value::Null);
+    assert_eq!(mac["name"], "MacBook Pro");
+    let mut request = string_request(&setup, "never", 1_789_990_000, SHOP_ITEM);
+    request["action_id"] = json!(ACTION_ID);
+    request["time"] = json!(1_790_000_060u64);
+    let prepared = call(&setup.phone, request);
+    let text = prepared["action_string"].as_str().unwrap();
+    assert_eq!(
+        names_digest("Claude Code", "Shop database", "MacBook Pro"),
+        NAMES_V2
+    );
+    assert_eq!(
+        text,
+        ACTION_STRING.replace("apassy-feed-action-v1", "apassy-feed-action-v2")
+            + &format!("\nnames:{NAMES_V2}")
+    );
+    assert_eq!(text.len(), 293);
+    assert_eq!(
+        sha256(text.as_bytes()),
+        "faee55b8a1050aac2b18711bdc15869dd35f454293319bd516044e56a941345c"
+    );
+    assert!(verify_signature(
+        &decode_b64u(ANSWER_PUBLIC).unwrap(),
+        text.as_bytes(),
+        &decode_b64u(SIGNATURE_V2).unwrap()
+    ));
+    // The mark is kept on disk with the seq: no secret.
+    let marks: Value =
+        serde_json::from_slice(&std::fs::read(setup.data.join("feed-seq.json")).unwrap()).unwrap();
+    assert_eq!(
+        marks,
+        json!({"version": 1, "teams": {TEAM: {"2": 1_790_000_040u64}}, "names": {TEAM: [2]}})
+    );
+    // A newer feed of that Mac without the mark: still v2.
+    let seq = fresh_feed(&setup);
+    assert_eq!(macs(&setup.phone)[0]["seq"], seq);
+    let prepared = call(
+        &setup.phone,
+        string_request(&setup, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    assert!(
+        prepared["action_string"]
+            .as_str()
+            .unwrap()
+            .starts_with("apassy-feed-action-v2\n")
+    );
+}
+
+/// v2 signs the names that `feed_list` shows: the title of the iPhone's own copy when it
+/// holds the item, else the feed's; the agent's name and the Mac's row name with the
+/// list's sanitizer. The action is `v` 2 with `names`.
+#[test]
+fn a_v2_action_signs_the_names_that_the_list_shows() {
+    let setup = setup();
+    let seq = now();
+    let text = feed(seq, seq, |value| {
+        value["agents"][0]["name"] = json!("Claude\u{202E} Code");
+        value["agents"][0]["exceptions"] = json!([
+            {"item": SHOP_ITEM, "item_title": "Shop database", "kind": "never", "created_at": 1_789_990_000u64},
+            {"item": API_ITEM, "item_title": "API token", "kind": "only", "created_at": 1_789_990_100u64},
+        ]);
+    }) + "\n";
+    publish(&setup.a.relay, TEAM, &setup.a.key, 2, &text);
+    let mac = &macs(&setup.phone)[0];
+    let agent = &mac["agents"][0];
+    assert_eq!(agent["name"], "Claude? Code");
+    assert_eq!(agent["exceptions"][1]["title"], "Synthetic API token");
+
+    // Not on this iPhone: the feed's title.
+    let (prepared, _) = act(&setup, "never", 1_789_990_000, SHOP_ITEM);
+    let names = names_digest("Claude? Code", "Shop database", "MacBook Pro");
+    assert!(
+        prepared["action_string"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("\nnames:{names}"))
+    );
+    let stored = setup.a.relay.actions().pop().unwrap();
+    let right = aad(&[
+        "apassy-feed-v1",
+        "action",
+        TEAM,
+        prepared["action_id"].as_str().unwrap(),
+        KEY_ID,
+        "3",
+        "2",
+    ]);
+    let action: Value = serde_json::from_slice(
+        &open(&setup.a.key, &right, &stored.nonce, &stored.ciphertext).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(action["v"], 2);
+    assert_eq!(action["names"], names.as_str());
+    assert!(verify_signature(
+        &decode_b64u(ANSWER_PUBLIC).unwrap(),
+        prepared["action_string"].as_str().unwrap().as_bytes(),
+        &decode_b64u(action["signature"].as_str().unwrap()).unwrap()
+    ));
+
+    // On this iPhone: its own title, not the feed's.
+    let (prepared, _) = act(&setup, "only", 1_789_990_100, API_ITEM);
+    let names = names_digest("Claude? Code", "Synthetic API token", "MacBook Pro");
+    assert!(
+        prepared["action_string"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("\nnames:{names}"))
+    );
+}
+
+/// A Mac whose feed does not say that it checks the names (0.5.2): the iPhone sends v1,
+/// eight lines and `v` 1 without `names`, which that Mac takes.
+#[test]
+fn a_mac_without_the_mark_gets_v1() {
+    let setup = setup();
+    fresh_feed(&setup);
+    macs(&setup.phone);
+    let (prepared, _) = act(&setup, "never", 1_789_990_000, SHOP_ITEM);
+    let text = prepared["action_string"].as_str().unwrap();
+    assert!(text.starts_with("apassy-feed-action-v1\n"));
+    assert_eq!(text.lines().count(), 8);
+    assert!(!text.contains("names:"));
+    let stored = setup.a.relay.actions().pop().unwrap();
+    let right = aad(&[
+        "apassy-feed-v1",
+        "action",
+        TEAM,
+        prepared["action_id"].as_str().unwrap(),
+        KEY_ID,
+        "3",
+        "2",
+    ]);
+    let action: Value = serde_json::from_slice(
+        &open(&setup.a.key, &right, &stored.nonce, &stored.ciphertext).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(action["v"], 1);
+    assert!(action.get("names").is_none());
+    let marks: Value =
+        serde_json::from_slice(&std::fs::read(setup.data.join("feed-seq.json")).unwrap()).unwrap();
+    assert!(marks.get("names").is_none(), "{marks}");
+}
+
 #[test]
 fn an_item_reference_has_one_form() {
     let setup = setup();
