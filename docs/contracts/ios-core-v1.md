@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1).
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD).
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -60,6 +60,7 @@ Files in `data_dir`:
 | `phone.json` | The vaults on this iPhone (section 6). |
 | `vaults/<vault_id>.apassy` | The live vault (SQLCipher), as on the Mac. |
 | `sync/<vault_id>.json` and `sync/.*` | The relay sync state and work files, as on the Mac. |
+| `feed-seq.json` | The highest feed `seq` accepted of each Mac (section 5.12). No secret. |
 | `icloud-transfer/<transaction>/…` | Private encrypted input/output snapshots for one coordinated file transaction. |
 | iCloud bookmarks | Private Swift-managed file access records, keyed by vault ID. They contain no passphrase. |
 
@@ -472,6 +473,111 @@ Folder rules (`Vault::create_folder` and the others): a name is trimmed, has 1 t
 `add_pasted` detects `text` again in the core (the app never sends a detected value back) and saves the picked entries in one transaction: all or none (`Vault::add_detected_all`). `pick` names entries by the `index` of `detect` for the same text; when it is absent, every entry. An index that is not there, a repeated index, and an empty `pick` are `invalid_input`; a text with no credential is `invalid_input` with the Mac's note. A title of `titles` replaces the detected title of that entry when it is not empty after trimming (at most 128 bytes), as the title field of each row on the Mac does. The rest is the Mac's: a title that another item has gets " 2", " 3"; a variable that another item uses becomes the automatic name; the declaration, its provider, and the source of each value are saved; the items go to `folder` (`not_found`, "The folder is gone. Select another folder.", when it is not there). The items have no origin: the owner pasted them, as on the Mac (the `item_origin` table records only agents, ADR 0025 §6). `summary` uses the stored title, the stored variable, and the stored environment.
 
 `item_options_set` saves what the owner answered on the credential screen. `always_ask` turns "Always ask me" on or off. `environment` sets the environment of the declaration with the source `owner`; the project, the provider, the other values, and their sources stay. An item without a declaration gets one with this environment and the most sensitive other values, which count as defaults. A declaration event goes to the history. Both members are optional; `always_ask` is applied first. An item that is not there is `not_found` and nothing changes. The core does not check the owner: the app asks for Face ID or the passphrase first when the change makes the bouncer less careful (turning "Always ask me" off, or an environment other than `production`), and for any environment of an item without a declaration (the Mac saves a first declaration only after its owner check), as the Mac asks for its owner check. Turning "Always ask me" on and choosing `production` for an item with a declaration need no check.
+
+### 5.12 The agents of the Macs (contract relay-feed-v1)
+
+Added 2026-10-14 (stream FD). The iPhone is a reader and a sender of [relay-feed-v1](relay-feed-v1.md): it reads the sealed feed that each Mac publishes of its agents, opens and checks each one (relay-feed-v1 section 7.4), and sends one kind of action back, the removal of an exception of an agent. The source is `ios/ApassyCore/src/core/feed.rs`. All these calls are of the app only (`not_allowed` in the AutoFill extension).
+
+A feed travels in the questions team of its vault, so the feeds use the questions **contexts** of section 5.10: a vault has feeds on this iPhone when it has a context (unlocked in this session by `unlock` or `questions_unlock`). What the feeds of a vault hold in memory (the last good feed of each Mac, the actions this process posted, the titles of the vault's items by item UUID) is part of its context: a `lock`, a `suspend`, and `remove_vault` drop it with the context; `select` keeps it. With no context the calls answer `locked` (or `no_vault` when no vault is selected), as the questions calls do; with an unlocked vault that has no questions team, `feed_list` answers `{"vaults": []}` and `feed_wait` `{"changed": false}` at once.
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `feed_list` | | `{"vaults": [FeedVault]}` |
+| `feed_wait` | `timeout` (1 to 25 s) | `{"changed": bool}` |
+| `feed_action_string` | `vault_id`, `mac_device`, `agent`, `item`, `kind`, `created_at`, `action_id`?, `time`? | `Prepared` |
+| `feed_action` | the same, `action_id`, `time`, `signature`? | `{"action_id": "…", "seq": n\|null, "created_at": n\|null, "expires_at": n\|null}` |
+| `feed_action_wait` | `action_id`, `vault_id`?, `timeout`? (0 to 25 s, default 0) | `Outcome` |
+
+`feed_action_status` is accepted as another name of `feed_action_wait` (the name of relay-feed-v1 section 2).
+
+**`feed_list`** reads `GET /v1/feed` for every context at once (from its last `change`, without a long poll) and answers what this iPhone shows:
+
+```json
+{"vaults": [
+  {"vault_id": "4f1c0a2b-…", "vault_name": "Personal", "team_id": "t_7k2m5q4x3c",
+   "registered": true, "answer_key": true, "error": null,
+   "macs": [
+     {"device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", "relay_device_id": 2, "name": "MacBook Pro",
+      "seq": 1790000040, "generated_at": 1790000040, "stale": false, "truncated": false,
+      "problem": null, "week": {"by_you": 3, "automatic": 128},
+      "agents": [
+        {"id": "4", "name": "Claude Code", "host": "claude", "where": "mac", "revoked": false,
+         "token_expires_at": 1797776000, "last_use_at": 1790000010, "uses_this_week": 12,
+         "projects": ["synthetic-shop"], "note": "Deploys only from the main branch.",
+         "restricted": false,
+         "actions": [{"action": "deploy", "allowed": 2, "not_allowed": 1, "projects": ["synthetic-shop"]}],
+         "exceptions": [{"item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "item_title": "Shop database",
+                         "title": null, "here": false, "kind": "never", "created_at": 1789990000}],
+         "recent": [{"at": 1790000010, "item": "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e",
+                     "item_title": "API token", "title": "API token", "here": true,
+                     "action": "deploy", "project": "synthetic-shop",
+                     "command": "npm run deploy -- --token [apassy:secret]",
+                     "outcome": "allowed", "decided_by": "owner", "answered_on": "Test iPhone"}]}]}]}]}
+```
+
+- One `FeedVault` for each context, in the order of `vault_id`. `registered`: the vault holds the row of this iPhone (it can send actions). `answer_key`: that row has an answer key (it can send the Face ID kinds; else the app says "Connect this iPhone again on a Mac to use Face ID here." for `never` and `always_ask`). `error` is the code of the last relay call of that vault that failed, until one works: `feed_unavailable` for a relay without feeds (relay-feed-v1 section 14.2), `relay_unreachable`, `removed`, and the others of section 4. The call fails only when every vault failed. A removed iPhone (`status.removed` of section 5.10) gets no Mac of that vault.
+- A Mac is listed when its last feed passed every check of relay-feed-v1 section 7.4: the envelope opens with the question key of its `key_id` and the AAD of the relay's `device_id` and `seq`; the JSON has exactly the fields of section 7.1 within the limits, `v` 1, and the relay's `seq`; `mac.device` is a live `trusted_device` of kind `mac` whose device number in the team, when set, is the relay's `device_id`; and `seq` is above the highest `seq` this iPhone accepted of that relay device. A feed that fails step 4 or 5 is ignored with no text. A Mac removed from the vault leaves at once, and a Mac that is not in the relay's `present` leaves the list.
+- `name` is the name of the Mac's `trusted_device` row. `relay_device_id` is its device number in the team, the target of an action.
+- `problem` is the text of the step that the last feed of this Mac failed: "Sync this vault to see the agents of <Mac>." (step 1: another key, or it does not open) or "Update Apassy to see the agents of <Mac>." (steps 2 and 3). The last good feed stays with it. When no feed of the Mac opened in this session, the Mac is listed with `seq`, `generated_at`, and `week` null and no agent. Such a Mac is listed only when a live trusted Mac row has that device number.
+- `stale` is true when `generated_at` is more than 24 hours old on the iPhone's clock: the app dims the Mac ("The Mac has not reported since <date>") and offers no action. A `generated_at` in the future is not stale; the app shows it as "now".
+- The members of an agent are those of the feed (relay-feed-v1 section 7.1), every text with control and format characters replaced by `?`. For each exception and recent use, `item` and `item_title` are the feed's; `title` is the title of the item with that UUID in the vault on this iPhone, else null; `here` is whether the vault on this iPhone holds it (false for a null `item`; null when the items of the vault were not read in this session). The app shows `title`, else `item_title` with "not on this iPhone", and "A deleted credential" for a null `item` (with no action).
+- After an applied removal (`feed_action_wait` with `outcome: applied` and `verified: true`), the exception leaves the list at once, until the next feed of that Mac.
+- An item reference is the contract's 36-character UUID, or the 32 lowercase hex characters that `item.uuid` holds in the vault (`Vault::item_uuids`); the core matches both forms against the vault.
+
+**The high-water mark.** The core keeps the highest `seq` accepted of each Mac, by team and relay device id, in `feed-seq.json` in the data folder (`{"version": 1, "teams": {"t_7k2m5q4x3c": {"2": 1790000040}}}`, written as `phone.json` is). It holds no secret and stays after a lock and a restart, so a relay cannot bring back an older feed. A feed with a lower `seq` is ignored; a feed with the same `seq` shows only when this process does not show that Mac (after a lock or a restart: the AAD binds the `seq`, so it is the same feed).
+
+**`feed_wait {timeout}`** runs one long poll of `GET /v1/feed` for each context at the same time and returns as soon as one brings news (a new feed, a removed one, a new problem); that ends the others. `changed: false` after the timeout. A `lock` or a `suspend` ends them all with `locked`. The app calls it only while the Agents tab or an agent page is on the screen, and `feed_list` after `changed: true`.
+
+**`feed_action_string`** builds the action string of relay-feed-v1 section 9.3 for the exception that the feed shows:
+
+```json
+{"op": "feed_action_string", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+ "agent": "4", "item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "kind": "never", "created_at": 1789990000}
+```
+
+```json
+{"vault_id": "4f1c0a2b-…", "team_id": "t_7k2m5q4x3c", "action_id": "sLGys7S1tre4ubq7vL2-vw",
+ "time": 1790000060, "feed_seq": 1790000040,
+ "action_string": "apassy-feed-action-v1\n6f1c0e2a-…\n0b7e5c3a-…\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060",
+ "needs_face_id": true, "face_id_reason": "remove an exception of agent \"Claude Code\""}
+```
+
+- `mac_device` is the `device` of the Mac in `feed_list`; `agent`, `item`, `kind`, and `created_at` are those of the exception in the list. `kind` is `never`, `always_ask`, or `only`. The core finds the exception in the last good feed of that Mac (it reads the relay once when it has none): an exception, an agent, or a Mac that is not there is `not_found` ("This list of the Mac changed. Look at it again."); a disconnected agent is `invalid_input`. The string has the device UUID of this iPhone's row (`by`), the Mac's UUID (`to`), the team, the `action_id`, the exception, the `seq` of that feed (`feed_seq`), and `time`.
+- `action_id` is 16 random bytes of the core, b64u (22 characters), unless the request gives one (a retry); `time` is now unless the request gives one. The app keeps both for `feed_action`.
+- `needs_face_id` is true for `never` and `always_ask`: the app signs `action_string` with the Secure Enclave answer key **of the team `team_id`** after Face ID for this action (a new `LAContext`, no reuse), with `face_id_reason` as the prompt (the agent name without control characters and `"`, at most 40 characters). For `only` it is false: the core signs with the relay key of the membership, and the app asks nothing.
+- The core does not check the age of the feed here; `feed_action` does.
+- Errors: `removed` and `not_registered` as in section 5.10 (no row of this iPhone); `not_registered` with "Connect this iPhone again on a Mac to use Face ID here." for a Face ID kind when the row has no answer key.
+
+**`feed_action`** takes the same parameters with the `action_id` and `time` of `feed_action_string`, and for a Face ID kind the DER `signature` as b64u:
+
+```json
+{"op": "feed_action", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-…", "agent": "4",
+ "item": "3c9e1f7a-…", "kind": "never", "created_at": 1789990000,
+ "action_id": "sLGys7S1tre4ubq7vL2-vw", "time": 1790000060, "signature": "MEUCIQ…"}
+```
+
+```json
+{"action_id": "sLGys7S1tre4ubq7vL2-vw", "seq": 9, "created_at": 1790000060, "expires_at": 1790000360}
+```
+
+- The core builds the string again from the feed it shows and checks it as `feed_action_string` does, then: `time` more than 55 s old is `stale_action` (do it again, with Face ID again); more than 60 s ahead is `invalid_input`; a stale feed (24 hours) is `stale_feed`. For `never` and `always_ask`, `signature` must verify with the answer key of this iPhone's row over the string (`invalid_input` without it, `not_registered` when it does not verify). For `only`, `signature` must be absent (`invalid_input`); the core signs with the relay key, which must be the row's `sign_key`.
+- The core seals the plaintext of relay-feed-v1 section 9.2 (fields in the contract's order) with the question key, a new random nonce, and the AAD `action` with this iPhone's device number as the sender and the Mac's `relay_device_id` as the target, and posts `POST /v1/feed/actions`. A retry after a network error sends the same `action_id`, `time`, and `signature` in a new envelope; a relay that has the action already answers `409 conflict`, and the core answers with `seq`, `created_at`, and `expires_at` null.
+- Relay errors: `not_routed` (`403 not_routed`), `not_found` (`404`: the Mac has no feed on the relay now, it may be locked), `too_many_actions` (`403 too_many_actions`), `too_large`, `removed`, `rate_limited`, `relay_unreachable`.
+- The relay taking the action does not mean that it counted: the settle says that.
+
+**`feed_action_wait`** reads the state of an action that this process posted (`GET /v1/feed/actions/{action_id}`), with a long poll of `timeout` while it is open:
+
+```json
+{"action_id": "sLGys7S1tre4ubq7vL2-vw", "outcome": "applied", "verified": true,
+ "reason": null, "feed_seq": 1790000070, "at": 1790000061}
+```
+
+- `outcome`: `pending` (open), `applied`, `refused`, `stale`, or `expired` (the relay expired it, or it is open past its `expires_at` on this iPhone's clock: "<Mac> did not answer. It may be asleep or locked.").
+- `verified` is true when the settle opened with the question key and the AAD of the relay's clear outcome, and names this action and this outcome; `reason` (the target's text, for `refused` and `stale`; null when empty), `feed_seq`, and `at` come from it. Else they are null, and `outcome` is the relay's clear outcome (a Mac under another key; relay-feed-v1 section 9.5).
+- The app shows "Removed on <Mac>." for `applied`, "The list on <Mac> changed. Look at it again." for `stale`, and "<Mac> refused it: <reason>." for `refused`.
+- Without `vault_id` the core uses the context that posted the action. An action that this process does not know (another session, after a lock) is `not_found`, as is one the relay purged.
+
+Errors of these calls, besides those of section 4 and section 5.10: `feed_unavailable`, `not_found`, `stale_action`, `stale_feed`, `too_many_actions`, `not_routed`, `unreadable` (no question key to seal an action: sync the vault).
 
 ## 6. `phone.json`
 
