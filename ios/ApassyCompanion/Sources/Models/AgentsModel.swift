@@ -208,10 +208,21 @@ final class AgentsModel {
         }
     }
 
+    /// The pause after a poll that answered at once (relay-feed-v1 section 10.10): 5 s at
+    /// first, then twice the last, up to 60 s; the sleep adds ±20 % jitter. Scaled by
+    /// `retryInterval` (2 s in the app), so tests stay fast.
+    private func backOff(after last: Duration?) -> Duration {
+        let first = retryInterval * 5 / 2
+        let most = retryInterval * 30
+        guard let last else { return first }
+        return min(last * 2, most)
+    }
+
     /// Read the list, then follow it with the long poll while the task runs: the Agents tab or an
     /// agent page is on the screen (contract section 5.12).
     func watch() async {
         await refresh()
+        var early: Duration?
         while !Task.isCancelled {
             let waits = phase == .ready || (phase == .noFeed && !vaults.isEmpty)
             guard waits, !unsupported else {
@@ -230,10 +241,16 @@ final class AgentsModel {
             let started = ContinuousClock.now
             do {
                 if try await service.feedWait(timeout: 25) {
+                    early = nil
                     await refresh()
                 } else if ContinuousClock.now - started < .seconds(1) {
-                    // A poll that answers at once (a vault without a team): no busy loop.
-                    try? await Task.sleep(for: retryInterval)
+                    // A poll that answers at once (a vault without a team, or a relay with no
+                    // free seat): back off, relay-feed-v1 section 10.10.
+                    let pause = backOff(after: early)
+                    early = pause
+                    try? await Task.sleep(for: pause * Double.random(in: 0.8...1.2))
+                } else {
+                    early = nil
                 }
             } catch {
                 if Task.isCancelled { return }
@@ -433,6 +450,7 @@ final class AgentsModel {
 
     /// Wait for the Mac to settle the action. The core says `expired` once it is open past its end.
     private func settle(_ sent: SentFeedAction, vaultID: String, started: Int) async throws -> FeedActionOutcome {
+        var early: Duration?
         while true {
             guard started == generation, !Task.isCancelled else { throw CancellationError() }
             let asked = ContinuousClock.now
@@ -443,7 +461,13 @@ final class AgentsModel {
                 if let end = sent.expiresAt, Int64(now().timeIntervalSince1970) > end + 60 {
                     return FeedActionOutcome(actionID: sent.actionID, outcome: .expired, verified: false)
                 }
-                if ContinuousClock.now - asked < .seconds(1) { try await Task.sleep(for: retryInterval) }
+                if ContinuousClock.now - asked < .seconds(1) {
+                    let pause = backOff(after: early)
+                    early = pause
+                    try await Task.sleep(for: pause * Double.random(in: 0.8...1.2))
+                } else {
+                    early = nil
+                }
             } catch let error as VaultError where error.code == .relayUnreachable || error.code == .rateLimited {
                 try await Task.sleep(for: retryInterval)
             }
