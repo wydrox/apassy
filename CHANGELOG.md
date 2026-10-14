@@ -4,6 +4,25 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-14
+
+### Added
+
+- **Agents on the iPhone:** the Agents tab lists the agents of every Mac of your vaults, grouped by vault and Mac. Each agent shows its uses this week, its recent uses, and its exceptions. Commands show `[apassy:secret]` in place of the values of the vault's credentials. You can remove an exception from the iPhone. Removing one that limits the agent ("Never" or "Always ask") asks for Face ID, and the Mac checks the signature before it applies it. The Macs publish this list end-to-end encrypted through the relay team of the vault's questions ([relay feed v1](docs/contracts/relay-feed-v1.md)). The relay needs team schema 6; with an older relay, the tab says where the agents are.
+- **Mac setting "Show agents on the iPhone"** (Settings > Devices > Relay), on by default. Turning it off removes this Mac's list from the relay.
+
+### Fixed
+
+- **Questions of every vault on one iPhone:** an iPhone with several vaults (for example Personal and Work, each with its own Macs) gets and answers the questions of each vault. Each answer is signed with the answer key of that vault's team. After the app returns from the background, Decisions shows one "Unlock with Face ID" row for the locked vaults; it no longer prompts by itself.
+- **Notifications off** removes the push token from the team of every vault and unregisters the iPhone from notifications. Removing a vault also removes its token from that vault's team.
+- **iPhone battery:** no busy loop when this iPhone was removed from the team of every vault.
+- **iPhone background:** the app no longer holds a vault file lock in the background while it opens the questions of another vault.
+- **iPhone search:** only the Search tab has the search field.
+
+### Security
+
+- **Masked commands:** use rows and the Activity text of a run mask the values of every credential of the run before the text is cut. A value of another credential in the same command, or the start of a value at the cut, is no longer stored in clear.
+
 ## [0.5.1] - 2026-10-14
 
 ### Fixed
