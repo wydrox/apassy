@@ -26,7 +26,8 @@ Reserved for a later version: the open requests, the suggestions, the agent use 
 | The publisher: build, fit, seal, `PUT /v1/feed`, the 15-minute beat | `src/questions/feed.rs` | FD |
 | The action handler: read, open, check, apply, settle | `src/questions/feed.rs`, `src/vault/exceptions.rs` (reused) | FD |
 | `OwnerCheck::RemoteAction` for `OwnerAction::RemoveAgentException` | `src/broker/approvals/owner_auth.rs` | FD |
-| The masking of commands | `src/vault/learning.rs` `mask_values` (reused) | FD |
+| "Show agents on the iPhone" in Settings > Devices > Relay, kept in `ui.json` | `src/desktop/ui/settings.rs`, `src/desktop/ui_prefs.rs` | FD |
+| The masking of commands | `src/vault/usage.rs` `CommandMask` (mask whole, then cut), `src/vault/learning.rs` `mask_values` (reused) | FD |
 | iPhone core calls `feed_list`, `feed_wait`, `feed_action_string`, `feed_action`, `feed_action_status` | `ios/ApassyCore/src/core/feed.rs`, contract [ios-core-v1](ios-core-v1.md) | FD |
 | Swift Agents tab, the agent page, Face ID for an action | `ios/` | FD |
 | Relay endpoints, team schema 6, limits, audit | `apassy-relay`: `src/server/feed.rs`, `store.rs`, SPEC section 27 | FD |
@@ -57,7 +58,7 @@ The encodings of relay-questions-v1 section 4 apply: b64u without padding, lower
 | `change` | a JSON number, 0 or more. |
 | `action_id` | 16 random bytes from the sender's CSPRNG, b64u: exactly 22 characters of `A-Za-z0-9-_`. |
 | Agent id | the decimal id of the agent row on the publishing Mac, as a string (`"4"`). It means something only on that Mac. Agent ids are never reused in a vault (`AUTOINCREMENT`). |
-| Item reference | the item's `uuid` (`item.uuid`) in the vault's own form: 32 lowercase hex characters, no hyphens. A reader and a target compare it byte for byte and never reformat it. **Never the numeric item id**: that id is per device, and sync matches items by `uuid` (`src/vault/merge.rs`). The plan's "item ids refer to the synced vault" is corrected here. |
+| Item reference | the item's `uuid` (`item.uuid`) in the vault's own form: 32 lowercase hex characters, no hyphens. This is the only form: a reader and a target refuse any other (a hyphenated or upper-case uuid is a bad form), compare it byte for byte, and never reformat it. An item whose stored uuid has another form has no reference: the feed sends it as `null`. **Never the numeric item id**: that id is per device, and sync matches items by `uuid` (`src/vault/merge.rs`). The plan's "item ids refer to the synced vault" is corrected here. |
 | Text in the feed | UTF-8. The publisher removes control characters (as `clean` in `src/vault/usage.rs`) and cuts at a character boundary to the limit of the field. |
 | Text in the action string | the exact UTF-8 bytes. No normalization. |
 
@@ -131,8 +132,8 @@ The plaintext of a feed is one JSON object, UTF-8, with exactly these fields. A 
       "note": "Deploys only from the main branch.",
       "restricted": false,
       "actions": [{"action": "deploy", "allowed": 2, "not_allowed": 1, "projects": ["synthetic-shop"]}],
-      "exceptions": [{"item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "item_title": "Shop database", "kind": "never", "created_at": 1789990000}],
-      "recent": [{"at": 1790000010, "item": "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e", "item_title": "API token", "action": "deploy",
+      "exceptions": [{"item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "item_title": "Shop database", "kind": "never", "created_at": 1789990000}],
+      "recent": [{"at": 1790000010, "item": "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e", "item_title": "API token", "action": "deploy",
                   "project": "synthetic-shop", "command": "npm run deploy -- --token [apassy:secret]",
                   "outcome": "allowed", "decided_by": "owner", "answered_on": "Test iPhone"}]
     }
@@ -167,7 +168,7 @@ Each agent:
 | `uses_this_week` | number, 0 to 2^32 − 1 | `AgentOverview.uses_this_week`. |
 | `projects` | list of text, at most 16, each 1 to 256 bytes | the project labels of its uses, most used first. Labels only, never a project key or a path. |
 | `note` | text, 0 to 500 bytes | the owner's sentence for the bouncer (`MAX_AGENT_NOTE_BYTES`). |
-| `restricted` | bool | "Only these items" (ADR 0025 §3f): the agent sees only the items listed with `only`. The marker row (`ONLY_MARKER_ITEM`) is never sent as an exception. |
+| `restricted` | bool | "Only these items" (ADR 0025 §3f): the agent sees only the items listed with `only`. The marker row (`ONLY_MARKER_ITEM`) is never sent as an exception. "Sees" here means the `only` rows of the feed only: grants that the owner made on the Mac (`grant_rule`, `exec_grant`) are not in the feed in v1, so a reader cannot tell from it which other items the agent may use (v2: a `granted` count). |
 | `actions` | list, at most 4 | `ActionUse` of the last 7 days, most used first: `action` (`read`, `change`, `deploy`, `delete`), `allowed` and `not_allowed` (numbers), `projects` (as above, at most 16). No duplicate `action`. |
 | `exceptions` | list, at most 256 | see below, by `item_title`, then `kind`. |
 | `recent` | list, at most 20 | see below, newest first. |
@@ -190,7 +191,7 @@ Each recent use (an `item_use` row of the agent):
 | `item_title` | text, 0 to 128 bytes | as for an exception. |
 | `action` | `read`, `change`, `deploy`, `delete` | `item_use.action_kind`. |
 | `project` | text, 0 to 256 bytes | `item_use.project_label`; empty when there is no project. Never `project_key`. |
-| `command` | text, 0 to 256 bytes | `item_use.command_summary`, masked again (section 7.2). |
+| `command` | text, 0 to 256 bytes | `item_use.command_summary`, masked again (section 7.2). A command that was cut ends in `...`. |
 | `outcome` | `allowed`, `denied`, `refused`, `timed_out` | `UseOutcome::as_str`. |
 | `decided_by` | `bouncer`, `pattern`, `answer`, `owner`, `rule` | `UseDecidedBy::as_str`. |
 | `answered_on` | text, 0 to 64 bytes | `item_use.answered_on`: the device that answered, or empty. |
@@ -200,7 +201,10 @@ A reader shows titles from its own copy of the item with the same `uuid`, and `i
 ### 7.2 What keeps secrets out
 
 - **No value, ever.** The feed has no field value, no item notes, no secret, no agent token, no destination, no host list of a use, no environment variable value, no `cwd`, and no project key (keys are paths). Items are named by `uuid` and title only.
-- **Commands are masked twice.** `item_use.command_summary` was masked when the row was written (`Vault::record_item_use`: `mask_values` with the item's secret values, replaced by `[apassy:secret]`, the masking of the use log and the decision log). The publisher runs the same `mask_values` again at publish time with the current secret values of the item of that use, so a value set after the row was written is masked too. Then it cuts to 256 bytes. A row whose item is gone keeps its stored masking.
+- **Commands are masked twice, each time before they are cut** (`CommandMask::summary`, `src/vault/usage.rs`).
+  - **When the row is written.** The run masks the whole command (`run <argv joined by spaces>`) with the secret values of every item of the request, replaced by `[apassy:secret]` (`mask_values`, the masking of the use log and the decision log), and only then cuts it to 256 bytes, ending in `...`. So a value of one item never shows in the row of another item of the same run, and a value never leaves a part at the cut. `Vault::record_item_use` masks again with the values of the row's item. The Agents page of the Mac shows these rows.
+  - **When the feed is built.** The publisher reads the current secret values of every item of the vault once per build (`Vault::vault_command_mask`) and masks every command with all of them, whatever the item of the row, also when that item has no reference (it is gone, or its uuid has another form). So a value set after the row was written, a value of an item that was not in the request, and a value of an item without a reference are masked too. Then it cuts to 256 bytes.
+  - **The end of a cut command.** When a command was cut (it is over 256 bytes, or it ends in `...` from an earlier cut), and its end is the start of a known value, at least 8 bytes long, that start is masked too: the command ends in `[apassy:secret]...`. A cut never splits a `[apassy:secret]`.
 - **Text from agents.** Agent names, notes, project labels, and command summaries come from agents and the owner. The reader shows them as text, never as a link, with control and format characters replaced by `?` (as questions section 7.3).
 
 ### 7.3 Fitting the size
@@ -220,14 +224,16 @@ In this order; the first failure keeps the last good feed of that Mac on the scr
 1. The envelope opens (section 6.2). Else "Sync this vault to see the agents of <Mac>".
 2. The JSON has exactly the fields of section 7.1, within the limits. Else "Update Apassy to see the agents of <Mac>".
 3. `v` is 1 and `seq` equals the relay's `seq`.
-4. `mac.device` is a live `trusted_device` of kind `mac` whose device number in this team (`relay_devices[team id]`), when set, equals the relay's `device_id`. Else the feed is ignored, with no text.
+4. `mac.device` is a live `trusted_device` of kind `mac` whose device number in this team (`relay_devices[team id]`) equals the relay's `device_id`. Else the feed is ignored, with no text. The publisher's `trusted_device` row must carry `relay_devices[team]` equal to the relay's `device_id` on the reader's copy of the vault; a row without that entry publishes nothing there, and its feed is ignored without a text. Unlike the asker check of questions (questions section 13), a missing entry is never accepted: a feed never predates the membership, because the Mac publishes only after its row has its device number in the team.
 5. `seq` is above the highest `seq` that this reader accepted from that device (section 8). Else the feed is ignored, with no text.
 
 ## 8. Order and freshness
 
 - **The publisher's `seq`.** Each new feed has `seq = max(last seq + 1, now)`, with `now` the publisher's clock. So a Mac that lost its last `seq` (a restart, a vault restored from a backup) still goes up without state. After a start it reads its own feed (`GET /v1/feed?since=0`) and uses `max(that seq + 1, now)`.
-- **When it publishes.** While the vault is unlocked, the questions are on for the vault, the feed is on (Settings > Devices > "Show agents on the iPhone", on by default), and the vault has at least one live `trusted_device` of kind `iphone`: after each change of what the feed holds (a use, an exception, an agent, a note), at most once per 10 s; and every 15 minutes while nothing changes. A locked Mac publishes nothing; its last feed stays.
-- **The reader** keeps, per team and relay device id, the highest `seq` it accepted, in its app data (not secret; it survives a restart). It ignores a feed with a lower or equal `seq`. So a relay cannot bring back an older feed. It shows the feeds of all Macs together, each agent with "On <Mac>", and each Mac's header with "From <Mac>, <generated_at as a relative time>".
+- **When it publishes.** While the vault is unlocked, the questions are on for the vault, the feed is on (Settings > Devices > Relay > "Show agents on the iPhone", on by default; a setting of this Mac, kept in its `ui.json`, for every vault), and the vault has at least one live `trusted_device` of kind `iphone`: after each change of what the feed holds (a use, an exception, an agent, a note), at most once per 10 s; and every 15 minutes while nothing changes. A locked Mac publishes nothing; its last feed stays. A problem of the feed (section 14.2) shows as a short line under the setting.
+- **When the feed goes.** The Mac deletes its feed (`DELETE /v1/feed`, section 10.5) when the owner turns "Show agents on the iPhone" off, when the questions go off for the vault (or this Mac may no longer ask through the relay), and when the last live iPhone row of the vault is removed. While the setting is off, it publishes nothing and reads no action.
+- **The reader** keeps, per team and relay device id, the highest `seq` it accepted, in its app data (not secret; it survives a restart). It ignores a feed with a lower or equal `seq`. So a relay cannot bring back an older feed to a reader that has a mark for that Mac; a reader with no mark (a new or reset iPhone) can be served an older feed (section 15). It shows the feeds of all Macs together, each agent with "On <Mac>", and each Mac's header with "From <Mac>, <generated_at as a relative time>".
+- **A reader with an older copy of the devices.** A reader whose copy of a vault's devices is older than a feed of that vault (a vault that is not open) shows the feed but offers no action on it.
 - **Stale.** When `generated_at` is more than 24 hours old on the reader's clock, the reader shows that Mac's data dimmed with "The Mac has not reported since <date>", and offers no action on it. A `generated_at` in the future is shown as "now".
 - A device whose feed leaves the relay (section 10.4, `present`) leaves the reader's list. A Mac removed from the vault (its `trusted_device` row deleted) leaves at once.
 
@@ -248,7 +254,7 @@ Removing a `never` or `always_ask` row is the remote form of `OwnerAction::Remov
 The plaintext of an action is one JSON object with exactly these fields:
 
 ```json
-{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"<b64u DER>"}
+{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"<b64u DER>"}
 ```
 
 | Field | Rule |
@@ -288,30 +294,35 @@ remove_exception:<agent id>:<item uuid>:<exception kind>:<exception created_at>
 
 ### 9.4 Face ID, the window, and replay
 
-- **Face ID.** For `never` and `always_ask`, the iPhone signs with the answer key of the team after Face ID, with a new `LAContext` and `touchIDAuthenticationAllowableReuseDuration = 0`, as an answer (questions section 5.3). The prompt reason is `remove an exception of agent "NAME"`, with NAME the agent name with control characters and `"` removed, at most 40 characters. For `only`, it signs with `sign_key` and asks nothing.
+- **Face ID.** For `never` and `always_ask`, the iPhone signs with the answer key of the team after Face ID, with a new `LAContext` and `touchIDAuthenticationAllowableReuseDuration = 0`, as an answer (questions section 5.3). The prompt reason is `remove an exception of agent "NAME"`. The Face ID reason shows the agent name after the same replacement of control and format characters as the list, without `"`, cut to 40 characters. For `only`, it signs with `sign_key` and asks nothing.
+- **One string.** A sender signs the action string once and sends that exact string with its `feed_seq`; a newer feed of the target in between does not change it, and the target accepts any `feed_seq` up to its last, while the exception row is still as that feed showed it (section 9.5 step 9).
 - **The window.** The target accepts `time` within 60 s of its clock, both ways (`PROOF_LIFETIME`, as questions section 12.4). The relay keeps an action open for 300 s (section 10.6); after 60 s it can no longer count.
-- **Replay.** `action_id` is 128 random bits, and the relay refuses a second action with the same id (`409 conflict`). The target applies each `action_id` once and keeps the ids it handled in memory for 10 minutes. A replay after that is outside the window. A replay within the window after a restart finds the exception gone, or made again with another `created_at`, and is `stale`. An action replayed to another Mac fails to open (the AAD binds the target's device id) and fails the signature (`to`). An action replayed into another team fails both (team id).
+- **Replay.** `action_id` is 128 random bits, and the relay refuses a second action with the same id (`409 conflict`). The target handles each `action_id` once: it marks the id before the first check, so one id gets at most one settle, also when the relay serves a damaged copy first (section 9.5). It keeps the ids it handled in memory for 10 minutes. A replay after that is outside the window. A replay within the window after a restart finds the exception gone, or made again with another `created_at`, and is `stale`. An action replayed to another Mac fails to open (the AAD binds the target's device id) and fails the signature (`to`). An action replayed into another team fails both (team id).
 - **The feed it saw.** `feed_seq` must be a `seq` that the target published (at most its last one). The exception must still exist as the feed showed it. A change after the feed (removed, made again) makes the action `stale`.
 
 ### 9.5 What the target checks
 
-While the vault is unlocked and the feed is on, the target long-polls `GET /v1/feed/actions?after=<last seq>&wait=25` and handles each action once, in `seq` order. The first failure ends the action with the outcome named, an Activity line ("An action from <device> did not count: <reason>"), and a settle:
+While the vault is unlocked and the feed is on, the target long-polls `GET /v1/feed/actions?after=<last seq>&wait=25` and handles at most 20 actions of one answer (section 10.7), each once, in `seq` order. The first failure ends the action with the outcome named, a settle, and, for an action that opened, an Activity line ("An action from <device> did not count: <reason>"):
 
-1. It opens with its key named by `key_id` and the AAD with the stamped `from_device_id` and its own device id (section 6.1). Else `refused` ("could not be read").
+0. `action_id` was not handled before. Else nothing: no second settle. The target marks the id handled before step 1, so one id gets at most one settle, also when the relay serves a damaged copy of a real action first.
+1. It opens with its key named by `key_id` and the AAD with the stamped `from_device_id` and its own device id (section 6.1). Else `refused` ("it could not be read"), with no Activity line of its own: anyone on the path can make such a record. Activity says "Actions through the relay could not be read. They did not count." at most once per 10 minutes.
 2. The JSON has exactly the fields of section 9.2, `v` is 1, `action_id` is the relay's, `kind` is `remove_exception`. Else `refused`.
 3. `to` is its own `trusted_device.uuid`. Else `refused`.
 4. `by` is a live `trusted_device` of kind `iphone`, whose device number in this team (`relay_devices[team id]`), when set, equals the stamped `from_device_id`. Else `refused`.
 5. `time` is within the window of section 9.4. Else `refused` ("too old").
-6. `action_id` was not handled before. Else nothing: no second settle.
+6. Once: the target checks it first, as step 0.
 7. `agent` is an agent of this vault on this Mac that is not revoked, and `item` is the `uuid` of a live item. Else `stale`.
 8. The signature verifies over the rebuilt action string (section 9.3):
-   - `never`, `always_ask`: through `OwnerGate::authorize(OwnerAction::RemoveAgentException { agent_id, item_id, kind }, OwnerCheck::RemoteAction { device_uuid, team_id, action_id, time, signature })`. The gate loads the live `trusted_device`, checks the window, rebuilds the string, verifies with `answer_key` (a NULL `answer_key` or a `mac` row is `RemoteRejected`), and checks the vault session before and after, as `OwnerCheck::Remote` (questions section 12.4). `CheckMethod::Remote` is recorded. A remote check can make a proof for `RemoveAgentException` with `never` or `always_ask` only through `RemoteAction`, and `RemoteAction` makes no other proof.
+   - `never`, `always_ask`: through `OwnerGate::authorize(OwnerAction::RemoveAgentException { agent_id, item_id, kind }, OwnerCheck::RemoteAction { signed, signature })`. The gate loads the live `trusted_device`, rebuilds `to` (the `trusted_device.uuid` of this Mac in the questions team of the vault) and the team id (the questions team of the vault) from the vault and refuses an action whose `to` or team differs (`RemoteRejected`), whatever its caller passed; checks the window, rebuilds the string, verifies with `answer_key` (a NULL `answer_key` or a `mac` row is `RemoteRejected`), and checks the vault session before and after, as `OwnerCheck::Remote` (questions section 12.4). `CheckMethod::Remote` is recorded. A remote check can make a proof for `RemoveAgentException` with `never` or `always_ask` only through `RemoteAction`, and `RemoteAction` makes no other proof.
    - `only`: the signature verifies with `sign_key`. No owner check.
    - A signature by the other key of the device is invalid. Else `refused`.
 9. `feed_seq` is at most its last published `seq`, and the row `(agent, item, kind)` exists with `created_at` equal to `exception.created_at`. Else `stale`.
 10. It removes the row (`Vault::remove_agent_exception`), writes the Activity line ("Removed on <iPhone name>: “Not for this agent” for <agent> and <item>"), counts one owner interaction for `never` and `always_ask` (ADR 0025 §1, as a remote answer), settles with `applied`, and publishes a new feed when section 12 allows.
 
-A target that cannot open an action settles it `refused` with a settle sealed under its current key. The sender may not open that settle; it shows the outcome in clear.
+- **The device in Activity** is the `trusted_device` that the opened action names in `by`, or "a device of this vault"; never the device that the relay stamped (`from_device_id`).
+- **A lock during the check.** When the vault locks (or its session changes) while the target handles an action, the action gets no settle and is not marked handled, and `after` stays before it: the target checks it again after the unlock, while it is in its window.
+- **A flood.** When no action of an answer opened (each failed step 1, or was handled before), the target waits before it polls again as after an early empty answer (section 10.10: 5 s, doubling to 60 s, with jitter).
+- **An unopenable settle.** A target that cannot open an action settles it `refused` with a settle sealed under its current key. The only legitimate settle that a sender cannot open is `refused`. A reader that cannot open a settle treats it as a refusal whatever the clear outcome; only `refused` may be sealed under a key the sender may not hold, and an unopenable `applied` or `stale` is never shown as such: the sender shows "Not applied, or unknown", never applied or stale.
 
 ### 9.6 The settle
 
@@ -335,6 +346,7 @@ The sender shows:
 | `applied` | "Removed on <Mac>." The row leaves the list at once; the next feed confirms it. |
 | `stale` | "The list on <Mac> changed. Look at it again." |
 | `refused` | "<Mac> refused it: <reason>." |
+| a settle that does not open, any clear outcome | "Not applied, or unknown." (section 9.5) |
 | expired, no settle | "<Mac> did not answer. It may be asleep or locked." |
 
 The settle is not signed: it is sealed with the question key, so only a device of the vault can make it, and it changes nothing but the display.
@@ -346,7 +358,8 @@ The settle is not signed: it is sealed with the question key, so only a device o
 - Transport, headers, deadlines, and retries: relay-sync-v1 section 3. A `429` from the Worker holds every call to that relay, as there.
 - Auth: `Authorization: Bearer apassy_acc_…`, the access token of a **live device** of the questions team. The relay checks `Need::Member` and then requires `MemberAuth.device`; a member token gets `401 unauthenticated`. The device and its member are read again at each request and at each turn of a long poll.
 - The team comes from the token. No endpoint takes a team id.
-- **Same-member routing.** A device sees only the feeds of the live devices of its own member, its own included, and may send an action only to such a device, not to itself. Other members' devices never see a feed, its existence, or an action.
+- **Same-member routing.** A device sees only the feeds of the live devices of its own member, its own included, and may send an action only to such a device, not to itself. Other members' devices never get a feed, its device, or an action, and cannot read one. They can see that feeds and actions change in the team: the team-wide `change` of `GET /v1/feed` and `seq` of `GET /v1/feed/actions` go up with every feed and action of any member, and the team-wide limits (`feed_bytes`, `feed_actions_per_hour`, open actions per team) refuse them too when another member used them up.
+- **Member shares.** The relay gives the feed and action budgets of a team member shares, so one member cannot use up a team's `feed_bytes` or actions, and it reserves a poll seat in the question lane for the Mac's action poll (`GET /v1/feed/actions`), so the feed long polls of other devices do not keep a Mac from its actions.
 - Bodies: JSON, `deny_unknown_fields`, `v` must be `1`. At most 64 KiB, except `PUT /v1/feed`: at most 360448 bytes (352 KiB: the b64u of a 256 KiB ciphertext is 349526 characters), with `Content-Length` and without `Transfer-Encoding`.
 
 ### 10.2 Errors
@@ -367,9 +380,11 @@ The settle is not signed: it is sealed with the question key, so only a device o
 | 413 | `payload_too_large` | A body over its limit, or a ciphertext over section 6.3. |
 | 503 | `busy` | As relay-sync-v1. `Retry-After: 2`. |
 
-Which code wins on `PUT /v1/feed`, in order: 400 (shape) → 413 → 401 → 409 `seq_not_newer` → 403 `feed_limit` (time, then bytes). The `409` comes before the time limit so that a retry of a feed that landed gets `409`, not `403` (section 10.3).
+Which code wins on `PUT /v1/feed`, in order: 401 → 400 (shape) → 413 → 409 `seq_not_newer` → 403 `feed_limit` (time, then bytes). The `409` comes before the time limit so that a retry of a feed that landed gets `409`, not `403` (section 10.3).
 
-Which code wins on `POST /v1/feed/actions`: 400 → 413 → 401 → 403 `not_routed` → 404 (no feed) → 409 `conflict` → 403 `too_many_actions`.
+Which code wins on `POST /v1/feed/actions`: 401 → 400 → 413 → 403 `not_routed` → 404 (no feed) → 409 `conflict` → 403 `too_many_actions`.
+
+The relay checks the token first: a request without a valid device token gets `401` whatever its body (the first draft of this contract had 400 and 413 before 401; the relay deviates, and the app needs no change, as it never sends a body of another form). The Worker's `413` for a body over its limit (section 10.1) still comes before the relay.
 
 ### 10.3 `PUT /v1/feed`
 
@@ -379,7 +394,7 @@ Which code wins on `POST /v1/feed/actions`: 400 → 413 → 401 → 403 `not_rou
 
 Answer: `{"device_id":2,"seq":1790000040,"change":17,"updated_at":1790000041}`. The relay replaces the caller's feed (one row per device) in one transaction, sets `change = ++team.feed_change`, and wakes the feed long polls of the member. It does not read the feed.
 
-After a network error the publisher sends the same body again. A `409 seq_not_newer` then means the first one may have landed: the publisher reads `GET /v1/feed?since=0&wait=0`; when its own entry has this `seq`, the feed landed; else it builds a new feed with `seq = max(that seq + 1, now)`. A `403 feed_limit` waits until 10 s after the last accepted feed.
+After a network error the publisher sends the same body again. A `409 seq_not_newer` then means the first one may have landed: the publisher reads `GET /v1/feed?since=0&wait=0`, and follows `more` (section 10.4) until it has seen every feed of the member. The feed landed only when its own entry has this `seq` and the same envelope (the digest of `key_id`, the nonce, and the ciphertext equals the one of the body it sent). Else (another `seq`, or another feed at this `seq`) it builds a new feed with `seq = max(that seq + 1, now)`, also when the content did not change. After three answers in a row that did not land, it waits before the next try, as after a failed put (2 s, doubling to 30 s), and keeps the change for it. A `403 feed_limit` waits until 10 s after the last accepted feed.
 
 ### 10.4 `GET /v1/feed?since=N&wait=S`
 
@@ -404,7 +419,7 @@ The feeds of the caller's member with `change > since`, oldest `change` first. `
 
 ### 10.5 `DELETE /v1/feed`
 
-No body. Removes the caller's feed. Answer `{"device_id":2,"change":18}`. The publisher sends it when the owner turns "Show agents on the iPhone" off, or turns the questions off for the vault. Its open actions expire.
+No body. Removes the caller's feed. Answer `{"device_id":2,"change":18}`. The publisher sends it when the owner turns "Show agents on the iPhone" off, when the questions go off for the vault, and when the last live iPhone row of the vault is removed (section 8). Its open actions expire. A `404` (a relay without the feed) ends the delete; another error that can pass is tried again later.
 
 ### 10.6 `POST /v1/feed/actions`
 
@@ -427,6 +442,8 @@ The target only: the open actions with `to_device` = the caller and `seq > after
 
 `wait` 0 to 25: while there is none, hold up to `wait` seconds. One action long poll per device. A top-level `seq` below `after` means: set `after` to 0.
 
+The target handles at most 20 actions of one answer, also when a relay sends more, and moves `after` past an action only once it handled it (section 9.5). When no action of an answer opened, it waits as after an early empty answer (section 10.10) before it polls again.
+
 ### 10.8 `POST /v1/feed/actions/{action_id}/settle`
 
 The target only. Body `{"v":1,"outcome":"applied","key_id":"…","nonce":"…","ciphertext":"<b64u>"}`. Answer `{"action_id":"…","state":"settled","outcome":"applied","settled_at":1790000061}`. The same body again answers the same (a retry); another body after a settle is `409 action_settled`; after `expires_at`, `409 action_expired`. It wakes the sender's status long poll.
@@ -444,7 +461,7 @@ The sender only.
 
 ### 10.10 Long polls and the lane
 
-The three feed long polls (`GET /v1/feed`, `GET /v1/feed/actions`, `GET /v1/feed/actions/{id}`) with a `wait` above 0 run in the question lane (SPEC section 25.5) and count in a team's share of it (`question_long_polls_per_team`). When the lane or the share is full, they are answered at once, as with `wait=0`. In a Connect team they also count in the Connect bound (relay-connect-v1 section 5) and can answer early with nothing new. After an early empty answer the device waits before it polls again (5 s, doubling to 60 s, with jitter). The iPhone polls the feed only while the Agents tab or an agent page is on the screen; there is no push for feeds or actions in v1.
+The three feed long polls (`GET /v1/feed`, `GET /v1/feed/actions`, `GET /v1/feed/actions/{id}`) with a `wait` above 0 run in the question lane (SPEC section 25.5) and count in a team's share of it (`question_long_polls_per_team`). When the lane or the share is full, they are answered at once, as with `wait=0`. In a Connect team they also count in the Connect bound (relay-connect-v1 section 5) and can answer early with nothing new. After an early empty answer the device waits before it polls again (5 s, doubling to 60 s, with jitter). The relay reserves a seat of the lane for the action poll of a Mac, so the feed polls of the iPhones cannot fill it. The iPhone polls the feed only while the Agents tab or an agent page is on the screen; there is no push for feeds or actions in v1.
 
 ## 11. Routing
 
@@ -466,10 +483,10 @@ The routing set of a feed and of an action is computed by the relay at each requ
 | Feeds in one answer | until 1 MiB of ciphertext text, at least one | relay |
 | Actions in one answer | 20 | relay |
 | Feed retention | replaced by each `PUT`; deleted by `DELETE /v1/feed`, by the revocation of the device or its member, and 30 days after `updated_at` | relay |
-| Action retention | leaves the target's list when settled or expired; purged 10 minutes after the settle or the expiry, and 24 hours after `created_at` at the latest | relay |
+| Action retention | leaves the target's list when settled or expired; purged 10 minutes after the settle or the expiry, and 24 hours after `created_at` at the latest. A purged action keeps its row in `feed_action` (the relay deviates: the purge does not delete the row) | relay |
 
-- Feeds count in their own budget, `feed_bytes`, not in `question_bytes`, so a large feed never blocks a question. A Connect team's file cap (relay-connect-v1 section 5: about `question_bytes` plus 8 MiB) grows by `feed_bytes`.
-- **Audit.** The relay writes no audit row per feed update: a Mac publishes up to every 10 s, and a Connect team never deletes audit rows. It writes `feed_started` at the first feed of a device, `feed_deleted`, `feed_action_posted`, `feed_action_settled` (with the clear outcome), and `limit_reached` as in section 22 of the SPEC. Rows have device ids only, never a ciphertext, a nonce, or an `action_id`.
+- Feeds count in their own budget, `feed_bytes`, not in `question_bytes`, so a large feed never blocks a question. The relay gives the feed and action budgets of a team member shares (section 10.1), and reserves a poll seat for the Mac's action poll (section 10.10). A Connect team's file cap (relay-connect-v1 section 5: about `question_bytes` plus 8 MiB) grows by `feed_bytes`.
+- **Audit.** The relay writes no audit row per feed update: a Mac publishes up to every 10 s, and a Connect team never deletes audit rows. It writes `feed_started` at the first feed of a device (the relay deviates: it writes `feed_started` again at the first feed after a delete), `feed_deleted`, `feed_action_posted`, `feed_action_settled` (with the clear outcome), and `limit_reached` as in section 22 of the SPEC. Rows have device ids only, never a ciphertext, a nonce, or an `action_id`.
 
 ## 13. Relay team schema 6
 
@@ -512,9 +529,10 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 
 ### 13.3 Rollback
 
-- **The Worker.** `npx wrangler rollback`. The old Worker answers a feed body over 128 KiB with `413`; the app then fits to the old size (section 14.2).
+- **The Worker.** `npx wrangler rollback`. The old Worker answers a feed body over 128 KiB (131072 bytes) with `413`; the app then fits to the old size, 95 KiB of plaintext (section 14.2).
 - **The relay image, back to schema 5.** Stop the relay, put the version 5 copies back (`for f in /data/teams/*.db.pre-v6; do cp -p "$f" "${f%.pre-v6}"; done`), and start the previous image. If an `admin limits` call changed `feed_bytes` or `feed_actions_per_hour` after the deploy, set them back to the default with the new image still running, or restore `relay.db` from the backup taken before the deploy (OPERATIONS section 19.3 has the same rule for question limits).
-- **What it loses.** Everything since the migration in each team file: the feeds and the actions, and also the questions, devices, and sync heads made after it (as 19.3). The feeds are harmless to lose: the previous image answers `404` on `/v1/feed`, the Macs stop publishing, and the iPhones keep their interim screen (section 14). A team made after the migration has no `.pre-v6` and is version 6 from the start: suspend it, or restore the backup instead.
+- **What it loses.** Everything since the migration in each team file: the feeds and the actions, and also the questions, devices, and sync heads made after it (as 19.3).
+- **Revocations come back.** Putting the `.pre-v6` copies back also undoes every revocation of a device or a member made after the deploy: a removed device or member is live again on the relay. Before the rollback, list the revocations since the deploy (from the revocation rows of the relay's audit log); after it, either fix forward (deploy a fixed version 6 image instead of rolling back) or revoke each of them again at once. The feeds are harmless to lose: the previous image answers `404` on `/v1/feed`, the Macs stop publishing, and the iPhones keep their interim screen (section 14). A team made after the migration has no `.pre-v6` and is version 6 from the start: suspend it, or restore the backup instead.
 - Delete the `.pre-v6` files when no rollback to schema 5 is needed any more.
 
 ## 14. Versioning and compatibility
@@ -530,7 +548,7 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 | Case | What happens |
 | --- | --- |
 | A relay without schema 6 | Every `/v1/feed` route answers `404`. The Mac stops publishing, asks again 5 minutes later, and shows "The relay does not show agents on the iPhone yet — update the relay." in Settings > Devices and once in Activity. The iPhone keeps its interim Agents screen (the agents stay on the Mac, with the Mac's name). |
-| A Worker older than this contract | A `PUT /v1/feed` body over 128 KiB gets `413` from the Worker. The Mac then fits the feed to 96 KiB of plaintext (section 7.3, `truncated: true`) until its next start. |
+| A Worker older than this contract | A `PUT /v1/feed` body over 128 KiB (131072 bytes) gets `413` from the Worker. The Mac then fits the feed to 95 KiB of plaintext (97280 bytes; section 7.3, `truncated: true`) until its next start: its ciphertext is 97296 bytes, their b64u 129728 characters, and the body with the other fields stays under 131072 bytes. (At 96 KiB the b64u of the ciphertext alone is 131094 characters, over the limit.) |
 | A Mac app older than this contract | It publishes no feed. The iPhone shows its interim screen for that Mac: "Agents of <Mac> show here after you update Apassy on it." |
 | An iPhone app older than this contract | It reads no feed. Nothing breaks; the Mac still publishes while the vault has a live iPhone row. |
 | An iPhone without an answer key for the team (an old link) | It shows the feed and offers removals of `only` rows. For `never` and `always_ask` it says "Connect this iPhone again on a Mac to use Face ID here." |
@@ -540,8 +558,10 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 ## 15. What this does not protect
 
 - **What the relay sees.** The team, the device ids of the publisher, the sender, and the target, and that they belong to one member; the size of each feed (which grows with the agents and their use), the times of each feed and action (when a Mac is on and unlocked, when the owner acts), the `seq` of each feed (which follows the Mac's clock, section 8), `key_id` (so when the key rotates), and the clear outcome of each action. With one kind in v1, it also knows that an action is a removal of an exception. Cloudflare sees the same.
-- **What the relay cannot do.** Read a feed or an action (it has no question key). Forge a feed, an action, or a settle. Make an action count (it needs a signature by a key of `trusted_device`, and Face ID for a removal that gives authority back). Roll a feed back (the reader keeps the highest `seq`, and the AAD binds it). Move a feed to another Mac, or an action to another Mac or from another sender (the AADs bind the device ids, and the action string binds `to`). Flip a settle's outcome (the AAD binds it). Replay an action (one-time `action_id`, the 60 s window, the exception's `created_at`).
-- **What the relay can do.** Withhold or delay feeds and actions, keep serving the last feed, or refuse to route. The reader shows the age of each feed and dims it after 24 hours; an action that gets no settle shows "did not answer". The Mac's own Agents page always works.
+- **What other members learn.** The devices of another member of the team never get a feed or an action, but they can see that feeds and actions change: the team-wide `change` and action `seq` go up, and the team-wide limits refuse them when this member used them up (section 10.1). They cannot read any of it.
+- **What the relay cannot do.** Read a feed or an action (it has no question key). Forge a feed, an action, or a settle. Make an action count (it needs a signature by a key of `trusted_device`, and Face ID for a removal that gives authority back). Roll a feed back for a reader that has a mark for that Mac (the reader keeps the highest `seq`, and the AAD binds it). Move a feed to another Mac, or an action to another Mac or from another sender (the AADs bind the device ids, and the action string binds `to`). Change the outcome inside a settle that opens (the AAD binds it). Replay an action (one-time `action_id`, the 60 s window, the exception's `created_at`). Get more than one settle for one `action_id` (the target marks it before its first check). Wipe the Mac's Activity with actions that do not open (one line per 10 minutes for all of them, at most 20 handled per answer, and a wait when none opened).
+- **What the relay can do.** Withhold or delay feeds and actions, keep serving the last feed, or refuse to route. Serve an older feed to a reader with no highest-`seq` mark for that Mac (a new or reset iPhone): the bound is that the feed shows its age, and the Mac checks every action against its rows as they are now, the exception's `created_at` included (section 9.5 step 9) and `time` against its own clock (section 9.4). Make an action end `refused`: it can serve a damaged copy of a real action first, which the Mac settles `refused` ("it could not be read") and after which the real one gets no settle, or serve a settle that the sender cannot open. So the relay can turn an outcome into a refusal, never into `applied`: a settle that does not open shows "Not applied, or unknown" (section 9.5). The reader shows the age of each feed and dims it after 24 hours; an action that gets no settle shows "did not answer". The Mac's own Agents page always works.
+- **The names an action shows.** The iPhone signs ids (the agent id, the item uuid, the kind), not the names it shows next to them. A holder of the question key who works with the relay could serve a feed that labels a real exception with false agent and item names, so the owner removes another exception than the one they read. The Mac's Activity line records the true names of what it removed. A digest of the shown names in the action string is planned for v2.
 - **The vault is the trust root** (questions section 18). Any device that holds the vault holds the question key: it can read the feeds and seal an action. It still cannot sign an action that gives authority back without the answer key of a live iPhone row, but a holder of the vault passphrase can write `trusted_device` rows.
 - **A Mac's agent rows go to the iPhone.** The feed copies local history (agent names, project labels, masked command summaries) to every iPhone of the vault. They are sealed on the wire, and the iPhone keeps only the `seq` high-water mark on disk. Masking catches the values that the vault knows; a secret that the vault does not hold, typed by an agent into a command, is not masked (the same limit as the use log).
 - **Display text.** Agent names, notes, and command summaries come from agents. A prompt injection there reaches the iPhone; it is shown as text, never as a link.
@@ -554,7 +574,7 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 
 ## 17. Test vectors
 
-These values are synthetic. Every suite (the app, `apassy-core` for the iPhone, the relay for the AADs and the sizes) uses them. The key, team, device uuids, relay device ids, and the answer key are those of relay-questions-v1 section 20. They were computed with a throwaway Python script on `cryptography` (`ChaCha20Poly1305`, `ec.ECDSA(SHA256)` on SECP256R1) and `hashlib`; the same script first reproduced the settle ciphertext of relay-questions-v1 section 20.4 byte for byte, so the cipher, the key, and the AAD join match the app's `ring` code. The action signature was checked independently with `openssl dgst -sha256 -verify`.
+These values are synthetic. Every suite (the app, `apassy-core` for the iPhone, the relay for the AADs and the sizes) uses them. The key, team, device uuids, relay device ids, and the answer key are those of relay-questions-v1 section 20. They were first computed with a throwaway Python script on `cryptography` (`ChaCha20Poly1305`, `ec.ECDSA(SHA256)` on SECP256R1) and `hashlib`, which first reproduced the settle ciphertext of relay-questions-v1 section 20.4 byte for byte. On 2026-10-14 the item uuids moved to the vault's own 32-hex form (section 4: the same uuids without hyphens), and the values of 17.1 to 17.3 that depend on them (the feed and action plaintexts, their sizes, SHA-256 digests and ciphertexts, the action string, and the signature) were computed again from the Mac implementation (`tests/relay_feed.rs`, `ring`). The AADs and the settle of 17.4 did not change. The new action signature was checked independently with `openssl dgst -sha256 -verify`.
 
 | Name | Value |
 | --- | --- |
@@ -563,8 +583,8 @@ These values are synthetic. Every suite (the app, `apassy-core` for the iPhone, 
 | Team id | `t_7k2m5q4x3c` |
 | Publisher (Mac) uuid, relay device id | `0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d`, `2` |
 | Sender (iPhone) uuid, relay device id | `6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b`, `3` |
-| Item of the exception, uuid | `3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c` ("Shop database") |
-| Item of the recent use, uuid | `8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e` ("API token") |
+| Item of the exception, uuid | `3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c` ("Shop database") |
+| Item of the recent use, uuid | `8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e` ("API token") |
 | Feed `seq` | `1790000040` |
 | Feed nonce (bytes `30` to `3b`) | `MDEyMzQ1Njc4OTo7` |
 | `action_id` (bytes `b0` to `bf`) | `sLGys7S1tre4ubq7vL2-vw` |
@@ -575,10 +595,10 @@ These values are synthetic. Every suite (the app, `apassy-core` for the iPhone, 
 
 ### 17.1 The feed
 
-The feed plaintext is exactly these 927 bytes (one line, no newline at the end; SHA-256 `9419276eb6a004d6496e626b439d01c94c24d19e0f3844e765b01da58cd0af98`):
+The feed plaintext is exactly these 919 bytes (one line, no newline at the end; SHA-256 `5a47ba132d8e33ffd68237f2c8f5332fbf27c15f39fe14e06b9fc33415b34785`):
 
 ```
-{"v":1,"mac":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"MacBook Pro"},"seq":1790000040,"generated_at":1790000040,"truncated":false,"week":{"by_you":3,"automatic":128},"agents":[{"id":"4","name":"Claude Code","host":"claude","where":"mac","revoked":false,"token_expires_at":1797776000,"last_use_at":1790000010,"uses_this_week":12,"projects":["synthetic-shop"],"note":"Deploys only from the main branch.","restricted":false,"actions":[{"action":"deploy","allowed":2,"not_allowed":1,"projects":["synthetic-shop"]}],"exceptions":[{"item":"3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c","item_title":"Shop database","kind":"never","created_at":1789990000}],"recent":[{"at":1790000010,"item":"8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e","item_title":"API token","action":"deploy","project":"synthetic-shop","command":"npm run deploy -- --token [apassy:secret]","outcome":"allowed","decided_by":"owner","answered_on":"Test iPhone"}]}]}
+{"v":1,"mac":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"MacBook Pro"},"seq":1790000040,"generated_at":1790000040,"truncated":false,"week":{"by_you":3,"automatic":128},"agents":[{"id":"4","name":"Claude Code","host":"claude","where":"mac","revoked":false,"token_expires_at":1797776000,"last_use_at":1790000010,"uses_this_week":12,"projects":["synthetic-shop"],"note":"Deploys only from the main branch.","restricted":false,"actions":[{"action":"deploy","allowed":2,"not_allowed":1,"projects":["synthetic-shop"]}],"exceptions":[{"item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","item_title":"Shop database","kind":"never","created_at":1789990000}],"recent":[{"at":1790000010,"item":"8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e","item_title":"API token","action":"deploy","project":"synthetic-shop","command":"npm run deploy -- --token [apassy:secret]","outcome":"allowed","decided_by":"owner","answered_on":"Test iPhone"}]}]}
 ```
 
 Feed AAD (text, `\0` is one zero byte): `apassy-feed-v1\0feed\0t_7k2m5q4x3c\02\01790000040\0630dcd2966c43366`
@@ -589,15 +609,15 @@ Feed AAD (hex, 62 bytes):
 6170617373792d666565642d7631006665656400745f376b326d357134783363003200313739303030303034300036333064636432393636633433333636
 ```
 
-Feed ciphertext (hex, 943 bytes; SHA-256 `3a5a92a71d541af1263f3e90d4db82827fd8674f671e109b47752dbb61f61043`; the last 16 bytes are the tag `57cdef5d1ead09fbb024b3b879af3d10`):
+Feed ciphertext (hex, 935 bytes; SHA-256 `f79d190efe856940ca7f53b5909c8e2d35d85035d3646551fd15fb70ddbca2a6`; the last 16 bytes are the tag `b0d6de4e7c01d3b980b2c6b4fd344af9`):
 
 ```
-2dd63c68fed0fbc70573da2e4fe30a66aeb5b976a8a32b0bac67d36775ac2786b3c33d810f960fecdfb645235a84123fc5efd943182bc2ec6862253cd5f918b6ce2b3f1b5baec9990a838d36008edbf9ce1294712bbe2dcf1a7db5c7268e61beb68f20a72bd99de63f88d774bf4121b9a766adade408521da5b3f36aa0b6b57f5e0fdd956a7fc7471bbb5ff39441703e59e76517dcb23d098944e744d4a4797fdf44a9143e5ab65e2474eada739bb1f83ba85ea8dfe4ed55fe9ef01f8007eb352b281f2fdb1db7f9164a2ac9856b9b943786ee6ffef7f962e6fa81deb8a2d999509e18d91b746984c550dd8fccca1fcb1ff803ca97e48d04a78b79695b98bcddc170f808894ef24bd3a890358075f9031cee5ddec1bd9490f4d3162b902c38fbfb69f3ff41fecafa48d111d253daaf23f447d5f9998406241c60a1110213e932690c93933f6e4c91cf52a37380b2a48749999519caed7b735c7395e8e58d8a9e664b16308ec8c502a185a13289e31a5ba84d5ced3a4de5bbcfca9c3bc3b22eb0077f5e1d21af4bfac786ca23eeecaeecdc8e64d59c7997832031134b6d6239dd0ecaf50de6611493b21406f6c780c167cf92edbfe4ee5bf5b87b8d795535ee3249b614a699776b884198a76e346fa239a0ea2e05f5a9b3bf90cb5f99c966486d90836d591637195412f2d114eabe41e6a8d8291012700aac012c1e139e109fc35a7bbd491fb67a9f933dfda4d978f867c6263c4c2d39efeee34636166fb40b147823542fec687577d784b540c8078d40ed40f9b3fd5b3f6db45023ff3afbc7039dd4ecad5835a8f1b0ad63fdfeaa4fc5902941167c69edd10d9a2ec53a3626b696ce0b8e31a96cc78e8b8396c4a561326de2994013a218fc5602b2b288acbbdf522771eddeb42c2be6e0f4048d2bbec3502c7922e9d9e9c5819e0c5d8f401f10fff0e4afd09b0584d9b7d60dde78184303fd03275ee4b93c5a819a5553dcb9ce8f48540e110894242e2cdd3bb1ce18c8367835793c116e51dcbc9ebcab5147c8010958b359794aed4ece7c837ea6a5bacc13b131bf9a6f9fdd31c18f36f7c60ea545035897d624f1e0d180f935139c2fd1b203e4c3722cf5ecaea15541e58947b78db27d464c31add5aed50cbe545702db2093c72f7dc0690e7c366c486f15ca00bb7a0364c986af0a6890965bb4ee6189018eef28ef95f88c270416f72bea4193c7532372c7deb509106955eb7a20ac611074f0d49313d8ff98d4d685b33ffb0b61cece6f6bb3c9a1c01210d418661810651b6f79236a5e83ac257f4e9a9f57cdef5d1ead09fbb024b3b879af3d10
+2dd63c68fed0fbc70573da2e4fe30a66aeb5b976a8a32b0bac67d36775ac2786b3c33d810f960fecdfb645235a84123fc5efd943182bc2ec6862253cd5f918b6ce2b3f1b5baec9990a838d36008edbf9ce1294712bbe2dcf1a7db5c7268e61beb68f20a72bd99de63f88d774bf4121b9a766adade408521da5b3f36aa0b6b57f5e0fdd956a7fc7471bbb5ff39441703e59e76517dcb23d098944e744d4a4797fdf44a9143e5ab65e2474eada739bb1f83ba85ea8dfe4ed55fe9ef01f8007eb352b281f2fdb1db7f9164a2ac9856b9b943786ee6ffef7f962e6fa81deb8a2d999509e18d91b746984c550dd8fccca1fcb1ff803ca97e48d04a78b79695b98bcddc170f808894ef24bd3a890358075f9031cee5ddec1bd9490f4d3162b902c38fbfb69f3ff41fecafa48d111d253daaf23f447d5f9998406241c60a1110213e932690c93933f6e4c91cf52a37380b2a48749999519caed7b735c7395e8e58d8a9e664b16308ec8c502a185a13289e31a5ba84d5ced3a4de5bbcfca9c3bc3b22eb0077f5e1d21af4bfac786ca23eeecaeecdc8e64d59c7997832031134b6d6239dd0ecaf50de6611493b21406f6c780c167cf92edbfe4ee5bf5b87b8d795535ee3249b614a699776b884198a76e346fa239a0ea2e05f5a9b3bf90cb5f99c966486d90836d591637195412f2d114eabe41e6a8d8291012700aac012c1e139e109fc35a7bbd491fb67a9f933dfda4d978f867c6263c4c2d39efeee34636166fb40b147823542fec687577d784b540c818dd16bd10b7b1fb553c70ed0771ad73ffc0079fd8e8a85d2ee5e1bafb2ab2c8aa43dca3380a58325fa7845fe922cb3e7720b691ca4bc360a72785c8c2d0dacee22d7571a5c30702f251bf4115b38c9dbdfdba02646beed6ba2422efe9b9699139b1fb1f6b6533a886dcca81c5230497105c0bf5f1e3a6d09a0598cbef92449133560456bb0b6452e3bd385f849f524a89ea9cd406570f140b8b79797d8e77b9cf1bc9203221717017326b8af9c8b9ba1610b5343065ff48341baa61bc19816baabab6cd5fbf29fc9d7e86de309a9738b1d30ca6401f19cfd66ea1fcc28bee2954d264c1e61ef8c4677ab0ade0bd5043f4c50fb7d4ff7e5b407fbb82fad706ab491b1fd76e9e8e6a20817218377e2f481959ce0ea36c147ee182bc197e97b243eba96d8e1099dd67a695addb320b15f539ad1f938a1d2b78d3d2b54e581453f73b73ea6b0345f7df9305d8f181c9c492e376bd3560d39b303b82c88ddb5c5bbe525d130633465b541678b0d6de4e7c01d3b980b2c6b4fd344af9
 ```
 
 ### 17.2 The action string and its signature
 
-The removal of the `never` exception of agent `4` for "Shop database", by the iPhone, at `time` `1790000060`, from the feed of 17.1. The action string (the bytes between the fences, `\n` between the lines, none at the end; 226 bytes; SHA-256 `bf7b086d31906cba873ce5545b64b042f2ea8e67bd2ffd2be5b5d26058e87a0d`):
+The removal of the `never` exception of agent `4` for "Shop database", by the iPhone, at `time` `1790000060`, from the feed of 17.1. The action string (the bytes between the fences, `\n` between the lines, none at the end; 222 bytes; SHA-256 `4555d68b3fbe31ad493893152aa08eb21342feb0dbf69e91247748a6ae81ad6d`):
 
 ```
 apassy-feed-action-v1
@@ -605,21 +625,21 @@ apassy-feed-action-v1
 0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d
 t_7k2m5q4x3c
 sLGys7S1tre4ubq7vL2-vw
-remove_exception:4:3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c:never:1789990000
+remove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000
 1790000040
 1790000060
 ```
 
 ECDSA signatures are randomized: a suite cannot reproduce this signature, and a new signature of the same string differs. This is a **verify vector**: the signature below, by the answer key, must verify with the answer key's public key above over the action string, and the plaintext of 17.3 carries it.
 
-Signature (b64u DER, 71 bytes): `MEUCIQDL-JNMgp74rl6v619inkFkPNgRVDLWyCjH-QdHFiLgSgIgZwwg3N2Z_lW1AQ9nXjx57eGcxJ9e32f5VG3SJbV2qic`
+Signature (b64u DER, 71 bytes): `MEUCIQCOrTEXw3oKicPKbs27qpgbvM95jFR7lYdT06KKIVWa-wIgT3NaBhBSf5jHK8K-zhPQ0hBmo181UGMB1WMeAjoHBRk`
 
 ### 17.3 The action envelope
 
-The action plaintext (419 bytes, one line; SHA-256 `356dde394e065c67bc16add23183836e7bf005749627ca31a596e32f8e81d51e`):
+The action plaintext (415 bytes, one line; SHA-256 `22af11dac5c7a34b5ff375255a687d57b616f3307301bce022a82a7a9c74aa26`):
 
 ```
-{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"MEUCIQDL-JNMgp74rl6v619inkFkPNgRVDLWyCjH-QdHFiLgSgIgZwwg3N2Z_lW1AQ9nXjx57eGcxJ9e32f5VG3SJbV2qic"}
+{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"MEUCIQCOrTEXw3oKicPKbs27qpgbvM95jFR7lYdT06KKIVWa-wIgT3NaBhBSf5jHK8K-zhPQ0hBmo181UGMB1WMeAjoHBRk"}
 ```
 
 Action AAD (text): `apassy-feed-v1\0action\0t_7k2m5q4x3c\0sLGys7S1tre4ubq7vL2-vw\0630dcd2966c43366\03\02`
@@ -630,10 +650,10 @@ Action AAD (hex, 78 bytes):
 6170617373792d666565642d763100616374696f6e00745f376b326d35713478336300734c4779733753317472653475627137764c322d7677003633306463643239363663343333363600330032
 ```
 
-Action ciphertext (hex, 435 bytes; SHA-256 `db227d023e5a931dd5e96208eb78381f27a452c0db6dc453dc9922f29f4b93a8`):
+Action ciphertext (hex, 431 bytes; SHA-256 `d804b41435c71360d58e728b82f8715e5d586507b8f11d8f844b12789e887da4`):
 
 ```
-83760aa3487bc22339ac8269d48132a4d0ee593a37b006168d3b816a9e555f5e85d1e847500750db7c180d6b483697bcdb715aafcf15bd4ae9a322086a5f574cff551c3b7e2b861220235deaf24a170fee3da44fc9dfc2429f05c30f367eb216a95dbb391fe5384e66eaf6e93fd854db8fc1d6ceb0b2ab28d979941a463e3768ea501aefb6d699f22d9a1c02c99bfdddfd7c80e2a4cf67d726f759e70e92ee1a4208141f7e524fc951c2e256158fef5c05ebac29bccb949f0d55496147c2adca721668fbabe886329f133e0a88c2a5a8852d6313d8b1a8599a9e54d090baf388daafb0f9aef88394fd2dd1d17ae94da471e0809a58f297dca1445b7856d52ffd318b85094841c7dafc3d91560900be56e5f679d80a7034b6bbd91f3194a3984e46fbf31bef4e009fc9594605f8734cc51c5ef7a6a11bc23583f85ddd57b8c0b89fe84609d024214c9bb156b8df32a17499c42b9db93e5328b59343b3d4f5bd6dfd7f510ebc14181e77fc16ce84944f495bb2b6128a25991a5c4d48356faf8357c590e377c72b9594ef2cfc90e70c25d470d5856f5932ab7a95df6cb8e2234c8d075eda3e9036e08067be6043ec080bb183b69f
+83760aa3487bc22339ac8269d48132a4d0ee593a37b006168d3b816a9e555f5e85d1e847500750db7c180d6b483697bcdb715aafcf15bd4ae9a322086a5f574cff551c3b7e2b861220235deaf24a170fee3da44fc9dfc2429f05c30f367eb216a95dbb391fe5384e66eaf6e93fd854db8fc1d6ceb0b2ab28d979941a463e3768ea501aefb6d699f22d9a1c02c99bfdddfd7c80e2a4cf67d726f759e70e92ee1a4208141f7e524fc951c2e256158fef5c05ebac29bccb949f0d5556311192fd84701066f8b6b1d160cd5a3a0d8cc0a9ac8028785ec8b7f216dd8b58da9aa4a5dbcee3f9aabbbecac7b127969d3df50afe36f1d0d31be580dd9f514a3e33856ce732838b014148ce97e02fc74e40468740e5e304915e362fbcbade163190a3845c06a2b25cb91d5ccdd2534702f1734ac5004cb2ffea57d02891e4598b18e8e8dff089421dc6281a499aa50cc1fe34af67febb3b82bd7f1469eb985b95abab8765c81a6b139417516b56ff72c9b7bd24575eb2b1468d23810569791d4e37bd9703d98cd84eae14fd96d574a4c4985e08d904f2870a7262bc57c9c46488df3340b9c35b116c3068090c9df1df08e407c7
 ```
 
 ### 17.4 The settle
