@@ -345,7 +345,7 @@ fn main() -> ExitCode {
                     "{}",
                     serde_json::to_string_pretty(&teams).unwrap_or_default()
                 );
-                let unclean = teams.iter().filter(|team| !team.clean()).count();
+                let unclean = teams.iter().filter(|team| !team.clean).count();
                 if unclean == 0 {
                     eprintln!(
                         "apassy-relay: {} teams; a rollback undoes nothing of them but their feeds.",
@@ -370,8 +370,10 @@ fn main() -> ExitCode {
                         "apassy-relay: push is off (APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, and APASSY_RELAY_PUSH_SECRET are not set): questions reach the devices by their long polls only"
                     );
                 }
-                running.wait();
-                ExitCode::SUCCESS
+                match running.wait() {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => fail(&error.message),
+                }
             }
             Err(error) => fail(&error.message),
         },

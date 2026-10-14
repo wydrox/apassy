@@ -112,9 +112,14 @@ pub struct Core {
     /// (`Limits::feed_long_polls_per_team`, for a Connect team `connect::TEAM_FEED_POLLS`),
     /// apart from its question seats (docs/SPEC.md section 27.7).
     pub feed_lane: AtomicUsize,
-    /// The feed list and status polls of this team out of `feed_lane`, at most
-    /// `feed::reader_seats` of its share, so the readers leave seats to the action polls.
-    pub feed_readers: AtomicUsize,
+    /// The feed list polls and the action status polls of this team out of `feed_lane`,
+    /// at most `feed::kind_seats` of its share each, so they leave seats to the action
+    /// polls and to each other.
+    pub feed_lists: AtomicUsize,
+    pub feed_statuses: AtomicUsize,
+    /// The feed polls of each member of this team out of `feed_lane`
+    /// (`feed::member_seats`), so one member's devices leave a seat to each other member.
+    pub feed_members: Mutex<HashMap<u64, usize>>,
     /// The last `feed_started` or `feed_deleted` row of each device and whether its feed
     /// changed since without a row (`feed::FeedAudit`), so a loop of `PUT` and `DELETE`
     /// writes at most one row per device and hour. In memory only.
@@ -339,7 +344,7 @@ pub struct RunningRelay {
     pub addr: SocketAddr,
     hub: Arc<Hub>,
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<RelayResult<()>>>,
     operator: Option<JoinHandle<()>>,
 }
 
@@ -359,10 +364,14 @@ impl RunningRelay {
         self.hub.clone()
     }
 
-    /// Blocks until the server stops.
-    pub fn wait(mut self) {
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+    /// Blocks until the server stops. An error when the listener died (`http::serve`):
+    /// the caller exits non-zero.
+    pub fn wait(mut self) -> RelayResult<()> {
+        match self.handle.take() {
+            Some(handle) => handle
+                .join()
+                .unwrap_or_else(|_| Err(RelayError::internal("The accept loop panicked."))),
+            None => Ok(()),
         }
     }
 

@@ -13,8 +13,10 @@
 //!
 //! It runs without the relay: it reads `relay.db` with the master key and each file with
 //! its key, all read-only, so it works with the relay up (`docker compose exec`) or down
-//! (`docker compose run`), and it takes no lock. It names kinds, ids, times, and audit
-//! action names, never a name, a token, a policy, or an audit detail.
+//! (`docker compose run`). It does not take `relay.lock`, but its reads take SQLite's
+//! shared locks for a moment, and a write of the relay waits for them (up to 5 s). It
+//! names kinds, ids, times, and audit action names, never a name, a token, a policy, or
+//! an audit detail.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,11 +45,35 @@ const REVOCABLE: [(&str, &str); 5] = [
 /// (as text), and whether only a change to `1` counts (a member token that ended). Rows
 /// that only one of the two files has are left out: a row made after the copy goes with
 /// the rollback.
-const CHANGED: [(&str, &str, &str, bool); 4] = [
+const CHANGED: [(&str, &str, &str, bool); 7] = [
     ("member_role", "member", "role", false),
     ("member_token", "member", "token_hash IS NULL", true),
     ("collection_policy", "collection", "policy", false),
     ("key_holder", "device", "key_holder", false),
+    // An archived item (a credential deleted or rotated out) is live again for the
+    // agents of its grants.
+    ("item_archived", "item", "archived_at IS NOT NULL", true),
+    // A used invite can be used again.
+    ("invite_used", "invite", "used_at IS NOT NULL", true),
+    // An agent bound to a device since then is unbound again: a later revocation of
+    // the device no longer revokes it.
+    ("agent_device", "agent", "device_id IS NOT NULL", true),
+];
+
+/// Audit actions that record a change of access. A team that lost any of these rows is
+/// not clean even when the comparison found nothing (a row made and changed after the
+/// copy, or a change this module does not compare): the operator looks at it.
+const ACCESS_ACTIONS: [&str; 10] = [
+    "device_revoked",
+    "member_revoked",
+    "agent_revoked",
+    "grant_revoked",
+    "member_role_changed",
+    "policy_changed",
+    "item_archived",
+    "key_holder_moved",
+    "key_holder_claimed",
+    "member_enrolled",
 ];
 
 /// One revocation that a rollback would undo.
@@ -90,19 +116,30 @@ pub struct TeamRollback {
     pub audit_rows_lost: u64,
     /// The same rows by audit action.
     pub audit_lost: BTreeMap<String, u64>,
+    /// The actions of `audit_lost` that record a change of access (`ACCESS_ACTIONS`).
+    pub access_rows_lost: Vec<String>,
+    /// The team's limits in `relay.db` hold `feed_bytes` or `feed_actions_per_hour`
+    /// (a value away from the preset): the schema 5 image refuses the whole directory.
+    pub feed_limits_stored: bool,
+    /// `TeamRollback::is_clean`.
+    pub clean: bool,
     /// Why the team could not be read, when it could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl TeamRollback {
-    /// True when a rollback undoes nothing of this team but its feeds: it has a copy and
-    /// nothing in `revocations` or `changes`, or it is a version 5 file left as it is.
-    pub fn clean(&self) -> bool {
+    /// True when a rollback undoes nothing of this team but its feeds and its other new
+    /// rows: the file could be read, nothing is in `revocations`, `changes`, or
+    /// `access_rows_lost`, no feed limit is stored, and the team has a copy or is a file
+    /// below version 6 that the migration never touched (a team suspended through it).
+    pub fn is_clean(&self) -> bool {
         self.error.is_none()
             && self.revocations.is_empty()
             && self.changes.is_empty()
-            && (self.pre_v6 || self.schema == Some(5))
+            && self.access_rows_lost.is_empty()
+            && !self.feed_limits_stored
+            && (self.pre_v6 || self.schema.is_some_and(|schema| schema < 6))
     }
 }
 
@@ -232,8 +269,15 @@ fn check_team(config: &RelayConfig, row: &TeamRow) -> TeamRollback {
         changes: Vec::new(),
         audit_rows_lost: 0,
         audit_lost: BTreeMap::new(),
+        access_rows_lost: Vec::new(),
+        feed_limits_stored: false,
+        clean: false,
         error: None,
     };
+    match row.limits.stored_json(row.kind) {
+        Ok(text) => answer.feed_limits_stored = text.contains("\"feed_"),
+        Err(error) => answer.error = Some(error.message),
+    }
     let file = config.team_path(&row.id);
     let pre = pre_v6_path(&file);
     answer.pre_v6 = std::fs::symlink_metadata(&pre).is_ok_and(|meta| meta.is_file());
@@ -248,13 +292,39 @@ fn check_team(config: &RelayConfig, row: &TeamRow) -> TeamRollback {
         answer.audit_rows_lost = found.audit_lost.values().sum();
         answer.revocations = found.revocations;
         answer.changes = found.changes;
+        answer.access_rows_lost = found
+            .audit_lost
+            .keys()
+            .filter(|action| ACCESS_ACTIONS.contains(&action.as_str()))
+            .cloned()
+            .collect();
         answer.audit_lost = found.audit_lost;
         Ok(())
     })();
     if let Err(error) = result {
         answer.error = Some(error.message);
     }
+    answer.clean = answer.is_clean();
     answer
+}
+
+/// The answer for a team whose reading thread ended without one.
+fn unread(row: &TeamRow) -> TeamRollback {
+    TeamRollback {
+        team: row.id.clone(),
+        kind: row.kind,
+        state: row.state,
+        schema: None,
+        pre_v6: false,
+        revocations: Vec::new(),
+        changes: Vec::new(),
+        audit_rows_lost: 0,
+        audit_lost: BTreeMap::new(),
+        access_rows_lost: Vec::new(),
+        feed_limits_stored: false,
+        clean: false,
+        error: Some("The check of this team stopped before its end.".to_string()),
+    }
 }
 
 /// The teams of `relay.db`, read-only with the master key.
@@ -288,11 +358,22 @@ pub fn check(config: &RelayConfig) -> RelayResult<Vec<TeamRollback>> {
                 })
             })
             .collect();
+        // A thread that panicked leaves no answer: each of its teams gets an error, so
+        // the check is not clean.
         parts
             .into_iter()
-            .flat_map(|part| part.join().unwrap_or_default())
+            .zip(rows.chunks(chunk))
+            .flat_map(|(part, part_rows)| {
+                part.join()
+                    .unwrap_or_else(|_| part_rows.iter().map(unread).collect())
+            })
             .collect()
     });
+    if answers.len() != rows.len() {
+        return Err(RelayError::internal(
+            "The check did not read every team of the directory.",
+        ));
+    }
     // The order of the directory: oldest team first.
     answers.sort_by_key(|answer| {
         rows.iter()
@@ -314,10 +395,11 @@ mod tests {
                revoked_at INTEGER);
              CREATE TABLE member (id INTEGER PRIMARY KEY, role TEXT NOT NULL DEFAULT 'member',
                token_hash BLOB, revoked_at INTEGER);
-             CREATE TABLE agent (id INTEGER PRIMARY KEY, revoked_at INTEGER);
+             CREATE TABLE agent (id INTEGER PRIMARY KEY, device_id INTEGER, revoked_at INTEGER);
              CREATE TABLE access_grant (id INTEGER PRIMARY KEY, revoked_at INTEGER);
-             CREATE TABLE invite (id INTEGER PRIMARY KEY, revoked_at INTEGER);
+             CREATE TABLE invite (id INTEGER PRIMARY KEY, used_at INTEGER, revoked_at INTEGER);
              CREATE TABLE collection (id INTEGER PRIMARY KEY, policy TEXT NOT NULL);
+             CREATE TABLE item (id INTEGER PRIMARY KEY, archived_at INTEGER);
              CREATE TABLE audit (id INTEGER PRIMARY KEY, action TEXT NOT NULL);",
         )
         .unwrap();
@@ -330,10 +412,11 @@ mod tests {
         let base = "INSERT INTO device (id, key_holder, revoked_at) VALUES (1, 1, NULL), (2, 0, NULL), (3, 0, 50);
             INSERT INTO member (id, role, token_hash, revoked_at) VALUES
               (1, 'owner', x'01', NULL), (2, 'manager', NULL, NULL), (3, 'member', x'03', NULL);
-            INSERT INTO agent VALUES (4, NULL), (5, NULL);
+            INSERT INTO agent (id, device_id, revoked_at) VALUES (4, NULL, NULL), (5, NULL, NULL), (6, 1, NULL);
             INSERT INTO access_grant VALUES (6, NULL);
-            INSERT INTO invite VALUES (7, NULL), (8, 60);
+            INSERT INTO invite (id, used_at, revoked_at) VALUES (7, NULL, NULL), (8, NULL, 60), (9, NULL, NULL);
             INSERT INTO collection VALUES (1, '{\"mode\":\"open\"}');
+            INSERT INTO item VALUES (1, NULL), (2, 40);
             INSERT INTO audit VALUES (1, 'a'), (2, 'b');";
         let pre = file(base);
         let now = file(&format!(
@@ -347,8 +430,12 @@ mod tests {
             UPDATE member SET token_hash = NULL WHERE id = 1;
             UPDATE collection SET policy = '{{\"mode\":\"approve\"}}' WHERE id = 1;
             UPDATE device SET key_holder = 0 WHERE id = 1;
+            UPDATE item SET archived_at = 500 WHERE id = 1;
+            UPDATE invite SET used_at = 500 WHERE id = 9;
+            UPDATE agent SET device_id = 1 WHERE id = 4;
             INSERT INTO device (id, key_holder, revoked_at) VALUES (9, 1, 500);
             INSERT INTO member (id, role) VALUES (10, 'owner');
+            INSERT INTO item VALUES (3, 600);
             INSERT INTO audit VALUES (3, 'device_revoked'), (4, 'member_revoked'), (5, 'device_revoked');"
         ));
         let found = compare(&now, &pre).unwrap();
@@ -369,8 +456,9 @@ mod tests {
                 ("invite", 7, 400),
             ]
         );
-        // The demotion, the ended member token, the policy, and the key holder; member
-        // 10 was made after the copy.
+        // The demotion, the ended member token, the policy, the key holder, the archived
+        // item, the used invite, and the agent bound to a device; member 10 and item 3
+        // were made after the copy, and item 2 was archived before it.
         let changes: Vec<(&str, u64)> = found.changes.iter().map(|c| (c.kind, c.id)).collect();
         assert_eq!(
             changes,
@@ -379,6 +467,9 @@ mod tests {
                 ("member_token", 1),
                 ("collection_policy", 1),
                 ("key_holder", 1),
+                ("item_archived", 1),
+                ("invite_used", 9),
+                ("agent_device", 4),
             ]
         );
         assert_eq!(
@@ -393,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn a_team_is_clean_with_its_copy_and_nothing_to_undo_or_as_an_untouched_version_5() {
+    fn a_team_is_clean_only_when_a_rollback_undoes_no_access() {
         let team = |schema, pre_v6| TeamRollback {
             team: TeamId::parse("t_abcdefgh23").unwrap(),
             kind: TeamKind::Connect,
@@ -404,27 +495,55 @@ mod tests {
             changes: Vec::new(),
             audit_rows_lost: 4,
             audit_lost: BTreeMap::new(),
+            access_rows_lost: Vec::new(),
+            feed_limits_stored: false,
+            clean: false,
             error: None,
         };
-        assert!(team(Some(6), true).clean());
-        assert!(team(Some(5), false).clean());
+        assert!(team(Some(6), true).is_clean());
+        // Below version 6 without a copy: suspended through the migration, left as is.
+        assert!(team(Some(5), false).is_clean());
+        assert!(team(Some(4), false).is_clean());
         // Made after the migration: the old image cannot open it.
-        assert!(!team(Some(6), false).clean());
+        assert!(!team(Some(6), false).is_clean());
         let mut revoked = team(Some(6), true);
         revoked.revocations.push(Revocation {
             kind: "device",
             id: 2,
             revoked_at: 9,
         });
-        assert!(!revoked.clean());
+        assert!(!revoked.is_clean());
         let mut changed = team(Some(6), true);
         changed.changes.push(Change {
             kind: "member_role",
             id: 2,
         });
-        assert!(!changed.clean());
+        assert!(!changed.is_clean());
+        let mut lost = team(Some(6), true);
+        lost.access_rows_lost.push("item_archived".to_string());
+        assert!(!lost.is_clean());
+        let mut stored = team(Some(6), true);
+        stored.feed_limits_stored = true;
+        assert!(!stored.is_clean());
         let mut unread = team(None, true);
         unread.error = Some("The vault key is wrong.".to_string());
-        assert!(!unread.clean());
+        assert!(!unread.is_clean());
+        assert!(!unread_answer().is_clean());
+    }
+
+    fn unread_answer() -> TeamRollback {
+        let row = TeamRow {
+            id: TeamId::parse("t_abcdefgh23").unwrap(),
+            name: "T".to_string(),
+            file_key: crate::secret::SecretString::new("k".to_string()),
+            state: TeamState::Active,
+            legacy: false,
+            created_at: 0,
+            suspended_at: None,
+            limits: crate::server::directory::TeamLimits::default(),
+            kind: TeamKind::Operator,
+            suspend_reason: None,
+        };
+        unread(&row)
     }
 }

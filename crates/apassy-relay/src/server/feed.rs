@@ -90,59 +90,151 @@ pub fn member_share(limit: u64, members: u64) -> u64 {
     }
 }
 
-/// The seats of a team's feed lane share `share` that the readers' polls (the feed list
-/// and the action status) may hold together: the share less a quarter (at least one
-/// seat), so readers that come first never leave the Macs' action polls
-/// (`GET /v1/feed/actions`) without a seat. An action poll may take any free seat of the
-/// share. A share of 1 keeps no seat back.
-pub fn reader_seats(share: usize) -> usize {
-    if share < 2 {
-        share
-    } else {
-        share - (share / 4).max(1)
+/// The kind of a feed long poll, for its seats (`lane_seat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedPoll {
+    /// `GET /v1/feed`: a reader's list.
+    List,
+    /// `GET /v1/feed/actions`: a Mac's action poll.
+    Actions,
+    /// `GET /v1/feed/actions/{id}`: a reader's status of one action.
+    Status,
+}
+
+/// The seats of a team's feed share `share` that the polls of one kind may hold
+/// together: list polls half of it, status polls a quarter, each at least one; an action
+/// poll any free seat. So list and status polls that come first never take every seat
+/// from the Macs' action polls (a quarter, and at least one seat of a share of 3 or
+/// more), and a status poll never waits behind a list poll.
+pub fn kind_seats(share: usize, poll: FeedPoll) -> usize {
+    match poll {
+        FeedPoll::List => (share / 2).max(1),
+        FeedPoll::Status => (share / 4).max(1),
+        FeedPoll::Actions => share,
     }
 }
 
-/// The feed text that one device was given in the current minute (`Core::feed_reads`).
+/// The seats of a team's feed share that the polls of one member may hold together,
+/// when `others` other members have a feed: one seat stays free for each of them (for its
+/// Mac's action poll), and the member keeps at least one.
+pub fn member_seats(share: usize, others: usize) -> usize {
+    share.saturating_sub(others).max(1)
+}
+
+/// The text that one feed read may give at most: a page stops once it reaches
+/// `MAX_LIST_TEXT`, and the feed that reaches it adds at most one whole feed.
+pub const FEED_READ_RESERVE: u64 = MAX_LIST_TEXT as u64 + 349_526;
+/// Feed reads of one device in flight at once (`GET /v1/feed`: its long poll and one
+/// more). One more is 403 `feed_rate` at once.
+pub const FEED_READS_IN_FLIGHT: u32 = 2;
+
+/// The feed text that one device was given in the current minute, with the reserve of
+/// each read in flight, and its reads in flight (`Core::feed_reads`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FeedReads {
     minute: u64,
     text: u64,
+    in_flight: u32,
+}
+
+/// Why a feed read may not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRefused {
+    /// `FEED_READS_IN_FLIGHT` reads of the device run.
+    InFlight,
+    /// The budget of the minute is used: the time of the next minute.
+    Budget(u64),
 }
 
 impl FeedReads {
-    /// Whether the device may read at `now`: `Err(next minute)` once it got
-    /// `FEED_READ_TEXT_PER_MINUTE` in this minute.
-    pub fn check(&mut self, now: u64) -> Result<(), u64> {
+    fn roll(&mut self, now: u64) {
         let minute = now / 60;
         if self.minute != minute {
             (self.minute, self.text) = (minute, 0);
         }
-        if self.text >= FEED_READ_TEXT_PER_MINUTE {
-            return Err((minute + 1) * 60);
-        }
-        Ok(())
     }
 
-    /// Counts the `text` of an answer at `now`.
-    pub fn add(&mut self, text: u64, now: u64) {
-        let minute = now / 60;
-        if self.minute != minute {
-            (self.minute, self.text) = (minute, 0);
+    /// Starts one read at `now`: it reserves `FEED_READ_RESERVE` of the minute's budget
+    /// before the read, so reads in parallel cannot pass it. Returns the minute of the
+    /// reserve, for `end`.
+    pub fn begin(&mut self, now: u64) -> Result<u64, ReadRefused> {
+        self.roll(now);
+        if self.in_flight >= FEED_READS_IN_FLIGHT {
+            return Err(ReadRefused::InFlight);
         }
-        self.text = self.text.saturating_add(text);
+        if self.text.saturating_add(FEED_READ_RESERVE) > FEED_READ_TEXT_PER_MINUTE {
+            return Err(ReadRefused::Budget((self.minute + 1) * 60));
+        }
+        self.text += FEED_READ_RESERVE;
+        self.in_flight += 1;
+        Ok(self.minute)
+    }
+
+    /// Ends a read that began in `minute` and gave `given` of text: the reserve goes
+    /// back and the text counts, in the minute of `now`.
+    pub fn end(&mut self, minute: u64, given: u64, now: u64) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if self.minute == minute && now / 60 == minute {
+            self.text = self.text.saturating_sub(FEED_READ_RESERVE);
+        } else {
+            self.roll(now);
+        }
+        self.text = self.text.saturating_add(given);
     }
 }
 
-/// 403 `feed_rate`: the device read its feed text of the minute; it reads again at `at`.
-fn feed_rate(at: u64) -> RelayError {
-    RelayError::new(
-        codes::FEED_RATE,
-        format!(
+/// One feed read in flight; dropping it ends the read with the text it gave.
+struct ReadTicket<'a> {
+    core: &'a Core,
+    device: DeviceId,
+    minute: u64,
+    given: u64,
+}
+
+impl<'a> ReadTicket<'a> {
+    fn begin(core: &'a Core, device: DeviceId) -> RelayResult<Self> {
+        let minute = core
+            .feed_reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(device.0)
+            .or_default()
+            .begin(crate::now_unix())
+            .map_err(feed_rate)?;
+        Ok(Self {
+            core,
+            device,
+            minute,
+            given: 0,
+        })
+    }
+}
+
+impl Drop for ReadTicket<'_> {
+    fn drop(&mut self) {
+        self.core
+            .feed_reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(self.device.0)
+            .or_default()
+            .end(self.minute, self.given, crate::now_unix());
+    }
+}
+
+/// 403 `feed_rate`: the device has its reads in flight, or read its feed text of the
+/// minute.
+fn feed_rate(refused: ReadRefused) -> RelayError {
+    let message = match refused {
+        ReadRefused::InFlight => format!(
+            "This device has {FEED_READS_IN_FLIGHT} feed reads in flight. Wait for one to end."
+        ),
+        ReadRefused::Budget(at) => format!(
             "This device read {} MiB of feeds this minute. Read again at {at}.",
             FEED_READ_TEXT_PER_MINUTE / 1_048_576
         ),
-    )
+    };
+    RelayError::new(codes::FEED_RATE, message)
 }
 
 /// What the audit says of one device's feed: the last `feed_started` or `feed_deleted`
@@ -340,23 +432,84 @@ fn still_the_caller(conn: &Connection, by: &MemberAuth, device: DeviceId) -> Rel
     Ok(())
 }
 
+/// One seat of a member in its team's feed share. Dropping it gives the seat back.
+struct MemberSeat<'a> {
+    seats: &'a std::sync::Mutex<std::collections::HashMap<u64, usize>>,
+    member: u64,
+}
+
+impl Drop for MemberSeat<'_> {
+    fn drop(&mut self) {
+        let mut seats = self.seats.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = seats.get_mut(&self.member) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                seats.remove(&self.member);
+            }
+        }
+    }
+}
+
+/// The seats that one feed long poll holds: of the team's share, of its kind, and of its
+/// member.
+struct FeedSeat<'a> {
+    _lane: LaneSeat<'a>,
+    _kind: Option<LaneSeat<'a>>,
+    _member: MemberSeat<'a>,
+}
+
 /// A seat of the team's share of the feed lane for a feed long poll: for an operator
 /// team one of `feed_long_polls_per_team`, for a Connect team one of
-/// `connect::TEAM_FEED_POLLS`; a reader's poll also takes one of `reader_seats` of it
-/// (`Core::feed_readers`). Feed polls never take a question seat. `None` when they are
-/// all held: then the poll answers at once.
-fn lane_seat(core: &Core, action_poll: bool) -> Option<(LaneSeat<'_>, Option<LaneSeat<'_>>)> {
+/// `connect::TEAM_FEED_POLLS`; a list or status poll also one of `kind_seats` of its kind
+/// (`Core::feed_lists`, `Core::feed_statuses`), and every poll one of `member_seats` of
+/// its member (`Core::feed_members`). Feed polls never take a question seat. `None` when
+/// any is full: then the poll answers at once.
+fn lane_seat<'a>(core: &'a Core, by: &MemberAuth, poll: FeedPoll) -> Option<FeedSeat<'a>> {
     let mut share = core.config.limits.feed_long_polls_per_team;
     if core.kind == crate::api::TeamKind::Connect {
         share = share.min(crate::server::connect::TEAM_FEED_POLLS);
     }
-    let reader = if action_poll {
-        None
-    } else {
-        Some(take_seat(&core.feed_readers, reader_seats(share))?)
+    let kind = match poll {
+        FeedPoll::List => Some(take_seat(&core.feed_lists, kind_seats(share, poll))?),
+        FeedPoll::Status => Some(take_seat(&core.feed_statuses, kind_seats(share, poll))?),
+        FeedPoll::Actions => None,
     };
-    // A reader's seat that was taken goes back when the team's share is full.
-    take_seat(&core.feed_lane, share).map(|seat| (seat, reader))
+    // The other members with a feed: one seat stays free for each.
+    let others: i64 = core
+        .store
+        .with(|conn| {
+            conn.query_row(
+                "SELECT count(DISTINCT member_id) FROM feed WHERE member_id <> ?1",
+                params![to_i(by.id.0)],
+                |row| row.get(0),
+            )
+            .map_err(db)
+        })
+        .ok()?;
+    let member = {
+        let mut seats = core
+            .feed_members
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let held = seats.entry(by.id.0).or_insert(0);
+        if *held >= member_seats(share, usize::try_from(others).unwrap_or(usize::MAX)) {
+            if *held == 0 {
+                seats.remove(&by.id.0);
+            }
+            return None;
+        }
+        *held += 1;
+        MemberSeat {
+            seats: &core.feed_members,
+            member: by.id.0,
+        }
+    };
+    // The kind's and the member's seats go back when the team's share is full.
+    take_seat(&core.feed_lane, share).map(|lane| FeedSeat {
+        _lane: lane,
+        _kind: kind,
+        _member: member,
+    })
 }
 
 /// Runs a feed long poll: `turn` reads the answer and says whether it is final. While it
@@ -368,7 +521,7 @@ fn long_poll<T>(
     core: &Core,
     by: &MemberAuth,
     polls: &LongPolls,
-    action_poll: bool,
+    kind: FeedPoll,
     wait_secs: u64,
     hold: bool,
     mut turn: impl FnMut(&Connection, DeviceId, u64) -> RelayResult<(T, bool)>,
@@ -379,7 +532,7 @@ fn long_poll<T>(
     } else {
         None
     };
-    let lane = poll.as_ref().and_then(|_| lane_seat(core, action_poll));
+    let lane = poll.as_ref().and_then(|_| lane_seat(core, by, kind));
     // The relay's seat of a Connect team is taken only when the team's seat was.
     let seat = lane.as_ref().and_then(|_| core.feed_poll_seat());
     let wait_secs = if seat.is_some() { wait_secs } else { 0 };
@@ -706,9 +859,10 @@ fn feeds_now(conn: &Connection, by: &MemberAuth, since: u64) -> RelayResult<Feed
 
 /// `GET /v1/feed?since=N&wait=S`. While no feed of the member changed after `since`,
 /// holds up to `wait` seconds; it also answers when a feed of the member left (`present`
-/// changed) or the counter is below `since` (a restored relay). A device that got
-/// `FEED_READ_TEXT_PER_MINUTE` of feed text in this minute gets 403 `feed_rate` until the
-/// next one; each answer adds its ciphertext text.
+/// changed) or the counter is below `since` (a restored relay). Each read reserves
+/// `FEED_READ_RESERVE` of the device's `FEED_READ_TEXT_PER_MINUTE` before it reads and
+/// counts the text it gave after (`ReadTicket`); a read over the budget, or a third read
+/// of the device in flight, is 403 `feed_rate`.
 pub fn list(
     core: &Core,
     by: &MemberAuth,
@@ -717,20 +871,13 @@ pub fn list(
     hold: bool,
 ) -> RelayResult<FeedList> {
     let device = device_of(by)?;
-    let at_start = crate::now_unix();
-    core.feed_reads
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(device.0)
-        .or_default()
-        .check(at_start)
-        .map_err(feed_rate)?;
+    let mut ticket = ReadTicket::begin(core, device)?;
     let mut first: Option<Vec<DeviceId>> = None;
     let list = long_poll(
         core,
         by,
         &core.feed_polls,
-        false,
+        FeedPoll::List,
         wait_secs,
         hold,
         |conn, _, _| {
@@ -741,12 +888,7 @@ pub fn list(
         },
     )?;
     let text: usize = list.feeds.iter().map(|feed| feed.ciphertext.len()).sum();
-    core.feed_reads
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(device.0)
-        .or_default()
-        .add(text as u64, crate::now_unix());
+    ticket.given = text as u64;
     Ok(list)
 }
 
@@ -1053,7 +1195,7 @@ pub fn actions(
         core,
         by,
         &core.feed_action_polls,
-        true,
+        FeedPoll::Actions,
         wait_secs,
         hold,
         |conn, device, now| {
@@ -1189,7 +1331,7 @@ pub fn status(
         core,
         by,
         &core.feed_status_polls,
-        false,
+        FeedPoll::Status,
         wait_secs,
         hold,
         |conn, device, now| {
@@ -1370,24 +1512,45 @@ mod tests {
     }
 
     #[test]
-    fn feed_reads_count_text_per_minute() {
+    fn feed_reads_reserve_their_text_before_they_read() {
         let mut reads = FeedReads::default();
-        reads.check(600).unwrap();
-        reads.add(FEED_READ_TEXT_PER_MINUTE - 1, 600);
-        // Under the budget a read still goes, and its whole answer counts.
-        reads.check(610).unwrap();
-        reads.add(349_526, 610);
-        assert_eq!(reads.check(615), Err(660));
-        assert_eq!(reads.check(659), Err(660));
-        // The next minute starts again; an empty answer costs nothing.
-        reads.check(660).unwrap();
-        reads.add(0, 660);
-        assert_eq!(reads.text, 0);
-        // An answer that comes in the next minute counts there.
-        let mut late = FeedReads::default();
-        late.check(659).unwrap();
-        late.add(FEED_READ_TEXT_PER_MINUTE, 661);
-        assert_eq!(late.check(662), Err(720));
+        // Two reads in flight at once, a third waits for one of them.
+        let first = reads.begin(600).unwrap();
+        let second = reads.begin(600).unwrap();
+        assert_eq!(reads.begin(600), Err(ReadRefused::InFlight));
+        assert_eq!(reads.text, 2 * FEED_READ_RESERVE);
+        // The reserve goes back and the text given counts.
+        reads.end(first, 100, 601);
+        reads.end(second, 0, 601);
+        assert_eq!((reads.text, reads.in_flight), (100, 0));
+        // A read starts only while its reserve fits in the budget.
+        reads.text = FEED_READ_TEXT_PER_MINUTE - FEED_READ_RESERVE;
+        let last = reads.begin(610).unwrap();
+        assert_eq!(reads.begin(610), Err(ReadRefused::Budget(660)));
+        reads.end(last, FEED_READ_RESERVE, 610);
+        assert_eq!(reads.begin(659), Err(ReadRefused::Budget(660)));
+        // The next minute starts again; a read that ends there counts there.
+        let late = reads.begin(660).unwrap();
+        reads.end(late, 5, 721);
+        assert_eq!((reads.minute, reads.text, reads.in_flight), (12, 5, 0));
+    }
+
+    #[test]
+    fn feed_seats_keep_room_for_the_action_polls_and_for_each_member() {
+        assert_eq!(
+            [1, 2, 3, 16].map(|share| kind_seats(share, FeedPoll::List)),
+            [1, 1, 1, 8]
+        );
+        assert_eq!(
+            [1, 2, 3, 16].map(|share| kind_seats(share, FeedPoll::Status)),
+            [1, 1, 1, 4]
+        );
+        assert_eq!(kind_seats(16, FeedPoll::Actions), 16);
+        // A Connect team's 3: one list, one status, and one left for the Mac.
+        assert_eq!(crate::server::connect::TEAM_FEED_POLLS, 3);
+        assert_eq!(member_seats(16, 0), 16);
+        assert_eq!(member_seats(16, 3), 13);
+        assert_eq!(member_seats(2, 5), 1);
     }
 
     #[test]

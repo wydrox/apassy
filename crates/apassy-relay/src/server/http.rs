@@ -40,6 +40,10 @@ use crate::server::{Core, admin, approvals, connect, decide, devices, host, join
 pub const BUSY_RETRY_AFTER: &str = "2";
 /// `Retry-After` of `POST /v1/connect` when the relay made its Connect teams of the day.
 pub const CONNECT_RETRY_AFTER: &str = "3600";
+/// Seconds between two probes of the listener (`listener_alive`), and the failed probes
+/// in a row after which the relay stops with an error, so its container restarts.
+const LISTENER_PROBE_SECS: u64 = 10;
+const LISTENER_PROBE_FAILURES: u32 = 3;
 /// Seconds between two sweeps of timed out runs and expired sessions.
 const MAINTENANCE_SECS: u64 = 5;
 /// Seconds between two sweeps of a Connect team that had no request since its last one.
@@ -469,10 +473,28 @@ impl Drop for TeamSlotGuard {
     }
 }
 
+/// True when a TCP connection to the listener at `addr` (an unspecified address as the
+/// loopback) opens within a second. tiny_http accepts on a thread of its own and drops
+/// the listener when that thread ends, for example when it cannot start a thread for a
+/// connection (out of PIDs): then no request comes any more, and the process would stay
+/// up without serving.
+pub fn listener_alive(addr: std::net::SocketAddr) -> bool {
+    let mut target = addr;
+    if target.ip().is_unspecified() {
+        target.set_ip(match target {
+            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    std::net::TcpStream::connect_timeout(&target, Duration::from_secs(1)).is_ok()
+}
+
 /// Accepts requests until `stop` is set. At most `max_active` requests run at
 /// once, and agent paths leave `member_reserve` of them free. A request over a
-/// limit gets 503 `busy` with `Retry-After`.
-pub fn serve(serving: Serving) {
+/// limit gets 503 `busy` with `Retry-After`. Returns an error when tiny_http's accept
+/// thread ended (an accept error, or `LISTENER_PROBE_FAILURES` failed probes of the
+/// listener in a row), so the process exits non-zero and `restart` brings it back.
+pub fn serve(serving: Serving) -> RelayResult<()> {
     let Serving {
         hub,
         proxy,
@@ -507,7 +529,28 @@ pub fn serve(serving: Serving) {
     if maintenance.is_err() {
         eprintln!("apassy-relay: the maintenance thread cannot start");
     }
+    let listen = server.server_addr().to_ip();
+    let mut probed = Instant::now();
+    let mut failed_probes = 0;
+    let mut outcome = Ok(());
     while !stop.load(Ordering::Relaxed) {
+        if let Some(addr) = listen
+            && probed.elapsed() >= Duration::from_secs(LISTENER_PROBE_SECS)
+        {
+            probed = Instant::now();
+            failed_probes = if listener_alive(addr) {
+                0
+            } else {
+                failed_probes + 1
+            };
+            if failed_probes >= LISTENER_PROBE_FAILURES {
+                eprintln!(
+                    "apassy-relay: the listener on {addr} does not accept connections any more: stopping, so the container restarts"
+                );
+                outcome = Err(RelayError::internal("The listener stopped."));
+                break;
+            }
+        }
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
                 // Only the accept loop takes a slot, so a load and an add do not race.
@@ -568,12 +611,24 @@ pub fn serve(serving: Serving) {
                 }
             }
             Ok(None) => {}
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            // tiny_http's accept thread sends its error and ends: nothing is accepted
+            // any more.
+            Err(error) => {
+                eprintln!(
+                    "apassy-relay: the listener failed ({error}): stopping, so the container restarts"
+                );
+                outcome = Err(RelayError::internal("The listener failed."));
+                break;
+            }
         }
+    }
+    if outcome.is_err() {
+        stop.store(true, Ordering::Relaxed);
     }
     if let Ok(handle) = maintenance {
         let _ = handle.join();
     }
+    outcome
 }
 
 /// One maintenance pass over every team: timed out runs, expired sessions, joins,
@@ -1598,6 +1653,22 @@ mod tests {
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();
         let core = hub.all().pop().unwrap();
         (dir, hub, core)
+    }
+
+    #[test]
+    fn the_listener_probe_sees_a_listener_go() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert!(listener_alive(addr));
+        drop(listener);
+        assert!(!listener_alive(addr));
+        // An unspecified address is probed on the loopback.
+        let any = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = any.local_addr().unwrap().port();
+        assert!(listener_alive(std::net::SocketAddr::from((
+            [0, 0, 0, 0],
+            port
+        ))));
     }
 
     #[test]

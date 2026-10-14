@@ -81,6 +81,11 @@ fn main() -> ExitCode {
             }
         });
     }
-    running.wait();
-    ExitCode::SUCCESS
+    match running.wait() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("e2e relay: {}", error.message);
+            ExitCode::from(1)
+        }
+    }
 }

@@ -39,9 +39,9 @@ pub const REQUESTS_PER_MINUTE: u64 = 300;
 /// answers at once, as with `wait=0`.
 pub const TEAM_QUESTION_POLLS: usize = 2;
 /// The feed long polls of one Connect team at once (docs/SPEC.md section 27.7), apart
-/// from its question seats: the Mac's action poll and one poll of a reader. A third
-/// answers at once, as with `wait=0`.
-pub const TEAM_FEED_POLLS: usize = 2;
+/// from its question seats: the Mac's action poll, one feed list poll, and one action
+/// status poll of a reader. A fourth answers at once, as with `wait=0`.
+pub const TEAM_FEED_POLLS: usize = 3;
 /// The page cache of a Connect team's connection, in KiB (`Store::set_cache_kib`).
 /// SQLite's default is 2 MiB a connection; at 100 Connect teams in a container of 512
 /// MiB that would be 200 MiB. Operator teams keep the default.
