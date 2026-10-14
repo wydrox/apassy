@@ -11,7 +11,7 @@ use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_view::SettingsSection;
 use super::{
     ADD_IPHONE, RELAY_QUESTIONS, RELAY_QUESTIONS_NEW_TEAM, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
-    RELAY_ROW,
+    RELAY_ROW, SHOW_AGENTS,
 };
 use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::owner_check::OwnerRequest;
@@ -492,6 +492,18 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
         text.contains("This Mac") && text.contains(ADD_IPHONE),
         "{text}"
     );
+    // "Show agents on the iPhone" shows with the questions on, and is on by default.
+    assert!(text.contains(SHOW_AGENTS), "{text}");
+    assert!(!app.ui.feed_off);
+    super::set_feed_shown(&mut app, false);
+    assert!(app.ui.feed_off);
+    let (text, _) = frames(&mut app, TALL);
+    assert!(
+        text.contains(SHOW_AGENTS),
+        "the switch stays to turn it on: {text}"
+    );
+    super::set_feed_shown(&mut app, true);
+    assert!(!app.ui.feed_off);
 
     // Off: stricter, no check.
     super::set_relay_questions(&mut app, false, None);
