@@ -305,6 +305,8 @@ pub fn revoke(core: &Core, by: &MemberAuth, id: DeviceId, now: u64) -> RelayResu
         conn.execute("UPDATE device SET revoked_at = ?2 WHERE id = ?1", params![to_i(id.0), to_i(now)]).map_err(db)?;
         // A removed device gets no more pushes (docs/SPEC.md section 25.2).
         conn.execute("DELETE FROM push_token WHERE device_id = ?1", params![to_i(id.0)]).map_err(db)?;
+        // Its feed goes, and its open actions expire (docs/SPEC.md section 27.6).
+        crate::server::feed::drop_devices(core, conn, &[id], true, &member_actor(by.id.0), "device_revoked", now)?;
         conn.execute("UPDATE agent SET revoked_at = ?2 WHERE device_id = ?1 AND revoked_at IS NULL", params![to_i(id.0), to_i(now)]).map_err(db)?;
         conn.execute("UPDATE device_link SET state = 'expired', decided_at = ?2 WHERE made_by_device = ?1 AND state IN ('open','pending')", params![to_i(id.0), to_i(now)]).map_err(db)?;
         invalidate_pending(core, conn, now, &member_actor(by.id.0), "device_revoked", |run| agents.contains(&run.agent_id))?;

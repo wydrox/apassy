@@ -39,6 +39,9 @@ pub const CLIENT_PREFIX_MAC_HEADER: &str = "X-Apassy-Client-Prefix-Mac";
 pub const RELAY_HEADER: &str = "X-Apassy-Relay";
 /// The largest JSON request body on `/v1/*` and `/mcp`.
 pub const MAX_JSON_BODY: usize = 64 * 1024;
+/// The largest body of `PUT /v1/feed` (docs/SPEC.md section 27): the base64url of a
+/// 256 KiB sealed feed is 349526 characters.
+pub const MAX_FEED_BODY: usize = 352 * 1024;
 
 /// Limits of a run request (the same as the core `RunRequest::validate`).
 pub const MAX_RUN_ITEMS: usize = 16;
@@ -101,6 +104,13 @@ pub mod paths {
     pub const QUESTIONS: &str = "/v1/questions";
     /// `PUT`: the APNs token of this device; `DELETE`: removes it.
     pub const PUSH_TOKEN: &str = "/v1/push/token";
+    /// `PUT`: the sealed feed of this device; `DELETE`: removes it; `GET
+    /// ?since=N&wait=S`: the feeds of the caller's member (docs/SPEC.md section 27).
+    pub const FEED: &str = "/v1/feed";
+    /// `POST`: an action to another device of the member; `GET ?after=N&wait=S`: the open
+    /// actions to this device. `GET /v1/feed/actions/{id}?wait=S` (the sender) and `POST
+    /// /v1/feed/actions/{id}/settle` (the target) are under it.
+    pub const FEED_ACTIONS: &str = "/v1/feed/actions";
     pub const MCP: &str = "/mcp";
     /// `/p/<session key>/<host[:port]>/<path>`.
     pub const PROXY_PREFIX: &str = "/p/";
@@ -1132,6 +1142,110 @@ pub struct AnswerList {
     pub state: String,
     pub expires_at: u64,
     pub answers: Vec<AnswerView>,
+}
+
+/// `PUT /v1/feed` (docs/SPEC.md section 27.4): the sealed feed of the calling device.
+/// The relay never opens it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedPut {
+    pub v: u64,
+    /// 1 to 2^53 - 1, higher than the device's last one.
+    pub seq: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+/// One feed in `GET /v1/feed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedView {
+    pub device_id: DeviceId,
+    /// The relay's name of the device, for a log only.
+    pub device_name: String,
+    pub seq: u64,
+    pub change: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub updated_at: u64,
+}
+
+/// `GET /v1/feed?since=N&wait=S`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedList {
+    /// The team's feed counter now. Below the caller's `since`: the relay was restored
+    /// from a backup, read again from 0.
+    pub change: u64,
+    /// True when the answer stopped at its size: ask again at once with the `change` of
+    /// the last feed.
+    pub more: bool,
+    /// Every device of the member that has a feed now.
+    pub present: Vec<DeviceId>,
+    pub feeds: Vec<FeedView>,
+}
+
+/// `POST /v1/feed/actions`: a sealed action to another device of the caller's member.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionPost {
+    pub v: u64,
+    /// 16 random bytes of the sender, base64url: 22 characters.
+    pub action_id: String,
+    pub to_device: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+/// `POST /v1/feed/actions/{id}/settle`: the outcome in clear and its sealed settle.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionSettle {
+    pub v: u64,
+    /// `applied`, `refused`, or `stale`.
+    pub outcome: String,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+/// One open action in `GET /v1/feed/actions`, stamped by the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionView {
+    pub action_id: String,
+    pub seq: u64,
+    pub from_device_id: DeviceId,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// `GET /v1/feed/actions?after=N&wait=S`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionList {
+    /// The team's action sequence now. Below the caller's `after`: read again from 0.
+    pub seq: u64,
+    pub actions: Vec<ActionView>,
+}
+
+/// `GET /v1/feed/actions/{id}?wait=S`, for the sending device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionStatus {
+    pub action_id: String,
+    pub to_device: DeviceId,
+    /// `open`, `settled`, or `expired`.
+    pub state: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<SealedView>,
 }
 
 #[cfg(test)]

@@ -373,6 +373,16 @@ fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayR
             params![to_i(id.0)],
         )
         .map_err(db)?;
+        // Their feeds go, and their open actions expire (docs/SPEC.md section 27.6).
+        crate::server::feed::drop_devices(
+            core,
+            tx,
+            &devices,
+            true,
+            &member_actor(by.id.0),
+            "member_revoked",
+            now,
+        )?;
         tx.execute(
             "UPDATE device SET revoked_at = ?2 WHERE member_id = ?1 AND revoked_at IS NULL",
             params![to_i(id.0), to_i(now)],

@@ -87,6 +87,19 @@ pub mod codes {
     /// Too many requests: `POST /v1/connect` from one client prefix in a day, or a
     /// Connect team over its requests per minute. `Retry-After` says when to try again.
     pub const RATE_LIMITED: &str = "rate_limited";
+    // The feed of a Mac and its actions (docs/SPEC.md section 27).
+    /// A feed within 10 s of the device's last accepted feed, or one that would pass the
+    /// team's `feed_bytes`. 403, not 429: the app's other calls go on.
+    pub const FEED_LIMIT: &str = "feed_limit";
+    /// `feed_actions_per_hour` of the team, or too many open actions of the team or of
+    /// the sending device.
+    pub const TOO_MANY_ACTIONS: &str = "too_many_actions";
+    /// `PUT /v1/feed` with a `seq` at or below the stored `seq` of the device.
+    pub const SEQ_NOT_NEWER: &str = "seq_not_newer";
+    /// A settle of a settled action with another body.
+    pub const ACTION_SETTLED: &str = "action_settled";
+    /// A settle after the action's `expires_at`.
+    pub const ACTION_EXPIRED: &str = "action_expired";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -121,11 +134,13 @@ pub fn status_of(code: &str) -> u16 {
         | NOT_ROUTED
         | TOO_MANY_QUESTIONS
         | TOO_MANY_ANSWERS
-        | PLAN_REQUIRED => 403,
+        | PLAN_REQUIRED
+        | FEED_LIMIT
+        | TOO_MANY_ACTIONS => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
-        | CONNECT_KEY_USED => 409,
+        | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED | ACTION_EXPIRED => 409,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
         RATE_LIMITED => 429,
@@ -217,6 +232,8 @@ mod tests {
             codes::TOO_MANY_QUESTIONS,
             codes::TOO_MANY_ANSWERS,
             codes::PLAN_REQUIRED,
+            codes::FEED_LIMIT,
+            codes::TOO_MANY_ACTIONS,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 403);
         }
@@ -225,6 +242,9 @@ mod tests {
             codes::QUESTION_EXPIRED,
             codes::PUSH_UNAVAILABLE,
             codes::CONNECT_KEY_USED,
+            codes::SEQ_NOT_NEWER,
+            codes::ACTION_SETTLED,
+            codes::ACTION_EXPIRED,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 409);
         }

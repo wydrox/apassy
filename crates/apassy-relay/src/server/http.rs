@@ -5,8 +5,8 @@
 //! the edge secret; the proxy path `/p/`; the route (404, 405); the body (413); the
 //! token and its role; the endpoint. Every JSON answer is an envelope. The endpoints of
 //! the owner's host (`/v1/host/...`) are not agent paths: they use the member lane.
-//! Question long polls have a lane of their own (`Limits::question_long_polls`), apart
-//! from `max_active`, so they never take the threads of the member reserve.
+//! Question and feed long polls have a lane of their own (`Limits::question_long_polls`),
+//! apart from `max_active`, so they never take the threads of the member reserve.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -29,6 +29,7 @@ use crate::proxy::Proxy;
 use crate::secret::{TokenKind, parse_token};
 use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
+use crate::server::feed::{self, ActionId};
 use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
@@ -106,6 +107,13 @@ pub enum Endpoint {
     Settle(Qid),
     PushTokenPut,
     PushTokenDelete,
+    FeedPut,
+    FeedList,
+    FeedDelete,
+    FeedActionPost,
+    FeedActionList,
+    FeedActionGet(ActionId),
+    FeedActionSettle(ActionId),
 }
 
 type Routed = (Need, Endpoint);
@@ -265,6 +273,37 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
                 ("DELETE", Need::Member, PushTokenDelete),
             ],
         ),
+        ["v1", "feed"] => pick(
+            method,
+            &[
+                ("PUT", Need::Member, FeedPut),
+                ("GET", Need::Member, FeedList),
+                ("DELETE", Need::Member, FeedDelete),
+            ],
+        ),
+        ["v1", "feed", "actions"] => pick(
+            method,
+            &[
+                ("POST", Need::Member, FeedActionPost),
+                ("GET", Need::Member, FeedActionList),
+            ],
+        ),
+        ["v1", "feed", "actions", id] => pick(
+            method,
+            &[(
+                "GET",
+                Need::Member,
+                FeedActionGet(feed::path_action_id(id)?),
+            )],
+        ),
+        ["v1", "feed", "actions", id, "settle"] => pick(
+            method,
+            &[(
+                "POST",
+                Need::Member,
+                FeedActionSettle(feed::path_action_id(id)?),
+            )],
+        ),
         _ => Err(not_found()),
     }
 }
@@ -289,15 +328,22 @@ pub fn is_agent_path(url: &str) -> bool {
         || path.starts_with("/v1/runs/")
 }
 
-/// True for a question long poll: `GET /v1/questions` or `GET
-/// /v1/questions/{qid}/answers` with a `wait` above 0. It may run in the question lane.
+/// True for a question or feed long poll with a `wait` above 0: `GET /v1/questions`,
+/// `GET /v1/questions/{qid}/answers`, `GET /v1/feed`, `GET /v1/feed/actions`, or `GET
+/// /v1/feed/actions/{id}`. It may run in the question lane (docs/SPEC.md 25.5, 27.7).
 pub fn is_question_poll(method: &str, url: &str) -> bool {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    let one_segment = |rest: &str| !rest.is_empty() && !rest.contains('/');
     let polls = path == paths::QUESTIONS
         || path
             .strip_prefix("/v1/questions/")
             .and_then(|rest| rest.strip_suffix("/answers"))
-            .is_some_and(|qid| !qid.is_empty() && !qid.contains('/'));
+            .is_some_and(one_segment)
+        || path == paths::FEED
+        || path == paths::FEED_ACTIONS
+        || path
+            .strip_prefix("/v1/feed/actions/")
+            .is_some_and(one_segment);
     method == "GET"
         && polls
         && query_param(query, "wait")
@@ -515,6 +561,9 @@ pub fn maintain(hub: &Hub, now: u64) {
             .and_then(|()| joins::expire(&core, now))
             .and_then(|()| sync::maintenance(&core, now))
             .and_then(|()| questions::maintenance(&core, now));
+        // The feed sweep writes no row: it runs also when a sweep above failed (a full
+        // file), so old feeds and actions still go.
+        let swept = feed::maintenance(&core, now).and(swept);
         // A full file refuses the rows of a sweep too: `watch_cap` warned about it, at
         // most once an hour, so the pass does not log it again every few seconds.
         if let Err(error) = swept
@@ -737,6 +786,14 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         }
         return;
     }
+    // A feed must declare its length within its cap (400, then 413) before the token is
+    // read, as a push (section 27.4).
+    if endpoint == Endpoint::FeedPut
+        && let Err(error) = feed_length(&request)
+    {
+        respond_error(request, &error);
+        return;
+    }
     // A push answers a malformed request (400) before it reads the token (section 24.3).
     let push = if endpoint == Endpoint::SyncPush {
         match PushRequest::from_headers(|name| header_value(&request, name)) {
@@ -816,7 +873,12 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         );
         return;
     }
-    let body = match read_body(&mut request, &method) {
+    let max_body = if endpoint == Endpoint::FeedPut {
+        api::MAX_FEED_BODY
+    } else {
+        api::MAX_JSON_BODY
+    };
+    let body = match read_body_max(&mut request, &method, max_body) {
         Ok(body) => body,
         Err(error) => {
             respond_error(request, &error);
@@ -846,6 +908,9 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             | Endpoint::AnswerPost(_)
             | Endpoint::Settle(_)
             | Endpoint::PushTokenPut
+            | Endpoint::FeedPut
+            | Endpoint::FeedActionPost
+            | Endpoint::FeedActionSettle(_)
     ) {
         after_body
     } else {
@@ -1102,26 +1167,51 @@ fn authenticate(
 
 /// Reads a JSON body of at most `MAX_JSON_BODY` bytes for POST and PUT.
 fn read_body(request: &mut Request, method: &str) -> RelayResult<Vec<u8>> {
+    read_body_max(request, method, api::MAX_JSON_BODY)
+}
+
+/// Reads a JSON body of at most `max` bytes for POST and PUT.
+fn read_body_max(request: &mut Request, method: &str, max: usize) -> RelayResult<Vec<u8>> {
     if method != "POST" && method != "PUT" {
         return Ok(Vec::new());
     }
-    let too_large = || RelayError::new(codes::PAYLOAD_TOO_LARGE, "The body is larger than 64 KiB.");
-    if request
-        .body_length()
-        .is_some_and(|len| len > api::MAX_JSON_BODY)
-    {
+    let too_large = || {
+        RelayError::new(
+            codes::PAYLOAD_TOO_LARGE,
+            format!("The body is larger than {} KiB.", max / 1024),
+        )
+    };
+    if request.body_length().is_some_and(|len| len > max) {
         return Err(too_large());
     }
     let mut body = Vec::new();
     request
         .as_reader()
-        .take(api::MAX_JSON_BODY as u64 + 1)
+        .take(max as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|_| RelayError::invalid("The body cannot be read."))?;
-    if body.len() > api::MAX_JSON_BODY {
+    if body.len() > max {
         return Err(too_large());
     }
     Ok(body)
+}
+
+/// `PUT /v1/feed` declares its length (400 without `Content-Length` or with
+/// `Transfer-Encoding`) within `MAX_FEED_BODY` (413).
+fn feed_length(request: &Request) -> RelayResult<()> {
+    if header_value(request, "Transfer-Encoding").is_some() {
+        return Err(RelayError::invalid(
+            "Send the feed with Content-Length, not Transfer-Encoding.",
+        ));
+    }
+    match request.body_length() {
+        None => Err(RelayError::invalid("Content-Length is required.")),
+        Some(len) if len > api::MAX_FEED_BODY => Err(RelayError::new(
+            codes::PAYLOAD_TOO_LARGE,
+            "The body is larger than 352 KiB.",
+        )),
+        Some(_) => Ok(()),
+    }
 }
 
 fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body: &[u8]) {
@@ -1391,6 +1481,50 @@ fn dispatch(
             questions::push_token_put(core, device_member_of(principal)?, &parse_body(body)?, now)
         }
         PushTokenDelete => questions::push_token_delete(core, device_member_of(principal)?, now),
+        FeedPut => feed::put(core, device_member_of(principal)?, &parse_body(body)?, now),
+        FeedDelete => feed::delete(core, device_member_of(principal)?, now),
+        FeedList => {
+            let since = number(query, "since")?.unwrap_or(0);
+            let wait = wait_of(query)?;
+            to_value(&feed::list(
+                core,
+                device_member_of(principal)?,
+                since,
+                wait,
+                hold,
+            )?)
+        }
+        FeedActionPost => {
+            feed::post_action(core, device_member_of(principal)?, &parse_body(body)?, now)
+        }
+        FeedActionList => {
+            let after = number(query, "after")?.unwrap_or(0);
+            let wait = wait_of(query)?;
+            to_value(&feed::actions(
+                core,
+                device_member_of(principal)?,
+                after,
+                wait,
+                hold,
+            )?)
+        }
+        FeedActionGet(id) => {
+            let wait = wait_of(query)?;
+            to_value(&feed::status(
+                core,
+                device_member_of(principal)?,
+                id,
+                wait,
+                hold,
+            )?)
+        }
+        FeedActionSettle(id) => feed::settle(
+            core,
+            device_member_of(principal)?,
+            id,
+            &parse_body(body)?,
+            now,
+        ),
         SyncHead | SyncSnapshot | SyncPush | SyncDelete => {
             Err(RelayError::internal("This endpoint is served elsewhere."))
         }
@@ -1634,6 +1768,48 @@ mod tests {
                 .code,
             codes::NOT_FOUND
         );
+        let action = ActionId::parse("sLGys7S1tre4ubq7vL2-vw").unwrap();
+        for (method, path, endpoint) in [
+            ("PUT", "/v1/feed", Endpoint::FeedPut),
+            ("GET", "/v1/feed", Endpoint::FeedList),
+            ("DELETE", "/v1/feed", Endpoint::FeedDelete),
+            ("POST", "/v1/feed/actions", Endpoint::FeedActionPost),
+            ("GET", "/v1/feed/actions", Endpoint::FeedActionList),
+            (
+                "GET",
+                "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw",
+                Endpoint::FeedActionGet(action),
+            ),
+            (
+                "POST",
+                "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw/settle",
+                Endpoint::FeedActionSettle(action),
+            ),
+        ] {
+            assert_eq!(route(method, path).unwrap(), (Need::Member, endpoint));
+        }
+        for (method, path) in [
+            ("POST", "/v1/feed"),
+            ("DELETE", "/v1/feed/actions"),
+            ("POST", "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw"),
+            ("GET", "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw/settle"),
+        ] {
+            assert_eq!(
+                route(method, path).unwrap_err().code,
+                codes::METHOD_NOT_ALLOWED
+            );
+        }
+        assert_eq!(
+            route("GET", "/v1/feed/actions/short").unwrap_err().code,
+            codes::INVALID_REQUEST
+        );
+        assert_eq!(
+            route("GET", "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw/x")
+                .unwrap_err()
+                .code,
+            codes::NOT_FOUND
+        );
+        assert!(!is_agent_path("/v1/feed?since=0&wait=25"));
     }
 
     #[test]
@@ -1645,6 +1821,9 @@ mod tests {
                 "GET",
                 "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers?after=0&wait=25",
             ),
+            ("GET", "/v1/feed?since=3&wait=25"),
+            ("GET", "/v1/feed/actions?after=0&wait=1"),
+            ("GET", "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw?wait=25"),
         ] {
             assert!(is_question_poll(method, url), "{method} {url}");
         }
@@ -1658,6 +1837,12 @@ mod tests {
             ("GET", "/v1/questions/a/b/answers?wait=25"),
             ("GET", "/v1/sync/head?wait=25"),
             ("GET", "/v1/questionsx?wait=25"),
+            ("GET", "/v1/feed?since=3&wait=0"),
+            ("PUT", "/v1/feed?wait=25"),
+            ("POST", "/v1/feed/actions?wait=25"),
+            ("GET", "/v1/feed/actions/a/settle?wait=25"),
+            ("GET", "/v1/feed/actions/?wait=25"),
+            ("GET", "/v1/feedx?wait=25"),
         ] {
             assert!(!is_question_poll(method, url), "{method} {url}");
         }

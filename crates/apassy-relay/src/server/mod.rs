@@ -18,6 +18,7 @@ pub mod decide;
 pub mod devices;
 pub mod directory;
 pub mod env;
+pub mod feed;
 pub mod host;
 pub mod http;
 pub mod hub;
@@ -98,8 +99,21 @@ pub struct Core {
     /// The open answer long polls of each asking device: at most one.
     pub answer_polls: LongPolls,
     /// Question long polls of this team that hold a thread of the question lane
-    /// (`Limits::question_long_polls_per_team`).
+    /// (`Limits::question_long_polls_per_team`), and the feed long polls of an operator
+    /// team (docs/SPEC.md section 27.7).
     pub question_lane: AtomicUsize,
+    /// The open feed list long polls of each device: at most one (section 27).
+    pub feed_polls: LongPolls,
+    /// The open action list long polls of each target device: at most one.
+    pub feed_action_polls: LongPolls,
+    /// The open action status long polls of each sending device: at most one.
+    pub feed_status_polls: LongPolls,
+    /// The feed long polls of a Connect team that hold a thread of the question lane
+    /// (`connect::TEAM_FEED_POLLS`), apart from its two question seats.
+    pub feed_lane: AtomicUsize,
+    /// The time of each device's last accepted feed, so a delete does not lift the 10 s
+    /// pace of feeds. In memory only: the feed row keeps it across a restart.
+    pub feed_times: Mutex<HashMap<u64, u64>>,
     /// The push trigger of the relay, shared by every `Core`.
     pub push: Arc<push::Push>,
     /// The long polls that all Connect teams hold (`Limits::connect_long_polls`). One

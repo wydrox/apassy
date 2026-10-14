@@ -11,7 +11,7 @@
 //! a question 10 minutes after it ended, and deletes the rest 24 hours after it was
 //! posted. A post hands the push tokens of the routing set to `server::push`.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -83,7 +83,7 @@ pub fn path_qid(text: &str) -> RelayResult<Qid> {
 }
 
 /// The device of the caller. Questions are for devices only: a member token is 401.
-fn device_of(by: &MemberAuth) -> RelayResult<DeviceId> {
+pub(crate) fn device_of(by: &MemberAuth) -> RelayResult<DeviceId> {
     by.device
         .map(|device| device.id)
         .ok_or_else(RelayError::unauthenticated)
@@ -93,7 +93,7 @@ fn is_approver(role: Role) -> bool {
     matches!(role, Role::Owner | Role::Manager)
 }
 
-fn check_v(v: u64) -> RelayResult<()> {
+pub(crate) fn check_v(v: u64) -> RelayResult<()> {
     if v == 1 {
         Ok(())
     } else {
@@ -102,7 +102,7 @@ fn check_v(v: u64) -> RelayResult<()> {
 }
 
 /// `key_id`: exactly 16 lowercase hex characters.
-fn check_key_id(text: &str) -> RelayResult<()> {
+pub(crate) fn check_key_id(text: &str) -> RelayResult<()> {
     if text.len() == 16 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         Ok(())
     } else {
@@ -113,7 +113,7 @@ fn check_key_id(text: &str) -> RelayResult<()> {
 }
 
 /// `nonce`: 12 bytes, base64url (16 characters).
-fn nonce(text: &str) -> RelayResult<Vec<u8>> {
+pub(crate) fn nonce(text: &str) -> RelayResult<Vec<u8>> {
     decode_b64(text, 12)
         .ok()
         .filter(|bytes| bytes.len() == 12)
@@ -121,8 +121,10 @@ fn nonce(text: &str) -> RelayResult<Vec<u8>> {
 }
 
 /// A ciphertext: base64url, not empty (400), at most `max` bytes (413).
-fn ciphertext(text: &str, max: usize) -> RelayResult<Vec<u8>> {
-    let bytes = decode_b64(text, crate::api::MAX_JSON_BODY)
+pub(crate) fn ciphertext(text: &str, max: usize) -> RelayResult<Vec<u8>> {
+    // Decoded up to the size of the largest body (a feed), so a text over `max` is 413
+    // below, not 400.
+    let bytes = decode_b64(text, crate::api::MAX_FEED_BODY)
         .ok()
         .filter(|bytes| !bytes.is_empty())
         .ok_or_else(|| RelayError::invalid("The ciphertext is base64url and not empty."))?;
@@ -424,12 +426,21 @@ fn counts_for(
 
 /// One thread of the question lane held by a long poll of this team. Dropping it
 /// gives the seat back.
-struct LaneSeat<'a>(&'a Core);
+pub(crate) struct LaneSeat<'a>(&'a AtomicUsize);
 
 impl Drop for LaneSeat<'_> {
     fn drop(&mut self) {
-        self.0.question_lane.fetch_sub(1, Ordering::Relaxed);
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// A seat of `held`, or `None` when `max` are held.
+pub(crate) fn take_seat(held: &AtomicUsize, max: usize) -> Option<LaneSeat<'_>> {
+    held.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        (count < max).then_some(count + 1)
+    })
+    .ok()
+    .map(|_| LaneSeat(held))
 }
 
 /// A seat of the team's share of the question lane (`question_long_polls_per_team`, and
@@ -440,12 +451,7 @@ fn lane_seat(core: &Core) -> Option<LaneSeat<'_>> {
     if core.kind == crate::api::TeamKind::Connect {
         max = max.min(crate::server::connect::TEAM_QUESTION_POLLS);
     }
-    core.question_lane
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-            (held < max).then_some(held + 1)
-        })
-        .ok()
-        .map(|_| LaneSeat(core))
+    take_seat(&core.question_lane, max)
 }
 
 /// The caller read again at each turn of a long poll: 401 when its device or its
