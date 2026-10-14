@@ -38,6 +38,7 @@
 		57F528F0B67E737BA20801B9 /* DecisionsPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD8CEAA508FFCEBC5F4F219 /* DecisionsPreview.swift */; };
 		57F6005A3BA458D149AD653A /* AppWelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F58D1C2BB6F8A7EB17A42568 /* AppWelcomeView.swift */; };
 		58649B1B8B8EA0BF7F0A2E83 /* ApassyVaultKit in Frameworks */ = {isa = PBXBuildFile; productRef = EACEA60C501FAA941326D7E1 /* ApassyVaultKit */; };
+		593715361F8DF9C0D206027C /* AgentsReach.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBC58866E8D84D1709C08E7B /* AgentsReach.swift */; };
 		5F11EE428F560015AA9E2BCE /* VaultModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A053A5569796E7D6C02E46D /* VaultModel.swift */; };
 		609072B00CF0B945807B0E6A /* CodeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7817EDC4D472A14E4FC7E630 /* CodeViews.swift */; };
 		62C2AD2281BED22FAE979FF1 /* QuestionsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D734E9F3EE27770461E0EEA9 /* QuestionsModel.swift */; };
@@ -66,6 +67,7 @@
 		BDD9FABC86173D3F21C383A8 /* ItemEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D22401E12E72EAFD4F8B7F52 /* ItemEditorView.swift */; };
 		BE572DDF87E2FB0868F01D8B /* DecisionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AFC29EB97BB7769CEAF312E /* DecisionsView.swift */; };
 		C42C4BC25E83C2DFFE8F7810 /* CredentialProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B210B98EF4836F5C25B4F8E9 /* CredentialProviderViewController.swift */; };
+		C49AC2E93BFAE315331E62DC /* VaultTabsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 328E3085509CB1EF6B2A4400 /* VaultTabsUITests.swift */; };
 		C4F4921D3099A8AEA0CDEC7D /* FolderTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FCED0F2F37B942B42179FA /* FolderTree.swift */; };
 		C6B241DE56F61F56D77E5647 /* GeneralSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2043F8854A0C2B12C6D4E160 /* GeneralSettingsView.swift */; };
 		C75F905D2E169F09022BA2A5 /* CoverPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F822347FA7AB2283110B8D02 /* CoverPolicy.swift */; };
@@ -94,6 +96,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		2FCD64EB3612E3412CC290B0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DCBC3BBE1FCC07BF25224DB2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4FC48928FE53A7A1DD0B420A;
+			remoteInfo = ApassyCompanion;
+		};
 		BDFA531F274669DA526FB977 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = DCBC3BBE1FCC07BF25224DB2 /* Project object */;
@@ -136,6 +145,7 @@
 		28D931508D2F301CC10F79C0 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
 		2F434C376345E9C5F41FD05C /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		32002E1EB97F3D154A7EE790 /* NewCredentialModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewCredentialModel.swift; sourceTree = "<group>"; };
+		328E3085509CB1EF6B2A4400 /* VaultTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultTabsUITests.swift; sourceTree = "<group>"; };
 		33EFF55AA7ADF95410EB9472 /* ApprovalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalsView.swift; sourceTree = "<group>"; };
 		35FEB27DAC4943C23B689CEA /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
 		3767CC017257A886D4694D81 /* LicensesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicensesView.swift; sourceTree = "<group>"; };
@@ -165,6 +175,7 @@
 		8A053A5569796E7D6C02E46D /* VaultModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultModel.swift; sourceTree = "<group>"; };
 		8ADC1C45326B2A085857E93A /* PrivacyCover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyCover.swift; sourceTree = "<group>"; };
 		8BBBE6D218E66D39BFFB94C7 /* ApassyCompanionKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ApassyCompanionKit; path = ../ApassyCompanionKit; sourceTree = SOURCE_ROOT; };
+		8DA163ED7580567D1F572F80 /* ApassyCompanionUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ApassyCompanionUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8E4146357404F8C913371D3F /* OwnerGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerGate.swift; sourceTree = "<group>"; };
 		94464EB492A4DD83D9AC9C29 /* AdvancedSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvancedSettingsView.swift; sourceTree = "<group>"; };
 		95CB97B8F03841A75DB19BE7 /* ICloudVaultModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudVaultModel.swift; sourceTree = "<group>"; };
@@ -201,6 +212,7 @@
 		F76344E40653E5870D388064 /* DevicesSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesSettingsView.swift; sourceTree = "<group>"; };
 		F822347FA7AB2283110B8D02 /* CoverPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverPolicy.swift; sourceTree = "<group>"; };
 		FA344DB5652B1982DBA3DA0C /* CredentialLooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialLooks.swift; sourceTree = "<group>"; };
+		FBC58866E8D84D1709C08E7B /* AgentsReach.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsReach.swift; sourceTree = "<group>"; };
 		FF384FB7C7A9E213F181560D /* JoinFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinFlowView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -271,6 +283,7 @@
 			children = (
 				D3E90CB21B3E02087D2ADE0F /* ApassyAutoFill.appex */,
 				7EABE51DFD3F87A3C292A656 /* ApassyCompanion.app */,
+				8DA163ED7580567D1F572F80 /* ApassyCompanionUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -294,6 +307,14 @@
 			path = Agents;
 			sourceTree = "<group>";
 		};
+		69C07771ACD15672D409A137 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				328E3085509CB1EF6B2A4400 /* VaultTabsUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
 		72C2FA9447F32FFF3EF0552B = {
 			isa = PBXGroup;
 			children = (
@@ -302,6 +323,7 @@
 				869A26A7BA633E3F312E5677 /* Packages */,
 				47F184B0B0DAC0AB82A3563C /* Resources */,
 				E409E008BFAF2CE02E8FC229 /* Sources */,
+				69C07771ACD15672D409A137 /* UITests */,
 				BE3E088099E8720E3A1C3836 /* Frameworks */,
 				4CCBEF17C0233B8C4A5BA55B /* Products */,
 			);
@@ -346,6 +368,7 @@
 		851D92E78BC2F2B7FEB466DE /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				FBC58866E8D84D1709C08E7B /* AgentsReach.swift */,
 				BB4A7BA9C612A81A002BFFDC /* AnswerSigners.swift */,
 				684F437C25C8B450F56C714A /* AppModel.swift */,
 				F822347FA7AB2283110B8D02 /* CoverPolicy.swift */,
@@ -466,6 +489,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		213F6A1DDB534FB4A0956725 /* ApassyCompanionUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 82F8B185938D8E47152AEEA8 /* Build configuration list for PBXNativeTarget "ApassyCompanionUITests" */;
+			buildPhases = (
+				E6377876109C630DCF87734A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DE04EAF89F093F6012CDDFF8 /* PBXTargetDependency */,
+			);
+			name = ApassyCompanionUITests;
+			packageProductDependencies = (
+			);
+			productName = ApassyCompanionUITests;
+			productReference = 8DA163ED7580567D1F572F80 /* ApassyCompanionUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		4FC48928FE53A7A1DD0B420A /* ApassyCompanion */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 4402D8B11FD5791AAD24B0F2 /* Build configuration list for PBXNativeTarget "ApassyCompanion" */;
@@ -519,6 +560,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					213F6A1DDB534FB4A0956725 = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 4FC48928FE53A7A1DD0B420A;
+					};
 					4FC48928FE53A7A1DD0B420A = {
 						ProvisioningStyle = Automatic;
 					};
@@ -547,6 +592,7 @@
 			targets = (
 				4FC48928FE53A7A1DD0B420A /* ApassyCompanion */,
 				DFAA36CE6FA994B0BF0F57A1 /* ApassyAutoFill */,
+				213F6A1DDB534FB4A0956725 /* ApassyCompanionUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -580,6 +626,7 @@
 			files = (
 				B9E78C434584B11B6067254E /* ActivityView.swift in Sources */,
 				F3D5C01F585A08880162E5C5 /* AdvancedSettingsView.swift in Sources */,
+				593715361F8DF9C0D206027C /* AgentsReach.swift in Sources */,
 				CD5D1BA5A01624F519B225F8 /* AgentsView.swift in Sources */,
 				EEEECFDF4E3661F119562534 /* AnswerSigners.swift in Sources */,
 				3EB151FA4F3F4C95FDA98FE8 /* ApassyCompanionApp.swift in Sources */,
@@ -653,6 +700,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E6377876109C630DCF87734A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C49AC2E93BFAE315331E62DC /* VaultTabsUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -660,6 +715,11 @@
 			isa = PBXTargetDependency;
 			target = DFAA36CE6FA994B0BF0F57A1 /* ApassyAutoFill */;
 			targetProxy = BDFA531F274669DA526FB977 /* PBXContainerItemProxy */;
+		};
+		DE04EAF89F093F6012CDDFF8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4FC48928FE53A7A1DD0B420A /* ApassyCompanion */;
+			targetProxy = 2FCD64EB3612E3412CC290B0 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -770,6 +830,40 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
+		};
+		2645353E30F4D1C263A30C2A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.wydrox.apassy.companion.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = ApassyCompanion;
+			};
+			name = Release;
+		};
+		31903F3DF134FD7B1DACCC3C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.wydrox.apassy.companion.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = ApassyCompanion;
+			};
+			name = Debug;
 		};
 		4000E7D8952CE94B1DE821AC /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -900,6 +994,15 @@
 			buildConfigurations = (
 				1AD535A29E46E6806AD04F09 /* Debug */,
 				1CBAEA25E00DEC5BDDECF0BB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		82F8B185938D8E47152AEEA8 /* Build configuration list for PBXNativeTarget "ApassyCompanionUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				31903F3DF134FD7B1DACCC3C /* Debug */,
+				2645353E30F4D1C263A30C2A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
