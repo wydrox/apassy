@@ -57,7 +57,7 @@ final class RootModel {
                 let made = try makeVault()
                 vault = made
                 exchange = CredentialExchangeModel(vault: made, system: Self.exchangeSystem())
-                makeQuestions(service: made.service)
+                makeQuestions(vault: made)
                 if let token = earlyImportToken {
                     earlyImportToken = nil
                     exchange?.receive(token: token)
@@ -242,13 +242,14 @@ final class RootModel {
         TeamAnswerSigners(store: KeychainAnswerKeyStore())
     }
 
-    private func makeQuestions(service: any VaultService) {
+    private func makeQuestions(vault: VaultModel) {
         let push = PushRegistrar.shared
         let model = QuestionsModel(
-            service: service, signers: answerSigners, push: push,
+            service: vault.service, signers: answerSigners, push: push,
             deviceName: settings.deviceName ?? DeviceName.current(), defaults: SharedContainer.defaults,
             onCompanionCode: { [weak self] code in self?.prepareCompanion(code: code) },
             onDeviceName: { [settings] name in settings.deviceName = name })
+        model.follow(vault)
         questions = model
         push.onToken = { [weak model] token in
             Task { await model?.receivePushToken(token) }

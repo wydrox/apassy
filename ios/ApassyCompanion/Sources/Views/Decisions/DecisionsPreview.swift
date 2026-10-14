@@ -36,8 +36,22 @@ import SwiftUI
             ]
         }
 
+        /// The question of a third vault, "Family", whose questions are locked until it opens.
+        static func familyQuestions(now: Date = Date()) -> [RemoteQuestion] {
+            [
+                question(
+                    qid: "ZmFtaWx5LWhvbWUtcXVlc3Rpb24", agent: "codex", item: "Home router", production: false,
+                    project: "home-lab", command: ["ansible-playbook", "router.yml"], env: ["ROUTER_PASSWORD"],
+                    why: "Codex has not used Home router in home-lab before.",
+                    answers: ["once", "in_project:read", "never_for_agent", "always_ask_for_agent", "disconnect"],
+                    waited: 4, asker: "iMac", now: now)
+            ]
+        }
+
         /// The second vault of `-ApassyPreviewDecisions vaults`.
         static let workVault = (id: "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b", name: "Work", team: "t_wq3k7m2p5x")
+        /// The locked vault of `-ApassyPreviewDecisions locked`.
+        static let familyVault = (id: "0a1b2c3d4e5f60718293a4b5c6d7e8f9", name: "Family", team: "t_fffffffff2")
 
         private static func question(
             qid: String, agent: String, item: String, production: Bool, project: String, command: [String],
@@ -64,9 +78,11 @@ import SwiftUI
     #if targetEnvironment(simulator)
         extension View {
             /// A development aid of the Simulator: with `-ApassyPreviewVault -ApassyPreviewDecisions
-            /// list|detail|vaults`, the preview vault gets the synthetic questions; `detail` opens the
-            /// newest as a notification would; `vaults` adds a second vault, "Work", with its own
-            /// questions team, as a core that keeps every unlocked vault lists it.
+            /// list|detail|vaults|locked`, the preview vault gets the synthetic questions; `detail`
+            /// opens the newest as a notification would; `vaults` adds a second vault, "Work", with
+            /// its own questions team, as a core that keeps every unlocked vault lists it; `locked`
+            /// adds a third vault on this iPhone too, "Family", whose questions are not open: its row
+            /// has Unlock, and the passphrase of the preview opens it.
             func decisionsPreviewSeed(_ model: QuestionsModel?) -> some View {
                 modifier(DecisionsPreviewSeed(model: model))
             }
@@ -88,11 +104,19 @@ import SwiftUI
                     await service.setQuestions(
                         enabled: true, questions: DecisionsPreview.questions(),
                         answerKey: try? signers?.joinKey(team: "t_7k2m5q4x3c"))
-                    if mode == "vaults" {
+                    if mode == "vaults" || mode == "locked" {
                         let work = DecisionsPreview.workVault
                         await service.addQuestionsVault(
                             id: work.id, name: work.name, team: work.team, questions: DecisionsPreview.workQuestions(),
                             answerKey: try? signers?.joinKey(team: work.team))
+                    }
+                    if mode == "locked" {
+                        let family = DecisionsPreview.familyVault
+                        await service.addQuestionsVault(
+                            id: family.id, name: family.name, team: family.team,
+                            questions: DecisionsPreview.familyQuestions(),
+                            answerKey: try? signers?.joinKey(team: family.team), onPhone: true, open: false)
+                        await vault?.refreshInfo()
                     }
                     await model.refresh()
                     if mode == "detail" { model.notificationOpened() }

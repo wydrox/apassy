@@ -6,7 +6,7 @@ import Foundation
 /// shows a list, and it must not say "when the Mac is connected" to an owner whose Mac already
 /// sends its questions here: it says where the agents are, and offers what this iPhone can do now.
 enum AgentsReach: Equatable {
-    /// The questions are still loading and no Mac is paired on Wi-Fi.
+    /// The questions are still loading (or locked) and no Mac is paired on Wi-Fi.
     case checking
     /// No questions through the relay and no Mac paired on Wi-Fi.
     case notConnected
@@ -18,6 +18,28 @@ enum AgentsReach: Equatable {
         case connect
         /// "Open Decisions": where the questions of the agents arrive.
         case openDecisions
+        /// "Pair with the Mac on Wi-Fi": the companion, which brings the requests of the agents.
+        case pairOnWiFi
+
+        var title: String {
+            switch self {
+            case .connect: "Connect this iPhone"
+            case .openDecisions: "Open Decisions"
+            case .pairOnWiFi: "Pair with the Mac on Wi-Fi"
+            }
+        }
+    }
+
+    /// Another place that shows a part of the Mac's vault which does not reach this iPhone.
+    enum Place: Equatable {
+        /// Decisions › Requests, while no Mac is paired on Wi-Fi (a paired Mac sends them).
+        case requests
+        /// Decisions › Suggestions: they never leave the Mac yet.
+        case suggestions
+        /// A credential › Agent use.
+        case agentUse
+        /// A credential › Rules from your answers.
+        case rules
     }
 
     /// - Parameters:
@@ -31,7 +53,8 @@ enum AgentsReach: Equatable {
         }
         switch questions {
         case .ready where !removed: self = .connected(mac: nil)
-        case .loading: self = .checking
+        // Locked: the questions may well be connected; say nothing about it until they open.
+        case .loading, .locked: self = .checking
         case .ready, .off, .failed, nil: self = .notConnected
         }
     }
@@ -54,6 +77,39 @@ enum AgentsReach: Equatable {
         case .checking: nil
         case .notConnected: .connect
         case .connected: .openDecisions
+        }
+    }
+}
+
+extension AgentsReach {
+    /// What `place` says: where its data lives. Never "when the Mac is connected": a connected
+    /// Mac does not send it either.
+    func note(_ place: Place) -> String {
+        switch place {
+        case .requests:
+            "Requests from agents show in Apassy on your Mac. To see them here too, pair this iPhone with the Mac on Wi-Fi."
+        case .suggestions:
+            "Suggestions come from your Mac. They show in Apassy on the Mac."
+        case .agentUse:
+            switch self {
+            case .connected:
+                "Which agents used this credential is on your Mac. Their questions about it arrive in Decisions."
+            case .notConnected:
+                "Which agents used this credential is on your Mac. Connect this iPhone to answer their questions here."
+            case .checking:
+                "Which agents used this credential is on your Mac."
+            }
+        case .rules:
+            "The rules from your answers are kept on your Mac. Open this credential there to see or remove them."
+        }
+    }
+
+    /// The one action of `place` that helps now, if any.
+    func action(_ place: Place) -> Action? {
+        switch place {
+        case .requests: .pairOnWiFi
+        case .suggestions, .rules: nil
+        case .agentUse: action
         }
     }
 }

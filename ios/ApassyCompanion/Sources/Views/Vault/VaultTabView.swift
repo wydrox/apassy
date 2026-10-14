@@ -90,6 +90,10 @@ struct VaultTabView: View {
         #if targetEnvironment(simulator)
             .task { openFromLaunchArgument() }
         #endif
+        // On the tabs, not on Decisions: the Agents tab shows the seeded state too.
+        #if DEBUG && targetEnvironment(simulator)
+            .decisionsPreviewSeed(root.questions)
+        #endif
     }
 
     /// The rows of Decisions, as it lists them: a run that a question shows counts once.

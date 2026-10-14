@@ -117,8 +117,5 @@ struct ApprovalsHub: View {
 
     var body: some View {
         DecisionsView(questions: questions, companion: companion, onSettings: onSettings)
-        #if DEBUG && targetEnvironment(simulator)
-            .decisionsPreviewSeed(questions)
-        #endif
     }
 }

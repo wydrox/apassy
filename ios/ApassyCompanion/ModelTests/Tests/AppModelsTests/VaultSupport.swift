@@ -50,6 +50,13 @@ final class MemoryPassphraseStore: PassphraseStore {
     private struct State {
         var values: [String: String] = [:]
         var readError: VaultError?
+        /// The Face ID prompts: each `read`, and each `readSession`.
+        var prompts: [String] = []
+        /// The next `readSession` is cancelled, as when the owner cancels Face ID.
+        var cancelsSession = false
+        /// The vault IDs that a session read.
+        var sessionReads: [String] = []
+        var openSessions = 0
     }
 
     private let state = Mutex(State())
@@ -59,6 +66,56 @@ final class MemoryPassphraseStore: PassphraseStore {
     var readError: VaultError? {
         get { state.withLock { $0.readError } }
         set { state.withLock { $0.readError = newValue } }
+    }
+
+    /// The reasons of the Face ID prompts, in order.
+    var prompts: [String] { state.withLock { $0.prompts } }
+
+    var cancelsSession: Bool {
+        get { state.withLock { $0.cancelsSession } }
+        set { state.withLock { $0.cancelsSession = newValue } }
+    }
+
+    var sessionReads: [String] { state.withLock { $0.sessionReads } }
+
+    /// Sessions that did not end yet.
+    var openSessions: Int { state.withLock { $0.openSessions } }
+
+    func readSession(reason: String) async throws -> any PassphraseReads {
+        let cancelled = state.withLock { state in
+            state.prompts.append(reason)
+            if state.cancelsSession { return true }
+            state.openSessions += 1
+            return false
+        }
+        if cancelled { throw VaultError(.cancelled, "Face ID did not unlock the vaults.") }
+        return Reads(store: self)
+    }
+
+    /// The reads of one prompt: no prompt each.
+    private final class Reads: PassphraseReads {
+        private let store: MemoryPassphraseStore
+        private let ended = Mutex(false)
+
+        init(store: MemoryPassphraseStore) { self.store = store }
+
+        func read(vaultID: String) async throws -> String {
+            guard !ended.withLock({ $0 }) else { throw VaultError(.locked, "The session ended.") }
+            let outcome: Result<String, VaultError> = store.state.withLock { state in
+                state.sessionReads.append(vaultID)
+                if let value = state.values[vaultID] { return .success(value) }
+                return .failure(VaultError(.locked, "No passphrase is stored."))
+            }
+            return try outcome.get()
+        }
+
+        func end() {
+            let first = ended.withLock { ended in
+                defer { ended = true }
+                return !ended
+            }
+            if first { store.state.withLock { $0.openSessions -= 1 } }
+        }
     }
 
     /// The stored passphrase of a vault, without a Face ID prompt.
@@ -76,6 +133,7 @@ final class MemoryPassphraseStore: PassphraseStore {
 
     func read(vaultID: String, reason: String) async throws -> String {
         let outcome: Result<String, VaultError> = state.withLock { state in
+            state.prompts.append(reason)
             if let error = state.readError { return .failure(error) }
             if let value = state.values[vaultID] { return .success(value) }
             return .failure(VaultError(.locked, "No passphrase is stored."))
