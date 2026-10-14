@@ -25,8 +25,9 @@ use crate::secret::SecretString;
 /// the item values in the vault. Version 2 keeps only sealed values (`uid`, `sealed`).
 /// Version 3 adds devices and permits members without member tokens. Version 4 adds
 /// the heads and receipts of vault sync (docs/SPEC.md section 24). Version 5 adds the
-/// questions, their answers, and the push tokens (docs/SPEC.md section 25).
-pub const SCHEMA_VERSION: i64 = 5;
+/// questions, their answers, and the push tokens (docs/SPEC.md section 25). Version 6
+/// adds the feeds of the Macs and their actions (docs/SPEC.md section 27).
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// `max_page_count` without a cap: SQLite clamps it to its own largest value.
 const NO_PAGE_CAP: u64 = 4_294_967_294;
@@ -149,6 +150,31 @@ CREATE TABLE device_wrapped_key (
   device_id INTEGER NOT NULL REFERENCES device(id), name TEXT NOT NULL, wrapped BLOB NOT NULL,
   by_device INTEGER NOT NULL REFERENCES device(id), at INTEGER NOT NULL,
   PRIMARY KEY (device_id, name));
+";
+
+const FEED_SCHEMA: &str = "
+ALTER TABLE team ADD COLUMN feed_change INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE team ADD COLUMN feed_action_seq INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE feed (
+  device_id INTEGER PRIMARY KEY REFERENCES device(id),
+  member_id INTEGER NOT NULL REFERENCES member(id),
+  seq INTEGER NOT NULL CHECK (seq >= 1),
+  key_id TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL,
+  change_seq INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX feed_change ON feed(change_seq);
+CREATE TABLE feed_action (
+  action_id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  from_device INTEGER NOT NULL REFERENCES device(id),
+  to_device INTEGER NOT NULL REFERENCES device(id),
+  member_id INTEGER NOT NULL REFERENCES member(id),
+  key_id TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open','settled','expired')),
+  outcome TEXT CHECK (outcome IN ('applied','refused','stale')),
+  settled_at INTEGER, settle_key_id TEXT, settle_nonce BLOB, settle_ciphertext BLOB);
+CREATE INDEX feed_action_to ON feed_action(to_device, seq);
+CREATE INDEX feed_action_created ON feed_action(created_at);
 ";
 
 const REBUILD_V3: &str = "
@@ -325,7 +351,7 @@ impl Store {
             path,
             key,
             &format!(
-                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}PRAGMA user_version = 5;"
+                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}PRAGMA user_version = 6;"
             ),
         )
     }
@@ -363,6 +389,14 @@ impl Store {
             store.migrate_v5(path).map_err(|error| {
                 RelayError::internal(format!(
                     "The team file cannot be moved to schema version 5: {} It is still version 4 and unchanged; free disk space or read the log, then start the relay again.",
+                    error.message
+                ))
+            })?;
+        }
+        if store.user_version()? == 5 {
+            store.migrate_v6(path).map_err(|error| {
+                RelayError::internal(format!(
+                    "The team file cannot be moved to schema version 6: {} It is still version 5 and unchanged; free disk space or read the log, then start the relay again.",
                     error.message
                 ))
             })?;
@@ -427,6 +461,18 @@ impl Store {
         let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate).map_err(db)?;
         tx.execute_batch(QUESTION_SCHEMA).map_err(db)?;
         tx.pragma_update(None, "user_version", 5).map_err(db)?;
+        tx.commit().map_err(db)
+    }
+
+    /// Keeps an encrypted version 5 backup and adds the feed tables and the two feed
+    /// counters of the team in one transaction. Additive, as version 5: questions, sync,
+    /// and devices stay as they are (docs/SPEC.md section 27.8).
+    fn migrate_v6(&self, path: &Path) -> RelayResult<()> {
+        let mut conn = self.lock();
+        write_pre(path, ".pre-v6")?;
+        let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate).map_err(db)?;
+        tx.execute_batch(FEED_SCHEMA).map_err(db)?;
+        tx.pragma_update(None, "user_version", 6).map_err(db)?;
         tx.commit().map_err(db)
     }
 
@@ -539,7 +585,7 @@ pub fn copy_private(source: &Path, dest: &Path) -> RelayResult<u64> {
     Ok(bytes)
 }
 
-/// Writes `<file><suffix>` (`.pre-v3`, `.pre-v4`, `.pre-v5`): a copy of the file before a schema
+/// Writes `<file><suffix>` (`.pre-v3` to `.pre-v6`): a copy of the file before a schema
 /// change, the way back for an image that cannot read the new version. The copy goes to
 /// `<suffix>.tmp`, is synced, and is renamed over `<suffix>`, so a stop at any point
 /// leaves either the old backup or the new one. A backup that exists while the file is
@@ -884,7 +930,7 @@ mod tests {
         let before = crate::now_unix();
         let store = Store::open_team(&path, &key).unwrap();
         let after = crate::now_unix();
-        assert_eq!(store.user_version().unwrap(), 5);
+        assert_eq!(store.user_version().unwrap(), 6);
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
             fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
@@ -953,11 +999,18 @@ mod tests {
             4
         );
         assert_eq!(
-            Store::open_team(&path, &key)
+            Store::open_at(&dir.path().join("team.db.pre-v6"), &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
             5
+        );
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            6
         );
     }
 
@@ -972,20 +1025,20 @@ mod tests {
         fs::write(dir.path().join("team.db.pre-v3.tmp"), b"a half temp copy").unwrap();
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 5);
+        assert_eq!(store.user_version().unwrap(), 6);
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
             original
         );
         assert!(!dir.path().join("team.db.pre-v3.tmp").exists());
         drop(store);
-        // A version 5 file opens again and keeps its backup.
+        // A version 6 file opens again and keeps its backup.
         assert_eq!(
             Store::open_team(&path, &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
@@ -1051,8 +1104,8 @@ mod tests {
         v3_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        // Version 3 goes through 4 to 5 in one start.
-        assert_eq!(store.user_version().unwrap(), 5);
+        // Version 3 goes through 4 and 5 to 6 in one start.
+        assert_eq!(store.user_version().unwrap(), 6);
         let backup = dir.path().join("team.db.pre-v4");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1087,7 +1140,7 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1125,7 +1178,7 @@ mod tests {
         v4_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 5);
+        assert_eq!(store.user_version().unwrap(), 6);
         let backup = dir.path().join("team.db.pre-v5");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1190,7 +1243,7 @@ mod tests {
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
@@ -1225,15 +1278,159 @@ mod tests {
         .unwrap();
     }
 
+    /// A version 5 file as `create_team` made it before feeds, with a question.
+    fn v5_vault(path: &Path, key: &SecretString) {
+        let store = Store::create_at(
+            path,
+            key,
+            &format!(
+                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}PRAGMA user_version = 5;"
+            ),
+        )
+        .unwrap();
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO team (id, name, created_at, question_seq) VALUES (1, 'Team', 100, 4);
+                     INSERT INTO member (name, role, created_at) VALUES ('owner', 'owner', 100);
+                     INSERT INTO device (member_id, name, public_key, key_holder, created_at)
+                        VALUES (1, 'Mac', X'04AA', 1, 100);
+                     INSERT INTO device (member_id, name, public_key, created_at)
+                        VALUES (1, 'iPhone', X'04BB', 100);
+                     INSERT INTO question VALUES ('q1', 1, 1, 0, 'k', X'00', X'01', 4, 100, 400, 'open', NULL, NULL, NULL);
+                     INSERT INTO push_token VALUES (2, X'61', 'production', 'b', 100, NULL);",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+    }
+
     #[test]
-    fn a_version_6_file_is_refused() {
+    fn v6_migration_adds_the_feed_tables_and_keeps_a_v5_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v5_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 6);
+        let backup = dir.path().join("team.db.pre-v6");
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!dir.path().join("team.db.pre-v6.tmp").exists());
+        assert!(!dir.path().join("team.db.pre-v5").exists());
+        // The copy is encrypted like the file.
+        assert!(!original.windows(6).any(|bytes| bytes == b"iPhone"));
+        store
+            .with(|conn| {
+                // The question, the push token, and the team row are untouched; the feed
+                // counters start at 0.
+                let team: (String, i64, i64, i64) = conn
+                    .query_row(
+                        "SELECT name, question_seq, feed_change, feed_action_seq FROM team",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .map_err(db)?;
+                assert_eq!(team, ("Team".to_string(), 4, 0, 0));
+                let kept: (i64, i64) = conn
+                    .query_row(
+                        "SELECT (SELECT count(*) FROM question WHERE qid = 'q1'), (SELECT count(*) FROM push_token)",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .map_err(db)?;
+                assert_eq!(kept, (1, 1));
+                conn.execute_batch(
+                    "INSERT INTO feed VALUES (1, 1, 1790000040, 'k', X'00', X'01', 1, 100, 100);
+                     INSERT INTO feed_action VALUES ('a1', 1, 2, 1, 1, 'k', X'00', X'01', 100, 400, 'open', NULL, NULL, NULL, NULL, NULL);
+                     UPDATE feed_action SET state = 'settled', outcome = 'applied', settled_at = 101,
+                        settle_key_id = 'k', settle_nonce = X'00', settle_ciphertext = X'02';",
+                )
+                .map_err(db)?;
+                for bad in [
+                    "INSERT INTO feed VALUES (1, 1, 2, 'k', X'00', X'01', 2, 100, 100)",
+                    "INSERT INTO feed VALUES (2, 1, 0, 'k', X'00', X'01', 2, 100, 100)",
+                    "INSERT INTO feed VALUES (9, 1, 1, 'k', X'00', X'01', 2, 100, 100)",
+                    "INSERT INTO feed VALUES (2, 9, 1, 'k', X'00', X'01', 2, 100, 100)",
+                    "INSERT INTO feed_action VALUES ('a1', 2, 2, 1, 1, 'k', X'00', X'01', 100, 400, 'open', NULL, NULL, NULL, NULL, NULL)",
+                    "INSERT INTO feed_action VALUES ('a2', 2, 2, 1, 1, 'k', X'00', X'01', 100, 400, 'gone', NULL, NULL, NULL, NULL, NULL)",
+                    "INSERT INTO feed_action VALUES ('a3', 2, 2, 1, 1, 'k', X'00', X'01', 100, 400, 'settled', 'done', NULL, NULL, NULL, NULL)",
+                    "INSERT INTO feed_action VALUES ('a4', 2, 2, 9, 1, 'k', X'00', X'01', 100, 400, 'open', NULL, NULL, NULL, NULL, NULL)",
+                ] {
+                    assert!(conn.execute(bad, []).is_err(), "{bad}");
+                }
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open_at(&backup, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            5
+        );
+        // A version 6 file opens again and keeps its backup.
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            6
+        );
+        assert_eq!(fs::read(&backup).unwrap(), original);
+    }
+
+    #[test]
+    fn a_failed_v6_backup_leaves_version_5() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v5_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        fs::create_dir(dir.path().join("team.db.pre-v6.tmp")).unwrap();
+        fs::write(dir.path().join("team.db.pre-v6.tmp/x"), b"x").unwrap();
+        let error = Store::open_team(&path, &key).err().unwrap();
+        assert!(error.message.contains("version 6"), "{error}");
+        assert!(error.message.contains("still version 5"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!dir.path().join("team.db.pre-v6").exists());
+        let old = Store::open_at(&path, &key).unwrap();
+        assert_eq!(old.user_version().unwrap(), 5);
+        old.with(|conn| {
+            let tables: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name IN ('feed','feed_action')",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(db)?;
+            let columns: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('team') WHERE name IN ('feed_change','feed_action_seq')",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(db)?;
+            assert_eq!((tables, columns), (0, 0));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_version_7_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("team.db");
         let key = SecretString::new("schema migration test passphrase".into());
         drop(Store::create_team(&path, &key).unwrap());
         Store::open_at(&path, &key)
             .unwrap()
-            .with(|conn| conn.pragma_update(None, "user_version", 6).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 7).map_err(db))
             .unwrap();
         let error = Store::open_team(&path, &key).err().unwrap();
         assert!(error.message.contains("unknown schema version"), "{error}");
@@ -1261,11 +1458,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_team_uses_v5_and_has_a_member_token_deadline() {
+    fn fresh_team_uses_v6_and_has_a_member_token_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let key = SecretString::new("new schema test passphrase".into());
         let store = Store::create_team(&dir.path().join("team.db"), &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 5);
+        assert_eq!(store.user_version().unwrap(), 6);
         store
             .with(|conn| {
                 conn.execute(

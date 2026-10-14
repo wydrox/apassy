@@ -256,11 +256,11 @@ fn a_vault_from_the_first_alpha_is_refused() {
 }
 
 #[test]
-fn a_new_vault_is_version_5_with_no_value_column() {
+fn a_new_vault_is_version_6_with_no_value_column() {
     let relay = start(UpstreamOptions::default());
     let version = relay.vault_rows("SELECT user_version, '' FROM pragma_user_version");
-    assert_eq!(version[0].0, b"5");
-    assert_eq!(store::SCHEMA_VERSION, 5);
+    assert_eq!(version[0].0, b"6");
+    assert_eq!(store::SCHEMA_VERSION, 6);
 }
 
 #[test]
