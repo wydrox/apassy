@@ -1,10 +1,11 @@
 import Foundation
 
-/// What the Agents tab says (ADR 0026 §8) while the Mac does not send its agents to the iPhone.
-/// The agents, their use, and their exceptions are rows of the Mac's vault that do not sync; the
-/// feed that will carry them (stage5-plan.md, section D) does not exist yet. So the tab never
-/// shows a list, and it must not say "when the Mac is connected" to an owner whose Mac already
-/// sends its questions here: it says where the agents are, and offers what this iPhone can do now.
+/// What the Agents tab says (ADR 0026 §8) while no Mac sends its agents to the iPhone. The agents,
+/// their use, and their exceptions are rows of the Mac's vault that do not sync; a Mac publishes
+/// them through the relay feed (contract relay-feed-v1, `AgentsModel`), and until one does, or with
+/// a relay or a core without the feed, the tab shows no list. It must not say "when the Mac is
+/// connected" to an owner whose Mac already sends its questions here: it says where the agents are,
+/// and offers what this iPhone can do now.
 enum AgentsReach: Equatable {
     /// The questions are still loading (or locked) and no Mac is paired on Wi-Fi.
     case checking

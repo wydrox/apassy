@@ -117,6 +117,8 @@ final class VaultModel {
     /// The questions of the vaults (`QuestionsModel.follow`): an open of the vault opens the
     /// questions of the others, and a lock drops them.
     @ObservationIgnored weak var questions: QuestionsModel?
+    /// The agents of the Macs (`AgentsModel`): a lock drops them, an open reads them again.
+    @ObservationIgnored weak var agents: AgentsModel?
     /// The Face ID of a Face ID unlock, for the questions of the other vaults; it holds no
     /// passphrase, and ends when they are read.
     @ObservationIgnored private var pendingReads: (any PassphraseReads)?
@@ -316,6 +318,7 @@ final class VaultModel {
         let reads = pendingReads
         pendingReads = nil
         if let questions { questions.vaultDidOpen(reads: reads) } else { reads?.end() }
+        agents?.vaultDidOpen()
         syncStatus = try? await service.syncStatus()
         await reloadAndPublish()
         startSync()
@@ -324,6 +327,7 @@ final class VaultModel {
     /// Lock the vault and drop everything read from it.
     func lock() async {
         questions?.vaultDidLock()
+        agents?.vaultDidLock()
         stopSync()
         debounceTask?.cancel()
         debounceTask = nil
@@ -348,6 +352,7 @@ final class VaultModel {
     func enterBackground() {
         isInBackground = true
         questions?.vaultWillLeave()
+        agents?.vaultWillLeave()
         gate.cancel()
         revealEpoch += 1
         stopSync()
@@ -441,6 +446,7 @@ final class VaultModel {
         leftAt = nil
         // The suspend dropped the questions of every vault; the core opened the selected one.
         questions?.vaultDidOpen()
+        agents?.vaultDidOpen()
         await reload()
         startSync()
     }
@@ -970,6 +976,7 @@ final class VaultModel {
         _ = try await service.removeVault(id: vault.id, force: force)
         // The core dropped the questions of every vault.
         questions?.vaultDidLock()
+        agents?.vaultDidLock()
         passphraseStore.remove(vaultID: vault.id)
         settings.forget(vaultID: vault.id)
         await hooks.removeAllIdentities()

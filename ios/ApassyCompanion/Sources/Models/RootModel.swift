@@ -31,6 +31,8 @@ final class RootModel {
     private(set) var vault: VaultModel?
     /// Questions through the relay of the vaults on this iPhone (contract relay-questions-v1).
     private(set) var questions: QuestionsModel?
+    /// The agents that the Macs publish for the vaults on this iPhone (contract relay-feed-v1).
+    private(set) var agents: AgentsModel?
     /// The answer keys of this iPhone, one per questions team: the joins and the questions use them.
     let answerSigners: any AnswerSigners = RootModel.makeAnswerSigners()
     /// The owner opened the notification of a question: the vault tabs show Questions.
@@ -255,6 +257,12 @@ final class RootModel {
             Task { await model?.receivePushToken(token) }
         }
         push.onOpen = { [weak self] in self?.questionsRequested = true }
+        // The removals of exceptions sign with the answer key of the row in each vault's team.
+        let agents = AgentsModel(
+            service: vault.service, signers: answerSigners,
+            registeredKey: { [weak model] vaultID, team in model?.registeredAnswerKey(vaultID: vaultID, team: team) })
+        vault.agents = agents
+        self.agents = agents
     }
 
     // MARK: The service

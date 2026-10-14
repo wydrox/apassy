@@ -92,6 +92,57 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Unlock Family"].exists)
     }
 
+    /// With the synthetic feeds of two Macs and two vaults, Agents lists the agents by vault and
+    /// Mac, and a row opens the agent's page with its use and its exceptions.
+    func testAgentsListOpensAnAgent() {
+        let app = launch(["-ApassyOpen", "agents", "-ApassyPreviewAgents", "list"])
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "54 uses this week")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Personal · Mac mini"].exists)
+        XCTAssertFalse(app.staticTexts["Agents run on your Mac"].exists)
+        row.tap()
+        XCTAssertTrue(app.navigationBars["Claude Code"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["On Mac mini · Personal"].exists)
+        XCTAssertTrue(app.staticTexts["This week"].exists)
+        let exception = app.staticTexts["Always ask: Production Postgres"]
+        for _ in 0..<6 where !exception.isHittable { app.swipeUp() }
+        XCTAssertTrue(exception.exists)
+        XCTAssertTrue(app.buttons["Remove Always ask: Production Postgres"].exists)
+        XCTAssertTrue(app.staticTexts["Deploys only from the main branch."].exists)
+    }
+
+    /// "Remove" asks first, naming the agent, the credential, and the Mac; an "only" item needs no
+    /// Face ID, and the row says where it was removed.
+    func testRemovingAnExceptionAsksFirst() {
+        let app = launch(["-ApassyOpen", "agents", "-ApassyPreviewAgents", "list"])
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "8 uses this week")).firstMatch
+        for _ in 0..<3 where !(row.waitForExistence(timeout: 5) && row.isHittable) { app.swipeUp() }
+        row.tap()
+        XCTAssertTrue(app.navigationBars["Claude Code"].waitForExistence(timeout: 5))
+        let remove = app.buttons["Remove Only: Deploy key"]
+        for _ in 0..<6 where !(remove.exists && remove.isHittable) { app.swipeUp() }
+        remove.tap()
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        XCTAssertTrue(alert.label.contains("Claude Code"))
+        XCTAssertTrue(alert.label.contains("Deploy key"))
+        XCTAssertTrue(alert.label.contains("MacBook Pro"))
+        alert.buttons["Remove"].tap()
+        XCTAssertTrue(app.staticTexts["Removed on MacBook Pro."].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["Remove Only: Deploy key"].exists)
+    }
+
+    /// A Mac that has not reported for days is dimmed and offers no removal.
+    func testAStaleMacOffersNoRemoval() {
+        let app = launch(["-ApassyOpen", "agents", "-ApassyPreviewAgents", "stale"])
+        XCTAssertTrue(app.navigationBars["CI on GitHub"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts.matching(Self.starts("MacBook Pro has not reported since")).firstMatch.exists)
+        let exception = app.staticTexts["Never: Stripe live key"]
+        for _ in 0..<6 where !exception.isHittable { app.swipeUp() }
+        XCTAssertTrue(exception.exists)
+        XCTAssertFalse(app.buttons["Remove Never: Stripe live key"].exists)
+    }
+
     private static func starts(_ text: String) -> NSPredicate {
         NSPredicate(format: "label BEGINSWITH %@", text)
     }

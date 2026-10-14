@@ -295,6 +295,12 @@ final class QuestionsModel {
         return vaults.first { $0.vaultID == id }
     }
 
+    /// The answer key that the row of this iPhone holds in the questions team `team` of `vaultID`,
+    /// when the list knows it. Nil when the team is not the vault's: no other team's key answers.
+    func registeredAnswerKey(vaultID: String, team: String) -> Data? {
+        contexts.first { ($0.vaultID == vaultID || vaults.isEmpty) && $0.status.teamID == team }?.status.answerKey
+    }
+
     /// The questions that wait for an answer now.
     var waiting: [RemoteQuestion] {
         let at = Int64(now().timeIntervalSince1970)
