@@ -25,6 +25,7 @@ mod folders;
 mod history;
 mod learning;
 mod merge;
+pub mod overview;
 pub mod passkey;
 mod policy;
 pub mod providers;
