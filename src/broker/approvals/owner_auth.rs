@@ -39,8 +39,9 @@
 //! The check of an action of the feed through the relay ([`OwnerCheck::RemoteAction`],
 //! contract relay-feed-v1 section 9.5) verifies the Face ID answer key of a live iPhone
 //! of the vault over the action string, which the gate rebuilds with the item UUID of
-//! the action. It makes a proof for the removal of a "Not for this agent" or "Always ask
-//! for this agent" exception only.
+//! the action, and, for a v2 action, with the names that the vault has for the agent,
+//! the item, and this Mac. It makes a proof for the removal of a "Not for this agent" or
+//! "Always ask for this agent" exception only.
 //!
 //! A notification, an inbox acknowledgment, or an agent request cannot make a proof
 //! (goal item N4).
@@ -1150,8 +1151,9 @@ impl OwnerGate {
     /// the signed ones and whose item has the signed UUID; the live trusted device from
     /// the vault in the session `epoch`; the team (the questions team of the vault) and
     /// the target (the trusted device of this Mac in it), rebuilt from the vault and not
-    /// taken from the caller; the window; and the signature of its answer key over the
-    /// action string. Only this action makes a proof through `RemoteAction`,
+    /// taken from the caller; for a v2 action, its `names` among those rebuilt from the
+    /// vault's agent, item, and this Mac (`feed::names_here`); the window; and the
+    /// signature of its answer key over the action string. Only this action makes a proof through `RemoteAction`,
     /// and no other remote check makes a proof for it.
     fn check_remote_action(
         &self,
@@ -1175,7 +1177,7 @@ impl OwnerGate {
             return Err(OwnerAuthError::RemoteRejected);
         }
         let other = |error: crate::vault::VaultError| OwnerAuthError::Other(error.to_string());
-        let (device, item_uuid, team_id, me) = {
+        let (device, item_uuid, team_id, me, names) = {
             let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
                 Some(vault) if !vault.is_locked() && vault.epoch() == epoch => {
@@ -1191,11 +1193,31 @@ impl OwnerGate {
                         }
                         None => None,
                     };
+                    // v2: the names of the agent, the item, and this Mac, from the vault.
+                    let names = match (&signed.names, &me) {
+                        (Some(_), Some(me)) => {
+                            let agent = vault
+                                .list_agents()
+                                .map_err(other)?
+                                .into_iter()
+                                .find(|agent| agent.id == *agent_id);
+                            let title = vault
+                                .item_refs()
+                                .map_err(other)?
+                                .remove(item_id)
+                                .map(|item| item.title);
+                            agent.zip(title).map(|(agent, title)| {
+                                crate::questions::feed::names_here(&agent.name, &title, &me.name)
+                            })
+                        }
+                        _ => None,
+                    };
                     (
                         vault.trusted_device(&signed.by).map_err(other)?,
                         vault.item_uuid(*item_id).map_err(other)?,
                         membership.map(|membership| membership.team_id),
                         me.map(|me| me.uuid),
+                        names,
                     )
                 }
                 _ => return Err(OwnerAuthError::SessionChanged),
@@ -1207,6 +1229,12 @@ impl OwnerGate {
         if item_uuid.as_deref() != Some(signed.item_uuid.as_str())
             || team_id.as_deref() != Some(signed.team_id.as_str())
             || me.as_deref() != Some(signed.to.as_str())
+        {
+            return Err(OwnerAuthError::RemoteRejected);
+        }
+        // A v2 action signs the names the owner saw: they must be this Mac's names.
+        if let Some(signed_names) = &signed.names
+            && !names.is_some_and(|names| names.contains(signed_names))
         {
             return Err(OwnerAuthError::RemoteRejected);
         }
