@@ -457,6 +457,29 @@ public struct AnswerKeyRegistration: Codable, Sendable, Equatable {
     }
 }
 
+/// What `pushTokenClear` did: the vaults whose team dropped the token now, and those that keep
+/// it until they open on this iPhone (vault IDs).
+public struct PushCleared: Codable, Sendable, Equatable {
+    public var cleared: [String]
+    public var pending: [String]
+
+    public init(cleared: [String] = [], pending: [String] = []) {
+        self.cleared = cleared
+        self.pending = pending
+    }
+
+    /// An answer without the lists (`{}`) cleared the team of the selected vault only.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cleared = try container.decodeIfPresent([String].self, forKey: .cleared) ?? []
+        pending = try container.decodeIfPresent([String].self, forKey: .pending) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case cleared, pending
+    }
+}
+
 /// A join of a notifications-only team (plan §A7).
 public struct AttachInfo: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable { case waiting, attached }
@@ -541,7 +564,7 @@ public extension VaultService {
         throw VaultError(.noQuestions, "This vault gets no questions through the relay.")
     }
 
-    func pushTokenClear() async throws {}
+    func pushTokenClear() async throws -> PushCleared { PushCleared() }
 
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         throw VaultError(.notAllowed, "This service cannot connect to the relay.")

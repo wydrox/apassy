@@ -8,7 +8,7 @@
 mod questions_relay;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apassy::sync::{DeviceKey, decode_b64u, encode_b64u, verify_signature};
 use apassy::vault::{TrustedDeviceKind, Vault};
@@ -785,4 +785,77 @@ fn a_cancelled_attach_leaves_the_vault_without_a_team() {
         ),
         "no_questions"
     );
+}
+
+/// A removed iPhone has nothing to ask the relay, but `questions_wait` still waits out its
+/// time, so the app that waits again never spins; a lock ends the wait at once.
+#[test]
+fn a_removed_iphone_waits_out_the_long_poll() {
+    let setup = setup();
+    let uuid = attach(&setup);
+    as_the_mac(&setup, |vault| {
+        vault.remove_trusted_device_and_rotate(&uuid).unwrap();
+    });
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["removed"], true);
+    let before = setup.relay.log().len();
+    let start = Instant::now();
+    let waited = call(&setup.core, json!({"op": "questions_wait", "timeout": 1}));
+    assert_eq!(waited["changed"], false);
+    assert!(
+        start.elapsed() >= Duration::from_millis(900),
+        "the wait returned at once: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(setup.relay.log().len(), before, "the relay was not asked");
+
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            let start = Instant::now();
+            let code = fails(&setup.core, json!({"op": "questions_wait", "timeout": 20}));
+            (code, start.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        call(&setup.core, json!({"op": "lock"}));
+        let (code, took) = waiting.join().unwrap();
+        assert_eq!(code, "locked");
+        assert!(
+            took < Duration::from_secs(5),
+            "the lock did not end the wait: {took:?}"
+        );
+    });
+}
+
+/// Removing a vault with a notifications-only team takes the push token of this iPhone
+/// off its team, then leaves the team, while the relay key is still in memory.
+#[test]
+fn removing_a_vault_takes_its_push_token_and_its_device_off_the_team() {
+    let setup = setup();
+    attach(&setup);
+    call(
+        &setup.core,
+        json!({"op": "push_token_set", "token": "0e".repeat(32), "environment": "development"}),
+    );
+    assert!(setup.relay.push_token().is_some());
+    let id = call(&setup.core, json!({"op": "info"}))["selected"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let removed = call(
+        &setup.core,
+        json!({"op": "remove_vault", "vault_id": id, "force": false}),
+    );
+    assert_eq!(removed["left_relay"], true);
+    assert!(
+        setup.relay.push_token().is_none(),
+        "the token left the team"
+    );
+    let log = setup.relay.log();
+    let token = log.iter().position(|line| line == "DELETE /v1/push/token");
+    let device = log.iter().position(|line| line == "DELETE /v1/devices/2");
+    assert!(
+        token.is_some() && device.is_some() && token < device,
+        "the token, then the device: {log:?}"
+    );
+    assert!(!setup.file.exists());
 }

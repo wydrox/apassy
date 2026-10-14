@@ -41,7 +41,7 @@ pub(super) mod envelope;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -51,7 +51,7 @@ use apassy::sync::{
     Cancel, DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
     encode_b64u, verify_signature,
 };
-use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault};
+use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault, VaultErrorKind};
 
 use envelope::{CardRefusal, Choice};
 
@@ -69,6 +69,8 @@ const ANSWER_RETRY_SECONDS: u64 = 55;
 const KEEP_ENDED_SECONDS: u64 = 600;
 /// A list call reads at most this many pages of 100 questions.
 const MAX_PAGES: usize = 10;
+/// How often a long poll without a team looks whether a lock ended it.
+const IDLE_STEP: Duration = Duration::from_millis(50);
 /// Display limits of a path and of a name.
 const SHOWN_PATH: usize = 80;
 const SHOWN_NAME: usize = 64;
@@ -100,6 +102,27 @@ pub struct State {
     /// The highest feed `seq` accepted of each Mac (relay-feed-v1 section 8): no secret,
     /// kept on disk, and not dropped with the contexts.
     pub(super) feed_marks: super::feed::Marks,
+    /// The teams of removed vaults that still hold the push token or the device of this
+    /// iPhone: each read tries again while the app runs. A lock or a suspend drops them
+    /// with their keys.
+    leftovers: Vec<Leftover>,
+}
+
+/// What a removed vault's team still holds of this iPhone, with the device that can take
+/// it away.
+pub(super) struct Leftover {
+    member: Arc<RelayMember>,
+    /// The push token is still in the team.
+    token: bool,
+    /// The device number of this iPhone in a notifications-only team that it did not
+    /// leave yet.
+    leave: Option<u64>,
+}
+
+impl Leftover {
+    fn done(&self) -> bool {
+        !self.token && self.leave.is_none()
+    }
 }
 
 /// What the questions of one vault need, kept while the app runs.
@@ -733,6 +756,8 @@ pub(super) struct Keys {
     pub(super) own: Option<TrustedDevice>,
     /// The key of the membership is the key of a removed device.
     removed: bool,
+    /// The team is a notifications-only team (plan §A7): it carries no relay sync.
+    questions_only: bool,
 }
 
 impl Keys {
@@ -908,6 +933,10 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
         key: question_key(vault)?,
         team_id: membership.team_id.clone(),
         device_id: membership.device_id,
+        questions_only: membership
+            .purposes
+            .iter()
+            .all(|purpose| *purpose == MembershipPurpose::Questions),
     };
     Ok(Some((membership, keys)))
 }
@@ -1084,14 +1113,24 @@ impl Core {
     pub(super) fn questions_drop_all(&self) -> Ended {
         let mut state = guard(&self.questions);
         state.drops += 1;
+        let leftovers = std::mem::take(&mut state.leftovers);
         let members = std::mem::take(&mut state.contexts)
             .into_values()
             .map(|context| context.member)
+            .chain(leftovers.into_iter().map(|leftover| leftover.member))
             .collect();
         Ended {
             members,
             waits: std::mem::take(&mut state.waits),
             attach: state.attach.take(),
+        }
+    }
+
+    /// A removed vault: its context goes, if one came back (`remove_vault`).
+    pub(super) fn questions_forget(&self, vault_id: &str) {
+        let mut state = guard(&self.questions);
+        if state.forget(vault_id) {
+            self.save_push(&state);
         }
     }
 
@@ -1221,6 +1260,10 @@ impl Core {
 
     /// A context of the vault `vault_id` from its passphrase, without selecting or
     /// opening it for the other calls: the vault opens for the reads and closes again.
+    ///
+    /// The vault file is open (with its exclusive `.lock`) only under the `opening` mutex,
+    /// which `lock`, `suspend`, and `remove_vault` take too: a suspend waits for the key
+    /// derivation, so no file lock outlives it (iOS ends a suspended app that holds one).
     fn questions_unlock(&self, vault_id: &str, passphrase: &str) -> CoreResult<VaultOpened> {
         if guard(&self.list).get(vault_id).is_none() {
             return Err(not_open(false));
@@ -1233,33 +1276,65 @@ impl Core {
                 .map_or_else(StatusOut::off, |context| StatusOut::of(&context.keys))
         };
         if matches!(&selected, Selected::Unlocked(id) if id == vault_id) {
+            // The open vault has its context already, but the app may keep this
+            // passphrase behind Face ID: it must open the vault.
+            match Vault::verify_passphrase_at(&self.paths.vault_file(vault_id), passphrase) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        VaultErrorKind::WrongKeyOrCorrupt | VaultErrorKind::InvalidInput
+                    ) =>
+                {
+                    return Err(VaultErrorKind::WrongKeyOrCorrupt.into());
+                }
+                Err(error) => return Err(error.into()),
+            }
             return Ok(VaultOpened {
                 vault_id: vault_id.to_owned(),
                 status: status(&guard(&self.questions)),
             });
         }
         let drops = guard(&self.questions).drops;
-        let mut vault = Vault::open(&self.paths.vault_file(vault_id))?;
-        // The titles by item UUID go to the agent feeds of the vault (`feed.rs`).
-        let read = vault
-            .unlock(passphrase)
-            .map_err(CoreError::from)
-            .and_then(|()| Ok((read_keys(&vault)?, super::feed::item_titles(&vault).ok())));
-        let _ = vault.lock();
-        drop(vault);
-        let (read, titles) = read?;
+        let (read, titles) = {
+            let _opening = guard(&self.opening);
+            // A removal in between deleted the file.
+            if guard(&self.list).get(vault_id).is_none() {
+                return Err(not_open(false));
+            }
+            let mut vault = Vault::open(&self.paths.vault_file(vault_id))?;
+            // The titles by item UUID go to the agent feeds of the vault (`feed.rs`).
+            let read = vault
+                .unlock(passphrase)
+                .map_err(CoreError::from)
+                .and_then(|()| Ok((read_keys(&vault)?, super::feed::item_titles(&vault).ok())));
+            let _ = vault.lock();
+            drop(vault);
+            read?
+        };
         let member = match &read {
             Some((membership, _)) => Some(member_of(membership)?),
             None => None,
         };
+        // Lock order: the list, then the questions. A removal of this vault in between
+        // removed its entry first, and drops its context again after.
+        let list = guard(&self.list);
         let mut state = guard(&self.questions);
-        if state.drops != drops {
+        let refused = if state.drops != drops {
             // A lock came during the key derivation.
+            Some(CoreError::locked())
+        } else if list.get(vault_id).is_none() {
+            Some(not_open(false))
+        } else {
+            None
+        };
+        drop(list);
+        if let Some(error) = refused {
             drop(state);
             if let Some(member) = member {
                 member.close();
             }
-            return Err(CoreError::locked());
+            return Err(error);
         }
         match (read, member) {
             (Some((membership, keys)), Some(member)) => {
@@ -1286,6 +1361,97 @@ impl Core {
             vault_id: vault_id.to_owned(),
             status: status(&state),
         })
+    }
+
+    // ---- A removed vault. ----
+
+    /// `remove_vault` of `vault_id`, before the drop of every context: the questions team
+    /// of the vault drops the push token of this iPhone, and a notifications-only team
+    /// drops this device, with the relay key of its context while it is in memory (the
+    /// vault was open in this session). `left_team`: the team that this device left
+    /// already (the relay sync team). Returns what failed, for [`Self::questions_park`].
+    pub(super) fn questions_leave(
+        &self,
+        vault_id: &str,
+        left_team: Option<&str>,
+    ) -> Option<Leftover> {
+        // The selected vault, open: its context as the vault holds it now.
+        let _ = self.questions_refresh();
+        // Out of the contexts, so the drop of the removal does not end its device.
+        let context = guard(&self.questions).contexts.remove(vault_id)?;
+        let keys = context.keys;
+        // A removed iPhone is no device of that team any more, and a device that left
+        // gets no push.
+        if keys.is_removed() || left_team == Some(keys.team_id.as_str()) {
+            context.member.close();
+            return None;
+        }
+        let mut leftover = Leftover {
+            member: context.member,
+            token: true,
+            leave: keys.questions_only.then_some(keys.device_id),
+        };
+        Self::leave_team(&mut leftover);
+        if leftover.done() {
+            leftover.member.close();
+            None
+        } else {
+            Some(leftover)
+        }
+    }
+
+    /// Keep what a removal could not take away, until a lock or a suspend. Called after
+    /// the drop of the removal.
+    pub(super) fn questions_park(&self, leftover: Option<Leftover>) {
+        if let Some(leftover) = leftover {
+            guard(&self.questions).leftovers.push(leftover);
+        }
+    }
+
+    /// `DELETE /v1/push/token`, then `DELETE /v1/devices/{id}` of a notifications-only
+    /// team. A failure stays for the next try.
+    fn leave_team(leftover: &mut Leftover) {
+        if leftover.token && Self::delete_token(&leftover.member).is_ok() {
+            leftover.token = false;
+        }
+        if leftover.token {
+            return;
+        }
+        if let Some(device_id) = leftover.leave {
+            let path = format!("/v1/devices/{device_id}");
+            match leftover.member.call("DELETE", &path, None, Duration::ZERO) {
+                // `401`: the device is no member any more.
+                Ok(_) | Err(RelayCallError::Relay { status: 401, .. }) => leftover.leave = None,
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Try the leftovers of removed vaults again (before each read).
+    fn retry_leftovers(&self) {
+        let (mut leftovers, drops) = {
+            let mut state = guard(&self.questions);
+            (std::mem::take(&mut state.leftovers), state.drops)
+        };
+        if leftovers.is_empty() {
+            return;
+        }
+        for leftover in &mut leftovers {
+            Self::leave_team(leftover);
+        }
+        let (done, open): (Vec<_>, Vec<_>) = leftovers.into_iter().partition(Leftover::done);
+        let mut state = guard(&self.questions);
+        // A lock in between took no leftover: they end here.
+        let ended = if state.drops == drops {
+            state.leftovers.extend(open);
+            done
+        } else {
+            done.into_iter().chain(open).collect()
+        };
+        drop(state);
+        for leftover in ended {
+            leftover.member.close();
+        }
     }
 
     // ---- Reading the questions. ----
@@ -1318,10 +1484,12 @@ impl Core {
     /// long polls of the others. Returns whether any came; an error only when every
     /// context failed.
     fn questions_fetch(&self, wait: Duration, early: bool) -> CoreResult<bool> {
+        self.retry_leftovers();
         let targets = self.fetch_targets();
         let drops = guard(&self.questions).drops;
         let results: Vec<(String, Arc<RelayMember>, CoreResult<bool>)> = match targets.as_slice() {
-            [] => return Ok(false),
+            // Every context is of a removed iPhone: nothing to ask the relay.
+            [] => return self.wait_idle(wait, drops),
             // One context: a lock ends its call through the device.
             [(id, member)] => {
                 let result = self.fetch_one(id, member, wait, None);
@@ -1393,6 +1561,36 @@ impl Core {
             Some(error) if !worked => Err(error),
             _ => Ok(changed),
         }
+    }
+
+    /// A long poll with nothing to ask: wait out `wait`, as the relay would, so a caller
+    /// that waits again never spins. A lock ends it.
+    fn wait_idle(&self, wait: Duration, drops: u64) -> CoreResult<bool> {
+        if wait.is_zero() {
+            return Ok(false);
+        }
+        let cancel = Arc::new(Cancel::default());
+        {
+            let mut state = guard(&self.questions);
+            if state.drops != drops {
+                return Err(CoreError::locked());
+            }
+            state.waits.push(Arc::clone(&cancel));
+        }
+        let end = Instant::now() + wait;
+        while !cancel.is_closed() {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(IDLE_STEP));
+        }
+        let mut state = guard(&self.questions);
+        state.waits.retain(|held| !Arc::ptr_eq(held, &cancel));
+        if state.drops != drops {
+            return Err(CoreError::locked());
+        }
+        Ok(false)
     }
 
     /// The questions of one context, as [`Self::questions_fetch`]. A push token change

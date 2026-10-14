@@ -42,6 +42,12 @@ final class PushRegistrar: NSObject, PushPermission {
         UIApplication.shared.registerForRemoteNotifications()
     }
 
+    /// The owner turned notifications off: iOS delivers nothing more, also from a team that keeps
+    /// the token until its vault opens on this iPhone.
+    func unregisterForPushes() {
+        UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
     func observeOpens(_ handler: @escaping @MainActor () -> Void) {
         onOpenQuestion = handler
     }

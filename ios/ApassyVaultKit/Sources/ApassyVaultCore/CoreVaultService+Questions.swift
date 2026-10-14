@@ -71,7 +71,7 @@ extension CoreVaultService {
         try await call("push_token_set", ["token": hex, "environment": environment.rawValue])
     }
 
-    public func pushTokenClear() async throws { try await call("push_token_clear") }
+    public func pushTokenClear() async throws -> PushCleared { try await call("push_token_clear") }
 
     public func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         try await call(

@@ -11,6 +11,11 @@
 //! session (section 5.10, `questions.rs`): a selection keeps them, a `lock`, a
 //! `suspend`, and `remove_vault` drop them all. The agent feeds of the Macs (section
 //! 5.12, `feed.rs`) live in the same contexts.
+//!
+//! A vault file opens outside the vault mutex for its key derivation (`unlock`,
+//! `questions_unlock`), but only under the `opening` mutex, which `lock`, `suspend`, and
+//! `remove_vault` take first: when they return, this process holds no vault file lock
+//! that they did not close.
 
 mod autofill;
 mod config;
@@ -90,6 +95,9 @@ pub struct Core {
     /// Questions through the relay: a context for each vault unlocked in this session
     /// (section 5.10).
     questions: Mutex<questions::State>,
+    /// Held while `unlock` or `questions_unlock` has a vault file open outside the vault
+    /// mutex. Lock order: before every other mutex.
+    opening: Mutex<()>,
 }
 
 /// What a close of the vault ends.
@@ -235,6 +243,7 @@ impl Core {
             status: Mutex::new(sync::Memory::default()),
             icloud_pending: Mutex::new(None),
             questions: Mutex::new(questions),
+            opening: Mutex::new(()),
         };
         if core.role == Role::App {
             core.clear_unfinished_joins();
@@ -665,6 +674,8 @@ impl Core {
     fn unlock(&self, passphrase: &str, keep: bool) -> CoreResult<()> {
         let entry = self.selected()?;
         self.close(Closing::Switch);
+        // A lock or a suspend waits for the key derivation, then closes this vault.
+        let _opening = guard(&self.opening);
         let closes = self.closes.load(Ordering::SeqCst);
         let mut vault = Vault::open(&self.paths.vault_file(&entry.id))?;
         vault.unlock(passphrase)?;
@@ -690,6 +701,10 @@ impl Core {
         if let Some(relay) = guard(&self.relay).as_ref() {
             relay.forget();
         }
+        // A lock and a suspend wait for a vault file that opens for a key derivation
+        // (`unlock`, `questions_unlock`): at most one derivation. A switch comes from the
+        // call that opens the vault next.
+        let _opening = (closing != Closing::Switch).then(|| guard(&self.opening));
         // Lock order: the vault, then the questions, then the kept passphrase, as in
         // `unlock`. The questions change under the vault mutex, so no context of the
         // vault that closes comes back after a lock.
