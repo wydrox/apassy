@@ -3,12 +3,37 @@ import Foundation
 /// The questions of the preview vault: one synthetic question of the contract's test vectors,
 /// answers kept in memory, and a join that the "Mac" confirms at the second poll. No value is
 /// real, and nothing leaves the process.
+///
+/// With `addQuestionsVault`, it answers as a core that keeps the questions of every unlocked
+/// vault: the list has `vaults` and each question its vault, and the push token reaches every
+/// team. Without, it answers as an older core: the selected vault only.
 public struct PreviewQuestions: Sendable {
     public struct Sent: Sendable, Equatable {
         public var qid: String
         public var answer: RemoteAnswer
         public var time: Int64
         public var signature: Data?
+        /// The `vaultID` of the call.
+        public var vaultID: String? = nil
+    }
+
+    /// Another unlocked vault with a questions team.
+    struct Other: Sendable {
+        var id: String
+        var name: String
+        var team: String
+        var questions: [RemoteQuestion]
+        var answerKey: Data?
+        var registered: Bool
+        var removed: Bool
+        var pushToken: Data?
+
+        var status: QuestionsStatus {
+            QuestionsStatus(
+                enabled: true, teamID: team, relayDeviceID: 4,
+                deviceUUID: answerKey == nil ? nil : "7a2d1f3b-4c5e-4f60-9a1b-2c3d4e5f6a7b", answerKey: answerKey,
+                hasKey: true, registered: registered, removed: removed)
+        }
     }
 
     var enabled = false
@@ -28,6 +53,7 @@ public struct PreviewQuestions: Sendable {
     var removed = false
     /// The answer key that the last `joinAttach` / `joinStart` sent.
     var attachAnswerKey: Data?
+    var others: [Other] = []
 
     public init() {}
 }
@@ -72,6 +98,24 @@ extension PreviewVaultService {
         questionsState.answerKey = answerKey
         questionsState.registered = registered
         questionsState.removed = removed
+    }
+
+    /// Another unlocked vault with its own questions team and questions. From then on the service
+    /// answers as a core that keeps the questions of every unlocked vault.
+    public func addQuestionsVault(
+        id: String, name: String, team: String, questions: [RemoteQuestion] = [], answerKey: Data? = nil,
+        registered: Bool = true, removed: Bool = false
+    ) {
+        questionsState.others.removeAll { $0.id == id }
+        questionsState.others.append(
+            .init(
+                id: id, name: name, team: team, questions: questions, answerKey: answerKey, registered: registered,
+                removed: removed))
+    }
+
+    /// The push token in the team of the vault `vaultID` (the selected vault: `currentPushToken`).
+    public func pushToken(vaultID: String) -> Data? {
+        questionsState.others.first { $0.id == vaultID }?.pushToken
     }
 
     /// The answer key that the last `joinAttach` sent.
@@ -119,9 +163,21 @@ extension PreviewVaultService {
         }
     }
 
-    private func openQuestion(_ qid: String) throws -> RemoteQuestion {
-        try requireQuestions()
-        guard let question = questionsState.questions.first(where: { $0.qid == qid }) else {
+    /// The other vault of `vaultID`, or else the one that holds `qid`; nil for the selected vault.
+    private func other(qid: String, vaultID: String?) -> Int? {
+        if let vaultID { return questionsState.others.firstIndex { $0.id == vaultID } }
+        return questionsState.others.firstIndex { $0.questions.contains { $0.qid == qid } }
+    }
+
+    private func openQuestion(_ qid: String, other: Int? = nil) throws -> RemoteQuestion {
+        let questions: [RemoteQuestion]
+        if let other {
+            questions = questionsState.others[other].questions
+        } else {
+            try requireQuestions()
+            questions = questionsState.questions
+        }
+        guard let question = questions.first(where: { $0.qid == qid }) else {
             throw VaultError(.expired, "This question expired.")
         }
         switch question.state {
@@ -131,10 +187,28 @@ extension PreviewVaultService {
         }
     }
 
+    private static func tagged(_ questions: [RemoteQuestion], _ id: String, _ name: String) -> [RemoteQuestion] {
+        questions.map { question in
+            var question = question
+            question.vaultID = id
+            question.vaultName = name
+            return question
+        }
+    }
+
     public func questionsList() async throws -> QuestionsList {
-        QuestionsList(
-            status: questionsStatus,
-            questions: questionsState.enabled && !questionsState.removed ? questionsState.questions : [])
+        let own = questionsState.enabled && !questionsState.removed ? questionsState.questions : []
+        guard !questionsState.others.isEmpty else { return QuestionsList(status: questionsStatus, questions: own) }
+        let selected = try await info().selectedVault
+        let (id, name) = (selected?.id ?? "", selected?.name ?? "This vault")
+        var vaults: [QuestionsVault] = []
+        if questionsState.enabled { vaults.append(QuestionsVault(vaultID: id, vaultName: name, status: questionsStatus)) }
+        var questions = Self.tagged(own, id, name)
+        for other in questionsState.others {
+            vaults.append(QuestionsVault(vaultID: other.id, vaultName: other.name, status: other.status))
+            if !other.removed { questions += Self.tagged(other.questions, other.id, other.name) }
+        }
+        return QuestionsList(status: questionsStatus, questions: questions, vaults: vaults)
     }
 
     public func questionsWait(timeout: Int) async throws -> Bool {
@@ -148,7 +222,15 @@ extension PreviewVaultService {
     public func questionOpen(qid: String) async throws -> RemoteQuestion { try openQuestion(qid) }
 
     public func questionAnswerString(qid: String, answer: RemoteAnswer) async throws -> PreparedAnswer {
-        let question = try openQuestion(qid)
+        try await questionAnswerString(qid: qid, answer: answer, vaultID: nil)
+    }
+
+    public func questionAnswerString(qid: String, answer: RemoteAnswer, vaultID: String?) async throws
+        -> PreparedAnswer
+    {
+        let other = other(qid: qid, vaultID: vaultID)
+        let question = try openQuestion(qid, other: other)
+        let status = other.map { questionsState.others[$0].status } ?? questionsStatus
         let time = Int64(Date().timeIntervalSince1970)
         let line =
             switch answer.kind {
@@ -159,7 +241,7 @@ extension PreviewVaultService {
             default: answer.kind.rawValue
             }
         let text = [
-            "apassy-question-answer-v1", questionsStatus.deviceUUID ?? "", "t_7k2m5q4x3c", qid, line,
+            "apassy-question-answer-v1", status.deviceUUID ?? "", status.teamID ?? "", qid, line,
             question.card?.digest ?? "", String(time),
         ].joined(separator: "\n")
         return PreparedAnswer(time: time, answerString: text, needsFaceID: answer.needsFaceID)
@@ -168,20 +250,33 @@ extension PreviewVaultService {
     public func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws
         -> SentAnswer
     {
-        _ = try openQuestion(qid)
-        if questionsState.removed { throw VaultError(.removed, "This device was removed from questions.") }
+        try await questionAnswer(qid: qid, answer: answer, time: time, signature: signature, vaultID: nil)
+    }
+
+    public func questionAnswer(
+        qid: String, answer: RemoteAnswer, time: Int64, signature: Data?, vaultID: String?
+    ) async throws -> SentAnswer {
+        let other = other(qid: qid, vaultID: vaultID)
+        _ = try openQuestion(qid, other: other)
+        let status = other.map { questionsState.others[$0].status } ?? questionsStatus
+        if status.removed { throw VaultError(.removed, "This device was removed from questions.") }
         if let error = questionsState.nextAnswerError {
             questionsState.nextAnswerError = nil
             throw error
         }
-        guard questionsState.answerKey != nil else {
+        guard status.answerKey != nil else {
             throw VaultError(.notRegistered, "Turn on answers on this iPhone first.")
         }
         if answer.needsFaceID != (signature != nil) {
             throw VaultError(.invalidInput, "This answer needs Face ID.")
         }
-        questionsState.sent.append(.init(qid: qid, answer: answer, time: time, signature: signature))
-        if let at = questionsState.questions.firstIndex(where: { $0.qid == qid }) {
+        questionsState.sent.append(
+            .init(qid: qid, answer: answer, time: time, signature: signature, vaultID: vaultID))
+        if let other {
+            if let at = questionsState.others[other].questions.firstIndex(where: { $0.qid == qid }) {
+                questionsState.others[other].questions[at].answered = answer.kind
+            }
+        } else if let at = questionsState.questions.firstIndex(where: { $0.qid == qid }) {
             questionsState.questions[at].answered = answer.kind
         }
         return SentAnswer(id: UInt64(questionsState.sent.count), at: time, kind: answer.kind)
@@ -206,11 +301,15 @@ extension PreviewVaultService {
     }
 
     public func pushTokenSet(token: Data, environment: PushEnvironment) async throws {
-        try requireQuestions()
-        questionsState.pushToken = token
+        if questionsState.others.isEmpty { try requireQuestions() }
+        if questionsState.enabled { questionsState.pushToken = token }
+        for at in questionsState.others.indices { questionsState.others[at].pushToken = token }
     }
 
-    public func pushTokenClear() async throws { questionsState.pushToken = nil }
+    public func pushTokenClear() async throws {
+        questionsState.pushToken = nil
+        for at in questionsState.others.indices { questionsState.others[at].pushToken = nil }
+    }
 
     public func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         guard link.contains("apassy_lnk_") else {

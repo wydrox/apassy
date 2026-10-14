@@ -47,6 +47,40 @@ import Testing
         #expect(settled.card == nil)
         #expect(settled.problem == "Sync this vault to read this question.")
         #expect(settled.settle?.deviceName == "Test iPhone")
+        // An older core: no vaults, and no vault on a question.
+        #expect(list.vaults == nil)
+        #expect(open.vaultID == nil)
+    }
+
+    @Test func aListOfEveryVaultDecodes() throws {
+        let json = """
+            {"status": {"enabled": true, "team_id": "t_7k2m5q4x3c", "has_key": true, "registered": true},
+             "vaults": [
+              {"vault_id": "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", "vault_name": "Personal",
+               "status": {"enabled": true, "team_id": "t_7k2m5q4x3c", "has_key": true, "registered": true}},
+              {"vault_id": "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b", "vault_name": "Work",
+               "status": {"enabled": true, "team_id": "t_wq3k7m2p5x", "has_key": false, "removed": true}}],
+             "questions": [
+              {"qid": "AAAAAAAAAAAAAAAAAAAAAA", "state": "open", "asker_name": "MacBook Pro",
+               "created_at": 1790000001, "expires_at": 1790000300, "card": null,
+               "vault_id": "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b", "vault_name": "Work"}]}
+            """
+        let list = try JSONDecoder().decode(QuestionsList.self, from: Data(json.utf8))
+        #expect(list.vaults?.map(\.vaultName) == ["Personal", "Work"])
+        #expect(list.vaults?[1].status.teamID == "t_wq3k7m2p5x")
+        #expect(list.vaults?[1].status.removed == true)
+        #expect(list.questions[0].vaultID == "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b")
+        #expect(list.questions[0].vaultName == "Work")
+    }
+
+    @Test func aListOfVaultsThatDoesNotDecodeIsLeftOut() throws {
+        let json = """
+            {"status": {"enabled": true, "team_id": "t_7k2m5q4x3c", "has_key": true},
+             "vaults": [{"id": "renamed", "name": "Personal"}], "questions": []}
+            """
+        let list = try JSONDecoder().decode(QuestionsList.self, from: Data(json.utf8))
+        #expect(list.vaults == nil)
+        #expect(list.status.teamID == "t_7k2m5q4x3c")
     }
 
     @Test func theCoreAnswersOfAnAnswerDecode() throws {

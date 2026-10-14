@@ -15,6 +15,9 @@ struct WaitingDecision: Identifiable, Equatable {
     let createdAt: Date?
     /// When an answer is too late, or nil when the Mac did not say.
     let deadline: Date?
+    /// The vault and the asking Mac of a question ("Personal · Mac mini"), when the questions of
+    /// two vaults or more show; else nil.
+    var vault: String? = nil
 
     var id: String {
         switch source {
@@ -84,16 +87,18 @@ enum Decisions {
     /// the relay that have not expired, and the runs of the paired Mac, named `pairedMac`. A run
     /// that a question already shows (the same run of the same agent, asked by that Mac) is not
     /// shown twice; the question is richer. A run whose waiting time the Mac did not say goes last.
+    /// With `namesVaults` (the questions of two vaults or more), each question names its vault.
     static func waiting(
         questions: [RemoteQuestion], runs: [PendingRun], runTimeout: Int, fetchedAt: Date?, pairedMac: String?,
-        now: Date
+        namesVaults: Bool = false, now: Date
     ) -> [WaitingDecision] {
         let at = Int64(now.timeIntervalSince1970)
         let open = questions.filter { $0.state == .open && $0.expiresAt > at }
         var rows = open.map { question in
             WaitingDecision(
                 source: .question(question), createdAt: Date(timeIntervalSince1970: TimeInterval(question.createdAt)),
-                deadline: Date(timeIntervalSince1970: TimeInterval(question.expiresAt)))
+                deadline: Date(timeIntervalSince1970: TimeInterval(question.expiresAt)),
+                vault: namesVaults ? question.vaultLine : nil)
         }
         for run in runs where !open.contains(where: { shows($0, run, pairedMac: pairedMac) }) {
             var created: Date?
@@ -125,11 +130,13 @@ enum Decisions {
 
     /// Waiting as Decisions shows it: the questions, and the runs of `session`'s Mac.
     @MainActor
-    static func waiting(questions: [RemoteQuestion], session: SessionModel?, now: Date) -> [WaitingDecision] {
+    static func waiting(
+        questions: [RemoteQuestion], session: SessionModel?, namesVaults: Bool = false, now: Date
+    ) -> [WaitingDecision] {
         waiting(
             questions: questions, runs: session?.runs ?? [],
             runTimeout: session?.approvalTimeout ?? SessionModel.defaultApprovalTimeout,
-            fetchedAt: session?.fetchedAt, pairedMac: session?.macName, now: now)
+            fetchedAt: session?.fetchedAt, pairedMac: session?.macName, namesVaults: namesVaults, now: now)
     }
 
     /// The number on the Decisions tab: the rows of Waiting (a run that a question shows counts
@@ -195,6 +202,11 @@ enum AgentName {
 }
 
 extension RemoteQuestion {
+    /// "Personal · Mac mini": the vault of the question and the Mac that asks.
+    var vaultLine: String {
+        [vaultName, askerName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     /// The credential of the row: the first item, and how many more.
     var credentialTitle: String {
         guard let items = card?.question.items, let first = items.first else { return "A question" }

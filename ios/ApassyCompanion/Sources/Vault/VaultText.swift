@@ -71,6 +71,21 @@ enum VaultText {
         return nil
     }
 
+    /// The team of a device link of the relay, `apassy_lnk_<team id>_<hex>` (a team id is `t_` and
+    /// 10 of a-z and 2-7), alone or after `/link#`, or nil. It picks the answer key of the team;
+    /// the core checks the whole link.
+    static func linkTeam(_ text: String) -> String? {
+        guard let start = text.range(of: "apassy_lnk_") else { return nil }
+        let code = text[start.upperBound...].prefix { $0 != "&" && !$0.isWhitespace }
+        let team = code.prefix(12)
+        let base32 = Set("abcdefghijklmnopqrstuvwxyz234567")
+        let hex = Set("0123456789abcdef")
+        guard team.count == 12, team.hasPrefix("t_"), team.dropFirst(2).allSatisfy(base32.contains),
+            code.dropFirst(12).first == "_", code.count > 13, code.dropFirst(13).allSatisfy(hex.contains)
+        else { return nil }
+        return String(team)
+    }
+
     /// Whether `text` is a one-time password setup code: an `otpauth://totp/` URI.
     static func otpURI(from text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

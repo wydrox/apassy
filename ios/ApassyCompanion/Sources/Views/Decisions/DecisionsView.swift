@@ -105,7 +105,9 @@ struct DecisionsView: View {
     // MARK: The list
 
     private func list(now: Date) -> some View {
-        let waiting = Decisions.waiting(questions: questions?.questions ?? [], session: session, now: now)
+        let waiting = Decisions.waiting(
+            questions: questions?.questions ?? [], session: session, namesVaults: questions?.namesVaults ?? false,
+            now: now)
         let ended = (questions?.questions ?? []).filter { question in
             !waiting.contains { $0.id == "question-\(question.qid)" }
         }
@@ -173,6 +175,15 @@ struct DecisionsView: View {
         switch questions?.phase {
         case .loading where session?.runs.isEmpty ?? true:
             ProgressView().frame(maxWidth: .infinity)
+        case .locked:
+            VStack(alignment: .leading, spacing: 4) {
+                Label("The vault is locked", systemImage: "lock")
+                    .font(.headline)
+                Text("Unlock it to read and answer the questions of your agents.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
         case .failed(let message):
             VStack(alignment: .leading, spacing: 8) {
                 Label("Apassy cannot read the questions", systemImage: "exclamationmark.triangle")
@@ -213,10 +224,16 @@ struct DecisionsView: View {
             if let notice = questions.notice {
                 Section { Text(notice).font(.footnote).foregroundStyle(.secondary) }
             }
-            if questions.phase == .ready, !questions.status.hasKey {
-                Section {
-                    Text("This vault has no question key yet. Sync it with your Mac to read its questions.")
+            if questions.phase == .ready {
+                ForEach(questions.contexts.filter { $0.status.enabled && !$0.status.hasKey }) { vault in
+                    Section {
+                        Text(
+                            questions.namesVaults
+                                ? "\(vault.vaultName) has no question key yet. Sync it with your Mac to read its questions."
+                                : "This vault has no question key yet. Sync it with your Mac to read its questions."
+                        )
                         .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -236,8 +253,7 @@ struct DecisionsView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 if let questions {
-                    switch questions.phase {
-                    case .ready:
+                    if questions.phase == .ready {
                         Section {
                             Toggle(
                                 "Notifications",
@@ -247,10 +263,9 @@ struct DecisionsView: View {
                         } footer: {
                             Text("A notification says only \u{201C}A question is waiting\u{201D}. Apple sees no question.")
                         }
-                    case .off, .failed:
+                    }
+                    if questions.canConnect {
                         Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
-                    case .loading:
-                        EmptyView()
                     }
                 }
                 Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Mac on Wi-Fi", systemImage: "wifi") {
@@ -278,6 +293,12 @@ private struct WaitingRow: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if let vault = decision.vault {
+                    Text(vault)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             if decision.production {
@@ -321,7 +342,7 @@ private struct EndedRow: View {
     #Preview {
         let service = PreviewVaultService()
         let model = QuestionsModel(
-            service: service, signer: EnclaveAnswerSigner(), push: nil, deviceName: "Test iPhone")
+            service: service, signers: TeamAnswerSigners(), push: nil, deviceName: "Test iPhone")
         DecisionsView(questions: model, companion: AppModel())
             .task {
                 await service.setQuestions(enabled: true, questions: DecisionsPreview.questions())

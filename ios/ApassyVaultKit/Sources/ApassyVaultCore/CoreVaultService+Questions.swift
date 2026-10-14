@@ -4,6 +4,8 @@ import Foundation
 // Questions through the relay over the core (contract ios-core-v1 section 5.10). The core refuses
 // these calls in the AutoFill extension.
 extension CoreVaultService {
+    /// The questions of every vault that the core keeps (`vaults`), or of the selected vault with
+    /// an older core.
     public func questionsList() async throws -> QuestionsList { try await call("questions_list") }
 
     private struct Waited: Decodable, Sendable { var changed: Bool }
@@ -17,18 +19,32 @@ extension CoreVaultService {
     }
 
     public func questionAnswerString(qid: String, answer: RemoteAnswer) async throws -> PreparedAnswer {
+        try await questionAnswerString(qid: qid, answer: answer, vaultID: nil)
+    }
+
+    public func questionAnswerString(qid: String, answer: RemoteAnswer, vaultID: String?) async throws
+        -> PreparedAnswer
+    {
         var params = answer.parameters
         params["qid"] = qid
+        if let vaultID { params["vault_id"] = vaultID }
         return try await call("question_answer_string", params)
     }
 
     public func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws
         -> SentAnswer
     {
+        try await questionAnswer(qid: qid, answer: answer, time: time, signature: signature, vaultID: nil)
+    }
+
+    public func questionAnswer(
+        qid: String, answer: RemoteAnswer, time: Int64, signature: Data?, vaultID: String?
+    ) async throws -> SentAnswer {
         var params = answer.parameters
         params["qid"] = qid
         params["time"] = time
         if let signature { params["signature"] = Base64URL.encode(signature) }
+        if let vaultID { params["vault_id"] = vaultID }
         return try await call("question_answer", params)
     }
 
