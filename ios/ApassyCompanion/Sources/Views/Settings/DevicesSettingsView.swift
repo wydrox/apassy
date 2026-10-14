@@ -45,7 +45,9 @@ struct QuestionsStateRow: View {
 
     private var state: String {
         switch root.questions?.phase {
-        case .ready?: "Connected"
+        case .ready?:
+            root.questions?.namesVaults == true ? "Connected, \(root.questions?.vaults.count ?? 0) vaults" : "Connected"
+        case .locked?: "Locked"
         case .off?: "Not connected"
         case .failed?: "Not available"
         case .loading?, nil: "Checking"

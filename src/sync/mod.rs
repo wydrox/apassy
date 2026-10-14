@@ -59,7 +59,7 @@ pub use relay_crypto::{
     encode_b64u, head_hash, link_code_team, safety_words, same_words, sha256_hex, sign_in_message,
     valid_team_code, verify_signature,
 };
-pub use relay_http::{DEFAULT_RELAY_URL, RelayUrl};
+pub use relay_http::{Cancel, DEFAULT_RELAY_URL, RelayUrl};
 pub use state::{SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};
 

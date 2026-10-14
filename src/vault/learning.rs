@@ -48,7 +48,7 @@ const PRUNE_EVERY: u64 = 64;
 const DAY_SECONDS: u64 = 86_400;
 /// Secret values shorter than this are not masked. They would damage ordinary text.
 const MIN_MASK_BYTES: usize = 4;
-const MASK: &str = "[apassy:secret]";
+pub(super) const MASK: &str = "[apassy:secret]";
 const MAX_COMMAND_BYTES: usize = 8192;
 const MAX_USER_REQUEST_BYTES: usize = 2000;
 const MAX_PURPOSE_BYTES: usize = 500;
@@ -883,26 +883,30 @@ impl Vault {
         let mut values = Vec::new();
         for item in items {
             let rows = stmt
-                .query_map([to_sql_id(*item)?], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                })
+                .query_map([to_sql_id(*item)?], field_row)
                 .map_err(|_| err(VaultErrorKind::Storage))?;
             for row in rows {
-                let (name, value, secret) = row.map_err(|_| err(VaultErrorKind::Storage))?;
-                if secret != 1 && !super::is_setup_key_field(&name, &value) {
-                    continue;
-                }
-                if value.len() >= MIN_MASK_BYTES {
-                    values.push(value);
-                }
+                push_secret(&mut values, row.map_err(|_| err(VaultErrorKind::Storage))?);
             }
         }
-        // Longer values first, so a value inside another value does not leave a part.
-        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        sort_values(&mut values);
+        Ok(values)
+    }
+
+    /// The values to mask of every item of the vault, in one read.
+    pub(super) fn all_secret_values(&self) -> VaultResult<Vec<String>> {
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT name, value, secret FROM item_field")
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([], field_row)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut values = Vec::new();
+        for row in rows {
+            push_secret(&mut values, row.map_err(|_| err(VaultErrorKind::Storage))?);
+        }
+        sort_values(&mut values);
         Ok(values)
     }
 
@@ -1299,6 +1303,25 @@ fn rfc3339(unix: u64) -> String {
     let text = format_utc(unix);
     let text = text.trim_end_matches(" UTC");
     format!("{}Z", text.replacen(' ', "T", 1))
+}
+
+fn field_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, i64)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
+/// Keep the value of a field row when it is a secret (or an old plain setup key) long
+/// enough to mask.
+fn push_secret(values: &mut Vec<String>, (name, value, secret): (String, String, i64)) {
+    if (secret == 1 || super::is_setup_key_field(&name, &value)) && value.len() >= MIN_MASK_BYTES {
+        values.push(value);
+    }
+}
+
+/// Longer values first, so a value inside another value does not leave a part; each
+/// value once.
+fn sort_values(values: &mut Vec<String>) {
+    values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    values.dedup();
 }
 
 /// `text` with each of `values` replaced by the mask. The use log and the interaction

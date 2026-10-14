@@ -36,6 +36,12 @@
 //! production, or correct an environment to development for an item of the waiting
 //! question: never reveal, grant, pair, connect an agent, or change a setting.
 //!
+//! The check of an action of the feed through the relay ([`OwnerCheck::RemoteAction`],
+//! contract relay-feed-v1 section 9.5) verifies the Face ID answer key of a live iPhone
+//! of the vault over the action string, which the gate rebuilds with the item UUID of
+//! the action. It makes a proof for the removal of a "Not for this agent" or "Always ask
+//! for this agent" exception only.
+//!
 //! A notification, an inbox acknowledgment, or an agent request cannot make a proof
 //! (goal item N4).
 //!
@@ -617,6 +623,16 @@ pub enum OwnerCheck {
         signature: Vec<u8>,
         correction_of: Option<Box<PendingRun>>,
     },
+    /// The signature of an action of the feed through the relay (relay-feed-v1 section
+    /// 9.5 step 8): the signed fields of the action string (the sender `by`, this Mac
+    /// `to`, the team, the `action_id`, the exception as the feed showed it, the feed
+    /// `seq`, and the time) and the DER ECDSA signature. It works for
+    /// [`OwnerAction::RemoveAgentException`] of a `never` or `always_ask` row only, with
+    /// the Face ID answer key of a live iPhone of the vault.
+    RemoteAction {
+        signed: Box<crate::questions::feed::RemovalAction>,
+        signature: Vec<u8>,
+    },
 }
 
 impl OwnerCheck {
@@ -630,7 +646,7 @@ impl OwnerCheck {
             Self::TouchId => CheckMethod::TouchId,
             Self::Passphrase(_) => CheckMethod::Passphrase,
             Self::Companion { .. } => CheckMethod::Companion,
-            Self::Remote { .. } => CheckMethod::Remote,
+            Self::Remote { .. } | Self::RemoteAction { .. } => CheckMethod::Remote,
         }
     }
 }
@@ -654,6 +670,11 @@ impl fmt::Debug for OwnerCheck {
             } => write!(
                 f,
                 "OwnerCheck::Remote {{ device_uuid: {device_uuid}, qid: {qid}, time: {time}, signature: [redacted] }}"
+            ),
+            Self::RemoteAction { signed, .. } => write!(
+                f,
+                "OwnerCheck::RemoteAction {{ by: {}, action_id: {}, time: {}, signature: [redacted] }}",
+                signed.by, signed.action_id, signed.time
             ),
         }
     }
@@ -938,6 +959,9 @@ impl OwnerGate {
         }
         let (path, epoch) = self.session()?;
         let method = check.method();
+        // An action of the feed counts as an owner interaction when it is applied
+        // (relay-feed-v1 section 9.5 step 10), not at its check.
+        let counted = !matches!(check, OwnerCheck::RemoteAction { .. });
         match check {
             OwnerCheck::TouchId => {
                 let Some(helper) = &self.touch_id else {
@@ -976,6 +1000,9 @@ impl OwnerGate {
                 },
                 epoch,
             )?,
+            OwnerCheck::RemoteAction { signed, signature } => {
+                self.check_remote_action(&action, &signed, &signature, epoch)?;
+            }
             OwnerCheck::Passphrase(passphrase) => {
                 if passphrase.is_empty() {
                     return Err(OwnerAuthError::EmptyPassphrase);
@@ -1001,7 +1028,9 @@ impl OwnerGate {
         // A lock, an unlock, or another vault during the check ends the session.
         match self.session() {
             Ok((now_path, now_epoch)) if now_path == path && now_epoch == epoch => {
-                self.count_check(&action, &path, epoch);
+                if counted {
+                    self.count_check(&action, &path, epoch);
+                }
                 Ok(OwnerProof::issue(action, method, epoch))
             }
             _ => Err(OwnerAuthError::SessionChanged),
@@ -1116,6 +1145,77 @@ impl OwnerGate {
         )
     }
 
+    /// Verify the signature of an action of the feed (relay-feed-v1 section 9.5 step 8):
+    /// only the removal of a `never` or `always_ask` exception, whose agent and kind are
+    /// the signed ones and whose item has the signed UUID; the live trusted device from
+    /// the vault in the session `epoch`; the team (the questions team of the vault) and
+    /// the target (the trusted device of this Mac in it), rebuilt from the vault and not
+    /// taken from the caller; the window; and the signature of its answer key over the
+    /// action string. Only this action makes a proof through `RemoteAction`,
+    /// and no other remote check makes a proof for it.
+    fn check_remote_action(
+        &self,
+        action: &OwnerAction,
+        signed: &crate::questions::feed::RemovalAction,
+        signature: &[u8],
+        epoch: [u8; 32],
+    ) -> Result<(), OwnerAuthError> {
+        let OwnerAction::RemoveAgentException {
+            agent_id,
+            item_id,
+            kind,
+        } = action
+        else {
+            return Err(OwnerAuthError::RemoteUnsupported);
+        };
+        if *kind == ExceptionKind::Only {
+            return Err(OwnerAuthError::RemoteUnsupported);
+        }
+        if signed.agent_id != *agent_id || signed.kind != *kind {
+            return Err(OwnerAuthError::RemoteRejected);
+        }
+        let other = |error: crate::vault::VaultError| OwnerAuthError::Other(error.to_string());
+        let (device, item_uuid, team_id, me) = {
+            let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+            match guard.as_ref() {
+                Some(vault) if !vault.is_locked() && vault.epoch() == epoch => {
+                    // The team and this Mac come from the vault, never from the caller:
+                    // the questions team of the vault and the trusted device of this Mac
+                    // in it.
+                    let membership =
+                        crate::relay::membership::questions_membership(vault).map_err(other)?;
+                    let me = match &membership {
+                        Some(membership) => {
+                            crate::relay::membership::this_device(vault, membership)
+                                .map_err(other)?
+                        }
+                        None => None,
+                    };
+                    (
+                        vault.trusted_device(&signed.by).map_err(other)?,
+                        vault.item_uuid(*item_id).map_err(other)?,
+                        membership.map(|membership| membership.team_id),
+                        me.map(|me| me.uuid),
+                    )
+                }
+                _ => return Err(OwnerAuthError::SessionChanged),
+            }
+        };
+        let Some(device) = device else {
+            return Err(OwnerAuthError::RemoteRejected);
+        };
+        if item_uuid.as_deref() != Some(signed.item_uuid.as_str())
+            || team_id.as_deref() != Some(signed.team_id.as_str())
+            || me.as_deref() != Some(signed.to.as_str())
+        {
+            return Err(OwnerAuthError::RemoteRejected);
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        verify_remote_action(&device, signed, signature, now)
+    }
+
     /// The path and the epoch of the unlocked vault. The vault mutex is held only here.
     fn session(&self) -> Result<(PathBuf, [u8; 32]), OwnerAuthError> {
         let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1218,6 +1318,39 @@ pub fn verify_remote_answer(
         return Err(OwnerAuthError::RemoteRejected);
     };
     let Some(key) = remote_key(device, choice) else {
+        return Err(OwnerAuthError::RemoteRejected);
+    };
+    if verify_ecdsa(key, text.as_bytes(), signature) {
+        Ok(())
+    } else {
+        Err(OwnerAuthError::RemoteRejected)
+    }
+}
+
+/// Verify an action of the feed at the time `now` (relay-feed-v1 sections 9.1, 9.4, and
+/// 9.5 step 8): `now - 60 <= time <= now + 60`, then the signature over the action
+/// string rebuilt from `signed` with the key of its kind: the answer key (Face ID) of an
+/// iPhone for the removal of a `never` or `always_ask` row, its relay key (`sign_key`)
+/// for an `only` row. A Mac is no sender in v1, and a signature by the other key of the
+/// device is invalid.
+pub fn verify_remote_action(
+    device: &TrustedDevice,
+    signed: &crate::questions::feed::RemovalAction,
+    signature: &[u8],
+    now: u64,
+) -> Result<(), OwnerAuthError> {
+    if !crate::questions::feed::in_window(signed.time, now) {
+        return Err(OwnerAuthError::RemoteStale);
+    }
+    if device.kind != TrustedDeviceKind::Iphone || device.uuid != signed.by {
+        return Err(OwnerAuthError::RemoteRejected);
+    }
+    let key = if signed.gives_authority() {
+        device.answer_key.as_deref()
+    } else {
+        Some(device.sign_key.as_slice())
+    };
+    let (Some(key), Some(text)) = (key, signed.string()) else {
         return Err(OwnerAuthError::RemoteRejected);
     };
     if verify_ecdsa(key, text.as_bytes(), signature) {

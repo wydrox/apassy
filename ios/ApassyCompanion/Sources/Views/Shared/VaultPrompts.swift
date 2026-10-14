@@ -39,6 +39,18 @@ struct PromptTrackingPassphraseStore: PassphraseStore {
     }
 
     func remove(vaultID: String) { inner.remove(vaultID: vaultID) }
+
+    func readSession(reason: String) async throws -> any PassphraseReads {
+        await PrivacyCover.shared.beginSystemPrompt()
+        do {
+            let reads = try await inner.readSession(reason: reason)
+            await PrivacyCover.shared.endSystemPrompt()
+            return reads
+        } catch {
+            await PrivacyCover.shared.endSystemPrompt()
+            throw error
+        }
+    }
 }
 
 /// Time from iOS to finish a vault write after the app leaves the screen. iOS kills a suspended

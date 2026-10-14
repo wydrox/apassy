@@ -2,8 +2,8 @@
 //! 5, 7, 9, 10, and 13; contract ios-core-v1 section 5.10).
 //!
 //! The iPhone is an answering device. It reads the open questions of the questions team
-//! of the selected vault, opens each card with the question key of the vault, checks it,
-//! and posts the owner's answer, sealed with the same key and signed:
+//! of each vault it holds, opens each card with the question key of that vault, checks
+//! it, and posts the owner's answer, sealed with the same key and signed:
 //!
 //! - an answer that gives authority (approve once, in the project, production, and
 //!   "Development") is signed in Swift by the Secure Enclave answer key after Face ID
@@ -17,6 +17,15 @@
 //! `join_attach`: the iPhone joins a notifications-only team that a Mac made (plan §A7),
 //! confirmed with the safety words and Touch ID on the Mac, and downloads nothing.
 //!
+//! One iPhone answers for several Macs with several vaults. The core holds one unlocked
+//! vault, so it keeps a **context** for each vault that was unlocked in this session
+//! (an `unlock`, or `questions_unlock`): the relay device of its questions team with its
+//! key, the question key, the trusted devices, this iPhone's row, and the questions the
+//! relay returned. A context holds no item and no passphrase. A selection keeps every
+//! context; a `lock`, a `suspend`, `remove_vault`, and the end of the process drop them
+//! all. The context of the selected vault is read again from the vault while it is
+//! unlocked; the context of another vault keeps what its vault held when it was open.
+//!
 //! The iPhone never writes its own `trusted_device` row. It sends its answer key with the
 //! link (in the device name, `apassy::questions::device_link`), and the Mac that confirms
 //! the link writes the row during its owner check. The row reaches the iPhone with the
@@ -27,27 +36,29 @@
 //!
 //! The relay calls run without the vault mutex. A lock ends them ([`Core::close`]).
 
-mod envelope;
+pub(super) mod envelope;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::Zeroizing;
 
 use apassy::sync::{
-    DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
+    Cancel, DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
     encode_b64u, verify_signature,
 };
-use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault};
+use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault, VaultErrorKind};
 
 use envelope::{CardRefusal, Choice};
 
+use super::config::write_private;
 use super::errors::{CoreError, CoreResult};
 use super::wire::{Empty, Secret, ok, params};
-use super::{Core, guard, now};
+use super::{Core, Role, guard, now};
 
 /// The bundle ID of the app, the relay's push topic (integrator decision 6).
 const BUNDLE_ID: &str = "com.wydrox.apassy.companion";
@@ -58,26 +69,248 @@ const ANSWER_RETRY_SECONDS: u64 = 55;
 const KEEP_ENDED_SECONDS: u64 = 600;
 /// A list call reads at most this many pages of 100 questions.
 const MAX_PAGES: usize = 10;
+/// How often a long poll without a team looks whether a lock ended it.
+const IDLE_STEP: Duration = Duration::from_millis(50);
 /// Display limits of a path and of a name.
 const SHOWN_PATH: usize = 80;
 const SHOWN_NAME: usize = 64;
+/// The vaults whose questions team may still hold the push token of this iPhone after
+/// `push_token_clear`: vault IDs only, no secret. The token is cleared there when the
+/// vault opens.
+const PUSH_FILE: &str = "questions-push.json";
 
 const READ_FAILED: &str = "This question could not be read.";
 const UPDATE: &str = "Update Apassy to read this question.";
 const SYNC_FIRST: &str = "Sync this vault to read this question.";
 
-/// The questions of the selected vault in this process. Each part is reset by a lock,
-/// a suspend, and a selection.
+/// The questions of this process: a context for each vault unlocked in this session.
 #[derive(Default)]
 pub struct State {
+    /// By vault ID.
+    pub(super) contexts: BTreeMap<String, Context>,
+    /// A join of a notifications-only team that waits for the Mac.
+    attach: Option<Attaching>,
+    /// The long polls of `questions_wait` over several contexts: a drop ends them.
+    pub(super) waits: Vec<Arc<Cancel>>,
+    /// Counts each drop of every context. A `questions_unlock` keeps its context only when
+    /// no drop came during its key derivation.
+    pub(super) drops: u64,
+    /// The push token of `push_token_set` in this process: a context made later gets it.
+    push: Option<PushToken>,
+    /// The vaults of [`PUSH_FILE`].
+    push_clear: BTreeSet<String>,
+    /// The highest feed `seq` accepted of each Mac (relay-feed-v1 section 8): no secret,
+    /// kept on disk, and not dropped with the contexts.
+    pub(super) feed_marks: super::feed::Marks,
+    /// The teams of removed vaults that still hold the push token or the device of this
+    /// iPhone: each read tries again while the app runs. A lock or a suspend drops them
+    /// with their keys.
+    leftovers: Vec<Leftover>,
+}
+
+/// What a removed vault's team still holds of this iPhone, with the device that can take
+/// it away.
+pub(super) struct Leftover {
+    member: Arc<RelayMember>,
+    /// The push token is still in the team.
+    token: bool,
+    /// The device number of this iPhone in a notifications-only team that it did not
+    /// leave yet.
+    leave: Option<u64>,
+}
+
+impl Leftover {
+    fn done(&self) -> bool {
+        !self.token && self.leave.is_none()
+    }
+}
+
+/// What the questions of one vault need, kept while the app runs.
+pub(super) struct Context {
     /// The device of the questions team, with its key in memory.
-    member: Option<Arc<RelayMember>>,
+    pub(super) member: Arc<RelayMember>,
+    /// What the checks of the cards need, read from the vault.
+    pub(super) keys: Arc<Keys>,
     /// The last question sequence seen (section 10.4).
     since: u64,
     /// The questions that the relay returned, by `qid`.
     records: BTreeMap<String, Record>,
-    /// A join of a notifications-only team that waits for the Mac.
+    /// A push token change that this team still needs.
+    push_due: Option<PushDue>,
+    /// The code of the last failed relay call, until one works.
+    error: Option<&'static str>,
+    /// The agent feeds of the Macs of this team (relay-feed-v1, `feed.rs`).
+    pub(super) feed: super::feed::Mirror,
+}
+
+#[derive(Clone)]
+struct PushToken {
+    token: String,
+    environment: String,
+    bundle_id: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PushDue {
+    Set,
+    Clear,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PushFile {
+    version: u32,
+    clear: BTreeSet<String>,
+}
+
+impl State {
+    /// The state of a new process, with the vaults of [`PUSH_FILE`].
+    pub(super) fn load(data_dir: &Path) -> Self {
+        let clear = std::fs::read(data_dir.join(PUSH_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_slice::<PushFile>(&text).ok())
+            .filter(|file| file.version == 1)
+            .map(|file| {
+                file.clear
+                    .into_iter()
+                    .filter(|id| super::config::valid_id(id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            push_clear: clear,
+            feed_marks: super::feed::Marks::load(data_dir),
+            ..Self::default()
+        }
+    }
+
+    /// The context of `vault_id` while it still has the device `member`: a drop or a new
+    /// membership in between ends the call that used it.
+    pub(super) fn context_mut(
+        &mut self,
+        vault_id: &str,
+        member: &Arc<RelayMember>,
+    ) -> CoreResult<&mut Context> {
+        self.contexts
+            .get_mut(vault_id)
+            .filter(|context| Arc::ptr_eq(&context.member, member))
+            .ok_or_else(CoreError::locked)
+    }
+
+    /// Keep the context of `vault_id` with new `keys`. Another device of the questions
+    /// team (another membership) starts a new context.
+    fn keep(
+        &mut self,
+        vault_id: &str,
+        keys: Keys,
+        public_key: &[u8],
+        member: impl FnOnce() -> CoreResult<RelayMember>,
+    ) -> CoreResult<()> {
+        if let Some(context) = self.contexts.get_mut(vault_id)
+            && context.keys.team_id == keys.team_id
+            && context.keys.device_id == keys.device_id
+            && context.member.public_key() == public_key
+        {
+            context.keys = Arc::new(keys);
+            return Ok(());
+        }
+        self.put(vault_id, Arc::new(member()?), keys);
+        Ok(())
+    }
+
+    /// A new context of `vault_id` with the device `member`.
+    fn put(&mut self, vault_id: &str, member: Arc<RelayMember>, keys: Keys) {
+        let push_due = if self.push.is_some() {
+            Some(PushDue::Set)
+        } else if self.push_clear.contains(vault_id) {
+            Some(PushDue::Clear)
+        } else {
+            None
+        };
+        let context = Context {
+            member,
+            keys: Arc::new(keys),
+            since: 0,
+            records: BTreeMap::new(),
+            push_due,
+            error: None,
+            feed: super::feed::Mirror::default(),
+        };
+        if let Some(old) = self.contexts.insert(vault_id.to_owned(), context) {
+            old.member.close();
+        }
+    }
+
+    /// Forget the context of `vault_id`: its vault has no questions team now. Returns
+    /// whether [`PUSH_FILE`] changed.
+    fn forget(&mut self, vault_id: &str) -> bool {
+        if let Some(old) = self.contexts.remove(vault_id) {
+            old.member.close();
+        }
+        self.push_clear.remove(vault_id)
+    }
+
+    /// The vaults whose context holds `qid`.
+    fn owners(&self, qid: &str) -> Vec<String> {
+        self.contexts
+            .iter()
+            .filter(|(_, context)| context.records.contains_key(qid))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+}
+
+/// What a close took out of the questions, ended after the locks are released.
+#[must_use]
+pub(super) struct Ended {
+    members: Vec<Arc<RelayMember>>,
+    waits: Vec<Arc<Cancel>>,
     attach: Option<Attaching>,
+}
+
+impl Ended {
+    pub(super) fn finish(self) {
+        for member in self.members {
+            member.close();
+        }
+        for wait in self.waits {
+            wait.close();
+        }
+        if let Some(attach) = self.attach {
+            let _ = attach.pending.cancel();
+        }
+    }
+}
+
+/// The selected vault, as the questions calls see it.
+pub(super) enum Selected {
+    Unlocked(String),
+    Locked(String),
+    None,
+}
+
+impl Selected {
+    pub(super) fn id(&self) -> Option<&str> {
+        match self {
+            Self::Unlocked(id) | Self::Locked(id) => Some(id),
+            Self::None => None,
+        }
+    }
+
+    /// Why a call that needs a context of the selected vault has none.
+    pub(super) fn missing(&self) -> CoreError {
+        match self {
+            Self::Unlocked(_) => no_questions(),
+            Self::Locked(_) => CoreError::locked(),
+            Self::None => CoreError::no_vault(),
+        }
+    }
+}
+
+/// The device, the keys, and the vault of one context, for one call.
+struct Using {
+    vault_id: String,
+    member: Arc<RelayMember>,
+    keys: Arc<Keys>,
 }
 
 /// A question as the relay returned it.
@@ -183,17 +416,54 @@ impl StatusOut {
             removed: false,
         }
     }
+
+    fn of(keys: &Keys) -> Self {
+        Self {
+            enabled: true,
+            team_id: Some(keys.team_id.clone()),
+            relay_device_id: Some(keys.device_id),
+            device_uuid: keys.own.as_ref().map(|own| own.uuid.clone()),
+            answer_key: keys
+                .own
+                .as_ref()
+                .and_then(|own| own.answer_key.as_deref())
+                .map(encode_b64u),
+            has_key: keys.key.is_some(),
+            registered: keys.own.is_some(),
+            removed: keys.is_removed(),
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct ListOut {
+    /// The selected vault, as before several vaults (an older app reads only this).
     status: StatusOut,
+    /// One entry for each context.
+    vaults: Vec<VaultOut>,
+    /// The questions of every context, newest first.
     questions: Vec<QuestionOut>,
+}
+
+#[derive(Serialize)]
+struct VaultOut {
+    vault_id: String,
+    vault_name: String,
+    selected: bool,
+    /// The vault is open now: its keys are read from it at each call. Else they are
+    /// those of its last unlock in this session.
+    unlocked: bool,
+    status: StatusOut,
+    /// The code of the last failed relay call of this vault, until one works.
+    error: Option<&'static str>,
 }
 
 #[derive(Serialize)]
 struct QuestionOut {
     qid: String,
+    /// The vault whose questions team carries the question; an answer goes to it.
+    vault_id: String,
+    vault_name: String,
     /// `open`, `settled`, or `expired`.
     state: &'static str,
     /// The asking Mac: the card's name when the card opens, else the relay's.
@@ -303,8 +573,33 @@ struct Registered {
 
 #[derive(Serialize)]
 struct TokenSet {
+    /// Of the selected vault when its team took the token, else of the first that did.
     device_id: u64,
     updated_at: u64,
+    vaults: Vec<PushOut>,
+}
+
+#[derive(Serialize)]
+struct PushOut {
+    vault_id: String,
+    device_id: Option<u64>,
+    updated_at: Option<u64>,
+    /// The code of the failure; the core tries again at the next relay call of the vault.
+    error: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct TokenCleared {
+    /// The vaults whose team dropped the token now.
+    cleared: Vec<String>,
+    /// The vaults whose team may still hold it: cleared when the vault opens.
+    pending: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct VaultOpened {
+    vault_id: String,
+    status: StatusOut,
 }
 
 // ---- Requests. ----
@@ -312,11 +607,17 @@ struct TokenSet {
 #[derive(Deserialize)]
 struct Qid {
     qid: String,
+    #[serde(default)]
+    vault_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct AnswerIn {
     qid: String,
+    /// The vault of the question (`Question.vault_id`). Without it, the vault whose
+    /// context holds `qid`.
+    #[serde(default)]
+    vault_id: Option<String>,
     kind: String,
     #[serde(default)]
     action: Option<String>,
@@ -444,20 +745,30 @@ fn question_key(vault: &Vault) -> CoreResult<Option<(String, Zeroizing<Vec<u8>>)
     }
 }
 
-/// What a check of the cards needs from the vault, read under the vault mutex.
-struct Keys {
-    team_id: String,
-    device_id: u64,
-    key: Option<(String, Zeroizing<Vec<u8>>)>,
-    devices: Vec<TrustedDevice>,
-    own: Option<TrustedDevice>,
+/// What a check of the cards needs from the vault, read under the vault mutex and kept
+/// in the context of the vault.
+pub(super) struct Keys {
+    pub(super) team_id: String,
+    /// The device number of this iPhone in the questions team.
+    pub(super) device_id: u64,
+    pub(super) key: Option<(String, Zeroizing<Vec<u8>>)>,
+    pub(super) devices: Vec<TrustedDevice>,
+    pub(super) own: Option<TrustedDevice>,
     /// The key of the membership is the key of a removed device.
     removed: bool,
+    /// The team is a notifications-only team (plan §A7): it carries no relay sync.
+    questions_only: bool,
 }
 
 impl Keys {
+    /// The key of the membership belongs to a removed row: the owner took this iPhone
+    /// out, and it asks the relay nothing.
+    pub(super) fn is_removed(&self) -> bool {
+        self.own.is_none() && self.removed
+    }
+
     /// This iPhone's row, or why it cannot answer.
-    fn own_row(&self) -> CoreResult<TrustedDevice> {
+    pub(super) fn own_row(&self) -> CoreResult<TrustedDevice> {
         match &self.own {
             Some(own) => Ok(own.clone()),
             None if self.removed => Err(removed()),
@@ -590,6 +901,98 @@ fn state_of(record: &Record, at: u64) -> &'static str {
     }
 }
 
+fn wrong_vault() -> CoreError {
+    CoreError::new(
+        "wrong_vault",
+        "This question is of another vault. Answer it from the list of questions.",
+    )
+}
+
+/// A vault on this iPhone without a context: it was not unlocked in this session.
+pub(super) fn not_open(known: bool) -> CoreError {
+    if known {
+        CoreError::new(
+            "locked",
+            "Unlock this vault on this iPhone to read its questions.",
+        )
+    } else {
+        CoreError::new("no_vault", "This vault is not on this iPhone.")
+    }
+}
+
+/// The membership of the questions team of `vault` and what the checks need, or None
+/// when the vault has no questions team.
+fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
+    let Some(membership) = questions_membership(vault)? else {
+        return Ok(None);
+    };
+    let keys = Keys {
+        own: own_device(vault, &membership.public_key)?,
+        removed: vault.trusted_key_removed(&membership.public_key)?,
+        devices: vault.trusted_devices()?,
+        key: question_key(vault)?,
+        team_id: membership.team_id.clone(),
+        device_id: membership.device_id,
+        questions_only: membership
+            .purposes
+            .iter()
+            .all(|purpose| *purpose == MembershipPurpose::Questions),
+    };
+    Ok(Some((membership, keys)))
+}
+
+fn member_of(membership: &RelayMembership) -> CoreResult<RelayMember> {
+    Ok(RelayMember::new(
+        &membership.relay_url,
+        &membership.team_id,
+        membership.device_id,
+        membership.key_pkcs8.clone(),
+    )?)
+}
+
+fn settle_out(settle: envelope::Settle) -> SettleOut {
+    SettleOut {
+        outcome: settle.outcome,
+        device_name: settle
+            .device_name
+            .map(|name| envelope::shown(&name, SHOWN_NAME)),
+        device_kind: settle.device_kind,
+        kind: settle.kind,
+        at: settle.at,
+        replaced_by: settle.replaced_by,
+    }
+}
+
+/// The question of `record` in the list, with its card when every check passed.
+fn question_out(
+    vault_id: &str,
+    vault_name: &str,
+    keys: &Keys,
+    record: &Record,
+    at: u64,
+) -> QuestionOut {
+    let (card, problem) = match keys.open(record) {
+        Ok(card) => (Some(card), None),
+        Err(problem) => (None, Some(problem)),
+    };
+    QuestionOut {
+        qid: record.qid.clone(),
+        vault_id: vault_id.to_owned(),
+        vault_name: vault_name.to_owned(),
+        state: state_of(record, at),
+        asker_name: card.as_ref().map_or_else(
+            || envelope::shown(&record.from_device_name, SHOWN_NAME),
+            |card| envelope::shown(&card.asker.name, SHOWN_NAME),
+        ),
+        created_at: record.created_at,
+        expires_at: record.expires_at,
+        problem,
+        card: card.as_ref().map(card_out),
+        settle: keys.settle(record).map(settle_out),
+        answered: record.answered,
+    }
+}
+
 impl Core {
     pub(super) fn questions_call(&self, op: &str, request: &str) -> CoreResult<String> {
         match op {
@@ -600,12 +1003,24 @@ impl Core {
                     timeout: u64,
                 }
                 let Wait { timeout } = params(request)?;
-                let changed = self.questions_fetch(Duration::from_secs(timeout.clamp(1, 25)))?;
+                let changed = self.questions_wait(Duration::from_secs(timeout.clamp(1, 25)))?;
                 Ok(ok(&Waited { changed }))
             }
+            "questions_unlock" => {
+                #[derive(Deserialize)]
+                struct Unlock {
+                    vault_id: String,
+                    passphrase: Secret,
+                }
+                let Unlock {
+                    vault_id,
+                    passphrase,
+                } = params(request)?;
+                Ok(ok(&self.questions_unlock(&vault_id, passphrase.expose())?))
+            }
             "question_open" => {
-                let Qid { qid } = params(request)?;
-                Ok(ok(&self.question_open(&qid)?))
+                let Qid { qid, vault_id } = params(request)?;
+                Ok(ok(&self.question_open(&qid, vault_id.as_deref())?))
             }
             "question_answer_string" => {
                 let answer: AnswerIn = params(request)?;
@@ -621,9 +1036,16 @@ impl Core {
                 #[derive(Deserialize)]
                 struct Register {
                     public_key: String,
+                    #[serde(default)]
+                    vault_id: Option<String>,
                 }
-                let Register { public_key } = params(request)?;
-                Ok(ok(&self.answer_key_register(&public_key)?))
+                let Register {
+                    public_key,
+                    vault_id,
+                } = params(request)?;
+                Ok(ok(
+                    &self.answer_key_register(&public_key, vault_id.as_deref())?
+                ))
             }
             "push_token_set" => {
                 #[derive(Deserialize)]
@@ -644,13 +1066,7 @@ impl Core {
                     bundle_id.as_deref().unwrap_or(BUNDLE_ID),
                 )?))
             }
-            "push_token_clear" => {
-                let member = self.questions_member()?;
-                member
-                    .call("DELETE", "/v1/push/token", None, Duration::ZERO)
-                    .map_err(call_error)?;
-                Ok(ok(&Empty {}))
-            }
+            "push_token_clear" => Ok(ok(&self.push_token_clear()?)),
             "join_attach" => {
                 #[derive(Deserialize)]
                 struct Start {
@@ -689,114 +1105,551 @@ impl Core {
         }
     }
 
-    /// The vault locked, suspended, or another vault was selected: end the relay calls
-    /// and forget the questions. A join that waits is given up.
-    pub(super) fn questions_close(&self) {
-        let (member, attach) = {
-            let mut state = guard(&self.questions);
-            let member = state.member.take();
-            let attach = state.attach.take();
-            *state = State::default();
-            (member, attach)
-        };
-        if let Some(member) = member {
-            member.close();
-        }
-        if let Some(attach) = attach {
-            let _ = attach.pending.cancel();
-        }
-    }
+    // ---- The contexts. ----
 
-    /// The device of the questions team: the one in memory, or one from the membership
-    /// of the unlocked vault.
-    fn questions_member(&self) -> CoreResult<Arc<RelayMember>> {
-        if let Some(member) = guard(&self.questions).member.clone() {
-            return Ok(member);
-        }
-        let membership = self
-            .with_vault(questions_membership)?
-            .ok_or_else(no_questions)?;
-        let member = Arc::new(RelayMember::new(
-            &membership.relay_url,
-            &membership.team_id,
-            membership.device_id,
-            membership.key_pkcs8.clone(),
-        )?);
+    /// A lock, a suspend, a removal, or the end of the process: drop the context of
+    /// every vault. Called under the vault mutex, so no context of the vault that closes
+    /// comes back; the caller ends the relay calls with [`Ended::finish`] after it.
+    pub(super) fn questions_drop_all(&self) -> Ended {
         let mut state = guard(&self.questions);
-        // Lock order: the vault before the questions; the vault is not held here, so a
-        // close in between wins and this member is dropped with its key.
-        Ok(Arc::clone(state.member.get_or_insert(member)))
+        state.drops += 1;
+        let leftovers = std::mem::take(&mut state.leftovers);
+        let members = std::mem::take(&mut state.contexts)
+            .into_values()
+            .map(|context| context.member)
+            .chain(leftovers.into_iter().map(|leftover| leftover.member))
+            .collect();
+        Ended {
+            members,
+            waits: std::mem::take(&mut state.waits),
+            attach: state.attach.take(),
+        }
     }
 
-    /// What the checks need from the vault.
-    fn question_keys(&self) -> CoreResult<Option<Keys>> {
-        self.with_vault(|vault| {
-            let Some(membership) = questions_membership(vault)? else {
-                return Ok(None);
-            };
-            Ok(Some(Keys {
-                own: own_device(vault, &membership.public_key)?,
-                removed: vault.trusted_key_removed(&membership.public_key)?,
-                devices: vault.trusted_devices()?,
-                key: question_key(vault)?,
-                team_id: membership.team_id,
-                device_id: membership.device_id,
-            }))
+    /// A removed vault: its context goes, if one came back (`remove_vault`).
+    pub(super) fn questions_forget(&self, vault_id: &str) {
+        let mut state = guard(&self.questions);
+        if state.forget(vault_id) {
+            self.save_push(&state);
+        }
+    }
+
+    /// Another vault is selected or opens: the contexts stay, a join that waits is given
+    /// up (it is of the selected vault).
+    pub(super) fn questions_switch(&self) -> Ended {
+        Ended {
+            members: Vec::new(),
+            waits: Vec::new(),
+            attach: guard(&self.questions).attach.take(),
+        }
+    }
+
+    /// Keep the context of the selected vault from `vault`, open and unlocked. Called
+    /// under the vault mutex (lock order: the vault, the list, then the questions).
+    pub(super) fn questions_capture(&self, vault: &Vault) -> CoreResult<()> {
+        if self.role != Role::App {
+            return Ok(());
+        }
+        let Some(vault_id) = guard(&self.list).selected.clone() else {
+            return Ok(());
+        };
+        let read = read_keys(vault)?;
+        let mut state = guard(&self.questions);
+        match read {
+            Some((membership, keys)) => state.keep(&vault_id, keys, &membership.public_key, || {
+                member_of(&membership)
+            }),
+            None => {
+                if state.forget(&vault_id) {
+                    self.save_push(&state);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The selected vault, with its context read again from it while it is unlocked.
+    fn questions_refresh(&self) -> CoreResult<Selected> {
+        let slot = guard(&self.vault);
+        let selected = guard(&self.list).selected.clone();
+        let Some(id) = selected else {
+            return Ok(Selected::None);
+        };
+        match slot.as_ref() {
+            Some(vault) if !vault.is_locked() => {
+                self.questions_capture(vault)?;
+                Ok(Selected::Unlocked(id))
+            }
+            _ => Ok(Selected::Locked(id)),
+        }
+    }
+
+    /// The context of `vault_id`, else of the selected vault.
+    fn context_of(&self, vault_id: Option<&str>, selected: &Selected) -> CoreResult<Using> {
+        let id = match vault_id {
+            Some(id) => id,
+            None => selected.id().ok_or_else(CoreError::no_vault)?,
+        };
+        let found = guard(&self.questions)
+            .contexts
+            .get(id)
+            .map(|context| Using {
+                vault_id: id.to_owned(),
+                member: Arc::clone(&context.member),
+                keys: Arc::clone(&context.keys),
+            });
+        match found {
+            Some(using) => Ok(using),
+            None if vault_id.is_none() || selected.id() == Some(id) => Err(selected.missing()),
+            None => Err(not_open(guard(&self.list).get(id).is_some())),
+        }
+    }
+
+    /// The context that answers `qid`: the one that holds it. `vault_id`, when given,
+    /// must name that context: an answer never goes out with the keys of another vault.
+    fn context_for(&self, qid: &str, vault_id: Option<&str>) -> CoreResult<Using> {
+        if let Some(id) = vault_id
+            && guard(&self.list).get(id).is_none()
+        {
+            return Err(not_open(false));
+        }
+        let selected = self.questions_refresh()?;
+        let mut owners = guard(&self.questions).owners(qid);
+        if owners.is_empty() && envelope::valid_qid(qid) {
+            let any = !guard(&self.questions).contexts.is_empty();
+            if any {
+                self.questions_fetch(Duration::ZERO, false)?;
+                owners = guard(&self.questions).owners(qid);
+            }
+        }
+        match (vault_id, owners.as_slice()) {
+            (Some(id), owners) if owners.is_empty() || owners.iter().any(|owner| owner == id) => {
+                self.context_of(Some(id), &selected)
+            }
+            (Some(_), _) => Err(wrong_vault()),
+            (None, [owner]) => self.context_of(Some(owner), &selected),
+            (None, []) => {
+                // A question that no context holds: the context of the selected vault
+                // says why (it expired, or this iPhone was removed), else any context.
+                let first = guard(&self.questions).contexts.keys().next().cloned();
+                match (self.context_of(None, &selected), first) {
+                    (Err(_), Some(first)) => self.context_of(Some(&first), &selected),
+                    (found, _) => found,
+                }
+            }
+            (None, _) => Err(CoreError::invalid(
+                "Two vaults have a question with this ID. Name the vault of the answer.",
+            )),
+        }
+    }
+
+    /// Write [`PUSH_FILE`]. The app only; a failure leaves the old list (the core tries
+    /// again at the next change).
+    fn save_push(&self, state: &State) {
+        if self.role != Role::App {
+            return;
+        }
+        let file = PushFile {
+            version: 1,
+            clear: state.push_clear.clone(),
+        };
+        if let Ok(text) = serde_json::to_vec(&file) {
+            let _ = write_private(&self.paths.data_dir, PUSH_FILE, &text);
+        }
+    }
+
+    /// A context of the vault `vault_id` from its passphrase, without selecting or
+    /// opening it for the other calls: the vault opens for the reads and closes again.
+    ///
+    /// The vault file is open (with its exclusive `.lock`) only under the `opening` mutex,
+    /// which `lock`, `suspend`, and `remove_vault` take too: a suspend waits for the key
+    /// derivation, so no file lock outlives it (iOS ends a suspended app that holds one).
+    fn questions_unlock(&self, vault_id: &str, passphrase: &str) -> CoreResult<VaultOpened> {
+        if guard(&self.list).get(vault_id).is_none() {
+            return Err(not_open(false));
+        }
+        let selected = self.questions_refresh()?;
+        let status = |state: &State| {
+            state
+                .contexts
+                .get(vault_id)
+                .map_or_else(StatusOut::off, |context| StatusOut::of(&context.keys))
+        };
+        if matches!(&selected, Selected::Unlocked(id) if id == vault_id) {
+            // The open vault has its context already, but the app may keep this
+            // passphrase behind Face ID: it must open the vault.
+            match Vault::verify_passphrase_at(&self.paths.vault_file(vault_id), passphrase) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        VaultErrorKind::WrongKeyOrCorrupt | VaultErrorKind::InvalidInput
+                    ) =>
+                {
+                    return Err(VaultErrorKind::WrongKeyOrCorrupt.into());
+                }
+                Err(error) => return Err(error.into()),
+            }
+            return Ok(VaultOpened {
+                vault_id: vault_id.to_owned(),
+                status: status(&guard(&self.questions)),
+            });
+        }
+        let drops = guard(&self.questions).drops;
+        let (read, titles) = {
+            let _opening = guard(&self.opening);
+            // A removal in between deleted the file.
+            if guard(&self.list).get(vault_id).is_none() {
+                return Err(not_open(false));
+            }
+            let mut vault = Vault::open(&self.paths.vault_file(vault_id))?;
+            // The titles by item UUID go to the agent feeds of the vault (`feed.rs`).
+            let read = vault
+                .unlock(passphrase)
+                .map_err(CoreError::from)
+                .and_then(|()| Ok((read_keys(&vault)?, super::feed::item_titles(&vault).ok())));
+            let _ = vault.lock();
+            drop(vault);
+            read?
+        };
+        let member = match &read {
+            Some((membership, _)) => Some(member_of(membership)?),
+            None => None,
+        };
+        // Lock order: the list, then the questions. A removal of this vault in between
+        // removed its entry first, and drops its context again after.
+        let list = guard(&self.list);
+        let mut state = guard(&self.questions);
+        let refused = if state.drops != drops {
+            // A lock came during the key derivation.
+            Some(CoreError::locked())
+        } else if list.get(vault_id).is_none() {
+            Some(not_open(false))
+        } else {
+            None
+        };
+        drop(list);
+        if let Some(error) = refused {
+            drop(state);
+            if let Some(member) = member {
+                member.close();
+            }
+            return Err(error);
+        }
+        match (read, member) {
+            (Some((membership, keys)), Some(member)) => {
+                let mut member = Some(member);
+                state.keep(vault_id, keys, &membership.public_key, || {
+                    member
+                        .take()
+                        .ok_or_else(|| CoreError::internal("The device is missing."))
+                })?;
+                if let Some(unused) = member {
+                    unused.close();
+                }
+                if let Some(context) = state.contexts.get_mut(vault_id) {
+                    context.feed.titles = titles;
+                }
+            }
+            _ => {
+                if state.forget(vault_id) {
+                    self.save_push(&state);
+                }
+            }
+        }
+        Ok(VaultOpened {
+            vault_id: vault_id.to_owned(),
+            status: status(&state),
         })
     }
 
-    /// `GET /v1/questions` from the last sequence: the new and changed questions go into
-    /// the records. Returns whether any came. A long poll of `wait`.
-    fn questions_fetch(&self, wait: Duration) -> CoreResult<bool> {
-        let member = match self.questions_member() {
-            Ok(member) => member,
-            Err(error) if error.code == "no_questions" => return Ok(false),
-            Err(error) => return Err(error),
+    // ---- A removed vault. ----
+
+    /// `remove_vault` of `vault_id`, before the drop of every context: the questions team
+    /// of the vault drops the push token of this iPhone, and a notifications-only team
+    /// drops this device, with the relay key of its context while it is in memory (the
+    /// vault was open in this session). `left_team`: the team that this device left
+    /// already (the relay sync team). Returns what failed, for [`Self::questions_park`].
+    pub(super) fn questions_leave(
+        &self,
+        vault_id: &str,
+        left_team: Option<&str>,
+    ) -> Option<Leftover> {
+        // The selected vault, open: its context as the vault holds it now.
+        let _ = self.questions_refresh();
+        // Out of the contexts, so the drop of the removal does not end its device.
+        let context = guard(&self.questions).contexts.remove(vault_id)?;
+        let keys = context.keys;
+        // A removed iPhone is no device of that team any more, and a device that left
+        // gets no push.
+        if keys.is_removed() || left_team == Some(keys.team_id.as_str()) {
+            context.member.close();
+            return None;
+        }
+        let mut leftover = Leftover {
+            member: context.member,
+            token: true,
+            leave: keys.questions_only.then_some(keys.device_id),
         };
+        Self::leave_team(&mut leftover);
+        if leftover.done() {
+            leftover.member.close();
+            None
+        } else {
+            Some(leftover)
+        }
+    }
+
+    /// Keep what a removal could not take away, until a lock or a suspend. Called after
+    /// the drop of the removal.
+    pub(super) fn questions_park(&self, leftover: Option<Leftover>) {
+        if let Some(leftover) = leftover {
+            guard(&self.questions).leftovers.push(leftover);
+        }
+    }
+
+    /// `DELETE /v1/push/token`, then `DELETE /v1/devices/{id}` of a notifications-only
+    /// team. A failure stays for the next try.
+    fn leave_team(leftover: &mut Leftover) {
+        if leftover.token && Self::delete_token(&leftover.member).is_ok() {
+            leftover.token = false;
+        }
+        if leftover.token {
+            return;
+        }
+        if let Some(device_id) = leftover.leave {
+            let path = format!("/v1/devices/{device_id}");
+            match leftover.member.call("DELETE", &path, None, Duration::ZERO) {
+                // `401`: the device is no member any more.
+                Ok(_) | Err(RelayCallError::Relay { status: 401, .. }) => leftover.leave = None,
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Try the leftovers of removed vaults again (before each read).
+    fn retry_leftovers(&self) {
+        let (mut leftovers, drops) = {
+            let mut state = guard(&self.questions);
+            (std::mem::take(&mut state.leftovers), state.drops)
+        };
+        if leftovers.is_empty() {
+            return;
+        }
+        for leftover in &mut leftovers {
+            Self::leave_team(leftover);
+        }
+        let (done, open): (Vec<_>, Vec<_>) = leftovers.into_iter().partition(Leftover::done);
+        let mut state = guard(&self.questions);
+        // A lock in between took no leftover: they end here.
+        let ended = if state.drops == drops {
+            state.leftovers.extend(open);
+            done
+        } else {
+            done.into_iter().chain(open).collect()
+        };
+        drop(state);
+        for leftover in ended {
+            leftover.member.close();
+        }
+    }
+
+    // ---- Reading the questions. ----
+
+    /// The contexts that ask the relay: all but those of a removed iPhone.
+    pub(super) fn fetch_targets(&self) -> Vec<(String, Arc<RelayMember>)> {
+        guard(&self.questions)
+            .contexts
+            .iter()
+            .filter(|(_, context)| !context.keys.is_removed())
+            .map(|(id, context)| (id.clone(), Arc::clone(&context.member)))
+            .collect()
+    }
+
+    /// `questions_wait`: one long poll for each context at the same time; the first
+    /// that brings news ends the others.
+    fn questions_wait(&self, wait: Duration) -> CoreResult<bool> {
+        let selected = self.questions_refresh()?;
+        if guard(&self.questions).contexts.is_empty() {
+            return match selected {
+                Selected::Unlocked(_) => Ok(false),
+                other => Err(other.missing()),
+            };
+        }
+        self.questions_fetch(wait, true)
+    }
+
+    /// Read the questions of every context: `GET /v1/questions` from its last sequence,
+    /// with a long poll of `wait`. With `early`, the first context with news ends the
+    /// long polls of the others. Returns whether any came; an error only when every
+    /// context failed.
+    fn questions_fetch(&self, wait: Duration, early: bool) -> CoreResult<bool> {
+        self.retry_leftovers();
+        let targets = self.fetch_targets();
+        let drops = guard(&self.questions).drops;
+        let results: Vec<(String, Arc<RelayMember>, CoreResult<bool>)> = match targets.as_slice() {
+            // Every context is of a removed iPhone: nothing to ask the relay.
+            [] => return self.wait_idle(wait, drops),
+            // One context: a lock ends its call through the device.
+            [(id, member)] => {
+                let result = self.fetch_one(id, member, wait, None);
+                vec![(id.clone(), Arc::clone(member), result)]
+            }
+            _ => {
+                let cancel = Arc::new(Cancel::default());
+                guard(&self.questions).waits.push(Arc::clone(&cancel));
+                let results = std::thread::scope(|scope| {
+                    let running: Vec<_> = targets
+                        .iter()
+                        .map(|(id, member)| {
+                            let cancel = &cancel;
+                            scope.spawn(move || {
+                                let result = self.fetch_one(id, member, wait, Some(cancel));
+                                if early && matches!(result, Ok(true)) {
+                                    cancel.close();
+                                }
+                                match result {
+                                    // Ended by the news of another context.
+                                    Err(_) if cancel.is_closed() => Ok(false),
+                                    other => other,
+                                }
+                            })
+                        })
+                        .collect();
+                    running
+                        .into_iter()
+                        .zip(&targets)
+                        .map(|(running, (id, member))| {
+                            let result = running.join().unwrap_or_else(|_| {
+                                Err(CoreError::internal("The questions could not be read."))
+                            });
+                            (id.clone(), Arc::clone(member), result)
+                        })
+                        .collect()
+                });
+                guard(&self.questions)
+                    .waits
+                    .retain(|held| !Arc::ptr_eq(held, &cancel));
+                results
+            }
+        };
+        let mut state = guard(&self.questions);
+        if state.drops != drops {
+            return Err(CoreError::locked());
+        }
+        let mut changed = false;
+        let mut worked = false;
+        let mut failed = None;
+        for (id, member, result) in results {
+            let error = match result {
+                Ok(news) => {
+                    changed |= news;
+                    worked = true;
+                    None
+                }
+                Err(error) => {
+                    let code = error.code;
+                    failed.get_or_insert(error);
+                    Some(code)
+                }
+            };
+            if let Ok(context) = state.context_mut(&id, &member) {
+                context.error = error;
+            }
+        }
+        match failed {
+            Some(error) if !worked => Err(error),
+            _ => Ok(changed),
+        }
+    }
+
+    /// A long poll with nothing to ask: wait out `wait`, as the relay would, so a caller
+    /// that waits again never spins. A lock ends it.
+    fn wait_idle(&self, wait: Duration, drops: u64) -> CoreResult<bool> {
+        if wait.is_zero() {
+            return Ok(false);
+        }
+        let cancel = Arc::new(Cancel::default());
+        {
+            let mut state = guard(&self.questions);
+            if state.drops != drops {
+                return Err(CoreError::locked());
+            }
+            state.waits.push(Arc::clone(&cancel));
+        }
+        let end = Instant::now() + wait;
+        while !cancel.is_closed() {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(IDLE_STEP));
+        }
+        let mut state = guard(&self.questions);
+        state.waits.retain(|held| !Arc::ptr_eq(held, &cancel));
+        if state.drops != drops {
+            return Err(CoreError::locked());
+        }
+        Ok(false)
+    }
+
+    /// The questions of one context, as [`Self::questions_fetch`]. A push token change
+    /// that the team still needs goes first.
+    fn fetch_one(
+        &self,
+        vault_id: &str,
+        member: &Arc<RelayMember>,
+        wait: Duration,
+        cancel: Option<&Cancel>,
+    ) -> CoreResult<bool> {
+        self.push_due(vault_id, member);
         let mut changed = false;
         let mut wait = wait;
         for _ in 0..MAX_PAGES {
-            let since = guard(&self.questions).since;
+            let since = guard(&self.questions).context_mut(vault_id, member)?.since;
             let seconds = wait.as_secs();
             let path = if seconds > 0 {
                 format!("/v1/questions?since={since}&wait={seconds}")
             } else {
                 format!("/v1/questions?since={since}")
             };
-            let answer = member.call("GET", &path, None, wait).map_err(call_error)?;
+            let answer = member
+                .call_until("GET", &path, None, wait, cancel)
+                .map_err(call_error)?;
             let answer: ListAnswer = serde_json::from_value(answer)
                 .map_err(|_| CoreError::from(SyncError::RelayUnreachable))?;
             let more = answer.questions.len() >= 100;
             let mut state = guard(&self.questions);
-            // A close or another vault in between: this answer is of the old one.
-            if !state
-                .member
-                .as_ref()
-                .is_some_and(|held| Arc::ptr_eq(held, &member))
-            {
-                return Err(CoreError::locked());
-            }
-            if answer.seq < state.since {
+            // A close or another membership in between: this answer is of the old one.
+            let context = state.context_mut(vault_id, member)?;
+            if answer.seq < since {
                 // A relay restored from a backup: read everything again.
-                state.since = 0;
-                state.records.clear();
+                context.since = 0;
+                context.records.clear();
                 changed = true;
                 wait = Duration::ZERO;
                 continue;
             }
-            let mut last = state.since;
+            let mut last = since;
             for mut record in answer.questions {
                 if !envelope::valid_qid(&record.qid) || !envelope::valid_key_id(&record.key_id) {
                     continue;
                 }
                 last = last.max(record.seq);
-                record.answered = state.records.get(&record.qid).and_then(|old| old.answered);
-                state.records.insert(record.qid.clone(), record);
+                if let Some(old) = context.records.get(&record.qid) {
+                    // A call that ran at the same time brought a newer state.
+                    if old.seq > record.seq {
+                        continue;
+                    }
+                    record.answered = old.answered;
+                }
+                context.records.insert(record.qid.clone(), record);
                 changed = true;
             }
-            state.since = if more { last } else { answer.seq.max(last) };
+            let next = if more { last } else { answer.seq.max(last) };
+            context.since = context.since.max(next);
             let at = now();
-            state.records.retain(|_, record| {
+            context.records.retain(|_, record| {
                 let ended = record.settled_at.unwrap_or(record.expires_at);
                 record.state == "open" && at < record.expires_at + KEEP_ENDED_SECONDS
                     || ended + KEEP_ENDED_SECONDS > at
@@ -810,87 +1663,91 @@ impl Core {
     }
 
     fn questions_list(&self) -> CoreResult<ListOut> {
-        let Some(keys) = self.question_keys()? else {
-            return Ok(ListOut {
-                status: StatusOut::off(),
-                questions: Vec::new(),
-            });
-        };
-        let status = StatusOut {
-            enabled: true,
-            team_id: Some(keys.team_id.clone()),
-            relay_device_id: Some(keys.device_id),
-            device_uuid: keys.own.as_ref().map(|own| own.uuid.clone()),
-            answer_key: keys
-                .own
-                .as_ref()
-                .and_then(|own| own.answer_key.as_deref())
-                .map(encode_b64u),
-            has_key: keys.key.is_some(),
-            registered: keys.own.is_some(),
-            removed: keys.own.is_none() && keys.removed,
-        };
-        // A removed iPhone asks the relay nothing: the owner took it out.
-        if status.removed {
-            return Ok(ListOut {
-                status,
-                questions: Vec::new(),
-            });
+        let selected = self.questions_refresh()?;
+        if guard(&self.questions).contexts.is_empty() {
+            return match selected {
+                Selected::Unlocked(_) => Ok(ListOut {
+                    status: StatusOut::off(),
+                    vaults: Vec::new(),
+                    questions: Vec::new(),
+                }),
+                other => Err(other.missing()),
+            };
         }
-        self.questions_fetch(Duration::ZERO)?;
-        let records: Vec<Record> = guard(&self.questions).records.values().cloned().collect();
-        let at = now();
-        let mut questions: Vec<QuestionOut> = records
+        self.questions_fetch(Duration::ZERO, false)?;
+        let names: BTreeMap<String, String> = guard(&self.list)
+            .vaults
             .iter()
-            .map(|record| {
-                let state = state_of(record, at);
-                let opened = keys.open(record);
-                let settle = keys.settle(record).map(|settle| SettleOut {
-                    outcome: settle.outcome,
-                    device_name: settle
-                        .device_name
-                        .map(|name| envelope::shown(&name, SHOWN_NAME)),
-                    device_kind: settle.device_kind,
-                    kind: settle.kind,
-                    at: settle.at,
-                    replaced_by: settle.replaced_by,
-                });
-                let (card, problem) = match opened {
-                    Ok(card) => (Some(card), None),
-                    Err(problem) => (None, Some(problem)),
-                };
-                QuestionOut {
-                    qid: record.qid.clone(),
-                    state,
-                    asker_name: card.as_ref().map_or_else(
-                        || envelope::shown(&record.from_device_name, SHOWN_NAME),
-                        |card| envelope::shown(&card.asker.name, SHOWN_NAME),
-                    ),
-                    created_at: record.created_at,
-                    expires_at: record.expires_at,
-                    problem,
-                    card: card.as_ref().map(card_out),
-                    settle,
-                    answered: record.answered,
-                }
+            .map(|entry| (entry.id.clone(), entry.name.clone()))
+            .collect();
+        // The cards open without the mutex.
+        type Snapshot = (String, Arc<Keys>, Vec<Record>, Option<&'static str>);
+        let copies: Vec<Snapshot> = guard(&self.questions)
+            .contexts
+            .iter()
+            .map(|(id, context)| {
+                (
+                    id.clone(),
+                    Arc::clone(&context.keys),
+                    context.records.values().cloned().collect(),
+                    context.error,
+                )
             })
             .collect();
+        let at = now();
+        let mut status = StatusOut::off();
+        let mut vaults = Vec::new();
+        let mut questions = Vec::new();
+        for (id, keys, records, error) in copies {
+            let name = names.get(&id).cloned().unwrap_or_default();
+            let is_selected = selected.id() == Some(id.as_str());
+            if is_selected {
+                status = StatusOut::of(&keys);
+            }
+            // A removed iPhone shows no question of that vault.
+            if !keys.is_removed() {
+                questions.extend(
+                    records
+                        .iter()
+                        .map(|record| question_out(&id, &name, &keys, record, at)),
+                );
+            }
+            vaults.push(VaultOut {
+                unlocked: is_selected && matches!(selected, Selected::Unlocked(_)),
+                selected: is_selected,
+                status: StatusOut::of(&keys),
+                error,
+                vault_name: name,
+                vault_id: id,
+            });
+        }
         questions.sort_by(|a, b| (b.created_at, &b.qid).cmp(&(a.created_at, &a.qid)));
-        Ok(ListOut { status, questions })
+        Ok(ListOut {
+            status,
+            vaults,
+            questions,
+        })
     }
 
-    /// An open question that passed every check of section 7.3, from the records, or
-    /// from the relay when it is not there yet.
-    fn opened(&self, qid: &str, keys: &Keys) -> CoreResult<Opened> {
+    /// An open question of the context `using` that passed every check of section 7.3,
+    /// from its records, or from the relay when it is not there yet.
+    fn opened(&self, qid: &str, using: &Using) -> CoreResult<Opened> {
         if !envelope::valid_qid(qid) {
             return Err(CoreError::invalid("This question is not known."));
         }
-        let mut record = guard(&self.questions).records.get(qid).cloned();
-        if record.is_none() {
-            self.questions_fetch(Duration::ZERO)?;
-            record = guard(&self.questions).records.get(qid).cloned();
+        let record = |core: &Self| {
+            guard(&core.questions)
+                .contexts
+                .get(&using.vault_id)
+                .filter(|context| Arc::ptr_eq(&context.member, &using.member))
+                .and_then(|context| context.records.get(qid).cloned())
+        };
+        let mut found = record(self);
+        if found.is_none() && !using.keys.is_removed() {
+            self.fetch_one(&using.vault_id, &using.member, Duration::ZERO, None)?;
+            found = record(self);
         }
-        let record = record.ok_or_else(|| CoreError::new("expired", "This question expired."))?;
+        let record = found.ok_or_else(|| CoreError::new("expired", "This question expired."))?;
         match state_of(&record, now()) {
             "open" => {}
             "settled" => {
@@ -901,15 +1758,21 @@ impl Core {
             }
             _ => return Err(CoreError::new("expired", "This question expired.")),
         }
-        let card = keys.open(&record).map_err(unreadable)?;
+        let card = using.keys.open(&record).map_err(unreadable)?;
         Ok(Opened { record, card })
     }
 
-    fn question_open(&self, qid: &str) -> CoreResult<QuestionOut> {
-        let keys = self.question_keys()?.ok_or_else(no_questions)?;
-        let Opened { record, card } = self.opened(qid, &keys)?;
+    fn question_open(&self, qid: &str, vault_id: Option<&str>) -> CoreResult<QuestionOut> {
+        let using = self.context_for(qid, vault_id)?;
+        let Opened { record, card } = self.opened(qid, &using)?;
+        let vault_name = guard(&self.list)
+            .get(&using.vault_id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
         Ok(QuestionOut {
             qid: record.qid.clone(),
+            vault_id: using.vault_id,
+            vault_name,
             state: "open",
             asker_name: envelope::shown(&card.asker.name, SHOWN_NAME),
             created_at: record.created_at,
@@ -921,11 +1784,13 @@ impl Core {
         })
     }
 
+    // ---- Answers. ----
+
     /// The answer string of `answer` at `time`, checked against the card.
     fn prepare_answer(&self, answer: &AnswerIn, time: u64) -> CoreResult<(Prepared, Ready)> {
-        let keys = self.question_keys()?.ok_or_else(no_questions)?;
-        let own = keys.own_row()?;
-        let Opened { record, card } = self.opened(&answer.qid, &keys)?;
+        let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
+        let own = using.keys.own_row()?;
+        let Opened { record, card } = self.opened(&answer.qid, &using)?;
         let choice = Choice::for_card(
             &answer.kind,
             answer.action.as_deref(),
@@ -937,7 +1802,7 @@ impl Core {
         .map_err(CoreError::invalid)?;
         let text = envelope::answer_string(
             &own.uuid,
-            &keys.team_id,
+            &using.keys.team_id,
             &record.qid,
             &choice,
             &card.digest,
@@ -952,7 +1817,7 @@ impl Core {
         Ok((
             prepared,
             Ready {
-                keys,
+                using,
                 own,
                 record,
                 digest: card.digest,
@@ -976,7 +1841,8 @@ impl Core {
             return Err(CoreError::invalid("The answer has a time in the future."));
         }
         let (prepared, ready) = self.prepare_answer(answer, time)?;
-        let member = self.questions_member()?;
+        let member = &ready.using.member;
+        let keys = &ready.using.keys;
         let signature = if prepared.needs_face_id {
             let answer_key = ready.own.answer_key.as_deref().ok_or_else(not_registered)?;
             let signature = answer
@@ -1000,11 +1866,7 @@ impl Core {
             }
             member.sign(prepared.answer_string.as_bytes())?
         };
-        let (key_id, key) = ready
-            .keys
-            .key
-            .as_ref()
-            .ok_or_else(|| unreadable(SYNC_FIRST))?;
+        let (key_id, key) = keys.key.as_ref().ok_or_else(|| unreadable(SYNC_FIRST))?;
         if *key_id != ready.record.key_id {
             return Err(unreadable(SYNC_FIRST));
         }
@@ -1024,12 +1886,7 @@ impl Core {
         }
         let mut nonce = [0u8; 12];
         getrandom::fill(&mut nonce).map_err(|_| CoreError::io())?;
-        let aad = envelope::answer_aad(
-            &ready.keys.team_id,
-            &ready.record.qid,
-            key_id,
-            ready.keys.device_id,
-        );
+        let aad = envelope::answer_aad(&keys.team_id, &ready.record.qid, key_id, keys.device_id);
         let sealed = envelope::seal(key, &nonce, &aad, &plaintext)
             .ok_or_else(|| CoreError::internal("The answer cannot be sealed."))?;
         let body = json!({
@@ -1050,7 +1907,9 @@ impl Core {
         let posted: Posted = serde_json::from_value(result)
             .map_err(|_| CoreError::from(SyncError::RelayUnreachable))?;
         let kind = ready.choice.kind();
-        if let Some(record) = guard(&self.questions).records.get_mut(&ready.record.qid) {
+        if let Ok(context) = guard(&self.questions).context_mut(&ready.using.vault_id, member)
+            && let Some(record) = context.records.get_mut(&ready.record.qid)
+        {
             record.answered = Some(kind);
         }
         Ok(Sent {
@@ -1061,28 +1920,89 @@ impl Core {
     }
 
     /// Check that the vault holds this iPhone's row with the answer key `public_key`
-    /// (section 5.2). It writes nothing: the Mac that confirmed the link of this iPhone
-    /// wrote the row from the keys of the link. `not_registered`: the row has not synced
-    /// here yet. `removed`: the owner removed this iPhone. `answer_key_changed`: the row
-    /// holds another answer key (a new Face ID enrollment made a new one, or the relay
-    /// changed the link): the owner removes this iPhone and connects it again.
-    fn answer_key_register(&self, public_key: &str) -> CoreResult<Registered> {
+    /// (section 5.2), in the context of `vault_id`, else of the selected vault. It
+    /// writes nothing: the Mac that confirmed the link of this iPhone wrote the row from
+    /// the keys of the link. `not_registered`: the row has not synced here yet.
+    /// `removed`: the owner removed this iPhone. `answer_key_changed`: the row holds
+    /// another answer key (a new Face ID enrollment made a new one, or the relay changed
+    /// the link): the owner removes this iPhone and connects it again.
+    fn answer_key_register(
+        &self,
+        public_key: &str,
+        vault_id: Option<&str>,
+    ) -> CoreResult<Registered> {
         self.require_app()?;
         let answer_key = decode_b64u(public_key)
             .filter(|key| key.len() == 65 && key[0] == 0x04)
             .ok_or_else(|| CoreError::invalid("The answer key is not a P-256 public key."))?;
-        let keys = self.question_keys()?.ok_or_else(no_questions)?;
-        let own = keys.own_row()?;
+        let selected = self.questions_refresh()?;
+        let using = self.context_of(vault_id, &selected)?;
+        let own = using.keys.own_row()?;
         if own.answer_key.as_deref() != Some(answer_key.as_slice()) {
             return Err(answer_key_changed());
         }
         Ok(Registered {
             device_uuid: own.uuid,
-            team_id: keys.team_id,
-            relay_device_id: keys.device_id,
+            team_id: using.keys.team_id.clone(),
+            relay_device_id: using.keys.device_id,
         })
     }
 
+    // ---- The push token (relay-questions-v1 section 14). ----
+
+    fn put_token(member: &RelayMember, token: &PushToken) -> CoreResult<TokenSetWire> {
+        let body = json!({
+            "token": token.token,
+            "environment": token.environment,
+            "bundle_id": token.bundle_id,
+        });
+        let result = member
+            .call("PUT", "/v1/push/token", Some(&body), Duration::ZERO)
+            .map_err(call_error)?;
+        serde_json::from_value::<TokenSetWire>(result)
+            .map_err(|_| SyncError::RelayUnreachable.into())
+    }
+
+    fn delete_token(member: &RelayMember) -> CoreResult<()> {
+        member
+            .call("DELETE", "/v1/push/token", None, Duration::ZERO)
+            .map(|_| ())
+            .map_err(call_error)
+    }
+
+    /// The push token change that the team of `vault_id` still needs, before its next
+    /// read. A failure waits for the next one.
+    fn push_due(&self, vault_id: &str, member: &Arc<RelayMember>) {
+        let (due, token) = {
+            let mut state = guard(&self.questions);
+            let token = state.push.clone();
+            let Ok(context) = state.context_mut(vault_id, member) else {
+                return;
+            };
+            (context.push_due.take(), token)
+        };
+        let done = match (due, token) {
+            (None, _) => return,
+            (Some(PushDue::Set), Some(token)) => Self::put_token(member, &token).is_ok(),
+            // Notifications went off after the context was made.
+            (Some(PushDue::Set), None) => true,
+            (Some(PushDue::Clear), _) => Self::delete_token(member).is_ok(),
+        };
+        let mut state = guard(&self.questions);
+        if done {
+            if due == Some(PushDue::Clear) && state.push_clear.remove(vault_id) {
+                self.save_push(&state);
+            }
+        } else if let Ok(context) = state.context_mut(vault_id, member) {
+            // A newer change (`push_token_set` or `_clear`) in between wins.
+            if context.push_due.is_none() {
+                context.push_due = due;
+            }
+        }
+    }
+
+    /// `push_token_set`: the token goes to the questions team of every context, and to
+    /// the team of each vault that opens later in this process.
     fn push_token_set(
         &self,
         token: &str,
@@ -1099,17 +2019,122 @@ impl Core {
         if !matches!(environment, "development" | "production") {
             return Err(CoreError::invalid("The push environment is not valid."));
         }
-        let member = self.questions_member()?;
-        let body = json!({"token": token, "environment": environment, "bundle_id": bundle_id});
-        let result = member
-            .call("PUT", "/v1/push/token", Some(&body), Duration::ZERO)
-            .map_err(call_error)?;
-        serde_json::from_value::<TokenSetWire>(result)
-            .map(|wire| TokenSet {
-                device_id: wire.device_id,
-                updated_at: wire.updated_at,
-            })
-            .map_err(|_| SyncError::RelayUnreachable.into())
+        let selected = self.questions_refresh()?;
+        let token = PushToken {
+            token: token.to_owned(),
+            environment: environment.to_owned(),
+            bundle_id: bundle_id.to_owned(),
+        };
+        {
+            let mut state = guard(&self.questions);
+            state.push = Some(token.clone());
+            // Notifications are on again: no team needs a clear.
+            if !state.push_clear.is_empty() {
+                state.push_clear.clear();
+                self.save_push(&state);
+            }
+            for context in state.contexts.values_mut() {
+                context.push_due = None;
+            }
+        }
+        let mut targets = self.fetch_targets();
+        if targets.is_empty() {
+            return Err(selected.missing());
+        }
+        // The selected vault first: its device number is the one of the answer.
+        targets.sort_by_key(|(id, _)| selected.id() != Some(id.as_str()));
+        let mut vaults = Vec::new();
+        let mut first: Option<(u64, u64)> = None;
+        let mut failed = None;
+        for (id, member) in targets {
+            let out = match Self::put_token(&member, &token) {
+                Ok(wire) => {
+                    first.get_or_insert((wire.device_id, wire.updated_at));
+                    PushOut {
+                        vault_id: id,
+                        device_id: Some(wire.device_id),
+                        updated_at: Some(wire.updated_at),
+                        error: None,
+                    }
+                }
+                Err(error) => {
+                    if let Ok(context) = guard(&self.questions).context_mut(&id, &member) {
+                        context.push_due = Some(PushDue::Set);
+                    }
+                    let code = error.code;
+                    failed.get_or_insert(error);
+                    PushOut {
+                        vault_id: id,
+                        device_id: None,
+                        updated_at: None,
+                        error: Some(code),
+                    }
+                }
+            };
+            vaults.push(out);
+        }
+        match (first, failed) {
+            (Some((device_id, updated_at)), _) => Ok(TokenSet {
+                device_id,
+                updated_at,
+                vaults,
+            }),
+            (None, Some(error)) => Err(error),
+            (None, None) => Err(CoreError::internal("The push token went nowhere.")),
+        }
+    }
+
+    /// `push_token_clear`: the token leaves the questions team of every context. Each
+    /// other vault on this iPhone, and a team that failed, goes into [`PUSH_FILE`]: its
+    /// token is cleared when the vault opens.
+    fn push_token_clear(&self) -> CoreResult<TokenCleared> {
+        self.questions_refresh()?;
+        let vault_ids: Vec<String> = guard(&self.list)
+            .vaults
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let targets = {
+            let mut state = guard(&self.questions);
+            state.push = None;
+            for context in state.contexts.values_mut() {
+                context.push_due = None;
+            }
+            let without: Vec<String> = vault_ids
+                .into_iter()
+                .filter(|id| !state.contexts.contains_key(id))
+                .collect();
+            state.push_clear.extend(without);
+            // A removed iPhone is no device of that team any more: nothing to clear.
+            state
+                .contexts
+                .iter()
+                .filter(|(_, context)| !context.keys.is_removed())
+                .map(|(id, context)| (id.clone(), Arc::clone(&context.member)))
+                .collect::<Vec<_>>()
+        };
+        let mut cleared = Vec::new();
+        for (id, member) in targets {
+            match Self::delete_token(&member) {
+                Ok(()) => cleared.push(id),
+                Err(_) => {
+                    let mut state = guard(&self.questions);
+                    if let Ok(context) = state.context_mut(&id, &member) {
+                        context.push_due = Some(PushDue::Clear);
+                    }
+                    state.push_clear.insert(id);
+                }
+            }
+        }
+        let mut state = guard(&self.questions);
+        for id in &cleared {
+            state.push_clear.remove(id);
+        }
+        self.save_push(&state);
+        Ok(TokenCleared {
+            cleared,
+            pending: state.push_clear.iter().cloned().collect(),
+        })
     }
 
     // ---- A notifications-only team (plan §A7). ----
@@ -1225,6 +2250,10 @@ impl Core {
                     created_at: 0,
                 };
                 vault.add_relay_membership(&membership)?;
+                // The new device starts the context of this vault, with its session.
+                if let Some((_, keys)) = read_keys(vault)? {
+                    guard(&self.questions).put(&attaching.vault_id, Arc::new(member), keys);
+                }
                 Ok(())
             })
         })();
@@ -1233,10 +2262,6 @@ impl Core {
             joined.cancel();
             return Err(error);
         }
-        let mut state = guard(&self.questions);
-        state.member = Some(Arc::new(member));
-        state.since = 0;
-        state.records.clear();
         Ok(attaching.view("attached"))
     }
 }
@@ -1249,7 +2274,7 @@ struct TokenSetWire {
 
 /// An answer that passed the checks, ready to sign and seal.
 struct Ready {
-    keys: Keys,
+    using: Using,
     own: TrustedDevice,
     record: Record,
     digest: String,

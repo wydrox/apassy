@@ -16,6 +16,14 @@
 //!
 //! After the unlock, the tour sends one run of an agent to the broker of the app (the
 //! token is in `HOME/tour-agent-token`), so Decisions has a question that waits.
+//!
+//! `APASSY_TOUR_RELAY=on` (or `old`) with `run`: the synthetic relay scene. Before the
+//! window opens, the vault of `$HOME` gets a questions team on the fake relay of the
+//! tests (`tests/common/fake_relay.rs`, in this process on 127.0.0.1, never the network)
+//! and one linked iPhone, so Settings > Devices > Relay shows the questions on and "Show
+//! agents on the iPhone". With `old` the relay has no feed routes (a relay before
+//! relay-feed-v1), and the row shows the problem of the feed under it. The tour then
+//! shows only that group: `settings-devices-relay` or `settings-devices-relay-old`.
 
 use std::collections::VecDeque;
 use std::io::Write as _;
@@ -35,6 +43,11 @@ use apassy::vault::{
     Scope, SecretValue, Vault,
 };
 use eframe::egui;
+
+/// The fake relay reads the app's sync module under this name.
+use apassy::sync as relay_api;
+#[path = "../tests/common/fake_relay.rs"]
+mod fake_relay;
 
 const PASS: &str = "screenshots-demo-passphrase";
 /// The file in the scratch HOME with the token of the agent that asks in the tour.
@@ -760,6 +773,8 @@ struct Tour {
 }
 
 fn run() {
+    // The relay of the synthetic relay scene serves the whole run.
+    let _relay = relay_scene();
     let steps = VecDeque::from(tour_steps());
     // A fixed size, so the positions of the tour hold on each screen.
     let mut options = native_options();
@@ -784,6 +799,93 @@ fn run() {
         }),
     )
     .expect("window");
+}
+
+/// The scene of `APASSY_TOUR_RELAY`: `on` or `old` (a relay without the feed routes).
+fn relay_mode() -> Option<String> {
+    std::env::var("APASSY_TOUR_RELAY")
+        .ok()
+        .filter(|mode| mode == "on" || mode == "old")
+}
+
+/// The synthetic relay scene (`APASSY_TOUR_RELAY`): a fake relay on 127.0.0.1, a
+/// questions team of the vault of `$HOME` on it, and one iPhone linked as the iPhone app
+/// links (its answer key in the link name). The relay lives as long as the value.
+fn relay_scene() -> Option<fake_relay::FakeRelay> {
+    use apassy::questions::QuestionsClient;
+    use apassy::questions::device_link::link_device_name;
+    use apassy::relay::membership::{
+        adopt_questions_team, new_questions_team, questions_membership, register_linked_device,
+    };
+    use apassy::sync::{DeviceKey, PendingJoin};
+    let mode = relay_mode()?;
+    let relay = fake_relay::FakeRelay::start();
+    if mode == "old" {
+        relay.set_no_feed(true);
+    }
+    let home = std::env::var_os("HOME").expect("HOME");
+    let path = Path::new(&home).join("Library/Application Support/Apassy/vault.db");
+    let mut vault = Vault::open(&path).expect("the seeded vault");
+    vault.unlock(PASS).expect("unlock");
+    assert!(
+        questions_membership(&vault).expect("membership").is_none(),
+        "the relay scene needs a vault seeded for this run"
+    );
+    let membership = new_questions_team(
+        &relay.url,
+        &relay.team_code(),
+        "Personal",
+        "Synthetic MacBook Pro",
+    )
+    .expect("questions team");
+    adopt_questions_team(&mut vault, &membership, "Synthetic MacBook Pro").expect("adopt");
+    let client = QuestionsClient::from_membership(&membership).expect("client");
+    let code = client.create_link().expect("link");
+    let answer = DeviceKey::generate().expect("answer key");
+    let name = link_device_name("Synthetic iPhone", answer.public_key()).expect("link name");
+    let pending = PendingJoin::request_with_key(
+        &code.link,
+        "",
+        &name,
+        DeviceKey::generate().expect("device key"),
+    )
+    .expect("join");
+    let links = client.pending_links(Some(&code)).expect("links");
+    let device = client.confirm_link(&links[0]).expect("confirm");
+    pending.poll().expect("poll").expect("confirmed");
+    register_linked_device(
+        &mut vault,
+        &membership.team_id,
+        device.id,
+        &links[0].device_name,
+        &links[0].public_key,
+    )
+    .expect("iPhone row")
+    .expect("an iPhone row");
+    vault.lock().expect("lock");
+    println!("relay scene {mode} on {}", relay.url);
+    Some(relay)
+}
+
+/// The steps of the relay scene: Settings > Devices, scrolled to its Relay group.
+fn relay_steps(mode: &str) -> Vec<Step> {
+    use Step::*;
+    let shot = if mode == "old" {
+        "settings-devices-relay-old"
+    } else {
+        "settings-devices-relay"
+    };
+    vec![
+        // The questions waiter signs in and publishes its first feed (or meets the
+        // relay without feeds) within a few seconds.
+        Key(egui::Key::Comma, egui::Modifiers::COMMAND),
+        Wait(1.5),
+        Click(LAYOUT.settings_list.0, LAYOUT.settings_list.1 + 2.0 * 48.0),
+        Wait(1.0),
+        Scroll(820.0, 450.0, -2000.0),
+        Wait(4.0),
+        Shot(shot),
+    ]
 }
 
 /// The `.env` file that the tour pastes in New Credential, as in the mockup.
@@ -925,11 +1027,12 @@ fn tour_steps() -> Vec<Step> {
     if std::env::var_os("APASSY_TOUR_FIRST_STEPS").is_some() {
         steps.extend([Wait(1.0), Shot("first-steps")]);
     } else {
-        match std::env::var("APASSY_TOUR") {
-            Ok(file) => steps.extend(parse_steps(
+        match (std::env::var("APASSY_TOUR"), relay_mode()) {
+            (Ok(file), _) => steps.extend(parse_steps(
                 &std::fs::read_to_string(&file).expect("tour file"),
             )),
-            Err(_) => steps.extend(view_steps()),
+            (Err(_), Some(mode)) => steps.extend(relay_steps(&mode)),
+            (Err(_), None) => steps.extend(view_steps()),
         }
     }
     // A live tour waits for more steps (`APASSY_TOUR_LIVE`) and ends on `quit`.

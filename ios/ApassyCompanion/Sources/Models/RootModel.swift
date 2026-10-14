@@ -29,8 +29,12 @@ final class RootModel {
     let companion = AppModel()
     let settings = VaultSettings(defaults: SharedContainer.defaults)
     private(set) var vault: VaultModel?
-    /// Questions through the relay of the selected vault (contract relay-questions-v1).
+    /// Questions through the relay of the vaults on this iPhone (contract relay-questions-v1).
     private(set) var questions: QuestionsModel?
+    /// The agents that the Macs publish for the vaults on this iPhone (contract relay-feed-v1).
+    private(set) var agents: AgentsModel?
+    /// The answer keys of this iPhone, one per questions team: the joins and the questions use them.
+    let answerSigners: any AnswerSigners = RootModel.makeAnswerSigners()
     /// The owner opened the notification of a question: the vault tabs show Questions.
     var questionsRequested = false
     /// Imports from and exports to another app (Apple's credential exchange).
@@ -55,7 +59,7 @@ final class RootModel {
                 let made = try makeVault()
                 vault = made
                 exchange = CredentialExchangeModel(vault: made, system: Self.exchangeSystem())
-                makeQuestions(service: made.service)
+                makeQuestions(vault: made)
                 if let token = earlyImportToken {
                     earlyImportToken = nil
                     exchange?.receive(token: token)
@@ -108,7 +112,7 @@ final class RootModel {
                 service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
                 biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
                 isAway: { [weak vault] in vault?.isInBackground ?? false },
-                answerKey: { try EnclaveAnswerSigner().publicKey() },
+                answerKey: { [answerSigners] team in try answerSigners.joinKey(team: team) },
                 onFinished: { [weak self] _ in self?.finishAddVault() },
                 onCancel: { [weak self] in self?.cancelAddVault() },
                 onCompanionCode: { [weak self] code in self?.pairCompanion(code: code) }))
@@ -125,7 +129,7 @@ final class RootModel {
     /// Prepare first, so a scanner sheet can finish dismissing before navigation changes.
     private func prepareCompanion(code: String) -> String? {
         guard case .pairing(let model) = companion.phase else {
-            return "Open Decisions to check the existing companion pairing before pairing another Mac."
+            return "This iPhone is already paired with a Mac on Wi-Fi, and that pairing is for one Mac. To answer several Macs, use Questions through the relay: on each Mac, open Settings > Devices > Notifications through the relay > Add an iPhone."
         }
         return model.receiveCode(code)
     }
@@ -234,17 +238,31 @@ final class RootModel {
 
     // MARK: Questions
 
-    private func makeQuestions(service: any VaultService) {
+    /// One answer key per questions team in the keychain; a team whose row holds the shared key of
+    /// an earlier version keeps it (`TeamAnswerSigners`).
+    private nonisolated static func makeAnswerSigners() -> any AnswerSigners {
+        TeamAnswerSigners(store: KeychainAnswerKeyStore())
+    }
+
+    private func makeQuestions(vault: VaultModel) {
         let push = PushRegistrar.shared
         let model = QuestionsModel(
-            service: service, signer: EnclaveAnswerSigner(), push: push,
+            service: vault.service, signers: answerSigners, push: push,
             deviceName: settings.deviceName ?? DeviceName.current(), defaults: SharedContainer.defaults,
-            onCompanionCode: { [weak self] code in self?.prepareCompanion(code: code) })
+            onCompanionCode: { [weak self] code in self?.prepareCompanion(code: code) },
+            onDeviceName: { [settings] name in settings.deviceName = name })
+        model.follow(vault)
         questions = model
         push.onToken = { [weak model] token in
             Task { await model?.receivePushToken(token) }
         }
         push.onOpen = { [weak self] in self?.questionsRequested = true }
+        // The removals of exceptions sign with the answer key of the row in each vault's team.
+        let agents = AgentsModel(
+            service: vault.service, signers: answerSigners,
+            registeredKey: { [weak model] vaultID, team in model?.registeredAnswerKey(vaultID: vaultID, team: team) })
+        vault.agents = agents
+        self.agents = agents
     }
 
     // MARK: The service

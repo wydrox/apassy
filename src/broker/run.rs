@@ -97,7 +97,9 @@ use crate::agent::wire::{WireResponse, codes};
 use crate::vault::answers::{AnswerScope, ProjectRef, normal_host};
 use crate::vault::exceptions::Standing;
 use crate::vault::providers;
-use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
+use crate::vault::usage::{
+    CUT_MARK, InteractionKind, MAX_COMMAND_SUMMARY_BYTES, NewItemUse, UseDecidedBy, UseOutcome,
+};
 use crate::vault::{
     ActivityDecision, AgentSummary, DecisionEntry, Declaration, DeclarationSource,
     DeclarationSources, EnvBinding, EnvDelivery, Environment, NewActivity, OwnerLabel, RealOutcome,
@@ -112,6 +114,8 @@ const MAX_ARGS: usize = 64;
 const MAX_ARG_BYTES: usize = 4096;
 const MAX_PURPOSE_BYTES: usize = 500;
 const MAX_PATH_BYTES: usize = 4096;
+/// The Activity text of a run ([`RunRequest::label`]).
+const MAX_LABEL_BYTES: usize = 64;
 
 /// The start of the activity text of a run that the owner approved on the iPhone. It
 /// starts with "Owner approved", so the desktop inbox classifies it as before.
@@ -143,18 +147,20 @@ pub struct RunRequest<'a> {
 }
 
 impl RunRequest<'_> {
-    /// Short text for the activity log. It has no secret value, because the agent does not have one.
-    fn label(&self) -> String {
-        let mut text = format!("run {}", self.command.join(" "));
-        if text.len() > 64 {
-            let mut end = 61;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            text.push_str("...");
+    /// The whole command, as the use log masks and then cuts it.
+    fn command_text(&self) -> String {
+        format!("run {}", self.command.join(" "))
+    }
+
+    /// Short text for the activity log: the whole command masked with the values of every
+    /// item of the request, and only then cut, as the use log does (`store_uses`). An
+    /// agent can put a value in the command; the Activity never shows it, nor a part of
+    /// it at the cut. Without the values, only "run" and the cut mark.
+    fn label(&self, vault: &Vault) -> String {
+        match vault.command_mask(self.items) {
+            Ok(mask) => mask.summary(&self.command_text(), MAX_LABEL_BYTES),
+            Err(_) => format!("run {CUT_MARK}"),
         }
-        text
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -610,18 +616,18 @@ fn known(
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    let label = request.label();
-    let checked = {
+    let (checked, label) = {
         let mut guard = lock(&ctx.vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
             return locked_response();
         };
+        let label = request.label(vault);
         let agent = match authenticate(vault, token, &label) {
             Ok(agent) => agent,
             Err(response) => return response,
         };
         match check(vault, &agent, request) {
-            Ok(checked) => checked,
+            Ok(checked) => (checked, label),
             Err((code, reason)) => {
                 record(
                     vault,
@@ -1792,7 +1798,14 @@ fn store_uses(
     answered_on: &str,
 ) {
     let hosts = run_hosts(request.command);
-    let command_summary = request.label();
+    // The whole command, masked with the values of every item of the request, and only
+    // then cut: a value of one item never shows in the row of another, and a value at
+    // the cut never leaves a part (relay-feed-v1 section 7.2).
+    let Ok(mask) = vault.command_mask(request.items) else {
+        return;
+    };
+    let command_summary = mask.summary(&request.command_text(), MAX_COMMAND_SUMMARY_BYTES);
+    drop(mask);
     for item_id in request.items {
         // Only an item that exists gets a row.
         if vault.details(*item_id).is_err() {

@@ -293,7 +293,7 @@ impl Core {
             remove_temp();
             return Err(CoreError::invalid("This vault is on this iPhone already."));
         }
-        self.close(true);
+        self.close(super::Closing::Switch);
         let file = self.paths.vault_file(&id);
         let renamed = fs::rename(&temp_file, &file)
             .and_then(|()| fs::rename(&temp_state_file, sync_dir.join(format!("{id}.json"))));

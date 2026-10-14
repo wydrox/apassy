@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2.
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2. The questions of every vault on the iPhone (section 5.10, "Several vaults": `vault_id` and `vaults`, `questions_unlock`, the push token in every team) added 2026-10-14 (stream Q1). The agents of the Macs (section 5.12, contract relay-feed-v1) added 2026-10-14 (stream FD).
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -60,6 +60,7 @@ Files in `data_dir`:
 | `phone.json` | The vaults on this iPhone (section 6). |
 | `vaults/<vault_id>.apassy` | The live vault (SQLCipher), as on the Mac. |
 | `sync/<vault_id>.json` and `sync/.*` | The relay sync state and work files, as on the Mac. |
+| `feed-seq.json` | The highest feed `seq` accepted of each Mac (section 5.12). No secret. |
 | `icloud-transfer/<transaction>/…` | Private encrypted input/output snapshots for one coordinated file transaction. |
 | iCloud bookmarks | Private Swift-managed file access records, keyed by vault ID. They contain no passphrase. |
 
@@ -118,14 +119,14 @@ Error codes:
 | Op | Parameters | Result |
 | --- | --- | --- |
 | `info` **R** | | `{"vaults": [Vault], "selected": "<vault_id>" or null, "unlocked": bool, "join": Join or null, "schema": 19, "version": "0.3.4"}` |
-| `select` **R** | `vault_id` | `{}`. Locks the vault that was open. |
+| `select` **R** | `vault_id` | `{}`. Locks the vault that was open. The questions of each vault stay (section 5.10). |
 | `unlock` **R** | `passphrase`, `keep` (bool, app only, default false) | `{}`. Opens the selected vault. With `keep`, the core keeps the passphrase in an erasing buffer until `lock`, for `resume`. |
-| `lock` **R** | | `{}`. Closes the vault, erases a kept passphrase, drops the relay key and token from memory, and ends a long poll. |
-| `suspend` | | `{}`. Closes the vault and ends the relay calls, but keeps a kept passphrase. The app calls it when it leaves the screen. |
+| `lock` **R** | | `{}`. Closes the vault, erases a kept passphrase, drops the relay key and token from memory, drops the questions of every vault (section 5.10), and ends a long poll. |
+| `suspend` | | `{}`. Closes the vault and ends the relay calls, but keeps a kept passphrase. Drops the questions of every vault, as `lock` does. The app calls it when it leaves the screen. |
 | `resume` | | `{"unlocked": bool}`. Opens the vault again with the kept passphrase. False when there is none (the app shows the lock screen). |
 | `check_passphrase` **R** | `passphrase` | `{"ok": bool}`. Checks against the vault file; changes nothing. For the owner check without Face ID. |
 | `create_local_vault` | `name`, `passphrase` | `{"vault": Vault}`. A new vault on this iPhone only, without the relay, selected and unlocked. The app offers it only in a Simulator build and in tests. |
-| `remove_vault` | `vault_id`, `force` (bool) | `{"left_relay": bool}`. Section 5.6. |
+| `remove_vault` | `vault_id`, `force` (bool) | `{"left_relay": bool}`. Section 5.6. Drops the questions of every vault, as `lock` does (section 5.10). |
 
 `Vault`: `{"id": "<vault_id>", "name": "Personal", "relay_url": "https://…" or null, "team_id": "t_…" or null, "device_id": 3 or null, "added_at": 1791200000}`.
 
@@ -341,30 +342,36 @@ The app calls it after a fresh owner check and gives the answer straight to the 
 
 ### 5.10 Questions through the relay (contract relay-questions-v1)
 
-Added 2026-10-12 (stage 5, stream M3). The iPhone is an answering device of [relay-questions-v1](relay-questions-v1.md): it reads the questions of the vault that wait on a Mac, opens and checks each card, and posts the owner's answer. All these calls are of the app only (`not_allowed` in the AutoFill extension) and need the vault unlocked.
+Added 2026-10-12 (stage 5, stream M3). The iPhone is an answering device of [relay-questions-v1](relay-questions-v1.md): it reads the questions that wait on a Mac, opens and checks each card, and posts the owner's answer. All these calls are of the app only (`not_allowed` in the AutoFill extension). Since 2026-10-14 one iPhone answers the questions of every vault it holds, each vault through its own questions team ("Several vaults" below). A call needs at least one vault unlocked in this session; with none, it answers `locked` (or `no_vault` when no vault is selected).
 
-The **questions team** of the selected vault is its relay membership with the purpose `questions`, else its relay sync membership (relay-questions-v1 section 3). An iCloud vault gets a notifications-only team with `join_attach` (plan §A7). The question key is the vault secret `question-key-v1` that a Mac made; the iPhone never makes one, and gets it with the sync of the vault. The iPhone's `trusted_device` row (kind `iphone`) has the relay key of the questions team as `sign_key`, the Secure Enclave answer key as `answer_key`, and its device number in that team; the core finds its own row by `sign_key`. The iPhone never writes this row: the Mac that confirms the join writes it (see after the tables).
+The **questions team** of a vault is its relay membership with the purpose `questions`, else its relay sync membership (relay-questions-v1 section 3). An iCloud vault gets a notifications-only team with `join_attach` (plan §A7). The question key is the vault secret `question-key-v1` that a Mac made; the iPhone never makes one, and gets it with the sync of the vault. The iPhone's `trusted_device` row (kind `iphone`) has the relay key of the questions team as `sign_key`, the Secure Enclave answer key as `answer_key`, and its device number in that team; the core finds its own row by `sign_key`. The iPhone never writes this row: the Mac that confirms the join writes it (see after the tables).
 
 | Op | Parameters | Result |
 | --- | --- | --- |
-| `questions_list` | | `{"status": Status, "questions": [Question]}` |
+| `questions_list` | | `{"status": Status, "vaults": [QuestionsVault], "questions": [Question]}` |
 | `questions_wait` | `timeout` (1 to 25 s) | `{"changed": bool}` |
-| `question_open` | `qid` | `Question` with its card |
-| `question_answer_string` | `qid`, `kind`, `item_id`?, `environment`?, `action`?, `project_key`?, `time`? | `{"time": n, "answer_string": "…", "needs_face_id": bool}` |
+| `questions_unlock` | `vault_id`, `passphrase` | `{"vault_id": "…", "status": Status}` |
+| `question_open` | `qid`, `vault_id`? | `Question` with its card |
+| `question_answer_string` | `qid`, `vault_id`?, `kind`, `item_id`?, `environment`?, `action`?, `project_key`?, `time`? | `{"time": n, "answer_string": "…", "needs_face_id": bool}` |
 | `question_answer` | the same, `time`, `signature`? | `{"id": n, "at": n, "kind": "…"}` |
-| `answer_key_register` | `public_key` (b64u X9.63) | `{"device_uuid": "…", "team_id": "…", "relay_device_id": n}` |
-| `push_token_set` | `token` (lowercase hex, 32 to 200), `environment` (`development` or `production`), `bundle_id`? (default `com.wydrox.apassy.companion`) | `{"device_id": n, "updated_at": n}` |
-| `push_token_clear` | | `{}` |
+| `answer_key_register` | `public_key` (b64u X9.63), `vault_id`? | `{"device_uuid": "…", "team_id": "…", "relay_device_id": n}` |
+| `push_token_set` | `token` (lowercase hex, 32 to 200), `environment` (`development` or `production`), `bundle_id`? (default `com.wydrox.apassy.companion`) | `{"device_id": n, "updated_at": n, "vaults": [PushVault]}` |
+| `push_token_clear` | | `{"cleared": ["<vault_id>"], "pending": ["<vault_id>"]}` |
 | `join_attach` | `link`, `device_name`?, `answer_key` (b64u X9.63, required) | `{"state": "waiting", "team": "…", "words": [w1, w2], "expires_at": n}` |
 | `join_attach_poll` | | the same, `state` `waiting` or `attached` |
 | `join_attach_cancel` | | `{}` |
 
-`Status`: `{"enabled": bool, "team_id": "…"|null, "relay_device_id": n|null, "device_uuid": "…"|null, "answer_key": "<b64u>"|null, "has_key": bool, "registered": bool, "removed": bool}`. `registered` is true when the row of this iPhone is in the vault. `removed` is true when the key of the membership belongs to a removed row: then the list of questions is empty and the core does not ask the relay. Without a questions team `enabled` is false and the list is empty; `questions_wait` answers `changed: false` at once.
+`Status`: `{"enabled": bool, "team_id": "…"|null, "relay_device_id": n|null, "device_uuid": "…"|null, "answer_key": "<b64u>"|null, "has_key": bool, "registered": bool, "removed": bool}`. `registered` is true when the row of this iPhone is in the vault. `removed` is true when the key of the membership belongs to a removed row: then the list has no question of that vault and the core does not ask the relay for it. Without a questions team `enabled` is false; when no vault has a context, the list is empty and `questions_wait` answers `changed: false` at once. When every context is of a removed iPhone, `questions_wait` asks the relay nothing but waits out its `timeout` before `changed: false` (a lock ends it with `locked`), so an app that waits again never spins.
+
+`QuestionsVault`: `{"vault_id": "…", "vault_name": "Work", "selected": bool, "unlocked": bool, "status": Status, "error": "<code>"|null}`. One for each context (below), in the order of `vault_id`. `unlocked` is true for the selected vault while it is open: its keys are read from it at each call; for another vault they are those of its last unlock in this session. `error` is the code of the last relay call of that vault that failed (section 4 codes, such as `relay_unreachable`, or `removed` when the relay removed this device), until one works.
+
+`status` of `questions_list` is the `Status` of the selected vault, as before several vaults, so an older app still works: the `Status` of its context, else `enabled: false` (the selected vault has no team, or it is locked and has no context).
 
 `Question`:
 
 ```json
-{"qid": "oKGio6SlpqeoqaqrrK2urw", "state": "open", "asker_name": "MacBook Pro",
+{"qid": "oKGio6SlpqeoqaqrrK2urw", "vault_id": "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", "vault_name": "Work",
+ "state": "open", "asker_name": "MacBook Pro",
  "created_at": 1790000001, "expires_at": 1790000300, "problem": null, "answered": null,
  "card": {"asker_device": "0b7e5c3a-…", "created_at": 1790000000, "digest": "f3b3…",
           "run": {"id": "123456789012345", "agent": "claude-code", "command": ["npm", "run", "migrate"],
@@ -402,11 +409,29 @@ Answers (relay-questions-v1 sections 5.3, 9, and 13):
 
 The keys of a removed row (`sign_key` and `answer_key`) never register again (the vault answers `AlreadyExists`). A removed iPhone connects again with a new relay key (a new `join_attach`) and a new answer key: the app calls `renew()` on the Secure Enclave key when `status.removed` is true.
 
-Errors of these calls, besides those of section 4: `no_questions` (the vault has no questions team), `not_registered` (no row, no answer key, or the signature does not verify with it), `removed` (the row of this iPhone is removed), `answer_key_changed` (the row holds another answer key), `unreadable` (the card failed a check; the message is the `problem`), `already_answered` (`409 question_settled`), `expired` (`409 question_expired`, `404`, or past `expires_at`), `not_routed`, `too_many_answers` (the relay allows 3 answers of a device for a question, 20 for a question, and a byte budget for the team), `stale_answer`, `push_unavailable` (`409` on `PUT /v1/push/token`).
+Errors of these calls, besides those of section 4: `no_questions` (the vault has no questions team), `not_registered` (no row, no answer key, or the signature does not verify with it), `removed` (the row of this iPhone is removed), `answer_key_changed` (the row holds another answer key), `unreadable` (the card failed a check; the message is the `problem`), `already_answered` (`409 question_settled`), `expired` (`409 question_expired`, `404`, or past `expires_at`), `not_routed`, `too_many_answers` (the relay allows 3 answers of a device for a question, 20 for a question, and a byte budget for the team), `stale_answer`, `push_unavailable` (`409` on `PUT /v1/push/token`), `wrong_vault` (the `vault_id` of an answer is not the vault of its question), `locked` (the `vault_id` names a vault that has no context: unlock it first).
+
+**Several vaults** (2026-10-14, stream Q1). The core holds one unlocked vault, but it keeps a **context** for each vault that was unlocked in this app session, by `unlock` or by `questions_unlock`. A context holds only what the questions need: the relay device of the questions team with its key, the question key, the trusted devices, this iPhone's row, the last sequence, and the questions the relay returned. It holds no item, no other vault secret, and no passphrase.
+
+- `select`, `unlock`, `create_local_vault`, and `join_finish` keep every context. The context of the vault that closes keeps what the vault held at that moment.
+- `lock`, `suspend`, `remove_vault` (of any vault), and the end of the process drop every context: the relay calls end, and the keys leave memory (the question key is erased). After `resume` only the selected vault has a context again; the app calls `questions_unlock` for the others.
+- The context of the selected vault is read again from the vault at each call while it is open, so a sync that brings a new row or a new question key counts at once. The context of another vault keeps what its vault held at its last unlock: a card from a Mac that joined that vault later shows "This question could not be read.", and a new question key shows "Sync this vault to read this question.", until that vault opens again.
+- `questions_list` reads the relay for every context at once and lists all their questions, newest first; each names its `vault_id` and `vault_name`. A relay that fails for one vault sets the `error` of its `QuestionsVault` and leaves its last questions in the list; the call fails only when every vault failed.
+- `questions_wait` runs one long poll for each context at the same time (each is a separate relay device of its own team) and returns as soon as one brings news; that ends the others. A lock ends them all.
+- `question_open`, `question_answer_string`, and `question_answer` take an optional `vault_id`. Without it, the core uses the context that holds `qid` (it reads the relay once when none does); with it, the core refuses with `wrong_vault` when another context holds `qid`, and never signs or sends anything then. An answer is checked, signed, and sealed with the keys of the context of its question only. Two contexts that hold one `qid` (a relay that routes the same ID to two teams) give `invalid_input` without `vault_id`. A `vault_id` that is not on this iPhone is `no_vault`.
+- `answer_key_register` takes an optional `vault_id`; without it, the selected vault.
+- `questions_unlock {vault_id, passphrase}` makes the context of a vault without selecting it: the core opens the vault, reads what the context needs, and closes it again. The selected vault does not change and stays open. The app feeds it the passphrase from the Keychain after Face ID. For the selected vault while it is open it checks the passphrase against the vault file and returns the status (the app may store that passphrase behind Face ID). `wrong_passphrase` for a wrong passphrase; `locked` when a `lock` or a `suspend` came during the key derivation; `busy` when the AutoFill extension holds the vault; `no_vault` when the vault was removed meanwhile (no context of a removed vault survives). The vault file is open only under a mutex that `lock`, `suspend`, and `remove_vault` take too: a `suspend` waits for the key derivation (one PBKDF2 at most), so the app holds no file lock when `suspend` returns. `unlock` opens the selected vault under the same mutex. A vault without a questions team gives `status.enabled: false` and no context.
+- `push_token_set` sends the token to the questions team of every context (not of a removed iPhone), and keeps it in memory: a context made later in this process gets it at its next relay call. `PushVault` is `{"vault_id": "…", "device_id": n|null, "updated_at": n|null, "error": "<code>"|null}`, the selected vault first. The top `device_id` and `updated_at` are of the first team that took the token (the selected vault when it did). The call fails only when no team took it (with the error of the first, or `no_questions` / `locked` when there is no context). A team that failed gets the token at the next relay call of its vault.
+- `push_token_clear` removes the token from the team of every context. A team that failed, and each other vault on this iPhone, goes into `questions-push.json` in the data folder (`{"version": 1, "clear": ["<vault_id>"]}`, vault IDs only, written as `phone.json` is): when that vault opens, the core clears the token there at its first relay call and drops it from the file. `pending` lists those vaults. `push_token_set` empties the file.
+- `remove_vault` of a vault with a context (or the selected vault while it is open) first sends `DELETE /v1/push/token` to its questions team with the relay key in memory, then, for a notifications-only team, `DELETE /v1/devices/{id}` of this iPhone: it leaves that team. A relay sync team that the removal left needs neither. A call that fails is tried again before each later read of the questions while the app runs; a `lock` or a `suspend` drops it with the key. A vault without a context keeps the token in its team until a Mac removes this iPhone.
+
+The app (Swift: `VaultService.questionsUnlock`, `PassphraseStore.readSession`) never asks for Face ID by itself. After an unlock with the passphrase and after a `resume`, the other vaults whose passphrase is stored behind Face ID show one row in Decisions, "Work, Family are locked. Unlock with Face ID to see their questions."; its tap calls `questions_unlock` for each of them. A Face ID unlock of the selected vault ("Unlock Personal, and the questions of Work and Family") and an opened notification read them at once. It reads those passphrases with one Face ID match: one `LAContext`, evaluated once, passed with `kSecUseAuthenticationContext` to each keychain read, and invalidated after the last. A Face ID unlock of the selected vault uses the same match. Each passphrase lives for its call only. A vault that fails stays in the list as locked; a vault without a stored passphrase opens with a passphrase sheet, which calls `questions_unlock` and never `select`. The selected vault never gets a row or the sheet: the lock screen opens it. An answer to a question whose `vault_id` has no context is refused in the app before Face ID.
+
+Older apps: a request without `vault_id` works as before for the selected vault, and `status` is still the selected vault's. An older app that answers a question of another vault without `vault_id` still sends it with the keys of that vault.
 
 After an answer the app shows: "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused." The protocol has no receipts yet.
 
-The app asks for notification permission only when the owner turns notifications on, sends the device token with `push_token_set` at each launch with notifications on, and `push_token_clear` when they are turned off. The notification has the fixed text of relay-questions-v1 section 14.1; opening it shows the questions.
+The app asks for notification permission only when the owner turns notifications on, sends the device token with `push_token_set` at each launch with notifications on (once a vault is unlocked; vaults that open later get it from the core), and `push_token_clear` when they are turned off; it then calls `unregisterForRemoteNotifications`, and while `pending` names vaults with a questions team it says "Notifications stay on for: Work, Family until you open them." The notification has the fixed text of relay-questions-v1 section 14.1; opening it shows the questions.
 
 A person who knows the passphrase of the vault (has the vault) can still write `trusted_device` rows. This is the same class of risk as holding the vault ([relay-questions-v1](relay-questions-v1.md) section 18).
 
@@ -451,6 +476,118 @@ Folder rules (`Vault::create_folder` and the others): a name is trimmed, has 1 t
 `add_pasted` detects `text` again in the core (the app never sends a detected value back) and saves the picked entries in one transaction: all or none (`Vault::add_detected_all`). `pick` names entries by the `index` of `detect` for the same text; when it is absent, every entry. An index that is not there, a repeated index, and an empty `pick` are `invalid_input`; a text with no credential is `invalid_input` with the Mac's note. A title of `titles` replaces the detected title of that entry when it is not empty after trimming (at most 128 bytes), as the title field of each row on the Mac does. The rest is the Mac's: a title that another item has gets " 2", " 3"; a variable that another item uses becomes the automatic name; the declaration, its provider, and the source of each value are saved; the items go to `folder` (`not_found`, "The folder is gone. Select another folder.", when it is not there). The items have no origin: the owner pasted them, as on the Mac (the `item_origin` table records only agents, ADR 0025 §6). `summary` uses the stored title, the stored variable, and the stored environment.
 
 `item_options_set` saves what the owner answered on the credential screen. `always_ask` turns "Always ask me" on or off. `environment` sets the environment of the declaration with the source `owner`; the project, the provider, the other values, and their sources stay. An item without a declaration gets one with this environment and the most sensitive other values, which count as defaults. A declaration event goes to the history. Both members are optional; `always_ask` is applied first. An item that is not there is `not_found` and nothing changes. The core does not check the owner: the app asks for Face ID or the passphrase first when the change makes the bouncer less careful (turning "Always ask me" off, or an environment other than `production`), and for any environment of an item without a declaration (the Mac saves a first declaration only after its owner check), as the Mac asks for its owner check. Turning "Always ask me" on and choosing `production` for an item with a declaration need no check.
+
+### 5.12 The agents of the Macs (contract relay-feed-v1)
+
+Added 2026-10-14 (stream FD). The iPhone is a reader and a sender of [relay-feed-v1](relay-feed-v1.md): it reads the sealed feed that each Mac publishes of its agents, opens and checks each one (relay-feed-v1 section 7.4), and sends one kind of action back, the removal of an exception of an agent. The source is `ios/ApassyCore/src/core/feed.rs`. All these calls are of the app only (`not_allowed` in the AutoFill extension).
+
+A feed travels in the questions team of its vault, so the feeds use the questions **contexts** of section 5.10: a vault has feeds on this iPhone when it has a context (unlocked in this session by `unlock` or `questions_unlock`). What the feeds of a vault hold in memory (the last good feed of each Mac, the actions this process posted, the titles of the vault's items by item UUID) is part of its context: a `lock`, a `suspend`, and `remove_vault` drop it with the context; `select` keeps it. With no context the calls answer `locked` (or `no_vault` when no vault is selected), as the questions calls do; with an unlocked vault that has no questions team, `feed_list` answers `{"vaults": []}` and `feed_wait` `{"changed": false}` at once.
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `feed_list` | | `{"vaults": [FeedVault]}` |
+| `feed_wait` | `timeout` (1 to 25 s) | `{"changed": bool}` |
+| `feed_action_string` | `vault_id`, `mac_device`, `agent`, `item`, `kind`, `created_at`, `action_id`?, `time`? | `Prepared` |
+| `feed_action` | the same, `action_id`, `time`, `signature`? | `{"action_id": "…", "seq": n\|null, "created_at": n\|null, "expires_at": n\|null}` |
+| `feed_action_wait` | `action_id`, `vault_id`?, `timeout`? (0 to 25 s, default 0) | `Outcome` |
+
+`feed_action_status` is accepted as another name of `feed_action_wait` (the name of relay-feed-v1 section 2).
+
+**`feed_list`** reads `GET /v1/feed` for every context at once (from its last `change`, without a long poll) and answers what this iPhone shows:
+
+```json
+{"vaults": [
+  {"vault_id": "4f1c0a2b-…", "vault_name": "Personal", "team_id": "t_7k2m5q4x3c",
+   "registered": true, "answer_key": true, "error": null,
+   "macs": [
+     {"device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", "relay_device_id": 2, "name": "MacBook Pro",
+      "seq": 1790000040, "generated_at": 1790000040, "stale": false, "truncated": false,
+      "problem": null, "can_act": true, "week": {"by_you": 3, "automatic": 128},
+      "agents": [
+        {"id": "4", "name": "Claude Code", "host": "claude", "where": "mac", "revoked": false,
+         "token_expires_at": 1797776000, "last_use_at": 1790000010, "uses_this_week": 12,
+         "projects": ["synthetic-shop"], "note": "Deploys only from the main branch.",
+         "restricted": false,
+         "actions": [{"action": "deploy", "allowed": 2, "not_allowed": 1, "projects": ["synthetic-shop"]}],
+         "exceptions": [{"item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "item_title": "Shop database",
+                         "title": null, "here": false, "kind": "never", "created_at": 1789990000}],
+         "recent": [{"at": 1790000010, "item": "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e",
+                     "item_title": "API token", "title": "API token", "here": true,
+                     "action": "deploy", "project": "synthetic-shop",
+                     "command": "npm run deploy -- --token [apassy:secret]",
+                     "outcome": "allowed", "decided_by": "owner", "answered_on": "Test iPhone"}]}]}]}]}
+```
+
+- One `FeedVault` for each context, in the order of `vault_id`. `registered`: the vault holds the row of this iPhone (it can send actions). `answer_key`: that row has an answer key (it can send the Face ID kinds; else the app says "Connect this iPhone again on a Mac to use Face ID here." for `never` and `always_ask`). `error` is the code of the last relay call of that vault that failed, until one works: `feed_unavailable` for a relay without feeds (relay-feed-v1 section 14.2), `relay_unreachable`, `removed`, and the others of section 4. The call fails only when every vault failed. A removed iPhone (`status.removed` of section 5.10) gets no Mac of that vault.
+- A Mac is listed when its last feed passed every check of relay-feed-v1 section 7.4: the envelope opens with the question key of its `key_id` and the AAD of the relay's `device_id` and `seq`; the JSON has exactly the fields of section 7.1 within the limits, `v` 1, and the relay's `seq`; `mac.device` is a live `trusted_device` of kind `mac` whose device number in the team (`relay_devices`) on this iPhone's copy of the vault is the relay's `device_id` (a Mac whose number has not synced here yet publishes nothing: its feed is ignored, with no text); and `seq` is above the highest `seq` this iPhone accepted of that relay device. A feed that fails step 4 or 5 is ignored with no text. A Mac removed from the vault leaves at once, and a Mac that is not in the relay's `present` leaves the list.
+- `name` is the name of the Mac's `trusted_device` row. `relay_device_id` is its device number in the team, the target of an action.
+- `problem` is the text of the step that the last feed of this Mac failed: "Sync this vault to see the agents of <Mac>." (step 1: another key, or it does not open) or "Update Apassy to see the agents of <Mac>." (steps 2 and 3). The last good feed stays with it. When no feed of the Mac opened in this session, the Mac is listed with `seq`, `generated_at`, and `week` null and no agent. Such a Mac is listed only when a live trusted Mac row has that device number.
+- `can_act` is whether this iPhone can act on this feed. It is true for the selected, unlocked vault (its keys and devices are read again at each call), and for another vault when its keys were read (its last `questions_unlock`, or while it was selected) after this feed came. A vault that is not selected holds a copy of its `trusted_devices` from then: a later feed may come from a Mac removed from the vault since, so it is listed with `can_act: false`, `feed_action_string` refuses it (`invalid_input`), and the app says "Select <vault> on this iPhone to remove exceptions of its agents." The core cannot read such a vault again without its passphrase. Problem-only Macs have `can_act: false`.
+- `stale` is true when `generated_at` is more than 24 hours old on the iPhone's clock: the app dims the Mac ("The Mac has not reported since <date>") and offers no action. A `generated_at` in the future is not stale; the app shows it as "now".
+- The members of an agent are those of the feed (relay-feed-v1 section 7.1), every text with control and format characters replaced by `?`. For each exception and recent use, `item` and `item_title` are the feed's; `title` is the title of the item with that UUID in the vault on this iPhone, else null; `here` is whether the vault on this iPhone holds it (false for a null `item`; null when the items of the vault were not read in this session). The app shows `title`, else `item_title` with "not on this iPhone", and "A deleted credential" for a null `item` (with no action).
+- After an applied removal (`feed_action_wait` with `outcome: applied` and `verified: true`), the exception leaves the list at once (in the feed of that Mac shown then, which may be newer than the one the action named), until the next feed of that Mac.
+- An item reference is the vault's own form of an item UUID, 32 lowercase hex characters with no hyphens, as `item.uuid` holds it (`Vault::item_uuids`; relay-feed-v1 section 4). It is the only form: a feed with another form (a hyphenated or upper-case UUID) fails step 2 ("Update Apassy to see the agents of <Mac>."), `feed_action_string` and `feed_action` refuse it (`invalid_input`), and the core compares it byte for byte, never reformatted. An item of the vault on this iPhone whose stored UUID has another form has no `title` in the list.
+
+**The high-water mark.** The core keeps the highest `seq` accepted of each Mac, by team and relay device id, in `feed-seq.json` in the data folder (`{"version": 1, "teams": {"t_7k2m5q4x3c": {"2": 1790000040}}}`, written as `phone.json` is). It holds no secret and stays after a lock and a restart, so a relay cannot bring back an older feed. A feed with a lower `seq` is ignored; a feed with the same `seq` shows only when this process does not show that Mac (after a lock or a restart: the AAD binds the `seq`, so it is the same feed).
+
+**`feed_wait {timeout}`** runs one long poll of `GET /v1/feed` for each context at the same time and returns as soon as one brings news (a new feed, a removed one, a new problem); that ends the others. `changed: false` after the timeout. A `lock` or a `suspend` ends them all with `locked`. The app calls it only while the Agents tab or an agent page is on the screen, and `feed_list` after `changed: true`.
+
+**`feed_action_string`** builds the action string of relay-feed-v1 section 9.3 for the exception that the feed shows:
+
+```json
+{"op": "feed_action_string", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+ "agent": "4", "item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "kind": "never", "created_at": 1789990000}
+```
+
+```json
+{"vault_id": "4f1c0a2b-…", "team_id": "t_7k2m5q4x3c", "action_id": "sLGys7S1tre4ubq7vL2-vw",
+ "time": 1790000060, "feed_seq": 1790000040,
+ "action_string": "apassy-feed-action-v1\n6f1c0e2a-…\n0b7e5c3a-…\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060",
+ "needs_face_id": true, "face_id_reason": "remove an exception of agent \"Claude Code\""}
+```
+
+- `mac_device` is the `device` of the Mac in `feed_list`; `agent`, `item`, `kind`, and `created_at` are those of the exception in the list. `kind` is `never`, `always_ask`, or `only`. The core finds the exception in the last good feed of that Mac (it reads the relay once when it has none): an exception, an agent, or a Mac that is not there is `not_found` ("This list of the Mac changed. Look at it again."); a disconnected agent is `invalid_input`. The string has the device UUID of this iPhone's row (`by`), the Mac's UUID (`to`), the team, the `action_id`, the exception, the `seq` of that feed (`feed_seq`), and `time`.
+- `action_id` is 16 random bytes of the core, b64u (22 characters), unless the request gives one (a retry); `time` is now unless the request gives one. The app keeps both for `feed_action`.
+- The core keeps the prepared action by `action_id` in the context of the vault (the string, its `feed_seq`, the target, and the answer key of the row then; at most 64; a `lock` drops them). The same `action_id` and `time` for the same exception answer the kept string again.
+- A Mac with `can_act: false` is refused (`invalid_input`, "Select this vault on this iPhone to act on the agents of its Macs.").
+- `needs_face_id` is true for `never` and `always_ask`: the app signs `action_string` with the Secure Enclave answer key **of the team `team_id`** after Face ID for this action (a new `LAContext`, no reuse), with `face_id_reason` as the prompt (the agent name with control and format characters replaced by `?` as in the list, without `"`, at most 40 characters). For `only` it is false: the core signs with the relay key of the membership, and the app asks nothing.
+- The core does not check the age of the feed here; `feed_action` does.
+- Errors: `removed` and `not_registered` as in section 5.10 (no row of this iPhone); `not_registered` with "Connect this iPhone again on a Mac to use Face ID here." for a Face ID kind when the row has no answer key.
+
+**`feed_action`** takes the same parameters with the `action_id` and `time` of `feed_action_string`, and for a Face ID kind the DER `signature` as b64u:
+
+```json
+{"op": "feed_action", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-…", "agent": "4",
+ "item": "3c9e1f7a…", "kind": "never", "created_at": 1789990000,
+ "action_id": "sLGys7S1tre4ubq7vL2-vw", "time": 1790000060, "signature": "MEUCIQ…"}
+```
+
+```json
+{"action_id": "sLGys7S1tre4ubq7vL2-vw", "seq": 9, "created_at": 1790000060, "expires_at": 1790000360}
+```
+
+- The core sends the action that `feed_action_string` kept for this `action_id`, with its exact string and its `feed_seq`: a newer feed of the Mac that came during Face ID changes nothing (the Mac takes any `feed_seq` up to its last one, relay-feed-v1 section 9.5). An `action_id` it did not prepare (another session, after a lock) is `stale_action`; parameters other than the prepared ones are `invalid_input`. `time` more than 55 s old is `stale_action` (do it again, with Face ID again); more than 60 s ahead is `invalid_input`.
+- It reads the relay once (no long poll; a failure keeps what it holds) and checks the newest feed of that Mac: the Mac is still a publisher of the vault, the agent is not disconnected (`invalid_input`), and the exception is still there and not hidden by an applied removal; else `not_found`, "The list on <Mac> changed. Try again.". A stale newest feed (24 hours) is `stale_feed`.
+- For `never` and `always_ask`, `signature` must verify with the answer key of this iPhone's row over the kept string: `invalid_input` without it or when it does not verify with an unchanged key ("Face ID did not sign this action, so nothing was sent. Try again."); `not_registered` only for a real change: the row has no answer key now, or another one than when the string was made. For `only`, `signature` must be absent (`invalid_input`); the core signs with the relay key, which must be the row's `sign_key`.
+- The core seals the plaintext of relay-feed-v1 section 9.2 (fields in the contract's order) with the question key, a new random nonce, and the AAD `action` with this iPhone's device number as the sender and the Mac's `relay_device_id` as the target, and posts `POST /v1/feed/actions`. A retry after a network error sends the same `action_id`, `time`, and `signature` in a new envelope; a relay that has the action already answers `409 conflict`, and the core answers with `seq`, `created_at`, and `expires_at` null.
+- Relay errors: `not_routed` (`403 not_routed`), `not_found` (`404`: the Mac has no feed on the relay now, it may be locked), `too_many_actions` (`403 too_many_actions`), `too_large`, `removed`, `rate_limited`, `relay_unreachable`.
+- The relay taking the action does not mean that it counted: the settle says that.
+
+**`feed_action_wait`** reads the state of an action that this process posted (`GET /v1/feed/actions/{action_id}`), with a long poll of `timeout` while it is open:
+
+```json
+{"action_id": "sLGys7S1tre4ubq7vL2-vw", "outcome": "applied", "verified": true,
+ "reason": null, "feed_seq": 1790000070, "at": 1790000061}
+```
+
+- `outcome`: `pending` (open), `applied`, `refused`, `stale`, or `expired` (the relay expired it, or it is open past its `expires_at` on this iPhone's clock: "<Mac> did not answer. It may be asleep or locked.").
+- `verified` is true when the settle opened with the question key and the AAD of the relay's clear outcome, and names this action and this outcome; `reason` (the target's text, for `refused` and `stale`; null when empty), `feed_seq`, and `at` come from it. Else they are null, `verified` is false, and `outcome` is `refused` whatever the relay's clear outcome: the only settle a Mac seals so is a refusal (it could not read the action; relay-feed-v1 section 9.5), so an unopenable `applied` or `stale` is never believed, and the row stays.
+- The app shows "Removed on <Mac>." for a verified `applied`, "<Mac> did not accept it: the exception changed. Pull to refresh." for a verified `stale`, "<Mac> refused it: <reason>." for a verified `refused`, and "Not applied, or unknown. Check the list on <Mac>." for any settle with `verified: false`.
+- Without `vault_id` the core uses the context that posted the action. An action that this process does not know (another session, after a lock) is `not_found`, as is one the relay purged.
+
+Errors of these calls, besides those of section 4 and section 5.10: `feed_unavailable`, `not_found`, `stale_action`, `stale_feed`, `too_many_actions`, `not_routed`, `unreadable` (no question key to seal an action: sync the vault), `feed_rate`.
+
+**`feed_rate`.** A `403 feed_rate` of `GET /v1/feed` (relay-feed-v1 section 10.2: the iPhone read its 16 MiB of feed text of the relay's minute) is `feed_rate`, "The relay asks this iPhone to wait a minute before it reads the agents again." The core then reads no feed of that vault for 60 seconds (a whole minute always passes the relay's next one): in that time `feed_list` and the reads of the action calls answer `feed_rate` at once, without the relay, for that vault (the call fails only when every vault failed, as above), and `feed_wait` waits within its `timeout` instead of answering at once (it answers `changed: false` at the end of the timeout, or polls with the time left once the minute passed), so the app's watch loop polls again without a busy loop. A `lock` or a `suspend` ends that wait with `locked`, and drops the pause with the context.
 
 ## 6. `phone.json`
 

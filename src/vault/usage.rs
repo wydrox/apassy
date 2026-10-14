@@ -172,8 +172,9 @@ impl InteractionKind {
     }
 }
 
-/// Printable text without control characters, cut at `max` bytes.
-fn clean(text: &str, max: usize) -> String {
+/// Printable text without control characters, cut at `max` bytes. The feed of the
+/// agents (`questions::feed`) cleans its text with it too.
+pub(crate) fn clean(text: &str, max: usize) -> String {
     let clean: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -184,6 +185,78 @@ fn clean(text: &str, max: usize) -> String {
         end -= 1;
     }
     clean[..end].to_owned()
+}
+
+/// The end of a command summary that was cut.
+pub const CUT_MARK: &str = "...";
+/// A part of a secret value at the end of a cut summary this long or longer is masked too.
+pub const MIN_FRAGMENT_BYTES: usize = 8;
+
+/// The current secret values of some items, to mask a command summary
+/// ([`Vault::command_mask`], [`Vault::vault_command_mask`]). It never shows them.
+pub struct CommandMask(zeroize::Zeroizing<Vec<String>>);
+
+impl std::fmt::Debug for CommandMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CommandMask({} values, redacted)", self.0.len())
+    }
+}
+
+impl CommandMask {
+    /// `text` with control characters replaced, each value masked in the whole text, and
+    /// only then cut to `max` bytes with [`CUT_MARK`]. A cut text (also one that was cut
+    /// before, and ends in [`CUT_MARK`]) whose end is the start of a value, at least
+    /// [`MIN_FRAGMENT_BYTES`] long, has that part masked too.
+    pub fn summary(&self, text: &str, max: usize) -> String {
+        let masked = clean(&super::learning::mask_values(text, &self.0), usize::MAX);
+        let mut head = if masked.len() > max {
+            cut_outside_mask(&masked, max.saturating_sub(CUT_MARK.len()))
+        } else if let Some(head) = masked.strip_suffix(CUT_MARK) {
+            head
+        } else {
+            return masked;
+        };
+        let mut fragment = false;
+        while let Some(len) = value_fragment(head, &self.0) {
+            let room = max.saturating_sub(CUT_MARK.len() + super::learning::MASK.len());
+            head = cut_outside_mask(head, (head.len() - len).min(room));
+            fragment = true;
+        }
+        let mask = if fragment { super::learning::MASK } else { "" };
+        format!("{head}{mask}{CUT_MARK}")
+    }
+}
+
+/// `text` cut to at most `max` bytes at a character boundary, and before a mask that
+/// the cut would split.
+fn cut_outside_mask(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mask = super::learning::MASK;
+    if let Some((start, _)) = text
+        .match_indices(mask)
+        .find(|(start, _)| *start < end && start + mask.len() > end)
+    {
+        end = start;
+    }
+    &text[..end]
+}
+
+/// The length of the longest start of a value, at least [`MIN_FRAGMENT_BYTES`] long,
+/// that `text` ends with.
+fn value_fragment(text: &str, values: &[String]) -> Option<usize> {
+    let text = text.as_bytes();
+    values
+        .iter()
+        .filter_map(|value| {
+            let value = value.as_bytes();
+            (MIN_FRAGMENT_BYTES..=value.len().min(text.len()))
+                .rev()
+                .find(|len| text.ends_with(&value[..*len]))
+        })
+        .max()
 }
 
 type UseRow = (
@@ -252,11 +325,29 @@ fn parse_use(row: UseRow) -> VaultResult<ItemUse> {
 }
 
 impl Vault {
-    /// Store one use. The secret values of the item are masked in the command summary.
-    /// The log drops its oldest rows above [`MAX_ITEM_USE_ROWS`].
+    /// The current secret values of `items`, to mask a command summary.
+    pub fn command_mask(&self, items: &[u64]) -> VaultResult<CommandMask> {
+        Ok(CommandMask(zeroize::Zeroizing::new(
+            self.secret_values(items)?,
+        )))
+    }
+
+    /// The current secret values of every item of the vault, read once, to mask the
+    /// command summaries of the feed (relay-feed-v1 section 7.2).
+    pub fn vault_command_mask(&self) -> VaultResult<CommandMask> {
+        Ok(CommandMask(zeroize::Zeroizing::new(
+            self.all_secret_values()?,
+        )))
+    }
+
+    /// Store one use. The secret values of the item are masked in the whole command
+    /// summary before it is cut ([`CommandMask::summary`]); a caller with more items
+    /// masks their values first, as the run does. The log drops its oldest rows above
+    /// [`MAX_ITEM_USE_ROWS`].
     pub fn record_item_use(&mut self, item_use: &NewItemUse) -> VaultResult<u64> {
-        let values = self.secret_values(&[item_use.item_id])?;
-        let summary = super::learning::mask_values(&item_use.command_summary, &values);
+        let summary = self
+            .command_mask(&[item_use.item_id])?
+            .summary(&item_use.command_summary, MAX_COMMAND_SUMMARY_BYTES);
         let item = to_sql_id(item_use.item_id)?;
         let agent = item_use.agent_id.map(to_sql_id).transpose()?;
         let hosts: Vec<String> = item_use
@@ -517,6 +608,50 @@ mod tests {
     use crate::vault::{Field, ItemDraft, SecretValue};
 
     const PASS: &str = "synthetic-usage-pass";
+
+    fn mask(values: &[&str]) -> CommandMask {
+        let mut values: Vec<String> = values.iter().map(|value| (*value).to_owned()).collect();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        CommandMask(zeroize::Zeroizing::new(values))
+    }
+
+    #[test]
+    fn a_summary_is_masked_whole_before_it_is_cut() {
+        let values = mask(&["SYNTH-first-secret", "SYNTH-second-secret"]);
+        // Short: masked, not cut.
+        assert_eq!(
+            values.summary("a SYNTH-first-secret b", 64),
+            "a [apassy:secret] b"
+        );
+        // A value across the cut is masked whole before the cut.
+        let text = format!("{} SYNTH-second-secret tail", "x".repeat(40));
+        let out = values.summary(&text, 50);
+        assert_eq!(
+            out,
+            format!("{} ...", "x".repeat(40)),
+            "never a part of the mask"
+        );
+        assert!(out.len() <= 50);
+        // A start of a value of 8 bytes or more at the cut is masked; a shorter one is
+        // not a value part this rule knows.
+        let text = format!("{}SYNTH-second", "y".repeat(40));
+        let out = values.summary(&format!("{text}-zzzzzzzz"), 55);
+        assert_eq!(out, format!("{}[apassy:secret]...", "y".repeat(37)));
+        assert!(out.len() <= 55);
+        let out = values.summary(&format!("{}SYNTH-s zzzzzzzzzz", "y".repeat(40)), 50);
+        assert_eq!(out, format!("{}SYNTH-s...", "y".repeat(40)));
+        // A row that was cut before ends in "...": its end is checked too.
+        assert_eq!(
+            values.summary("run deploy --token SYNTH-first-...", 256),
+            "run deploy --token [apassy:secret]..."
+        );
+        assert_eq!(values.summary("run a...", 256), "run a...");
+        // Control characters go first; nothing is longer than the limit.
+        assert_eq!(values.summary("a\nb", 64), "a b");
+        assert!(values.summary(&"é".repeat(200), 61).len() <= 61);
+        assert!(format!("{values:?}").contains("redacted"));
+        assert!(!format!("{values:?}").contains("SYNTH"));
+    }
 
     #[test]
     fn uses_round_trip_and_history_needs_a_connected_agent() {

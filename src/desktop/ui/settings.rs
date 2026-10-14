@@ -174,6 +174,9 @@ pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it."
 pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. Turning it on joins the questions team of this vault, with a link from a Mac that has it on.";
 pub(super) const RELAY_QUESTIONS_REMOVED: &str =
     "Off. This Mac was removed. Turning it on again needs a link from a Mac that has it on.";
+/// The switch of the feed of the agents for the iPhone (relay-feed-v1 section 8). On by
+/// default; `ui.json` keeps it.
+pub(super) const SHOW_AGENTS: &str = "Show agents on the iPhone";
 /// The button that removes a device from the questions, after its confirmation.
 pub(super) const REMOVE_DEVICE: &str = "Remove…";
 /// The button that links an iPhone or another Mac to the questions team.
@@ -200,6 +203,15 @@ pub(super) fn set_relay_questions(app: &mut DesktopApp, on: bool, ctx: Option<&e
         app.questions_turn_on(ctx);
     } else {
         app.questions_turn_off();
+    }
+}
+
+/// Turn "Show agents on the iPhone" on or off. Off: the questions waiter deletes the feed
+/// of this Mac from the relay on its own thread, and takes no action from the iPhone.
+pub(super) fn set_feed_shown(app: &mut DesktopApp, on: bool) {
+    app.ui.set_feed_off(!on);
+    if let Some(questions) = &app.owner.questions {
+        questions.set_feed(on);
     }
 }
 
@@ -364,13 +376,21 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     // The problem of the questions waiter: a relay without the questions, or this Mac
     // removed from them.
-    let relay_problem = app
+    let questions_view = app
         .owner
         .questions
         .as_ref()
-        .map(|questions| questions.view())
+        .map(|questions| questions.view());
+    let relay_problem = questions_view
+        .clone()
         .filter(|view| view.unsupported)
         .and_then(|view| view.problem);
+    // "Show agents on the iPhone", with the problem of the feed under it while it is on.
+    let mut feed_shown = !app.ui.feed_off;
+    let feed_problem = questions_view
+        .and_then(|view| view.feed_problem)
+        .filter(|_| feed_shown);
+    let mut switch_feed = None;
     let mut switch_relay = None;
     let mut add_relay_iphone = false;
     let mut remove_device = None;
@@ -405,6 +425,21 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
             if let Some(problem) = &relay_problem {
                 g.tone_row(problem, Tone::Critical.text());
             }
+            if was {
+                // As the relay row above: the switch on the line of its label, and the
+                // problem of the feed under them, in the warning tone (the questions go
+                // on without the feed).
+                let before = feed_shown;
+                let problem = feed_problem
+                    .as_deref()
+                    .map(|problem| kit::text(problem, Font::Callout).color(Tone::Warning.text()));
+                g.line_note(SHOW_AGENTS, None, problem, |ui| {
+                    kit::toggle(ui, &mut feed_shown, SHOW_AGENTS);
+                });
+                if feed_shown != before {
+                    switch_feed = Some(feed_shown);
+                }
+            }
             // The devices that get the questions through the relay, "Remove…" for each
             // other device, and a new device.
             for device in &relay_devices {
@@ -434,6 +469,9 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     if let Some(on) = switch_relay {
         set_relay_questions(app, on, Some(&ctx));
+    }
+    if let Some(on) = switch_feed {
+        set_feed_shown(app, on);
     }
     if let Some(uuid) = remove_device {
         app.questions_ask_remove(&uuid, Some(&ctx));

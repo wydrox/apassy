@@ -87,21 +87,7 @@ impl PhoneList {
     /// Write the list: a private temporary file, then a rename.
     pub fn save(&self, data_dir: &Path) -> CoreResult<()> {
         let text = serde_json::to_vec_pretty(self).map_err(|_| CoreError::io())?;
-        let temp = data_dir.join(format!(".{LIST_FILE}.tmp"));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp)
-            .map_err(|_| CoreError::io())?;
-        file.write_all(&text)
-            .and_then(|()| file.sync_all())
-            .map_err(|_| CoreError::io())?;
-        fs::rename(&temp, data_dir.join(LIST_FILE)).map_err(|_| CoreError::io())?;
-        fs::File::open(data_dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|_| CoreError::io())
+        write_private(data_dir, LIST_FILE, &text)
     }
 
     pub fn get(&self, id: &str) -> Option<&VaultEntry> {
@@ -128,6 +114,25 @@ impl PhoneList {
             self.selected = self.vaults.first().map(|vault| vault.id.clone());
         }
     }
+}
+
+/// Write `name` in `data_dir`: a private temporary file, then a rename.
+pub fn write_private(data_dir: &Path, name: &str, text: &[u8]) -> CoreResult<()> {
+    let temp = data_dir.join(format!(".{name}.tmp"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|_| CoreError::io())?;
+    file.write_all(text)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| CoreError::io())?;
+    fs::rename(&temp, data_dir.join(name)).map_err(|_| CoreError::io())?;
+    fs::File::open(data_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|_| CoreError::io())
 }
 
 /// The folders and files of the core under its data folder.

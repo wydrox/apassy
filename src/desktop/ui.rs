@@ -267,6 +267,8 @@ pub(crate) struct UiState {
     pub(crate) sidebar_float: bool,
     /// The folders whose subfolders the sidebar shows, by UUID.
     pub(crate) open_folders: BTreeSet<String>,
+    /// "Show agents on the iPhone" is off (relay-feed-v1 section 8). `ui.json` keeps it.
+    pub(crate) feed_off: bool,
     /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
     /// keeps shared vaults; the tests draw synthetic ones.
     pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,
@@ -338,6 +340,7 @@ impl UiState {
         let prefs = crate::desktop::ui_prefs::UiPrefs::load(&path);
         self.sidebar_hidden = prefs.sidebar_hidden;
         self.open_folders = prefs.open_folders;
+        self.feed_off = prefs.feed_off;
         self.prefs_path = Some(path);
     }
 
@@ -349,6 +352,7 @@ impl UiState {
             let prefs = crate::desktop::ui_prefs::UiPrefs {
                 sidebar_hidden: self.sidebar_hidden,
                 open_folders: self.open_folders.clone(),
+                feed_off: self.feed_off,
             };
             let _ = prefs.save(path);
         }
@@ -369,6 +373,12 @@ impl UiState {
             self.sidebar_float = false;
             self.toggle_sidebar();
         }
+    }
+
+    /// Turn "Show agents on the iPhone" off or on, and keep the choice.
+    pub(crate) fn set_feed_off(&mut self, off: bool) {
+        self.feed_off = off;
+        self.save_prefs();
     }
 
     /// Show or hide the subfolders of a folder in the sidebar, and keep the choice.

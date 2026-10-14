@@ -27,7 +27,7 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     # The app has no App Intents. This stops the note "Metadata extraction skipped".
     LM_SKIP_METADATA_EXTRACTION: YES
-    MARKETING_VERSION: 0.5.1
+    MARKETING_VERSION: 0.5.2
     CURRENT_PROJECT_VERSION: 1
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"
@@ -128,7 +128,8 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-    scheme: {}
+    scheme:
+      testTargets: [ApassyCompanionUITests]
   ApassyAutoFill:
     type: app-extension
     platform: iOS
@@ -178,3 +179,17 @@ targets:
         INFOPLIST_FILE: AutoFill/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         APPLICATION_EXTENSION_API_ONLY: YES
+  # Checks of the screens in the Simulator, with the synthetic preview vault only (the launch
+  # arguments in ios/README.md). Not a part of the app.
+  ApassyCompanionUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: ApassyCompanion
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.wydrox.apassy.companion.uitests
+        TEST_TARGET_NAME: ApassyCompanion

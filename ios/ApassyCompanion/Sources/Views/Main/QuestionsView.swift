@@ -4,7 +4,7 @@ import SwiftUI
 /// Connect a vault from iCloud Drive to its notifications team: the link of the Mac, the two
 /// safety words while the Mac confirms, then done.
 struct ConnectQuestionsView: View {
-    let model: QuestionsModel
+    @Bindable var model: QuestionsModel
     @State private var link = ""
     @Environment(\.dismiss) private var dismiss
 
@@ -13,6 +13,17 @@ struct ConnectQuestionsView: View {
             Form {
                 switch model.attach {
                 case nil, .failed:
+                    Section {
+                        TextField("Name of this iPhone", text: $model.deviceName)
+                            .textInputAutocapitalization(.words)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("Name of this iPhone")
+                    } footer: {
+                        Text(
+                            JoinModel.deviceNameProblem(model.deviceName)
+                                ?? "Your Mac shows this name, so two devices are told apart.")
+                    }
                     Section {
                         CodeScannerPanel(
                             accessibilityLabel: "Camera for the device link", use: "to read the link of your Mac"
@@ -106,8 +117,5 @@ struct ApprovalsHub: View {
 
     var body: some View {
         DecisionsView(questions: questions, companion: companion, onSettings: onSettings)
-        #if DEBUG && targetEnvironment(simulator)
-            .decisionsPreviewSeed(questions)
-        #endif
     }
 }

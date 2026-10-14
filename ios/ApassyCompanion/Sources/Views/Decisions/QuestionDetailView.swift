@@ -117,6 +117,9 @@ struct QuestionDetailView: View {
                 }
             }
             LabeledContent("Asked on", value: question.askerName)
+            if model.namesVaults, let vault = question.vaultName {
+                LabeledContent("Vault", value: vault)
+            }
         }
     }
 
@@ -175,7 +178,7 @@ struct QuestionDetailView: View {
     #Preview {
         let service = PreviewVaultService()
         let model = QuestionsModel(
-            service: service, signer: EnclaveAnswerSigner(), push: nil, deviceName: "Test iPhone")
+            service: service, signers: TeamAnswerSigners(), push: nil, deviceName: "Test iPhone")
         NavigationStack {
             QuestionDetailView(model: model, qid: "oKGio6SlpqeoqaqrrK2urw")
         }

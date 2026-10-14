@@ -1,9 +1,10 @@
 //! An in-process fake of the relay's question routes (contract relay-questions-v1,
-//! section 10) and of the sign-in and device link routes that an iPhone needs to join a
-//! notifications-only team (relay-sync-v1, sections 5 and 7.2). One team, plain HTTP on
+//! section 10), of its feed routes (relay-feed-v1, section 10), and of the sign-in and
+//! device link routes that an iPhone needs to join a notifications-only team
+//! (relay-sync-v1, sections 5 and 7.2). One team with one member, plain HTTP on
 //! 127.0.0.1, one thread per connection, everything in memory. It checks what the real
-//! relay checks for an answer (routing, state, `key_id`, the count), never reads an
-//! envelope, and answers in the JSON envelope. Synthetic values only.
+//! relay checks for an answer and an action (routing, state, `key_id`, the forms), never
+//! reads an envelope, and answers in the JSON envelope. Synthetic values only.
 
 #![allow(dead_code)]
 
@@ -82,6 +83,63 @@ struct Relay {
     next_secret: u64,
     push: Option<(u64, Value)>,
     log: Vec<String>,
+    /// The feed of each device, by device id.
+    feeds: BTreeMap<u64, StoredFeed>,
+    feed_change: u64,
+    actions: Vec<StoredAction>,
+    action_seq: u64,
+    /// The next feed reads that get `403 feed_rate` (a scripted answer).
+    feed_rate_next: usize,
+}
+
+/// The feed of a device as the relay stores it (relay-feed-v1 section 13.1).
+#[derive(Clone, Debug)]
+pub struct StoredFeed {
+    pub seq: u64,
+    pub change: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub updated_at: u64,
+}
+
+/// An action as the relay stamps it.
+#[derive(Clone, Debug)]
+pub struct StoredAction {
+    pub action_id: String,
+    pub seq: u64,
+    pub from_device: u64,
+    pub to_device: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub state: String,
+    pub outcome: Option<String>,
+    pub settled_at: Option<u64>,
+    pub settle: Option<Value>,
+}
+
+impl StoredAction {
+    fn view(&self) -> Value {
+        let mut view = json!({
+            "action_id": self.action_id, "to_device": self.to_device, "state": self.state,
+            "created_at": self.created_at, "expires_at": self.expires_at,
+        });
+        if let (Some(outcome), Some(at), Some(settle)) =
+            (&self.outcome, self.settled_at, &self.settle)
+        {
+            view["outcome"] = json!(outcome);
+            view["settled_at"] = json!(at);
+            view["settle"] = settle.clone();
+        }
+        view
+    }
+}
+
+fn valid_b64u_16(text: &str) -> bool {
+    text.len() == 22 && decode_b64u(text).is_some_and(|bytes| bytes.len() == 16)
 }
 
 impl Relay {
@@ -289,6 +347,363 @@ impl QuestionsRelay {
     pub fn log(&self) -> Vec<String> {
         lock(&self.shared.0).log.clone()
     }
+
+    /// A new live device of the member with `public_key` (another Mac): its id.
+    pub fn add_device(&self, public_key: &[u8]) -> u64 {
+        let mut relay = lock(&self.shared.0);
+        let id = relay.devices.len() as u64 + 1;
+        relay.devices.push(Device {
+            id,
+            public_key: public_key.to_vec(),
+            live: true,
+        });
+        id
+    }
+
+    /// Device `device_id` publishes a feed, with no check of its `seq`: the test plays a
+    /// relay that serves any record.
+    pub fn put_feed(&self, device_id: u64, seq: u64, key_id: &str, nonce: &str, ciphertext: &str) {
+        let (mutex, changed) = &*self.shared;
+        let mut relay = lock(mutex);
+        relay.feed_change += 1;
+        let change = relay.feed_change;
+        relay.feeds.insert(
+            device_id,
+            StoredFeed {
+                seq,
+                change,
+                key_id: key_id.to_owned(),
+                nonce: nonce.to_owned(),
+                ciphertext: ciphertext.to_owned(),
+                updated_at: now(),
+            },
+        );
+        changed.notify_all();
+    }
+
+    /// Device `device_id` removes its feed (`DELETE /v1/feed`).
+    pub fn delete_feed(&self, device_id: u64) {
+        let (mutex, changed) = &*self.shared;
+        let mut relay = lock(mutex);
+        if relay.feeds.remove(&device_id).is_some() {
+            relay.feed_change += 1;
+        }
+        changed.notify_all();
+    }
+
+    /// The next `count` feed reads (`GET /v1/feed`) get `403 feed_rate`, as from a relay
+    /// whose read budget of the minute the device used up (relay-feed-v1 section 10.2).
+    pub fn rate_feed_reads(&self, count: usize) {
+        lock(&self.shared.0).feed_rate_next = count;
+    }
+
+    pub fn feeds(&self) -> BTreeMap<u64, StoredFeed> {
+        lock(&self.shared.0).feeds.clone()
+    }
+
+    pub fn actions(&self) -> Vec<StoredAction> {
+        lock(&self.shared.0).actions.clone()
+    }
+
+    /// The target settles `action_id` (`POST /v1/feed/actions/{id}/settle`).
+    pub fn settle_action(
+        &self,
+        action_id: &str,
+        outcome: &str,
+        key_id: &str,
+        nonce: &str,
+        ciphertext: &str,
+    ) {
+        let (mutex, changed) = &*self.shared;
+        let mut relay = lock(mutex);
+        let action = relay
+            .actions
+            .iter_mut()
+            .find(|action| action.action_id == action_id)
+            .expect("action");
+        action.state = "settled".to_owned();
+        action.outcome = Some(outcome.to_owned());
+        action.settled_at = Some(now());
+        action.settle = Some(json!({"key_id": key_id, "nonce": nonce, "ciphertext": ciphertext}));
+        changed.notify_all();
+    }
+
+    /// The relay's maintenance marks `action_id` expired.
+    pub fn expire_action(&self, action_id: &str) {
+        let (mutex, changed) = &*self.shared;
+        let mut relay = lock(mutex);
+        for action in relay
+            .actions
+            .iter_mut()
+            .filter(|a| a.action_id == action_id)
+        {
+            action.state = "expired".to_owned();
+        }
+        changed.notify_all();
+    }
+}
+
+/// Hold a long poll of `wait` seconds on `changed`: `found` answers, or holds with None
+/// while its second argument (the wait is over) is false.
+fn long_poll(
+    mut relay: MutexGuard<'_, Relay>,
+    changed: &Condvar,
+    wait: u64,
+    mut found: impl FnMut(&mut Relay, bool) -> Option<(u16, Value)>,
+) -> (u16, Value) {
+    let end = Instant::now() + Duration::from_secs(wait);
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        if let Some(answer) = found(&mut relay, left.is_zero()) {
+            return answer;
+        }
+        if left.is_zero() {
+            return fail(500, "internal");
+        }
+        relay = changed
+            .wait_timeout(relay, left)
+            .map(|(guard, _)| guard)
+            .unwrap_or_else(|error| error.into_inner().0);
+    }
+}
+
+/// A number of the query; absent is 0.
+fn number(request: &Incoming, name: &str) -> Option<u64> {
+    match request.query.get(name) {
+        None => Some(0),
+        Some(text) => text.parse().ok(),
+    }
+}
+
+/// The feed routes of relay-feed-v1 section 10 under `/v1/feed`, for the caller
+/// `device`. None: no such route.
+fn feed_route(
+    mut relay: MutexGuard<'_, Relay>,
+    changed: &Condvar,
+    request: &Incoming,
+    device: u64,
+    rest: &[&str],
+) -> Option<(u16, Value)> {
+    let answer = match (request.method.as_str(), rest) {
+        ("PUT", []) => {
+            let body = request.json();
+            let (Some(seq), Some(key_id), Some(nonce), Some(ciphertext)) = (
+                body["seq"].as_u64(),
+                body["key_id"].as_str(),
+                body["nonce"].as_str(),
+                body["ciphertext"].as_str(),
+            ) else {
+                return Some(fail(400, "invalid_request"));
+            };
+            if body["v"] != json!(1) {
+                return Some(fail(400, "invalid_request"));
+            }
+            if relay.feeds.get(&device).is_some_and(|feed| feed.seq >= seq) {
+                return Some(fail(409, "seq_not_newer"));
+            }
+            relay.feed_change += 1;
+            let change = relay.feed_change;
+            relay.feeds.insert(
+                device,
+                StoredFeed {
+                    seq,
+                    change,
+                    key_id: key_id.to_owned(),
+                    nonce: nonce.to_owned(),
+                    ciphertext: ciphertext.to_owned(),
+                    updated_at: now(),
+                },
+            );
+            changed.notify_all();
+            ok(json!({"device_id": device, "seq": seq, "change": change, "updated_at": now()}))
+        }
+        ("DELETE", []) => {
+            if relay.feeds.remove(&device).is_some() {
+                relay.feed_change += 1;
+            }
+            changed.notify_all();
+            ok(json!({"device_id": device, "change": relay.feed_change}))
+        }
+        ("GET", []) => {
+            let (Some(since), Some(wait)) = (number(request, "since"), number(request, "wait"))
+            else {
+                return Some(fail(400, "invalid_request"));
+            };
+            if wait > 25 {
+                return Some(fail(400, "invalid_request"));
+            }
+            if relay.feed_rate_next > 0 {
+                relay.feed_rate_next -= 1;
+                return Some(fail(403, "feed_rate"));
+            }
+            long_poll(relay, changed, wait, |relay, done| {
+                let mut found: Vec<(u64, StoredFeed)> = relay
+                    .feeds
+                    .iter()
+                    .filter(|(_, feed)| feed.change > since)
+                    .map(|(id, feed)| (*id, feed.clone()))
+                    .collect();
+                // A removal raises `change` too: it is news.
+                if found.is_empty() && since >= relay.feed_change && !done {
+                    return None;
+                }
+                found.sort_by_key(|(_, feed)| feed.change);
+                let feeds: Vec<Value> = found
+                    .iter()
+                    .map(|(id, feed)| {
+                        json!({"device_id": id, "device_name": "MacBook Pro", "seq": feed.seq,
+                               "change": feed.change, "key_id": feed.key_id, "nonce": feed.nonce,
+                               "ciphertext": feed.ciphertext, "updated_at": feed.updated_at})
+                    })
+                    .collect();
+                let present: Vec<u64> = relay.feeds.keys().copied().collect();
+                Some(ok(json!({"change": relay.feed_change, "more": false,
+                               "present": present, "feeds": feeds})))
+            })
+        }
+        ("POST", ["actions"]) => {
+            let body = request.json();
+            let (Some(action_id), Some(to_device), Some(key_id), Some(nonce), Some(ciphertext)) = (
+                body["action_id"].as_str(),
+                body["to_device"].as_u64(),
+                body["key_id"].as_str(),
+                body["nonce"].as_str(),
+                body["ciphertext"].as_str(),
+            ) else {
+                return Some(fail(400, "invalid_request"));
+            };
+            let known = [
+                "v",
+                "action_id",
+                "to_device",
+                "key_id",
+                "nonce",
+                "ciphertext",
+            ];
+            let unknown = body
+                .as_object()
+                .is_none_or(|map| map.keys().any(|key| !known.contains(&key.as_str())));
+            if body["v"] != json!(1) || unknown || !valid_b64u_16(action_id) {
+                return Some(fail(400, "invalid_request"));
+            }
+            if decode_b64u(ciphertext).is_none_or(|bytes| bytes.len() > 4112) {
+                return Some(fail(413, "payload_too_large"));
+            }
+            let routed =
+                to_device != device && relay.devices.iter().any(|d| d.id == to_device && d.live);
+            if !routed {
+                return Some(fail(403, "not_routed"));
+            }
+            if !relay.feeds.contains_key(&to_device) {
+                return Some(fail(404, "not_found"));
+            }
+            if relay.actions.iter().any(|a| a.action_id == action_id) {
+                return Some(fail(409, "conflict"));
+            }
+            relay.action_seq += 1;
+            let seq = relay.action_seq;
+            let created_at = now();
+            relay.actions.push(StoredAction {
+                action_id: action_id.to_owned(),
+                seq,
+                from_device: device,
+                to_device,
+                key_id: key_id.to_owned(),
+                nonce: nonce.to_owned(),
+                ciphertext: ciphertext.to_owned(),
+                created_at,
+                expires_at: created_at + 300,
+                state: "open".to_owned(),
+                outcome: None,
+                settled_at: None,
+                settle: None,
+            });
+            changed.notify_all();
+            ok(
+                json!({"action_id": action_id, "seq": seq, "created_at": created_at,
+                      "expires_at": created_at + 300}),
+            )
+        }
+        ("GET", ["actions"]) => {
+            let (Some(after), Some(wait)) = (number(request, "after"), number(request, "wait"))
+            else {
+                return Some(fail(400, "invalid_request"));
+            };
+            long_poll(relay, changed, wait.min(25), |relay, done| {
+                let found: Vec<Value> = relay
+                    .actions
+                    .iter()
+                    .filter(|a| a.to_device == device && a.state == "open" && a.seq > after)
+                    .take(20)
+                    .map(|a| {
+                        json!({"action_id": a.action_id, "seq": a.seq,
+                               "from_device_id": a.from_device, "key_id": a.key_id,
+                               "nonce": a.nonce, "ciphertext": a.ciphertext,
+                               "created_at": a.created_at, "expires_at": a.expires_at})
+                    })
+                    .collect();
+                if found.is_empty() && !done {
+                    return None;
+                }
+                Some(ok(json!({"seq": relay.action_seq, "actions": found})))
+            })
+        }
+        ("GET", ["actions", action_id]) => {
+            let Some(wait) = number(request, "wait") else {
+                return Some(fail(400, "invalid_request"));
+            };
+            let action_id = (*action_id).to_owned();
+            long_poll(relay, changed, wait.min(25), |relay, done| {
+                // The sender only.
+                let Some(action) = relay
+                    .actions
+                    .iter_mut()
+                    .find(|a| a.action_id == action_id && a.from_device == device)
+                else {
+                    return Some(fail(404, "not_found"));
+                };
+                if action.state == "open" && now() >= action.expires_at {
+                    action.state = "expired".to_owned();
+                }
+                if action.state == "open" && !done {
+                    return None;
+                }
+                Some(ok(action.view()))
+            })
+        }
+        ("POST", ["actions", action_id, "settle"]) => {
+            let body = request.json();
+            let Some(outcome) = body["outcome"]
+                .as_str()
+                .filter(|o| matches!(*o, "applied" | "refused" | "stale"))
+            else {
+                return Some(fail(400, "invalid_request"));
+            };
+            // The target only.
+            let Some(action) = relay
+                .actions
+                .iter_mut()
+                .find(|a| a.action_id == *action_id && a.to_device == device)
+            else {
+                return Some(fail(404, "not_found"));
+            };
+            if action.state == "settled" {
+                return Some(fail(409, "action_settled"));
+            }
+            action.state = "settled".to_owned();
+            action.outcome = Some(outcome.to_owned());
+            action.settled_at = Some(now());
+            action.settle = Some(json!({"key_id": body["key_id"], "nonce": body["nonce"],
+                                        "ciphertext": body["ciphertext"]}));
+            changed.notify_all();
+            ok(
+                json!({"action_id": action_id, "state": "settled", "outcome": outcome,
+                      "settled_at": now()}),
+            )
+        }
+        _ => return None,
+    };
+    Some(answer)
 }
 
 struct Incoming {
@@ -514,6 +929,10 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
             let Some(device) = device else {
                 return fail(401, "unauthenticated");
             };
+            if segments.get(1) == Some(&"feed") {
+                return feed_route(relay, changed, request, device, &segments[2..])
+                    .unwrap_or_else(|| fail(404, "not_found"));
+            }
             match (method, &segments[1..]) {
                 ("DELETE", ["devices", id]) => {
                     let id: u64 = id.parse().unwrap_or_default();

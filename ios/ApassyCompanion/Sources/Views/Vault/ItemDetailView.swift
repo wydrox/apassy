@@ -23,6 +23,8 @@ struct ItemDetailView: View {
     /// The removal that the owner asked for, as it was said to them.
     @State private var pendingPasskeyRemoval: PasskeyRemovalPlan?
     @State private var showsHistory = false
+    @Environment(RootModel.self) private var root: RootModel?
+    @State private var showsConnect = false
 
     init(model: ItemDetailModel) {
         _model = State(initialValue: model)
@@ -36,6 +38,17 @@ struct ItemDetailView: View {
             .task(id: vault.itemsVersion) { await model.load() }
             .onChange(of: vault.revealEpoch) { model.dropSecrets() }
             .onDisappear { model.dropSecrets() }
+            // The same sheet as "Connect this iPhone" in Decisions.
+            .sheet(
+                isPresented: $showsConnect,
+                onDismiss: {
+                    let opensCompanion = root?.questions?.attach == .companion
+                    root?.questions?.dismissAttach()
+                    if opensCompanion { root?.openPreparedCompanion() }
+                }
+            ) {
+                if let questions = root?.questions { ConnectQuestionsView(model: questions) }
+            }
             .fullScreenCover(
                 item: Binding(get: { model.largeType }, set: { if $0 == nil { model.closeLargeType() } })
             ) { large in
@@ -97,8 +110,8 @@ struct ItemDetailView: View {
                         }
                     }
                     if let passkey = detail.passkey { passkeySection(passkey) }
-                    Section("Agent use") { MacOnlyRow() }
-                    Section("Rules from your answers") { MacOnlyRow() }
+                    Section("Agent use") { macRow(.agentUse) }
+                    Section("Rules from your answers") { macRow(.rules) }
                     if CredentialOptions.isAvailable(detail) { options(detail).id("options") }
                     if !detail.notes.isEmpty {
                         Section("Notes") {
@@ -372,6 +385,19 @@ struct ItemDetailView: View {
         }
     }
 
+    /// Agent use and rules live in the Mac's vault and do not sync: the row says where they are,
+    /// with no invented data, and offers what this iPhone can do now (`AgentsReach`).
+    private func macRow(_ place: AgentsReach.Place) -> some View {
+        let reach = AgentsReach(questions: root?.questions, companion: root?.companion)
+        return MacPlaceRow(note: reach.note(place), action: reach.action(place)) { action in
+            switch action {
+            case .openDecisions: ui.tab = .decisions
+            case .connect: showsConnect = true
+            case .pairOnWiFi: break
+            }
+        }
+    }
+
     #if targetEnvironment(simulator)
         private func demoReveal() async {
             guard let field = model.detail?.fields.first(where: { $0.secret && $0.role != .totp }) else { return }
@@ -388,15 +414,6 @@ struct ItemDetailView: View {
     #endif
 }
 
-/// Agent use and rules live in the Mac's vault and do not sync: the iPhone says so and shows no
-/// invented data.
-private struct MacOnlyRow: View {
-    var body: some View {
-        Label("Available when the Mac is connected", systemImage: "laptopcomputer")
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-    }
-}
 
 /// A tag as a chip.
 struct TagChip: View {

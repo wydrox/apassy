@@ -1696,6 +1696,7 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic MacBook".to_owned(),
+            ..QuestionsConfig::default()
         },
     );
     let mut pending = run(

@@ -28,6 +28,8 @@ cd ios/ApassyVaultKit
 swift test
 ```
 
+`CoreMultiVaultQuestionsTests` runs `ApassyCore/build/questions-macs` (from `examples/questions_macs.rs`, built with the `mac` slice): two fake Macs with two vaults on the fake relay. The iPhone joins both, lists and answers the questions of each with its `vault_id`, and opens the other vault again after a suspend with `questions_unlock`.
+
 ## The companion kit
 
 It needs Xcode 27 (Swift 6.4). It builds for iOS 26 and macOS 15, and its tests run on macOS. No iOS simulator and no Secure Enclave are needed.
@@ -77,11 +79,11 @@ The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Sear
 | All credentials | Every credential that is not archived, grouped by folder as on the Mac (A to Z inside), with filters by kind and tag and a sort. |
 | A folder | Its subfolders, then its credentials with provider tiles and a red dot for production. "⋯" or a swipe: new folder, rename, move, delete. Deleting a folder moves its credentials and subfolders to the parent; no credential is deleted. "+" adds a credential to the folder. |
 | New Credential | "+" opens it. Paste text or scan a QR code, then Add. The core detects what the text is (a key, a database URL, an `otpauth://` link, a `.env`), and the sheet shows masked previews only. A `.env` gives one row per line, each with a checkbox and an editable title. You can pick a folder. "Fill in by hand" opens the full editor for a kind. The paste is cleared when the app leaves the foreground, when you cancel, and when the vault locks. |
-| A credential | The header with the provider tile and the environment, then the fields in the Mac's order and labels. A secret shows as dots: reveal, copy, a one-time code, and large type each need Face ID or the passphrase. Then Variable (the name agents get; a tap copies it) and Folder (a tap moves the credential). "Agent use" and "Rules from your answers" show "Available when the Mac is connected". Options: "Always ask me" and Environment. Turning "Always ask me" off, choosing any environment other than production, or setting the first environment needs Face ID or the passphrase first; a stricter change does not. Then notes, tags, times, history, and a note on a conflict copy. Edit, favorite, archive, delete. A website opens in Safari. |
+| A credential | The header with the provider tile and the environment, then the fields in the Mac's order and labels. A secret shows as dots: reveal, copy, a one-time code, and large type each need Face ID or the passphrase. Then Variable (the name agents get; a tap copies it) and Folder (a tap moves the credential). "Agent use" and "Rules from your answers" say that they are on the Mac. Agent use offers "Open Decisions" when questions reach this iPhone, else "Connect this iPhone". Options: "Always ask me" and Environment. Turning "Always ask me" off, choosing any environment other than production, or setting the first environment needs Face ID or the passphrase first; a stricter change does not. Then notes, tags, times, history, and a note on a conflict copy. Edit, favorite, archive, delete. A website opens in Safari. |
 | Edit | The full form for each kind (login, API key, SSH key, database, other), a Folder row, custom details, tags, notes, the password generator, and a one-time password from its QR code. A secret left empty keeps its stored value. |
 | Generator | Random, memorable (the EFF word list), or a PIN, with the strength. |
 | Decisions tab | See "Decisions" below. |
-| Agents tab | "Available when the Mac is connected". The agents and their exceptions live in the vault of the Mac and do not sync, so the tab shows nothing else. |
+| Agents tab | The agents that each Mac publishes for the unlocked vaults (contract `relay-feed-v1`, core calls `feed_*` of ios-core-v1 section 5.12), by Mac, and by vault when there are two or more: the round tile, the name, "Mac mini · 5 uses this week", the exceptions, and the last use. The feed is read with a long poll only while the tab shows; a lock or a suspend drops it. A Mac whose feed is more than a day old is dimmed ("Not reporting") and takes no action. An agent's page shows its use this week, its projects, what it sees (names only, never values), its actions (Read, Change, Deploy, Delete, with "not allowed" in red), its recent uses with their outcome, the note for the bouncer (read only), its exceptions, and "From <Mac>, <time>". "Remove" on an exception asks first, naming the agent, the credential, and the Mac. Removing "Never" or "Always ask" signs the core's action string with the answer key of that vault's team after Face ID; removing an "only these items" entry needs no Face ID (the core signs it). The row then says "Removed on <Mac>.", or why the Mac did not apply it. While no Mac publishes its agents here, the tab says "Agents run on your Mac": with questions through the relay or a Mac on Wi-Fi, their questions arrive in Decisions ("Open Decisions"); with neither, it offers "Connect this iPhone". |
 | Search tab | Searches titles, usernames, tags, and websites. Archived credentials show in their own section. |
 | Settings | Four groups. **General**: the vault (name or vault picker, "Add another vault", remove from this iPhone), "Move to another app" (import and export), and AutoFill. **Devices**: sync (service, state, last sync, "Sync now", team devices, "Select the iCloud file again", the new passphrase of the vault, "Use the relay copy"), questions through the relay, the Mac on Wi-Fi, and "Open Decisions". **Security**: "Unlock with Face ID", "Lock after", "Lock now", and "Clear copied secrets after". **Advanced**: the versions of the app and the vault core, and the licenses. |
 | AutoFill | Logins, one-time codes, and passkeys in Safari and apps, after Face ID or the passphrase for each fill or sign-in. New passkeys are saved in a new login or in a login of the website. The QuickType bar shows usernames, hosts, and passkey accounts only. |
@@ -104,12 +106,13 @@ The Decisions tab shows what blocks an agent now. Its badge counts the rows of W
 | Part | What it does |
 | --- | --- |
 | Waiting | The questions through the relay and the runs of the paired Mac on Wi-Fi, in one list, newest first. Each row has the agent, the credential, the project, a red dot for production, and a timer. A run that a question already shows counts once. |
-| Requests | "Available when the Mac is connected". When a Mac is paired: its open access requests, or "No requests". |
-| Suggestions | "Available when the Mac is connected". |
+| Locked vaults | A lock or a suspend drops the questions of every vault, and a resume opens the selected vault only. Face ID never asks by itself. After an unlock and a resume, the other vaults whose passphrase is stored behind Face ID ("Unlock with Face ID" on for it) share one row: "Work, Family are locked. Unlock with Face ID to see their questions." One tap reads them all with one Face ID (`questions_unlock`). A Face ID unlock of the selected vault reads them in the same prompt: "Unlock Personal, and the questions of Work and Family". Any other vault with questions shows one row: "<vault> is locked. Unlock to see its questions." Its Unlock shows a passphrase sheet. The selected vault never gets a row. The sheet opens the questions only; the vault on screen does not change. Its field is cleared when the app leaves the screen. |
+| Requests | When a Mac is paired on Wi-Fi: its open access requests, or "No requests". Else they are on the Mac, with "Pair with the Mac on Wi-Fi". |
+| Suggestions | "Suggestions come from your Mac. They show in Apassy on the Mac." |
 | Ended | Questions that expired or were answered elsewhere, with who answered. |
 | A question | The sentence, the facts, the command, and why the owner is asked. A fixed bar at the bottom has "Allow ACTION in PROJECT", "Deny", and "Allow Once". A production question shows a red "Allow production: ACTION in PROJECT". Its "⋯" menu holds the stricter answers and the environment of a credential. When the question has ended, the outcome takes the place of the bar. |
 | Face ID | An answer that gives authority asks for Face ID, as the core decides. The stricter answers go without it. A changed Face ID enrollment makes a new answer key; the Mac removes the old device, and the owner connects this iPhone again. |
-| Notification | A notification says only "A question is waiting". Opening one shows the newest waiting question. |
+| Notification | A notification says only "A question is waiting". Opening one shows the newest waiting question. It names no vault, so a locked vault opens first: with Face ID when its passphrase is stored, else with the passphrase sheet. |
 | "⋯" menu | "Notifications" (when the relay is connected), "Connect this iPhone" (when it is not), and "Mac on Wi-Fi" (pairing, Activity, Mac). |
 
 ### Mac on Wi-Fi (ADR 0020)
@@ -142,7 +145,8 @@ A Simulator build (never a device build) takes these development aids:
 | `-ApassyUnlockPassphrase <passphrase>` | Unlock once at launch. |
 | `-ApassyOpen <route>` | Open a screen. The routes are below. |
 | `-ApassyPasteDemo stripe\|env` | Fill New Credential with synthetic values that the preview vault detects: one Stripe key, or a `.env` with three lines. Use it with `-ApassyOpen newcredential`. |
-| `-ApassyPreviewDecisions list\|detail` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` also opens the newest one, as a notification would. |
+| `-ApassyPreviewDecisions list\|detail\|vaults\|locked` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` also opens the newest one, as a notification would. `vaults` adds the questions of a second vault, "Work". `locked` also adds a third vault, "Family", whose questions are locked; the preview passphrase opens them. |
+| `-ApassyPreviewAgents list\|detail\|confirm\|stale\|restricted\|unverified` | With `-ApassyPreviewVault`, give the preview vault the synthetic feeds of two Macs and two vaults. `detail` opens Claude Code on the Mac mini, `confirm` opens Codex and asks to remove its exception, `stale` opens the agent of a Mac that has not reported for three days, `restricted` opens the "only these items" agent of Work, and `unverified` removes one of its rows and gets a settle that this iPhone cannot open. Add `-ApassyPreviewAgentsScroll exceptions` (or `sees`) to scroll an agent's page to its exceptions (or to what it sees). |
 | `-ApassyPairingLink <link>` | The companion pairing, as below. |
 
 The `-ApassyOpen` routes:
@@ -228,7 +232,13 @@ cd ios/ApassyCompanion/ModelTests
 swift test
 ```
 
-The screens have no tests. They are checked by the build and by the `#Preview` of each view, which use synthetic data.
+The screens are checked by the build and by the `#Preview` of each view, which use synthetic data. A few checks of the tabs run in the Simulator (`UITests`, target `ApassyCompanionUITests`), with the synthetic preview vault only:
+
+```
+cd ios/ApassyCompanion
+xcodebuild test -project ApassyCompanion.xcodeproj -scheme ApassyCompanion \
+  -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath /tmp/apassy-dd-app
+```
 
 ### Run on an iPhone
 

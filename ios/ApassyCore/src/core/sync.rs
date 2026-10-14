@@ -326,9 +326,30 @@ impl Core {
                 Leave::Failed(error) => return Err(error),
             }
         }
+        // The questions team of the vault drops the push token of this iPhone (and a
+        // notifications-only team this device) while its relay key is in memory. The
+        // relay sync team that this device left needs nothing more.
+        let left_team = entry
+            .team_id
+            .as_deref()
+            .filter(|_| entry.relay_url.is_some() && left_relay);
+        let leftover = self.questions_leave(id, left_team);
         if selected {
-            self.close(true);
+            self.close(super::Closing::Lock);
+        } else {
+            // A removal drops the questions of every vault, as a lock does (section 5.10).
+            let ended = {
+                let _opening = guard(&self.opening);
+                let _slot = guard(&self.vault);
+                self.questions_drop_all()
+            };
+            ended.finish();
         }
+        // What failed is tried again at the next read, until a lock or a suspend.
+        self.questions_park(leftover);
+        // No `questions_unlock` has the file open while it goes (lock order: the opening,
+        // then the list, then the questions).
+        let opening = guard(&self.opening);
         let file = self.paths.vault_file(id);
         let _ = fs::remove_file(&file);
         let _ = fs::remove_file(super::sidecar(&file));
@@ -353,6 +374,10 @@ impl Core {
             list.remove(id);
             list.save(&self.paths.data_dir)?;
         }
+        // A `questions_unlock` that read the vault before the files went: its context goes
+        // too (it checks the list after this).
+        self.questions_forget(id);
+        drop(opening);
         if selected {
             self.select_relay()?;
         }

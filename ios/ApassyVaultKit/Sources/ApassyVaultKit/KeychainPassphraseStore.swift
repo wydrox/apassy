@@ -58,14 +58,25 @@ public struct KeychainPassphraseStore: PassphraseStore {
     }
 
     public func read(vaultID: String, reason: String) async throws -> String {
+        let context = LAContext()
+        context.localizedReason = reason
+        context.localizedFallbackTitle = "Enter Passphrase"
+        return try await copy(vaultID, context: Context(context))
+    }
+
+    /// A context that one read hands to a keychain thread; nothing else uses it meanwhile.
+    fileprivate struct Context: @unchecked Sendable {
+        let context: LAContext
+        init(_ context: LAContext) { self.context = context }
+    }
+
+    /// Read the passphrase of `vaultID` with `context` on a keychain thread.
+    fileprivate func copy(_ vaultID: String, context: Context) async throws -> String {
         let store = self
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var request = store.query(vaultID)
-                let context = LAContext()
-                context.localizedReason = reason
-                context.localizedFallbackTitle = "Enter Passphrase"
-                request[kSecUseAuthenticationContext as String] = context
+                request[kSecUseAuthenticationContext as String] = context.context
                 request[kSecReturnData as String] = true
                 request[kSecMatchLimit as String] = kSecMatchLimitOne
                 var result: CFTypeRef?
@@ -83,6 +94,8 @@ public struct KeychainPassphraseStore: PassphraseStore {
                     continuation.resume(
                         throwing: VaultError(
                             .locked, "Face ID changed on this iPhone, so Apassy forgot the passphrase. Type it once."))
+                case errSecInteractionNotAllowed:
+                    continuation.resume(throwing: VaultError(.locked, "Face ID did not unlock the vault."))
                 default:
                     continuation.resume(
                         throwing: VaultError(.storage, "The keychain did not answer (error \(status))."))
@@ -91,8 +104,54 @@ public struct KeychainPassphraseStore: PassphraseStore {
         }
     }
 
+    public func readSession(reason: String) async throws -> any PassphraseReads {
+        let context = LAContext()
+        // No passphrase fallback: a vault that Face ID does not open shows its Unlock row.
+        context.localizedFallbackTitle = ""
+        do {
+            guard try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+            else { throw VaultError(.cancelled, "Face ID did not unlock the vaults.") }
+        } catch let error as VaultError {
+            throw error
+        } catch {
+            throw VaultError(.cancelled, "Face ID did not unlock the vaults.")
+        }
+        // The match counts for every read of this session, and no read may ask again.
+        context.interactionNotAllowed = true
+        return KeychainReads(store: self, context: Context(context))
+    }
+
     public func remove(vaultID: String) {
         SecItemDelete(query(vaultID) as CFDictionary)
+    }
+}
+
+/// The reads of one evaluated `LAContext` (`KeychainPassphraseStore.readSession`).
+private final class KeychainReads: PassphraseReads, @unchecked Sendable {
+    private let store: KeychainPassphraseStore
+    private let lock = NSLock()
+    private var context: KeychainPassphraseStore.Context?
+
+    init(store: KeychainPassphraseStore, context: KeychainPassphraseStore.Context) {
+        self.store = store
+        self.context = context
+    }
+
+    deinit { context?.context.invalidate() }
+
+    func read(vaultID: String) async throws -> String {
+        guard let context = lock.withLock({ self.context }) else {
+            throw VaultError(.locked, "Face ID did not unlock the vault.")
+        }
+        return try await store.copy(vaultID, context: context)
+    }
+
+    func end() {
+        let context = lock.withLock {
+            defer { self.context = nil }
+            return self.context
+        }
+        context?.context.invalidate()
     }
 }
 

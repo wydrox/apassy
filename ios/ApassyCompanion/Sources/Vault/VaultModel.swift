@@ -114,6 +114,14 @@ final class VaultModel {
     /// The last background or foreground transition. Each one waits for the one before, so a
     /// return never runs while the vault is still being closed.
     @ObservationIgnored private var transition: Task<Void, Never>?
+    /// The questions of the vaults (`QuestionsModel.follow`): an open of the vault opens the
+    /// questions of the others, and a lock drops them.
+    @ObservationIgnored weak var questions: QuestionsModel?
+    /// The agents of the Macs (`AgentsModel`): a lock drops them, an open reads them again.
+    @ObservationIgnored weak var agents: AgentsModel?
+    /// The Face ID of a Face ID unlock, for the questions of the other vaults; it holds no
+    /// passphrase, and ends when they are read.
+    @ObservationIgnored private var pendingReads: (any PassphraseReads)?
 
     init(
         service: any VaultService, settings: VaultSettings, gate: OwnerGate, passphraseStore: any PassphraseStore,
@@ -232,9 +240,16 @@ final class VaultModel {
         }
     }
 
-    /// Read the stored passphrase with Face ID and unlock. Cancelled: the field stays.
+    /// Read the stored passphrase with Face ID and unlock. Cancelled: the field stays. The same
+    /// Face ID reads the passphrases of the other vaults whose questions open with Face ID, so the
+    /// owner sees one prompt.
     func unlockWithFaceID() async {
         guard let vault, !isUnlocking else { return }
+        let others = questions?.faceIDVaults(excluding: vault.id) ?? []
+        guard others.isEmpty else {
+            await unlockWithFaceID(vault, others: others)
+            return
+        }
         let passphrase: String
         do {
             passphrase = try await passphraseStore.read(vaultID: vault.id, reason: "Unlock “\(vault.name)”")
@@ -249,6 +264,38 @@ final class VaultModel {
             return
         }
         await unlock(passphrase: passphrase)
+    }
+
+    /// One Face ID for the selected vault and for the questions of `others`.
+    private func unlockWithFaceID(_ vault: VaultEntry, others: [VaultEntry]) async {
+        let reads: any PassphraseReads
+        do {
+            reads = try await passphraseStore.readSession(
+                reason: QuestionsModel.reopenReason(others.map(\.name), unlocking: vault.name))
+        } catch let error as VaultError where error.code == .cancelled {
+            return
+        } catch {
+            unlockMessage = error.localizedDescription
+            return
+        }
+        let passphrase: String
+        do {
+            passphrase = try await reads.read(vaultID: vault.id)
+        } catch let error as VaultError where error.code == .locked {
+            reads.end()
+            faceIDNeedsRepair = true
+            unlockMessage = error.message
+            return
+        } catch {
+            reads.end()
+            unlockMessage = error.localizedDescription
+            return
+        }
+        pendingReads = reads
+        await unlock(passphrase: passphrase)
+        // The unlock did not open the vault: the reads go unused.
+        pendingReads?.end()
+        pendingReads = nil
     }
 
     func select(vaultID: String) async {
@@ -268,6 +315,10 @@ final class VaultModel {
         isUnlocked = true
         isSuspended = false
         leftAt = nil
+        let reads = pendingReads
+        pendingReads = nil
+        if let questions { questions.vaultDidOpen(reads: reads) } else { reads?.end() }
+        agents?.vaultDidOpen()
         syncStatus = try? await service.syncStatus()
         await reloadAndPublish()
         startSync()
@@ -275,6 +326,8 @@ final class VaultModel {
 
     /// Lock the vault and drop everything read from it.
     func lock() async {
+        questions?.vaultDidLock()
+        agents?.vaultDidLock()
         stopSync()
         debounceTask?.cancel()
         debounceTask = nil
@@ -298,6 +351,8 @@ final class VaultModel {
     /// one before it.
     func enterBackground() {
         isInBackground = true
+        questions?.vaultWillLeave()
+        agents?.vaultWillLeave()
         gate.cancel()
         revealEpoch += 1
         stopSync()
@@ -389,6 +444,10 @@ final class VaultModel {
         }
         isSuspended = false
         leftAt = nil
+        // The suspend dropped the questions of every vault; the core opened the selected one. The
+        // others wait in Decisions for the owner's Face ID: none is asked here.
+        questions?.vaultDidOpen()
+        agents?.vaultDidOpen()
         await reload()
         startSync()
     }
@@ -916,6 +975,9 @@ final class VaultModel {
         defer { end() }
         stopSync()
         _ = try await service.removeVault(id: vault.id, force: force)
+        // The core dropped the questions of every vault.
+        questions?.vaultDidLock()
+        agents?.vaultDidLock()
         passphraseStore.remove(vaultID: vault.id)
         settings.forget(vaultID: vault.id)
         await hooks.removeAllIdentities()

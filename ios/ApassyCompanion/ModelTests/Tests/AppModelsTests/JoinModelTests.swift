@@ -1,6 +1,7 @@
 import ApassyCompanionKit
 import ApassyVaultKit
 import Foundation
+import Synchronization
 import Testing
 
 @testable import AppModels
@@ -25,7 +26,7 @@ struct JoinModelTests {
 
         init(
             biometry: Biometry = .faceID, deviceName: String = "Test iPhone",
-            answerKey: (@Sendable () throws -> Data)? = nil
+            answerKey: (@Sendable (_ team: String?) throws -> Data)? = nil
         ) {
             model = JoinModel(
                 service: service, passphraseStore: store, settings: settings, biometry: biometry,
@@ -140,12 +141,12 @@ struct JoinModelTests {
     @Test("start sends the answer key of this iPhone with the link; without a key it sends none")
     func sendsTheAnswerKey() async {
         let key = Data([4] + [UInt8](repeating: 9, count: 64))
-        let withKey = Fixture(answerKey: { key })
+        let withKey = Fixture(answerKey: { _ in key })
         withKey.model.handleCode(link)
         await withKey.model.start()
         #expect(await withKey.service.attachedAnswerKey() == key)
 
-        let failing = Fixture(answerKey: { throw VaultError(.internal, "no key") })
+        let failing = Fixture(answerKey: { _ in throw VaultError(.internal, "no key") })
         failing.model.handleCode(link)
         await failing.model.start()
         #expect(await failing.service.attachedAnswerKey() == nil)
@@ -153,6 +154,41 @@ struct JoinModelTests {
             Issue.record("a missing key stopped the join")
             return
         }
+    }
+
+    @Test("start asks for the answer key of the team that the link names")
+    func answerKeyOfTheLinkTeam() async {
+        let teams = Mutex<[String?]>([])
+        let fixture = Fixture(answerKey: { team in
+            teams.withLock { $0.append(team) }
+            return Data([4] + [UInt8](repeating: 9, count: 64))
+        })
+        let code = "apassy_lnk_t_7k2m5q4x3c_" + String(repeating: "0123456789abcdef", count: 4)
+        fixture.model.handleCode("https://apassy-relay.example/link#\(code)&r=sync")
+        await fixture.model.start()
+        #expect(teams.withLock { $0 } == ["t_7k2m5q4x3c"])
+
+        let bare = Fixture(answerKey: { team in
+            teams.withLock { $0.append(team) }
+            return Data([4] + [UInt8](repeating: 9, count: 64))
+        })
+        bare.model.handleCode(link)
+        await bare.model.start()
+        #expect(teams.withLock { $0 } == ["t_7k2m5q4x3c", nil])
+    }
+
+    @Test("the team of a device link", arguments: [
+        ("apassy_lnk_t_7k2m5q4x3c_00ff", "t_7k2m5q4x3c"),
+        ("https://relay.example/link#apassy_lnk_t_aaaaaaaaaa_00&r=connect&n=Mac", "t_aaaaaaaaaa"),
+        ("apassy_lnk_abc123", nil),
+        ("apassy_lnk_t_7k2m5q4x3c", nil),
+        ("apassy_lnk_t_7k2m5q4x31_00", nil),
+        ("apassy_lnk_t_7K2M5Q4X3C_00", nil),
+        ("apassy_lnk_t_7k2m5q4x3c_0G", nil),
+        ("no link", nil),
+    ])
+    func linkTeam(text: String, team: String?) {
+        #expect(VaultText.linkTeam(text) == team)
     }
 
     @Test("an error of the relay while waiting ends in a failure")

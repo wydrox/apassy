@@ -23,6 +23,9 @@ pub(crate) struct UiPrefs {
     /// The folders whose subfolders the sidebar shows, by UUID. A folder UUID is
     /// random and the same on each Mac that syncs the vault.
     pub(crate) open_folders: BTreeSet<String>,
+    /// The owner turned "Show agents on the iPhone" off (relay-feed-v1 section 8). On by
+    /// default.
+    pub(crate) feed_off: bool,
 }
 
 impl UiPrefs {
@@ -111,6 +114,7 @@ mod tests {
             UiPrefs {
                 sidebar_hidden: true,
                 open_folders: ["folder-1".to_owned()].into(),
+                feed_off: false,
             }
         );
         prefs.save(&path).expect("save");
@@ -126,6 +130,7 @@ mod tests {
         let prefs = UiPrefs {
             sidebar_hidden: true,
             open_folders: ["folder-1".to_owned()].into(),
+            feed_off: true,
         };
         prefs.save(&path).expect("save");
         assert_eq!(UiPrefs::load(&path), prefs);
@@ -178,6 +183,23 @@ mod tests {
         assert!(third.ui.open_folders.contains("folder-a"));
         third.ui.toggle_folder("folder-a");
         assert!(UiPrefs::load(&path).open_folders.is_empty());
+    }
+
+    /// "Show agents on the iPhone" is on by default, and off stays off after a restart.
+    #[test]
+    fn the_feed_setting_is_on_by_default_and_kept() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = UiPrefs::path(dir.path());
+        let mut app = crate::desktop::DesktopApp::new();
+        app.ui.load_prefs(dir.path().to_path_buf());
+        assert!(!app.ui.feed_off, "on by default");
+        app.ui.set_feed_off(true);
+        assert!(UiPrefs::load(&path).feed_off);
+        let mut next = crate::desktop::DesktopApp::new();
+        next.ui.load_prefs(dir.path().to_path_buf());
+        assert!(next.ui.feed_off, "off after a restart");
+        next.ui.set_feed_off(false);
+        assert!(!UiPrefs::load(&path).feed_off);
     }
 
     #[test]

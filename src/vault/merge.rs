@@ -2092,6 +2092,27 @@ impl Vault {
             .collect()
     }
 
+    /// The sync UUID of each item by local item ID: the name of the item on every device
+    /// of the vault (`item.uuid`, 32 lowercase hex characters). The local ID is per
+    /// device; the UUID is not. An item without a UUID is left out.
+    pub fn item_uuids(&self) -> VaultResult<BTreeMap<u64, String>> {
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT id, uuid FROM item WHERE uuid IS NOT NULL ORDER BY id")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage)?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (id, uuid) = row.map_err(storage)?;
+            out.insert(super::to_public_id(id)?, uuid);
+        }
+        Ok(out)
+    }
+
     /// The synced-content digest of the scope: each credential with its version, the
     /// tombstones, and the synced history. A change of local data (agents, activity) does
     /// not change it. The vault must be unlocked.

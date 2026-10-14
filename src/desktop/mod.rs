@@ -257,6 +257,10 @@ impl DesktopApp {
             // screen (ADR 0013).
             app.load_vault_list(crate::paths::data_dir(), true);
             app.ui.load_prefs(crate::paths::data_dir());
+            // "Show agents on the iPhone" as `ui.json` keeps it (on by default).
+            if let Some(questions) = &app.owner.questions {
+                questions.set_feed(!app.ui.feed_off);
+            }
             app.open_last_vault(Some(&cc.egui_ctx));
             // Folder sync runs on its own thread, also while the window is hidden.
             app.start_sync_worker(&cc.egui_ctx);

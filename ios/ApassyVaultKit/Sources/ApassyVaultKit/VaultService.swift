@@ -53,6 +53,20 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         /// The time of the answer is too old to send again: answer again.
         case staleAnswer = "stale_answer"
         case pushUnavailable = "push_unavailable"
+        /// The `vault_id` of an answer is not the vault of its question.
+        case wrongVault = "wrong_vault"
+        // The agents of the Macs (section 5.12).
+        /// The relay does not carry the feeds yet.
+        case feedUnavailable = "feed_unavailable"
+        /// The time of the action is too old to send again: do it again, with Face ID again.
+        case staleAction = "stale_action"
+        /// The feed of the Mac is more than a day old: no action until it reports again.
+        case staleFeed = "stale_feed"
+        case tooManyActions = "too_many_actions"
+        /// The relay asks this iPhone to wait a minute before it reads the feeds again.
+        case feedRate = "feed_rate"
+        /// The service has no such call (an older core; app side, not the core).
+        case unsupported
     }
 
     public var code: Code
@@ -155,6 +169,12 @@ public protocol VaultService: Sendable {
 
     // 5.10 Questions through the relay (contract relay-questions-v1). The app only.
     func questionsList() async throws -> QuestionsList
+    /// Make the questions context of `vaultID` without selecting it (a vault that is not open
+    /// after `resume`, or after the app started): the core opens the vault, reads what its
+    /// questions need, and closes it again. Returns the status of its questions team
+    /// (`enabled: false` without one). `wrong_passphrase`, `busy` (AutoFill holds the vault), or
+    /// `locked` (a lock or a suspend came first).
+    func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus
     /// True when the relay has new or changed questions (a long poll of at most 25 s).
     func questionsWait(timeout: Int) async throws -> Bool
     func questionOpen(qid: String) async throws -> RemoteQuestion
@@ -163,11 +183,20 @@ public protocol VaultService: Sendable {
     /// Seal and post an answer. `signature` (DER, by the answer key) for an answer that needs Face
     /// ID; nil for the others, which the core signs with the relay key of this iPhone.
     func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws -> SentAnswer
+    /// The two calls above for the question of `vaultID` (`RemoteQuestion.vaultID`). Nil: the core
+    /// uses the vault that owns the qid.
+    func questionAnswerString(qid: String, answer: RemoteAnswer, vaultID: String?) async throws -> PreparedAnswer
+    func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?, vaultID: String?)
+        async throws -> SentAnswer
     /// Check that the vault row of this iPhone has this Secure Enclave answer key (X9.63). It writes
     /// nothing: the Mac that confirmed the join writes the row.
     func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration
+    /// Send the APNs token to the questions team of the selected vault; a core that keeps the
+    /// questions of every unlocked vault sends it to the team of each.
     func pushTokenSet(token: Data, environment: PushEnvironment) async throws
-    func pushTokenClear() async throws
+    /// Remove the token from the relay, as `pushTokenSet` reaches it. `pending`: the vaults whose
+    /// team keeps it until they open (a core that keeps every unlocked vault; else empty).
+    func pushTokenClear() async throws -> PushCleared
     /// Join the notifications-only team of the selected vault with the device link of the Mac.
     /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo
@@ -198,6 +227,22 @@ public protocol VaultService: Sendable {
     /// the owner: ask for Face ID first when turning "Always ask me" off or choosing an
     /// environment other than production, as the Mac does.
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws
+
+    // 5.12 The agents of the Macs (contract relay-feed-v1). The app only. An older service throws
+    // `VaultError.feedUnsupported` (`Feed.swift`).
+    /// The agents of every vault with a questions context, as the feeds of their Macs show them.
+    func feedList() async throws -> FeedList
+    /// True when a feed changed (a long poll of at most 25 s). Only while the Agents tab shows.
+    func feedWait(timeout: Int) async throws -> Bool
+    /// The action string of a removal, to sign with the answer key of `teamID` after Face ID when
+    /// `needsFaceID`. `actionID` and `time`: those of an earlier try (a retry); nil for new ones.
+    func feedActionString(_ removal: FeedRemoval, actionID: String?, time: Int64?) async throws -> PreparedFeedAction
+    /// Seal and post a removal with the `actionID` and `time` of `feedActionString`. `signature`
+    /// (DER, by the answer key) for a Face ID kind; nil for `only`, which the core signs.
+    func feedAction(_ removal: FeedRemoval, actionID: String, time: Int64, signature: Data?) async throws
+        -> SentFeedAction
+    /// The state of a posted action; a long poll of `timeout` seconds (0 to 25) while it is open.
+    func feedActionWait(actionID: String, vaultID: String?, timeout: Int) async throws -> FeedActionOutcome
 }
 
 public extension VaultService {
@@ -273,5 +318,10 @@ public extension VaultService {
 
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
         throw VaultError(.notAllowed, "This vault cannot change the options of a credential. Update Apassy.")
+    }
+
+    /// An older service keeps the questions of the selected vault only.
+    func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus {
+        throw VaultError(.notAllowed, "This vault cannot read the questions of another vault. Update Apassy.")
     }
 }

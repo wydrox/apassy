@@ -20,15 +20,13 @@ struct VaultTabView: View {
             }
             .badge(waitingCount)
             Tab("Agents", systemImage: "cpu", value: VaultTab.agents) {
-                AgentsView()
+                AgentsView(model: root.agents, questions: root.questions, companion: root.companion)
             }
             Tab(value: VaultTab.search, role: .search) {
                 SearchView()
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
-        // On the TabView, the field belongs to the search tab and shows in the tab bar.
-        .searchable(text: $ui.searchText, prompt: "Titles, usernames, tags, websites")
         .environment(ui)
         .sheet(item: $ui.sheet) { sheet in
             Group {
@@ -91,6 +89,10 @@ struct VaultTabView: View {
         }
         #if targetEnvironment(simulator)
             .task { openFromLaunchArgument() }
+        #endif
+        // On the tabs, not on Decisions: the Agents tab shows the seeded state too.
+        #if DEBUG && targetEnvironment(simulator)
+            .decisionsPreviewSeed(root.questions)
         #endif
     }
 
@@ -284,11 +286,15 @@ struct SearchView: View {
     @Environment(VaultUI.self) private var ui
 
     var body: some View {
+        @Bindable var ui = ui
         NavigationStack {
             results
                 .navigationTitle("Search")
                 .vaultDestinations()
         }
+        // Here, not on the TabView: there the field reached the stack of every tab, and on Vault,
+        // Decisions, and Agents it searched nothing.
+        .searchable(text: $ui.searchText, prompt: "Titles, usernames, tags, websites")
     }
 
     @ViewBuilder

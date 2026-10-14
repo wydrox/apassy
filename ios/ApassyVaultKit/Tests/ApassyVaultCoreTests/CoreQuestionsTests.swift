@@ -11,10 +11,13 @@ import Testing
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
-        _ = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
+        let vault = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
 
+        // A core that keeps the questions of every vault lists none: no vault has a context.
         let list = try await core.questionsList()
-        #expect(list == .off)
+        #expect(list.status == .off)
+        #expect(list.questions.isEmpty)
+        #expect(list.vaults ?? [] == [])
         #expect(try await core.questionsWait(timeout: 1) == false)
         let key = Data([4] + [UInt8](repeating: 7, count: 64))
         do {
@@ -30,6 +33,23 @@ import Testing
             Issue.record("an answer went without a team")
         } catch let error as VaultError {
             #expect(error.code == .noQuestions)
+        }
+        // The vault of the question goes as `vault_id`: this vault has no team, and a vault
+        // that is not on this iPhone is `no_vault`.
+        do {
+            _ = try await core.questionAnswerString(
+                qid: "oKGio6SlpqeoqaqrrK2urw", answer: RemoteAnswer(kind: .deny), vaultID: vault.id)
+            Issue.record("an answer string was made without a team")
+        } catch let error as VaultError {
+            #expect(error.code == .noQuestions, "\(error)")
+        }
+        do {
+            _ = try await core.questionAnswerString(
+                qid: "oKGio6SlpqeoqaqrrK2urw", answer: RemoteAnswer(kind: .deny),
+                vaultID: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c")
+            Issue.record("an answer string was made for a vault that is not on this iPhone")
+        } catch let error as VaultError {
+            #expect(error.code == .noVault, "\(error)")
         }
         do {
             _ = try await core.joinAttach(link: "not a link", deviceName: "Test iPhone", answerKey: key)

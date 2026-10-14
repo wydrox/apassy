@@ -4,18 +4,59 @@ import Foundation
 // models of the core's answers, and the kinds of answer. The core opens and checks each card;
 // every text here is for display, with control and format characters replaced.
 
-/// The questions of the selected vault, and whether it has a questions team.
+/// The questions of the vaults, and whether the selected vault has a questions team. A core that
+/// keeps the questions of every unlocked vault lists them all, with `vaults`; an older core lists
+/// the selected vault only, and `vaults` is nil.
 public struct QuestionsList: Codable, Sendable, Equatable {
+    /// The selected vault.
     public var status: QuestionsStatus
     public var questions: [RemoteQuestion]
+    /// One entry per vault with a questions context (the vaults unlocked this session), or nil
+    /// from an older core.
+    public var vaults: [QuestionsVault]?
 
-    public init(status: QuestionsStatus, questions: [RemoteQuestion]) {
+    public init(status: QuestionsStatus, questions: [RemoteQuestion], vaults: [QuestionsVault]? = nil) {
         self.status = status
         self.questions = questions
+        self.vaults = vaults
     }
 
     /// No questions team: the vault gets no questions through the relay.
     public static let off = QuestionsList(status: .off, questions: [])
+
+    enum CodingKeys: String, CodingKey {
+        case status, questions, vaults
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(QuestionsStatus.self, forKey: .status)
+        questions = try container.decode([RemoteQuestion].self, forKey: .questions)
+        // A list of vaults that this app cannot read is left out: the selected vault still
+        // answers as with an older core.
+        vaults = try? container.decodeIfPresent([QuestionsVault].self, forKey: .vaults)
+    }
+}
+
+/// A vault whose questions the core keeps: its questions team and this iPhone's row in it.
+public struct QuestionsVault: Codable, Sendable, Equatable, Identifiable {
+    public var vaultID: String
+    public var vaultName: String
+    public var status: QuestionsStatus
+
+    public var id: String { vaultID }
+
+    public init(vaultID: String, vaultName: String, status: QuestionsStatus) {
+        self.vaultID = vaultID
+        self.vaultName = vaultName
+        self.status = status
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case vaultID = "vault_id"
+        case vaultName = "vault_name"
+    }
 }
 
 public struct QuestionsStatus: Codable, Sendable, Equatable {
@@ -102,12 +143,17 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
     public var settle: QuestionSettle?
     /// The kind of the answer this iPhone sent, while the core remembers it.
     public var answered: AnswerKind?
+    /// The vault that got the question, from a core that keeps the questions of every unlocked
+    /// vault; nil from an older core (then it is the selected vault).
+    public var vaultID: String?
+    public var vaultName: String?
 
     public var id: String { qid }
 
     public init(
         qid: String, state: State, askerName: String, createdAt: Int64, expiresAt: Int64, problem: String? = nil,
-        card: QuestionCard? = nil, settle: QuestionSettle? = nil, answered: AnswerKind? = nil
+        card: QuestionCard? = nil, settle: QuestionSettle? = nil, answered: AnswerKind? = nil,
+        vaultID: String? = nil, vaultName: String? = nil
     ) {
         self.qid = qid
         self.state = state
@@ -118,6 +164,8 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
         self.card = card
         self.settle = settle
         self.answered = answered
+        self.vaultID = vaultID
+        self.vaultName = vaultName
     }
 
     enum CodingKeys: String, CodingKey {
@@ -125,6 +173,8 @@ public struct RemoteQuestion: Codable, Sendable, Equatable, Identifiable {
         case askerName = "asker_name"
         case createdAt = "created_at"
         case expiresAt = "expires_at"
+        case vaultID = "vault_id"
+        case vaultName = "vault_name"
     }
 }
 
@@ -407,6 +457,29 @@ public struct AnswerKeyRegistration: Codable, Sendable, Equatable {
     }
 }
 
+/// What `pushTokenClear` did: the vaults whose team dropped the token now, and those that keep
+/// it until they open on this iPhone (vault IDs).
+public struct PushCleared: Codable, Sendable, Equatable {
+    public var cleared: [String]
+    public var pending: [String]
+
+    public init(cleared: [String] = [], pending: [String] = []) {
+        self.cleared = cleared
+        self.pending = pending
+    }
+
+    /// An answer without the lists (`{}`) cleared the team of the selected vault only.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cleared = try container.decodeIfPresent([String].self, forKey: .cleared) ?? []
+        pending = try container.decodeIfPresent([String].self, forKey: .pending) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case cleared, pending
+    }
+}
+
 /// A join of a notifications-only team (plan §A7).
 public struct AttachInfo: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable { case waiting, attached }
@@ -472,6 +545,17 @@ public extension VaultService {
         throw VaultError(.noQuestions, "This vault gets no questions through the relay.")
     }
 
+    /// A service that keeps the questions of one vault answers for it, without `vaultID`.
+    func questionAnswerString(qid: String, answer: RemoteAnswer, vaultID: String?) async throws -> PreparedAnswer {
+        try await questionAnswerString(qid: qid, answer: answer)
+    }
+
+    func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?, vaultID: String?)
+        async throws -> SentAnswer
+    {
+        try await questionAnswer(qid: qid, answer: answer, time: time, signature: signature)
+    }
+
     func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration {
         throw VaultError(.noQuestions, "This vault gets no questions through the relay.")
     }
@@ -480,7 +564,7 @@ public extension VaultService {
         throw VaultError(.noQuestions, "This vault gets no questions through the relay.")
     }
 
-    func pushTokenClear() async throws {}
+    func pushTokenClear() async throws -> PushCleared { PushCleared() }
 
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         throw VaultError(.notAllowed, "This service cannot connect to the relay.")
