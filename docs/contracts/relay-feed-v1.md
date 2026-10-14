@@ -57,7 +57,7 @@ The encodings of relay-questions-v1 section 4 apply: b64u without padding, lower
 | `change` | a JSON number, 0 or more. |
 | `action_id` | 16 random bytes from the sender's CSPRNG, b64u: exactly 22 characters of `A-Za-z0-9-_`. |
 | Agent id | the decimal id of the agent row on the publishing Mac, as a string (`"4"`). It means something only on that Mac. Agent ids are never reused in a vault (`AUTOINCREMENT`). |
-| Item reference | the item's `uuid` (`item.uuid`, 36 lowercase characters `8-4-4-4-12`). **Never the numeric item id**: that id is per device, and sync matches items by `uuid` (`src/vault/merge.rs`). The plan's "item ids refer to the synced vault" is corrected here. |
+| Item reference | the item's `uuid` (`item.uuid`) in the vault's own form: 32 lowercase hex characters, no hyphens. A reader and a target compare it byte for byte and never reformat it. **Never the numeric item id**: that id is per device, and sync matches items by `uuid` (`src/vault/merge.rs`). The plan's "item ids refer to the synced vault" is corrected here. |
 | Text in the feed | UTF-8. The publisher removes control characters (as `clean` in `src/vault/usage.rs`) and cuts at a character boundary to the limit of the field. |
 | Text in the action string | the exact UTF-8 bytes. No normalization. |
 
