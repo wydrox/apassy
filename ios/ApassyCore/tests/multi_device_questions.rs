@@ -1059,3 +1059,179 @@ fn the_push_token_follows_the_vaults_that_open_later() {
     let saved: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(saved, json!({"version": 1, "clear": []}));
 }
+
+/// The vault file of `vault` on the iPhone of `setup`.
+fn vault_file(setup: &TwoVaults, vault: &str) -> PathBuf {
+    setup
+        .root
+        .path()
+        .join("iphone")
+        .join("vaults")
+        .join(format!("{vault}.apassy"))
+}
+
+/// `questions_unlock` of `vault` until it is not `busy` (the test opens the file too).
+fn unlock_questions(phone: &Core, vault: &str) -> Value {
+    loop {
+        let request = json!({"op": "questions_unlock", "vault_id": vault, "passphrase": PASS});
+        let answer: Value = serde_json::from_str(&phone.call(&request.to_string())).unwrap();
+        if answer["error"]["code"] != "busy" {
+            return answer;
+        }
+    }
+}
+
+/// A suspend waits for a `questions_unlock` that has the vault file open for its key
+/// derivation: when the suspend returns, no file lock is left (iOS ends a suspended app
+/// that holds one), and the context of that vault is gone with the others.
+#[test]
+fn a_suspend_waits_for_questions_unlock_and_leaves_no_file_lock() {
+    let setup = two_vaults();
+    let iphone = &setup.iphone;
+    call(iphone, json!({"op": "lock"}));
+    call(
+        iphone,
+        json!({"op": "unlock", "passphrase": PASS, "keep": true}),
+    );
+    let file = vault_file(&setup, &setup.personal);
+    std::thread::scope(|scope| {
+        let opening = scope.spawn(|| unlock_questions(iphone, &setup.personal));
+        // Wait until the call holds the file: then the suspend comes.
+        let start = Instant::now();
+        let mut held = false;
+        while !held && !opening.is_finished() {
+            match Vault::open(&file) {
+                Ok(probe) => drop(probe),
+                Err(error) => {
+                    assert_eq!(error.kind(), apassy::vault::VaultErrorKind::Busy);
+                    held = true;
+                }
+            }
+            assert!(
+                start.elapsed() < WAIT,
+                "questions_unlock never opened the file"
+            );
+        }
+        call(iphone, json!({"op": "suspend"}));
+        assert!(
+            Vault::open(&file).is_ok(),
+            "a file lock outlived the suspend (held during it: {held})"
+        );
+        let answer = opening.join().unwrap();
+        assert!(
+            answer["ok"] == true || answer["error"]["code"] == "locked",
+            "{answer}"
+        );
+    });
+    assert_eq!(fails(iphone, json!({"op": "questions_list"})), "locked");
+    assert_eq!(call(iphone, json!({"op": "resume"}))["unlocked"], true);
+    let list = call(iphone, json!({"op": "questions_list"}));
+    assert_eq!(listed_vaults(&list), vec![setup.work.clone()], "{list}");
+}
+
+/// A `questions_unlock` that runs while its vault is removed never leaves a context of
+/// the removed vault.
+#[test]
+fn a_removal_during_questions_unlock_leaves_no_context() {
+    let setup = two_vaults();
+    let iphone = &setup.iphone;
+    call(iphone, json!({"op": "lock"}));
+    call(iphone, json!({"op": "unlock", "passphrase": PASS}));
+    let started = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let opening = scope.spawn(|| {
+            loop {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                let answer = unlock_questions(iphone, &setup.personal);
+                if answer["error"]["code"] == "no_vault" {
+                    return;
+                }
+                assert!(
+                    answer["ok"] == true || answer["error"]["code"] == "locked",
+                    "{answer}"
+                );
+            }
+        });
+        while !started.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        call(
+            iphone,
+            json!({"op": "remove_vault", "vault_id": setup.personal, "force": true}),
+        );
+        opening.join().unwrap();
+    });
+    let list = call(iphone, json!({"op": "questions_list"}));
+    assert_eq!(listed_vaults(&list), vec![setup.work.clone()], "{list}");
+    assert!(!vault_file(&setup, &setup.personal).exists());
+}
+
+/// `questions_unlock` of the open selected vault checks the passphrase too: the app keeps
+/// the passphrase behind Face ID after it.
+#[test]
+fn questions_unlock_of_the_open_vault_checks_the_passphrase() {
+    let setup = two_vaults();
+    let iphone = &setup.iphone;
+    assert_eq!(
+        fails(
+            iphone,
+            json!({"op": "questions_unlock", "vault_id": setup.work,
+                   "passphrase": "synthetic-wrong-pass"})
+        ),
+        "wrong_passphrase"
+    );
+    assert_eq!(
+        fails(
+            iphone,
+            json!({"op": "questions_unlock", "vault_id": setup.work, "passphrase": ""})
+        ),
+        "wrong_passphrase"
+    );
+    let opened = call(
+        iphone,
+        json!({"op": "questions_unlock", "vault_id": setup.work, "passphrase": PASS}),
+    );
+    assert_eq!(opened["status"]["team_id"], setup.mac_b.team.as_str());
+    assert_eq!(call(iphone, json!({"op": "info"}))["unlocked"], true);
+}
+
+/// Removing a vault takes the push token of this iPhone off its questions team while the
+/// relay key is in memory. When the relay does not answer, the next read tries again.
+#[test]
+fn removing_a_vault_clears_its_push_token_now_or_at_the_next_read() {
+    let setup = two_vaults();
+    let iphone = &setup.iphone;
+    call(
+        iphone,
+        json!({"op": "push_token_set", "token": "0f".repeat(32), "environment": "development"}),
+    );
+    let teams = |relay: &FakeRelay| {
+        sorted(
+            relay
+                .push_tokens()
+                .into_iter()
+                .map(|(team, _, _)| team)
+                .collect(),
+        )
+    };
+    assert_eq!(
+        teams(&setup.relay),
+        sorted(vec![setup.mac_a.team.clone(), setup.mac_b.team.clone()])
+    );
+    // "Personal" is not selected: the device stays on the relay (`force`), and its
+    // token goes; the relay fails the first try.
+    setup.relay.fail_next("DELETE /v1/push/token", 1, 500);
+    let removed = call(
+        iphone,
+        json!({"op": "remove_vault", "vault_id": setup.personal, "force": true}),
+    );
+    assert_eq!(removed["left_relay"], false);
+    assert_eq!(
+        teams(&setup.relay),
+        sorted(vec![setup.mac_a.team.clone(), setup.mac_b.team.clone()]),
+        "the relay failed"
+    );
+    call(iphone, json!({"op": "questions_list"}));
+    assert_eq!(teams(&setup.relay), vec![setup.mac_b.team.clone()]);
+}
