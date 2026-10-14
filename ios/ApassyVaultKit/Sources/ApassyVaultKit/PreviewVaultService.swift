@@ -22,9 +22,9 @@ public actor PreviewVaultService: VaultService {
         var key: P256.Signing.PrivateKey
     }
 
-    private var vaults: [VaultEntry]
-    private var selected: String?
-    private var unlocked: Bool
+    var vaults: [VaultEntry]
+    var selected: String?
+    var unlocked: Bool
     private var join: JoinInfo?
     private var joinPolls = 0
     var items: [UInt64: Stored] = [:]
@@ -245,6 +245,7 @@ public actor PreviewVaultService: VaultService {
     public func suspend() async throws {
         if unlocked { suspended = true }
         unlocked = false
+        dropQuestionContexts()
     }
 
     public func resume() async throws -> Bool {
@@ -267,6 +268,7 @@ public actor PreviewVaultService: VaultService {
         unlocked = false
         kept = false
         suspended = false
+        dropQuestionContexts()
     }
 
     public func checkPassphrase(_ passphrase: String) async throws -> Bool {
@@ -312,6 +314,7 @@ public actor PreviewVaultService: VaultService {
     public func removeVault(id: String, force: Bool) async throws -> Bool {
         let leftRelay = vaults.first(where: { $0.id == id })?.isRelay == true
         vaults.removeAll { $0.id == id }
+        dropQuestionContexts()
         if selected == id {
             selected = vaults.first?.id
             unlocked = false

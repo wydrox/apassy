@@ -53,6 +53,8 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         /// The time of the answer is too old to send again: answer again.
         case staleAnswer = "stale_answer"
         case pushUnavailable = "push_unavailable"
+        /// The `vault_id` of an answer is not the vault of its question.
+        case wrongVault = "wrong_vault"
     }
 
     public var code: Code
@@ -155,6 +157,12 @@ public protocol VaultService: Sendable {
 
     // 5.10 Questions through the relay (contract relay-questions-v1). The app only.
     func questionsList() async throws -> QuestionsList
+    /// Make the questions context of `vaultID` without selecting it (a vault that is not open
+    /// after `resume`, or after the app started): the core opens the vault, reads what its
+    /// questions need, and closes it again. Returns the status of its questions team
+    /// (`enabled: false` without one). `wrong_passphrase`, `busy` (AutoFill holds the vault), or
+    /// `locked` (a lock or a suspend came first).
+    func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus
     /// True when the relay has new or changed questions (a long poll of at most 25 s).
     func questionsWait(timeout: Int) async throws -> Bool
     func questionOpen(qid: String) async throws -> RemoteQuestion
@@ -281,5 +289,10 @@ public extension VaultService {
 
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
         throw VaultError(.notAllowed, "This vault cannot change the options of a credential. Update Apassy.")
+    }
+
+    /// An older service keeps the questions of the selected vault only.
+    func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus {
+        throw VaultError(.notAllowed, "This vault cannot read the questions of another vault. Update Apassy.")
     }
 }

@@ -27,6 +27,9 @@ public struct PreviewQuestions: Sendable {
         var registered: Bool
         var removed: Bool
         var pushToken: Data?
+        /// The core holds its context: it was unlocked in this session, and no lock or suspend
+        /// came since.
+        var open = true
 
         var status: QuestionsStatus {
             QuestionsStatus(
@@ -54,6 +57,10 @@ public struct PreviewQuestions: Sendable {
     /// The answer key that the last `joinAttach` / `joinStart` sent.
     var attachAnswerKey: Data?
     var others: [Other] = []
+    /// The selected vault keeps its context after a selection, until a lock or a suspend.
+    var ownOpen = false
+    /// The vault IDs of each `questionsUnlock`, in order.
+    var unlocks: [String] = []
 
     public init() {}
 }
@@ -102,15 +109,40 @@ extension PreviewVaultService {
 
     /// Another unlocked vault with its own questions team and questions. From then on the service
     /// answers as a core that keeps the questions of every unlocked vault.
+    ///
+    /// - Parameters:
+    ///   - onPhone: the vault is on this iPhone too (`info`), as a relay vault of `team`.
+    ///   - open: the core holds its context now; false: `questionsUnlock` makes it, with the
+    ///     passphrase of the preview.
     public func addQuestionsVault(
         id: String, name: String, team: String, questions: [RemoteQuestion] = [], answerKey: Data? = nil,
-        registered: Bool = true, removed: Bool = false
+        registered: Bool = true, removed: Bool = false, onPhone: Bool = false, open: Bool = true
     ) {
         questionsState.others.removeAll { $0.id == id }
         questionsState.others.append(
             .init(
                 id: id, name: name, team: team, questions: questions, answerKey: answerKey, registered: registered,
-                removed: removed))
+                removed: removed, open: open))
+        if onPhone, !vaults.contains(where: { $0.id == id }) {
+            vaults.append(
+                VaultEntry(
+                    id: id, name: name, relayURL: "https://relay.apassy.example", teamID: team, deviceID: 4,
+                    addedAt: 1_791_000_100))
+        }
+    }
+
+    /// The vault IDs of each `questionsUnlock`, in order.
+    public func questionsUnlocks() -> [String] { questionsState.unlocks }
+
+    /// Whether the core holds the questions context of the other vault `vaultID`.
+    public func hasQuestionsContext(vaultID: String) -> Bool {
+        questionsState.others.first { $0.id == vaultID }?.open ?? false
+    }
+
+    /// A lock, a suspend, or a removal drops the context of every vault, as the core does.
+    func dropQuestionContexts() {
+        questionsState.ownOpen = false
+        for at in questionsState.others.indices { questionsState.others[at].open = false }
     }
 
     /// The push token in the team of the vault `vaultID` (the selected vault: `currentPushToken`).
@@ -172,6 +204,9 @@ extension PreviewVaultService {
     private func openQuestion(_ qid: String, other: Int? = nil) throws -> RemoteQuestion {
         let questions: [RemoteQuestion]
         if let other {
+            guard questionsState.others[other].open else {
+                throw VaultError(.locked, "Unlock this vault to answer its questions.")
+            }
             questions = questionsState.others[other].questions
         } else {
             try requireQuestions()
@@ -196,19 +231,46 @@ extension PreviewVaultService {
         }
     }
 
+    /// The selected vault has a context: it is open, or it was since the last lock or suspend.
+    private var ownContext: Bool { unlocked || questionsState.ownOpen }
+
     public func questionsList() async throws -> QuestionsList {
-        let own = questionsState.enabled && !questionsState.removed ? questionsState.questions : []
+        if unlocked { questionsState.ownOpen = true }
+        let openOthers = questionsState.others.filter(\.open)
+        guard ownContext || !openOthers.isEmpty else { throw VaultError(.locked, "The vault is locked.") }
+        let own = ownContext && questionsState.enabled && !questionsState.removed ? questionsState.questions : []
         guard !questionsState.others.isEmpty else { return QuestionsList(status: questionsStatus, questions: own) }
         let selected = try await info().selectedVault
         let (id, name) = (selected?.id ?? "", selected?.name ?? "This vault")
         var vaults: [QuestionsVault] = []
-        if questionsState.enabled { vaults.append(QuestionsVault(vaultID: id, vaultName: name, status: questionsStatus)) }
+        if questionsState.enabled, ownContext {
+            vaults.append(QuestionsVault(vaultID: id, vaultName: name, status: questionsStatus))
+        }
         var questions = Self.tagged(own, id, name)
-        for other in questionsState.others {
+        for other in openOthers {
             vaults.append(QuestionsVault(vaultID: other.id, vaultName: other.name, status: other.status))
             if !other.removed { questions += Self.tagged(other.questions, other.id, other.name) }
         }
         return QuestionsList(status: questionsStatus, questions: questions, vaults: vaults)
+    }
+
+    public func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus {
+        guard vaults.contains(where: { $0.id == vaultID }) else {
+            throw VaultError(.noVault, "This vault is not on this iPhone.")
+        }
+        // The key derivation of the core takes a moment.
+        try await Task.sleep(for: .milliseconds(100))
+        guard passphrase == Self.passphrase else {
+            throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
+        }
+        questionsState.unlocks.append(vaultID)
+        if vaultID == selected {
+            questionsState.ownOpen = true
+            return questionsStatus
+        }
+        guard let at = questionsState.others.firstIndex(where: { $0.id == vaultID }) else { return .off }
+        questionsState.others[at].open = true
+        return questionsState.others[at].status
     }
 
     public func questionsWait(timeout: Int) async throws -> Bool {
@@ -303,7 +365,9 @@ extension PreviewVaultService {
     public func pushTokenSet(token: Data, environment: PushEnvironment) async throws {
         if questionsState.others.isEmpty { try requireQuestions() }
         if questionsState.enabled { questionsState.pushToken = token }
-        for at in questionsState.others.indices { questionsState.others[at].pushToken = token }
+        for at in questionsState.others.indices where questionsState.others[at].open {
+            questionsState.others[at].pushToken = token
+        }
     }
 
     public func pushTokenClear() async throws {

@@ -8,6 +8,20 @@ extension CoreVaultService {
     /// an older core.
     public func questionsList() async throws -> QuestionsList { try await call("questions_list") }
 
+    private struct Unlocked: Decodable, Sendable {
+        var vaultID: String
+        var status: QuestionsStatus
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case vaultID = "vault_id"
+        }
+    }
+
+    public func questionsUnlock(vaultID: String, passphrase: String) async throws -> QuestionsStatus {
+        try await call("questions_unlock", ["vault_id": vaultID, "passphrase": passphrase], as: Unlocked.self).status
+    }
+
     private struct Waited: Decodable, Sendable { var changed: Bool }
 
     public func questionsWait(timeout: Int) async throws -> Bool {

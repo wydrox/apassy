@@ -6,6 +6,7 @@
 #   scripts/build-ios-core.sh device     # iPhone only, for an archive
 #   scripts/build-ios-core.sh sim mac    # any of: device, sim, mac
 #
+# The mac slice also builds build/questions-macs (two fake Macs on a fake relay) for swift test.
 # APASSY_CORE_PROFILE=dev builds without optimizations (faster, larger).
 set -euo pipefail
 
@@ -42,6 +43,10 @@ for slice in "${slices[@]}"; do
     # No debug symbols in the archive: the app has its own dSYM for Swift.
     strip -S -x -o "$out/$target/libapassy_core.a" "$lib" 2>/dev/null || cp "$lib" "$out/$target/libapassy_core.a"
     args+=(-library "$out/$target/libapassy_core.a" -headers "$headers")
+    if [ "$slice" = mac ]; then
+        cargo build -p apassy-core --profile "$profile" --target "$target" --example questions_macs
+        cp "$target_dir/$target/$dir/examples/questions_macs" "$out/questions-macs"
+    fi
 done
 
 rm -rf "$out/ApassyCore.xcframework"

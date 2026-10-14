@@ -47,6 +47,20 @@ public protocol PassphraseStore: Sendable {
     func read(vaultID: String, reason: String) async throws -> String
     /// Remove the passphrase.
     func remove(vaultID: String)
+    /// One Face ID match for the reads of several vaults: one `LAContext`, evaluated once here,
+    /// that each `PassphraseReads.read` passes to the keychain, so no read asks again. End it
+    /// as soon as the reads are done. Throws `VaultError(.cancelled, …)` when the owner cancels.
+    func readSession(reason: String) async throws -> any PassphraseReads
+}
+
+/// The reads of one Face ID match (`PassphraseStore.readSession`). It holds the evaluated
+/// context, never a passphrase: each read returns one, which the caller drops after its call.
+public protocol PassphraseReads: Sendable {
+    /// The stored passphrase of a vault, without a new prompt. `VaultError(.locked, …)` when it is
+    /// gone (a new Face ID enrollment), or when the session ended.
+    func read(vaultID: String) async throws -> String
+    /// Invalidate the context: later reads fail.
+    func end()
 }
 
 /// The kind of biometry of this iPhone, for the texts ("Face ID", "Touch ID").
