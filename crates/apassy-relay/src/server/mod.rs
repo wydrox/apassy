@@ -115,11 +115,12 @@ pub struct Core {
     /// The feed list and status polls of this team out of `feed_lane`, at most
     /// `feed::reader_seats` of its share, so the readers leave seats to the action polls.
     pub feed_readers: AtomicUsize,
-    /// The time of each device's last `feed_started` and `feed_deleted` row, so a loop of
-    /// `PUT` and `DELETE` writes at most one of each per device and hour. In memory only.
-    pub feed_audit: Mutex<HashMap<(u64, &'static str), u64>>,
-    /// The full feed reads of each device in the current minute and the newest feed
-    /// counter it was given (`feed::take_full_read`). In memory only.
+    /// The last `feed_started` or `feed_deleted` row of each device and whether its feed
+    /// changed since without a row (`feed::FeedAudit`), so a loop of `PUT` and `DELETE`
+    /// writes at most one row per device and hour. In memory only.
+    pub feed_audit: Mutex<HashMap<u64, feed::FeedAudit>>,
+    /// The feed text that each device read in the current minute (`feed::FeedReads`).
+    /// In memory only.
     pub feed_reads: Mutex<HashMap<u64, feed::FeedReads>>,
     /// The time of each device's last accepted feed, so a delete does not lift the 10 s
     /// pace of feeds. In memory only: the feed row keeps it across a restart.
@@ -166,11 +167,26 @@ impl Core {
         now: u64,
         kind: &'static str,
     ) -> RelayResult<RelayError> {
+        self.limit_error_every(conn, now, kind, 10)
+    }
+
+    /// `limit_error_on` with at most one row of `kind` per `secs` seconds (the feed limits:
+    /// one an hour, docs/SPEC.md section 27.9).
+    pub fn limit_error_every(
+        &self,
+        conn: &rusqlite::Connection,
+        now: u64,
+        kind: &'static str,
+        secs: u64,
+    ) -> RelayResult<RelayError> {
         let mut last = self
             .last_limit
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if last.get(kind).is_none_or(|at| now >= at.saturating_add(10)) {
+        if last
+            .get(kind)
+            .is_none_or(|at| now >= at.saturating_add(secs))
+        {
             self.audit.write_on(
                 conn,
                 now,

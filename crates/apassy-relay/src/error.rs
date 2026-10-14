@@ -94,6 +94,9 @@ pub mod codes {
     /// `feed_actions_per_hour` of the team, or too many open actions of the team or of
     /// the sending device.
     pub const TOO_MANY_ACTIONS: &str = "too_many_actions";
+    /// `GET /v1/feed` of a device that read its feed text of the minute. 403, not 429:
+    /// the app's other calls go on.
+    pub const FEED_RATE: &str = "feed_rate";
     /// `PUT /v1/feed` with a `seq` at or below the stored `seq` of the device.
     pub const SEQ_NOT_NEWER: &str = "seq_not_newer";
     /// A settle of a settled action with another body.
@@ -136,6 +139,7 @@ pub fn status_of(code: &str) -> u16 {
         | TOO_MANY_ANSWERS
         | PLAN_REQUIRED
         | FEED_LIMIT
+        | FEED_RATE
         | TOO_MANY_ACTIONS => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
@@ -233,6 +237,7 @@ mod tests {
             codes::TOO_MANY_ANSWERS,
             codes::PLAN_REQUIRED,
             codes::FEED_LIMIT,
+            codes::FEED_RATE,
             codes::TOO_MANY_ACTIONS,
         ] {
             assert_eq!(RelayError::new(code, "x").status(), 403);

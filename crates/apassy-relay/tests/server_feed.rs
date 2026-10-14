@@ -153,10 +153,10 @@ fn pace(relay: &TestRelay, core: &Core) {
     relay.edit_vault_live("UPDATE feed SET updated_at = updated_at - 10");
 }
 
-/// Moves the last `feed_started` and `feed_deleted` rows of each device an hour back.
+/// Moves the last `feed_started` or `feed_deleted` row of each device an hour back.
 fn hour_later(core: &Core) {
-    for at in core.feed_audit.lock().unwrap().values_mut() {
-        *at = at.saturating_sub(feed::FEED_AUDIT_SECS);
+    for last in core.feed_audit.lock().unwrap().values_mut() {
+        last.at = last.at.saturating_sub(feed::FEED_AUDIT_SECS);
     }
 }
 
@@ -683,8 +683,8 @@ fn seq_goes_up_and_a_feed_replaces_the_last_one() {
     assert_eq!((status, code(&value)), (403, "feed_limit"), "{value}");
     pace(&relay, &core);
     assert_eq!(put(&relay, &mini, 1, &encode_b64(&[1; 20])).0, 200);
-    // No audit row per feed update: one `feed_started` per first feed, one
-    // `feed_deleted`; a new start within the hour of the last one writes none.
+    // No audit row per feed update: one `feed_started` per first feed. The delete came
+    // within the hour of the device's last row, so it waits: no row yet.
     let audit_rows = audit(&relay);
     assert_eq!(
         rows(&audit_rows, "feed_started"),
@@ -693,29 +693,38 @@ fn seq_goes_up_and_a_feed_replaces_the_last_one() {
             &json!({"device_id": mini.id})
         ]
     );
-    assert_eq!(
-        rows(&audit_rows, "feed_deleted"),
-        vec![&json!({"device_id": mini.id, "reason": "deleted"})]
-    );
+    assert!(rows(&audit_rows, "feed_deleted").is_empty());
     let count = audit_rows.len();
     pace(&relay, &core);
     publish(&relay, &mac, 200);
     assert_eq!(audit(&relay).len(), count);
-    // A loop of PUT and DELETE does not grow the audit: at most one `feed_started` and
-    // one `feed_deleted` per device and hour.
+    // A loop of PUT and DELETE does not grow the audit: at most one row per device and
+    // hour, and the feed is on again, as the last row says, so maintenance writes none.
     for seq in 2..8 {
         relay.ok("DELETE", "/v1/feed", &mini.token, None);
         pace(&relay, &core);
         assert_eq!(put(&relay, &mini, seq, &encode_b64(&[1; 20])).0, 200);
     }
-    assert_eq!(audit(&relay).len(), count);
-    // An hour later each writes its row again.
     hour_later(&core);
+    feed::maintenance(&core, now_unix()).unwrap();
+    assert_eq!(audit(&relay).len(), count);
+    // An hour later a delete writes its row at once; the start right after it waits,
+    // and maintenance writes it an hour later, as the feed is on then.
     relay.ok("DELETE", "/v1/feed", &mini.token, None);
     pace(&relay, &core);
     assert_eq!(put(&relay, &mini, 9, &encode_b64(&[1; 20])).0, 200);
+    feed::maintenance(&core, now_unix()).unwrap();
     let audit_rows = audit(&relay);
-    assert_eq!(audit_rows.len(), count + 2);
+    assert_eq!(
+        audit_rows[count..],
+        [(
+            "feed_deleted".to_string(),
+            json!({"device_id": mini.id, "reason": "deleted"})
+        )]
+    );
+    hour_later(&core);
+    feed::maintenance(&core, now_unix()).unwrap();
+    let audit_rows = audit(&relay);
     assert_eq!(
         audit_rows[count..],
         [
@@ -726,6 +735,8 @@ fn seq_goes_up_and_a_feed_replaces_the_last_one() {
             ("feed_started".to_string(), json!({"device_id": mini.id}))
         ]
     );
+    let actors = relay.vault_rows("SELECT actor, '' FROM audit ORDER BY id DESC LIMIT 1");
+    assert_eq!(actors[0].0, format!("member:{}", mini.member).into_bytes());
     // A revocation always writes its row, also within the hour.
     relay.ok(
         "DELETE",
@@ -737,6 +748,11 @@ fn seq_goes_up_and_a_feed_replaces_the_last_one() {
         rows(&audit(&relay), "feed_deleted").last().unwrap(),
         &&json!({"device_id": mini.id, "reason": "device_revoked"})
     );
+    // A revoked device's held-back row is not written later.
+    hour_later(&core);
+    let count = audit(&relay).len();
+    feed::maintenance(&core, now_unix()).unwrap();
+    assert_eq!(audit(&relay).len(), count);
 }
 
 #[test]
@@ -1086,82 +1102,55 @@ fn a_feed_list_pages_at_one_mebibyte_of_text() {
     );
 }
 
-/// `GET path` with the token: the status, the `Retry-After` seconds, and the body.
-fn get_retry(relay: &TestRelay, path: &str, token: &str) -> (u16, Option<u64>, Value) {
-    let addr = relay.url.trim_start_matches("http://").to_string();
-    let mut stream = std::net::TcpStream::connect(&addr).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(20)))
-        .unwrap();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n",
-        relay.edge_secret,
-    )
-    .unwrap();
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).unwrap();
-    let status = answer.split(' ').nth(1).unwrap().parse().unwrap();
-    let retry = answer.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("retry-after")
-            .then(|| value.trim().parse().ok())?
-    });
-    let body = &answer[answer.find("\r\n\r\n").unwrap() + 4..];
-    (status, retry, serde_json::from_str(body).unwrap())
-}
-
 #[test]
-fn full_feed_reads_have_a_pace_per_device() {
+fn feed_reads_have_a_text_budget_per_device_and_minute() {
     let mut relay = start(UpstreamOptions::default());
     let mac = personal_team(&mut relay);
     let phone = add_device(&relay, &mac, "iPhone");
-    let pad = add_device(&relay, &mac, "iPad");
-    let mini = add_device(&relay, &mac, "Mac mini");
     let core = core_of(&relay, &mac);
-    publish(&relay, &mac, 1);
-    publish(&relay, &mini, 1);
-    // The counts are per minute of the relay clock: start early in a minute.
-    while now_unix() % 60 > 50 {
+    let full = encode_b64(&vec![7; feed::MAX_FEED_BYTES]);
+    let macs: Vec<Device> = (0..3)
+        .map(|n| add_device(&relay, &mac, &format!("Mac {n}")))
+        .collect();
+    for device in &macs {
+        assert_eq!(put(&relay, device, 1, &full).0, 200);
+    }
+    // The budget is per minute of the relay clock: start early in a minute.
+    while now_unix() % 60 > 45 {
         std::thread::sleep(Duration::from_millis(500));
     }
-    // Six full reads of one device a minute; the seventh is 429 with Retry-After.
-    for _ in 0..feed::FULL_READS_PER_MINUTE {
-        assert_eq!(
-            get_retry(&relay, "/v1/feed?since=0&wait=0", &phone.token).0,
-            200
-        );
+    // Each read of everything gives three full feeds (1048578 characters): 16 of them
+    // pass 16 MiB, and the 17th read of the minute is 403 `feed_rate`, not a 429.
+    let page = 3 * full.len() as u64;
+    let reads = feed::FEED_READ_TEXT_PER_MINUTE.div_ceil(page);
+    assert_eq!(reads, 16);
+    for _ in 0..reads {
+        assert_eq!(feed_ids(&feeds(&relay, &phone, 0)).len(), 3);
     }
-    let (status, retry, value) = get_retry(&relay, "/v1/feed?since=0&wait=0", &phone.token);
-    assert_eq!((status, code(&value)), (429, "rate_limited"));
-    let retry = retry.expect("Retry-After");
-    assert!((1..=60).contains(&retry), "{retry}");
-    // A long poll that reads all again counts too, and answers at once.
-    let (status, _, _) = get_retry(&relay, "/v1/feed?since=0&wait=5", &phone.token);
-    assert_eq!(status, 429);
-    // Reads that go on from the last answer are free: the device keeps its feeds.
-    for _ in 0..10 {
-        let list = feeds(&relay, &phone, 2);
-        assert_eq!((&list["change"], &list["feeds"]), (&json!(2), &json!([])));
+    let (status, value) = relay.call("GET", "/v1/feed?since=0", Some(&phone.token), None);
+    assert_eq!((status, code(&value)), (403, "feed_rate"), "{value}");
+    // Every feed read of the device waits for the next minute, also one that would
+    // give nothing; its other calls go on.
+    let (status, _) = relay.call("GET", "/v1/feed?since=3&wait=5", Some(&phone.token), None);
+    assert_eq!(status, 403);
+    assert_eq!(relay.call("GET", "/v1/me", Some(&phone.token), None).0, 200);
+    assert_eq!(
+        relay
+            .call("GET", "/v1/questions?since=0", Some(&phone.token), None)
+            .0,
+        200
+    );
+    // Other devices read as before.
+    assert_eq!(feed_ids(&feeds(&relay, &mac, 0)).len(), 3);
+    // Reads that go on from the last answer cost only what they give: an empty one
+    // nothing, however often.
+    for _ in 0..50 {
+        assert_eq!(feeds(&relay, &mac, 3)["feeds"], json!([]));
     }
-    // A read below the counter that a device was given is a full read too.
-    assert_eq!(feeds(&relay, &pad, 2)["change"], 2);
-    for _ in 0..feed::FULL_READS_PER_MINUTE {
-        assert_eq!(feed_ids(&feeds(&relay, &pad, 1)), vec![mini.id]);
-    }
-    let (status, _, value) = get_retry(&relay, "/v1/feed?since=1", &pad.token);
-    assert_eq!((status, code(&value)), (429, "rate_limited"));
-    // Other devices read as before, and the other feed routes are not counted.
-    assert_eq!(feed_ids(&feeds(&relay, &mac, 0)), vec![mac.id, mini.id]);
-    assert_eq!(actions(&relay, &mac, 0)["actions"], json!([]));
-    // A bad query keeps its 400, before any count.
-    let (status, _, _) = get_retry(&relay, "/v1/feed?since=x", &phone.token);
-    assert_eq!(status, 400);
-    // No audit row for the pace, and the limit is in memory: the next minute (here, a
-    // cleared table) reads again.
+    // No audit row for the budget; the next minute (here, a cleared table) reads again.
     assert!(rows(&audit(&relay), "limit_reached").is_empty());
     core.feed_reads.lock().unwrap().clear();
-    assert_eq!(feeds(&relay, &phone, 0)["change"], 2);
+    assert_eq!(feed_ids(&feeds(&relay, &phone, 0)).len(), 3);
 }
 
 #[test]
@@ -1810,6 +1799,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     // A device and a member from before the migration.
     let pad = add_device(&relay, &mac, "iPad");
     let ola = join(&relay, "member", "Ola");
+    let ewa = join(&relay, "manager", "Ewa");
     // Make the file what the schema 5 image left: no feed tables, version 5.
     relay.edit_offline(|config| {
         let conn = open_team_file(config, &team);
@@ -1860,11 +1850,13 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     );
     assert_eq!(publish(&relay, &mac, 1)["change"], 1);
     assert_eq!(feed_ids(&feeds(&relay, &phone, 0)), vec![mac.id]);
-    // `admin rollback-check` (OPERATIONS 21.3) names what a rollback would undo: no
-    // revocation yet, only the audit rows written since the migration.
-    let entry = |relay: &TestRelay, id: &TeamId| -> Value {
-        let check = relay.operator(Command::RollbackCheck).unwrap();
-        check
+    // `apassy-relay rollback-check` (OPERATIONS 21.3) names what a rollback would undo,
+    // read-only, with the relay up: no revocation yet, only the audit rows written since
+    // the migration.
+    let entry_of = |config: &apassy_relay::config::RelayConfig, id: &TeamId| -> Value {
+        let check = apassy_relay::server::rollback::check(config).unwrap();
+        serde_json::to_value(&check)
+            .unwrap()
             .as_array()
             .unwrap()
             .iter()
@@ -1872,10 +1864,16 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
             .unwrap()
             .clone()
     };
+    let entry = |relay: &TestRelay, id: &TeamId| entry_of(&relay.config, id);
     let before = entry(&relay, &team);
     assert_eq!(
-        (&before["pre_v6"], &before["schema"], &before["revocations"]),
-        (&json!(true), &json!(6), &json!([]))
+        (
+            &before["pre_v6"],
+            &before["schema"],
+            &before["revocations"],
+            &before["changes"]
+        ),
+        (&json!(true), &json!(6), &json!([]), &json!([]))
     );
     let lost = before["audit_rows_lost"].as_u64().unwrap();
     assert!(lost > 0, "{before}");
@@ -1886,6 +1884,12 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
         &format!("/v1/devices/{}", pad.id),
         &mac.token,
         None,
+    );
+    relay.ok(
+        "PUT",
+        &format!("/v1/members/{}/role", ewa.member),
+        &mac.token,
+        Some(&json!({"role": "member"})),
     );
     relay.ok(
         "DELETE",
@@ -1916,7 +1920,18 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
             ("member".to_string(), ola.member)
         ]
     );
+    // The demotion is named too, and the lost rows by action.
+    assert_eq!(
+        after["changes"],
+        json!([{"kind": "member_role", "id": ewa.member}])
+    );
     assert!(after["audit_rows_lost"].as_u64().unwrap() > lost);
+    for action in ["device_revoked", "member_revoked", "member_role_changed"] {
+        assert!(
+            after["audit_lost"][action].as_u64().unwrap() >= 1,
+            "{after}"
+        );
+    }
     assert!(after.get("error").is_none(), "{after}");
     // It only reads: the copy is the same, byte for byte.
     assert_eq!(std::fs::read(&backup).unwrap(), copy);
@@ -1929,7 +1944,10 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     );
     // The rollback of OPERATIONS 21.3: the copy goes back over the file, which is then
     // version 5 again with its question, and the image of schema 6 moves it once more.
+    // The check also runs with the relay stopped, and says the same.
+    let named_now = after["revocations"].clone();
     relay.edit_offline(|config| {
+        assert_eq!(entry_of(config, &team)["revocations"], named_now);
         let path = config.team_path(&team);
         let mut backup = path.clone().into_os_string();
         backup.push(".pre-v6");

@@ -426,6 +426,17 @@ pub struct TeamRow {
     pub suspend_reason: Option<String>,
 }
 
+/// Every team of the directory on `conn`, oldest first.
+pub fn read_teams(conn: &Connection) -> RelayResult<Vec<TeamRow>> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {TEAM_COLUMNS} FROM team ORDER BY created_at, id"
+        ))
+        .map_err(db)?;
+    let rows = statement.query_map([], team_from_row).map_err(db)?;
+    rows.map(|row| row.map_err(db)).collect()
+}
+
 fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
     let id: String = row.get(0)?;
     let state: String = row.get(3)?;
@@ -519,15 +530,7 @@ impl Directory {
 
     /// Every team, oldest first.
     pub fn teams(&self) -> RelayResult<Vec<TeamRow>> {
-        self.store.with(|conn| {
-            let mut statement = conn
-                .prepare(&format!(
-                    "SELECT {TEAM_COLUMNS} FROM team ORDER BY created_at, id"
-                ))
-                .map_err(db)?;
-            let rows = statement.query_map([], team_from_row).map_err(db)?;
-            rows.map(|row| row.map_err(db)).collect()
-        })
+        self.store.with(read_teams)
     }
 
     /// One team by id.
@@ -577,8 +580,9 @@ impl Directory {
     /// Removes a team from the directory: its row and the key of its file. The caller
     /// deletes the file. The `connect_key` row of a Connect team stays, as used; with
     /// `free_connect_key` its hash becomes random bytes, so the device key that made the
-    /// team may make a new one, and the row still counts for the daily cap.
-    pub fn remove(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<()> {
+    /// team may make a new one, and the row still counts for the daily cap. Returns
+    /// whether a key was freed.
+    pub fn remove(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<bool> {
         self.store.tx(|tx| {
             let changed = tx
                 .execute("DELETE FROM team WHERE id = ?1", params![id.as_str()])
@@ -608,7 +612,7 @@ impl Directory {
             };
             self.audit
                 .write_on(tx, now, OPERATOR_ACTOR, "team_deleted", None, &detail)?;
-            Ok(())
+            Ok(freed > 0)
         })
     }
 

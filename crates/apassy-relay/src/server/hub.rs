@@ -857,7 +857,8 @@ impl Hub {
     /// Deletes a suspended team: its row and file key in the directory, then its file.
     /// There is no undo. With `free_connect_key` (a Connect team only, 400 otherwise) the
     /// device key that made the team may make a new one (docs/SPEC.md section 27.10).
-    pub fn delete(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<()> {
+    /// Returns whether a connect key was freed.
+    pub fn delete(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<bool> {
         let row = self
             .directory
             .team(id)?
@@ -894,7 +895,7 @@ impl Hub {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        self.directory.remove(id, free_connect_key, now)?;
+        let freed = self.directory.remove(id, free_connect_key, now)?;
         self.draining
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -904,7 +905,7 @@ impl Hub {
         if legacy.as_ref() == Some(id) {
             *legacy = None;
         }
-        Ok(())
+        Ok(freed)
     }
 
     /// The teams as the operator sees them.
@@ -1026,7 +1027,7 @@ impl Hub {
                     (if dry_run {
                         Ok(())
                     } else {
-                        self.delete(&row.id, false, now)
+                        self.delete(&row.id, false, now).map(drop)
                     })
                     .map(|()| report.deleted.push(row.id.clone()))
                 }

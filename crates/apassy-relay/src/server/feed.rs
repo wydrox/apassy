@@ -10,9 +10,9 @@
 //! `feed_bytes`, not in `question_bytes`, and one member uses at most its share of the
 //! feed and action limits (`member_share`). No audit row is written per feed update: a
 //! Mac publishes up to every 10 s, and a Connect team never deletes audit rows; a loop
-//! of `PUT` and `DELETE` writes at most one `feed_started` and one `feed_deleted` per
-//! device and hour. A device reads all of its member's feeds again at most
-//! `FULL_READS_PER_MINUTE` times a minute.
+//! of `PUT` and `DELETE` writes at most one `feed_started` or `feed_deleted` per device
+//! and hour, and maintenance writes a held-back one later (`audit_catch_up`). A device
+//! reads at most `FEED_READ_TEXT_PER_MINUTE` of feed text a minute (403 `feed_rate`).
 //! Maintenance expires actions at `expires_at`, drops their envelopes 10 minutes after
 //! they ended, deletes them 24 hours after they were posted, and deletes a feed 30 days
 //! after its last update.
@@ -63,13 +63,19 @@ pub const PURGE_AFTER_SECS: u64 = 600;
 pub const ACTION_RETENTION_SECS: u64 = 86_400;
 /// Maintenance deletes a feed this long after its last update.
 pub const FEED_RETENTION_SECS: u64 = 30 * 86_400;
-/// At most one `feed_started` and one `feed_deleted` row (reason `deleted`) per device in
-/// this many seconds, so a loop of `PUT` and `DELETE` cannot grow a Connect team's audit,
-/// which is never trimmed. Revocations always write their row.
+/// At most one `feed_started` or `feed_deleted` row (reason `deleted`) per device in this
+/// many seconds, so a loop of `PUT` and `DELETE` cannot grow a Connect team's audit,
+/// which is never trimmed. A change within it is written by maintenance once it has
+/// passed, when the feed is still in the other state (`audit_catch_up`). Revocations
+/// always write their row.
 pub const FEED_AUDIT_SECS: u64 = 3600;
-/// Full feed reads of one device in one minute (`take_full_read`). A read over it is 429
-/// `rate_limited` with `Retry-After`: the seconds to the next minute.
-pub const FULL_READS_PER_MINUTE: u64 = 6;
+/// At most one `limit_reached` row of each feed limit per team in this many seconds: a
+/// Connect team never trims its audit.
+pub const FEED_LIMIT_ROW_SECS: u64 = 3600;
+/// The base64url ciphertext text that `GET /v1/feed` gives one device in one minute of
+/// the relay clock (`Core::feed_reads`). Once a device got this much, its next feed read
+/// in that minute is 403 `feed_rate`; the answer that passes it is still sent whole.
+pub const FEED_READ_TEXT_PER_MINUTE: u64 = 16 * 1_048_576;
 
 /// The share of one member in a team's feed limit `limit` (`feed_bytes`,
 /// `feed_actions_per_hour`, `OPEN_ACTIONS`): three quarters of it, as the question limits
@@ -97,89 +103,207 @@ pub fn reader_seats(share: usize) -> usize {
     }
 }
 
-/// The full feed reads of one device: those of the current minute, and the newest feed
-/// counter that its last answer gave it (`Core::feed_reads`).
+/// The feed text that one device was given in the current minute (`Core::feed_reads`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FeedReads {
     minute: u64,
-    count: u64,
-    given: Option<u64>,
+    text: u64,
 }
 
 impl FeedReads {
-    /// Counts one read with `since` at `now` when it is a full read (`take_full_read`).
-    /// `Err(seconds)` over `FULL_READS_PER_MINUTE` in this minute.
-    pub fn take(&mut self, since: u64, now: u64) -> Result<(), u64> {
-        let full = since == 0 || self.given.is_some_and(|given| since < given);
-        if !full {
-            return Ok(());
-        }
+    /// Whether the device may read at `now`: `Err(next minute)` once it got
+    /// `FEED_READ_TEXT_PER_MINUTE` in this minute.
+    pub fn check(&mut self, now: u64) -> Result<(), u64> {
         let minute = now / 60;
         if self.minute != minute {
-            (self.minute, self.count) = (minute, 0);
+            (self.minute, self.text) = (minute, 0);
         }
-        if self.count >= FULL_READS_PER_MINUTE {
-            return Err(60 - now % 60);
+        if self.text >= FEED_READ_TEXT_PER_MINUTE {
+            return Err((minute + 1) * 60);
         }
-        self.count += 1;
         Ok(())
+    }
+
+    /// Counts the `text` of an answer at `now`.
+    pub fn add(&mut self, text: u64, now: u64) {
+        let minute = now / 60;
+        if self.minute != minute {
+            (self.minute, self.text) = (minute, 0);
+        }
+        self.text = self.text.saturating_add(text);
     }
 }
 
-/// Counts one `GET /v1/feed` of `device` when it is a full read: `since` is 0, or below
-/// the newest counter that the device was given (it reads again what it had). A read
-/// that goes on from its last answer (`since` = the top-level `change`, or the `change`
-/// of the last entry after `more`) is never one. `Err(seconds)` when the device made
-/// `FULL_READS_PER_MINUTE` already in this minute: the seconds to the next one. In memory
-/// only: a restart forgets the counts.
-pub fn take_full_read(core: &Core, device: DeviceId, since: u64, now: u64) -> Result<(), u64> {
-    core.feed_reads
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(device.0)
-        .or_default()
-        .take(since, now)
-}
-
-/// 429 `rate_limited` of a full feed read over `FULL_READS_PER_MINUTE`.
-pub fn reads_limited() -> RelayError {
+/// 403 `feed_rate`: the device read its feed text of the minute; it reads again at `at`.
+fn feed_rate(at: u64) -> RelayError {
     RelayError::new(
-        codes::RATE_LIMITED,
+        codes::FEED_RATE,
         format!(
-            "This device read all of its feeds {FULL_READS_PER_MINUTE} times this minute. Read on from the last change, or try again in a moment."
+            "This device read {} MiB of feeds this minute. Read again at {at}.",
+            FEED_READ_TEXT_PER_MINUTE / 1_048_576
         ),
     )
 }
 
-/// The newest feed counter that an answer gave `device`: the `change` of its last entry
-/// when there is more, else the top-level `change`.
-fn record_given(core: &Core, device: DeviceId, list: &FeedList) {
-    let given = match (list.more, list.feeds.last()) {
-        (true, Some(last)) => last.change,
-        _ => list.change,
-    };
-    core.feed_reads
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(device.0)
-        .or_default()
-        .given = Some(given);
+/// What the audit says of one device's feed: the last `feed_started` or `feed_deleted`
+/// row written for it and when, and whether the feed changed since without a row
+/// (`Core::feed_audit`, in memory).
+#[derive(Debug, Clone, Copy)]
+pub struct FeedAudit {
+    /// `feed_started` or `feed_deleted`.
+    pub written: &'static str,
+    pub at: u64,
+    pub pending: bool,
 }
 
-/// Whether the `action` row (`feed_started`, or `feed_deleted` of a `DELETE`) of `device`
-/// is written at `now`: when none was in the last `FEED_AUDIT_SECS`.
-fn feed_audit_due(core: &Core, device: DeviceId, action: &'static str, now: u64) -> bool {
-    let mut last = core
+/// What to do with the row of one change of a device's feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditStep {
+    /// Write the row now.
+    Write,
+    /// The last row of the device was less than `FEED_AUDIT_SECS` ago: no row now;
+    /// maintenance writes it later if the feed is still so.
+    Later,
+    /// The last row already says this: the change undid one without a row.
+    Same,
+}
+
+fn audit_step(core: &Core, device: DeviceId, action: &'static str, now: u64) -> AuditStep {
+    let audit = core
         .feed_audit
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let due = last
-        .get(&(device.0, action))
-        .is_none_or(|at| now >= at.saturating_add(FEED_AUDIT_SECS));
-    if due {
-        last.insert((device.0, action), now);
+    match audit.get(&device.0) {
+        None => AuditStep::Write,
+        Some(last) if last.written == action => AuditStep::Same,
+        Some(last) if now >= last.at.saturating_add(FEED_AUDIT_SECS) => AuditStep::Write,
+        Some(_) => AuditStep::Later,
     }
-    due
+}
+
+/// Keeps what `step` did, after its transaction committed.
+fn audit_done(core: &Core, device: DeviceId, action: &'static str, step: AuditStep, now: u64) {
+    let mut audit = core
+        .feed_audit
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match step {
+        AuditStep::Write => {
+            audit.insert(
+                device.0,
+                FeedAudit {
+                    written: action,
+                    at: now,
+                    pending: false,
+                },
+            );
+        }
+        AuditStep::Later => {
+            if let Some(last) = audit.get_mut(&device.0) {
+                last.pending = true;
+            }
+        }
+        AuditStep::Same => {
+            if let Some(last) = audit.get_mut(&device.0) {
+                last.pending = false;
+            }
+        }
+    }
+}
+
+/// The detail of a `feed_started` or `feed_deleted` row of a device's own change.
+fn audit_detail(device: DeviceId, action: &str) -> Value {
+    if action == "feed_deleted" {
+        json!({"device_id": device, "reason": "deleted"})
+    } else {
+        json!({"device_id": device})
+    }
+}
+
+/// Writes the rows that `FEED_AUDIT_SECS` held back, once it has passed: for each device
+/// whose feed changed after its last row, a row of the state the feed is in now when the
+/// last row says the other one, with the device's member as the actor. Its own
+/// transaction, after the maintenance one: a Connect team at its file cap fails here and
+/// tries again at the next pass. A revoked device has its revocation row.
+fn audit_catch_up(core: &Core, now: u64) -> RelayResult<()> {
+    let due: Vec<(u64, &'static str)> = core
+        .feed_audit
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|(_, last)| last.pending && now >= last.at.saturating_add(FEED_AUDIT_SECS))
+        .map(|(device, last)| (*device, last.written))
+        .collect();
+    if due.is_empty() {
+        return Ok(());
+    }
+    let written = core.store.tx(|tx| {
+        let mut written = Vec::new();
+        for (device, last) in due {
+            let member: Option<i64> = tx
+                .query_row(
+                    "SELECT member_id FROM device WHERE id = ?1 AND revoked_at IS NULL",
+                    params![to_i(device)],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db)?;
+            let Some(member) = member else {
+                written.push((device, None));
+                continue;
+            };
+            let has_feed: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM feed WHERE device_id = ?1)",
+                    params![to_i(device)],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            let action = if has_feed {
+                "feed_started"
+            } else {
+                "feed_deleted"
+            };
+            if action != last {
+                core.audit.write_on(
+                    tx,
+                    now,
+                    &member_actor(to_u(member)),
+                    action,
+                    None,
+                    &audit_detail(DeviceId(device), action),
+                )?;
+                written.push((device, Some(action)));
+            } else {
+                written.push((device, None));
+            }
+        }
+        Ok(written)
+    })?;
+    let mut audit = core
+        .feed_audit
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for (device, action) in written {
+        match action {
+            Some(action) => {
+                audit.insert(
+                    device,
+                    FeedAudit {
+                        written: action,
+                        at: now,
+                        pending: false,
+                    },
+                );
+            }
+            None => {
+                if let Some(last) = audit.get_mut(&device) {
+                    last.pending = false;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An `action_id`: the form of a `qid`, 22 base64url characters of 16 bytes. `Copy`, so
@@ -372,7 +496,7 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
             ),
         ] {
             if to_u(held).saturating_add(new) > limit {
-                core.limit_error_on(tx, now, kind)?;
+                core.limit_error_every(tx, now, kind, FEED_LIMIT_ROW_SECS)?;
                 return Ok(Err(feed_limit(format!(
                     "The team's {kind} limit is reached."
                 ))));
@@ -398,19 +522,25 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
             ],
         )
         .map_err(db)?;
-        if old.is_none() && feed_audit_due(core, device, "feed_started", now) {
+        let step = old
+            .is_none()
+            .then(|| audit_step(core, device, "feed_started", now));
+        if step == Some(AuditStep::Write) {
             core.audit.write_on(
                 tx,
                 now,
                 &member_actor(by.id.0),
                 "feed_started",
                 None,
-                &json!({"device_id": device}),
+                &audit_detail(device, "feed_started"),
             )?;
         }
-        Ok(Ok(change))
+        Ok(Ok((change, step)))
     })?;
-    let change = outcome?;
+    let (change, step) = outcome?;
+    if let Some(step) = step {
+        audit_done(core, device, "feed_started", step, now);
+    }
     core.feed_times
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -421,8 +551,8 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
 
 /// Deletes the feeds of `devices` on the transaction, with one new feed counter value
 /// when there was one, and expires the open actions to them (and, with `senders`, from
-/// them). One `feed_deleted` row per feed, with `reason`; for the reason `deleted` (the
-/// device's own `DELETE`) at most one per device and `FEED_AUDIT_SECS`. Returns the
+/// them). One `feed_deleted` row per feed, with `reason` (a revocation); the reason
+/// `deleted` writes none here: `delete` writes its own row (`audit_step`). Returns the
 /// counter now. The caller wakes the long polls.
 pub fn drop_devices(
     core: &Core,
@@ -454,11 +584,12 @@ pub fn drop_devices(
         return counters(tx).map(|(change, _)| change);
     }
     let change = next_change(tx)?;
+    if reason == "deleted" {
+        return Ok(change);
+    }
     for device in removed {
-        // A revocation always writes its row; a device's own delete at most once an hour.
-        if reason == "deleted" && !feed_audit_due(core, device, "feed_deleted", now) {
-            continue;
-        }
+        // A revocation always writes its row. The device is gone, so no later row of it
+        // is held back.
         core.audit.write_on(
             tx,
             now,
@@ -467,25 +598,52 @@ pub fn drop_devices(
             None,
             &json!({"device_id": device, "reason": reason}),
         )?;
+        core.feed_audit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                device.0,
+                FeedAudit {
+                    written: "feed_deleted",
+                    at: now,
+                    pending: false,
+                },
+            );
     }
     Ok(change)
 }
 
-/// `DELETE /v1/feed`: removes the caller's feed; its open actions expire. No feed: the
-/// same answer with the counter as it is.
+/// `DELETE /v1/feed`: removes the caller's feed; its open actions expire; a
+/// `feed_deleted` row as `audit_step` says. No feed: the same answer with the counter as
+/// it is, and no row.
 pub fn delete(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value> {
     let device = device_of(by)?;
-    let change = core.store.tx(|tx| {
-        drop_devices(
-            core,
-            tx,
-            &[device],
-            false,
-            &member_actor(by.id.0),
-            "deleted",
-            now,
-        )
+    let (change, step) = core.store.tx(|tx| {
+        let had: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM feed WHERE device_id = ?1)",
+                params![to_i(device.0)],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        let actor = member_actor(by.id.0);
+        let change = drop_devices(core, tx, &[device], false, &actor, "deleted", now)?;
+        let step = had.then(|| audit_step(core, device, "feed_deleted", now));
+        if step == Some(AuditStep::Write) {
+            core.audit.write_on(
+                tx,
+                now,
+                &actor,
+                "feed_deleted",
+                None,
+                &audit_detail(device, "feed_deleted"),
+            )?;
+        }
+        Ok((change, step))
     })?;
+    if let Some(step) = step {
+        audit_done(core, device, "feed_deleted", step, now);
+    }
     core.notify.notify();
     Ok(json!({"device_id": device, "change": change}))
 }
@@ -548,8 +706,9 @@ fn feeds_now(conn: &Connection, by: &MemberAuth, since: u64) -> RelayResult<Feed
 
 /// `GET /v1/feed?since=N&wait=S`. While no feed of the member changed after `since`,
 /// holds up to `wait` seconds; it also answers when a feed of the member left (`present`
-/// changed) or the counter is below `since` (a restored relay). The HTTP layer counts a
-/// full read first (`take_full_read`); the answer sets the counter the device was given.
+/// changed) or the counter is below `since` (a restored relay). A device that got
+/// `FEED_READ_TEXT_PER_MINUTE` of feed text in this minute gets 403 `feed_rate` until the
+/// next one; each answer adds its ciphertext text.
 pub fn list(
     core: &Core,
     by: &MemberAuth,
@@ -557,6 +716,15 @@ pub fn list(
     wait_secs: u64,
     hold: bool,
 ) -> RelayResult<FeedList> {
+    let device = device_of(by)?;
+    let at_start = crate::now_unix();
+    core.feed_reads
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(device.0)
+        .or_default()
+        .check(at_start)
+        .map_err(feed_rate)?;
     let mut first: Option<Vec<DeviceId>> = None;
     let list = long_poll(
         core,
@@ -572,7 +740,13 @@ pub fn list(
             Ok((list, done))
         },
     )?;
-    record_given(core, device_of(by)?, &list);
+    let text: usize = list.feeds.iter().map(|feed| feed.ciphertext.len()).sum();
+    core.feed_reads
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(device.0)
+        .or_default()
+        .add(text as u64, crate::now_unix());
     Ok(list)
 }
 
@@ -649,14 +823,14 @@ fn own_action(
 }
 
 /// 403 `too_many_actions` naming `kind`, with a `limit_reached` row (at most one per kind
-/// and ten seconds) on the transaction, which the caller commits.
+/// and `FEED_LIMIT_ROW_SECS`) on the transaction, which the caller commits.
 fn too_many_actions(
     core: &Core,
     conn: &Connection,
     now: u64,
     kind: &'static str,
 ) -> RelayResult<RelayError> {
-    core.limit_error_on(conn, now, kind)?;
+    core.limit_error_every(conn, now, kind, FEED_LIMIT_ROW_SECS)?;
     Ok(RelayError::new(
         codes::TOO_MANY_ACTIONS,
         format!("The team's {kind} limit is reached."),
@@ -1070,7 +1244,7 @@ pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
     if changed {
         core.notify.notify();
     }
-    Ok(())
+    audit_catch_up(core, now)
 }
 
 #[cfg(test)]
@@ -1196,25 +1370,24 @@ mod tests {
     }
 
     #[test]
-    fn full_reads_are_counted_per_minute_and_reads_that_go_on_are_free() {
+    fn feed_reads_count_text_per_minute() {
         let mut reads = FeedReads::default();
-        // Before any answer only `since=0` is a full read.
-        reads.take(5, 600).unwrap();
-        for _ in 0..FULL_READS_PER_MINUTE {
-            reads.take(0, 600).unwrap();
-        }
-        assert_eq!(reads.take(0, 615), Err(45));
-        // At the counter it was given, or above it, a device goes on; below it, it reads
-        // again what it had.
-        reads.given = Some(9);
-        for since in [9, 9, 12] {
-            reads.take(since, 615).unwrap();
-        }
-        assert_eq!(reads.take(8, 615), Err(45));
-        assert_eq!(reads.take(0, 659), Err(1));
-        // The next minute starts again.
-        reads.take(0, 660).unwrap();
-        assert_eq!(reads.count, 1);
+        reads.check(600).unwrap();
+        reads.add(FEED_READ_TEXT_PER_MINUTE - 1, 600);
+        // Under the budget a read still goes, and its whole answer counts.
+        reads.check(610).unwrap();
+        reads.add(349_526, 610);
+        assert_eq!(reads.check(615), Err(660));
+        assert_eq!(reads.check(659), Err(660));
+        // The next minute starts again; an empty answer costs nothing.
+        reads.check(660).unwrap();
+        reads.add(0, 660);
+        assert_eq!(reads.text, 0);
+        // An answer that comes in the next minute counts there.
+        let mut late = FeedReads::default();
+        late.check(659).unwrap();
+        late.add(FEED_READ_TEXT_PER_MINUTE, 661);
+        assert_eq!(late.check(662), Err(720));
     }
 
     #[test]

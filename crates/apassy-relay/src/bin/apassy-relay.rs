@@ -23,6 +23,7 @@ const USAGE: &str = "Usage:
   apassy-relay [serve]
   apassy-relay init [--team <name> --owner <name>]
   apassy-relay migrate
+  apassy-relay rollback-check
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
@@ -35,7 +36,6 @@ const USAGE: &str = "Usage:
   apassy-relay admin suspend|resume <team id>
   apassy-relay admin delete <team id> [--free-connect-key]
   apassy-relay admin backup
-  apassy-relay admin rollback-check
   apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run]
 
 The configuration is read from the environment:
@@ -47,7 +47,10 @@ The configuration is read from the environment:
   APASSY_RELAY_QUESTIONS_TO_APPROVERS (0 or 1), APASSY_RELAY_CONNECT_TEAMS_PER_DAY,
   APASSY_RELAY_CONNECT_TEAMS_MAX, APASSY_RELAY_CONNECT_LONG_POLLS.
 `migrate` also reads APASSY_RELAY_OLD_KEY or _FILE: the key of the old team.db.
-`admin` reads only APASSY_RELAY_DATA and talks to the running relay.";
+`admin` reads only APASSY_RELAY_DATA and talks to the running relay.
+`rollback-check` reads relay.db and the team files read-only, with or without a running
+relay, and prints what a rollback to schema 5 would undo (docs/OPERATIONS.md 21.3). It
+exits 1 when any team is not clean.";
 
 /// `connect-sweep`: days without a sign-in before a suspension, and days of suspension
 /// before a deletion.
@@ -59,6 +62,7 @@ enum Command {
     Serve,
     Init { team: Option<(String, String)> },
     Migrate,
+    RollbackCheck,
     Admin(Operator),
     Help,
 }
@@ -192,7 +196,6 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
             })
         }
         "backup" if rest.is_empty() => Ok(Operator::Backup),
-        "rollback-check" if rest.is_empty() => Ok(Operator::RollbackCheck),
         "connect-sweep" => {
             let dry_run = rest.iter().any(|arg| arg == "--dry-run");
             let others: Vec<String> = rest
@@ -231,6 +234,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
     match first.as_str() {
         "serve" if args.len() == 1 => Ok(Command::Serve),
         "migrate" if args.len() == 1 => Ok(Command::Migrate),
+        "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
             let flags = parse_flags(&args[1..], &["--team", "--owner"])?;
@@ -335,6 +339,29 @@ fn main() -> ExitCode {
                 Err(error) => fail(&error.message),
             }
         }
+        Command::RollbackCheck => match apassy_relay::server::rollback::check(&config) {
+            Ok(teams) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&teams).unwrap_or_default()
+                );
+                let unclean = teams.iter().filter(|team| !team.clean()).count();
+                if unclean == 0 {
+                    eprintln!(
+                        "apassy-relay: {} teams; a rollback undoes nothing of them but their feeds.",
+                        teams.len()
+                    );
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!(
+                        "apassy-relay: {unclean} of {} teams need a decision before a rollback (docs/OPERATIONS.md 21.3).",
+                        teams.len()
+                    );
+                    ExitCode::from(1)
+                }
+            }
+            Err(error) => fail(&error.message),
+        },
         Command::Serve => match Relay::start(config) {
             Ok(running) => {
                 eprintln!("apassy-relay: listening on {}", running.addr);
@@ -510,10 +537,12 @@ mod tests {
                 "{words:?}"
             );
         }
-        assert_eq!(
-            parse_admin(&args(&["rollback-check"])).unwrap(),
-            Operator::RollbackCheck
-        );
+        assert!(matches!(
+            parse(&args(&["rollback-check"])).unwrap(),
+            Command::RollbackCheck
+        ));
+        assert!(parse(&args(&["rollback-check", "t_abcdefgh23"])).is_err());
+        assert!(parse_admin(&args(&["rollback-check"])).is_err());
         for values in [
             vec!["delete"],
             vec!["delete", "--free-connect-key"],
@@ -524,7 +553,6 @@ mod tests {
                 "--free-connect-key",
             ],
             vec!["delete", "t_abcdefgh23", "--force"],
-            vec!["rollback-check", "t_abcdefgh23"],
         ] {
             assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
         }

@@ -4,8 +4,7 @@
 //! sends one JSON line to the running relay and reads one JSON line back. There is no
 //! operator endpoint on HTTP. The socket has mode 0600 in a directory of mode 0700, so
 //! only the user of the relay can use it. No command shows members, items, runs, or the
-//! audit of a team: `rollback-check` names only the kind, id, and time of a revocation
-//! and a count of audit rows.
+//! audit of a team.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -61,8 +60,6 @@ pub enum Command {
     },
     /// A consistent copy of `relay.db` and every team file, with a manifest.
     Backup,
-    /// What a rollback to schema 5 undoes in each team (`server::rollback`). Reads only.
-    RollbackCheck,
     /// Suspends idle Connect teams and deletes those suspended long enough (SPEC 26.5).
     ConnectSweep {
         idle_days: u64,
@@ -94,15 +91,15 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
             team,
             free_connect_key,
         } => {
-            hub.delete(team, *free_connect_key, now)?;
+            let freed = hub.delete(team, *free_connect_key, now)?;
             if *free_connect_key {
-                return Ok(json!({"team": team, "state": "deleted", "connect_key": "freed"}));
+                let key = if freed { "freed" } else { "none" };
+                return Ok(json!({"team": team, "state": "deleted", "connect_key": key}));
             }
             Ok(json!({"team": team, "state": "deleted"}))
         }
         Command::Backup => hub.backup(now),
-        Command::RollbackCheck => serde_json::to_value(crate::server::rollback::check(hub)?)
-            .map_err(|_| RelayError::internal("A result cannot be written.")),
+
         Command::ConnectSweep {
             idle_days,
             delete_days,
@@ -251,7 +248,6 @@ mod tests {
                 },
                 r#"{"command":"delete","team":"t_abcdefgh23","free_connect_key":true}"#,
             ),
-            (Command::RollbackCheck, r#"{"command":"rollback_check"}"#),
             (
                 Command::ConnectSweep {
                     idle_days: 30,

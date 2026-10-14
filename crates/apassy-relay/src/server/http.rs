@@ -957,27 +957,6 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         respond_mcp(&core, request, principal, &body);
         return;
     }
-    // A full feed read has a pace per device (section 27.4): 429 with `Retry-After`. A
-    // query out of its form, or a member token, gets its 400 or 401 from the endpoint.
-    if endpoint == Endpoint::FeedList
-        && let Ok(by) = device_member_of(principal.as_ref())
-        && let (Ok(since), Ok(_)) = (number(&query, "since"), wait_of(&query))
-        && let Ok(device) = questions::device_of(by)
-        && let Err(wait) = feed::take_full_read(&core, device, since.unwrap_or(0), now)
-    {
-        let error = feed::reads_limited();
-        respond_json_with(
-            request,
-            error.status(),
-            &error.to_envelope(),
-            false,
-            Header::from_bytes(&b"Retry-After"[..], wait.to_string().as_bytes())
-                .ok()
-                .into_iter()
-                .collect(),
-        );
-        return;
-    }
     match dispatch(
         &core,
         endpoint,
