@@ -143,6 +143,36 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Remove Never: Stripe live key"].exists)
     }
 
+    /// "Sees" of an "only these items" agent lists the rows of its Mac and says that access granted
+    /// on the Mac is not shown.
+    func testSeesSaysWhatTheMacLists() {
+        let app = launch(["-ApassyOpen", "agents", "-ApassyPreviewAgents", "restricted"])
+        XCTAssertTrue(app.navigationBars["Claude Code"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["On MacBook Pro · Work"].exists)
+        let footer = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Listed for this agent on MacBook Pro.")
+        ).firstMatch
+        for _ in 0..<6 where !(footer.exists && footer.isHittable) { app.swipeUp() }
+        XCTAssertTrue(footer.exists)
+        XCTAssertTrue(footer.label.contains("Access granted on the Mac is not shown here."))
+        XCTAssertFalse(app.staticTexts["No credential"].exists)
+    }
+
+    /// A settle that this iPhone cannot open is "not applied, or unknown", never "removed", and the
+    /// row stays.
+    func testAnUnopenableSettleIsNeverRemoved() {
+        let app = launch([
+            "-ApassyOpen", "agents", "-ApassyPreviewAgents", "unverified", "-ApassyPreviewAgentsScroll", "exceptions",
+        ])
+        XCTAssertTrue(app.navigationBars["Claude Code"].waitForExistence(timeout: 15))
+        let line = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Not applied, or unknown. Check the list on MacBook Pro.")
+        ).firstMatch
+        XCTAssertTrue(line.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Removed on MacBook Pro."].exists)
+        XCTAssertTrue(app.buttons["Remove Only: Cloudflare API (not on this iPhone)"].exists)
+    }
+
     private static func starts(_ text: String) -> NSPredicate {
         NSPredicate(format: "label BEGINSWITH %@", text)
     }

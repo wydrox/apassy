@@ -902,7 +902,9 @@ fn an_action_is_sealed_with_its_aad_and_reaches_the_relay() {
             .sign(prepared["action_string"].as_str().unwrap().as_bytes())
             .unwrap()
     ));
-    assert_eq!(fails(&setup.phone, other), "not_registered");
+    // The row's answer key did not change: a signature by another key is not of this
+    // action, and no reason to connect the iPhone again.
+    assert_eq!(fails(&setup.phone, other), "invalid_input");
 
     // "Only these items": the core signs with the relay key, no Face ID.
     let (prepared, _) = act(&setup, "only", 1_789_990_100, API_ITEM);
@@ -986,13 +988,13 @@ fn the_outcomes_of_an_action() {
     settle(&setup, &stale_id, "stale", "stale", "The list changed.");
     assert_eq!(wait_action(&setup, &stale_id, 0)["outcome"], "stale");
 
-    // A relay that flips the clear outcome: the settle does not open, the outcome is not
-    // verified.
+    // A relay that flips the clear outcome: the settle does not open, so it is a refusal
+    // that is not verified, never "applied".
     let (prepared, _) = act(&setup, "never", 1_789_990_000, SHOP_ITEM);
     let flipped_id = prepared["action_id"].as_str().unwrap().to_owned();
     settle(&setup, &flipped_id, "refused", "applied", "");
     let flipped = wait_action(&setup, &flipped_id, 0);
-    assert_eq!(flipped["outcome"], "applied");
+    assert_eq!(flipped["outcome"], "refused");
     assert_eq!(flipped["verified"], false);
     assert_eq!(
         macs(&setup.phone)[0]["agents"][0]["exceptions"]
@@ -1097,4 +1099,267 @@ fn a_lock_drops_everything() {
     // A suspend drops them too.
     call(&setup.phone, json!({"op": "suspend"}));
     assert_eq!(fails(&setup.phone, json!({"op": "feed_list"})), "locked");
+}
+
+/// The code and the message of a call that fails.
+fn failure(core: &Core, request: Value) -> (String, String) {
+    let answer: Value = serde_json::from_str(&core.call(&request.to_string())).expect("json");
+    assert_eq!(answer["ok"], false, "{request} -> {answer}");
+    (
+        answer["error"]["code"].as_str().unwrap().to_owned(),
+        answer["error"]["message"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// The `feed_action` of `prepared`, signed by "Face ID" with the answer key.
+fn signed_action(
+    setup: &Setup,
+    prepared: &Value,
+    kind: &str,
+    created_at: u64,
+    item: &str,
+) -> Value {
+    let mut request = string_request(setup, kind, created_at, item);
+    request["op"] = json!("feed_action");
+    request["action_id"] = prepared["action_id"].clone();
+    request["time"] = prepared["time"].clone();
+    let text = prepared["action_string"].as_str().unwrap();
+    request["signature"] = json!(encode_b64u(&answer_key().sign(text.as_bytes()).unwrap()));
+    request
+}
+
+#[test]
+fn a_feed_that_lands_during_face_id_does_not_stop_the_action() {
+    let setup = setup();
+    let first = now();
+    fresh_feed_with_seq(&setup, first);
+    macs(&setup.phone);
+    let prepared = call(
+        &setup.phone,
+        string_request(&setup, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    assert_eq!(prepared["feed_seq"], first);
+    // Face ID takes a while. The Mac of an active agent publishes again, and the watch of
+    // the tab reads it.
+    fresh_feed_with_seq(&setup, first + 1);
+    assert_eq!(macs(&setup.phone)[0]["seq"], first + 1);
+    let sent = call(
+        &setup.phone,
+        signed_action(&setup, &prepared, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    assert_eq!(sent["seq"], 1);
+    // The action is the string that Face ID signed: the `feed_seq` of the feed shown then.
+    let stored = setup.a.relay.actions().pop().unwrap();
+    let action_id = prepared["action_id"].as_str().unwrap();
+    let right = aad(&[
+        "apassy-feed-v1",
+        "action",
+        TEAM,
+        action_id,
+        KEY_ID,
+        "3",
+        "2",
+    ]);
+    let action: Value = serde_json::from_slice(
+        &open(&setup.a.key, &right, &stored.nonce, &stored.ciphertext).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(action["feed_seq"], first);
+    assert!(verify_signature(
+        &decode_b64u(ANSWER_PUBLIC).unwrap(),
+        prepared["action_string"].as_str().unwrap().as_bytes(),
+        &decode_b64u(action["signature"].as_str().unwrap()).unwrap()
+    ));
+
+    // Again, and the Mac's next feed no longer has the exception. The tab did not read it:
+    // the core reads the newest feed itself, says the list changed, and sends nothing.
+    let prepared = call(
+        &setup.phone,
+        string_request(&setup, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    let without = feed(first + 2, now(), |value| {
+        value["agents"][0]["exceptions"] = json!([
+            {"item": API_ITEM, "item_title": "API token", "kind": "only", "created_at": 1_789_990_100u64},
+        ]);
+    });
+    publish(&setup.a.relay, TEAM, &setup.a.key, 2, &without);
+    let (code, message) = failure(
+        &setup.phone,
+        signed_action(&setup, &prepared, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    assert_eq!(code, "not_found");
+    assert_eq!(message, "The list on MacBook Pro changed. Try again.");
+    assert_eq!(setup.a.relay.actions().len(), 1);
+
+    // An action that names another exception than the prepared one is refused, and one
+    // that was never prepared is too old to send.
+    let prepared = call(
+        &setup.phone,
+        string_request(&setup, "only", 1_789_990_100, API_ITEM),
+    );
+    let mut other = string_request(&setup, "only", 1_789_990_101, API_ITEM);
+    other["op"] = json!("feed_action");
+    other["action_id"] = prepared["action_id"].clone();
+    other["time"] = prepared["time"].clone();
+    assert_eq!(fails(&setup.phone, other.clone()), "invalid_input");
+    other["action_id"] = json!("AAAAAAAAAAAAAAAAAAAAAA");
+    assert_eq!(fails(&setup.phone, other), "stale_action");
+    assert_eq!(setup.a.relay.actions().len(), 1);
+}
+
+#[test]
+fn a_settle_that_does_not_open_is_never_applied_or_stale() {
+    let setup = setup();
+    fresh_feed(&setup);
+    macs(&setup.phone);
+    let other = [9u8; 32];
+    let other_id = key_id(&other);
+    for clear in ["applied", "stale", "refused"] {
+        let (prepared, _) = act(&setup, "only", 1_789_990_100, API_ITEM);
+        let action_id = prepared["action_id"].as_str().unwrap().to_owned();
+        // The relay answers with a settle under a key this iPhone does not hold.
+        let plaintext = json!({"v": 1, "action_id": action_id, "outcome": clear, "reason": "",
+                               "feed_seq": null, "at": now()});
+        let aad = aad(&[
+            "apassy-feed-v1",
+            "settle",
+            TEAM,
+            &action_id,
+            &other_id,
+            clear,
+        ]);
+        let (nonce, ciphertext) = seal(&other, &aad, plaintext.to_string().as_bytes());
+        setup
+            .a
+            .relay
+            .settle_action(&action_id, clear, &other_id, &nonce, &ciphertext);
+        let out = wait_action(&setup, &action_id, 0);
+        assert_eq!(out["outcome"], "refused", "{clear}");
+        assert_eq!(out["verified"], false);
+        assert_eq!(out["reason"], Value::Null);
+        assert_eq!(out["at"], Value::Null);
+        // The row stays.
+        assert_eq!(
+            macs(&setup.phone)[0]["agents"][0]["exceptions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+}
+
+#[test]
+fn a_mac_whose_device_number_has_not_synced_is_ignored() {
+    const MAC_C: &str = "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f";
+    let setup = setup();
+    // A second Mac's row reached this iPhone, its device number in the team not yet.
+    as_the_mac(&setup.phone, &setup.a, |vault| {
+        vault
+            .register_trusted_device(
+                MAC_C,
+                "Mac Studio",
+                TrustedDeviceKind::Mac,
+                DeviceKey::generate().unwrap().public_key(),
+                None,
+            )
+            .unwrap();
+    });
+    let seq = now();
+    let as_c = |seq: u64| {
+        feed(seq, seq, |value| {
+            value["mac"] = json!({"device": MAC_C, "name": "Mac Studio"});
+        })
+    };
+    publish(&setup.a.relay, TEAM, &setup.a.key, 1, &as_c(seq));
+    assert_eq!(macs(&setup.phone), Vec::<Value>::new());
+    // A feed that does not open says nothing either.
+    publish(&setup.a.relay, TEAM, &[9u8; 32], 1, &as_c(seq + 1));
+    assert_eq!(macs(&setup.phone), Vec::<Value>::new());
+    assert!(!setup.data.join("feed-seq.json").exists());
+
+    // The number syncs: the next feed of that Mac shows.
+    as_the_mac(&setup.phone, &setup.a, |vault| {
+        vault.set_trusted_device_relay_id(MAC_C, TEAM, 1).unwrap();
+    });
+    publish(&setup.a.relay, TEAM, &setup.a.key, 1, &as_c(seq + 2));
+    let shown = macs(&setup.phone);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0]["device"], MAC_C);
+    assert_eq!(shown[0]["can_act"], true);
+}
+
+#[test]
+fn the_keys_of_a_vault_that_is_not_selected_are_a_copy() {
+    let setup = setup();
+    let b = add_vault(
+        &setup.phone,
+        &setup.data,
+        "Work",
+        TEAM_B,
+        QUESTION_KEY_B,
+        (MAC_B, "Mac Studio"),
+    );
+    call(
+        &setup.phone,
+        json!({"op": "select", "vault_id": setup.a.vault_id}),
+    );
+    call(&setup.phone, json!({"op": "unlock", "passphrase": PASS}));
+    let open_b = json!({"op": "questions_unlock", "vault_id": b.vault_id, "passphrase": PASS});
+    call(&setup.phone, open_b.clone());
+    let seq = now();
+    let of_b = |seq: u64| {
+        feed(seq, seq, |value| {
+            value["mac"] = json!({"device": MAC_B, "name": "Mac Studio"});
+            value["agents"][0]["exceptions"] = json!([
+                {"item": API_ITEM, "item_title": "API token", "kind": "only", "created_at": 1_789_990_100u64},
+            ]);
+        })
+    };
+    publish(&b.relay, TEAM_B, &b.key, 2, &of_b(seq));
+    fresh_feed(&setup);
+    let work_macs = |phone: &Core| -> Vec<Value> {
+        list(phone)["vaults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vault| vault["vault_id"] == b.vault_id.as_str())
+            .unwrap()["macs"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let in_b = json!({"op": "feed_action_string", "vault_id": b.vault_id, "mac_device": MAC_B,
+                      "agent": "4", "item": API_ITEM, "kind": "only", "created_at": 1_789_990_100u64});
+
+    // The feed of Work came after its keys were read at its unlock: no action from it.
+    let work = work_macs(&setup.phone);
+    assert_eq!(work[0]["device"], MAC_B);
+    assert_eq!(work[0]["can_act"], false);
+    assert_eq!(fails(&setup.phone, in_b.clone()), "invalid_input");
+    // The selected vault reads its keys at each call: its Mac can act.
+    assert_eq!(macs(&setup.phone)[0]["can_act"], true);
+
+    // Work opens again: its keys are read after the feed, so the feed can be acted on.
+    call(&setup.phone, open_b.clone());
+    assert_eq!(work_macs(&setup.phone)[0]["can_act"], true);
+    call(&setup.phone, in_b.clone());
+
+    // The owner removes Mac Studio from Work on another Mac, and the change reaches the
+    // copy of Work on this iPhone while Personal is selected.
+    {
+        let mut vault = Vault::open(&b.file).unwrap();
+        vault.unlock(PASS).unwrap();
+        assert!(vault.remove_trusted_device(MAC_B).unwrap());
+    }
+    // Its next feed shows from the old copy of the keys, without an action.
+    publish(&b.relay, TEAM_B, &b.key, 2, &of_b(seq + 1));
+    let work = work_macs(&setup.phone);
+    assert_eq!(work[0]["seq"], seq + 1);
+    assert_eq!(work[0]["can_act"], false);
+    assert_eq!(fails(&setup.phone, in_b.clone()), "invalid_input");
+    // The next open of Work reads the vault again: the Mac leaves at once.
+    call(&setup.phone, open_b);
+    assert_eq!(work_macs(&setup.phone), Vec::<Value>::new());
+    assert_eq!(fails(&setup.phone, in_b), "not_found");
 }

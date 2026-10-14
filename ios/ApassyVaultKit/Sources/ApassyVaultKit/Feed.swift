@@ -91,6 +91,10 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
     public var truncated: Bool
     /// Why the last feed of this Mac could not be shown ("Sync this vault to see …").
     public var problem: String?
+    /// This iPhone can act on this feed. False for a vault that is not selected when the feed
+    /// came after its keys were read (the Mac may have been removed from it since): select the
+    /// vault first. Missing (an older core): true.
+    public var canAct: Bool
     public var week: FeedWeek?
     public var agents: [FeedAgent]
 
@@ -98,8 +102,8 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
 
     public init(
         device: String, relayDeviceID: UInt64? = nil, name: String, seq: UInt64? = nil, generatedAt: Int64? = nil,
-        stale: Bool = false, truncated: Bool = false, problem: String? = nil, week: FeedWeek? = nil,
-        agents: [FeedAgent] = []
+        stale: Bool = false, truncated: Bool = false, problem: String? = nil, canAct: Bool = true,
+        week: FeedWeek? = nil, agents: [FeedAgent] = []
     ) {
         self.device = device
         self.relayDeviceID = relayDeviceID
@@ -109,6 +113,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
         self.stale = stale
         self.truncated = truncated
         self.problem = problem
+        self.canAct = canAct
         self.week = week
         self.agents = agents
     }
@@ -117,6 +122,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
         case device, name, seq, stale, truncated, problem, week, agents
         case relayDeviceID = "relay_device_id"
         case generatedAt = "generated_at"
+        case canAct = "can_act"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -129,6 +135,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
         stale = container.flag(forKey: .stale)
         truncated = container.flag(forKey: .truncated)
         problem = container.optionalText(forKey: .problem)
+        canAct = ((try? container.decodeIfPresent(Bool.self, forKey: .canAct)) ?? nil) ?? true
         week = try? container.decodeIfPresent(FeedWeek.self, forKey: .week)
         agents = container.lossy(FeedAgent.self, forKey: .agents)
     }
@@ -526,7 +533,8 @@ public struct FeedActionOutcome: Decodable, Sendable, Equatable {
     public var actionID: String
     public var outcome: Outcome
     /// The settle opened with the question key and names this action and this outcome. Without it
-    /// the outcome is the relay's word only.
+    /// the outcome is the relay's word only: the core says `refused`, and the app shows "Not
+    /// applied, or unknown", never a removal.
     public var verified: Bool
     /// The Mac's text, for `refused` and `stale`.
     public var reason: String?

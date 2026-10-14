@@ -88,7 +88,7 @@ struct AgentDetailView: View {
             }
             .refreshable { await model.refresh() }
             #if DEBUG && targetEnvironment(simulator)
-                .agentsScrollSeed { reader.scrollTo("exceptions", anchor: .top) }
+                .agentsScrollSeed { reader.scrollTo($0, anchor: .top) }
             #endif
         }
     }
@@ -166,8 +166,9 @@ struct AgentDetailView: View {
         }
     }
 
-    /// What the agent sees: the names of its "only these items", or every credential of the vault.
-    /// Never a value.
+    /// What the agent sees: the names of its "only these items" that the Mac lists, or every
+    /// credential of the vault. Never a value. The feed holds the `only` rows only: access that
+    /// the owner granted on the Mac is not in it, so the list is not the whole of it.
     private func sees(_ entry: AgentEntry) -> some View {
         let only = entry.agent.exceptions.filter { $0.kind == .only }
         return Section {
@@ -176,7 +177,7 @@ struct AgentDetailView: View {
                     credentialRow(AgentsText.credential(exception))
                 }
                 if only.isEmpty {
-                    Text("No credential").foregroundStyle(.secondary)
+                    Text("None listed").foregroundStyle(.secondary)
                 }
             } else {
                 Label("Every credential in \(entry.vaultName)", systemImage: "key.horizontal")
@@ -184,8 +185,13 @@ struct AgentDetailView: View {
         } header: {
             Text("Sees")
         } footer: {
-            Text("The names only, never the values.")
+            if entry.agent.restricted {
+                Text("\(AgentsText.seesFooter(mac: entry.mac.name)) The names only, never the values.")
+            } else {
+                Text("The names only, never the values.")
+            }
         }
+        .id("sees")
     }
 
     private func recent(_ entry: AgentEntry, now: Date) -> some View {

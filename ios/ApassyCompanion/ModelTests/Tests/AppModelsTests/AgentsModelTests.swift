@@ -292,10 +292,10 @@ struct AgentsModelTests {
             (.init(.refused), "Mac mini refused it."),
             (.init(.stale), "Mac mini did not accept it: the exception changed. Pull to refresh."),
             (.init(.expired, verified: false), "Mac mini did not answer. It may be asleep or locked."),
-            (
-                .init(.applied, verified: false),
-                "Mac mini reports it removed, but this iPhone could not check that answer. Sync this vault, then pull to refresh."
-            ),
+            // A settle that this iPhone cannot open is never "removed" nor "changed".
+            (.init(.applied, verified: false), "Not applied, or unknown. Check the list on Mac mini."),
+            (.init(.stale, verified: false), "Not applied, or unknown. Check the list on Mac mini."),
+            (.init(.refused, verified: false), "Not applied, or unknown. Check the list on Mac mini."),
         ]
         for (scripted, text) in cases {
             let fixture = await Fixture()
@@ -309,6 +309,98 @@ struct AgentsModelTests {
             // The exception stays.
             #expect(try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex").agent.exceptions == [never])
         }
+    }
+
+    /// A signer whose "Face ID" runs `during` before it signs: a new feed lands meanwhile.
+    final class SlowFaceID: AnswerSigner {
+        let during: @Sendable () async -> Void
+
+        init(during: @escaping @Sendable () async -> Void) { self.during = during }
+
+        func publicKey() throws -> Data { Data([4] + [UInt8](repeating: 1, count: 64)) }
+
+        func sign(_ message: Data, reason: String) async throws -> Data {
+            await during()
+            return Data("signature".utf8)
+        }
+
+        func renew() throws -> Data { try publicKey() }
+    }
+
+    @Test func aFeedThatLandsDuringFaceIDStillSendsThePreparedAction() async throws {
+        let service = PreviewVaultService()
+        let now = Date()
+        var newer = PreviewVaultService.sampleFeed(now: now)
+        let shown = try #require(newer[0].macs[0].seq)
+        newer[0].macs[0].seq = shown + 5
+        newer[0].macs[0].generatedAt = Int64(now.timeIntervalSince1970)
+        let landed = newer
+        let signer = SlowFaceID { await service.setFeed(landed) }
+        let model = AgentsModel(
+            service: service, signers: SharedAnswerSigners(signer: signer), retryInterval: .milliseconds(10),
+            actionWait: 0)
+        await service.setFeed(PreviewVaultService.sampleFeed(now: now))
+        await model.refresh()
+        let codex = try #require(model.sections.first?.agents.first { $0.agent.name == "Codex" })
+        let never = try #require(codex.agent.exceptions.first { $0.kind == .never })
+
+        await model.remove(never, in: codex)
+
+        let removal = try #require(model.removal(of: never, in: codex))
+        #expect(model.removals[removal] == .removed("Removed on Mac mini."))
+        let prepared = try #require(await service.preparedFeedActions().first)
+        let sent = try #require(await service.sentFeedActions().first)
+        // The string that Face ID signed went out, with the `feed_seq` of the feed shown then.
+        #expect(sent.actionString == prepared.actionString)
+        #expect(sent.feedSeq == shown)
+        #expect(model.sections.first?.mac.seq == shown + 5)
+    }
+
+    @Test func anExceptionGoneDuringFaceIDSaysTheListChanged() async throws {
+        let service = PreviewVaultService()
+        let now = Date()
+        var newer = PreviewVaultService.sampleFeed(now: now)
+        newer[0].macs[0].seq = (newer[0].macs[0].seq ?? 0) + 5
+        newer[0].macs[0].agents[1].exceptions = []
+        let landed = newer
+        let signer = SlowFaceID { await service.setFeed(landed) }
+        let model = AgentsModel(
+            service: service, signers: SharedAnswerSigners(signer: signer), retryInterval: .milliseconds(10),
+            actionWait: 0)
+        await service.setFeed(PreviewVaultService.sampleFeed(now: now))
+        await model.refresh()
+        let codex = try #require(model.sections.first?.agents.first { $0.agent.name == "Codex" })
+        let never = try #require(codex.agent.exceptions.first { $0.kind == .never })
+
+        await model.remove(never, in: codex)
+
+        let removal = try #require(model.removal(of: never, in: codex))
+        #expect(model.removals[removal] == .failed("The list on Mac mini changed. Try again."))
+        #expect(await service.sentFeedActions().isEmpty)
+    }
+
+    @Test func aVaultThatIsNotSelectedAsksToSelectItFirst() async throws {
+        var feed = PreviewVaultService.sampleFeed()
+        feed[1].macs[0].canAct = false
+        let fixture = await Fixture(feed: feed)
+        await fixture.model.refresh()
+        let work = try fixture.entry(vault: "Work", mac: "MacBook Pro", agent: "Claude Code")
+        let only = try fixture.exception(work, .only)
+        #expect(
+            fixture.model.removalBlock(of: only, in: work)
+                == "Select Work on this iPhone to remove exceptions of its agents.")
+        await fixture.model.remove(only, in: work)
+        #expect(await fixture.service.preparedFeedActions().isEmpty)
+        #expect(await fixture.service.sentFeedActions().isEmpty)
+        // The selected vault's Macs still can.
+        let codex = try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex")
+        #expect(fixture.model.removalBlock(of: try fixture.exception(codex, .never), in: codex) == nil)
+    }
+
+    @Test func seesSaysThatTheMacListsOnlyItsRows() {
+        #expect(
+            AgentsText.seesFooter(mac: "MacBook Pro")
+                == "Listed for this agent on MacBook Pro. Access granted on the Mac is not shown here.")
     }
 
     @Test func aCancelledFaceIDSendsNothing() async throws {
@@ -364,7 +456,7 @@ struct AgentsModelTests {
 
         await fixture.service.failNextFeedActionString(VaultError(.notFound, "This list of the Mac changed."))
         await fixture.model.remove(never, in: codex)
-        #expect(fixture.model.removals[removal] == .failed("The list on Mac mini changed. Pull to refresh."))
+        #expect(fixture.model.removals[removal] == .failed("The list on Mac mini changed. Try again."))
 
         await fixture.service.failNextFeedAction(VaultError(.staleAction, "Too old."))
         await fixture.model.remove(never, in: codex)
