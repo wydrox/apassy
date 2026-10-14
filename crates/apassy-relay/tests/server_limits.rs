@@ -24,7 +24,8 @@ fn defaults() -> Value {
            "sync_pushes_per_hour":600,"sync_transfers":2,
            "open_questions":20,"questions_per_hour":300,"question_bytes":8388608,
            "member_open_questions":15,"member_questions_per_hour":225,
-           "device_open_questions":10,"device_questions_per_hour":150})
+           "device_open_questions":10,"device_questions_per_hour":150,
+           "feed_bytes":4194304,"feed_actions_per_hour":60})
 }
 
 fn set(relay: &TestRelay, update: Value) -> Value {

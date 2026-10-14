@@ -1085,9 +1085,10 @@ impl Hub {
                 ),
             };
             let detail = json!({"team_id": id, "limits": limits});
-            // Question limits at their default stay out of the column, so the image
-            // before questions can read it after a rollback.
-            let text = limits.stored_json()?;
+            // Question limits at their default, and feed limits at the preset of the
+            // team's kind, stay out of the column, so the images before them can read it
+            // after a rollback.
+            let text = limits.stored_json(row.kind)?;
             tx.execute(
                 "UPDATE team SET limits = ?1 WHERE id = ?2",
                 params![text, id.as_str()],

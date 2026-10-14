@@ -31,6 +31,7 @@ const USAGE: &str = "Usage:
     [--open-questions <n>] [--questions-per-hour <n>] [--question-bytes <n>]
     [--member-open-questions <n>] [--member-questions-per-hour <n>]
     [--device-open-questions <n>] [--device-questions-per-hour <n>]
+    [--feed-bytes <n>] [--feed-actions-per-hour <n>]
   apassy-relay admin suspend|resume|delete <team id>
   apassy-relay admin backup
   apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run]
@@ -124,9 +125,11 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                 "--member-questions-per-hour",
                 "--device-open-questions",
                 "--device-questions-per-hour",
+                "--feed-bytes",
+                "--feed-actions-per-hour",
             ];
             let flags = parse_flags(&rest[1..], &names)?;
-            let mut values = [None; 16];
+            let mut values = [None; 18];
             for (index, text) in flags.iter().enumerate() {
                 if let Some(text) = text {
                     values[index] =
@@ -155,6 +158,8 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                     member_questions_per_hour: values[13],
                     device_open_questions: values[14],
                     device_questions_per_hour: values[15],
+                    feed_bytes: values[16],
+                    feed_actions_per_hour: values[17],
                 });
             if let Some(update) = set {
                 TeamLimits::default()
@@ -392,6 +397,9 @@ mod tests {
             vec!["limits", "t_abcdefgh23", "--member-open-questions", "0"],
             vec!["limits", "t_abcdefgh23", "--member-questions-per-hour", "0"],
             vec!["limits", "t_abcdefgh23", "--device-open-questions", "1001"],
+            vec!["limits", "t_abcdefgh23", "--feed-bytes", "1048575"],
+            vec!["limits", "t_abcdefgh23", "--feed-bytes", "67108865"],
+            vec!["limits", "t_abcdefgh23", "--feed-actions-per-hour", "0"],
             vec![
                 "limits",
                 "t_abcdefgh23",
@@ -508,6 +516,10 @@ mod tests {
                 "15",
                 "--device-questions-per-hour",
                 "16",
+                "--feed-bytes",
+                "1048576",
+                "--feed-actions-per-hour",
+                "18",
             ]))
             .unwrap(),
             Operator::Limits {
@@ -529,6 +541,8 @@ mod tests {
                     member_questions_per_hour: Some(14),
                     device_open_questions: Some(15),
                     device_questions_per_hour: Some(16),
+                    feed_bytes: Some(1_048_576),
+                    feed_actions_per_hour: Some(18),
                 }),
             }
         );

@@ -92,6 +92,11 @@ pub struct TeamLimits {
     pub member_questions_per_hour: u64,
     pub device_open_questions: u64,
     pub device_questions_per_hour: u64,
+    /// The bytes of feed ciphertext the team's file holds at once (docs/SPEC.md
+    /// section 27): its own budget, apart from `question_bytes`.
+    pub feed_bytes: u64,
+    /// Feed actions posted in the last 3600 seconds.
+    pub feed_actions_per_hour: u64,
 }
 
 /// The fields of `TeamLimits` that the image before questions (`sync-*`, 84a57fa) does
@@ -106,6 +111,12 @@ pub const QUESTION_LIMIT_FIELDS: [&str; 7] = [
     "device_open_questions",
     "device_questions_per_hour",
 ];
+
+/// The fields of `TeamLimits` that the image before feeds (schema 5, `connect-*`) does not
+/// know. `stored_json` leaves them out while they equal the preset of the team's kind
+/// (`TeamLimits::for_kind`), and `from_stored` fills them from that preset, so the
+/// `connect` preset's 1 MiB is never stored and a rollback can still read the column.
+pub const FEED_LIMIT_FIELDS: [&str; 2] = ["feed_bytes", "feed_actions_per_hour"];
 
 impl Default for TeamLimits {
     fn default() -> Self {
@@ -126,6 +137,8 @@ impl Default for TeamLimits {
             member_questions_per_hour: 225,
             device_open_questions: 10,
             device_questions_per_hour: 150,
+            feed_bytes: 4 * 1_048_576,
+            feed_actions_per_hour: 60,
         }
     }
 }
@@ -166,13 +179,17 @@ pub struct TeamLimitsUpdate {
     pub device_open_questions: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_questions_per_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed_actions_per_hour: Option<u64>,
 }
 
 impl TeamLimits {
     /// The limits of a new Connect team (docs/SPEC.md section 26): one member, no items
-    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), and 2 MiB
-    /// of questions. The other fields are the defaults. Devices are 10 per member, as in
-    /// every team.
+    /// and no agents (so no runs and no proxy), no vault sync (`plan_required`), 2 MiB
+    /// of questions, and 1 MiB of feeds. The other fields are the defaults. Devices are
+    /// 10 per member, as in every team.
     pub fn connect() -> Self {
         Self {
             members: 1,
@@ -180,19 +197,22 @@ impl TeamLimits {
             agents: 0,
             sync_bytes: 0,
             question_bytes: CONNECT_QUESTION_BYTES,
+            feed_bytes: CONNECT_FEED_BYTES,
             ..Self::default()
         }
     }
 
     /// The largest file of a team of `kind` (`Store::set_max_bytes`), or `None` for no
-    /// cap. A Connect team: its `question_bytes`, plus `CONNECT_FILE_SLACK` for its
-    /// rows and audit, plus room for the items and members that a plan may give it. An
-    /// operator team has no cap: the operator made it with a code and watches it.
+    /// cap. A Connect team: its `question_bytes` and `feed_bytes`, plus
+    /// `CONNECT_FILE_SLACK` for its rows and audit, plus room for the items and members
+    /// that a plan may give it. An operator team has no cap: the operator made it with a
+    /// code and watches it.
     pub fn file_bytes(&self, kind: TeamKind) -> Option<u64> {
         match kind {
             TeamKind::Operator => None,
             TeamKind::Connect => Some(
                 self.question_bytes
+                    .saturating_add(self.feed_bytes)
                     .saturating_add(CONNECT_FILE_SLACK)
                     .saturating_add(self.items.saturating_mul(ITEM_FILE_BYTES))
                     .saturating_add(
@@ -221,6 +241,7 @@ impl TeamLimits {
             ("questions_per_hour", self.questions_per_hour),
             ("member_questions_per_hour", self.member_questions_per_hour),
             ("device_questions_per_hour", self.device_questions_per_hour),
+            ("feed_actions_per_hour", self.feed_actions_per_hour),
         ] {
             if !(1..=1_000_000).contains(&value) {
                 return Err(RelayError::invalid(format!(
@@ -264,6 +285,11 @@ impl TeamLimits {
                 "question_bytes must be {MIN_QUESTION_BYTES} to {MAX_QUESTION_BYTES}."
             )));
         }
+        if !(MIN_FEED_BYTES..=MAX_FEED_BYTES).contains(&self.feed_bytes) {
+            return Err(RelayError::invalid(format!(
+                "feed_bytes must be {MIN_FEED_BYTES} to {MAX_FEED_BYTES}."
+            )));
+        }
         Ok(())
     }
 
@@ -295,27 +321,57 @@ impl TeamLimits {
             device_questions_per_hour: update
                 .device_questions_per_hour
                 .unwrap_or(self.device_questions_per_hour),
+            feed_bytes: update.feed_bytes.unwrap_or(self.feed_bytes),
+            feed_actions_per_hour: update
+                .feed_actions_per_hour
+                .unwrap_or(self.feed_actions_per_hour),
         };
         limits.validate()?;
         Ok(limits)
     }
 
-    /// The text of the `limits` column: every field, except a field of
-    /// `QUESTION_LIMIT_FIELDS` that equals its default. The image before questions
-    /// refuses unknown fields, so with default question limits it still reads the
-    /// column after a rollback (docs/OPERATIONS.md section 19.3).
-    pub fn stored_json(&self) -> RelayResult<String> {
+    /// The text of the `limits` column of a team of `kind`: every field, except a field
+    /// of `QUESTION_LIMIT_FIELDS` that equals its default and a field of
+    /// `FEED_LIMIT_FIELDS` that equals the preset of `kind`. The images before questions
+    /// and before feeds refuse unknown fields, so with those limits at their default
+    /// they still read the column after a rollback (docs/OPERATIONS.md sections 19.3
+    /// and 21.3).
+    pub fn stored_json(&self, kind: TeamKind) -> RelayResult<String> {
         let unwritable = || RelayError::internal("The limits cannot be written.");
         let mut value = serde_json::to_value(self).map_err(|_| unwritable())?;
         let defaults = serde_json::to_value(Self::default()).map_err(|_| unwritable())?;
+        let preset = serde_json::to_value(Self::for_kind(kind)).map_err(|_| unwritable())?;
         if let Some(fields) = value.as_object_mut() {
             for name in QUESTION_LIMIT_FIELDS {
                 if fields.get(name) == defaults.get(name) {
                     fields.remove(name);
                 }
             }
+            for name in FEED_LIMIT_FIELDS {
+                if fields.get(name) == preset.get(name) {
+                    fields.remove(name);
+                }
+            }
         }
         serde_json::to_string(&value).map_err(|_| unwritable())
+    }
+
+    /// The limits of a team of `kind` from the text of its `limits` column (`None`: the
+    /// defaults). A field that is not there takes its default, and a field of
+    /// `FEED_LIMIT_FIELDS` the preset of `kind`, as `stored_json` left it out.
+    pub fn from_stored(text: Option<&str>, kind: TeamKind) -> Option<Self> {
+        let mut value: serde_json::Value = match text {
+            Some(text) => serde_json::from_str(text).ok()?,
+            None => serde_json::json!({}),
+        };
+        let preset = serde_json::to_value(Self::for_kind(kind)).ok()?;
+        let fields = value.as_object_mut()?;
+        for name in FEED_LIMIT_FIELDS {
+            if !fields.contains_key(name) {
+                fields.insert(name.to_string(), preset.get(name)?.clone());
+            }
+        }
+        serde_json::from_value(value).ok()
     }
 }
 
@@ -324,6 +380,11 @@ pub const MIN_QUESTION_BYTES: u64 = 1_048_576;
 pub const MAX_QUESTION_BYTES: u64 = 268_435_456;
 /// `question_bytes` of a new Connect team: 2 MiB.
 pub const CONNECT_QUESTION_BYTES: u64 = 2_097_152;
+/// The range of `feed_bytes`: 1 MiB to 64 MiB (docs/SPEC.md section 27).
+pub const MIN_FEED_BYTES: u64 = 1_048_576;
+pub const MAX_FEED_BYTES: u64 = 67_108_864;
+/// `feed_bytes` of a new Connect team: 1 MiB, about four full feeds.
+pub const CONNECT_FEED_BYTES: u64 = 1_048_576;
 /// The file of a Connect team beyond its `question_bytes`: its team, member, device,
 /// and link rows, the question metadata, and its audit (`TeamLimits::file_bytes`).
 pub const CONNECT_FILE_SLACK: u64 = 8 * 1_048_576;
@@ -369,20 +430,16 @@ fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
     let id: String = row.get(0)?;
     let state: String = row.get(3)?;
     let text: Option<String> = row.get(7)?;
-    let limits = match text {
-        Some(text) => {
-            serde_json::from_str::<TeamLimits>(&text).map_err(|_| rusqlite::Error::InvalidQuery)?
-        }
-        None => TeamLimits::default(),
-    };
-    limits
-        .validate()
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let kind = match row.get::<_, String>(8)?.as_str() {
         "operator" => TeamKind::Operator,
         "connect" => TeamKind::Connect,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
+    let limits =
+        TeamLimits::from_stored(text.as_deref(), kind).ok_or(rusqlite::Error::InvalidQuery)?;
+    limits
+        .validate()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(TeamRow {
         id: TeamId::parse(&id).ok_or(rusqlite::Error::InvalidQuery)?,
         name: row.get(1)?,
@@ -656,7 +713,7 @@ pub fn insert_connect_team(
     file_key: &SecretString,
     now: u64,
 ) -> RelayResult<()> {
-    let limits = TeamLimits::connect().stored_json()?;
+    let limits = TeamLimits::connect().stored_json(TeamKind::Connect)?;
     conn.execute(
         "INSERT INTO team (id, name, file_key, state, legacy, created_at, limits, kind) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, 'connect')",
         params![id.as_str(), name, file_key.expose(), to_i(now), limits],
@@ -793,6 +850,7 @@ mod tests {
                 "question_bytes": 8388608,
                 "member_open_questions": 15, "member_questions_per_hour": 225,
                 "device_open_questions": 10, "device_questions_per_hour": 150,
+                "feed_bytes": 4194304, "feed_actions_per_hour": 60,
             })
         );
         assert_eq!(serde_json::from_str::<TeamLimits>("{}").unwrap(), defaults);
@@ -859,6 +917,8 @@ mod tests {
             ("member_questions_per_hour", 1, 1_000_000),
             ("device_questions_per_hour", 1, 1_000_000),
             ("question_bytes", MIN_QUESTION_BYTES, MAX_QUESTION_BYTES),
+            ("feed_bytes", MIN_FEED_BYTES, MAX_FEED_BYTES),
+            ("feed_actions_per_hour", 1, 1_000_000),
         ] {
             let set = |value: u64| {
                 defaults.apply(
@@ -919,7 +979,7 @@ mod tests {
     #[test]
     fn stored_limits_with_default_question_limits_read_in_the_old_image() {
         let defaults = TeamLimits::default();
-        let text = defaults.stored_json().unwrap();
+        let text = defaults.stored_json(TeamKind::Operator).unwrap();
         serde_json::from_str::<OldTeamLimits>(&text).unwrap();
         assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), defaults);
         // A changed limit of the old image stays readable too.
@@ -930,7 +990,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let text = changed.stored_json().unwrap();
+        let text = changed.stored_json(TeamKind::Operator).unwrap();
         let old = serde_json::from_str::<OldTeamLimits>(&text).unwrap();
         assert_eq!((old.members, old.sync_transfers), (7, 3));
         assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), changed);
@@ -945,7 +1005,7 @@ mod tests {
                 serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
                     .unwrap();
             let limits = defaults.apply(update).unwrap();
-            let text = limits.stored_json().unwrap();
+            let text = limits.stored_json(TeamKind::Operator).unwrap();
             assert!(text.contains(field), "{field}");
             assert!(
                 serde_json::from_str::<OldTeamLimits>(&text).is_err(),
@@ -960,8 +1020,102 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .len(),
-            16
+            18
         );
+    }
+
+    /// `TeamLimits` of the image before feeds (schema 5, `connect-*`), field for field.
+    #[derive(Debug, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct SchemaFiveLimits {
+        members: u64,
+        items: u64,
+        agents: u64,
+        runs_per_hour: u64,
+        pending_runs: u64,
+        agent_requests: u64,
+        sync_bytes: u64,
+        sync_pushes_per_hour: u64,
+        sync_transfers: u64,
+        open_questions: u64,
+        questions_per_hour: u64,
+        question_bytes: u64,
+        member_open_questions: u64,
+        member_questions_per_hour: u64,
+        device_open_questions: u64,
+        device_questions_per_hour: u64,
+    }
+
+    impl Default for SchemaFiveLimits {
+        fn default() -> Self {
+            let d = TeamLimits::default();
+            Self {
+                members: d.members,
+                items: d.items,
+                agents: d.agents,
+                runs_per_hour: d.runs_per_hour,
+                pending_runs: d.pending_runs,
+                agent_requests: d.agent_requests,
+                sync_bytes: d.sync_bytes,
+                sync_pushes_per_hour: d.sync_pushes_per_hour,
+                sync_transfers: d.sync_transfers,
+                open_questions: d.open_questions,
+                questions_per_hour: d.questions_per_hour,
+                question_bytes: d.question_bytes,
+                member_open_questions: d.member_open_questions,
+                member_questions_per_hour: d.member_questions_per_hour,
+                device_open_questions: d.device_open_questions,
+                device_questions_per_hour: d.device_questions_per_hour,
+            }
+        }
+    }
+
+    #[test]
+    fn feed_limits_at_the_preset_of_the_kind_read_in_the_schema_5_image() {
+        for kind in [TeamKind::Operator, TeamKind::Connect] {
+            let preset = TeamLimits::for_kind(kind);
+            let text = preset.stored_json(kind).unwrap();
+            assert!(!text.contains("feed_"), "{text}");
+            serde_json::from_str::<SchemaFiveLimits>(&text).unwrap();
+            assert_eq!(TeamLimits::from_stored(Some(&text), kind).unwrap(), preset);
+            // Each feed limit away from the preset is written, and the old image refuses
+            // the column: the rollback restores relay.db (OPERATIONS 21.3).
+            for field in FEED_LIMIT_FIELDS {
+                let value = match (field, kind) {
+                    ("feed_bytes", TeamKind::Connect) => 2 * MIN_FEED_BYTES,
+                    ("feed_bytes", TeamKind::Operator) => MIN_FEED_BYTES,
+                    _ => 7,
+                };
+                let update =
+                    serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
+                        .unwrap();
+                let limits = preset.apply(update).unwrap();
+                let text = limits.stored_json(kind).unwrap();
+                assert!(text.contains(field), "{field}");
+                assert!(
+                    serde_json::from_str::<SchemaFiveLimits>(&text).is_err(),
+                    "{field}"
+                );
+                assert_eq!(TeamLimits::from_stored(Some(&text), kind).unwrap(), limits);
+            }
+        }
+        // A column of the schema 5 image reads the preset of its kind: a Connect team's
+        // 1 MiB, an operator team's 4 MiB. No column: the defaults.
+        let connect_text =
+            r#"{"members":1,"items":0,"agents":0,"sync_bytes":0,"question_bytes":2097152}"#;
+        let connect = TeamLimits::from_stored(Some(connect_text), TeamKind::Connect).unwrap();
+        assert_eq!(connect, TeamLimits::connect());
+        assert_eq!(connect.feed_bytes, CONNECT_FEED_BYTES);
+        let operator =
+            TeamLimits::from_stored(Some(r#"{"members":7}"#), TeamKind::Operator).unwrap();
+        assert_eq!((operator.members, operator.feed_bytes), (7, 4 * 1_048_576));
+        assert_eq!(
+            TeamLimits::from_stored(None, TeamKind::Operator).unwrap(),
+            TeamLimits::default()
+        );
+        assert!(TeamLimits::from_stored(Some(r#"{"feeds":1}"#), TeamKind::Operator).is_none());
+        assert!(TeamLimits::from_stored(Some("[]"), TeamKind::Operator).is_none());
     }
 
     /// The directory of the image before Connect teams (version 1002), as it made it.
@@ -995,6 +1149,7 @@ PRAGMA user_version = 1002;
             (1, 0, 0, 0)
         );
         assert_eq!(connect.question_bytes, 2 * 1024 * 1024);
+        assert_eq!(connect.feed_bytes, 1024 * 1024);
         let defaults = TeamLimits::default();
         assert_eq!(
             TeamLimits {
@@ -1003,14 +1158,22 @@ PRAGMA user_version = 1002;
                 agents: defaults.agents,
                 sync_bytes: defaults.sync_bytes,
                 question_bytes: defaults.question_bytes,
+                feed_bytes: defaults.feed_bytes,
                 ..connect
             },
             defaults
         );
+        // The file cap grows by the feed budget: 2 + 1 + 8 MiB.
+        assert_eq!(connect.file_bytes(TeamKind::Connect), Some(11 * 1_048_576));
+        assert_eq!(defaults.file_bytes(TeamKind::Operator), None);
         assert_eq!(TeamLimits::for_kind(TeamKind::Operator), defaults);
         assert_eq!(TeamLimits::for_kind(TeamKind::Connect), connect);
-        let text = connect.stored_json().unwrap();
-        assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), connect);
+        let text = connect.stored_json(TeamKind::Connect).unwrap();
+        assert!(!text.contains("feed_bytes"), "{text}");
+        assert_eq!(
+            TeamLimits::from_stored(Some(&text), TeamKind::Connect).unwrap(),
+            connect
+        );
         // The operator can still raise every field of a Connect team.
         let raised = connect
             .apply(TeamLimitsUpdate {

@@ -1546,9 +1546,9 @@ fn a_connect_team_file_has_a_cap_and_a_full_team_is_refused_without_losing_its_a
     let (team, mac) = connect(&relay, "Rafal");
     let hub = relay.hub();
     let core = hub.team(&team).unwrap();
-    // question_bytes (2 MiB) and 8 MiB, in pages of 4 KiB.
+    // question_bytes (2 MiB), feed_bytes (1 MiB), and 8 MiB, in pages of 4 KiB.
     let (_, max) = core.store.pages().unwrap();
-    assert_eq!(max, (2 * 1_048_576 + 8 * 1_048_576) / 4096);
+    assert_eq!(max, (2 * 1_048_576 + 1_048_576 + 8 * 1_048_576) / 4096);
     // A small page cache for each Connect team; an operator team keeps the default.
     assert_eq!(
         core.store.cache_kib().unwrap(),
