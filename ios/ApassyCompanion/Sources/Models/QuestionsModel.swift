@@ -10,6 +10,8 @@ protocol PushPermission: AnyObject {
     func requestAuthorization() async -> Bool
     /// Ask iOS for a device token. It arrives in `QuestionsModel.receivePushToken`.
     func registerForPushes()
+    /// Tell iOS to deliver no more pushes to Apassy (`unregisterForRemoteNotifications`).
+    func unregisterForPushes()
     /// The APNs environment of this build.
     var environment: PushEnvironment { get }
     /// Call `handler` when the owner opens a notification of a question.
@@ -121,6 +123,14 @@ struct LockedVault: Equatable, Identifiable {
 
     /// The row in Decisions.
     var text: String { "\(name) is locked. Unlock to see its questions." }
+
+    /// The one row of the locked vaults whose passphrase is stored behind Face ID.
+    static func faceIDText(_ vaults: [LockedVault]) -> String {
+        let names = vaults.map(\.name).joined(separator: ", ")
+        return vaults.count == 1
+            ? "\(names) is locked. Unlock with Face ID to see its questions."
+            : "\(names) are locked. Unlock with Face ID to see their questions."
+    }
 }
 
 /// Questions through the relay on this iPhone (contract relay-questions-v1, section 13): the list
@@ -172,6 +182,13 @@ final class QuestionsModel {
     static let pushClearKey = "ApassyQuestionPushClear"
     /// The teams that the token already left since then.
     static let pushClearedKey = "ApassyQuestionPushCleared"
+    /// The vaults whose team keeps the token until they open on this iPhone (vault IDs), as the
+    /// core said at the last clear.
+    static let pushPendingKey = "ApassyQuestionPushPending"
+    /// A long poll that ends sooner than this without news did not wait: the next one waits
+    /// after a pause that grows to `maxWaitPause`.
+    static let quickWait: Duration = .seconds(1)
+    static let maxWaitPause: Duration = .seconds(30)
 
     private(set) var phase = Phase.loading
     /// The selected vault.
@@ -185,6 +202,9 @@ final class QuestionsModel {
     /// A problem with the answer key or the notifications, for a line under the list.
     private(set) var notice: String?
     private(set) var notificationsOn: Bool
+    /// Notifications are off, but the teams of these vaults keep the token until each opens on this
+    /// iPhone (names).
+    private(set) var notificationsPending: [String] = []
     /// Counts the notifications that the owner opened; Decisions then opens the newest question.
     private(set) var focusRequests = 0
     /// The name of this iPhone that a connection gives the Mac, so that two devices are told apart.
@@ -225,7 +245,7 @@ final class QuestionsModel {
     /// Counts the opens and the locks of the vault: work of an earlier one stops.
     @ObservationIgnored private var openGeneration = 0
     /// The vaults whose stored passphrase did not open them: Unlock asks for the passphrase.
-    @ObservationIgnored private var faceIDFailed: Set<String> = []
+    private var faceIDFailed: Set<String> = []
     /// The vaults whose questions_unlock said that they have no questions team, in this launch.
     @ObservationIgnored private var withoutQuestions: Set<String> = []
     /// The locked vaults asked for in the round of the last notification (Face ID or the sheet),
@@ -338,6 +358,7 @@ final class QuestionsModel {
     func watch() async {
         await refresh()
         askForTokenOnce()
+        var pause = retryInterval
         while !Task.isCancelled {
             guard phase == .ready else {
                 // A locked vault opens soon after the owner returns: look again shortly.
@@ -347,7 +368,18 @@ final class QuestionsModel {
                 continue
             }
             do {
-                if try await service.questionsWait(timeout: 25) { await refresh() }
+                let started = ContinuousClock.now
+                if try await service.questionsWait(timeout: 25) {
+                    pause = retryInterval
+                    await refresh()
+                } else if ContinuousClock.now - started < Self.quickWait {
+                    // Nothing to wait on (this iPhone was removed from every team, or an older
+                    // core): never ask again at once.
+                    try? await Task.sleep(for: pause)
+                    pause = min(pause * 2, Self.maxWaitPause)
+                } else {
+                    pause = retryInterval
+                }
             } catch {
                 if Task.isCancelled { return }
                 try? await Task.sleep(for: retryInterval)
@@ -432,8 +464,13 @@ final class QuestionsModel {
     /// others go at once. A network failure sends the same signed answer again while it is young.
     func send(_ choice: AnswerBar.Choice, for question: RemoteQuestion) async {
         guard deliveries[question.qid] != .sending, let card = question.card else { return }
+        // The row of this iPhone in the team of the question's vault: its key signs. A question
+        // of a vault whose questions are not open now never goes out with another vault's key.
+        if question.vaultID != nil, vault(of: question) == nil {
+            deliveries[question.qid] = .failed(Self.notOpenText(question.vaultName))
+            return
+        }
         deliveries[question.qid] = .sending
-        // The row of this iPhone in the team of the question's vault: its key signs.
         let row = vault(of: question)?.status ?? status
         do {
             let prepared = try await service.questionAnswerString(
@@ -481,6 +518,11 @@ final class QuestionsModel {
                 try await Task.sleep(for: retryInterval)
             }
         }
+    }
+
+    static func notOpenText(_ vaultName: String?) -> String {
+        let name = vaultName.map { $0.isEmpty ? "Its vault" : $0 } ?? "Its vault"
+        return "\(name) is locked on this iPhone. Unlock it in Decisions, then answer."
     }
 
     static func message(for error: VaultError, asker: String) -> String {
@@ -632,7 +674,9 @@ final class QuestionsModel {
         return (defaults.stringArray(forKey: Self.questionVaultsKey) ?? []).contains(entry.id)
     }
 
-    /// Remember the vaults of the list that have a questions team, and list the locked ones.
+    /// Remember the vaults of the list that have a questions team, and list the locked ones. The
+    /// selected vault is never one: the lock screen opens it, and its sheet would keep a
+    /// passphrase that the core did not check against it.
     private func updateLockedVaults() {
         guard listsEveryVault, let vault else {
             lockedVaults = []
@@ -644,14 +688,14 @@ final class QuestionsModel {
         known.formIntersection(onPhone)
         defaults.set(known.sorted(), forKey: Self.questionVaultsKey)
         let open = Set(vaults.map(\.vaultID))
-        let selected = vault.isUnlocked ? vault.vault?.id : nil
+        let selected = vault.vault?.id
         lockedVaults = vault.vaults
             .filter { isQuestionVault($0) && !open.contains($0.id) && $0.id != selected }
             .map { LockedVault(id: $0.id, name: $0.name) }
     }
 
-    /// The vault locked (or the core answered `locked`): no question shows, and every vault with
-    /// questions is locked.
+    /// The vault locked (or the core answered `locked`): no question shows, and every other vault
+    /// with questions is locked.
     private func showLocked() {
         questions = []
         vaults = []
@@ -660,12 +704,27 @@ final class QuestionsModel {
             lockedVaults = []
             return
         }
-        lockedVaults = vault.vaults.filter(isQuestionVault).map { LockedVault(id: $0.id, name: $0.name) }
+        let selected = vault.vault?.id
+        lockedVaults = vault.vaults.filter { isQuestionVault($0) && $0.id != selected }
+            .map { LockedVault(id: $0.id, name: $0.name) }
+    }
+
+    /// The locked vaults whose questions open with one Face ID (their passphrase is stored, and it
+    /// did not fail): one row, "Unlock with Face ID".
+    var faceIDLocked: [LockedVault] {
+        lockedVaults.filter { canUseFaceID($0.id) && !faceIDFailed.contains($0.id) }
+    }
+
+    /// The other locked vaults: a row each, with the passphrase sheet.
+    var passphraseLocked: [LockedVault] {
+        let stored = Set(faceIDLocked.map(\.id))
+        return lockedVaults.filter { !stored.contains($0.id) }
     }
 
     /// The selected vault opened (an unlock or a resume). The core holds the questions of that
-    /// vault only: open the others whose passphrase is stored behind Face ID, with one Face ID, in
-    /// the background. `reads`: the Face ID of a Face ID unlock, which reads their passphrases too.
+    /// vault only. Face ID is never asked by itself: `reads`, the Face ID of a Face ID unlock that
+    /// the owner asked for, reads the passphrases of the others too; else they wait in one row
+    /// "Unlock with Face ID" (`unlockFaceIDTapped`).
     func vaultDidOpen(reads: (any PassphraseReads)? = nil) {
         openGeneration += 1
         let generation = openGeneration
@@ -676,13 +735,22 @@ final class QuestionsModel {
                 return
             }
             await self.refresh()
-            let targets = self.lockedVaults.filter { self.canUseFaceID($0.id) && !self.faceIDFailed.contains($0.id) }
+            guard let reads else { return }
+            let targets = self.faceIDLocked
             guard !targets.isEmpty, self.isCurrent(generation) else {
-                reads?.end()
+                reads.end()
                 return
             }
             await self.reopen(targets, reads: reads, generation: generation)
         }
+    }
+
+    /// "Unlock with Face ID" in the row of the locked vaults with a stored passphrase: one Face ID
+    /// reads them all.
+    func unlockFaceIDTapped() async {
+        let targets = faceIDLocked.filter { !opening.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        await reopen(targets, reads: nil, generation: openGeneration)
     }
 
     /// The vault locks: the core drops the questions of every vault, and so does the list.
@@ -770,17 +838,27 @@ final class QuestionsModel {
         return result
     }
 
-    /// The text of the Face ID prompt for the questions of other vaults.
+    /// The text of the Face ID prompt for the questions of other vaults: it names each of them.
     static func reopenReason(_ names: [String], unlocking selected: String? = nil) -> String {
-        let others = names.count == 1 ? "“\(names[0])”" : "\(names.count) other vaults"
-        if let selected { return "Unlock “\(selected)” and read the questions of \(others)" }
-        return "Read the questions of \(others)"
+        let others = list(names)
+        if let selected { return "Unlock \(selected), and the questions of \(others)" }
+        return "Unlock the questions of \(others)"
+    }
+
+    /// "Work", "Work and Family", "Work, Family, and Home".
+    static func list(_ names: [String]) -> String {
+        switch names.count {
+        case 0: ""
+        case 1: names[0]
+        case 2: "\(names[0]) and \(names[1])"
+        default: names.dropLast().joined(separator: ", ") + ", and " + names[names.count - 1]
+        }
     }
 
     /// Unlock in the row of a locked vault: Face ID when its passphrase is stored (and opened it
     /// before), else the passphrase sheet. A Face ID that does not open it shows the sheet.
     func unlockTapped(_ locked: LockedVault) async {
-        guard !opening.contains(locked.id) else { return }
+        guard !opening.contains(locked.id), locked.id != vault?.vault?.id else { return }
         if canUseFaceID(locked.id), !faceIDFailed.contains(locked.id) {
             let result = await reopen([locked], reads: nil, generation: openGeneration)
             if result.cancelled || !lockedVaults.contains(locked) { return }
@@ -795,6 +873,8 @@ final class QuestionsModel {
     func unlockQuestions(_ locked: LockedVault, passphrase: String) async -> String? {
         guard !passphrase.isEmpty else { return "Type the passphrase." }
         guard let vault, vault.isUnlocked else { return "Unlock Apassy first." }
+        // The vault on screen opens on the lock screen, never here.
+        guard locked.id != vault.vault?.id else { return "Unlock “\(locked.name)” on the lock screen." }
         opening.insert(locked.id)
         defer { opening.remove(locked.id) }
         do {
@@ -834,12 +914,17 @@ final class QuestionsModel {
             defaults.set(true, forKey: Self.notificationsKey)
             defaults.removeObject(forKey: Self.pushClearKey)
             defaults.removeObject(forKey: Self.pushClearedKey)
+            defaults.removeObject(forKey: Self.pushPendingKey)
+            notificationsPending = []
             tokenTeams = []
             push.registerForPushes()
             await updatePushToken()
         } else {
             notificationsOn = false
             defaults.set(false, forKey: Self.notificationsKey)
+            // iOS delivers nothing more, also from a team that still has the token.
+            push?.unregisterForPushes()
+            pushToken = nil
             // Every team, also those of the vaults that are not open now: each is cleared when
             // its vault is in the list.
             defaults.set(true, forKey: Self.pushClearKey)
@@ -895,9 +980,13 @@ final class QuestionsModel {
         guard !notificationsOn, defaults.bool(forKey: Self.pushClearKey) else { return }
         var cleared = Set(defaults.stringArray(forKey: Self.pushClearedKey) ?? [])
         let teams = Set(contexts.filter { $0.status.enabled }.compactMap(\.status.teamID))
-        guard !teams.isSubset(of: cleared) else { return }
+        guard !teams.isSubset(of: cleared) else {
+            updatePending()
+            return
+        }
         do {
-            try await service.pushTokenClear()
+            let result = try await service.pushTokenClear()
+            defaults.set(result.pending, forKey: Self.pushPendingKey)
         } catch let error as VaultError where error.code == .noQuestions || error.code == .removed {
             // Nothing to take away.
         } catch {
@@ -905,6 +994,21 @@ final class QuestionsModel {
         }
         cleared.formUnion(teams)
         defaults.set(cleared.sorted(), forKey: Self.pushClearedKey)
+        updatePending()
+    }
+
+    /// The names of the vaults with a questions team whose team keeps the token.
+    private func updatePending() {
+        let pending = Set(defaults.stringArray(forKey: Self.pushPendingKey) ?? [])
+        notificationsPending =
+            notificationsOn
+            ? [] : (vault?.vaults ?? []).filter { pending.contains($0.id) && isQuestionVault($0) }.map(\.name)
+    }
+
+    /// "Notifications stay on for: Work, Family until you open them."
+    var notificationsPendingText: String? {
+        notificationsPending.isEmpty
+            ? nil : "Notifications stay on for: \(notificationsPending.joined(separator: ", ")) until you open them."
     }
 
     // MARK: Connecting a vault from iCloud Drive

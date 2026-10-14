@@ -128,7 +128,15 @@ struct DecisionsView: View {
                 }
                 if waiting.isEmpty { emptyWaiting }
                 if let questions, questions.phase != .locked {
-                    ForEach(questions.lockedVaults) { locked in
+                    let stored = questions.faceIDLocked
+                    if !stored.isEmpty {
+                        FaceIDLockedRow(
+                            vaults: stored, opening: stored.contains { questions.opening.contains($0.id) }
+                        ) {
+                            Task { await questions.unlockFaceIDTapped() }
+                        }
+                    }
+                    ForEach(questions.passphraseLocked) { locked in
                         LockedVaultRow(locked: locked, opening: questions.opening.contains(locked.id)) {
                             Task { await questions.unlockTapped(locked) }
                         }
@@ -245,6 +253,9 @@ struct DecisionsView: View {
             if let notice = questions.notice {
                 Section { Text(notice).font(.footnote).foregroundStyle(.secondary) }
             }
+            if let pending = questions.notificationsPendingText {
+                Section { Text(pending).font(.footnote).foregroundStyle(.secondary) }
+            }
             if questions.phase == .ready {
                 ForEach(questions.contexts.filter { $0.status.enabled && !$0.status.hasKey }) { vault in
                     Section {
@@ -337,8 +348,8 @@ private struct WaitingRow: View {
     }
 }
 
-/// A vault whose questions are not open now: one row with Unlock (Face ID when its passphrase is
-/// stored, else the passphrase sheet).
+/// A vault whose questions are not open now and whose passphrase is not stored behind Face ID (or
+/// did not open it): one row with Unlock, which shows the passphrase sheet.
 private struct LockedVaultRow: View {
     let locked: LockedVault
     let opening: Bool
@@ -360,6 +371,35 @@ private struct LockedVaultRow: View {
                 Button("Unlock", action: unlock)
                     .buttonStyle(.bordered)
                     .accessibilityLabel("Unlock \(locked.name)")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// The locked vaults whose passphrase is stored behind Face ID: one row, and one Face ID opens the
+/// questions of them all. Face ID never asks by itself after a return to the app.
+private struct FaceIDLockedRow: View {
+    let vaults: [LockedVault]
+    let opening: Bool
+    let unlock: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "faceid")
+                .foregroundStyle(.secondary)
+                .frame(width: 36)
+                .accessibilityHidden(true)
+            Text(LockedVault.faceIDText(vaults))
+                .font(.subheadline)
+            Spacer(minLength: 8)
+            if opening {
+                ProgressView()
+                    .accessibilityLabel("Opening the locked vaults")
+            } else {
+                Button("Unlock", action: unlock)
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Unlock with Face ID")
             }
         }
         .padding(.vertical, 2)

@@ -439,7 +439,8 @@ final class VaultModel {
         }
         isSuspended = false
         leftAt = nil
-        // The suspend dropped the questions of every vault; the core opened the selected one.
+        // The suspend dropped the questions of every vault; the core opened the selected one. The
+        // others wait in Decisions for the owner's Face ID: none is asked here.
         questions?.vaultDidOpen()
         await reload()
         startSync()

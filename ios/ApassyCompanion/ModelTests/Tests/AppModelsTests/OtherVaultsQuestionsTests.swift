@@ -6,8 +6,10 @@ import Testing
 
 /// The questions of the vaults that are not selected (contract ios-core-v1 section 5.10, "Several
 /// vaults"): the core drops every questions context on a lock and a suspend, and after a resume
-/// holds the selected vault only. The app opens the others again with `questions_unlock`: with one
-/// Face ID for those whose passphrase is stored, else with the passphrase sheet of their row.
+/// holds the selected vault only. The app opens the others again with `questions_unlock`: those
+/// whose passphrase is stored share one row, and its tap reads them all with one Face ID (a Face ID
+/// unlock reads them in its own prompt); each other vault has a row with the passphrase sheet.
+/// Face ID never asks by itself after an unlock or a resume.
 @MainActor
 @Suite("Questions of the other vaults")
 struct OtherVaultsQuestionsTests {
@@ -19,6 +21,7 @@ struct OtherVaultsQuestionsTests {
     final class Fixture {
         let service = PreviewVaultService(empty: false, unlocked: false)
         let store = MemoryPassphraseStore()
+        let push = ScriptedPush(allows: true)
         let settings = makeSettings()
         let defaults: UserDefaults
         let vault: VaultModel
@@ -53,7 +56,7 @@ struct OtherVaultsQuestionsTests {
                 open: false)
             (vault, _) = makeVault(service: service, store: store, settings: settings)
             questions = QuestionsModel(
-                service: service, signers: signers, push: nil, deviceName: "Test iPhone", defaults: defaults,
+                service: service, signers: signers, push: push, deviceName: "Test iPhone", defaults: defaults,
                 retryInterval: .milliseconds(10))
             questions.follow(vault)
             await vault.start()
@@ -71,6 +74,12 @@ struct OtherVaultsQuestionsTests {
             await questions.reopenFinished()
         }
 
+        /// Unlock Personal, then tap the Face ID row of the other vaults.
+        func unlockAndTapFaceID() async {
+            await unlock()
+            await questions.unlockFaceIDTapped()
+        }
+
         func contexts() async -> [String: Bool] {
             [
                 work.id: await service.hasQuestionsContext(vaultID: work.id),
@@ -84,7 +93,7 @@ struct OtherVaultsQuestionsTests {
         func locked(_ id: String) -> LockedVault? { questions.lockedVaults.first { $0.id == id } }
     }
 
-    @Test("an unlock opens the questions of the other vaults with one Face ID, in the background")
+    @Test("a typed unlock asks no Face ID: the vaults with a stored passphrase share one row, and its tap opens them")
     func unlockOpensOthers() async throws {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id)
@@ -92,7 +101,18 @@ struct OtherVaultsQuestionsTests {
 
         await fixture.unlock()
 
-        #expect(fixture.store.prompts == ["Read the questions of 2 other vaults"])
+        #expect(fixture.store.prompts.isEmpty, "no Face ID by itself")
+        #expect(await fixture.service.questionsUnlocks().isEmpty)
+        let both = [LockedVault(id: Self.work.id, name: "Work"), LockedVault(id: Self.family.id, name: "Family")]
+        #expect(fixture.questions.faceIDLocked == both)
+        #expect(fixture.questions.passphraseLocked.isEmpty)
+        #expect(LockedVault.faceIDText(both) == "Work, Family are locked. Unlock with Face ID to see their questions.")
+        #expect(
+            LockedVault.faceIDText([both[0]]) == "Work is locked. Unlock with Face ID to see its questions.")
+
+        await fixture.questions.unlockFaceIDTapped()
+
+        #expect(fixture.store.prompts == ["Unlock the questions of Work and Family"])
         #expect(Set(fixture.store.sessionReads) == [Self.work.id, Self.family.id])
         #expect(fixture.store.openSessions == 0)
         #expect(Set(await fixture.service.questionsUnlocks()) == [Self.work.id, Self.family.id])
@@ -104,12 +124,12 @@ struct OtherVaultsQuestionsTests {
         #expect(fixture.vault.vault?.id == Self.personal)
     }
 
-    @Test("resume opens the questions of the other vaults again with one Face ID")
+    @Test("a resume asks no Face ID; one tap on the row opens the other vaults again with one Face ID")
     func resumeReopensWithOneFaceID() async throws {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id)
         try fixture.storeFaceID(Self.family.id)
-        await fixture.unlock()
+        await fixture.unlockAndTapFaceID()
         #expect(fixture.store.prompts.count == 1)
 
         // The suspend drops every context.
@@ -120,6 +140,13 @@ struct OtherVaultsQuestionsTests {
         await fixture.vault.didBecomeActive()
         await fixture.questions.reopenFinished()
         #expect(fixture.vault.isUnlocked && !fixture.vault.isSuspended)
+        // No Face ID by itself: one row for both vaults.
+        #expect(fixture.store.prompts.count == 1)
+        #expect(await fixture.contexts() == [Self.work.id: false, Self.family.id: false])
+        #expect(fixture.questions.faceIDLocked.map(\.id) == [Self.work.id, Self.family.id])
+        #expect(fixture.questions.questions.allSatisfy { $0.vaultID == Self.personal })
+
+        await fixture.questions.unlockFaceIDTapped()
         // One more Face ID for both vaults, and both contexts again.
         #expect(fixture.store.prompts.count == 2)
         #expect(fixture.store.openSessions == 0)
@@ -142,7 +169,7 @@ struct OtherVaultsQuestionsTests {
         await fixture.questions.reopenFinished()
 
         #expect(fixture.vault.isUnlocked)
-        #expect(fixture.store.prompts == ["Unlock “Personal” and read the questions of 2 other vaults"])
+        #expect(fixture.store.prompts == ["Unlock Personal, and the questions of Work and Family"])
         #expect(fixture.store.sessionReads.first == Self.personal)
         #expect(Set(fixture.store.sessionReads) == [Self.personal, Self.work.id, Self.family.id])
         #expect(fixture.store.openSessions == 0)
@@ -155,8 +182,12 @@ struct OtherVaultsQuestionsTests {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id)
         await fixture.unlock()
-
         let family = try #require(fixture.locked(Self.family.id))
+        // Work waits in the Face ID row, Family in a row of its own.
+        #expect(fixture.questions.faceIDLocked.map(\.id) == [Self.work.id])
+        #expect(fixture.questions.passphraseLocked == [family])
+        await fixture.questions.unlockFaceIDTapped()
+
         #expect(fixture.questions.lockedVaults == [family])
         #expect(family.text == "Family is locked. Unlock to see its questions.")
         #expect(!fixture.questions.questions.contains { $0.vaultID == Self.family.id })
@@ -187,10 +218,13 @@ struct OtherVaultsQuestionsTests {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id, passphrase: "an old passphrase")
         try fixture.storeFaceID(Self.family.id)
-        await fixture.unlock()
+        await fixture.unlockAndTapFaceID()
 
         let work = try #require(fixture.locked(Self.work.id))
         #expect(fixture.questions.lockedVaults == [work])
+        // It leaves the Face ID row for a row with the passphrase sheet.
+        #expect(fixture.questions.faceIDLocked.isEmpty)
+        #expect(fixture.questions.passphraseLocked == [work])
         await fixture.questions.unlockTapped(work)
         #expect(fixture.questions.unlockPrompt == work)
         #expect(fixture.store.prompts.count == 1, "no second Face ID for a passphrase that failed")
@@ -206,16 +240,18 @@ struct OtherVaultsQuestionsTests {
         try fixture.storeFaceID(Self.work.id)
         try fixture.storeFaceID(Self.family.id)
         fixture.store.cancelsSession = true
-        await fixture.unlock()
+        await fixture.unlockAndTapFaceID()
 
         #expect(fixture.vault.isUnlocked)
         #expect(Set(fixture.questions.lockedVaults.map(\.id)) == [Self.work.id, Self.family.id])
+        #expect(fixture.questions.faceIDLocked.count == 2, "the row stays")
         #expect(await fixture.service.questionsUnlocks().isEmpty)
 
-        // Unlock in a row asks Face ID again for that vault only.
+        // Unlock of one vault asks Face ID again for that vault only.
         fixture.store.cancelsSession = false
         await fixture.questions.unlockTapped(try #require(fixture.locked(Self.work.id)))
-        #expect(fixture.store.prompts == ["Read the questions of 2 other vaults", "Read the questions of “Work”"])
+        #expect(
+            fixture.store.prompts == ["Unlock the questions of Work and Family", "Unlock the questions of Work"])
         #expect(fixture.questions.lockedVaults.map(\.id) == [Self.family.id])
         #expect(fixture.questions.unlockPrompt == nil)
     }
@@ -246,15 +282,15 @@ struct OtherVaultsQuestionsTests {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id)
         try fixture.storeFaceID(Self.family.id)
-        fixture.store.cancelsSession = true
         await fixture.unlock()
         #expect(fixture.questions.lockedVaults.count == 2)
+        #expect(fixture.store.prompts.isEmpty)
 
-        fixture.store.cancelsSession = false
+        // A tapped notification is the owner's action: Face ID asks at once.
         fixture.questions.notificationOpened()
         let qid = await fixture.questions.takeFocus(stillFree: { true })
         #expect(qid == fixture.familyQuestion.qid)
-        #expect(fixture.store.prompts.count == 2)
+        #expect(fixture.store.prompts == ["Unlock the questions of Work and Family"])
         #expect(fixture.questions.unlockPrompt == nil)
         #expect(fixture.questions.lockedVaults.isEmpty)
     }
@@ -273,25 +309,50 @@ struct OtherVaultsQuestionsTests {
         #expect(fixture.questions.unlockPrompt == nil)
     }
 
-    @Test("a lock shows every vault as locked, and drops every question")
+    @Test("a lock shows every other vault as locked, and drops every question")
     func lockShowsEveryVaultLocked() async throws {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id)
         try fixture.storeFaceID(Self.family.id)
-        await fixture.unlock()
+        await fixture.unlockAndTapFaceID()
         #expect(fixture.questions.lockedVaults.isEmpty)
 
         await fixture.vault.lock()
         #expect(fixture.questions.phase == .locked)
         #expect(fixture.questions.questions.isEmpty)
         #expect(fixture.questions.vaults.isEmpty)
-        #expect(Set(fixture.questions.lockedVaults.map(\.id)) == [Self.personal, Self.work.id, Self.family.id])
+        // The selected vault opens on the lock screen, never in a row.
+        #expect(Set(fixture.questions.lockedVaults.map(\.id)) == [Self.work.id, Self.family.id])
         #expect(await fixture.contexts() == [Self.work.id: false, Self.family.id: false])
 
         // The list read again says the same.
         await fixture.questions.refresh()
         #expect(fixture.questions.phase == .locked)
-        #expect(fixture.questions.lockedVaults.count == 3)
+        #expect(fixture.questions.lockedVaults.count == 2)
+    }
+
+    @Test("the selected vault never gets the passphrase sheet, and nothing is stored for it")
+    func selectedVaultHasNoSheet() async throws {
+        let fixture = try await Fixture()
+        fixture.settings.setFaceIDUnlock(true, vaultID: Self.personal)
+        await fixture.unlock()
+        #expect(!fixture.questions.lockedVaults.contains { $0.id == Self.personal })
+        let personal = LockedVault(id: Self.personal, name: "Personal")
+
+        await fixture.questions.unlockTapped(personal)
+        #expect(fixture.questions.unlockPrompt == nil)
+        let message = await fixture.questions.unlockQuestions(personal, passphrase: "not the passphrase")
+        #expect(message == "Unlock “Personal” on the lock screen.")
+        #expect(await fixture.service.questionsUnlocks().isEmpty)
+        #expect(fixture.store.stored(vaultID: Self.personal) != "not the passphrase")
+
+        // A notification while the vault is suspended (the core answers locked) asks for the
+        // other vaults only.
+        await fixture.vault.didEnterBackground()
+        fixture.questions.notificationOpened()
+        _ = await fixture.questions.takeFocus(stillFree: { true })
+        #expect(fixture.questions.unlockPrompt?.id != Self.personal)
+        await fixture.vault.didBecomeActive()
     }
 
     @Test("the passphrase sheet closes when the app leaves the screen, and the work stops")
@@ -305,5 +366,31 @@ struct OtherVaultsQuestionsTests {
         fixture.vault.enterBackground()
         #expect(fixture.questions.unlockPrompt == nil)
         await fixture.vault.settle()
+    }
+
+    @Test("notifications off: iOS stops, the open teams drop the token, and the closed vaults are named")
+    func notificationsOffNamesClosedVaults() async throws {
+        let fixture = try await Fixture()
+        await fixture.unlock()
+        await fixture.questions.setNotifications(true)
+        await fixture.questions.receivePushToken(Data([7]))
+        #expect(await fixture.service.currentPushToken() == Data([7]))
+
+        await fixture.questions.setNotifications(false)
+        #expect(fixture.push.unregistrations == 1)
+        #expect(await fixture.service.currentPushToken() == nil)
+        #expect(fixture.questions.notificationsPending == ["Work", "Family"])
+        #expect(
+            fixture.questions.notificationsPendingText
+                == "Notifications stay on for: Work, Family until you open them.")
+
+        // Work opens: its team drops the token, and it leaves the line.
+        let work = try #require(fixture.locked(Self.work.id))
+        #expect(await fixture.questions.unlockQuestions(work, passphrase: PreviewVaultService.passphrase) == nil)
+        #expect(fixture.questions.notificationsPending == ["Family"])
+
+        // On again: no line.
+        await fixture.questions.setNotifications(true)
+        #expect(fixture.questions.notificationsPendingText == nil)
     }
 }

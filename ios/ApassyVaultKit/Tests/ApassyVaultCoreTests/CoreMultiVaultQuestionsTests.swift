@@ -113,6 +113,21 @@ import Testing
             outcomes[try #require(event["vault"] as? String)] = event["outcome"] as? String
         }
         #expect(outcomes == ["Personal": "approved", "Work": "denied"])
+
+        // i. questionsUnlock of the open selected vault checks its passphrase too.
+        do {
+            _ = try await core.questionsUnlock(vaultID: work, passphrase: "wrong-pass-123")
+            Issue.record("a wrong passphrase passed for the open vault")
+        } catch let error as VaultError {
+            #expect(error.code == .wrongPassphrase)
+        }
+
+        // j. Notifications off with Work open only: Personal keeps the token until it opens.
+        try await core.suspend()
+        #expect(try await core.resume())
+        let cleared = try await core.pushTokenClear()
+        #expect(cleared.cleared == [work])
+        #expect(cleared.pending == [personal])
     }
 
     // MARK: helpers

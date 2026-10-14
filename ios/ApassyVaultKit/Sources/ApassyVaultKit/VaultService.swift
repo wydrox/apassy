@@ -182,8 +182,9 @@ public protocol VaultService: Sendable {
     /// Send the APNs token to the questions team of the selected vault; a core that keeps the
     /// questions of every unlocked vault sends it to the team of each.
     func pushTokenSet(token: Data, environment: PushEnvironment) async throws
-    /// Remove the token from the relay, as `pushTokenSet` reaches it.
-    func pushTokenClear() async throws
+    /// Remove the token from the relay, as `pushTokenSet` reaches it. `pending`: the vaults whose
+    /// team keeps it until they open (a core that keeps every unlocked vault; else empty).
+    func pushTokenClear() async throws -> PushCleared
     /// Join the notifications-only team of the selected vault with the device link of the Mac.
     /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo

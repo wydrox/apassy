@@ -61,6 +61,9 @@ final class ScriptedPush: PushPermission {
 
     func registerForPushes() { registrations += 1 }
 
+    private(set) var unregistrations = 0
+    func unregisterForPushes() { unregistrations += 1 }
+
     func observeOpens(_ handler: @escaping @MainActor () -> Void) { onOpen = handler }
 
     /// The owner opens a notification.
@@ -416,8 +419,50 @@ struct QuestionsModelTests {
         #expect(await fixture.service.currentPushToken() == Data([1, 2, 3]))
         await fixture.model.setNotifications(false)
         #expect(await fixture.service.currentPushToken() == nil)
+        // iOS delivers nothing more.
+        #expect(fixture.push.unregistrations == 1)
         await fixture.model.receivePushToken(Data([4]))
         #expect(await fixture.service.currentPushToken() == nil)
+    }
+
+    // MARK: The long poll
+
+    @Test("a long poll that ends at once without news waits before the next one, longer each time")
+    func quickWaitsBackOff() async {
+        let fixture = Fixture()
+        // This iPhone was removed from the team: the status is still enabled, so the list is
+        // ready, and an older core answers each wait at once.
+        await fixture.service.setQuestions(enabled: true, removed: true)
+        await fixture.service.scriptQuestionWaits(Array(repeating: false, count: 1000))
+        let watching = Task { await fixture.model.watch() }
+        try? await Task.sleep(for: .milliseconds(400))
+        watching.cancel()
+        await watching.value
+        #expect(fixture.model.phase == .ready)
+        let used = 1000 - (await fixture.service.questionWaitsLeft())
+        // 10, 20, 40, 80, 160 ms of pause: a handful of calls, not a busy loop.
+        #expect(used >= 2 && used <= 10, "\(used) waits in 400 ms")
+    }
+
+    // MARK: The vault of an answer
+
+    @Test("an answer to a question of a vault whose questions are not open is refused before Face ID")
+    func answerOfAVaultThatIsNotOpen() async throws {
+        let fixture = Fixture()
+        _ = await fixture.withQuestion()
+        var question = PreviewVaultService.sampleQuestion(qid: "ZmFtaWx5LXF1ZXN0aW9uLTAwMQ")
+        question.vaultID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+        question.vaultName = "Family"
+        let bar = AnswerBar.make(for: try #require(question.card))
+        await fixture.model.send(try #require(bar.allowOnce), for: question)
+        #expect(fixture.signer.reasons.isEmpty, "no Face ID")
+        #expect(await fixture.service.sentAnswers().isEmpty)
+        #expect(
+            fixture.model.deliveries[question.qid]
+                == .failed("Family is locked on this iPhone. Unlock it in Decisions, then answer."))
+        // Deny needs no Face ID, and it is refused too: never the key of the selected vault.
+        await fixture.model.send(bar.deny, for: question)
+        #expect(await fixture.service.sentAnswers().isEmpty)
     }
 
     // MARK: Connecting a vault from iCloud Drive

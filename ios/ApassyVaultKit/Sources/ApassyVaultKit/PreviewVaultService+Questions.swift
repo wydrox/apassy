@@ -168,6 +168,9 @@ extension PreviewVaultService {
     /// The answers of the next `questionsWait` calls; after them it answers false.
     public func scriptQuestionWaits(_ waits: [Bool]) { questionsState.waits = waits }
 
+    /// How many scripted answers of `questionsWait` are left.
+    public func questionWaitsLeft() -> Int { questionsState.waits.count }
+
     /// The Mac settles a question.
     public func settleQuestion(qid: String, by device: String) {
         guard let at = questionsState.questions.firstIndex(where: { $0.qid == qid }) else { return }
@@ -370,9 +373,21 @@ extension PreviewVaultService {
         }
     }
 
-    public func pushTokenClear() async throws {
-        questionsState.pushToken = nil
-        for at in questionsState.others.indices { questionsState.others[at].pushToken = nil }
+    public func pushTokenClear() async throws -> PushCleared {
+        // As the core: the teams of the vaults with a context drop the token now; each other
+        // vault on this iPhone keeps it until it opens.
+        var result = PushCleared()
+        if ownContext, let selected {
+            questionsState.pushToken = nil
+            result.cleared.append(selected)
+        }
+        for at in questionsState.others.indices where questionsState.others[at].open {
+            questionsState.others[at].pushToken = nil
+            result.cleared.append(questionsState.others[at].id)
+        }
+        result.pending = vaults.map(\.id).filter { !result.cleared.contains($0) }.sorted()
+        result.cleared.sort()
+        return result
     }
 
     public func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {

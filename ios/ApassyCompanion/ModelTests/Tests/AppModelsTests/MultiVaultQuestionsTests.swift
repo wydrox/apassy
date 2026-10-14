@@ -85,8 +85,9 @@ private actor TwoVaultQuestionsService: VaultService {
         pushTokens[current.team] = token
     }
 
-    func pushTokenClear() async throws {
+    func pushTokenClear() async throws -> PushCleared {
         pushTokens[current.team] = nil
+        return PushCleared(cleared: [selected])
     }
 
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
