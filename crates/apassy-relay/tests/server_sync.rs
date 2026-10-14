@@ -1314,7 +1314,10 @@ fn backups_hold_the_snapshots_and_a_deleted_team_loses_them() {
         .operator(Command::Suspend { team: team.clone() })
         .unwrap();
     relay
-        .operator(Command::Delete { team: team.clone() })
+        .operator(Command::Delete {
+            team: team.clone(),
+            free_connect_key: false,
+        })
         .unwrap();
     assert!(!relay.config.sync_dir(&team).exists());
     assert!(!relay.config.team_path(&team).exists());

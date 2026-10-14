@@ -32,8 +32,10 @@ const USAGE: &str = "Usage:
     [--member-open-questions <n>] [--member-questions-per-hour <n>]
     [--device-open-questions <n>] [--device-questions-per-hour <n>]
     [--feed-bytes <n>] [--feed-actions-per-hour <n>]
-  apassy-relay admin suspend|resume|delete <team id>
+  apassy-relay admin suspend|resume <team id>
+  apassy-relay admin delete <team id> [--free-connect-key]
   apassy-relay admin backup
+  apassy-relay admin rollback-check
   apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run]
 
 The configuration is read from the environment:
@@ -174,10 +176,23 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
         "resume" => Ok(Operator::Resume {
             team: team_arg(rest)?,
         }),
-        "delete" => Ok(Operator::Delete {
-            team: team_arg(rest)?,
-        }),
+        "delete" => {
+            let free_connect_key = rest.iter().any(|arg| arg == "--free-connect-key");
+            let others: Vec<String> = rest
+                .iter()
+                .filter(|arg| *arg != "--free-connect-key")
+                .cloned()
+                .collect();
+            if others.len() + 1 < rest.len() {
+                return Err("--free-connect-key is given twice.".to_string());
+            }
+            Ok(Operator::Delete {
+                team: team_arg(&others)?,
+                free_connect_key,
+            })
+        }
         "backup" if rest.is_empty() => Ok(Operator::Backup),
+        "rollback-check" if rest.is_empty() => Ok(Operator::RollbackCheck),
         "connect-sweep" => {
             let dry_run = rest.iter().any(|arg| arg == "--dry-run");
             let others: Vec<String> = rest
@@ -473,6 +488,43 @@ mod tests {
             vec!["connect-sweep", "--dry-run", "--dry-run"],
             vec!["connect-sweep", "--force"],
             vec!["connect-sweep", "t_abcdefgh23"],
+        ] {
+            assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn delete_and_rollback_check_commands() {
+        let team = TeamId::parse("t_abcdefgh23").unwrap();
+        for (words, free_connect_key) in [
+            (vec!["delete", "t_abcdefgh23"], false),
+            (vec!["delete", "t_abcdefgh23", "--free-connect-key"], true),
+            (vec!["delete", "--free-connect-key", "t_abcdefgh23"], true),
+        ] {
+            assert_eq!(
+                parse_admin(&args(&words)).unwrap(),
+                Operator::Delete {
+                    team: team.clone(),
+                    free_connect_key
+                },
+                "{words:?}"
+            );
+        }
+        assert_eq!(
+            parse_admin(&args(&["rollback-check"])).unwrap(),
+            Operator::RollbackCheck
+        );
+        for values in [
+            vec!["delete"],
+            vec!["delete", "--free-connect-key"],
+            vec![
+                "delete",
+                "t_abcdefgh23",
+                "--free-connect-key",
+                "--free-connect-key",
+            ],
+            vec!["delete", "t_abcdefgh23", "--force"],
+            vec!["rollback-check", "t_abcdefgh23"],
         ] {
             assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
         }

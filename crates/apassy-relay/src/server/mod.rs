@@ -27,6 +27,7 @@ pub mod mcp;
 pub mod operator;
 pub mod push;
 pub mod questions;
+pub mod rollback;
 pub mod runkeys;
 pub mod sessions;
 pub mod store;
@@ -99,8 +100,7 @@ pub struct Core {
     /// The open answer long polls of each asking device: at most one.
     pub answer_polls: LongPolls,
     /// Question long polls of this team that hold a thread of the question lane
-    /// (`Limits::question_long_polls_per_team`), and the feed long polls of an operator
-    /// team (docs/SPEC.md section 27.7).
+    /// (`Limits::question_long_polls_per_team`). Feed polls never count here.
     pub question_lane: AtomicUsize,
     /// The open feed list long polls of each device: at most one (section 27).
     pub feed_polls: LongPolls,
@@ -108,9 +108,19 @@ pub struct Core {
     pub feed_action_polls: LongPolls,
     /// The open action status long polls of each sending device: at most one.
     pub feed_status_polls: LongPolls,
-    /// The feed long polls of a Connect team that hold a thread of the question lane
-    /// (`connect::TEAM_FEED_POLLS`), apart from its two question seats.
+    /// The feed long polls of this team that hold a thread of the feed lane
+    /// (`Limits::feed_long_polls_per_team`, for a Connect team `connect::TEAM_FEED_POLLS`),
+    /// apart from its question seats (docs/SPEC.md section 27.7).
     pub feed_lane: AtomicUsize,
+    /// The feed list and status polls of this team out of `feed_lane`, at most
+    /// `feed::reader_seats` of its share, so the readers leave seats to the action polls.
+    pub feed_readers: AtomicUsize,
+    /// The time of each device's last `feed_started` and `feed_deleted` row, so a loop of
+    /// `PUT` and `DELETE` writes at most one of each per device and hour. In memory only.
+    pub feed_audit: Mutex<HashMap<(u64, &'static str), u64>>,
+    /// The full feed reads of each device in the current minute and the newest feed
+    /// counter it was given (`feed::take_full_read`). In memory only.
+    pub feed_reads: Mutex<HashMap<u64, feed::FeedReads>>,
     /// The time of each device's last accepted feed, so a delete does not lift the 10 s
     /// pace of feeds. In memory only: the feed row keeps it across a restart.
     pub feed_times: Mutex<HashMap<u64, u64>>,
@@ -119,6 +129,9 @@ pub struct Core {
     /// The long polls that all Connect teams hold (`Limits::connect_long_polls`). One
     /// counter for the relay, shared by every `Core`.
     pub connect_polls: Arc<AtomicUsize>,
+    /// The feed long polls that all Connect teams hold (`Limits::connect_feed_long_polls`),
+    /// apart from `connect_polls`. One counter for the relay, shared by every `Core`.
+    pub connect_feed_polls: Arc<AtomicUsize>,
     /// The requests of this team in the current minute (a Connect team only).
     pub request_rate: connect::RequestRate,
     /// The time of the last request that named this team, and of its last maintenance
@@ -253,6 +266,19 @@ impl Core {
             return Some(connect::PollSeat::free());
         }
         connect::PollSeat::take(&self.connect_polls, self.config.limits.connect_long_polls)
+    }
+
+    /// A seat for one feed long poll: always for an operator team; for a Connect team one
+    /// of `Limits::connect_feed_long_polls`, apart from the seats of `poll_seat`, or
+    /// `None` when they are all held (the poll then answers at once).
+    pub fn feed_poll_seat(&self) -> Option<connect::PollSeat<'_>> {
+        if self.kind != crate::api::TeamKind::Connect {
+            return Some(connect::PollSeat::free());
+        }
+        connect::PollSeat::take(
+            &self.connect_feed_polls,
+            self.config.limits.connect_feed_long_polls,
+        )
     }
 
     /// Counts one authenticated request of a Connect team: 429 `rate_limited` over

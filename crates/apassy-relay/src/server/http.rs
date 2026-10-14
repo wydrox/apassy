@@ -5,8 +5,9 @@
 //! the edge secret; the proxy path `/p/`; the route (404, 405); the body (413); the
 //! token and its role; the endpoint. Every JSON answer is an envelope. The endpoints of
 //! the owner's host (`/v1/host/...`) are not agent paths: they use the member lane.
-//! Question and feed long polls have a lane of their own (`Limits::question_long_polls`),
-//! apart from `max_active`, so they never take the threads of the member reserve.
+//! Question long polls have a lane of their own (`Limits::question_long_polls`), and feed
+//! long polls another (`Limits::feed_long_polls`), apart from `max_active`, so they never
+//! take the threads of the member reserve, and feed polls never take a question poll's.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -328,27 +329,47 @@ pub fn is_agent_path(url: &str) -> bool {
         || path.starts_with("/v1/runs/")
 }
 
-/// True for a question or feed long poll with a `wait` above 0: `GET /v1/questions`,
-/// `GET /v1/questions/{qid}/answers`, `GET /v1/feed`, `GET /v1/feed/actions`, or `GET
-/// /v1/feed/actions/{id}`. It may run in the question lane (docs/SPEC.md 25.5, 27.7).
-pub fn is_question_poll(method: &str, url: &str) -> bool {
+/// The long polls that have threads of their own, apart from `max_active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollKind {
+    /// `GET /v1/questions` or `GET /v1/questions/{qid}/answers` with a `wait` above 0:
+    /// the question lane (`Limits::question_long_polls`, docs/SPEC.md 25.5).
+    Question,
+    /// `GET /v1/feed`, `GET /v1/feed/actions`, or `GET /v1/feed/actions/{id}` with a
+    /// `wait` above 0: the feed lane (`Limits::feed_long_polls`, docs/SPEC.md 27.7).
+    Feed,
+}
+
+/// The kind of a question or feed long poll, or `None` for any other request.
+pub fn poll_kind(method: &str, url: &str) -> Option<PollKind> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let one_segment = |rest: &str| !rest.is_empty() && !rest.contains('/');
-    let polls = path == paths::QUESTIONS
+    let waits = method == "GET"
+        && query_param(query, "wait")
+            .and_then(|wait| wait.parse::<u64>().ok())
+            .is_some_and(|wait| wait > 0);
+    if !waits {
+        return None;
+    }
+    if path == paths::QUESTIONS
         || path
             .strip_prefix("/v1/questions/")
             .and_then(|rest| rest.strip_suffix("/answers"))
             .is_some_and(one_segment)
-        || path == paths::FEED
+    {
+        return Some(PollKind::Question);
+    }
+    let feed = path == paths::FEED
         || path == paths::FEED_ACTIONS
         || path
             .strip_prefix("/v1/feed/actions/")
             .is_some_and(one_segment);
-    method == "GET"
-        && polls
-        && query_param(query, "wait")
-            .and_then(|wait| wait.parse::<u64>().ok())
-            .is_some_and(|wait| wait > 0)
+    feed.then_some(PollKind::Feed)
+}
+
+/// True for a question long poll with a `wait` above 0 (docs/SPEC.md 25.5).
+pub fn is_question_poll(method: &str, url: &str) -> bool {
+    poll_kind(method, url) == Some(PollKind::Question)
 }
 
 /// The threads a request runs on.
@@ -360,14 +381,18 @@ enum Lane {
     Agent,
     /// A question long poll: `question_long_polls`, apart from `max_active`.
     Question,
+    /// A feed long poll: `feed_long_polls`, apart from `max_active` and the question
+    /// lane.
+    Feed,
 }
 
-/// The request threads in use: all of them, those of agent paths, and the question
-/// long polls (not in `all`).
+/// The request threads in use: all of them, those of agent paths, and the question and
+/// feed long polls (not in `all`).
 struct Slots {
     all: AtomicUsize,
     agent: AtomicUsize,
     questions: AtomicUsize,
+    feeds: AtomicUsize,
 }
 
 impl Slots {
@@ -375,6 +400,9 @@ impl Slots {
         match lane {
             Lane::Question => {
                 self.questions.fetch_sub(1, Ordering::Relaxed);
+            }
+            Lane::Feed => {
+                self.feeds.fetch_sub(1, Ordering::Relaxed);
             }
             Lane::Agent => {
                 self.all.fetch_sub(1, Ordering::Relaxed);
@@ -457,6 +485,7 @@ pub fn serve(serving: Serving) {
         all: AtomicUsize::new(0),
         agent: AtomicUsize::new(0),
         questions: AtomicUsize::new(0),
+        feeds: AtomicUsize::new(0),
     });
     // The maintenance of every team runs on its own thread, so many teams never slow the
     // accept loop.
@@ -482,17 +511,22 @@ pub fn serve(serving: Serving) {
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
                 // Only the accept loop takes a slot, so a load and an add do not race.
-                let lane = if is_question_poll(request.method().as_str(), request.url())
+                let poll = poll_kind(request.method().as_str(), request.url());
+                let lane = if poll == Some(PollKind::Question)
                     && slots.questions.load(Ordering::Relaxed) < limits.question_long_polls
                 {
                     Lane::Question
+                } else if poll == Some(PollKind::Feed)
+                    && slots.feeds.load(Ordering::Relaxed) < limits.feed_long_polls
+                {
+                    Lane::Feed
                 } else if is_agent_path(request.url()) {
                     Lane::Agent
                 } else {
                     Lane::Member
                 };
                 let full = match lane {
-                    Lane::Question => false,
+                    Lane::Question | Lane::Feed => false,
                     Lane::Agent => {
                         slots.all.load(Ordering::Relaxed) >= limits.max_active
                             || slots.agent.load(Ordering::Relaxed) >= agent_max
@@ -505,6 +539,9 @@ pub fn serve(serving: Serving) {
                     match lane {
                         Lane::Question => {
                             slots.questions.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Lane::Feed => {
+                            slots.feeds.fetch_add(1, Ordering::Relaxed);
                         }
                         Lane::Agent => {
                             slots.all.fetch_add(1, Ordering::Relaxed);
@@ -519,9 +556,9 @@ pub fn serve(serving: Serving) {
                         slots: slots.clone(),
                         lane,
                     };
-                    // Only a question poll in its own lane may wait: one that overflows
-                    // into the member lane is answered at once.
-                    let hold = lane == Lane::Question;
+                    // Only a question or feed poll in its own lane may wait: one that
+                    // overflows into the member lane is answered at once.
+                    let hold = matches!(lane, Lane::Question | Lane::Feed);
                     let _ = std::thread::Builder::new()
                         .name("relay-request".to_string())
                         .spawn(move || {
@@ -658,7 +695,7 @@ fn respond_ok(request: Request, result: Value) {
     respond_json(request, 200, &Envelope::success(result), false);
 }
 
-/// Handles one request. `hold`: a question long poll may wait (its own lane).
+/// Handles one request. `hold`: a question or feed long poll may wait (its own lane).
 fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
@@ -918,6 +955,27 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     };
     if endpoint == Endpoint::Mcp {
         respond_mcp(&core, request, principal, &body);
+        return;
+    }
+    // A full feed read has a pace per device (section 27.4): 429 with `Retry-After`. A
+    // query out of its form, or a member token, gets its 400 or 401 from the endpoint.
+    if endpoint == Endpoint::FeedList
+        && let Ok(by) = device_member_of(principal.as_ref())
+        && let (Ok(since), Ok(_)) = (number(&query, "since"), wait_of(&query))
+        && let Ok(device) = questions::device_of(by)
+        && let Err(wait) = feed::take_full_read(&core, device, since.unwrap_or(0), now)
+    {
+        let error = feed::reads_limited();
+        respond_json_with(
+            request,
+            error.status(),
+            &error.to_envelope(),
+            false,
+            Header::from_bytes(&b"Retry-After"[..], wait.to_string().as_bytes())
+                .ok()
+                .into_iter()
+                .collect(),
+        );
         return;
     }
     match dispatch(
@@ -1570,11 +1628,16 @@ mod tests {
             all: AtomicUsize::new(1),
             agent: AtomicUsize::new(1),
             questions: AtomicUsize::new(0),
+            feeds: AtomicUsize::new(1),
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _global = SlotGuard {
                 slots: slots.clone(),
                 lane: Lane::Agent,
+            };
+            let _feed = SlotGuard {
+                slots: slots.clone(),
+                lane: Lane::Feed,
             };
             let _team = TeamSlotGuard::take(&core, now_unix(), true).unwrap();
             assert_eq!(core.agent_requests.load(Ordering::Relaxed), 1);
@@ -1583,6 +1646,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(slots.all.load(Ordering::Relaxed), 0);
         assert_eq!(slots.agent.load(Ordering::Relaxed), 0);
+        assert_eq!(slots.feeds.load(Ordering::Relaxed), 0);
         assert_eq!(core.agent_requests.load(Ordering::Relaxed), 0);
         assert!(TeamSlotGuard::take(&core, now_unix(), true).is_some());
         assert_eq!(core.agent_requests.load(Ordering::Relaxed), 0);
@@ -1813,19 +1877,29 @@ mod tests {
     }
 
     #[test]
-    fn question_polls_are_gets_with_a_wait() {
-        for (method, url) in [
-            ("GET", "/v1/questions?since=3&wait=25"),
-            ("GET", "/v1/questions?wait=1"),
+    fn question_and_feed_polls_are_gets_with_a_wait() {
+        for (method, url, kind) in [
+            ("GET", "/v1/questions?since=3&wait=25", PollKind::Question),
+            ("GET", "/v1/questions?wait=1", PollKind::Question),
             (
                 "GET",
                 "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers?after=0&wait=25",
+                PollKind::Question,
             ),
-            ("GET", "/v1/feed?since=3&wait=25"),
-            ("GET", "/v1/feed/actions?after=0&wait=1"),
-            ("GET", "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw?wait=25"),
+            ("GET", "/v1/feed?since=3&wait=25", PollKind::Feed),
+            ("GET", "/v1/feed/actions?after=0&wait=1", PollKind::Feed),
+            (
+                "GET",
+                "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw?wait=25",
+                PollKind::Feed,
+            ),
         ] {
-            assert!(is_question_poll(method, url), "{method} {url}");
+            assert_eq!(poll_kind(method, url), Some(kind), "{method} {url}");
+            assert_eq!(
+                is_question_poll(method, url),
+                kind == PollKind::Question,
+                "{method} {url}"
+            );
         }
         for (method, url) in [
             ("GET", "/v1/questions"),
@@ -1844,7 +1918,7 @@ mod tests {
             ("GET", "/v1/feed/actions/?wait=25"),
             ("GET", "/v1/feedx?wait=25"),
         ] {
-            assert!(!is_question_poll(method, url), "{method} {url}");
+            assert_eq!(poll_kind(method, url), None, "{method} {url}");
         }
     }
 

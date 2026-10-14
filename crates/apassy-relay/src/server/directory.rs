@@ -575,8 +575,10 @@ impl Directory {
     }
 
     /// Removes a team from the directory: its row and the key of its file. The caller
-    /// deletes the file.
-    pub fn remove(&self, id: &TeamId, now: u64) -> RelayResult<()> {
+    /// deletes the file. The `connect_key` row of a Connect team stays, as used; with
+    /// `free_connect_key` its hash becomes random bytes, so the device key that made the
+    /// team may make a new one, and the row still counts for the daily cap.
+    pub fn remove(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<()> {
         self.store.tx(|tx| {
             let changed = tx
                 .execute("DELETE FROM team WHERE id = ?1", params![id.as_str()])
@@ -585,19 +587,27 @@ impl Directory {
                 return Err(RelayError::not_found("team"));
             }
             // The key of a deleted Connect team stays used, but no longer names the team.
-            tx.execute(
-                "UPDATE connect_key SET team_id = NULL WHERE team_id = ?1",
-                params![id.as_str()],
-            )
+            let freed = if free_connect_key {
+                tx.execute(
+                    "UPDATE connect_key SET key_hash = randomblob(32), team_id = NULL \
+                     WHERE team_id = ?1",
+                    params![id.as_str()],
+                )
+            } else {
+                tx.execute(
+                    "UPDATE connect_key SET team_id = NULL WHERE team_id = ?1",
+                    params![id.as_str()],
+                )
+                .map(|_| 0)
+            }
             .map_err(db)?;
-            self.audit.write_on(
-                tx,
-                now,
-                OPERATOR_ACTOR,
-                "team_deleted",
-                None,
-                &serde_json::json!({"team_id": id}),
-            )?;
+            let detail = if free_connect_key {
+                serde_json::json!({"team_id": id, "connect_key_freed": freed > 0})
+            } else {
+                serde_json::json!({"team_id": id})
+            };
+            self.audit
+                .write_on(tx, now, OPERATOR_ACTOR, "team_deleted", None, &detail)?;
             Ok(())
         })
     }

@@ -53,6 +53,16 @@ pub const MAX_CONNECT_TEAMS_MAX: u64 = 1_000_000;
 /// always leave an operator team its share of the lane, and well under the member lane.
 pub const DEFAULT_CONNECT_LONG_POLLS: usize = 96;
 pub const MAX_CONNECT_LONG_POLLS: usize = 1024;
+/// The feed long polls of all teams at once (`Limits::feed_long_polls`, docs/SPEC.md
+/// section 27.7): threads of their own, apart from the question lane, so feed polls never
+/// take the place of a question or an answer poll.
+pub const DEFAULT_FEED_LONG_POLLS: usize = 64;
+/// The feed long polls of one operator team at once, out of `feed_long_polls`.
+pub const DEFAULT_FEED_LONG_POLLS_PER_TEAM: usize = 16;
+/// The feed long polls of all Connect teams at once (`Limits::connect_feed_long_polls`):
+/// the feed lane less one operator team's share, as `DEFAULT_CONNECT_LONG_POLLS` is for
+/// the question lane.
+pub const DEFAULT_CONNECT_FEED_LONG_POLLS: usize = 48;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
 /// The folder of the team files in the data directory.
@@ -169,7 +179,19 @@ pub struct Limits {
     /// The long polls that Connect teams hold at once, all of them together, in any lane
     /// (docs/SPEC.md section 26), so anonymous teams cannot fill the member lane or the
     /// question lane. A poll over this is answered at once, as with `wait=0`.
+    /// Feed polls do not count in it: they have `connect_feed_long_polls`.
     pub connect_long_polls: usize,
+    /// The feed long polls of all teams at once (`GET /v1/feed`, `GET /v1/feed/actions`,
+    /// and `GET /v1/feed/actions/{id}` with a `wait`). Threads of their own, apart from
+    /// `max_active` and from `question_long_polls`. A poll over this runs in the member
+    /// lane and is answered at once.
+    pub feed_long_polls: usize,
+    /// The feed long polls of one operator team at once, out of `feed_long_polls`. A
+    /// quarter of it (at least one seat) is kept for the action polls of the Macs.
+    pub feed_long_polls_per_team: usize,
+    /// The feed long polls that Connect teams hold at once, all of them together, out of
+    /// `feed_long_polls`. A poll over this is answered at once.
+    pub connect_feed_long_polls: usize,
 }
 
 impl Default for Limits {
@@ -183,6 +205,9 @@ impl Default for Limits {
             question_long_polls: 128,
             question_long_polls_per_team: 32,
             connect_long_polls: DEFAULT_CONNECT_LONG_POLLS,
+            feed_long_polls: DEFAULT_FEED_LONG_POLLS,
+            feed_long_polls_per_team: DEFAULT_FEED_LONG_POLLS_PER_TEAM,
+            connect_feed_long_polls: DEFAULT_CONNECT_FEED_LONG_POLLS,
         }
     }
 }

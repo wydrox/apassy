@@ -153,6 +153,13 @@ fn pace(relay: &TestRelay, core: &Core) {
     relay.edit_vault_live("UPDATE feed SET updated_at = updated_at - 10");
 }
 
+/// Moves the last `feed_started` and `feed_deleted` rows of each device an hour back.
+fn hour_later(core: &Core) {
+    for at in core.feed_audit.lock().unwrap().values_mut() {
+        *at = at.saturating_sub(feed::FEED_AUDIT_SECS);
+    }
+}
+
 fn feeds(relay: &TestRelay, by: &Device, since: u64) -> Value {
     relay.ok("GET", &format!("/v1/feed?since={since}"), &by.token, None)
 }
@@ -676,14 +683,13 @@ fn seq_goes_up_and_a_feed_replaces_the_last_one() {
     assert_eq!((status, code(&value)), (403, "feed_limit"), "{value}");
     pace(&relay, &core);
     assert_eq!(put(&relay, &mini, 1, &encode_b64(&[1; 20])).0, 200);
-    // No audit row per feed update: one `feed_started` per first feed (and again after a
-    // delete), one `feed_deleted`.
+    // No audit row per feed update: one `feed_started` per first feed, one
+    // `feed_deleted`; a new start within the hour of the last one writes none.
     let audit_rows = audit(&relay);
     assert_eq!(
         rows(&audit_rows, "feed_started"),
         vec![
             &json!({"device_id": mac.id}),
-            &json!({"device_id": mini.id}),
             &json!({"device_id": mini.id})
         ]
     );
@@ -695,6 +701,42 @@ fn seq_goes_up_and_a_feed_replaces_the_last_one() {
     pace(&relay, &core);
     publish(&relay, &mac, 200);
     assert_eq!(audit(&relay).len(), count);
+    // A loop of PUT and DELETE does not grow the audit: at most one `feed_started` and
+    // one `feed_deleted` per device and hour.
+    for seq in 2..8 {
+        relay.ok("DELETE", "/v1/feed", &mini.token, None);
+        pace(&relay, &core);
+        assert_eq!(put(&relay, &mini, seq, &encode_b64(&[1; 20])).0, 200);
+    }
+    assert_eq!(audit(&relay).len(), count);
+    // An hour later each writes its row again.
+    hour_later(&core);
+    relay.ok("DELETE", "/v1/feed", &mini.token, None);
+    pace(&relay, &core);
+    assert_eq!(put(&relay, &mini, 9, &encode_b64(&[1; 20])).0, 200);
+    let audit_rows = audit(&relay);
+    assert_eq!(audit_rows.len(), count + 2);
+    assert_eq!(
+        audit_rows[count..],
+        [
+            (
+                "feed_deleted".to_string(),
+                json!({"device_id": mini.id, "reason": "deleted"})
+            ),
+            ("feed_started".to_string(), json!({"device_id": mini.id}))
+        ]
+    );
+    // A revocation always writes its row, also within the hour.
+    relay.ok(
+        "DELETE",
+        &format!("/v1/devices/{}", mini.id),
+        &mac.token,
+        None,
+    );
+    assert_eq!(
+        rows(&audit(&relay), "feed_deleted").last().unwrap(),
+        &&json!({"device_id": mini.id, "reason": "device_revoked"})
+    );
 }
 
 #[test]
@@ -940,10 +982,12 @@ fn feed_bytes_bound_the_feeds_of_a_team_apart_from_questions() {
         })
         .unwrap();
     let full = encode_b64(&vec![7; feed::MAX_FEED_BYTES]);
-    let devices: Vec<Device> = (0..4)
+    let devices: Vec<Device> = (0..3)
         .map(|n| add_device(&relay, &mac, &format!("Mac {n}")))
         .collect();
-    // Four full feeds are exactly 1 MiB; a fifth is over it.
+    // One member holds at most its share, three quarters of the team's budget: three
+    // full feeds are 768 KiB of 1 MiB, and a fourth of the member is over it.
+    assert_eq!(feed::member_share(1_048_576, 50), 786_432);
     for device in &devices {
         assert_eq!(put(&relay, device, 1, &full).0, 200);
     }
@@ -953,11 +997,27 @@ fn feed_bytes_bound_the_feeds_of_a_team_apart_from_questions() {
         value["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("feed_bytes")
+            .contains("member_feed_bytes")
+    );
+    // A member at its share does not block another member: its full feed takes the
+    // rest of the team's budget, exactly 1 MiB in all.
+    let other = join(&relay, "member", "Ola");
+    assert_eq!(put(&relay, &other, 1, &full).0, 200);
+    // Then the team's budget is full for everyone.
+    let third = join(&relay, "member", "Ewa");
+    let (status, value) = put(&relay, &third, 1, &encode_b64(&[1; 1000]));
+    assert_eq!((status, code(&value)), (403, "feed_limit"));
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("feed_bytes") && !message.contains("member_"),
+        "{message}"
     );
     assert_eq!(
         rows(&audit(&relay), "limit_reached"),
-        vec![&json!({"limit": "feed_bytes"})]
+        vec![
+            &json!({"limit": "member_feed_bytes"}),
+            &json!({"limit": "feed_bytes"})
+        ]
     );
     // A device's own old feed does not count against its new one.
     let core = core_of(&relay, &mac);
@@ -973,7 +1033,7 @@ fn feed_bytes_bound_the_feeds_of_a_team_apart_from_questions() {
         200
     );
     // A smaller feed fits once a feed goes.
-    relay.ok("DELETE", "/v1/feed", &devices[3].token, None);
+    relay.ok("DELETE", "/v1/feed", &devices[2].token, None);
     assert_eq!(put(&relay, &mac, 1, &encode_b64(&[1; 1000])).0, 200);
     // The range of feed_bytes: 1 MiB to 64 MiB.
     for value in [1_048_575, 67_108_865] {
@@ -1026,6 +1086,84 @@ fn a_feed_list_pages_at_one_mebibyte_of_text() {
     );
 }
 
+/// `GET path` with the token: the status, the `Retry-After` seconds, and the body.
+fn get_retry(relay: &TestRelay, path: &str, token: &str) -> (u16, Option<u64>, Value) {
+    let addr = relay.url.trim_start_matches("http://").to_string();
+    let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n",
+        relay.edge_secret,
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let status = answer.split(' ').nth(1).unwrap().parse().unwrap();
+    let retry = answer.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("retry-after")
+            .then(|| value.trim().parse().ok())?
+    });
+    let body = &answer[answer.find("\r\n\r\n").unwrap() + 4..];
+    (status, retry, serde_json::from_str(body).unwrap())
+}
+
+#[test]
+fn full_feed_reads_have_a_pace_per_device() {
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    let pad = add_device(&relay, &mac, "iPad");
+    let mini = add_device(&relay, &mac, "Mac mini");
+    let core = core_of(&relay, &mac);
+    publish(&relay, &mac, 1);
+    publish(&relay, &mini, 1);
+    // The counts are per minute of the relay clock: start early in a minute.
+    while now_unix() % 60 > 50 {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Six full reads of one device a minute; the seventh is 429 with Retry-After.
+    for _ in 0..feed::FULL_READS_PER_MINUTE {
+        assert_eq!(
+            get_retry(&relay, "/v1/feed?since=0&wait=0", &phone.token).0,
+            200
+        );
+    }
+    let (status, retry, value) = get_retry(&relay, "/v1/feed?since=0&wait=0", &phone.token);
+    assert_eq!((status, code(&value)), (429, "rate_limited"));
+    let retry = retry.expect("Retry-After");
+    assert!((1..=60).contains(&retry), "{retry}");
+    // A long poll that reads all again counts too, and answers at once.
+    let (status, _, _) = get_retry(&relay, "/v1/feed?since=0&wait=5", &phone.token);
+    assert_eq!(status, 429);
+    // Reads that go on from the last answer are free: the device keeps its feeds.
+    for _ in 0..10 {
+        let list = feeds(&relay, &phone, 2);
+        assert_eq!((&list["change"], &list["feeds"]), (&json!(2), &json!([])));
+    }
+    // A read below the counter that a device was given is a full read too.
+    assert_eq!(feeds(&relay, &pad, 2)["change"], 2);
+    for _ in 0..feed::FULL_READS_PER_MINUTE {
+        assert_eq!(feed_ids(&feeds(&relay, &pad, 1)), vec![mini.id]);
+    }
+    let (status, _, value) = get_retry(&relay, "/v1/feed?since=1", &pad.token);
+    assert_eq!((status, code(&value)), (429, "rate_limited"));
+    // Other devices read as before, and the other feed routes are not counted.
+    assert_eq!(feed_ids(&feeds(&relay, &mac, 0)), vec![mac.id, mini.id]);
+    assert_eq!(actions(&relay, &mac, 0)["actions"], json!([]));
+    // A bad query keeps its 400, before any count.
+    let (status, _, _) = get_retry(&relay, "/v1/feed?since=x", &phone.token);
+    assert_eq!(status, 400);
+    // No audit row for the pace, and the limit is in memory: the next minute (here, a
+    // cleared table) reads again.
+    assert!(rows(&audit(&relay), "limit_reached").is_empty());
+    core.feed_reads.lock().unwrap().clear();
+    assert_eq!(feeds(&relay, &phone, 0)["change"], 2);
+}
+
 #[test]
 fn actions_have_limits_and_expire_then_go() {
     let mut relay = start(UpstreamOptions::default());
@@ -1035,7 +1173,11 @@ fn actions_have_limits_and_expire_then_go() {
     let tablet = add_device(&relay, &mac, "Second iPad");
     let core = core_of(&relay, &mac);
     publish(&relay, &mac, 1);
-    // 10 open actions of one sending device, 20 of the team.
+    // Another member with its own Mac and iPhone.
+    let ola_mac = join(&relay, "member", "Ola");
+    publish(&relay, &ola_mac, 1);
+    let ola_phone = add_device(&relay, &ola_mac, "Ola's iPhone");
+    // 10 open actions of one sending device, 15 of one member, 20 of the team.
     for n in 0..10 {
         assert_eq!(post(&relay, &phone, &action_id(n), &mac).0, 200);
     }
@@ -1047,7 +1189,7 @@ fn actions_have_limits_and_expire_then_go() {
             .unwrap()
             .contains("device_open_feed_actions")
     );
-    for n in 10..20 {
+    for n in 10..15 {
         assert_eq!(post(&relay, &pad, &action_id(n), &mac).0, 200);
     }
     let (status, value) = post(&relay, &tablet, &action_id(20), &mac);
@@ -1056,12 +1198,30 @@ fn actions_have_limits_and_expire_then_go() {
         value["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("open_feed_actions")
+            .contains("member_open_feed_actions")
     );
-    // The target's list holds 20 at most.
+    // A member at its share does not block another member, up to the team's 20.
+    for n in 15..20 {
+        assert_eq!(post(&relay, &ola_phone, &action_id(n), &ola_mac).0, 200);
+    }
+    let (status, value) = post(&relay, &ola_phone, &action_id(21), &ola_mac);
+    assert_eq!((status, code(&value)), (403, "too_many_actions"));
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("open_feed_actions") && !message.contains("member_"),
+        "{message}"
+    );
+    // Each target lists its own open actions.
     let listed = actions(&relay, &mac, 0);
-    assert_eq!(listed["actions"].as_array().unwrap().len(), 20);
+    assert_eq!(listed["actions"].as_array().unwrap().len(), 15);
     assert_eq!(listed["seq"], 20);
+    assert_eq!(
+        actions(&relay, &ola_mac, 0)["actions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
 
     // An open action past expires_at is expired before maintenance marks it.
     let first = action_id(0);
@@ -1139,25 +1299,38 @@ fn actions_have_limits_and_expire_then_go() {
     let (status, value) = post(&relay, &phone, &second, &mac);
     assert_eq!((status, code(&value)), (409, "conflict"));
 
-    // feed_actions_per_hour counts the purged ones too: 20 in the last hour.
+    // feed_actions_per_hour counts the purged ones too: 20 in the last hour, 15 of the
+    // first member. At 24 a member's share is 18.
     let team = team_of(&mac.token);
     relay
         .operator(Command::Limits {
             team: team.clone(),
             set: Some(TeamLimitsUpdate {
-                feed_actions_per_hour: Some(21),
+                feed_actions_per_hour: Some(24),
                 ..Default::default()
             }),
         })
         .unwrap();
-    assert_eq!(post(&relay, &tablet, &action_id(30), &mac).0, 200);
-    let (status, value) = post(&relay, &tablet, &action_id(31), &mac);
+    assert_eq!(feed::member_share(24, 50), 18);
+    for n in 30..33 {
+        assert_eq!(post(&relay, &tablet, &action_id(n), &mac).0, 200);
+    }
+    let (status, value) = post(&relay, &tablet, &action_id(33), &mac);
     assert_eq!((status, code(&value)), (403, "too_many_actions"));
     assert!(
         value["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("feed_actions_per_hour")
+            .contains("member_feed_actions_per_hour")
+    );
+    // The other member still posts, up to the team's limit.
+    assert_eq!(post(&relay, &ola_phone, &action_id(34), &ola_mac).0, 200);
+    let (status, value) = post(&relay, &ola_phone, &action_id(35), &ola_mac);
+    assert_eq!((status, code(&value)), (403, "too_many_actions"));
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("feed_actions_per_hour") && !message.contains("member_"),
+        "{message}"
     );
     let limits: Vec<Value> = rows(&audit(&relay), "limit_reached")
         .into_iter()
@@ -1167,7 +1340,9 @@ fn actions_have_limits_and_expire_then_go() {
         limits,
         vec![
             json!({"limit": "device_open_feed_actions"}),
+            json!({"limit": "member_open_feed_actions"}),
             json!({"limit": "open_feed_actions"}),
+            json!({"limit": "member_feed_actions_per_hour"}),
             json!({"limit": "feed_actions_per_hour"})
         ]
     );
@@ -1187,10 +1362,10 @@ fn actions_have_limits_and_expire_then_go() {
         &tablet.token,
         Some(&action_body(&second, mac.id, &encode_b64(&[1; 20]))),
     );
-    assert_eq!(posted["seq"], 22);
+    assert_eq!(posted["seq"], 25);
     // No row was written for an expiry or a purge.
     let audit_rows = audit(&relay);
-    assert_eq!(rows(&audit_rows, "feed_action_posted").len(), 22);
+    assert_eq!(rows(&audit_rows, "feed_action_posted").len(), 25);
     assert_eq!(rows(&audit_rows, "feed_action_settled").len(), 1);
 }
 
@@ -1389,13 +1564,15 @@ fn long_polls_wake_on_feeds_actions_settles_and_deletes() {
 }
 
 #[test]
-fn feed_polls_run_in_the_question_lane_and_count_in_the_team_share() {
+fn feed_polls_have_their_own_lane_and_leave_the_question_polls_their_share() {
     let mut relay = start_with(
         |config| {
             config.limits.max_active = 2;
             config.limits.member_reserve = 1;
             config.limits.question_long_polls = 3;
             config.limits.question_long_polls_per_team = 2;
+            config.limits.feed_long_polls = 3;
+            config.limits.feed_long_polls_per_team = 2;
         },
         UpstreamOptions::default(),
     );
@@ -1405,30 +1582,65 @@ fn feed_polls_run_in_the_question_lane_and_count_in_the_team_share() {
     publish(&relay, &mac, 1);
     let relay = &relay;
     std::thread::scope(|scope| {
-        // A question poll and a feed poll fill the team's share of 2, and no thread of
-        // `max_active`.
-        let question = scope.spawn(|| {
-            timed(|| relay.ok("GET", "/v1/questions?since=0&wait=3", &phone.token, None))
-        });
-        let listed =
-            scope.spawn(|| timed(|| relay.ok("GET", "/v1/feed?since=1&wait=3", &pad.token, None)));
+        // Two question polls fill the team's question share of 2, and a feed list poll
+        // and the Mac's action poll its feed share of 2, each in its own lane, and no
+        // thread of `max_active`.
+        let held = [
+            (&phone.token, "/v1/questions?since=0&wait=3"),
+            (&pad.token, "/v1/questions?since=0&wait=3"),
+            (&pad.token, "/v1/feed?since=1&wait=3"),
+            (&mac.token, "/v1/feed/actions?after=0&wait=3"),
+        ]
+        .map(|(token, path)| scope.spawn(move || timed(|| relay.ok("GET", path, token, None)).1));
         std::thread::sleep(Duration::from_millis(700));
-        // A third poll of the team answers at once, as with wait=0.
-        let (_, took) =
-            timed(|| relay.ok("GET", "/v1/feed/actions?after=0&wait=3", &mac.token, None));
-        assert!(took < Duration::from_secs(2), "{took:?}");
+        // A third poll of either kind answers at once, as with wait=0.
+        for (token, path) in [
+            (&phone.token, "/v1/feed?since=1&wait=3"),
+            (&mac.token, "/v1/questions?since=0&wait=3"),
+        ] {
+            let (_, took) = timed(|| relay.ok("GET", path, token, None));
+            assert!(took < Duration::from_secs(2), "{path}: {took:?}");
+        }
         // Members still get answers: the polls hold no member slot.
         for _ in 0..3 {
             assert_eq!(relay.call("GET", "/v1/me", Some(&mac.token), None).0, 200);
         }
-        for held in [question, listed] {
-            let (_, took) = held.join().unwrap();
-            assert!(took >= Duration::from_millis(2500), "{took:?}");
+        for (index, poll) in held.into_iter().enumerate() {
+            let took = poll.join().unwrap();
+            assert!(took >= Duration::from_millis(2500), "{index}: {took:?}");
         }
     });
     // The seats came back.
     let (_, took) = timed(|| relay.ok("GET", "/v1/feed/actions?after=0&wait=1", &mac.token, None));
     assert!(took >= Duration::from_secs(1), "{took:?}");
+    // Readers leave a quarter of the feed share (at least one seat) to the action polls.
+    assert_eq!([1, 2, 3, 4, 16].map(feed::reader_seats), [1, 1, 2, 3, 12]);
+}
+
+#[test]
+fn readers_that_poll_first_leave_the_mac_its_action_seat() {
+    let mut relay = start_with(
+        |config| config.limits.feed_long_polls_per_team = 2,
+        UpstreamOptions::default(),
+    );
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    let pad = add_device(&relay, &mac, "iPad");
+    publish(&relay, &mac, 1);
+    let relay = &relay;
+    std::thread::scope(|scope| {
+        // The unfriendly order: two readers ask first. One holds the readers' seat, the
+        // other answers at once, and the Mac's action poll still holds.
+        let reader = scope
+            .spawn(|| timed(|| relay.ok("GET", "/v1/feed?since=1&wait=3", &phone.token, None)).1);
+        std::thread::sleep(Duration::from_millis(500));
+        let (_, took) = timed(|| relay.ok("GET", "/v1/feed?since=1&wait=3", &pad.token, None));
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        let (_, took) =
+            timed(|| relay.ok("GET", "/v1/feed/actions?after=0&wait=2", &mac.token, None));
+        assert!(took >= Duration::from_millis(1500), "{took:?}");
+        assert!(reader.join().unwrap() >= Duration::from_millis(2500));
+    });
 }
 
 /// The body of `POST /v1/connect`, signed by `key` for this relay.
@@ -1520,55 +1732,70 @@ fn a_connect_team_has_one_mebibyte_of_feeds_and_its_own_feed_seats() {
     assert_eq!(action_ids(&actions(&relay, &mac, 0)), vec![action_id(1)]);
 
     // Two feed polls hold while the team's two question polls hold too; a third feed
-    // poll and a third question poll answer at once.
+    // poll and a third question poll answer at once. The readers come first: one holds
+    // the readers' seat, the other answers at once, and the Mac's action poll then
+    // still finds its seat.
     let pad = &macs[1];
     let change = feeds(&relay, &phone, 0)["change"].as_u64().unwrap();
     let feed_poll = format!("/v1/feed?since={change}&wait=3");
     std::thread::scope(|scope| {
         let relay = &relay;
-        let held: Vec<_> = [
+        let reader = {
+            let path = feed_poll.as_str();
+            let token = &phone.token;
+            scope.spawn(move || timed(|| relay.ok("GET", path, token, None)).1)
+        };
+        std::thread::sleep(Duration::from_millis(500));
+        let (_, took) = timed(|| relay.ok("GET", &feed_poll, &pad.token, None));
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        let mut held: Vec<_> = [
             (&mac.token, "/v1/questions?since=0&wait=3"),
             (&phone.token, "/v1/questions?since=0&wait=3"),
             (&mac.token, "/v1/feed/actions?after=1&wait=3"),
-            (&phone.token, feed_poll.as_str()),
         ]
         .into_iter()
         .map(|(token, path)| scope.spawn(move || timed(|| relay.ok("GET", path, token, None)).1))
         .collect();
+        held.push(reader);
         std::thread::sleep(Duration::from_millis(700));
-        let (_, took) = timed(|| relay.ok("GET", &feed_poll, &pad.token, None));
-        assert!(took < Duration::from_secs(2), "{took:?}");
         let (_, took) = timed(|| relay.ok("GET", "/v1/questions?since=0&wait=3", &pad.token, None));
         assert!(took < Duration::from_secs(2), "{took:?}");
         for (index, poll) in held.into_iter().enumerate() {
             let took = poll.join().unwrap();
-            assert!(took >= Duration::from_millis(2500), "{index}: {took:?}");
+            assert!(took >= Duration::from_millis(2000), "{index}: {took:?}");
         }
     });
     assert_eq!(apassy_relay::server::connect::TEAM_FEED_POLLS, 2);
-    // The Connect bound holds feed polls too.
+    // Feed polls have a Connect bound of their own, apart from `connect_long_polls`:
+    // with each at 1, one team holds a feed poll and a question poll at once, and
+    // another team's poll of either kind answers at once.
     let bound = start_with(
-        |config| config.limits.connect_long_polls = 1,
+        |config| {
+            config.limits.connect_long_polls = 1;
+            config.limits.connect_feed_long_polls = 1;
+        },
         UpstreamOptions::default(),
     );
     let (_, first) = connect(&bound);
     let (_, second) = connect(&bound);
     std::thread::scope(|scope| {
-        let bound = &bound;
-        let held = scope.spawn(|| {
-            timed(|| bound.ok("GET", "/v1/feed/actions?after=0&wait=3", &first.token, None)).1
-        });
+        let (bound, token) = (&bound, &first.token);
+        let held = [
+            "/v1/feed/actions?after=0&wait=3",
+            "/v1/questions?since=0&wait=3",
+        ]
+        .map(|path| scope.spawn(move || timed(|| bound.ok("GET", path, token, None)).1));
         std::thread::sleep(Duration::from_millis(500));
-        let (_, took) = timed(|| {
-            bound.ok(
-                "GET",
-                "/v1/feed/actions?after=0&wait=3",
-                &second.token,
-                None,
-            )
-        });
-        assert!(took < Duration::from_secs(2), "{took:?}");
-        assert!(held.join().unwrap() >= Duration::from_secs(3));
+        for path in [
+            "/v1/feed/actions?after=0&wait=3",
+            "/v1/questions?since=0&wait=3",
+        ] {
+            let (_, took) = timed(|| bound.ok("GET", path, &second.token, None));
+            assert!(took < Duration::from_secs(2), "{path}: {took:?}");
+        }
+        for poll in held {
+            assert!(poll.join().unwrap() >= Duration::from_secs(3));
+        }
     });
 }
 
@@ -1580,6 +1807,9 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     let card = json!({"v": 1, "qid": action_id(7), "to": "member", "expires_at": now_unix() + 300,
         "key_id": KEY_ID, "nonce": FEED_NONCE, "ciphertext": encode_b64(&[1; 40])});
     relay.ok("POST", "/v1/questions", &mac.token, Some(&card));
+    // A device and a member from before the migration.
+    let pad = add_device(&relay, &mac, "iPad");
+    let ola = join(&relay, "member", "Ola");
     // Make the file what the schema 5 image left: no feed tables, version 5.
     relay.edit_offline(|config| {
         let conn = open_team_file(config, &team);
@@ -1630,6 +1860,73 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     );
     assert_eq!(publish(&relay, &mac, 1)["change"], 1);
     assert_eq!(feed_ids(&feeds(&relay, &phone, 0)), vec![mac.id]);
+    // `admin rollback-check` (OPERATIONS 21.3) names what a rollback would undo: no
+    // revocation yet, only the audit rows written since the migration.
+    let entry = |relay: &TestRelay, id: &TeamId| -> Value {
+        let check = relay.operator(Command::RollbackCheck).unwrap();
+        check
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["team"] == json!(id))
+            .unwrap()
+            .clone()
+    };
+    let before = entry(&relay, &team);
+    assert_eq!(
+        (&before["pre_v6"], &before["schema"], &before["revocations"]),
+        (&json!(true), &json!(6), &json!([]))
+    );
+    let lost = before["audit_rows_lost"].as_u64().unwrap();
+    assert!(lost > 0, "{before}");
+    // A device and a member revoked after the migration come back with the copy: the
+    // check names them, by kind, id, and time, and counts the audit rows that go.
+    relay.ok(
+        "DELETE",
+        &format!("/v1/devices/{}", pad.id),
+        &mac.token,
+        None,
+    );
+    relay.ok(
+        "DELETE",
+        &format!("/v1/members/{}", ola.member),
+        &mac.token,
+        None,
+    );
+    let copy = std::fs::read(&backup).unwrap();
+    let after = entry(&relay, &team);
+    let named: Vec<(String, u64)> = after["revocations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|revocation| {
+            assert!(revocation["revoked_at"].as_u64().unwrap() >= now_unix() - 60);
+            (
+                revocation["kind"].as_str().unwrap().to_string(),
+                revocation["id"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // The member's own device went with it.
+    assert_eq!(
+        named,
+        vec![
+            ("device".to_string(), pad.id),
+            ("device".to_string(), ola.id),
+            ("member".to_string(), ola.member)
+        ]
+    );
+    assert!(after["audit_rows_lost"].as_u64().unwrap() > lost);
+    assert!(after.get("error").is_none(), "{after}");
+    // It only reads: the copy is the same, byte for byte.
+    assert_eq!(std::fs::read(&backup).unwrap(), copy);
+    // A team made after the migration has no copy: the old image cannot open it.
+    let (later, _) = relay.new_team_device("Later", "owner");
+    let later = entry(&relay, &team_of(&later));
+    assert_eq!(
+        (&later["pre_v6"], &later["schema"], &later["revocations"]),
+        (&json!(false), &json!(6), &json!([]))
+    );
     // The rollback of OPERATIONS 21.3: the copy goes back over the file, which is then
     // version 5 again with its question, and the image of schema 6 moves it once more.
     relay.edit_offline(|config| {
@@ -1652,4 +1949,109 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
         b"1"
     );
     assert_eq!(relay.vault_rows("SELECT count(*), '' FROM feed")[0].0, b"0");
+    // And the revocations after the migration are undone: the device and the member
+    // are live again. This is what 21.3 warns about.
+    assert_eq!(
+        relay.vault_rows(&format!(
+            "SELECT (SELECT revoked_at IS NULL FROM device WHERE id = {}), \
+             (SELECT revoked_at IS NULL FROM member WHERE id = {})",
+            pad.id, ola.member
+        ))[0],
+        (b"1".to_vec(), b"1".to_vec())
+    );
+}
+
+#[test]
+fn a_connect_team_deleted_with_its_key_freed_lets_the_key_connect_again() {
+    let relay = start(UpstreamOptions::default());
+    let (team, mac) = connect(&relay);
+    // The rollback of OPERATIONS 21.3 for a Connect team made after the deploy: suspend
+    // it and delete it with its key freed, with the new image still up.
+    relay
+        .operator(Command::Suspend { team: team.clone() })
+        .unwrap();
+    let deleted = relay
+        .operator(Command::Delete {
+            team: team.clone(),
+            free_connect_key: true,
+        })
+        .unwrap();
+    assert_eq!(
+        deleted,
+        json!({"team": team, "state": "deleted", "connect_key": "freed"})
+    );
+    // The same device key makes a new team, and the freed row still counts for the
+    // daily cap.
+    let again = relay.ok(
+        "POST",
+        "/v1/connect",
+        "",
+        Some(&connect_body(&relay, "Rafal", &mac.key)),
+    );
+    assert_ne!(again["team_id"], json!(team));
+    let rows = {
+        let conn = rusqlite::Connection::open(relay.config.directory_path()).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+            .unwrap();
+        conn.query_row(
+            "SELECT count(*), count(team_id) FROM connect_key",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(rows, (2, 1));
+    let audit = relay.relay_audit();
+    assert!(
+        audit
+            .iter()
+            .any(|(_, action, detail)| action == "team_deleted"
+                && detail.contains("\"connect_key_freed\":true")),
+        "{audit:?}"
+    );
+    // Without the flag the key stays used.
+    let second: TeamId = serde_json::from_value(again["team_id"].clone()).unwrap();
+    relay
+        .operator(Command::Suspend {
+            team: second.clone(),
+        })
+        .unwrap();
+    relay
+        .operator(Command::Delete {
+            team: second,
+            free_connect_key: false,
+        })
+        .unwrap();
+    relay.fails(
+        "POST",
+        "/v1/connect",
+        None,
+        Some(&connect_body(&relay, "Rafal", &mac.key)),
+        409,
+        "connect_key_used",
+    );
+    // An operator team has no connect key: the flag is refused, and the team stays.
+    let mut relay = relay;
+    let owner = personal_team(&mut relay);
+    let operator_team = team_of(&owner.token);
+    relay
+        .operator(Command::Suspend {
+            team: operator_team.clone(),
+        })
+        .unwrap();
+    let refused = relay
+        .operator(Command::Delete {
+            team: operator_team.clone(),
+            free_connect_key: true,
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("Connect team"), "{refused}");
+    assert!(
+        relay
+            .hub()
+            .directory
+            .team(&operator_team)
+            .unwrap()
+            .is_some()
+    );
 }

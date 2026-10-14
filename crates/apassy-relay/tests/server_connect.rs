@@ -447,7 +447,10 @@ fn one_public_key_makes_one_connect_team_ever() {
         .operator(Command::Suspend { team: team.clone() })
         .unwrap();
     relay
-        .operator(Command::Delete { team: team.clone() })
+        .operator(Command::Delete {
+            team: team.clone(),
+            free_connect_key: false,
+        })
         .unwrap();
     assert!(teams(&relay).iter().all(|info| info["id"] != team.as_str()));
     let after = post_connect(&relay, &body);
@@ -1367,7 +1370,12 @@ fn the_relay_holds_at_most_connect_teams_max() {
         })
         .unwrap();
     assert_eq!(post_connect(&relay, &body).status, 503);
-    relay.operator(Command::Delete { team: first }).unwrap();
+    relay
+        .operator(Command::Delete {
+            team: first,
+            free_connect_key: false,
+        })
+        .unwrap();
     connect_ok(&relay, &body);
     let refused: Vec<_> = relay
         .relay_audit()

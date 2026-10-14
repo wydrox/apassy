@@ -349,7 +349,10 @@ fn the_operator_suspends_resumes_and_deletes_a_team() {
 
     // Delete needs a suspended team.
     let error = relay
-        .operator(Command::Delete { team: id_b.clone() })
+        .operator(Command::Delete {
+            team: id_b.clone(),
+            free_connect_key: false,
+        })
         .unwrap_err();
     assert!(error.message.contains("Suspend"), "{error}");
     relay
@@ -419,7 +422,10 @@ fn the_operator_suspends_resumes_and_deletes_a_team() {
         .operator(Command::Suspend { team: id_b.clone() })
         .unwrap();
     relay
-        .operator(Command::Delete { team: id_b.clone() })
+        .operator(Command::Delete {
+            team: id_b.clone(),
+            free_connect_key: false,
+        })
         .unwrap();
     assert!(!relay.config.team_path(&id_b).exists());
     assert!(Relay::team_vault(&relay.config, &id_b).is_err());
@@ -660,7 +666,11 @@ fn one_broken_team_does_not_stop_the_others() {
     );
     // The operator takes it out.
     send(Command::Suspend { team: id_b.clone() }).unwrap();
-    send(Command::Delete { team: id_b.clone() }).unwrap();
+    send(Command::Delete {
+        team: id_b.clone(),
+        free_connect_key: false,
+    })
+    .unwrap();
     assert!(!config.team_path(&id_b).exists());
     assert_eq!(me(&owner_a), 200);
     running.stop();

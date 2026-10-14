@@ -7,8 +7,12 @@
 //! action back to one of those devices, which settles it once. The relay never opens a
 //! feed, an action, or a settle: it checks forms, sizes, routing, and limits, stamps the
 //! sender, and stores the envelopes as given. Feeds count in their own budget,
-//! `feed_bytes`, not in `question_bytes`. No audit row is written per feed update: a Mac
-//! publishes up to every 10 s, and a Connect team never deletes audit rows.
+//! `feed_bytes`, not in `question_bytes`, and one member uses at most its share of the
+//! feed and action limits (`member_share`). No audit row is written per feed update: a
+//! Mac publishes up to every 10 s, and a Connect team never deletes audit rows; a loop
+//! of `PUT` and `DELETE` writes at most one `feed_started` and one `feed_deleted` per
+//! device and hour. A device reads all of its member's feeds again at most
+//! `FULL_READS_PER_MINUTE` times a minute.
 //! Maintenance expires actions at `expires_at`, drops their envelopes 10 minutes after
 //! they ended, deletes them 24 hours after they were posted, and deletes a feed 30 days
 //! after its last update.
@@ -59,6 +63,124 @@ pub const PURGE_AFTER_SECS: u64 = 600;
 pub const ACTION_RETENTION_SECS: u64 = 86_400;
 /// Maintenance deletes a feed this long after its last update.
 pub const FEED_RETENTION_SECS: u64 = 30 * 86_400;
+/// At most one `feed_started` and one `feed_deleted` row (reason `deleted`) per device in
+/// this many seconds, so a loop of `PUT` and `DELETE` cannot grow a Connect team's audit,
+/// which is never trimmed. Revocations always write their row.
+pub const FEED_AUDIT_SECS: u64 = 3600;
+/// Full feed reads of one device in one minute (`take_full_read`). A read over it is 429
+/// `rate_limited` with `Retry-After`: the seconds to the next minute.
+pub const FULL_READS_PER_MINUTE: u64 = 6;
+
+/// The share of one member in a team's feed limit `limit` (`feed_bytes`,
+/// `feed_actions_per_hour`, `OPEN_ACTIONS`): three quarters of it, as the question limits
+/// of a member are (15 of 20, 225 of 300), so one member at its share leaves room for the
+/// others. A team of at most one member (the `members` limit, as a Connect team's) gives
+/// it the whole limit.
+pub fn member_share(limit: u64, members: u64) -> u64 {
+    if members <= 1 {
+        limit
+    } else {
+        limit - limit / 4
+    }
+}
+
+/// The seats of a team's feed lane share `share` that the readers' polls (the feed list
+/// and the action status) may hold together: the share less a quarter (at least one
+/// seat), so readers that come first never leave the Macs' action polls
+/// (`GET /v1/feed/actions`) without a seat. An action poll may take any free seat of the
+/// share. A share of 1 keeps no seat back.
+pub fn reader_seats(share: usize) -> usize {
+    if share < 2 {
+        share
+    } else {
+        share - (share / 4).max(1)
+    }
+}
+
+/// The full feed reads of one device: those of the current minute, and the newest feed
+/// counter that its last answer gave it (`Core::feed_reads`).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FeedReads {
+    minute: u64,
+    count: u64,
+    given: Option<u64>,
+}
+
+impl FeedReads {
+    /// Counts one read with `since` at `now` when it is a full read (`take_full_read`).
+    /// `Err(seconds)` over `FULL_READS_PER_MINUTE` in this minute.
+    pub fn take(&mut self, since: u64, now: u64) -> Result<(), u64> {
+        let full = since == 0 || self.given.is_some_and(|given| since < given);
+        if !full {
+            return Ok(());
+        }
+        let minute = now / 60;
+        if self.minute != minute {
+            (self.minute, self.count) = (minute, 0);
+        }
+        if self.count >= FULL_READS_PER_MINUTE {
+            return Err(60 - now % 60);
+        }
+        self.count += 1;
+        Ok(())
+    }
+}
+
+/// Counts one `GET /v1/feed` of `device` when it is a full read: `since` is 0, or below
+/// the newest counter that the device was given (it reads again what it had). A read
+/// that goes on from its last answer (`since` = the top-level `change`, or the `change`
+/// of the last entry after `more`) is never one. `Err(seconds)` when the device made
+/// `FULL_READS_PER_MINUTE` already in this minute: the seconds to the next one. In memory
+/// only: a restart forgets the counts.
+pub fn take_full_read(core: &Core, device: DeviceId, since: u64, now: u64) -> Result<(), u64> {
+    core.feed_reads
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(device.0)
+        .or_default()
+        .take(since, now)
+}
+
+/// 429 `rate_limited` of a full feed read over `FULL_READS_PER_MINUTE`.
+pub fn reads_limited() -> RelayError {
+    RelayError::new(
+        codes::RATE_LIMITED,
+        format!(
+            "This device read all of its feeds {FULL_READS_PER_MINUTE} times this minute. Read on from the last change, or try again in a moment."
+        ),
+    )
+}
+
+/// The newest feed counter that an answer gave `device`: the `change` of its last entry
+/// when there is more, else the top-level `change`.
+fn record_given(core: &Core, device: DeviceId, list: &FeedList) {
+    let given = match (list.more, list.feeds.last()) {
+        (true, Some(last)) => last.change,
+        _ => list.change,
+    };
+    core.feed_reads
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(device.0)
+        .or_default()
+        .given = Some(given);
+}
+
+/// Whether the `action` row (`feed_started`, or `feed_deleted` of a `DELETE`) of `device`
+/// is written at `now`: when none was in the last `FEED_AUDIT_SECS`.
+fn feed_audit_due(core: &Core, device: DeviceId, action: &'static str, now: u64) -> bool {
+    let mut last = core
+        .feed_audit
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let due = last
+        .get(&(device.0, action))
+        .is_none_or(|at| now >= at.saturating_add(FEED_AUDIT_SECS));
+    if due {
+        last.insert((device.0, action), now);
+    }
+    due
+}
 
 /// An `action_id`: the form of a `qid`, 22 base64url characters of 16 bytes. `Copy`, so
 /// a route can carry it.
@@ -94,31 +216,35 @@ fn still_the_caller(conn: &Connection, by: &MemberAuth, device: DeviceId) -> Rel
     Ok(())
 }
 
-/// A seat of the team's share of the question lane for a feed long poll: for an
-/// operator team one of `question_long_polls_per_team`, shared with its question polls;
-/// for a Connect team one of `connect::TEAM_FEED_POLLS`, apart from its two question
-/// seats. `None` when they are all held: then the poll answers at once.
-fn lane_seat(core: &Core) -> Option<LaneSeat<'_>> {
-    let per_team = core.config.limits.question_long_polls_per_team;
+/// A seat of the team's share of the feed lane for a feed long poll: for an operator
+/// team one of `feed_long_polls_per_team`, for a Connect team one of
+/// `connect::TEAM_FEED_POLLS`; a reader's poll also takes one of `reader_seats` of it
+/// (`Core::feed_readers`). Feed polls never take a question seat. `None` when they are
+/// all held: then the poll answers at once.
+fn lane_seat(core: &Core, action_poll: bool) -> Option<(LaneSeat<'_>, Option<LaneSeat<'_>>)> {
+    let mut share = core.config.limits.feed_long_polls_per_team;
     if core.kind == crate::api::TeamKind::Connect {
-        take_seat(
-            &core.feed_lane,
-            per_team.min(crate::server::connect::TEAM_FEED_POLLS),
-        )
-    } else {
-        take_seat(&core.question_lane, per_team)
+        share = share.min(crate::server::connect::TEAM_FEED_POLLS);
     }
+    let reader = if action_poll {
+        None
+    } else {
+        Some(take_seat(&core.feed_readers, reader_seats(share))?)
+    };
+    // A reader's seat that was taken goes back when the team's share is full.
+    take_seat(&core.feed_lane, share).map(|seat| (seat, reader))
 }
 
 /// Runs a feed long poll: `turn` reads the answer and says whether it is final. While it
 /// is not, holds up to `wait_secs` on the team notifier. A device has at most one poll of
-/// each kind (`polls`), and `hold` is false when the relay's question lane is full: then,
-/// and over the team's share or the Connect bound, the answer comes at once, as with
-/// `wait=0`. Each turn reads the caller again.
+/// each kind (`polls`), and `hold` is false when the relay's feed lane is full: then, and
+/// over the team's share (`lane_seat`) or the Connect bound (`Core::feed_poll_seat`), the
+/// answer comes at once, as with `wait=0`. Each turn reads the caller again.
 fn long_poll<T>(
     core: &Core,
     by: &MemberAuth,
     polls: &LongPolls,
+    action_poll: bool,
     wait_secs: u64,
     hold: bool,
     mut turn: impl FnMut(&Connection, DeviceId, u64) -> RelayResult<(T, bool)>,
@@ -129,9 +255,9 @@ fn long_poll<T>(
     } else {
         None
     };
-    let lane = poll.as_ref().and_then(|_| lane_seat(core));
+    let lane = poll.as_ref().and_then(|_| lane_seat(core, action_poll));
     // The relay's seat of a Connect team is taken only when the team's seat was.
-    let seat = lane.as_ref().and_then(|_| core.poll_seat());
+    let seat = lane.as_ref().and_then(|_| core.feed_poll_seat());
     let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
@@ -178,9 +304,10 @@ fn feed_limit(message: String) -> RelayError {
 /// `PUT /v1/feed`. Forms (400) and the size (413) first; then in one transaction a
 /// `seq` above the stored one (409 `seq_not_newer`, before the pace, so a retry of a feed
 /// that landed gets 409), the pace of one feed per 10 s (403 `feed_limit`), and the
-/// team's `feed_bytes` with the old feed of the caller left out (403 `feed_limit` with a
-/// `limit_reached` row). The feed replaces the caller's one with the next feed counter.
-/// A `feed_started` row only for the first feed of a device.
+/// team's `feed_bytes`, then the member's share of it, with the old feed of the caller
+/// left out (403 `feed_limit` with a `limit_reached` row). The feed replaces the caller's
+/// one with the next feed counter. A `feed_started` row only for the first feed of a
+/// device, at most one per device and `FEED_AUDIT_SECS`.
 pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayResult<Value> {
     let device = device_of(by)?;
     check_v(request.v)?;
@@ -225,18 +352,31 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
                 last.saturating_add(FEED_INTERVAL_SECS)
             ))));
         }
-        let others: i64 = tx
+        // The other devices' feeds, of the team and of the caller's member.
+        let (others, member_others): (i64, i64) = tx
             .query_row(
-                "SELECT coalesce(sum(length(ciphertext)), 0) FROM feed WHERE device_id <> ?1",
-                params![to_i(device.0)],
-                |row| row.get(0),
+                "SELECT coalesce(sum(length(ciphertext)), 0), \
+                 coalesce(sum(CASE WHEN member_id = ?2 THEN length(ciphertext) ELSE 0 END), 0) \
+                 FROM feed WHERE device_id <> ?1",
+                params![to_i(device.0), to_i(by.id.0)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(db)?;
-        if to_u(others).saturating_add(ciphertext.len() as u64) > limits.feed_bytes {
-            core.limit_error_on(tx, now, "feed_bytes")?;
-            return Ok(Err(feed_limit(
-                "The team's feed_bytes limit is reached.".to_string(),
-            )));
+        let new = ciphertext.len() as u64;
+        for (held, limit, kind) in [
+            (others, limits.feed_bytes, "feed_bytes"),
+            (
+                member_others,
+                member_share(limits.feed_bytes, limits.members),
+                "member_feed_bytes",
+            ),
+        ] {
+            if to_u(held).saturating_add(new) > limit {
+                core.limit_error_on(tx, now, kind)?;
+                return Ok(Err(feed_limit(format!(
+                    "The team's {kind} limit is reached."
+                ))));
+            }
         }
         let change = next_change(tx)?;
         tx.execute(
@@ -258,7 +398,7 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
             ],
         )
         .map_err(db)?;
-        if old.is_none() {
+        if old.is_none() && feed_audit_due(core, device, "feed_started", now) {
             core.audit.write_on(
                 tx,
                 now,
@@ -281,8 +421,9 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
 
 /// Deletes the feeds of `devices` on the transaction, with one new feed counter value
 /// when there was one, and expires the open actions to them (and, with `senders`, from
-/// them). One `feed_deleted` row per feed, with `reason`. Returns the counter now. The
-/// caller wakes the long polls.
+/// them). One `feed_deleted` row per feed, with `reason`; for the reason `deleted` (the
+/// device's own `DELETE`) at most one per device and `FEED_AUDIT_SECS`. Returns the
+/// counter now. The caller wakes the long polls.
 pub fn drop_devices(
     core: &Core,
     tx: &Transaction<'_>,
@@ -314,6 +455,10 @@ pub fn drop_devices(
     }
     let change = next_change(tx)?;
     for device in removed {
+        // A revocation always writes its row; a device's own delete at most once an hour.
+        if reason == "deleted" && !feed_audit_due(core, device, "feed_deleted", now) {
+            continue;
+        }
         core.audit.write_on(
             tx,
             now,
@@ -403,7 +548,8 @@ fn feeds_now(conn: &Connection, by: &MemberAuth, since: u64) -> RelayResult<Feed
 
 /// `GET /v1/feed?since=N&wait=S`. While no feed of the member changed after `since`,
 /// holds up to `wait` seconds; it also answers when a feed of the member left (`present`
-/// changed) or the counter is below `since` (a restored relay).
+/// changed) or the counter is below `since` (a restored relay). The HTTP layer counts a
+/// full read first (`take_full_read`); the answer sets the counter the device was given.
 pub fn list(
     core: &Core,
     by: &MemberAuth,
@@ -412,12 +558,22 @@ pub fn list(
     hold: bool,
 ) -> RelayResult<FeedList> {
     let mut first: Option<Vec<DeviceId>> = None;
-    long_poll(core, by, &core.feed_polls, wait_secs, hold, |conn, _, _| {
-        let list = feeds_now(conn, by, since)?;
-        let present = first.get_or_insert_with(|| list.present.clone());
-        let done = !list.feeds.is_empty() || list.change < since || *present != list.present;
-        Ok((list, done))
-    })
+    let list = long_poll(
+        core,
+        by,
+        &core.feed_polls,
+        false,
+        wait_secs,
+        hold,
+        |conn, _, _| {
+            let list = feeds_now(conn, by, since)?;
+            let present = first.get_or_insert_with(|| list.present.clone());
+            let done = !list.feeds.is_empty() || list.change < since || *present != list.present;
+            Ok((list, done))
+        },
+    )?;
+    record_given(core, device_of(by)?, &list);
+    Ok(list)
 }
 
 /// One stored action.
@@ -510,8 +666,9 @@ fn too_many_actions(
 /// `POST /v1/feed/actions`. Forms (400) and the size (413) first; then in one
 /// transaction: `to_device` is a live device of the caller's member and not the caller
 /// (403 `not_routed`), it has a feed (404), the `action_id` is new in the team (409
-/// `conflict`: a retry of a post that landed), and the limits (403 `too_many_actions`).
-/// The relay stamps the caller's device and member and the next action sequence value.
+/// `conflict`: a retry of a post that landed), and the limits (403 `too_many_actions`):
+/// the team's, then the member's share of them (`member_share`), then the sender's. The
+/// relay stamps the caller's device and member and the next action sequence value.
 pub fn post_action(
     core: &Core,
     by: &MemberAuth,
@@ -573,19 +730,46 @@ pub fn post_action(
                 "An action with this action_id exists in the team.",
             )));
         }
-        let (hour, open, device_open): (i64, i64, i64) = tx
+        let counts: [i64; 5] = tx
             .query_row(
                 "SELECT coalesce(sum(created_at > ?2), 0), \
                  coalesce(sum(state = 'open' AND expires_at > ?1), 0), \
+                 coalesce(sum(member_id = ?4 AND created_at > ?2), 0), \
+                 coalesce(sum(member_id = ?4 AND state = 'open' AND expires_at > ?1), 0), \
                  coalesce(sum(from_device = ?3 AND state = 'open' AND expires_at > ?1), 0) \
                  FROM feed_action",
-                params![to_i(now), to_i(now.saturating_sub(3600)), to_i(device.0)],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                params![
+                    to_i(now),
+                    to_i(now.saturating_sub(3600)),
+                    to_i(device.0),
+                    to_i(by.id.0)
+                ],
+                |row| {
+                    Ok([
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ])
+                },
             )
             .map_err(db)?;
+        let [hour, open, member_hour, member_open, device_open] = counts;
+        let members = limits.members;
         for (count, limit, kind) in [
             (hour, limits.feed_actions_per_hour, "feed_actions_per_hour"),
             (open, OPEN_ACTIONS, "open_feed_actions"),
+            (
+                member_hour,
+                member_share(limits.feed_actions_per_hour, members),
+                "member_feed_actions_per_hour",
+            ),
+            (
+                member_open,
+                member_share(OPEN_ACTIONS, members),
+                "member_open_feed_actions",
+            ),
             (device_open, DEVICE_OPEN_ACTIONS, "device_open_feed_actions"),
         ] {
             if to_u(count) >= limit {
@@ -695,6 +879,7 @@ pub fn actions(
         core,
         by,
         &core.feed_action_polls,
+        true,
         wait_secs,
         hold,
         |conn, device, now| {
@@ -830,6 +1015,7 @@ pub fn status(
         core,
         by,
         &core.feed_status_polls,
+        false,
         wait_secs,
         hold,
         |conn, device, now| {
@@ -1007,6 +1193,42 @@ mod tests {
             );
         }
         assert_eq!(MAX_SEQ, 9_007_199_254_740_991);
+    }
+
+    #[test]
+    fn full_reads_are_counted_per_minute_and_reads_that_go_on_are_free() {
+        let mut reads = FeedReads::default();
+        // Before any answer only `since=0` is a full read.
+        reads.take(5, 600).unwrap();
+        for _ in 0..FULL_READS_PER_MINUTE {
+            reads.take(0, 600).unwrap();
+        }
+        assert_eq!(reads.take(0, 615), Err(45));
+        // At the counter it was given, or above it, a device goes on; below it, it reads
+        // again what it had.
+        reads.given = Some(9);
+        for since in [9, 9, 12] {
+            reads.take(since, 615).unwrap();
+        }
+        assert_eq!(reads.take(8, 615), Err(45));
+        assert_eq!(reads.take(0, 659), Err(1));
+        // The next minute starts again.
+        reads.take(0, 660).unwrap();
+        assert_eq!(reads.count, 1);
+    }
+
+    #[test]
+    fn a_member_gets_three_quarters_of_a_team_limit_unless_it_is_alone() {
+        assert_eq!(member_share(4_194_304, 50), 3_145_728);
+        assert_eq!(member_share(1_048_576, 2), 786_432);
+        assert_eq!(member_share(OPEN_ACTIONS, 50), 15);
+        assert_eq!(member_share(60, 50), 45);
+        assert_eq!(member_share(1, 50), 1);
+        // A team of one member (a Connect team) gives it the whole limit.
+        assert_eq!(member_share(1_048_576, 1), 1_048_576);
+        assert_eq!(member_share(OPEN_ACTIONS, 1), OPEN_ACTIONS);
+        // At the default limits a member's ten devices fit in its share of feed_bytes.
+        assert!(10 * MAX_FEED_BYTES as u64 <= member_share(4_194_304, 50));
     }
 
     #[test]

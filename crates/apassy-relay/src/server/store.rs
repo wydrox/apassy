@@ -345,6 +345,27 @@ impl Store {
         })
     }
 
+    /// Opens an existing encrypted file to read it only (`SQLITE_OPEN_READ_ONLY`): no
+    /// migration, no change of its mode, and no write, also by mistake. For the operator's
+    /// look at a `.pre-v6` copy or a closed team file (`Hub::rollback_check`).
+    pub fn open_read_only(path: &Path, key: &SecretString) -> RelayResult<Self> {
+        let meta = fs::symlink_metadata(path)
+            .map_err(|_| RelayError::internal("The vault file does not exist."))?;
+        if !meta.is_file() {
+            return Err(RelayError::internal("The vault is not a regular file."));
+        }
+        let conn = open_keyed_with(
+            path,
+            key,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
     /// Creates the file of one team (the team schema).
     pub fn create_team(path: &Path, key: &SecretString) -> RelayResult<Self> {
         Self::create_at(
@@ -631,8 +652,16 @@ fn prepare_dir(dir: &Path) -> RelayResult<()> {
 
 /// Opens the file, checks the build, and applies the key and the cipher parameters.
 fn open_keyed(path: &Path, key: &SecretString) -> RelayResult<Connection> {
-    let conn =
-        Connection::open(path).map_err(|_| RelayError::internal("The vault cannot be opened."))?;
+    open_keyed_with(path, key, rusqlite::OpenFlags::default())
+}
+
+fn open_keyed_with(
+    path: &Path,
+    key: &SecretString,
+    flags: rusqlite::OpenFlags,
+) -> RelayResult<Connection> {
+    let conn = Connection::open_with_flags(path, flags)
+        .map_err(|_| RelayError::internal("The vault cannot be opened."))?;
     require_build_options(&conn)?;
     let defensive = conn
         .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)

@@ -346,6 +346,8 @@ pub struct Hub {
     connect_prefixes: connect::PrefixLimiter,
     /// The long polls that Connect teams hold, all of them together.
     connect_polls: Arc<AtomicUsize>,
+    /// The feed long polls that Connect teams hold, all of them together.
+    connect_feed_polls: Arc<AtomicUsize>,
 }
 
 impl Hub {
@@ -381,6 +383,7 @@ impl Hub {
             push,
             connect_prefixes: connect::PrefixLimiter::default(),
             connect_polls: Arc::new(AtomicUsize::new(0)),
+            connect_feed_polls: Arc::new(AtomicUsize::new(0)),
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
@@ -491,9 +494,13 @@ impl Hub {
             feed_action_polls: LongPolls::new(1),
             feed_status_polls: LongPolls::new(1),
             feed_lane: AtomicUsize::new(0),
+            feed_readers: AtomicUsize::new(0),
             feed_times: Mutex::new(HashMap::new()),
+            feed_audit: Mutex::new(HashMap::new()),
+            feed_reads: Mutex::new(HashMap::new()),
             push: self.push.clone(),
             connect_polls: self.connect_polls.clone(),
+            connect_feed_polls: self.connect_feed_polls.clone(),
             request_rate: connect::RequestRate::default(),
             last_request: AtomicU64::new(0),
             maintained_at: AtomicU64::new(0),
@@ -848,12 +855,18 @@ impl Hub {
     }
 
     /// Deletes a suspended team: its row and file key in the directory, then its file.
-    /// There is no undo.
-    pub fn delete(&self, id: &TeamId, now: u64) -> RelayResult<()> {
+    /// There is no undo. With `free_connect_key` (a Connect team only, 400 otherwise) the
+    /// device key that made the team may make a new one (docs/SPEC.md section 27.10).
+    pub fn delete(&self, id: &TeamId, free_connect_key: bool, now: u64) -> RelayResult<()> {
         let row = self
             .directory
             .team(id)?
             .ok_or_else(|| RelayError::not_found("team"))?;
+        if free_connect_key && row.kind != TeamKind::Connect {
+            return Err(RelayError::invalid(
+                "Only a Connect team has a connect key to free.",
+            ));
+        }
         if row.state != TeamState::Suspended || self.team(id).is_some() {
             return Err(RelayError::new(
                 codes::CONFLICT,
@@ -881,7 +894,7 @@ impl Hub {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        self.directory.remove(id, now)?;
+        self.directory.remove(id, free_connect_key, now)?;
         self.draining
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1013,7 +1026,7 @@ impl Hub {
                     (if dry_run {
                         Ok(())
                     } else {
-                        self.delete(&row.id, now)
+                        self.delete(&row.id, false, now)
                     })
                     .map(|()| report.deleted.push(row.id.clone()))
                 }
