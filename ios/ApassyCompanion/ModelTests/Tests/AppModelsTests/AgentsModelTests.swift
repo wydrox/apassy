@@ -375,8 +375,80 @@ struct AgentsModelTests {
         await model.remove(never, in: codex)
 
         let removal = try #require(model.removal(of: never, in: codex))
-        #expect(model.removals[removal] == .failed("The list on Mac mini changed. Try again."))
+        #expect(model.removals[removal] == .failed("The list on Mac mini changed. Look at it again."))
         #expect(await service.sentFeedActions().isEmpty)
+    }
+
+    /// The alert keeps the list as the tap saw it. A feed that lands while it is up (a relay can
+    /// swap one in) does not change what is removed: the core refuses the list of another feed,
+    /// and nothing is sent.
+    @Test func aNewFeedWhileTheAlertIsUpSendsNothing() async throws {
+        let fixture = await Fixture()
+        await fixture.model.refresh()
+        let tapped = try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex")
+        let never = try fixture.exception(tapped, .never)
+        let removal = try #require(fixture.model.removal(of: never, in: tapped))
+        #expect(removal.feedSeq == tapped.mac.seq)
+        var newer = PreviewVaultService.sampleFeed(now: fixture.now)
+        newer[0].macs[0].seq = (newer[0].macs[0].seq ?? 0) + 1
+        newer[0].macs[0].agents[1].name = "Scratch Bot"
+        await fixture.service.setFeed(newer)
+        await fixture.model.refresh()
+
+        await fixture.model.remove(never, in: tapped)
+
+        #expect(fixture.model.removals[removal] == .failed("The list on Mac mini changed. Look at it again."))
+        #expect(await fixture.service.sentFeedActions().isEmpty)
+    }
+
+    /// The names that the action signs must be those that the alert showed, byte for byte.
+    @Test func namesThatDifferFromTheAlertSendNothing() async throws {
+        let fixture = await Fixture()
+        await fixture.model.refresh()
+        let tapped = try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex")
+        let never = try fixture.exception(tapped, .never)
+        // The same feed `seq` with another name for the agent: the core's string names it.
+        var renamed = PreviewVaultService.sampleFeed(now: fixture.now)
+        renamed[0].macs[0].agents[1].name = "Scratch Bot"
+        await fixture.service.setFeed(renamed)
+
+        await fixture.model.remove(never, in: tapped)
+
+        let removal = try #require(fixture.model.removal(of: never, in: tapped))
+        #expect(fixture.model.removals[removal] == .failed("The list on Mac mini changed. Look at it again."))
+        #expect(await fixture.service.sentFeedActions().isEmpty)
+        #expect(try #require(await fixture.service.preparedFeedActions().first).agentName == "Scratch Bot")
+    }
+
+    /// A Mac whose feed lacks the mark (Apassy 0.5.2) takes no removal that gives authority back:
+    /// the app says to update it instead of offering "Remove". "Only" is still offered, and the
+    /// old Mac's "bad form" answer says the same.
+    @Test func anOlderMacAsksForAnUpdate() async throws {
+        var feed = PreviewVaultService.sampleFeed()
+        feed[0].macs[0].checksNames = false
+        let fixture = await Fixture(feed: feed)
+        await fixture.model.refresh()
+        let codex = try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex")
+        let never = try fixture.exception(codex, .never)
+        #expect(fixture.model.removalBlock(of: never, in: codex) == "Update Apassy on Mac mini to remove this from the iPhone.")
+        await fixture.model.remove(never, in: codex)
+        #expect(await fixture.service.sentFeedActions().isEmpty)
+
+        let only = FeedException(
+            item: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a09", itemTitle: "Sentry", kind: .only, createdAt: 1_789_990_100)
+        #expect(fixture.model.removalBlock(of: only, in: codex) == nil)
+    }
+
+    @Test func theAnswerOfAnOlderMacSaysToUpdateIt() async throws {
+        let fixture = await Fixture()
+        await fixture.service.scriptFeedOutcomes([.init(.refused, reason: "it has a bad form")])
+        await fixture.model.refresh()
+        let work = try fixture.entry(vault: "Work", mac: "MacBook Pro", agent: "Claude Code")
+        let only = try fixture.exception(work, .only)
+        await fixture.model.remove(only, in: work)
+        let removal = try #require(fixture.model.removal(of: only, in: work))
+        #expect(
+            fixture.model.removals[removal] == .failed("Update Apassy on MacBook Pro to remove this from the iPhone."))
     }
 
     @Test func aVaultThatIsNotSelectedAsksToSelectItFirst() async throws {
@@ -456,7 +528,7 @@ struct AgentsModelTests {
 
         await fixture.service.failNextFeedActionString(VaultError(.notFound, "This list of the Mac changed."))
         await fixture.model.remove(never, in: codex)
-        #expect(fixture.model.removals[removal] == .failed("The list on Mac mini changed. Try again."))
+        #expect(fixture.model.removals[removal] == .failed("The list on Mac mini changed. Look at it again."))
 
         await fixture.service.failNextFeedAction(VaultError(.staleAction, "Too old."))
         await fixture.model.remove(never, in: codex)

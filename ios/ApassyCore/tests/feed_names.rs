@@ -12,7 +12,7 @@
 //! - A holder of the question key who works with the relay plants a feed with a false
 //!   agent name on real ids. The iPhone signs what it shows; the Mac refuses it as
 //!   `stale`, and the row stays. A later planted feed without the mark does not bring
-//!   back actions without the names: the iPhone remembers that this Mac checks them.
+//!   back actions without the names: the iPhone signs them for every Mac.
 //!
 //! Synthetic values only; no network beyond 127.0.0.1.
 
@@ -277,13 +277,22 @@ fn request(phone: &Core, mac: &Value, exception: &Value) -> Value {
     let vault_id = call(phone, json!({"op": "feed_list"}))["vaults"][0]["vault_id"].clone();
     json!({"op": "feed_action_string", "vault_id": vault_id, "mac_device": mac["device"],
            "agent": mac["agents"][0]["id"], "item": exception["item"],
-           "kind": exception["kind"], "created_at": exception["created_at"]})
+           "kind": exception["kind"], "created_at": exception["created_at"],
+           "feed_seq": mac["seq"]})
 }
 
 /// Remove `exception` as the app does: the action string, "Face ID" when it needs it,
 /// the action, and the Mac's outcome. Returns the action string and the outcome.
 fn remove(phone: &Core, mac: &Value, exception: &Value) -> (String, Value) {
     let prepared = call(phone, request(phone, mac, exception));
+    // The names that the action signs are those the list showed.
+    assert_eq!(prepared["agent_name"], mac["agents"][0]["name"]);
+    assert_eq!(prepared["mac_name"], mac["name"]);
+    let shown_title = match exception["title"].as_str() {
+        Some(title) if !title.is_empty() => title,
+        _ => exception["item_title"].as_str().unwrap(),
+    };
+    assert_eq!(prepared["credential_name"], shown_title);
     let mut send = request(phone, mac, exception);
     send["op"] = json!("feed_action");
     send["action_id"] = prepared["action_id"].clone();
@@ -401,28 +410,20 @@ fn a_planted_feed_with_false_names_is_refused_and_the_row_stays() {
     );
     assert_eq!(mac.kinds(), rows, "the row stays");
 
-    // A later planted feed without the mark: the iPhone still signs the names, because
-    // a feed of this Mac said that it checks them.
+    // A later planted feed without the mark: the iPhone still signs the names (it always
+    // does), and the list says that the Mac lacks the mark.
     mac.with(|vault| vault.set_agent_note(mac.agent, "A new note.").unwrap());
     let (newer, plaintext) = mac.settled_feed(&relay, seq);
     mac.plant(&relay, newer, &lie(&plaintext, false));
     let shown = shown_mac(&iphone);
     assert_eq!(shown["seq"], newer);
     assert_eq!(shown["agents"][0]["name"], "Scratch Bot");
+    assert_eq!(shown["checks_names"], false);
     let only = exception(&shown, "only").clone();
     let (text, outcome) = remove(&iphone, &shown, &only);
     assert!(text.starts_with("apassy-feed-action-v2\n"), "{text}");
     assert_eq!(outcome["outcome"], "stale", "{outcome}");
     assert_eq!(mac.kinds(), rows, "the row stays");
-    let marks: Value = serde_json::from_slice(
-        &fs::read(root.path().join("iphone").join("feed-seq.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        marks["names"][mac.team.as_str()],
-        json!([mac.device_id()]),
-        "{marks}"
-    );
 
     // The Mac's own next feed shows the true names again, and they apply.
     mac.with(|vault| vault.set_agent_note(mac.agent, "Another note.").unwrap());

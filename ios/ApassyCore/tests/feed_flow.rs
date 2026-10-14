@@ -316,9 +316,25 @@ fn macs(phone: &Core) -> Vec<Value> {
     list(phone)["vaults"][0]["macs"].as_array().unwrap().clone()
 }
 
+/// The `seq` of the publishing Mac in the list that this iPhone shows now (null when the
+/// list cannot be read): the `feed_seq` of the list the owner confirms.
+fn shown_seq(setup: &Setup) -> Value {
+    let answer: Value =
+        serde_json::from_str(&setup.phone.call(&json!({"op": "feed_list"}).to_string())).unwrap();
+    answer["result"]["vaults"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|vault| vault["vault_id"] == setup.a.vault_id.as_str())
+        .flat_map(|vault| vault["macs"].as_array().cloned().unwrap_or_default())
+        .find(|mac| mac["device"] == MAC)
+        .map_or(Value::Null, |mac| mac["seq"].clone())
+}
+
 fn string_request(setup: &Setup, kind: &str, created_at: u64, item: &str) -> Value {
     json!({"op": "feed_action_string", "vault_id": setup.a.vault_id, "mac_device": MAC,
-           "agent": "4", "item": item, "kind": kind, "created_at": created_at})
+           "agent": "4", "item": item, "kind": kind, "created_at": created_at,
+           "feed_seq": shown_seq(setup)})
 }
 
 /// The core builds the action string, "Face ID" signs it with the answer key of the
@@ -327,6 +343,7 @@ fn act(setup: &Setup, kind: &str, created_at: u64, item: &str) -> (Value, Value)
     let prepared = call(&setup.phone, string_request(setup, kind, created_at, item));
     let mut request = string_request(setup, kind, created_at, item);
     request["op"] = json!("feed_action");
+    request["feed_seq"] = prepared["feed_seq"].clone();
     request["action_id"] = prepared["action_id"].clone();
     request["time"] = prepared["time"].clone();
     if prepared["needs_face_id"] == true {
@@ -752,13 +769,22 @@ fn the_action_string_is_the_contract_vector() {
     request["action_id"] = json!(ACTION_ID);
     request["time"] = json!(1_790_000_060u64);
     let prepared = call(&setup.phone, request.clone());
-    assert_eq!(prepared["action_string"], ACTION_STRING);
+    // The feed of 17.1 has no mark (a Mac of 0.5.2): the core still signs the names, the
+    // string of 17.6, whose first eight lines are those of 17.2 but the tag.
     let text = prepared["action_string"].as_str().unwrap();
-    assert_eq!(text.len(), 222);
+    assert_eq!(
+        text,
+        ACTION_STRING.replace("apassy-feed-action-v1", "apassy-feed-action-v2")
+            + &format!("\nnames:{NAMES_V2}")
+    );
+    assert_eq!(text.len(), 293);
     assert_eq!(
         sha256(text.as_bytes()),
-        "4555d68b3fbe31ad493893152aa08eb21342feb0dbf69e91247748a6ae81ad6d"
+        "faee55b8a1050aac2b18711bdc15869dd35f454293319bd516044e56a941345c"
     );
+    assert_eq!(prepared["agent_name"], "Claude Code");
+    assert_eq!(prepared["credential_name"], "Shop database");
+    assert_eq!(prepared["mac_name"], "MacBook Pro");
     assert_eq!(prepared["action_id"], ACTION_ID);
     assert_eq!(prepared["time"], 1_790_000_060u64);
     assert_eq!(prepared["feed_seq"], 1_790_000_040u64);
@@ -773,7 +799,7 @@ fn the_action_string_is_the_contract_vector() {
     assert!(verify_signature(
         &decode_b64u(ANSWER_PUBLIC).unwrap(),
         text.as_bytes(),
-        &decode_b64u(SIGNATURE).unwrap()
+        &decode_b64u(SIGNATURE_V2).unwrap()
     ));
     // A new action ID each time without one.
     let first = call(
@@ -788,7 +814,7 @@ fn the_action_string_is_the_contract_vector() {
     assert_eq!(first["action_id"].as_str().unwrap().len(), 22);
     // The time of the vector is long past: the action is not sent.
     request["op"] = json!("feed_action");
-    request["signature"] = json!(SIGNATURE);
+    request["signature"] = json!(SIGNATURE_V2);
     assert_eq!(fails(&setup.phone, request), "stale_action");
     // An exception that the feed does not show, and an unknown kind.
     assert_eq!(
@@ -841,6 +867,7 @@ fn the_v2_action_string_is_the_contract_vector() {
     );
     let mac = &macs(&setup.phone)[0];
     assert_eq!(mac["seq"], 1_790_000_040u64);
+    assert_eq!(mac["checks_names"], true);
     assert_eq!(mac["agents"][0]["name"], "Claude Code");
     assert_eq!(
         mac["agents"][0]["exceptions"][0]["item_title"],
@@ -872,16 +899,17 @@ fn the_v2_action_string_is_the_contract_vector() {
         text.as_bytes(),
         &decode_b64u(SIGNATURE_V2).unwrap()
     ));
-    // The mark is kept on disk with the seq: no secret.
+    // The mark is a hint for the screen, kept nowhere: the file holds the seq only.
     let marks: Value =
         serde_json::from_slice(&std::fs::read(setup.data.join("feed-seq.json")).unwrap()).unwrap();
     assert_eq!(
         marks,
-        json!({"version": 1, "teams": {TEAM: {"2": 1_790_000_040u64}}, "names": {TEAM: [2]}})
+        json!({"version": 1, "teams": {TEAM: {"2": 1_790_000_040u64}}})
     );
-    // A newer feed of that Mac without the mark: still v2.
+    // A newer feed of that Mac without the mark: the hint says so, and the string is v2.
     let seq = fresh_feed(&setup);
     assert_eq!(macs(&setup.phone)[0]["seq"], seq);
+    assert_eq!(macs(&setup.phone)[0]["checks_names"], false);
     let prepared = call(
         &setup.phone,
         string_request(&setup, "never", 1_789_990_000, SHOP_ITEM),
@@ -956,37 +984,103 @@ fn a_v2_action_signs_the_names_that_the_list_shows() {
     );
 }
 
-/// A Mac whose feed does not say that it checks the names (0.5.2): the iPhone sends v1,
-/// eight lines and `v` 1 without `names`, which that Mac takes.
+/// A Mac whose feed does not say that it checks the names (0.5.2), with the marks file
+/// missing or empty: the iPhone still signs the names (v2, `v` 2 with `names`), and the
+/// list says that the Mac lacks the mark, so the app offers no Face ID removal on it.
 #[test]
-fn a_mac_without_the_mark_gets_v1() {
+fn the_iphone_sends_v2_without_a_mark_or_a_marks_file() {
+    for marks in [None, Some(""), Some("{}")] {
+        let setup = setup();
+        let file = setup.data.join("feed-seq.json");
+        let _ = std::fs::remove_file(&file);
+        if let Some(text) = marks {
+            std::fs::write(&file, text).unwrap();
+        }
+        fresh_feed(&setup);
+        assert_eq!(macs(&setup.phone)[0]["checks_names"], false);
+        for (kind, created_at, item) in [
+            ("never", 1_789_990_000, SHOP_ITEM),
+            ("only", 1_789_990_100, API_ITEM),
+        ] {
+            let (prepared, _) = act(&setup, kind, created_at, item);
+            let text = prepared["action_string"].as_str().unwrap();
+            assert!(text.starts_with("apassy-feed-action-v2\n"), "{text}");
+            assert_eq!(text.lines().count(), 9);
+            let stored = setup.a.relay.actions().pop().unwrap();
+            let right = aad(&[
+                "apassy-feed-v1",
+                "action",
+                TEAM,
+                prepared["action_id"].as_str().unwrap(),
+                KEY_ID,
+                "3",
+                "2",
+            ]);
+            let action: Value = serde_json::from_slice(
+                &open(&setup.a.key, &right, &stored.nonce, &stored.ciphertext).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(action["v"], 2);
+            assert!(action["names"].is_string());
+        }
+    }
+}
+
+/// The owner confirmed the list of one feed; a newer feed (a relay can swap one in while
+/// the confirmation is up) makes the core refuse the action string, and the answer names
+/// what the action signs, for the app to compare with its confirmation.
+#[test]
+fn a_new_feed_while_the_confirmation_is_up_stops_the_action() {
     let setup = setup();
-    fresh_feed(&setup);
-    macs(&setup.phone);
-    let (prepared, _) = act(&setup, "never", 1_789_990_000, SHOP_ITEM);
-    let text = prepared["action_string"].as_str().unwrap();
-    assert!(text.starts_with("apassy-feed-action-v1\n"));
-    assert_eq!(text.lines().count(), 8);
-    assert!(!text.contains("names:"));
-    let stored = setup.a.relay.actions().pop().unwrap();
-    let right = aad(&[
-        "apassy-feed-v1",
-        "action",
-        TEAM,
-        prepared["action_id"].as_str().unwrap(),
-        KEY_ID,
-        "3",
-        "2",
-    ]);
-    let action: Value = serde_json::from_slice(
-        &open(&setup.a.key, &right, &stored.nonce, &stored.ciphertext).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(action["v"], 1);
-    assert!(action.get("names").is_none());
-    let marks: Value =
-        serde_json::from_slice(&std::fs::read(setup.data.join("feed-seq.json")).unwrap()).unwrap();
-    assert!(marks.get("names").is_none(), "{marks}");
+    let seq = fresh_feed(&setup);
+    let confirmed = string_request(&setup, "never", 1_789_990_000, SHOP_ITEM);
+    assert_eq!(confirmed["feed_seq"], seq);
+    let prepared = call(&setup.phone, confirmed.clone());
+    assert_eq!(prepared["feed_seq"], seq);
+    assert_eq!(prepared["agent_name"], "Claude Code");
+    assert_eq!(prepared["credential_name"], "Shop database");
+    assert_eq!(prepared["mac_name"], "MacBook Pro");
+    // A feed with another name for the agent lands before the owner confirms.
+    let text = feed(seq + 1, seq + 1, |value| {
+        value["agents"][0]["name"] = json!("Scratch Bot");
+        value["agents"][0]["exceptions"] = json!([
+            {"item": SHOP_ITEM, "item_title": "Shop database", "kind": "never", "created_at": 1_789_990_000u64},
+        ]);
+    });
+    publish(&setup.a.relay, TEAM, &setup.a.key, 2, &text);
+    assert_eq!(macs(&setup.phone)[0]["seq"], seq + 1);
+    let mut late = confirmed.clone();
+    late.as_object_mut().unwrap().remove("action_id");
+    assert_eq!(
+        failure(&setup.phone, late.clone()),
+        (
+            "not_found".to_owned(),
+            "The list on MacBook Pro changed. Look at it again.".to_owned()
+        )
+    );
+    // Without the seq of the confirmed list, nothing either.
+    late.as_object_mut().unwrap().remove("feed_seq");
+    assert_eq!(fails(&setup.phone, late), "not_found");
+    // The list of the new feed names the agent "Scratch Bot": an action string for it
+    // says so, and the app compares that name with the one its confirmation showed.
+    let again = call(
+        &setup.phone,
+        string_request(&setup, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    assert_eq!(again["agent_name"], "Scratch Bot");
+    // The prepared action of the old feed is not sent with the seq of the new one.
+    let mut send = confirmed;
+    send["op"] = json!("feed_action");
+    send["feed_seq"] = json!(seq + 1);
+    send["action_id"] = prepared["action_id"].clone();
+    send["time"] = prepared["time"].clone();
+    send["signature"] = json!(encode_b64u(
+        &answer_key()
+            .sign(prepared["action_string"].as_str().unwrap().as_bytes())
+            .unwrap()
+    ));
+    assert_eq!(fails(&setup.phone, send), "invalid_input");
+    assert!(setup.a.relay.actions().is_empty());
 }
 
 #[test]
@@ -1191,14 +1285,16 @@ fn an_action_is_sealed_with_its_aad_and_reaches_the_relay() {
     let signature = action["signature"].as_str().unwrap().to_owned();
     assert_eq!(
         action,
-        json!({"v": 1, "action_id": action_id, "by": PHONE, "to": MAC,
+        json!({"v": 2, "action_id": action_id, "by": PHONE, "to": MAC,
                "kind": "remove_exception", "agent": "4", "item": SHOP_ITEM,
                "exception": {"kind": "never", "created_at": 1_789_990_000u64},
-               "feed_seq": seq, "time": prepared["time"], "signature": signature})
+               "feed_seq": seq, "time": prepared["time"], "names": NAMES_V2,
+               "signature": signature})
     );
     // The fields are in the contract's order.
     let text = String::from_utf8(plaintext.clone()).unwrap();
-    assert!(text.starts_with(&format!("{{\"v\":1,\"action_id\":\"{action_id}\",\"by\":")));
+    assert!(text.starts_with(&format!("{{\"v\":2,\"action_id\":\"{action_id}\",\"by\":")));
+    assert!(text.contains(&format!("\"names\":\"{NAMES_V2}\",\"signature\":")));
     assert!(verify_signature(
         &decode_b64u(ANSWER_PUBLIC).unwrap(),
         prepared["action_string"].as_str().unwrap().as_bytes(),
@@ -1230,6 +1326,7 @@ fn an_action_is_sealed_with_its_aad_and_reaches_the_relay() {
     // A retry after a network error: the same ID and signature in a new envelope; the
     // relay has it already.
     let mut retry = string_request(&setup, "never", 1_789_990_000, SHOP_ITEM);
+    retry["feed_seq"] = prepared["feed_seq"].clone();
     retry["op"] = json!("feed_action");
     retry["action_id"] = json!(action_id);
     retry["time"] = prepared["time"].clone();
@@ -1467,6 +1564,7 @@ fn signed_action(
 ) -> Value {
     let mut request = string_request(setup, kind, created_at, item);
     request["op"] = json!("feed_action");
+    request["feed_seq"] = prepared["feed_seq"].clone();
     request["action_id"] = prepared["action_id"].clone();
     request["time"] = prepared["time"].clone();
     let text = prepared["action_string"].as_str().unwrap();
@@ -1677,8 +1775,12 @@ fn the_keys_of_a_vault_that_is_not_selected_are_a_copy() {
             .clone()
     };
     let work_macs = |phone: &Core| macs_of(phone, &b.vault_id);
-    let in_b = json!({"op": "feed_action_string", "vault_id": b.vault_id, "mac_device": MAC_B,
-                      "agent": "4", "item": API_ITEM, "kind": "only", "created_at": 1_789_990_100u64});
+    let in_b_at = |feed_seq: u64| {
+        json!({"op": "feed_action_string", "vault_id": b.vault_id, "mac_device": MAC_B,
+               "agent": "4", "item": API_ITEM, "kind": "only", "created_at": 1_789_990_100u64,
+               "feed_seq": feed_seq})
+    };
+    let in_b = in_b_at(seq);
 
     // The feed of Work came after its keys were read at its unlock: no action from it.
     let work = work_macs(&setup.phone);
@@ -1705,6 +1807,7 @@ fn the_keys_of_a_vault_that_is_not_selected_are_a_copy() {
     let work = work_macs(&setup.phone);
     assert_eq!(work[0]["seq"], seq + 1);
     assert_eq!(work[0]["can_act"], false);
+    let in_b = in_b_at(seq + 1);
     assert_eq!(fails(&setup.phone, in_b.clone()), "invalid_input");
     // The next open of Work reads the vault again: the Mac leaves at once.
     call(&setup.phone, open_b);

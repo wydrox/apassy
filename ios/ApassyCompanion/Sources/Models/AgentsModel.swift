@@ -320,18 +320,20 @@ final class AgentsModel {
 
     // MARK: Removing an exception
 
-    /// The removal of `exception` as the feed of `entry` shows it; nil for a deleted credential.
+    /// The removal of `exception` as the feed of `entry` shows it, with the `seq` of that feed;
+    /// nil for a deleted credential.
     func removal(of exception: FeedException, in entry: AgentEntry) -> FeedRemoval? {
-        Self.removal(exception, vaultID: entry.vaultID, mac: entry.mac.device, agent: entry.agent.id)
+        Self.removal(
+            exception, vaultID: entry.vaultID, mac: entry.mac.device, agent: entry.agent.id, seq: entry.mac.seq)
     }
 
-    private static func removal(_ exception: FeedException, vaultID: String, mac: String, agent: String)
-        -> FeedRemoval?
-    {
+    private static func removal(
+        _ exception: FeedException, vaultID: String, mac: String, agent: String, seq: UInt64? = nil
+    ) -> FeedRemoval? {
         guard let item = exception.item else { return nil }
         return FeedRemoval(
             vaultID: vaultID, macDevice: mac, agent: agent, item: item, kind: exception.kind,
-            createdAt: exception.createdAt)
+            createdAt: exception.createdAt, feedSeq: seq)
     }
 
     /// Why `exception` offers no "Remove" now, or nil when it does.
@@ -339,6 +341,9 @@ final class AgentsModel {
         if exception.item == nil { return "The credential was deleted on the Mac." }
         if entry.mac.stale { return "Remove it when \(entry.mac.name) reports again." }
         if entry.agent.revoked { return "This agent is disconnected." }
+        // Apassy on that Mac is older than the names in an action (0.5.2): it takes no removal
+        // that gives authority back from this iPhone.
+        if exception.kind.needsFaceID, !entry.mac.checksNames { return AgentsText.updateMac(entry.mac.name) }
         // A vault that is not selected holds a copy of its keys from its last unlock: this list
         // came after it, perhaps from a Mac removed since (the core refuses it too). With its
         // passphrase behind Face ID, "Remove" reads them again first (`removeTapped`).
@@ -393,7 +398,7 @@ final class AgentsModel {
         await refresh()
         guard started == generation else { return false }
         guard let fresh = self.entry(entry.id), fresh.mac.canAct, fresh.agent.exceptions.contains(exception) else {
-            removals[removal] = .failed(AgentsText.listChanged(mac: entry.mac.name))
+            removals[removal] = .failed(AgentsText.listChanged(entry.mac.name))
             return false
         }
         removals[removal] = nil
@@ -402,8 +407,10 @@ final class AgentsModel {
 
     /// Remove `exception` of `entry` on its Mac: the action string of the core; for a kind that
     /// gives authority back, Face ID and the answer key of the vault's team; the post; then the
-    /// outcome that the Mac settles. The owner confirmed it before. A feed that the core cannot act
-    /// on sends nothing: `removeTapped` reads the keys again first.
+    /// outcome that the Mac settles. The owner confirmed it before, and `entry` is the list as the
+    /// confirmation showed it: the core refuses the string for another feed of that Mac, and
+    /// nothing is sent when the names that the string signs are not the ones shown. A feed that
+    /// the core cannot act on sends nothing: `removeTapped` reads the keys again first.
     func remove(_ exception: FeedException, in entry: AgentEntry) async {
         guard let removal = removal(of: exception, in: entry), removalBlock(of: exception, in: entry) == nil,
             entry.mac.canAct
@@ -420,6 +427,14 @@ final class AgentsModel {
             // The string must be of this vault and its team: no other team's key signs it.
             guard prepared.vaultID == removal.vaultID, !entry.teamID.isEmpty, prepared.teamID == entry.teamID else {
                 throw VaultError(.invalidInput, "This action is not for the team of this vault, so nothing was sent.")
+            }
+            // The names that the Mac checks are the ones the owner confirmed, byte for byte.
+            guard prepared.agentName == entry.agent.name, prepared.macName == entry.mac.name,
+                prepared.credentialName == AgentsText.shownName(exception)
+            else {
+                removals[removal] = .failed(AgentsText.listChanged(mac))
+                await refresh()
+                return
             }
             var signature: Data?
             if prepared.needsFaceID || removal.kind.needsFaceID {
@@ -549,6 +564,8 @@ final class AgentsModel {
         case .applied:
             return .removed("Removed on \(mac).")
         case .refused:
+            // A Mac of 0.5.2 takes no action that signs the names (relay-feed-v1 section 14.2).
+            if outcome.reason == AgentsText.oldMacReason { return .failed(AgentsText.updateMac(mac)) }
             let reason = outcome.reason?.trimmingCharacters(in: .whitespacesAndNewlines.union(.init(charactersIn: ".")))
             if let reason, !reason.isEmpty { return .failed("\(mac) refused it: \(reason).") }
             return .failed("\(mac) refused it.")
@@ -561,7 +578,7 @@ final class AgentsModel {
 
     static func message(for error: VaultError, mac: String) -> String {
         switch error.code {
-        case .notFound: "The list on \(mac) changed. Try again."
+        case .notFound: AgentsText.listChanged(mac)
         case .staleAction: "This took too long, so nothing was sent. Remove it again."
         case .staleFeed: "\(mac) has not reported for a day. Remove it when it reports again."
         case .notRouted: "\(mac) does not take actions from this iPhone."
@@ -616,6 +633,23 @@ enum AgentsText {
     /// section 9.6): never "removed".
     static func unverifiedSettle(mac: String) -> String { "Not applied, or unknown. Check the list on \(mac)." }
 
+    /// What to do when Apassy on `mac` is too old to take a removal from this iPhone.
+    static func updateMac(_ mac: String) -> String { "Update Apassy on \(mac) to remove this from the iPhone." }
+
+    /// The reason a Mac of 0.5.2 gives for an action that signs the names: shown as `updateMac`.
+    static let oldMacReason = "it has a bad form"
+
+    /// The list of `mac` is not the one the confirmation showed, or still cannot be acted on after
+    /// the keys were read again.
+    static func listChanged(_ mac: String) -> String { "The list on \(mac) changed. Look at it again." }
+
+    /// The name of the credential of `exception` that the confirmation shows and an action signs:
+    /// the title on this iPhone, else the Mac's title, without the words around it.
+    static func shownName(_ exception: FeedException) -> String {
+        if let title = exception.title, !title.isEmpty { return title }
+        return exception.itemTitle
+    }
+
     /// Why a feed of a vault that is not selected offers no "Remove" (its keys are a copy).
     static func selectVaultNote(_ vault: String) -> String {
         "Select \(vault) on this iPhone to remove exceptions of its agents."
@@ -630,9 +664,6 @@ enum AgentsText {
     static func keysNotRead(_ vault: String) -> String {
         "Face ID did not open \(vault). \(selectVaultNote(vault))"
     }
-
-    /// The core still cannot act on the list after the keys were read again: a newer one came.
-    static func listChanged(mac: String) -> String { "The list on \(mac) changed. Look at it again." }
 
     /// The footer of "Sees" for an agent with "only these items": the list holds its `only` rows.
     static func seesFooter(mac: String) -> String {
