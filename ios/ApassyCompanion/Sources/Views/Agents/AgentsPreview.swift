@@ -5,10 +5,12 @@ import SwiftUI
 
     extension View {
         /// A development aid of the Simulator: with `-ApassyPreviewVault -ApassyPreviewAgents
-        /// list|detail|confirm|stale`, the preview vault gets the synthetic feeds of two Macs and two
-        /// vaults (`PreviewVaultService.sampleFeed`). `detail` opens Claude Code on the Mac mini,
-        /// `confirm` opens Codex and asks to remove its exception, and `stale` opens the agent of the
-        /// MacBook Pro that has not reported for three days. No value is real.
+        /// list|detail|confirm|stale|restricted|unverified`, the preview vault gets the synthetic
+        /// feeds of two Macs and two vaults (`PreviewVaultService.sampleFeed`). `detail` opens Claude
+        /// Code on the Mac mini, `confirm` opens Codex and asks to remove its exception, `stale` opens
+        /// the agent of the MacBook Pro that has not reported for three days, `restricted` opens the
+        /// "only these items" agent of Work, and `unverified` removes one of its rows with a settle
+        /// that does not open. No value is real.
         func agentsPreviewSeed(_ model: AgentsModel?, path: Binding<[String]>) -> some View {
             modifier(AgentsPreviewSeed(model: model, path: path))
         }
@@ -58,6 +60,7 @@ import SwiftUI
                     case "detail": ("Personal", "Mac mini", "Claude Code")
                     case "confirm": ("Personal", "Mac mini", "Codex")
                     case "stale": ("Personal", "MacBook Pro", "CI on GitHub")
+                    case "restricted", "unverified": ("Work", "MacBook Pro", "Claude Code")
                     default: nil
                     }
                 guard let open,
@@ -65,6 +68,13 @@ import SwiftUI
                         .agents.first(where: { $0.agent.name == open.agent })
                 else { return }
                 path = [entry.id]
+                // `unverified`: the relay answers the removal of an "only" row with a settle that
+                // this iPhone cannot open.
+                if mode == "unverified", let only = entry.agent.exceptions.first(where: { $0.kind == .only }) {
+                    await service.scriptFeedOutcomes([.init(.applied, verified: false)])
+                    try? await Task.sleep(for: .milliseconds(800))
+                    await model.remove(only, in: entry)
+                }
             }
         }
     }

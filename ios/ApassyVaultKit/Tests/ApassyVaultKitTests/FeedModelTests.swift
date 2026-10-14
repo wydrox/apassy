@@ -416,6 +416,46 @@ import Testing
         #expect(await service.sentFeedActions().isEmpty)
     }
 
+    @Test func aMacSaysWhetherThisIPhoneCanActOnItsFeed() throws {
+        let mac = { (member: String) in
+            """
+            {"device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", "name": "Mac mini"\(member)}
+            """
+        }
+        #expect(try decode(FeedMac.self, mac("")).canAct)  // an older core
+        #expect(try decode(FeedMac.self, mac(", \"can_act\": true")).canAct)
+        #expect(try decode(FeedMac.self, mac(", \"can_act\": false")).canAct == false)
+        #expect(try decode(FeedMac.self, mac(", \"can_act\": \"no\"")).canAct)
+    }
+
+    @Test func thePreviewSendsThePreparedStringAfterANewerFeed() async throws {
+        let (service, vaults) = await previewService()
+        let target = try removal(
+            vaults, vault: "Personal", mac: PreviewVaultService.PreviewMacs.macMini, agent: "Codex",
+            agentID: "7", kind: .never)
+        let prepared = try await service.feedActionString(target, actionID: nil, time: nil)
+        // A newer feed of the Mac lands during Face ID, with the exception still in it.
+        var newer = vaults
+        newer[0].macs[0].seq = (newer[0].macs[0].seq ?? 0) + 5
+        await service.setFeed(newer)
+        _ = try await service.feedAction(
+            target, actionID: prepared.actionID, time: prepared.time, signature: Data("sig".utf8))
+        let sent = try #require(await service.sentFeedActions().first)
+        #expect(sent.feedSeq == prepared.feedSeq)
+        #expect(sent.actionString == prepared.actionString)
+
+        // The next one lands without it: the list changed, nothing is sent.
+        let again = try await service.feedActionString(target, actionID: nil, time: nil)
+        newer[0].macs[0].agents[1].exceptions = []
+        await service.setFeed(newer)
+        #expect(
+            await failure {
+                _ = try await service.feedAction(
+                    target, actionID: again.actionID, time: again.time, signature: Data("sig".utf8))
+            } == .notFound)
+        #expect(await service.sentFeedActions().count == 1)
+    }
+
     @Test func aLockDropsTheFeed() async throws {
         let (service, _) = await previewService()
         let list = try await service.feedList()

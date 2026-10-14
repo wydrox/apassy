@@ -296,6 +296,9 @@ final class AgentsModel {
         if exception.item == nil { return "The credential was deleted on the Mac." }
         if entry.mac.stale { return "Remove it when \(entry.mac.name) reports again." }
         if entry.agent.revoked { return "This agent is disconnected." }
+        // A vault that is not selected holds a copy of its keys from its last unlock: this list
+        // came after it, perhaps from a Mac removed since (the core refuses it too).
+        if !entry.mac.canAct { return AgentsText.selectVaultNote(entry.vaultName) }
         if !entry.registered {
             return "This iPhone can remove exceptions once the vault has synced from the Mac that confirmed it."
         }
@@ -348,7 +351,9 @@ final class AgentsModel {
             let outcome = try await settle(sent, vaultID: removal.vaultID, started: started)
             guard started == generation else { return }
             removals[removal] = Self.result(of: outcome, mac: mac)
-            if outcome.outcome == .applied, outcome.verified { hidden[removal] = entry.mac.seq }
+            // Hidden in the feed shown now (a newer one may have come during Face ID), until the
+            // Mac sends its next one.
+            if outcome.outcome == .applied, outcome.verified { hidden[removal] = shownSeq(of: removal) ?? entry.mac.seq }
         } catch is CancellationError {
             if started == generation { removals[removal] = nil }
             return
@@ -370,6 +375,11 @@ final class AgentsModel {
             removals[removal] = .failed(error.localizedDescription)
         }
         await refresh()
+    }
+
+    /// The `seq` of the feed of the Mac of `removal` that the list holds now.
+    private func shownSeq(of removal: FeedRemoval) -> UInt64? {
+        vaults.first { $0.vaultID == removal.vaultID }?.macs.first { $0.device == removal.macDevice }?.seq
     }
 
     /// Clear the line of an ended removal.
@@ -439,12 +449,14 @@ final class AgentsModel {
 
     /// What the owner reads after the Mac settled.
     static func result(of outcome: FeedActionOutcome, mac: String) -> Removal {
+        // A settle that does not open is the relay's word only. The one a Mac sends so is a
+        // refusal; it never shows as removed or as changed, and the row stays.
+        if !outcome.verified, [.applied, .refused, .stale].contains(outcome.outcome) {
+            return .failed(AgentsText.unverifiedSettle(mac: mac))
+        }
         switch outcome.outcome {
         case .applied:
-            return outcome.verified
-                ? .removed("Removed on \(mac).")
-                : .failed(
-                    "\(mac) reports it removed, but this iPhone could not check that answer. Sync this vault, then pull to refresh.")
+            return .removed("Removed on \(mac).")
         case .refused:
             let reason = outcome.reason?.trimmingCharacters(in: .whitespacesAndNewlines.union(.init(charactersIn: ".")))
             if let reason, !reason.isEmpty { return .failed("\(mac) refused it: \(reason).") }
@@ -458,7 +470,7 @@ final class AgentsModel {
 
     static func message(for error: VaultError, mac: String) -> String {
         switch error.code {
-        case .notFound: "The list on \(mac) changed. Pull to refresh."
+        case .notFound: "The list on \(mac) changed. Try again."
         case .staleAction: "This took too long, so nothing was sent. Remove it again."
         case .staleFeed: "\(mac) has not reported for a day. Remove it when it reports again."
         case .notRouted: "\(mac) does not take actions from this iPhone."
@@ -507,6 +519,20 @@ enum AgentsText {
             else if seconds < 86400 { seconds / 3600 == 1 ? "1 hour ago" : "\(seconds / 3600) hours ago" }
             else { seconds / 86400 == 1 ? "1 day ago" : "\(seconds / 86400) days ago" }
         return "From \(mac.name), \(when)"
+    }
+
+    /// The result of a removal whose settle this iPhone could not open (contract relay-feed-v1
+    /// section 9.6): never "removed".
+    static func unverifiedSettle(mac: String) -> String { "Not applied, or unknown. Check the list on \(mac)." }
+
+    /// Why a feed of a vault that is not selected offers no "Remove" (its keys are a copy).
+    static func selectVaultNote(_ vault: String) -> String {
+        "Select \(vault) on this iPhone to remove exceptions of its agents."
+    }
+
+    /// The footer of "Sees" for an agent with "only these items": the list holds its `only` rows.
+    static func seesFooter(mac: String) -> String {
+        "Listed for this agent on \(mac). Access granted on the Mac is not shown here."
     }
 
     /// The line of a Mac whose feed is more than a day old (contract section 5.12).

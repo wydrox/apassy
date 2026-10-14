@@ -13,6 +13,10 @@ public struct PreviewFeed: Sendable {
         public var actionID: String
         public var time: Int64
         public var signature: Data?
+        /// The `feed_seq` and the string of the prepared action that was sent: the core keeps
+        /// them by action ID.
+        public var feedSeq: UInt64?
+        public var actionString: String
     }
 
     /// The answer of one `feedActionWait`.
@@ -32,6 +36,8 @@ public struct PreviewFeed: Sendable {
     var waits: [Bool] = []
     var outcomes: [Scripted] = []
     var prepared: [PreparedFeedAction] = []
+    /// The strings that `feedActionString` made, by action ID: `feedAction` sends these.
+    var preparedByID: [String: PreparedFeedAction] = [:]
     var sent: [Sent] = []
     /// The removal of each action that `feedAction` took, by action ID.
     var posted: [String: FeedRemoval] = [:]
@@ -286,6 +292,9 @@ extension PreviewVaultService {
         }
         let found = try find(removal)
         let vault = feedState.vaults[found.vault]
+        guard vault.macs[found.mac].canAct else {
+            throw VaultError(.invalidInput, "Select this vault on this iPhone to act on the agents of its Macs.")
+        }
         guard vault.registered else {
             throw VaultError(.notRegistered, "This iPhone cannot send actions yet: the vault must sync to this iPhone first.")
         }
@@ -301,6 +310,7 @@ extension PreviewVaultService {
             needsFaceID: removal.kind.needsFaceID,
             faceIDReason: "remove an exception of agent \"\(String(agent.name.prefix(40)))\"")
         feedState.prepared.append(prepared)
+        feedState.preparedByID[id] = prepared
         return prepared
     }
 
@@ -308,9 +318,21 @@ extension PreviewVaultService {
         -> SentFeedAction
     {
         try requireFeedContext()
-        let found = try find(removal)
         let now = Int64(Date().timeIntervalSince1970)
         if time + 55 < now { throw VaultError(.staleAction, "This action is too old to send. Do it again.") }
+        // The core sends the string that it prepared, also after a newer feed of the Mac; the
+        // exception must still be in the newest feed.
+        guard let prepared = feedState.preparedByID[actionID], prepared.time == time,
+            prepared.vaultID == removal.vaultID
+        else {
+            throw VaultError(.staleAction, "This action was not prepared on this iPhone. Do it again.")
+        }
+        let macName =
+            feedState.vaults.first { $0.vaultID == removal.vaultID }?.macs.first { $0.device == removal.macDevice }?
+            .name ?? "the Mac"
+        guard let found = try? find(removal) else {
+            throw VaultError(.notFound, "The list on \(macName) changed. Try again.")
+        }
         let mac = feedState.vaults[found.vault].macs[found.mac]
         if mac.stale {
             throw VaultError(.staleFeed, "The Mac has not reported for a day. Act on it when it reports again.")
@@ -325,7 +347,10 @@ extension PreviewVaultService {
             feedState.nextActionError = nil
             throw error
         }
-        feedState.sent.append(.init(removal: removal, actionID: actionID, time: time, signature: signature))
+        feedState.sent.append(
+            .init(
+                removal: removal, actionID: actionID, time: time, signature: signature, feedSeq: prepared.feedSeq,
+                actionString: prepared.actionString))
         feedState.posted[actionID] = removal
         return SentFeedAction(
             actionID: actionID, seq: UInt64(feedState.sent.count), createdAt: now, expiresAt: now + 300)
