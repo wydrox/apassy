@@ -487,14 +487,21 @@ impl QuestionsWorker {
 
     /// "Show agents on the iPhone" (relay-feed-v1 section 8): off removes the feed of
     /// this Mac from the relay (`DELETE /v1/feed`) and stops the actions; on publishes
-    /// again. It calls the relay: run it on a thread of its own.
+    /// again. The publisher thread calls the relay, so the caller never waits.
     pub fn set_feed(&self, on: bool) {
         let was = self.shared.feed_on.swap(on, Ordering::SeqCst);
-        if was && !on {
-            self.shared.end_feed_poll();
-            self.shared.feed_off();
+        if was != on {
+            if !on {
+                self.shared.end_feed_poll();
+            }
+            self.shared.feed_switched(on);
         }
         self.shared.wake();
+    }
+
+    /// Whether "Show agents on the iPhone" is on.
+    pub fn feed_on(&self) -> bool {
+        self.shared.feed_on.load(Ordering::SeqCst)
     }
 
     /// What it takes to answer the remote question `id` of the view from this Mac: the
@@ -743,7 +750,11 @@ impl Shared {
     /// removed, or it has no row. The session goes, and the view says why.
     /// `None`: the questions are off for the vault.
     fn stand_down(&self, problem: Option<&str>) {
-        if lock(&self.state).active.is_some() {
+        let active = lock(&self.state).active.clone();
+        if let Some(active) = active {
+            // The feed of this Mac leaves the relay with the questions (relay-feed-v1
+            // section 10.5).
+            self.feed_stand_down(&active);
             self.forget();
         }
         let mut view = lock(&self.view);

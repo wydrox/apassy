@@ -53,8 +53,8 @@ const HOST: &str = "secret-host.synthetic.example";
 const TEAM: &str = "t_7k2m5q4x3c";
 const MAC_UUID: &str = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d";
 const PHONE_UUID: &str = "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
-const SHOP_UUID: &str = "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c";
-const API_UUID: &str = "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e";
+const SHOP_UUID: &str = "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c";
+const API_UUID: &str = "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e";
 const ACTION_ID: &str = "sLGys7S1tre4ubq7vL2-vw";
 const ANSWER_PRIVATE: &str = "bb684f0551ffd30d7040500bc8fa0d83efd5dbde18ea1e253f098b6ddfca5f1b";
 const ANSWER_PUBLIC: &str =
@@ -63,7 +63,7 @@ const ANSWER_PUBLIC: &str =
 const SYNC_PRIVATE: &str = "4f2d9c6e1b3a7d8f0c5e2a9b7f4d1c3e6a8b0d2f4c6e8a1b3d5f7a9c0e2b4d6f";
 const SYNC_PUBLIC: &str =
     "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA";
-const SIGNATURE: &str = "MEUCIQDL-JNMgp74rl6v619inkFkPNgRVDLWyCjH-QdHFiLgSgIgZwwg3N2Z_lW1AQ9nXjx57eGcxJ9e32f5VG3SJbV2qic";
+const SIGNATURE: &str = "MEUCIQCOrTEXw3oKicPKbs27qpgbvM95jFR7lYdT06KKIVWa-wIgT3NaBhBSf5jHK8K-zhPQ0hBmo181UGMB1WMeAjoHBRk";
 
 type SharedVault = Arc<Mutex<Option<Vault>>>;
 
@@ -208,10 +208,10 @@ fn the_contract_test_vectors_reproduce_exactly() {
     // 17.1 The feed.
     let feed = vector_feed();
     let plaintext = feed.to_plaintext();
-    assert_eq!(plaintext.len(), 927);
+    assert_eq!(plaintext.len(), 919);
     assert_eq!(
         sha256(&plaintext),
-        "9419276eb6a004d6496e626b439d01c94c24d19e0f3844e765b01da58cd0af98"
+        "5a47ba132d8e33ffd68237f2c8f5332fbf27c15f39fe14e06b9fc33415b34785"
     );
     assert_eq!(Feed::parse(&plaintext), Some(feed.clone()));
     let aad = feed_aad(TEAM, 2, 1_790_000_040, &key.key_id());
@@ -223,14 +223,14 @@ fn the_contract_test_vectors_reproduce_exactly() {
     let sealed = Sealed::with_nonce(&key, &nonce(0x30), &aad, &plaintext);
     assert_eq!(sealed.nonce, "MDEyMzQ1Njc4OTo7");
     let ciphertext = decode_b64u(&sealed.ciphertext).unwrap();
-    assert_eq!(ciphertext.len(), 943);
+    assert_eq!(ciphertext.len(), 935);
     assert_eq!(
         sha256(&ciphertext),
-        "3a5a92a71d541af1263f3e90d4db82827fd8674f671e109b47752dbb61f61043"
+        "f79d190efe856940ca7f53b5909c8e2d35d85035d3646551fd15fb70ddbca2a6"
     );
     assert_eq!(
         hex(&ciphertext[ciphertext.len() - 16..]),
-        "57cdef5d1ead09fbb024b3b879af3d10"
+        "b0d6de4e7c01d3b980b2c6b4fd344af9"
     );
     assert_eq!(
         sealed.open(&key, &aad).unwrap().as_slice(),
@@ -252,12 +252,12 @@ fn the_contract_test_vectors_reproduce_exactly() {
     let text = removal.string().unwrap();
     assert_eq!(
         text,
-        "apassy-feed-action-v1\n6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b\n0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060"
+        "apassy-feed-action-v1\n6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b\n0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060"
     );
-    assert_eq!(text.len(), 226);
+    assert_eq!(text.len(), 222);
     assert_eq!(
         sha256(text.as_bytes()),
-        "bf7b086d31906cba873ce5545b64b042f2ea8e67bd2ffd2be5b5d26058e87a0d"
+        "4555d68b3fbe31ad493893152aa08eb21342feb0dbf69e91247748a6ae81ad6d"
     );
     let signature = decode_b64u(SIGNATURE).unwrap();
     assert_eq!(signature.len(), 71);
@@ -289,10 +289,10 @@ fn the_contract_test_vectors_reproduce_exactly() {
             r#"{{"v":1,"action_id":"{ACTION_ID}","by":"{PHONE_UUID}","to":"{MAC_UUID}","kind":"remove_exception","agent":"4","item":"{SHOP_UUID}","exception":{{"kind":"never","created_at":1789990000}},"feed_seq":1790000040,"time":1790000060,"signature":"{SIGNATURE}"}}"#
         )
     );
-    assert_eq!(action.len(), 419);
+    assert_eq!(action.len(), 415);
     assert_eq!(
         sha256(&action),
-        "356dde394e065c67bc16add23183836e7bf005749627ca31a596e32f8e81d51e"
+        "22af11dac5c7a34b5ff375255a687d57b616f3307301bce022a82a7a9c74aa26"
     );
     assert_eq!(ActionBody::parse(&action), Some(body.clone()));
     let aad = action_aad(TEAM, ACTION_ID, &key.key_id(), 3, 2);
@@ -304,14 +304,14 @@ fn the_contract_test_vectors_reproduce_exactly() {
     let sealed_action = Sealed::with_nonce(&key, &nonce(0x40), &aad, &action);
     assert_eq!(sealed_action.nonce, "QEFCQ0RFRkdISUpL");
     let ciphertext = decode_b64u(&sealed_action.ciphertext).unwrap();
-    assert_eq!(ciphertext.len(), 435);
+    assert_eq!(ciphertext.len(), 431);
     assert_eq!(
         sha256(&ciphertext),
-        "db227d023e5a931dd5e96208eb78381f27a452c0db6dc453dc9922f29f4b93a8"
+        "d804b41435c71360d58e728b82f8715e5d586507b8f11d8f844b12789e887da4"
     );
     assert_eq!(
         hex(&ciphertext),
-        "83760aa3487bc22339ac8269d48132a4d0ee593a37b006168d3b816a9e555f5e85d1e847500750db7c180d6b483697bcdb715aafcf15bd4ae9a322086a5f574cff551c3b7e2b861220235deaf24a170fee3da44fc9dfc2429f05c30f367eb216a95dbb391fe5384e66eaf6e93fd854db8fc1d6ceb0b2ab28d979941a463e3768ea501aefb6d699f22d9a1c02c99bfdddfd7c80e2a4cf67d726f759e70e92ee1a4208141f7e524fc951c2e256158fef5c05ebac29bccb949f0d55496147c2adca721668fbabe886329f133e0a88c2a5a8852d6313d8b1a8599a9e54d090baf388daafb0f9aef88394fd2dd1d17ae94da471e0809a58f297dca1445b7856d52ffd318b85094841c7dafc3d91560900be56e5f679d80a7034b6bbd91f3194a3984e46fbf31bef4e009fc9594605f8734cc51c5ef7a6a11bc23583f85ddd57b8c0b89fe84609d024214c9bb156b8df32a17499c42b9db93e5328b59343b3d4f5bd6dfd7f510ebc14181e77fc16ce84944f495bb2b6128a25991a5c4d48356faf8357c590e377c72b9594ef2cfc90e70c25d470d5856f5932ab7a95df6cb8e2234c8d075eda3e9036e08067be6043ec080bb183b69f"
+        "83760aa3487bc22339ac8269d48132a4d0ee593a37b006168d3b816a9e555f5e85d1e847500750db7c180d6b483697bcdb715aafcf15bd4ae9a322086a5f574cff551c3b7e2b861220235deaf24a170fee3da44fc9dfc2429f05c30f367eb216a95dbb391fe5384e66eaf6e93fd854db8fc1d6ceb0b2ab28d979941a463e3768ea501aefb6d699f22d9a1c02c99bfdddfd7c80e2a4cf67d726f759e70e92ee1a4208141f7e524fc951c2e256158fef5c05ebac29bccb949f0d5556311192fd84701066f8b6b1d160cd5a3a0d8cc0a9ac8028785ec8b7f216dd8b58da9aa4a5dbcee3f9aabbbecac7b127969d3df50afe36f1d0d31be580dd9f514a3e33856ce732838b014148ce97e02fc74e40468740e5e304915e362fbcbade163190a3845c06a2b25cb91d5ccdd2534702f1734ac5004cb2ffea57d02891e4598b18e8e8dff089421dc6281a499aa50cc1fe34af67febb3b82bd7f1469eb985b95abab8765c81a6b139417516b56ff72c9b7bd24575eb2b1468d23810569791d4e37bd9703d98cd84eae14fd96d574a4c4985e08d904f2870a7262bc57c9c46488df3340b9c35b116c3068090c9df1df08e407c7"
     );
     // Not with the target 5 instead of 2, or the sender 4 instead of 3.
     assert!(
@@ -1362,4 +1362,472 @@ fn an_old_relay_without_the_feed_is_named_once() {
         1
     );
     assert_eq!(world.feed_puts(), 0);
+}
+
+// ---- Review fixes: masking, a hostile relay, seq, the lock, and the switch. ----
+
+/// No part of `secret` of 8 bytes or more is in `text`.
+fn no_part_of(text: &str, secret: &str) -> bool {
+    secret
+        .as_bytes()
+        .windows(8)
+        .all(|part| !text.contains(std::str::from_utf8(part).unwrap()))
+}
+
+/// The broker of the world's vault on a socket in its folder.
+fn broker_of(world: &World) -> (apassy::broker::BrokerHandle, std::path::PathBuf) {
+    use apassy::broker::BrokerOptions;
+    use apassy::broker::http::TlsClient;
+    let socket = world._root.path().join("run").join("broker.sock");
+    let options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    let broker =
+        apassy::broker::start_with(Arc::clone(&world.shared), &socket, options).expect("broker");
+    (broker, socket)
+}
+
+/// A run of `script` with `items` by the world's agent, which has no grant: the broker
+/// refuses it with `not_granted` and writes a use of each item, as every run does.
+fn refused_run(world: &World, socket: &std::path::Path, items: &[u64], script: &str) {
+    use apassy::agent::client;
+    use apassy::agent::wire::Action;
+    let answer = client::send(
+        socket,
+        &world.token,
+        Action::Run {
+            items: items.to_vec(),
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: world._root.path().display().to_string(),
+            purpose: "Deploy the synthetic shop.".into(),
+            path: Some("/usr/bin:/bin".into()),
+            user_request: Some("Deploy the synthetic shop.".into()),
+        },
+    )
+    .expect("broker answer");
+    let code = answer.error.as_ref().map(|error| error.code.as_str());
+    assert_eq!(code, Some("not_granted"), "{answer:?}");
+}
+
+/// Finding 1: the run masks the whole command with the values of every item of the
+/// request before it cuts it, so the row of one item never holds a value of another, and
+/// a value never leaves a part at the cut. The feed masks again with every value of the
+/// vault, and a cut row that ends in the start of a value has that start masked too.
+#[test]
+fn run_commands_are_masked_with_every_item_before_the_cut() {
+    let world = world();
+    let [shop, api] = world.items;
+    let (_broker, socket) = broker_of(&world);
+    // The value of the shop item crosses byte 61 (the cut before) and the last value of
+    // the API item crosses byte 256 (the cut now).
+    let padding = "p".repeat(159);
+    let tail = "e".repeat(40);
+    let script =
+        format!("deploy --api {API_SECRET} {SHOP_SECRET} {padding} --tail {API_SECRET} end {tail}");
+    let text = format!("run /bin/sh -c {script}");
+    let at = text.find(SHOP_SECRET).unwrap();
+    assert!(at < 61 && at + SHOP_SECRET.len() > 61);
+    let at = text.rfind(API_SECRET).unwrap();
+    assert!(at < 256 && at + API_SECRET.len() > 256);
+    refused_run(&world, &socket, &[shop, api], &script);
+    let rows = world.with(|vault| {
+        [shop, api].map(|item| vault.item_uses(item, 5).unwrap().remove(0).command_summary)
+    });
+    for row in &rows {
+        assert!(row.len() <= 256, "{row}");
+        assert!(
+            row.starts_with("run /bin/sh -c deploy --api [apassy:secret] [apassy:secret] p"),
+            "{row}"
+        );
+        assert!(row.ends_with("..."), "{row}");
+        for secret in [SHOP_SECRET, API_SECRET] {
+            assert!(no_part_of(row, secret), "a part of {secret} in {row}");
+        }
+    }
+
+    // The API item is not in this run: its value at the cut stays in the row of the
+    // shop item, and the feed masks its start.
+    let before = "q".repeat(228);
+    let script = format!("{before}{API_SECRET} end");
+    refused_run(&world, &socket, &[shop], &script);
+    let row = world.with(|vault| vault.item_uses(shop, 1).unwrap().remove(0).command_summary);
+    assert!(row.ends_with("SYNTH-api-..."), "{row}");
+    let me = world.me();
+    let feed = world.with(|vault| build_feed(vault, &me, 1, now()).unwrap());
+    let commands: Vec<&str> = feed.agents[0]
+        .recent
+        .iter()
+        .map(|recent| recent.command.as_str())
+        .collect();
+    assert_eq!(commands.len(), 3);
+    assert!(
+        commands[0].ends_with("q[apassy:secret]..."),
+        "{}",
+        commands[0]
+    );
+    for command in &commands {
+        assert!(command.len() <= 256, "{command}");
+        for secret in [SHOP_SECRET, API_SECRET] {
+            assert!(
+                no_part_of(command, secret),
+                "a part of {secret} in {command}"
+            );
+        }
+    }
+}
+
+/// Finding 2: a relay floods the Mac with thousands of actions that do not open. The Mac
+/// handles at most 20 of an answer, waits before it asks again, writes one Activity line
+/// for all of them, and the earlier Activity rows stay.
+#[test]
+fn a_flood_of_actions_that_do_not_open_leaves_activity_alone() {
+    let mut world = world();
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    phone.wait_feed(&world, "a feed", |_| true);
+    world.with(|vault| {
+        for index in 0..5 {
+            vault
+                .record_activity(&apassy::vault::NewActivity {
+                    agent_id: None,
+                    agent_name: "Synthetic".to_owned(),
+                    item_id: None,
+                    operation: "synthetic earlier row".to_owned(),
+                    decision: apassy::vault::ActivityDecision::Allow,
+                    reason: format!("earlier row {index}"),
+                })
+                .unwrap();
+        }
+    });
+    let ids = world.relay.inject_garbage_actions(
+        world.mac_id(),
+        phone.client.device_id().unwrap(),
+        3_000,
+    );
+    assert_eq!(ids.len(), 3_000);
+    let settled = || {
+        world
+            .relay
+            .log()
+            .iter()
+            .filter(|line| line.starts_with("POST /v1/feed/actions/") && line.ends_with("/settle"))
+            .count()
+    };
+    wait_until("the first answer", || (settled() >= 20).then_some(()));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(settled(), 20, "at most 20 of one answer, then a wait");
+    wait_until("the second answer after the wait", || {
+        (settled() >= 40).then_some(())
+    });
+    let rows = world.with(|vault| vault.recent_activity(500).unwrap());
+    for index in 0..5 {
+        let line = format!("earlier row {index}");
+        assert!(rows.iter().any(|row| row.reason == line), "{line} stays");
+    }
+    let lines = world.activity();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.as_str() == apassy::questions::feed::UNREADABLE_LINE)
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("An action from")),
+        "{lines:?}"
+    );
+}
+
+/// Finding 2: a relay serves a damaged copy of a real action first. The id gets one
+/// settle: the copy's. The real action does not get a second one and changes nothing.
+#[test]
+fn a_bad_copy_before_the_real_action_gets_the_only_settle() {
+    let mut world = world();
+    let [shop, _] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let feed = phone.wait_feed(&world, "the exception", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 1)
+    });
+    let rows = world.exceptions();
+    // Locked, the Mac reads no action: the relay has both copies before it looks.
+    world.with(|vault| vault.lock().unwrap());
+    std::thread::sleep(Duration::from_millis(300));
+    let removal = phone.removal(&world, &feed, &feed.agents[0].exceptions[0]);
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.answer.sign(text).unwrap()
+    });
+    world.relay.bad_copy_first(&removal.action_id);
+    world.with(|vault| vault.unlock(PASS).unwrap());
+    let (outcome, settle) = phone.settle(&world, &removal.action_id);
+    assert_eq!(
+        (outcome.as_str(), settle.reason.as_str()),
+        ("refused", "it could not be read")
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        world.relay.count(&format!(
+            "POST /v1/feed/actions/{}/settle",
+            removal.action_id
+        )),
+        1,
+        "one settle for one id"
+    );
+    assert_eq!(world.exceptions(), rows, "the real action did not apply");
+}
+
+/// Finding 8: the vault locks while an answer of the action poll is on its way. The Mac
+/// does not skip the action and does not settle it; after the unlock it applies it.
+#[test]
+fn an_action_that_a_lock_cut_short_is_checked_after_the_unlock() {
+    let mut world = world();
+    let [shop, _] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let feed = phone.wait_feed(&world, "the exception", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 1)
+    });
+    let shared = Arc::clone(&world.shared);
+    world.relay.on_next_actions(move || {
+        shared.lock().unwrap().as_mut().unwrap().lock().unwrap();
+    });
+    let removal = phone.removal(&world, &feed, &feed.agents[0].exceptions[0]);
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.answer.sign(text).unwrap()
+    });
+    wait_until("the lock", || {
+        world.with(|vault| vault.is_locked()).then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        world.relay.feed_action_state(&removal.action_id),
+        Some(("open".to_owned(), None)),
+        "no settle while locked"
+    );
+    world.with(|vault| vault.unlock(PASS).unwrap());
+    assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
+    assert!(world.exceptions().is_empty());
+}
+
+/// Finding 7: the read-back of the own feed follows `more`.
+#[test]
+fn the_read_back_follows_more() {
+    let mut world = world();
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    phone.wait_feed(&world, "the first feed", |_| true);
+    // The iPhone has a feed of its own too (a relay keeps one per device).
+    let other = Sealed::new(&world.key(), b"synthetic aad", b"synthetic feed").unwrap();
+    phone
+        .client
+        .put_feed(now(), &other)
+        .expect("the iPhone's feed");
+    world.worker = None;
+    let ahead = now() + 1_000;
+    world.relay.set_feed_seq(world.mac_id(), ahead);
+    // One feed in each answer: the Mac's comes on the second page.
+    world.relay.set_feed_page(Some(1));
+    world.start(config());
+    let next = wait_until("a feed after the restart", || {
+        world
+            .relay
+            .feed_of(world.mac_id())
+            .map(|(seq, ..)| seq)
+            .filter(|seq| *seq > ahead)
+    });
+    assert_eq!(next, ahead + 1, "max(that seq + 1, now)");
+}
+
+/// Finding 7: a relay that answers `seq_not_newer` again and again gets three puts, then
+/// the Mac waits.
+#[test]
+fn three_answers_seq_not_newer_make_the_mac_wait() {
+    let mut world = world();
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    phone.wait_feed(&world, "the first feed", |_| true);
+    std::thread::sleep(Duration::from_millis(1_200));
+    world.relay.set_feed_not_newer(true);
+    let before = world.feed_puts();
+    world.with(|vault| vault.set_agent_note(world.agent, "A new note.").unwrap());
+    wait_until("the first put", || {
+        (world.feed_puts() > before).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(world.feed_puts() - before, 3, "three puts, then a wait");
+    world.relay.set_feed_not_newer(false);
+    phone.wait_feed(&world, "the note after the wait", |feed| {
+        feed.agents[0].note == "A new note."
+    });
+}
+
+/// Finding 7: a retry gets `seq_not_newer`, and the relay holds that `seq` with other
+/// bytes. That is not the feed the Mac sent: it publishes again with a higher `seq`.
+#[test]
+fn a_seq_that_landed_with_other_bytes_is_published_again() {
+    let mut world = world();
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let first = phone.wait_feed(&world, "the first feed", |_| true);
+    std::thread::sleep(Duration::from_millis(1_200));
+    world.relay.lose_next_answers("PUT /v1/feed", 1);
+    world.with(|vault| vault.set_agent_note(world.agent, "A new note.").unwrap());
+    let landed = wait_until("the put whose answer was lost", || {
+        world
+            .relay
+            .feed_of(world.mac_id())
+            .map(|(seq, ..)| seq)
+            .filter(|seq| *seq > first.seq)
+    });
+    world.relay.swap_feed_bytes(world.mac_id());
+    let feed = phone.wait_feed(&world, "a good feed above it", |feed| feed.seq > landed);
+    assert_eq!(feed.agents[0].note, "A new note.");
+}
+
+/// Finding 3: "Show agents on the iPhone" off deletes the feed, on publishes it again;
+/// the feed goes when the last iPhone goes, and when the questions go off.
+#[test]
+fn the_feed_leaves_the_relay_when_it_goes_off() {
+    let mut world = world();
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    phone.wait_feed(&world, "the first feed", |_| true);
+    let deletes = || world.relay.count("DELETE /v1/feed");
+    let worker = world.worker.as_ref().unwrap();
+    assert!(worker.feed_on(), "on by default");
+    worker.set_feed(false);
+    wait_until("the delete after off", || {
+        world.relay.feed_of(world.mac_id()).is_none().then_some(())
+    });
+    assert_eq!(deletes(), 1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        world.relay.feed_of(world.mac_id()),
+        None,
+        "off publishes nothing"
+    );
+    worker.set_feed(true);
+    phone.wait_feed(&world, "a feed after on", |_| true);
+
+    // The last iPhone leaves the vault.
+    world.with(|vault| assert!(vault.remove_trusted_device(&phone.uuid).unwrap()));
+    wait_until("the delete without an iPhone", || {
+        world.relay.feed_of(world.mac_id()).is_none().then_some(())
+    });
+    assert_eq!(deletes(), 2);
+
+    // A new iPhone, then the questions go off for the vault.
+    let second = world.phone("Second iPhone", DeviceKey::generate().unwrap());
+    second.wait_feed(&world, "a feed for the new iPhone", |_| true);
+    world.with(|vault| {
+        assert!(apassy::relay::membership::disable_questions(vault).unwrap());
+    });
+    wait_until("the delete when the questions go off", || {
+        world.relay.feed_of(world.mac_id()).is_none().then_some(())
+    });
+    assert_eq!(deletes(), 3);
+}
+
+/// Finding 6: the gate takes the team and this Mac from the vault, not from the caller.
+#[test]
+fn the_gate_refuses_another_team_or_another_target() {
+    let world = world();
+    let [shop, _] = world.items;
+    let phone = world.phone("Test iPhone", answer_key());
+    let me = world.me();
+    let item_uuid = world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+        vault.item_uuid(shop).unwrap().unwrap()
+    });
+    let gate = OwnerGate::new(Arc::clone(&world.shared), None);
+    let signed = RemovalAction {
+        by: phone.uuid.clone(),
+        to: me.uuid.clone(),
+        team_id: world.team().to_owned(),
+        action_id: ACTION_ID.to_owned(),
+        agent_id: world.agent,
+        item_uuid,
+        kind: ExceptionKind::Never,
+        created_at: world.exceptions()[0].created_at,
+        feed_seq: 1,
+        time: now(),
+    };
+    let authorize = |signed: &RemovalAction| {
+        // The iPhone signs exactly what the caller says, so only the gate's own team and
+        // target can refuse it.
+        let signature = answer_key()
+            .sign(signed.string().unwrap().as_bytes())
+            .unwrap();
+        gate.authorize(
+            OwnerAction::RemoveAgentException {
+                agent_id: world.agent,
+                item_id: shop,
+                kind: ExceptionKind::Never,
+            },
+            OwnerCheck::RemoteAction {
+                signed: Box::new(signed.clone()),
+                signature,
+            },
+        )
+    };
+    let mut other_team = signed.clone();
+    other_team.team_id = "t_0000000000".to_owned();
+    assert_eq!(
+        authorize(&other_team).unwrap_err(),
+        OwnerAuthError::RemoteRejected
+    );
+    let mut other_target = signed.clone();
+    other_target.to = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4e".to_owned();
+    assert_eq!(
+        authorize(&other_target).unwrap_err(),
+        OwnerAuthError::RemoteRejected
+    );
+    assert!(
+        authorize(&signed).is_ok(),
+        "the vault's own team and target"
+    );
+}
+
+/// Section 9.4: the iPhone signs once with the `feed_seq` of the feed it showed. A newer
+/// feed of the Mac in between does not matter while the row is as that feed showed it.
+#[test]
+fn an_action_from_an_older_feed_applies_while_the_row_is_the_same() {
+    let mut world = world();
+    let [shop, _] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let older = phone.wait_feed(&world, "the exception", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 1)
+    });
+    world.with(|vault| vault.set_agent_note(world.agent, "A new note.").unwrap());
+    phone.wait_feed(&world, "a newer feed", |feed| feed.seq > older.seq);
+    let removal = phone.removal(&world, &older, &older.agents[0].exceptions[0]);
+    assert_eq!(removal.feed_seq, older.seq);
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.answer.sign(text).unwrap()
+    });
+    assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
+    assert!(world.exceptions().is_empty());
 }

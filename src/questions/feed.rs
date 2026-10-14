@@ -7,15 +7,21 @@
 //!
 //! - [`build_feed`] reads the same figures as the Agents page of the Mac
 //!   (`Vault::agent_facts`, `Vault::week_counts`), names each item by its sync UUID (in
-//!   the vault's own form: 32 lowercase hex characters, no hyphens) and its title, masks each command again with the current secret values of its item, and
-//!   sends project labels only. [`fit`] keeps the feed within its size (section 7.3).
+//!   the vault's own form: 32 lowercase hex characters, no hyphens) and its title,
+//!   masks each command again with the current secret values of every item of the
+//!   vault, and sends project labels only. [`fit`] keeps the feed within its size
+//!   (section 7.3).
 //! - The publisher (`Shared::feed_step`) seals the feed with the question key and puts it
 //!   on the relay with `seq = max(last + 1, now)` (section 8): after a change, at most
 //!   once per 10 s, and every 15 minutes, while the vault is unlocked, the questions are
-//!   on, and the vault has a live iPhone in the team. A locked Mac publishes nothing.
+//!   on, the vault has a live iPhone in the team, and "Show agents on the iPhone" is on.
+//!   A locked Mac publishes nothing. The feed leaves the relay when the setting goes off,
+//!   when the questions go off, and when the last iPhone goes.
 //! - The action handler (`Shared::actions_step`) long-polls the actions to this Mac and
-//!   checks each one as section 9.5 says, in order: it opens, it has the form, it is for
-//!   this Mac, from a live iPhone of the vault, in its 60 s window, once, for an agent and
+//!   checks at most 20 of an answer, each id once (marked before its first check, so one
+//!   id gets one settle), as section 9.5 says, in order: it opens (an action that does
+//!   not open writes no Activity line of its own), it has the form, it is for this Mac,
+//!   from a live iPhone of the vault, in its 60 s window, for an agent and
 //!   an item that are here, signed by the right key of the iPhone (through the owner gate,
 //!   [`OwnerCheck::RemoteAction`], for a removal that gives authority back), for an
 //!   exception as the feed showed it. Then it removes the row as the Mac's own "Remove
@@ -25,6 +31,7 @@
 //!
 //! [`OwnerCheck::RemoteAction`]: crate::broker::approvals::OwnerCheck::RemoteAction
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -32,7 +39,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Deserializer, Serialize};
 use zeroize::Zeroizing;
 
-use super::client::{FeedActionRecord, MAX_WAIT, QuestionsError};
+use super::client::{FeedActionRecord, FeedRecord, MAX_WAIT, QuestionsError};
 use super::envelope::{Sealed, new_nonce, parse_decimal, valid_qid};
 use super::worker::{Active, Shared, lock, unix_now};
 use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck, verify_remote_action};
@@ -59,8 +66,10 @@ pub const REMOVE_EXCEPTION: &str = "remove_exception";
 pub const MAX_FEED_BYTES: usize = 262_128;
 pub const MAX_ACTION_BYTES: usize = 4096;
 pub const MAX_SETTLE_BYTES: usize = 1024;
-/// The plaintext of a feed behind a Worker older than the contract (section 14.2).
-pub const OLD_WORKER_FEED_BYTES: usize = 96 * 1024;
+/// The plaintext of a feed behind a Worker older than the contract (section 14.2): 95 KiB,
+/// so the body (the b64u of the ciphertext and the other fields) stays within the old
+/// Worker's 128 KiB.
+pub const OLD_WORKER_FEED_BYTES: usize = 95 * 1024;
 /// The largest `seq`: 2^53 − 1.
 pub const MAX_SEQ: u64 = 9_007_199_254_740_991;
 /// The window of an action's `time` around the target's clock, both ways (section 9.4).
@@ -82,6 +91,17 @@ const IDLE_AGENT: u64 = 90 * DAY;
 const HANDLED_FOR: Duration = Duration::from_secs(10 * 60);
 /// The waits between two puts of a feed that failed for a reason that can pass.
 const RETRY_WAITS: [u64; 5] = [2, 4, 8, 16, 30];
+/// The target handles at most this many actions of one answer (section 10.7).
+pub const ACTIONS_PER_ANSWER: usize = 20;
+/// The read-back of the own feed follows `more` at most this many times.
+const MAX_FEED_PAGES: usize = 64;
+/// At most one Activity line about actions that could not be read in this time.
+const UNREADABLE_LINE_EVERY: Duration = Duration::from_secs(10 * 60);
+/// The Activity line about actions that could not be read (section 9.5 step 1).
+pub const UNREADABLE_LINE: &str =
+    "Actions through the relay could not be read. They did not count.";
+/// The name of a sender in Activity when the action does not name a device of the vault.
+const SOME_DEVICE: &str = "a device of this vault";
 /// After an early empty answer of the action long poll: 5 s, doubling to 60 s.
 const EARLY_WAIT_FIRST: Duration = Duration::from_secs(5);
 const EARLY_WAIT_MOST: Duration = Duration::from_secs(60);
@@ -265,10 +285,11 @@ fn projects_ok(projects: &[String]) -> bool {
             .all(|project| text_ok(project, 1, MAX_PROJECT_BYTES))
 }
 
-/// An item reference of a feed or an action: the native 32-hex form that this Mac
-/// sends, or the 36-character form of the contract text, as the iPhone core accepts.
+/// An item reference of a feed or an action: the vault's own form of an item UUID, 32
+/// lowercase hex characters (section 4). Exactly one form, so a reader and a target
+/// compare it byte for byte.
 pub fn valid_item_ref(text: &str) -> bool {
-    valid_item_uuid(text) || valid_uuid(text)
+    valid_item_uuid(text)
 }
 
 fn item_ok(item: Option<&String>) -> bool {
@@ -390,6 +411,7 @@ fn projects_of(projects: &[String]) -> Vec<String> {
 pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> VaultResult<Feed> {
     let week = vault.week_counts(now)?;
     let refs = vault.item_refs()?;
+    let mask = vault.vault_command_mask()?;
     let mut agents = Vec::new();
     for agent in vault.list_agents()? {
         let facts = vault.agent_facts(agent.id, now)?;
@@ -415,12 +437,10 @@ pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> Vaul
         let mut recent = Vec::new();
         for item_use in facts.uses.iter().take(MAX_RECENT) {
             let item = refs.get(&item_use.item_id);
-            // Masked again with the values of the item now: a value set after the row
-            // was written is masked too. A row whose item is gone keeps its masking.
-            let command = match item {
-                Some(_) => vault.mask_item_text(item_use.item_id, &item_use.command_summary)?,
-                None => item_use.command_summary.clone(),
-            };
+            // Masked again with the values of every item of the vault now, whatever the
+            // item of the row: a value set after the row was written, a value of another
+            // item, and a value of an item without a sync UUID are masked too.
+            let command = mask.summary(&item_use.command_summary, MAX_COMMAND_SUMMARY_BYTES);
             recent.push(FeedUse {
                 at: item_use.at,
                 item: item.map(|item| item.uuid.clone()),
@@ -428,7 +448,7 @@ pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> Vaul
                     .map_or_else(String::new, |item| cut_clean(&item.title, MAX_TITLE_BYTES)),
                 action: item_use.action.as_str().to_owned(),
                 project: cut_clean(&item_use.project_label, MAX_PROJECT_BYTES),
-                command: cut_clean(&command, MAX_COMMAND_SUMMARY_BYTES),
+                command,
                 outcome: item_use.outcome.as_str().to_owned(),
                 decided_by: item_use.decided_by.as_str().to_owned(),
                 answered_on: cut_clean(&item_use.answered_on, MAX_NAME_BYTES),
@@ -935,14 +955,24 @@ pub(super) struct FeedState {
     /// `/v1/feed` answered `404`: no feed call before this time.
     unsupported_until: Option<Instant>,
     unsupported_logged: Option<String>,
-    /// A Worker refused a feed body over 128 KiB: fit to 96 KiB until the next start.
+    /// A Worker refused a feed body over 128 KiB: fit to 95 KiB until the next start.
     old_worker: bool,
+    /// The relay may hold a feed of this Mac in the team: one landed in this run, or the
+    /// read-back found one.
+    live: bool,
+    /// The feed must leave the relay (`DELETE /v1/feed`, section 10.5): the owner turned
+    /// "Show agents on the iPhone" off, or the last iPhone left the vault.
+    delete_pending: bool,
     /// The last action `seq` handled (section 10.7).
     after: u64,
-    /// The action ids handled in the last 10 minutes.
-    handled: Vec<(String, Instant)>,
-    /// The wait after an early empty answer of the action long poll.
+    /// The action ids handled in the last 10 minutes, each marked before its first check:
+    /// one id gets at most one settle.
+    handled: HashMap<String, Instant>,
+    /// The wait after an early empty answer of the action long poll, or after an answer
+    /// whose every action was refused.
     early_wait: Option<Duration>,
+    /// When Activity last said that actions could not be read.
+    unreadable_logged: Option<Instant>,
 }
 
 impl FeedState {
@@ -952,6 +982,7 @@ impl FeedState {
                 team_id: Some(team_id.to_owned()),
                 handled: std::mem::take(&mut self.handled),
                 old_worker: self.old_worker,
+                unreadable_logged: self.unreadable_logged,
                 ..Self::default()
             };
         }
@@ -1009,6 +1040,10 @@ impl Shared {
     /// One step of the publisher (section 8).
     pub(super) fn feed_step(&self) {
         let tick = self.config.tick.max(Duration::from_millis(50));
+        if lock(&self.feed).delete_pending {
+            self.delete_step(tick);
+            return;
+        }
         let Some(active) = self.feed_session() else {
             self.sleep(Duration::from_secs(1).min(tick * 4));
             return;
@@ -1018,6 +1053,12 @@ impl Shared {
             return;
         };
         if !look.iphone {
+            // The last iPhone left the vault: the feed leaves the relay.
+            let mut feed = lock(&self.feed);
+            if feed.live {
+                feed.delete_pending = true;
+            }
+            drop(feed);
             self.sleep(tick);
             return;
         }
@@ -1057,24 +1098,88 @@ impl Shared {
         self.sleep(tick);
     }
 
-    /// Read the own feed back (`GET /v1/feed?since=0&wait=0`): its `seq`, or 0 when this
-    /// Mac has none. `None`: the relay did not answer.
-    fn own_seq(&self, active: &Active) -> Option<u64> {
-        let me = active.client.device_id()?;
-        match active.client.feeds(0, Duration::ZERO) {
-            Ok(list) => Some(
-                list.feeds
-                    .iter()
-                    .filter(|feed| feed.device_id == me)
-                    .map(|feed| feed.seq)
-                    .max()
-                    .unwrap_or(0),
-            ),
-            Err(error) => {
-                self.feed_error(active, &error);
-                None
+    /// A feed that must leave the relay: `DELETE /v1/feed` with the client of the
+    /// session, again later when it fails for a reason that can pass.
+    fn delete_step(&self, tick: Duration) {
+        let active = lock(&self.state).active.clone();
+        let Some(active) = active.filter(|_| self.config.feed) else {
+            self.sleep(tick);
+            return;
+        };
+        {
+            let mut feed = lock(&self.feed);
+            if feed.team_id.as_deref() != Some(active.team_id.as_str()) {
+                // Another team now: the feed to delete was of the team before.
+                feed.delete_pending = false;
+                return;
+            }
+            if feed.next_try.is_some_and(|at| Instant::now() < at) {
+                drop(feed);
+                self.sleep(tick);
+                return;
             }
         }
+        if !self.delete_feed_now(&active) {
+            back_off(&mut lock(&self.feed));
+        }
+        self.sleep(tick);
+    }
+
+    /// `DELETE /v1/feed` for the session `active`. True when the feed is gone or cannot
+    /// be deleted at all (a relay without the feed answers `404`); false when it may
+    /// work later.
+    pub(super) fn delete_feed_now(&self, active: &Active) -> bool {
+        let gone = match active.client.delete_feed() {
+            Ok(()) => true,
+            Err(error) => error.status() == Some(404) || !error.can_pass(),
+        };
+        if gone {
+            let mut feed = lock(&self.feed);
+            feed.delete_pending = false;
+            feed.live = false;
+            feed.last_put = None;
+            feed.last_digest = None;
+            feed.unsent = None;
+            feed.dirty = false;
+            feed.tries = 0;
+            feed.next_try = None;
+            drop(feed);
+            lock(&self.view).feed_seq = None;
+        }
+        gone
+    }
+
+    /// Read the own feed back (`GET /v1/feed?since=0&wait=0`, following `more`): its
+    /// `seq` and the digest of its envelope, or `(0, None)` when this Mac has none.
+    /// `None`: the relay did not answer.
+    fn own_feed(&self, active: &Active) -> Option<(u64, Option<[u8; 32]>)> {
+        let me = active.client.device_id()?;
+        let mut since = 0;
+        let mut own: Option<FeedRecord> = None;
+        for _ in 0..MAX_FEED_PAGES {
+            let list = match active.client.feeds(since, Duration::ZERO) {
+                Ok(list) => list,
+                Err(error) => {
+                    self.feed_error(active, &error);
+                    return None;
+                }
+            };
+            for feed in list.feeds.iter().filter(|feed| feed.device_id == me) {
+                if own.as_ref().is_none_or(|own| feed.seq > own.seq) {
+                    own = Some(feed.clone());
+                }
+            }
+            match list.feeds.iter().map(|feed| feed.change).max() {
+                Some(next) if list.more && next > since => since = next,
+                _ => break,
+            }
+        }
+        if own.is_some() {
+            lock(&self.feed).live = true;
+        }
+        Some(own.map_or((0, None), |own| {
+            (own.seq, Some(envelope_digest(&own.sealed())))
+        }))
     }
 
     /// Build, fit, seal, and put the feed of the open vault. With `force`, also when its
@@ -1087,7 +1192,7 @@ impl Shared {
         let mut last = match known {
             Some(last) => last,
             None => {
-                let last = self.own_seq(active)?;
+                let (last, _) = self.own_feed(active)?;
                 lock(&self.feed).last_seq = Some(last);
                 last
             }
@@ -1120,13 +1225,18 @@ impl Shared {
             match active.client.put_feed(seq, &sealed) {
                 Ok(_) => return Some(self.feed_landed(seq, digest)),
                 Err(error) if error.code() == Some("seq_not_newer") => {
-                    // The first put may have landed: read the own feed back.
-                    let own = self.own_seq(active)?;
-                    if own == seq {
+                    // The first put may have landed: read the own feed back. It landed
+                    // only when the relay holds this `seq` with this envelope.
+                    let (own, landed) = self.own_feed(active)?;
+                    if own == seq && landed == Some(envelope_digest(&sealed)) {
                         return Some(self.feed_landed(seq, digest));
                     }
+                    // Another feed at or above this `seq`: a new one goes above it, also
+                    // when the content did not change.
                     last = own.max(last);
-                    lock(&self.feed).last_seq = Some(last);
+                    let mut feed = lock(&self.feed);
+                    feed.last_seq = Some(last);
+                    feed.last_digest = None;
                 }
                 Err(error) if error.status() == Some(413) => {
                     let mut feed = lock(&self.feed);
@@ -1144,9 +1254,7 @@ impl Shared {
                 }
                 Err(error) if error.can_pass() => {
                     let mut feed = lock(&self.feed);
-                    let wait = RETRY_WAITS[feed.tries.min(RETRY_WAITS.len() - 1)];
-                    feed.tries += 1;
-                    feed.next_try = Some(Instant::now() + Duration::from_secs(wait));
+                    back_off(&mut feed);
                     feed.unsent = Some((seq, sealed, digest));
                     return None;
                 }
@@ -1156,6 +1264,11 @@ impl Shared {
                 }
             }
         }
+        // Three answers in a row that did not land (`seq_not_newer`): the next try
+        // waits, as after a put that failed, and the change is not lost.
+        let mut feed = lock(&self.feed);
+        back_off(&mut feed);
+        feed.dirty = true;
         None
     }
 
@@ -1209,6 +1322,7 @@ impl Shared {
             feed.last_seq = Some(seq);
             feed.last_put = Some(Instant::now());
             feed.last_digest = Some(digest);
+            feed.live = true;
             feed.tries = 0;
             feed.next_try = None;
             feed.unsupported_until = None;
@@ -1229,10 +1343,7 @@ impl Shared {
         if error.status() == Some(404) {
             self.feed_unsupported(active);
         } else if error.can_pass() {
-            let mut feed = lock(&self.feed);
-            let wait = RETRY_WAITS[feed.tries.min(RETRY_WAITS.len() - 1)];
-            feed.tries += 1;
-            feed.next_try = Some(Instant::now() + Duration::from_secs(wait));
+            back_off(&mut lock(&self.feed));
         }
     }
 
@@ -1271,16 +1382,26 @@ impl Shared {
         }
     }
 
-    /// Turn the feed off for the open vault: `DELETE /v1/feed` (section 10.5).
-    pub(super) fn feed_off(&self) {
-        let active = lock(&self.state).active.clone();
-        if let Some(active) = active {
-            let _ = active.client.delete_feed();
-        }
+    /// "Show agents on the iPhone" went off or on. Off: the publisher deletes the feed
+    /// (`DELETE /v1/feed`, section 10.5) on its own thread, so the caller never waits for
+    /// the relay. On: a delete that still waits goes, and the next feed goes at once.
+    pub(super) fn feed_switched(&self, on: bool) {
         let mut feed = lock(&self.feed);
+        feed.delete_pending = !on && self.config.feed;
         feed.last_put = None;
         feed.last_digest = None;
         feed.unsent = None;
+        feed.next_try = None;
+        feed.tries = 0;
+    }
+
+    /// The questions go off for the vault, or this Mac may no longer ask through the
+    /// relay: its feed leaves the relay now, with the client of the session, once.
+    pub(super) fn feed_stand_down(&self, active: &Active) {
+        if self.config.feed {
+            let _ = self.delete_feed_now(active);
+            lock(&self.feed).delete_pending = false;
+        }
     }
 
     // ---- The action handler. ----
@@ -1292,8 +1413,8 @@ impl Shared {
         }
     }
 
-    /// One step of the action handler: one long poll of `GET /v1/feed/actions`, then
-    /// each action once, in `seq` order (section 9.5).
+    /// One step of the action handler: one long poll of `GET /v1/feed/actions`, then at
+    /// most [`ACTIONS_PER_ANSWER`] actions, each once, in `seq` order (section 9.5).
     pub(super) fn actions_step(&self) {
         let Some(active) = self.feed_session() else {
             self.sleep(Duration::from_secs(1));
@@ -1302,7 +1423,7 @@ impl Shared {
         // The relay keeps actions only for a device that has a feed.
         let (after, published) = {
             let feed = lock(&self.feed);
-            (feed.after, feed.last_seq.is_some_and(|seq| seq > 0))
+            (feed.after, feed.live && !feed.delete_pending)
         };
         if !published {
             self.sleep(Duration::from_millis(500));
@@ -1345,42 +1466,86 @@ impl Shared {
         actions.sort_by_key(|action| action.seq);
         if actions.is_empty() {
             let early = started.elapsed() + Duration::from_secs(2) < MAX_WAIT;
-            let wait = {
-                let mut feed = lock(&self.feed);
-                if early {
-                    let wait = feed
-                        .early_wait
-                        .map_or(EARLY_WAIT_FIRST, |wait| (wait * 2).min(EARLY_WAIT_MOST));
-                    feed.early_wait = Some(wait);
-                    Some(wait)
-                } else {
-                    feed.early_wait = None;
-                    None
-                }
-            };
-            if let Some(wait) = wait {
-                self.sleep(jitter(wait));
+            if early {
+                self.wait_early();
+            } else {
+                lock(&self.feed).early_wait = None;
             }
             return;
         }
-        lock(&self.feed).early_wait = None;
-        for record in actions.iter().filter(|record| record.seq > after) {
-            self.handle_action(&active, record);
+        let mut opened = false;
+        for record in actions
+            .iter()
+            .filter(|record| record.seq > after)
+            .take(ACTIONS_PER_ANSWER)
+        {
+            match self.handle_action(&active, record) {
+                // The vault locked during the check: the action stays after `after`,
+                // and is checked again after the unlock.
+                Handled::Aborted => {
+                    self.sleep(Duration::from_millis(500));
+                    return;
+                }
+                Handled::Opened => opened = true,
+                Handled::Unopened | Handled::Seen => {}
+            }
             let mut feed = lock(&self.feed);
             feed.after = feed.after.max(record.seq);
         }
+        if opened {
+            lock(&self.feed).early_wait = None;
+        } else {
+            // No action of the answer opened: only the relay or the path makes such a
+            // list (actions that do not open, or ones handled before), and the Mac waits
+            // as after an early empty answer before it asks again.
+            self.wait_early();
+        }
     }
 
-    /// Check one action (section 9.5) and apply it when it passes; settle it.
-    fn handle_action(&self, active: &Active, record: &FeedActionRecord) {
+    /// The wait after an early empty answer: 5 s, doubling to 60 s, with jitter.
+    fn wait_early(&self) {
+        let wait = {
+            let mut feed = lock(&self.feed);
+            let wait = feed
+                .early_wait
+                .map_or(EARLY_WAIT_FIRST, |wait| (wait * 2).min(EARLY_WAIT_MOST));
+            feed.early_wait = Some(wait);
+            wait
+        };
+        self.sleep(jitter(wait));
+    }
+
+    /// Check one action (section 9.5) and apply it when it passes; settle it. Its id is
+    /// marked handled before the first step, so one id gets at most one settle; an action
+    /// that the lock of the vault cut short is not marked and gets no settle.
+    fn handle_action(&self, active: &Active, record: &FeedActionRecord) -> Handled {
+        // 6. Once: a second time is nothing, with no second settle.
+        {
+            let mut feed = lock(&self.feed);
+            feed.handled.retain(|_, at| at.elapsed() < HANDLED_FOR);
+            if feed.handled.contains_key(&record.action_id) {
+                return Handled::Seen;
+            }
+            feed.handled
+                .insert(record.action_id.clone(), Instant::now());
+        }
+        let handled = self.check_action(active, record);
+        if handled == Handled::Aborted {
+            lock(&self.feed).handled.remove(&record.action_id);
+        }
+        handled
+    }
+
+    /// Steps 1 to 5 and 7 to 10 of section 9.5 for an action marked handled.
+    fn check_action(&self, active: &Active, record: &FeedActionRecord) -> Handled {
         let Some(device_id) = active.client.device_id() else {
-            return;
+            return Handled::Aborted;
         };
         let (key, devices) = {
             let mut guard = lock(&self.vault);
             let Some(vault) = Self::vault_of(&mut guard, active) else {
-                // Locked: the action is not handled; it expires on the relay.
-                return;
+                // Locked: the action is not handled now.
+                return Handled::Aborted;
             };
             (
                 vault.question_key().ok().flatten(),
@@ -1392,55 +1557,36 @@ impl Shared {
             me: active.me.clone(),
             device_id,
         };
-        let sender_name = |opened: Option<&OpenedAction>| {
-            opened.map_or_else(
-                || {
-                    devices
-                        .iter()
-                        .find(|device| {
-                            device.relay_devices.get(&active.team_id)
-                                == Some(&record.from_device_id)
-                        })
-                        .map_or_else(
-                            || format!("device {}", record.from_device_id),
-                            |device| device.name.clone(),
-                        )
-                },
-                |opened| opened.sender.name.clone(),
-            )
-        };
         // Steps 1 to 5.
         let opened = match open_action(record, &target, key.as_ref(), &devices, unix_now()) {
             Ok(opened) => opened,
-            Err(refusal) => {
-                self.refuse_action(
+            Err(refusal) if refusal == UNREADABLE => {
+                // Anyone on the path can make an action that does not open: one Activity
+                // line in 10 minutes, and a settle that the sender cannot open.
+                self.unreadable_line(active);
+                self.settle_action(
                     active,
                     record,
                     key.as_ref(),
-                    &sender_name(None),
+                    refusal.outcome,
+                    refusal.reason,
                     None,
-                    refusal,
                 );
-                return;
+                return Handled::Unopened;
+            }
+            Err(refusal) => {
+                // It opened: the device that it names, never the one the relay stamped.
+                let name = named_sender(record, &target, key.as_ref(), &devices);
+                return self.refuse_action(active, record, key.as_ref(), &name, None, refusal);
             }
         };
-        let name = sender_name(Some(&opened));
-        // 6. Once: a second time is nothing, with no second settle.
-        {
-            let mut feed = lock(&self.feed);
-            feed.handled.retain(|(_, at)| at.elapsed() < HANDLED_FOR);
-            if feed.handled.iter().any(|(id, _)| *id == record.action_id) {
-                return;
-            }
-            feed.handled
-                .push((record.action_id.clone(), Instant::now()));
-        }
+        let name = opened.sender.name.clone();
         let removal = &opened.removal;
         // 7. An agent of this vault on this Mac that is not revoked, and a live item.
         let resolved = {
             let mut guard = lock(&self.vault);
             let Some(vault) = Self::vault_of(&mut guard, active) else {
-                return;
+                return Handled::Aborted;
             };
             let agent = vault
                 .list_agents()
@@ -1455,8 +1601,7 @@ impl Shared {
             agent.zip(item)
         };
         let Some((agent, item_id)) = resolved else {
-            self.refuse_action(active, record, key.as_ref(), &name, None, GONE);
-            return;
+            return self.refuse_action(active, record, key.as_ref(), &name, None, GONE);
         };
         let agent_line = Some((agent.id, agent.name.clone()));
         let action = OwnerAction::RemoveAgentException {
@@ -1473,8 +1618,11 @@ impl Shared {
             };
             match self.gate.authorize(action.clone(), check) {
                 Ok(proof) => Some(proof),
+                Err(OwnerAuthError::SessionChanged | OwnerAuthError::VaultLocked) => {
+                    return Handled::Aborted;
+                }
                 Err(error) => {
-                    self.refuse_action(
+                    return self.refuse_action(
                         active,
                         record,
                         key.as_ref(),
@@ -1482,14 +1630,13 @@ impl Shared {
                         agent_line,
                         reason_of(&error),
                     );
-                    return;
                 }
             }
         } else {
             if let Err(error) =
                 verify_remote_action(&opened.sender, removal, &opened.signature, unix_now())
             {
-                self.refuse_action(
+                return self.refuse_action(
                     active,
                     record,
                     key.as_ref(),
@@ -1497,7 +1644,6 @@ impl Shared {
                     agent_line,
                     reason_of(&error),
                 );
-                return;
             }
             None
         };
@@ -1506,59 +1652,74 @@ impl Shared {
         let last_seq = lock(&self.feed).last_seq.unwrap_or(0);
         let done = {
             let mut guard = lock(&self.vault);
-            match Self::vault_of(&mut guard, active) {
-                None => Err(LOCKED),
-                Some(vault) => {
-                    let exceptions = vault.agent_exceptions(agent.id).unwrap_or_default();
-                    still_shown(removal, item_id, &exceptions, last_seq).and_then(|()| {
-                        if let Some(proof) = &proof
-                            && proof.check(&action, &vault.epoch()).is_err()
-                        {
-                            return Err(LOCKED);
-                        }
-                        match vault.remove_agent_exception(agent.id, item_id, removal.kind) {
-                            Ok(true) => {
-                                let title = vault
-                                    .item_refs()
-                                    .ok()
-                                    .and_then(|refs| refs.get(&item_id).map(|r| r.title.clone()))
-                                    .unwrap_or_default();
-                                let _ = vault.record_activity(&NewActivity {
-                                    agent_id: Some(agent.id),
-                                    agent_name: agent.name.clone(),
-                                    item_id: Some(item_id),
-                                    operation: ACTIVITY_OPERATION.to_owned(),
-                                    decision: ActivityDecision::Allow,
-                                    reason: format!(
-                                        "Removed on {name}: {} for {} and {title}",
-                                        kind_words(removal.kind),
-                                        agent.name
-                                    ),
-                                });
-                                if removal.gives_authority() {
-                                    let _ = vault.record_interaction(
-                                        InteractionKind::OwnerCheck,
-                                        &action.reason(),
-                                        &[item_id],
-                                    );
-                                }
-                                Ok(())
-                            }
-                            Ok(false) => Err(CHANGED),
-                            Err(_) => Err(NOT_REMOVED),
-                        }
-                    })
-                }
+            let Some(vault) = Self::vault_of(&mut guard, active) else {
+                return Handled::Aborted;
+            };
+            if let Some(proof) = &proof
+                && proof.check(&action, &vault.epoch()).is_err()
+            {
+                return Handled::Aborted;
             }
+            let exceptions = vault.agent_exceptions(agent.id).unwrap_or_default();
+            still_shown(removal, item_id, &exceptions, last_seq).and_then(|()| {
+                match vault.remove_agent_exception(agent.id, item_id, removal.kind) {
+                    Ok(true) => {
+                        let title = vault
+                            .item_refs()
+                            .ok()
+                            .and_then(|refs| refs.get(&item_id).map(|r| r.title.clone()))
+                            .unwrap_or_default();
+                        let _ = vault.record_activity(&NewActivity {
+                            agent_id: Some(agent.id),
+                            agent_name: agent.name.clone(),
+                            item_id: Some(item_id),
+                            operation: ACTIVITY_OPERATION.to_owned(),
+                            decision: ActivityDecision::Allow,
+                            reason: format!(
+                                "Removed on {name}: {} for {} and {title}",
+                                kind_words(removal.kind),
+                                agent.name
+                            ),
+                        });
+                        if removal.gives_authority() {
+                            let _ = vault.record_interaction(
+                                InteractionKind::OwnerCheck,
+                                &action.reason(),
+                                &[item_id],
+                            );
+                        }
+                        Ok(())
+                    }
+                    Ok(false) => Err(CHANGED),
+                    Err(_) => Err(NOT_REMOVED),
+                }
+            })
         };
         if let Err(refusal) = done {
-            self.refuse_action(active, record, key.as_ref(), &name, agent_line, refusal);
-            return;
+            return self.refuse_action(active, record, key.as_ref(), &name, agent_line, refusal);
         }
         // A new feed shows the result, as soon as the 10 s limit allows.
         let feed_seq = self.publish_after_action(active);
         self.settle_action(active, record, key.as_ref(), Outcome::Applied, "", feed_seq);
         self.changed();
+        Handled::Opened
+    }
+
+    /// At most one Activity line in 10 minutes about actions that could not be read.
+    fn unreadable_line(&self, active: &Active) {
+        let due = {
+            let mut feed = lock(&self.feed);
+            let due = feed
+                .unreadable_logged
+                .is_none_or(|at| at.elapsed() >= UNREADABLE_LINE_EVERY);
+            if due {
+                feed.unreadable_logged = Some(Instant::now());
+            }
+            due
+        };
+        if due {
+            self.feed_activity(active, None, "Apassy", UNREADABLE_LINE);
+        }
     }
 
     /// Publish the feed after an applied action: wait for the 10 s limit, then put it.
@@ -1584,7 +1745,7 @@ impl Shared {
         self.publish_feed(active, false)
     }
 
-    /// An action that did not count: Activity and a settle.
+    /// An action that opened and did not count: Activity and a settle.
     fn refuse_action(
         &self,
         active: &Active,
@@ -1593,7 +1754,7 @@ impl Shared {
         device: &str,
         agent: Option<(u64, String)>,
         refusal: Refusal,
-    ) {
+    ) -> Handled {
         self.feed_activity(
             active,
             agent,
@@ -1601,6 +1762,7 @@ impl Shared {
             &format!("An action from {device} did not count: {}.", refusal.reason),
         );
         self.settle_action(active, record, key, refusal.outcome, refusal.reason, None);
+        Handled::Opened
     }
 
     /// Seal and post the settle of `record` under the current key, best effort.
@@ -1646,6 +1808,64 @@ impl Shared {
             }
         }
     }
+}
+
+/// What became of one action of an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handled {
+    /// It opened: applied, or settled `stale` or `refused`.
+    Opened,
+    /// It did not open: settled `refused`, with no Activity line of its own.
+    Unopened,
+    /// Its id was handled before: nothing, no second settle.
+    Seen,
+    /// The vault locked during the check: no settle; it is checked again after the
+    /// unlock.
+    Aborted,
+}
+
+/// The waits of the publisher after a call that failed for a reason that can pass.
+fn back_off(feed: &mut FeedState) {
+    let wait = RETRY_WAITS[feed.tries.min(RETRY_WAITS.len() - 1)];
+    feed.tries += 1;
+    feed.next_try = Some(Instant::now() + Duration::from_secs(wait));
+}
+
+/// The digest of an envelope as the relay holds it: its key, nonce, and ciphertext.
+fn envelope_digest(sealed: &Sealed) -> [u8; 32] {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for part in [&sealed.nonce, &sealed.ciphertext] {
+        let bytes = decode_b64u(part).unwrap_or_else(|| part.as_bytes().to_vec());
+        ctx.update(&(bytes.len() as u64).to_be_bytes());
+        ctx.update(&bytes);
+    }
+    ctx.update(sealed.key_id.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(ctx.finish().as_ref());
+    out
+}
+
+/// The name of the device that an action names in its `by`, when the action opens and
+/// `by` is a device of the vault; else [`SOME_DEVICE`]. The device id that the relay
+/// stamped never names it.
+fn named_sender(
+    record: &FeedActionRecord,
+    target: &Target,
+    key: Option<&QuestionKey>,
+    devices: &[TrustedDevice],
+) -> String {
+    let aad = action_aad(
+        &target.team_id,
+        &record.action_id,
+        &record.key_id,
+        record.from_device_id,
+        target.device_id,
+    );
+    key.and_then(|key| record.sealed().open(key, &aad))
+        .and_then(|plaintext| serde_json::from_slice::<serde_json::Value>(&plaintext).ok())
+        .and_then(|body| body.get("by")?.as_str().map(str::to_owned))
+        .and_then(|by| devices.iter().find(|device| device.uuid == by))
+        .map_or_else(|| SOME_DEVICE.to_owned(), |device| device.name.clone())
 }
 
 /// A sealed feed, or the same content as the last one.
@@ -1824,6 +2044,55 @@ mod tests {
         assert!(many.agents.is_empty() && many.truncated);
     }
 
+    /// Section 14.2: behind a Worker older than the contract, the fitted feed's body of
+    /// `PUT /v1/feed` (the b64u of its ciphertext and the other fields, with the longest
+    /// `seq`) stays within the old Worker's 128 KiB.
+    #[test]
+    fn a_feed_fitted_for_an_old_worker_has_a_body_within_128_kib() {
+        let agents = (1..=64)
+            .map(|id| {
+                let mut agent = agent(id, id % 3 == 0, Some(1_000 + id), 20);
+                for recent in &mut agent.recent {
+                    recent.command = "c".repeat(MAX_COMMAND_SUMMARY_BYTES);
+                    recent.project = "p".repeat(MAX_PROJECT_BYTES);
+                }
+                agent
+            })
+            .collect();
+        let mut full = feed(agents);
+        full.seq = MAX_SEQ;
+        assert!(size(&full) > OLD_WORKER_FEED_BYTES);
+        let plaintext = fit(&mut full, OLD_WORKER_FEED_BYTES, 2_000).expect("it fits");
+        assert!(plaintext.len() <= OLD_WORKER_FEED_BYTES);
+        assert!(full.truncated);
+        // The largest plaintext that fits, sealed: the body of the put.
+        let key = QuestionKey::from_bytes([7; 32]);
+        let largest = vec![b'x'; OLD_WORKER_FEED_BYTES];
+        let sealed = Sealed::new(&key, b"aad", &largest).unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "seq": MAX_SEQ,
+            "key_id": sealed.key_id,
+            "nonce": sealed.nonce,
+            "ciphertext": sealed.ciphertext,
+        }))
+        .unwrap();
+        assert!(body.len() <= 131_072, "{}", body.len());
+    }
+
+    #[test]
+    fn item_references_have_one_form() {
+        assert!(valid_item_ref("3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c"));
+        for bad in [
+            "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c",
+            "3C9E1F7A2B4D4C6E8F0A1B3D5E7F9A2C",
+            "7",
+            "",
+        ] {
+            assert!(!valid_item_ref(bad), "{bad}");
+        }
+    }
+
     #[test]
     fn a_feed_with_an_unknown_or_missing_field_is_refused() {
         let good = feed(vec![agent(1, false, None, 1)]);
@@ -1859,13 +2128,13 @@ mod tests {
             team_id: "t_7k2m5q4x3c".to_owned(),
             action_id: "sLGys7S1tre4ubq7vL2-vw".to_owned(),
             agent_id: 4,
-            item_uuid: "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c".to_owned(),
+            item_uuid: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c".to_owned(),
             kind: ExceptionKind::Never,
             created_at: 1_789_990_000,
             feed_seq: 1_790_000_040,
             time: 1_790_000_060,
         };
-        assert_eq!(removal.string().unwrap().len(), 226);
+        assert_eq!(removal.string().unwrap().len(), 222);
         let mut bad = removal.clone();
         bad.item_uuid = "a:b".to_owned();
         assert_eq!(bad.string(), None);
