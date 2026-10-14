@@ -46,4 +46,53 @@ final class VaultTabsUITests: XCTestCase {
         field.typeText("stripe")
         XCTAssertTrue(app.staticTexts["Stripe live key"].waitForExistence(timeout: 5))
     }
+
+    /// Decisions says where requests and suggestions are, never "when the Mac is connected", and
+    /// offers the pairing on Wi-Fi that brings the requests.
+    func testDecisionsSaysWhereRequestsAndSuggestionsAre() {
+        let app = launch(["-ApassyOpen", "decisions"])
+        XCTAssertTrue(app.navigationBars["Decisions"].waitForExistence(timeout: 15))
+        let suggestions = app.staticTexts["Suggestions come from your Mac. They show in Apassy on the Mac."]
+        for _ in 0..<3 where !suggestions.exists { app.swipeUp() }
+        XCTAssertTrue(suggestions.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.matching(Self.starts("Requests from agents show in Apassy on your Mac.")).firstMatch.exists)
+        XCTAssertTrue(app.buttons["Pair with the Mac on Wi-Fi"].exists)
+        XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
+    }
+
+    /// A credential's Agent use and Rules say that they are on the Mac.
+    func testCredentialSaysWhereAgentUseIs() {
+        let app = launch(["-ApassyOpen", "item:100"])
+        let agentUse = app.staticTexts.matching(Self.starts("Which agents used this credential is on your Mac.")).firstMatch
+        let rules = app.staticTexts.matching(Self.starts("The rules from your answers are kept on your Mac.")).firstMatch
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 15))
+        for _ in 0..<4 where !agentUse.exists { app.swipeUp() }
+        XCTAssertTrue(agentUse.waitForExistence(timeout: 5))
+        // The list loads the rows below as they scroll in.
+        for _ in 0..<3 where !rules.exists { app.swipeUp() }
+        XCTAssertTrue(rules.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
+    }
+
+    /// A vault whose questions are not open shows one row with Unlock; its passphrase opens its
+    /// questions, and the vault on screen stays.
+    func testLockedVaultOpensItsQuestions() {
+        let app = launch(["-ApassyOpen", "decisions", "-ApassyPreviewDecisions", "locked"])
+        let unlock = app.buttons["Unlock Family"]
+        XCTAssertTrue(unlock.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Family is locked. Unlock to see its questions."].exists)
+        let family = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Home router"))
+        XCTAssertFalse(family.firstMatch.exists)
+        unlock.tap()
+        let field = app.secureTextFields["Passphrase"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("preview passphrase\n")
+        XCTAssertTrue(family.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["Unlock Family"].exists)
+    }
+
+    private static func starts(_ text: String) -> NSPredicate {
+        NSPredicate(format: "label BEGINSWITH %@", text)
+    }
 }

@@ -11,12 +11,7 @@ struct AgentsView: View {
     @Environment(VaultUI.self) private var ui: VaultUI?
     @State private var showsConnect = false
 
-    private var reach: AgentsReach {
-        var wifiMac: String?
-        if case .paired(let session) = companion.phase { wifiMac = session.macName }
-        return AgentsReach(
-            questions: questions?.phase, removed: questions?.status.removed ?? false, wifiMac: wifiMac)
-    }
+    private var reach: AgentsReach { AgentsReach(questions: questions, companion: companion) }
 
     var body: some View {
         NavigationStack {
@@ -33,7 +28,7 @@ struct AgentsView: View {
                 case .openDecisions:
                     Button("Open Decisions") { ui?.tab = .decisions }
                         .buttonStyle(.bordered)
-                case nil:
+                case .pairOnWiFi, nil:
                     EmptyView()
                 }
             }
@@ -50,6 +45,37 @@ struct AgentsView: View {
         ) {
             if let questions { ConnectQuestionsView(model: questions) }
         }
+    }
+}
+
+extension AgentsReach {
+    /// The state of this iPhone: the questions through the relay, and the Mac paired on Wi-Fi.
+    @MainActor
+    init(questions: QuestionsModel?, companion: AppModel?) {
+        var wifiMac: String?
+        if case .paired(let session) = companion?.phase { wifiMac = session.macName }
+        self.init(questions: questions?.phase, removed: questions?.status.removed ?? false, wifiMac: wifiMac)
+    }
+}
+
+/// A part of the Mac's vault that does not reach this iPhone: where it lives (`AgentsReach.note`),
+/// and the one action that helps now.
+struct MacPlaceRow: View {
+    let note: String
+    var action: AgentsReach.Action?
+    var perform: (AgentsReach.Action) -> Void = { _ in }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(note, systemImage: "laptopcomputer")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if let action {
+                Button(action.title) { perform(action) }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

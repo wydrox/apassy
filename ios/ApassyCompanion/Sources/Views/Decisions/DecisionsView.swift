@@ -20,8 +20,9 @@ enum DecisionRoute: Hashable {
 
 /// Decisions (ADR 0026 §8, mockup screen 5): what blocks an agent now, with a timer, then the
 /// requests and the suggestions. Questions through the relay and the runs of the Mac on this Wi-Fi
-/// are one list. Requests and suggestions live in the Mac's vault and do not reach the iPhone yet,
-/// so their sections say so and show nothing else.
+/// are one list. Suggestions live in the Mac's vault and do not reach the iPhone yet, and requests
+/// come only from a Mac paired on Wi-Fi, so their sections say where they are (`AgentsReach`). A
+/// vault whose questions are not open shows one row with Unlock.
 struct DecisionsView: View {
     @Environment(RootModel.self) private var root: RootModel?
     let questions: QuestionsModel?
@@ -77,6 +78,13 @@ struct DecisionsView: View {
             ApprovalsView(app: companion)
                 .presentationDragIndicator(.visible)
         }
+        // The passphrase of a locked vault, for its questions only: the vault on screen stays.
+        .sheet(
+            item: Binding(get: { questions?.unlockPrompt }, set: { questions?.unlockPrompt = $0 }),
+            onDismiss: { questions?.unlockPromptClosed() }
+        ) { locked in
+            if let questions { QuestionsUnlockSheet(model: questions, locked: locked) }
+        }
         // The owner opened a notification: it holds no question, so open the newest one. Only on
         // a free screen: never when the owner opened something while the list was read again, and
         // never over a question or a run that still waits, which the owner may be about to answer.
@@ -119,6 +127,13 @@ struct DecisionsView: View {
                     }
                 }
                 if waiting.isEmpty { emptyWaiting }
+                if let questions, questions.phase != .locked {
+                    ForEach(questions.lockedVaults) { locked in
+                        LockedVaultRow(locked: locked, opening: questions.opening.contains(locked.id)) {
+                            Task { await questions.unlockTapped(locked) }
+                        }
+                    }
+                }
                 if let session, session.state != .connected, !session.runs.isEmpty {
                     Text("\(session.macName) does not answer. Its runs are the last known.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -135,10 +150,10 @@ struct DecisionsView: View {
                         Text("No requests").font(.subheadline).foregroundStyle(.secondary)
                     }
                 } else {
-                    macOnly
+                    macPlace(.requests)
                 }
             }
-            Section("Suggestions") { macOnly }
+            Section("Suggestions") { macPlace(.suggestions) }
             if !ended.isEmpty, let questions {
                 Section("Ended") {
                     ForEach(ended) { question in
@@ -163,10 +178,16 @@ struct DecisionsView: View {
         }
     }
 
-    private var macOnly: some View {
-        Text("Available when the Mac is connected")
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
+    /// A part of the Mac's vault that does not reach this iPhone: where it is, and the one action.
+    private func macPlace(_ place: AgentsReach.Place) -> some View {
+        let reach = AgentsReach(questions: questions, companion: companion)
+        return MacPlaceRow(note: reach.note(place), action: reach.action(place)) { action in
+            switch action {
+            case .pairOnWiFi: showsMac = true
+            case .connect: showsConnect = true
+            case .openDecisions: break
+            }
+        }
     }
 
     /// Nothing waits: why, and the way to connect this iPhone when the questions are not set up.
@@ -193,7 +214,7 @@ struct DecisionsView: View {
                     .buttonStyle(.bordered)
             }
             .padding(.vertical, 4)
-        case .off:
+        case .off where questions?.lockedVaults.isEmpty ?? true:
             VStack(alignment: .leading, spacing: 8) {
                 Label("Nothing waits", systemImage: "checkmark.circle")
                     .font(.headline)
@@ -313,6 +334,106 @@ private struct WaitingRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A vault whose questions are not open now: one row with Unlock (Face ID when its passphrase is
+/// stored, else the passphrase sheet).
+private struct LockedVaultRow: View {
+    let locked: LockedVault
+    let opening: Bool
+    let unlock: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "lock.fill")
+                .foregroundStyle(.secondary)
+                .frame(width: 36)
+                .accessibilityHidden(true)
+            Text(locked.text)
+                .font(.subheadline)
+            Spacer(minLength: 8)
+            if opening {
+                ProgressView()
+                    .accessibilityLabel("Opening \(locked.name)")
+            } else {
+                Button("Unlock", action: unlock)
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Unlock \(locked.name)")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// The passphrase of a locked vault, to read its questions. The core opens the vault, reads what
+/// the questions need, and closes it again: the vault on screen does not change. The field is
+/// cleared when the app leaves the screen and when the sheet closes.
+struct QuestionsUnlockSheet: View {
+    let model: QuestionsModel
+    let locked: LockedVault
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
+    @State private var passphrase = ""
+    @State private var message: String?
+    @FocusState private var focused: Bool
+
+    private var working: Bool { model.opening.contains(locked.id) }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("Passphrase", text: $passphrase)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.go)
+                        .focused($focused)
+                        .onSubmit(unlock)
+                        .disabled(working)
+                } header: {
+                    Text("Passphrase of “\(locked.name)”")
+                } footer: {
+                    if let message {
+                        Text(message).foregroundStyle(.red)
+                    } else {
+                        Text("Apassy opens the questions of “\(locked.name)” only. The vault on screen stays as it is.")
+                    }
+                }
+            }
+            .navigationTitle("Unlock “\(locked.name)”")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        passphrase = ""
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if working {
+                        ProgressView()
+                    } else {
+                        Button("Unlock", action: unlock)
+                            .disabled(passphrase.isEmpty)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .onAppear { focused = true }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { passphrase = "" }
+        }
+        .onDisappear { passphrase = "" }
+    }
+
+    private func unlock() {
+        let typed = passphrase
+        guard !typed.isEmpty else { return }
+        passphrase = ""
+        message = nil
+        Task { message = await model.unlockQuestions(locked, passphrase: typed) }
     }
 }
 
