@@ -426,8 +426,16 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 g.tone_row(problem, Tone::Critical.text());
             }
             if was {
+                // As the relay row above: the switch on the line of its label, and the
+                // problem of the feed under them, in the warning tone (the questions go
+                // on without the feed).
                 let before = feed_shown;
-                g.toggle(SHOW_AGENTS, feed_problem.as_deref(), &mut feed_shown);
+                let problem = feed_problem
+                    .as_deref()
+                    .map(|problem| kit::text(problem, Font::Callout).color(Tone::Warning.text()));
+                g.line_note(SHOW_AGENTS, None, problem, |ui| {
+                    kit::toggle(ui, &mut feed_shown, SHOW_AGENTS);
+                });
                 if feed_shown != before {
                     switch_feed = Some(feed_shown);
                 }
