@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import worker, { type RelayService } from "../src/index.ts";
-import { MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "../src/limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "../src/limits.ts";
 
 const SECRET = "edge-secret-synthetic-0123456789abcdef0123";
 const PUBLIC = "https://apassy-relay.wyderka.cc";
@@ -531,6 +531,112 @@ describe("snapshot push", () => {
       assert.equal(seen.length, 1, `${method} ${path}`);
     }
     assert.deepEqual(sync.keys, []);
+  });
+});
+
+describe("feed put", () => {
+  it("has the 352 KiB cap of the contract", () => {
+    assert.equal(MAX_FEED_LENGTH, 360448);
+  });
+
+  it("passes a put of exactly the cap, with its length and body", async () => {
+    const body = "f".repeat(MAX_FEED_LENGTH);
+    const response = await call("/v1/feed", {
+      method: "PUT",
+      body,
+      headers: { "content-length": String(MAX_FEED_LENGTH) },
+    }, { RELAY: vpc() });
+    assert.equal(response.status, 201);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.method, "PUT");
+    assert.equal(seen[0]!.url, "/v1/feed");
+    assert.deepEqual(values(seen[0]!, "content-length"), [String(MAX_FEED_LENGTH)]);
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+    assert.equal(seen[0]!.body.length, MAX_FEED_LENGTH);
+    assert.equal(seen[0]!.body.toString(), body);
+  });
+
+  it("refuses a put above the cap before the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const declared of [String(MAX_FEED_LENGTH + 1), String(MAX_SNAPSHOT_LENGTH), "99999999999999999999"]) {
+      const response = await call("/v1/feed", { method: "PUT", body: "x", headers: { "content-length": declared } }, {
+        RELAY: relay,
+      });
+      assert.equal(response.status, 413, declared);
+      assert.equal(response.headers.get("content-type"), "application/json", declared);
+      const body = await envelope(response);
+      assert.equal(body.ok, false, declared);
+      assert.equal(body.error.code, "payload_too_large", declared);
+      assert.equal(body.error.message, "The feed body is larger than 352 KiB.", declared);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("refuses a missing, non-numeric, or chunked length before the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const headers of [
+      {},
+      { "content-length": "" },
+      { "content-length": "abc" },
+      { "content-length": "3, 3" },
+      { "content-length": "3", "transfer-encoding": "chunked" },
+      { "transfer-encoding": "chunked" },
+    ] as Record<string, string>[]) {
+      const label = JSON.stringify(headers);
+      const response = await call("/v1/feed", { method: "PUT", body: "abc", headers }, { RELAY: relay });
+      assert.equal(response.status, 400, label);
+      assert.equal(response.headers.get("content-type"), "application/json", label);
+      assert.equal((await envelope(response)).error.code, "invalid_request", label);
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("raises the cap for PUT /v1/feed only", async () => {
+    const routes: [string, string][] = [
+      ["PUT", "/v1/feed/"],
+      ["POST", "/v1/feed"],
+      ["POST", "/v1/feed/actions"],
+      ["POST", "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw/settle"],
+      ["PUT", "/v1/questions"],
+      ["DELETE", "/v1/feed"],
+    ];
+    const { forwarded, relay } = recordingRelay();
+    for (const [method, path] of routes) {
+      const response = await call(path, {
+        method,
+        body: "x",
+        headers: { "content-length": String(MAX_JSON_LENGTH + 1) },
+      }, { RELAY: relay });
+      assert.equal(response.status, 413, `${method} ${path}`);
+      assert.equal((await envelope(response)).error.code, "payload_too_large", `${method} ${path}`);
+    }
+    assert.equal(forwarded.length, 0);
+    for (const [method, path] of routes) {
+      const response = await call(path, {
+        method,
+        body: "x",
+        headers: { "content-length": String(MAX_JSON_LENGTH) },
+      }, { RELAY: relay });
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.equal(forwarded.length, routes.length);
+    assert.ok(forwarded.every((f) => f.headers.get("content-length") === String(MAX_JSON_LENGTH)));
+  });
+
+  it("forwards the feed reads with path and query unchanged", async () => {
+    for (const path of [
+      "/v1/feed?since=0&wait=25",
+      "/v1/feed/actions?after=0&wait=25",
+      "/v1/feed/actions/sLGys7S1tre4ubq7vL2-vw?wait=25",
+    ]) {
+      const response = await call(path, {}, { RELAY: vpc() });
+      assert.equal(response.status, 201, path);
+      assert.equal(seen.length, 1, path);
+      assert.equal(seen[0]!.method, "GET", path);
+      assert.equal(seen[0]!.url, path, path);
+      assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET], path);
+      assert.deepEqual(vpcTargets, ["http://relay" + path], path);
+    }
   });
 });
 

@@ -10,7 +10,7 @@
 // the length limits live in limits.ts. Type exports are fine: they are erased.
 
 import { handleInternal, type PushEnv } from "./apns.ts";
-import { MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "./limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "./limits.ts";
 
 /** A Workers VPC service binding: a tunnel from the relay's host, no public origin. */
 export interface RelayService {
@@ -60,6 +60,8 @@ const VPC_ORIGIN = "http://relay";
 
 /** The vault snapshot push, the one relay route with a body larger than the proxy's. */
 const SNAPSHOT_PATH = "/v1/sync/snapshot";
+/** The sealed feed put (relay-feed-v1), the one JSON route with a body above MAX_JSON_LENGTH. */
+const FEED_PATH = "/v1/feed";
 /** The agent proxy prefix (SPEC 12). */
 const PROXY_PREFIX = "/p/";
 
@@ -81,13 +83,22 @@ function jsonError(status: number, code: string, message: string, extra: Record<
 // tiny_http reads and drops the rest of a declared body after an early answer, on any
 // path (an unknown path, a wrong method, a bad token, SPEC 24.10). So the edge bounds
 // the declared `Content-Length` of every request with a body before the relay sees it:
-// the snapshot push up to MAX_SNAPSHOT_LENGTH, the agent proxy up to MAX_PROXY_LENGTH,
-// everything else up to MAX_JSON_LENGTH. A push must declare its length. Elsewhere a
+// the snapshot push up to MAX_SNAPSHOT_LENGTH, the feed put (`PUT /v1/feed` exactly) up
+// to MAX_FEED_LENGTH, the agent proxy up to MAX_PROXY_LENGTH, everything else up to
+// MAX_JSON_LENGTH. A snapshot push and a feed put must declare their length. Elsewhere a
 // request without one has no body or a chunked one, which tiny_http does not drain.
 function lengthError(request: Request, path: string): Response | undefined {
-  const push = request.method === "PUT" && path === SNAPSHOT_PATH;
+  const snapshot = request.method === "PUT" && path === SNAPSHOT_PATH;
+  const feed = request.method === "PUT" && path === FEED_PATH;
+  const push = snapshot || feed;
   if (push && request.headers.has("transfer-encoding")) {
-    return jsonError(400, "invalid_request", "Send the snapshot with Content-Length, not Transfer-Encoding.");
+    return jsonError(
+      400,
+      "invalid_request",
+      snapshot
+        ? "Send the snapshot with Content-Length, not Transfer-Encoding."
+        : "Send the feed with Content-Length, not Transfer-Encoding.",
+    );
   }
   const declared = request.headers.get("content-length");
   if (declared === null && !push) return undefined;
@@ -95,9 +106,13 @@ function lengthError(request: Request, path: string): Response | undefined {
   if (!/^[0-9]{1,20}$/.test(length)) {
     return jsonError(400, "invalid_request", push ? "Content-Length is required." : "Content-Length is not a number.");
   }
-  if (push) {
+  if (snapshot) {
     if (Number(length) > MAX_SNAPSHOT_LENGTH) {
       return jsonError(413, "payload_too_large", "The snapshot is larger than 64 MiB.");
+    }
+  } else if (feed) {
+    if (Number(length) > MAX_FEED_LENGTH) {
+      return jsonError(413, "payload_too_large", "The feed body is larger than 352 KiB.");
     }
   } else if (path.startsWith(PROXY_PREFIX)) {
     if (Number(length) > MAX_PROXY_LENGTH) {
