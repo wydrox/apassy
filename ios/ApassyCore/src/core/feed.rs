@@ -2026,9 +2026,9 @@ mod tests {
     const ACTION_ID: &str = "sLGys7S1tre4ubq7vL2-vw";
     const ANSWER_PUBLIC: &str =
         "BAotqUNjRqTfgIY4YuJGS5yZV2N5Jat0I5dFMlv29IqSFmgkZk2dzWe-n2AcgOt933rMrBOrK054Bc7RwNTeyts";
-    const SIGNATURE: &str = "MEUCIQDL-JNMgp74rl6v619inkFkPNgRVDLWyCjH-QdHFiLgSgIgZwwg3N2Z_lW1AQ9nXjx57eGcxJ9e32f5VG3SJbV2qic";
-    const FEED: &str = r#"{"v":1,"mac":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"MacBook Pro"},"seq":1790000040,"generated_at":1790000040,"truncated":false,"week":{"by_you":3,"automatic":128},"agents":[{"id":"4","name":"Claude Code","host":"claude","where":"mac","revoked":false,"token_expires_at":1797776000,"last_use_at":1790000010,"uses_this_week":12,"projects":["synthetic-shop"],"note":"Deploys only from the main branch.","restricted":false,"actions":[{"action":"deploy","allowed":2,"not_allowed":1,"projects":["synthetic-shop"]}],"exceptions":[{"item":"3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c","item_title":"Shop database","kind":"never","created_at":1789990000}],"recent":[{"at":1790000010,"item":"8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e","item_title":"API token","action":"deploy","project":"synthetic-shop","command":"npm run deploy -- --token [apassy:secret]","outcome":"allowed","decided_by":"owner","answered_on":"Test iPhone"}]}]}"#;
-    const ACTION: &str = r#"{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"MEUCIQDL-JNMgp74rl6v619inkFkPNgRVDLWyCjH-QdHFiLgSgIgZwwg3N2Z_lW1AQ9nXjx57eGcxJ9e32f5VG3SJbV2qic"}"#;
+    const SIGNATURE: &str = "MEUCIQCOrTEXw3oKicPKbs27qpgbvM95jFR7lYdT06KKIVWa-wIgT3NaBhBSf5jHK8K-zhPQ0hBmo181UGMB1WMeAjoHBRk";
+    const FEED: &str = r#"{"v":1,"mac":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"MacBook Pro"},"seq":1790000040,"generated_at":1790000040,"truncated":false,"week":{"by_you":3,"automatic":128},"agents":[{"id":"4","name":"Claude Code","host":"claude","where":"mac","revoked":false,"token_expires_at":1797776000,"last_use_at":1790000010,"uses_this_week":12,"projects":["synthetic-shop"],"note":"Deploys only from the main branch.","restricted":false,"actions":[{"action":"deploy","allowed":2,"not_allowed":1,"projects":["synthetic-shop"]}],"exceptions":[{"item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","item_title":"Shop database","kind":"never","created_at":1789990000}],"recent":[{"at":1790000010,"item":"8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e","item_title":"API token","action":"deploy","project":"synthetic-shop","command":"npm run deploy -- --token [apassy:secret]","outcome":"allowed","decided_by":"owner","answered_on":"Test iPhone"}]}]}"#;
+    const ACTION: &str = r#"{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"MEUCIQCOrTEXw3oKicPKbs27qpgbvM95jFR7lYdT06KKIVWa-wIgT3NaBhBSf5jHK8K-zhPQ0hBmo181UGMB1WMeAjoHBRk"}"#;
     const SETTLE: &str = r#"{"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","outcome":"applied","reason":"","feed_seq":1790000070,"at":1790000061}"#;
 
     fn unhex(text: &str) -> Vec<u8> {
@@ -2055,7 +2055,7 @@ mod tests {
             device_id: 2,
             feed_seq: 1_790_000_040,
             agent: "4".to_owned(),
-            item: "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c".to_owned(),
+            item: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c".to_owned(),
             kind: "never".to_owned(),
             created_at: 1_789_990_000,
         }
@@ -2063,10 +2063,10 @@ mod tests {
 
     #[test]
     fn the_feed_vector_seals_opens_and_parses() {
-        assert_eq!(FEED.len(), 927);
+        assert_eq!(FEED.len(), 919);
         assert_eq!(
             sha256(FEED.as_bytes()),
-            "9419276eb6a004d6496e626b439d01c94c24d19e0f3844e765b01da58cd0af98"
+            "5a47ba132d8e33ffd68237f2c8f5332fbf27c15f39fe14e06b9fc33415b34785"
         );
         let aad = feed_aad(TEAM, 2, 1_790_000_040, KEY_ID);
         assert_eq!(
@@ -2075,14 +2075,14 @@ mod tests {
         );
         let key = unhex(KEY);
         let sealed = envelope::seal(&key, &nonce(0x30), &aad, FEED.as_bytes()).unwrap();
-        assert_eq!(sealed.len(), 943);
+        assert_eq!(sealed.len(), 935);
         assert_eq!(
             sha256(&sealed),
-            "3a5a92a71d541af1263f3e90d4db82827fd8674f671e109b47752dbb61f61043"
+            "f79d190efe856940ca7f53b5909c8e2d35d85035d3646551fd15fb70ddbca2a6"
         );
         assert_eq!(
             hex(&sealed[sealed.len() - 16..]),
-            "57cdef5d1ead09fbb024b3b879af3d10"
+            "b0d6de4e7c01d3b980b2c6b4fd344af9"
         );
         let opened = envelope::open(&key, &nonce(0x30), &aad, &sealed).unwrap();
         let feed = parse_feed(&opened).expect("the vector parses");
@@ -2144,10 +2144,10 @@ mod tests {
     #[test]
     fn the_action_string_and_envelope_match_the_vectors() {
         let text = action_string(PHONE, MAC, TEAM, ACTION_ID, &vector_target(), 1_790_000_060);
-        assert_eq!(text.len(), 226);
+        assert_eq!(text.len(), 222);
         assert_eq!(
             sha256(text.as_bytes()),
-            "bf7b086d31906cba873ce5545b64b042f2ea8e67bd2ffd2be5b5d26058e87a0d"
+            "4555d68b3fbe31ad493893152aa08eb21342feb0dbf69e91247748a6ae81ad6d"
         );
         let public = decode_b64u(ANSWER_PUBLIC).unwrap();
         let signature = decode_b64u(SIGNATURE).unwrap();
@@ -2166,7 +2166,7 @@ mod tests {
         assert_eq!(String::from_utf8(plaintext.clone()).unwrap(), ACTION);
         assert_eq!(
             sha256(&plaintext),
-            "356dde394e065c67bc16add23183836e7bf005749627ca31a596e32f8e81d51e"
+            "22af11dac5c7a34b5ff375255a687d57b616f3307301bce022a82a7a9c74aa26"
         );
         let aad = action_aad(TEAM, ACTION_ID, KEY_ID, 3, 2);
         assert_eq!(
@@ -2174,10 +2174,10 @@ mod tests {
             "6170617373792d666565642d763100616374696f6e00745f376b326d35713478336300734c4779733753317472653475627137764c322d7677003633306463643239363663343333363600330032"
         );
         let sealed = envelope::seal(&unhex(KEY), &nonce(0x40), &aad, &plaintext).unwrap();
-        assert_eq!(sealed.len(), 435);
+        assert_eq!(sealed.len(), 431);
         assert_eq!(
             sha256(&sealed),
-            "db227d023e5a931dd5e96208eb78381f27a452c0db6dc453dc9922f29f4b93a8"
+            "d804b41435c71360d58e728b82f8715e5d586507b8f11d8f844b12789e887da4"
         );
         for aad in [
             action_aad(TEAM, ACTION_ID, KEY_ID, 3, 5),

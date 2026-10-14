@@ -1148,8 +1148,10 @@ impl OwnerGate {
     /// Verify the signature of an action of the feed (relay-feed-v1 section 9.5 step 8):
     /// only the removal of a `never` or `always_ask` exception, whose agent and kind are
     /// the signed ones and whose item has the signed UUID; the live trusted device from
-    /// the vault in the session `epoch`; the window; and the signature of its answer key
-    /// over the action string. Only this action makes a proof through `RemoteAction`,
+    /// the vault in the session `epoch`; the team (the questions team of the vault) and
+    /// the target (the trusted device of this Mac in it), rebuilt from the vault and not
+    /// taken from the caller; the window; and the signature of its answer key over the
+    /// action string. Only this action makes a proof through `RemoteAction`,
     /// and no other remote check makes a proof for it.
     fn check_remote_action(
         &self,
@@ -1172,24 +1174,40 @@ impl OwnerGate {
         if signed.agent_id != *agent_id || signed.kind != *kind {
             return Err(OwnerAuthError::RemoteRejected);
         }
-        let (device, item_uuid) = {
+        let other = |error: crate::vault::VaultError| OwnerAuthError::Other(error.to_string());
+        let (device, item_uuid, team_id, me) = {
             let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
-                Some(vault) if !vault.is_locked() && vault.epoch() == epoch => (
-                    vault
-                        .trusted_device(&signed.by)
-                        .map_err(|error| OwnerAuthError::Other(error.to_string()))?,
-                    vault
-                        .item_uuid(*item_id)
-                        .map_err(|error| OwnerAuthError::Other(error.to_string()))?,
-                ),
+                Some(vault) if !vault.is_locked() && vault.epoch() == epoch => {
+                    // The team and this Mac come from the vault, never from the caller:
+                    // the questions team of the vault and the trusted device of this Mac
+                    // in it.
+                    let membership =
+                        crate::relay::membership::questions_membership(vault).map_err(other)?;
+                    let me = match &membership {
+                        Some(membership) => {
+                            crate::relay::membership::this_device(vault, membership)
+                                .map_err(other)?
+                        }
+                        None => None,
+                    };
+                    (
+                        vault.trusted_device(&signed.by).map_err(other)?,
+                        vault.item_uuid(*item_id).map_err(other)?,
+                        membership.map(|membership| membership.team_id),
+                        me.map(|me| me.uuid),
+                    )
+                }
                 _ => return Err(OwnerAuthError::SessionChanged),
             }
         };
         let Some(device) = device else {
             return Err(OwnerAuthError::RemoteRejected);
         };
-        if item_uuid.as_deref() != Some(signed.item_uuid.as_str()) {
+        if item_uuid.as_deref() != Some(signed.item_uuid.as_str())
+            || team_id.as_deref() != Some(signed.team_id.as_str())
+            || me.as_deref() != Some(signed.to.as_str())
+        {
             return Err(OwnerAuthError::RemoteRejected);
         }
         let now = SystemTime::now()

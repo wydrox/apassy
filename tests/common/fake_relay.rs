@@ -195,6 +195,9 @@ struct Relay {
     max_bytes: u64,
     log: Vec<String>,
     before_put: Option<Hook>,
+    /// Runs after the relay made the next answer of `GET /v1/feed/actions` that holds an
+    /// action, before the answer goes.
+    after_actions: Option<Hook>,
     stopped: bool,
     /// Requests that start with the prefix wait this long before the answer.
     delays: Vec<(String, Duration)>,
@@ -219,6 +222,10 @@ struct Relay {
     feed_body_limit: Option<usize>,
     /// A relay without team schema 6: every `/v1/feed` route answers `404`.
     no_feed: bool,
+    /// At most this many feeds in one answer of `GET /v1/feed`, then `more: true`.
+    feed_page: Option<usize>,
+    /// A relay that answers every `PUT /v1/feed` with `409 seq_not_newer`.
+    feed_not_newer: bool,
 }
 
 /// A running fake relay. It stops when dropped.
@@ -310,6 +317,12 @@ impl FakeRelay {
     /// pushes in the middle.
     pub fn on_next_put(&self, hook: impl FnOnce() + Send + 'static) {
         lock(&self.shared.0).before_put = Some(Box::new(hook));
+    }
+
+    /// Run `hook` after the relay made the next answer of `GET /v1/feed/actions` that
+    /// holds an action, before it sends it: the Mac locks while the answer is on its way.
+    pub fn on_next_actions(&self, hook: impl FnOnce() + Send + 'static) {
+        lock(&self.shared.0).after_actions = Some(Box::new(hook));
     }
 
     /// Answer each request that starts with `prefix` (`"GET /v1/sync/snapshot"`) after
@@ -572,6 +585,101 @@ impl FakeRelay {
         self.shared.1.notify_all();
     }
 
+    /// At most `page` feeds in one answer of `GET /v1/feed`, then `more: true` (section
+    /// 10.4). `None`: every feed.
+    pub fn set_feed_page(&self, page: Option<usize>) {
+        lock(&self.shared.0).feed_page = page;
+    }
+
+    /// A hostile relay answers every `PUT /v1/feed` with `409 seq_not_newer`.
+    pub fn set_feed_not_newer(&self, not_newer: bool) {
+        lock(&self.shared.0).feed_not_newer = not_newer;
+    }
+
+    /// A hostile relay keeps the `seq` of the feed of `device_id` and serves other
+    /// bytes with it: the envelope of another feed (its ciphertext with one bit flipped).
+    pub fn swap_feed_bytes(&self, device_id: u64) {
+        let id = self.team_id();
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(&id).expect("team");
+        team.feed_change += 1;
+        let change = team.feed_change;
+        let feed = team.feeds.get_mut(&device_id).expect("a feed");
+        let mut bytes = decode_b64u(&feed.ciphertext).expect("b64u");
+        bytes[0] ^= 1;
+        feed.ciphertext = encode_b64u(&bytes);
+        feed.change = change;
+        drop(relay);
+        self.shared.1.notify_all();
+    }
+
+    /// A hostile relay puts `count` open actions to `to_device` "from" `from_device`
+    /// whose envelopes open with no key: random bytes. Returns their ids.
+    pub fn inject_garbage_actions(
+        &self,
+        to_device: u64,
+        from_device: u64,
+        count: usize,
+    ) -> Vec<String> {
+        let id = self.team_id();
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(&id).expect("team");
+        let at = now();
+        let mut ids = Vec::new();
+        for index in 0..count {
+            let digest = sha256_hex(format!("garbage-{index}-{at}").as_bytes());
+            let mut raw = [0u8; 16];
+            for (byte, pair) in raw.iter_mut().zip(digest.as_bytes().chunks(2)) {
+                *byte = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+            }
+            let action_id = encode_b64u(&raw);
+            team.feed_action_seq += 1;
+            team.feed_actions.push(FakeAction {
+                action_id: action_id.clone(),
+                seq: team.feed_action_seq,
+                from_device,
+                to_device,
+                key_id: "630dcd2966c43366".to_owned(),
+                nonce: encode_b64u(&raw[..12]),
+                ciphertext: encode_b64u(digest.as_bytes()),
+                created_at: at,
+                expires_at: at + 300,
+                state: "open".to_owned(),
+                outcome: None,
+                settled_at: None,
+                settle: None,
+            });
+            ids.push(action_id);
+        }
+        drop(relay);
+        self.shared.1.notify_all();
+        ids
+    }
+
+    /// A hostile relay serves a damaged copy of the open action `action_id` first: the
+    /// copy gets the next `seq`, and the real one the `seq` after it.
+    pub fn bad_copy_first(&self, action_id: &str) {
+        let id = self.team_id();
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(&id).expect("team");
+        let at = team
+            .feed_actions
+            .iter()
+            .position(|action| action.action_id == action_id)
+            .expect("the action");
+        let mut bad = team.feed_actions[at].clone();
+        let mut bytes = decode_b64u(&bad.ciphertext).expect("b64u");
+        bytes[0] ^= 1;
+        bad.ciphertext = encode_b64u(&bytes);
+        team.feed_action_seq += 1;
+        bad.seq = team.feed_action_seq;
+        team.feed_action_seq += 1;
+        team.feed_actions[at].seq = team.feed_action_seq;
+        team.feed_actions.insert(at, bad);
+        drop(relay);
+        self.shared.1.notify_all();
+    }
+
     /// The state and the clear outcome of the action `action_id`.
     pub fn feed_action_state(&self, action_id: &str) -> Option<(String, Option<String>)> {
         let id = self.team_id();
@@ -742,6 +850,14 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
         Some(status) => fail(status, "relay_error"),
         None => route(shared, &request),
     };
+    if line == "GET /v1/feed/actions"
+        && String::from_utf8_lossy(&answer.body).contains("\"action_id\"")
+    {
+        let hook = lock(&shared.0).after_actions.take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     if lost {
         return;
     }
@@ -1868,6 +1984,9 @@ fn put_feed(
     if feed.size > FEED_BYTES {
         return fail(413, "payload_too_large");
     }
+    if relay.feed_not_newer {
+        return fail(409, "seq_not_newer");
+    }
     let every = relay.feed_every;
     let team = relay.teams.get_mut(team_id).expect("team");
     if let Some(stored) = team.feeds.get(&device_id) {
@@ -1936,6 +2055,10 @@ fn list_feeds<'a>(
         .filter(|(_, feed)| feed.change > since)
         .collect();
     feeds.sort_by_key(|(_, feed)| feed.change);
+    let more = relay.feed_page.is_some_and(|page| feeds.len() > page);
+    if let Some(page) = relay.feed_page {
+        feeds.truncate(page.max(1));
+    }
     let present: Vec<u64> = team.feeds.keys().copied().collect();
     let feeds: Vec<Value> = feeds
         .iter()
@@ -1950,7 +2073,7 @@ fn list_feeds<'a>(
                    "ciphertext": feed.ciphertext, "updated_at": feed.updated_at})
         })
         .collect();
-    ok(json!({"change": team.feed_change, "more": false, "present": present, "feeds": feeds}))
+    ok(json!({"change": team.feed_change, "more": more, "present": present, "feeds": feeds}))
 }
 
 /// `POST /v1/feed/actions`: 400, 413, 403 `not_routed`, 404 (no feed), 409 `conflict`.
