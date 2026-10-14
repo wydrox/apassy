@@ -9,7 +9,14 @@ struct AgentDetailView: View {
     let model: AgentsModel
     /// `AgentEntry.id`.
     let id: String
-    @State private var confirming: FeedException?
+    /// The exception and the list as the tap saw them: the alert shows only these, and the removal
+    /// is of this list (its feed `seq` and names), whatever feed lands while the alert is up.
+    @State private var confirming: Confirmation?
+
+    struct Confirmation: Equatable {
+        let exception: FeedException
+        let entry: AgentEntry
+    }
 
     var body: some View {
         if let entry = model.entry(id) {
@@ -19,19 +26,21 @@ struct AgentDetailView: View {
             .navigationTitle(entry.agent.name)
             .navigationBarTitleDisplayMode(.inline)
             .alert(
-                confirming.map { AgentsText.confirmTitle($0, agent: entry.agent.name, mac: entry.mac.name) } ?? "",
+                confirming.map {
+                    AgentsText.confirmTitle($0.exception, agent: $0.entry.agent.name, mac: $0.entry.mac.name)
+                } ?? "",
                 isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                 presenting: confirming
-            ) { exception in
+            ) { shown in
                 Button("Remove", role: .destructive) {
-                    Task { await model.remove(exception, in: entry) }
+                    Task { await model.remove(shown.exception, in: shown.entry) }
                 }
                 Button("Cancel", role: .cancel) {}
-            } message: { exception in
-                Text(AgentsText.confirmMessage(exception, agent: entry.agent.name, mac: entry.mac.name))
+            } message: { shown in
+                Text(AgentsText.confirmMessage(shown.exception, agent: shown.entry.agent.name, mac: shown.entry.mac.name))
             }
             #if DEBUG && targetEnvironment(simulator)
-                .agentsConfirmSeed(entry) { confirming = $0 }
+                .agentsConfirmSeed(entry) { confirming = Confirmation(exception: $0, entry: entry) }
             #endif
         } else {
             ContentUnavailableView(
@@ -240,7 +249,7 @@ struct AgentDetailView: View {
                     ProgressView()
                         .accessibilityLabel(text)
                 } else if block == nil {
-                    Button("Remove") { confirming = exception }
+                    Button("Remove") { confirming = Confirmation(exception: exception, entry: entry) }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.capsule)
                         .tint(.red)
