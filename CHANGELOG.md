@@ -4,6 +4,22 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-14
+
+### Upgrade notes
+
+- Update the Mac and the iPhone together. An iPhone on 0.5.3 removes an exception only on a Mac with 0.5.3; for a Mac on 0.5.2 it says "Update Apassy on <Mac>". A Mac on 0.5.3 no longer takes the removal of a "Never" or "Always ask" exception from an iPhone on 0.5.2.
+
+### Security
+
+- **What you confirm is what is removed:** removing an exception from the iPhone now signs the names it showed (agent, credential, Mac) and the list they came from. The Mac checks those names against its own vault, again at the moment it removes the row, and removes nothing when they differ. A feed with false names on real exceptions no longer gets an exception removed ([relay feed v1](docs/contracts/relay-feed-v1.md) §9.3, §15).
+
+### Fixed
+
+- **Mac, Settings > Devices:** the summary counts an iPhone linked through the relay ("1 iPhone"), not only one paired on this network.
+- **Mac, Settings > Devices > Relay:** "Remove…" lines up with the switches above it.
+- **iPhone, Agents:** on a vault that is not selected, "Remove" is offered when its passphrase is kept behind Face ID. Face ID reads that vault's keys again first, then the confirmation shows.
+
 ## [0.5.2] - 2026-10-14
 
 ### Added
