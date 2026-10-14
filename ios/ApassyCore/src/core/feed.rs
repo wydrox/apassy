@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -89,6 +89,14 @@ pub(super) struct Mirror {
     pub(super) titles: Option<BTreeMap<String, String>>,
     /// The actions that this process posted, by `action_id`.
     actions: BTreeMap<String, Posted>,
+    /// The action strings that `feed_action_string` made, by `action_id`: `feed_action`
+    /// checks the signature against this exact string, also when a newer feed of its Mac
+    /// came in between (Face ID takes a while; an active Mac publishes every few seconds).
+    prepared: BTreeMap<String, Pending>,
+    /// The keys of the context when the shown feed of each Mac was accepted. The keys of a
+    /// vault that is not selected are what the vault held when it was last open: a feed
+    /// accepted after that may come from a Mac removed since, so it offers no action.
+    under: BTreeMap<u64, Weak<Keys>>,
     /// The exceptions that an applied action removed, hidden until the next feed of their
     /// Mac (section 9.6: "The row leaves the list at once").
     hidden: Vec<Target>,
@@ -168,6 +176,34 @@ impl Problem {
     }
 }
 
+/// An action string that `feed_action_string` made, and what its action needs.
+#[derive(Clone)]
+struct Pending {
+    prepared: Prepared,
+    /// The `trusted_device` UUID of this iPhone and of the target Mac.
+    by: String,
+    to: String,
+    to_device: u64,
+    /// The name of the Mac's row, for the texts.
+    mac_name: String,
+    target: Target,
+    /// The answer key of this iPhone's row when the string was made.
+    answer_key: Option<Vec<u8>>,
+}
+
+impl Pending {
+    /// Whether `input` at `time` asks for this action.
+    fn is_for(&self, input: &ActionIn, time: u64) -> bool {
+        self.prepared.vault_id == input.vault_id
+            && self.prepared.time == time
+            && self.to == input.mac_device
+            && self.target.agent == input.agent
+            && plain_uuid(&self.target.item) == plain_uuid(&input.item)
+            && self.target.kind == input.kind
+            && self.target.created_at == input.created_at
+    }
+}
+
 /// An action that this process posted.
 struct Posted {
     to_device: u64,
@@ -183,6 +219,20 @@ struct Target {
     item: String,
     kind: String,
     created_at: u64,
+}
+
+impl Target {
+    /// Whether `exception` of the agent `agent` is the exception of this target, in any
+    /// feed of its Mac.
+    fn names(&self, agent: &str, exception: &Exception) -> bool {
+        self.agent == agent
+            && exception
+                .item
+                .as_deref()
+                .is_some_and(|item| plain_uuid(item) == plain_uuid(&self.item))
+            && exception.kind == self.kind
+            && exception.created_at == self.created_at
+    }
 }
 
 // ---- The feed plaintext (section 7.1). ----
@@ -528,9 +578,11 @@ fn parse_settle(plaintext: &[u8], action_id: &str, outcome: &str) -> Option<Sett
 
 /// The prompt reason of Face ID for an action on the agent `name` (section 9.4).
 fn face_id_reason(name: &str) -> String {
-    let name: String = name
+    // The sanitizer of the list: control and format characters (U+202E, the zero-width
+    // ones) show as `?`, never as themselves.
+    let name: String = text(name)
         .chars()
-        .filter(|c| !c.is_control() && *c != '"')
+        .filter(|c| *c != '"')
         .take(PROMPT_NAME_CHARS)
         .collect();
     format!("remove an exception of agent \"{name}\"")
@@ -624,16 +676,14 @@ impl Keys {
     }
 
     /// The publisher of a feed of the relay device `device_id` that names `uuid`: a live
-    /// trusted Mac of this vault whose device number in this team, when set, is
-    /// `device_id` (section 7.4, step 4).
+    /// trusted Mac of this vault whose device number in this team is `device_id` (section
+    /// 7.4, step 4). A Mac whose number has not synced to this copy of the vault yet
+    /// publishes nothing here: its feed is ignored, without a text.
     fn publisher(&self, uuid: &str, device_id: u64) -> Option<&TrustedDevice> {
         self.devices.iter().find(|device| {
             device.kind == TrustedDeviceKind::Mac
                 && device.uuid == uuid
-                && device
-                    .relay_devices
-                    .get(&self.team_id)
-                    .is_none_or(|id| *id == device_id)
+                && device.relay_devices.get(&self.team_id) == Some(&device_id)
         })
     }
 
@@ -685,6 +735,9 @@ struct MacOut {
     truncated: bool,
     /// The text of section 7.4 when the last feed of this Mac could not be shown.
     problem: Option<String>,
+    /// This iPhone can act on this feed: its vault is the selected one, or the keys of its
+    /// vault were read after the feed came. False: select the vault first.
+    can_act: bool,
     week: Option<Week>,
     agents: Vec<AgentOut>,
 }
@@ -749,7 +802,7 @@ struct Waited {
     changed: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Prepared {
     vault_id: String,
     team_id: String,
@@ -816,6 +869,63 @@ fn list_gone() -> CoreError {
         "not_found",
         "This list of the Mac changed. Look at it again.",
     )
+}
+
+/// The exception of a prepared action is not in the newest feed of its Mac.
+fn list_changed(mac: &str) -> CoreError {
+    CoreError::new(
+        "not_found",
+        format!("The list on {mac} changed. Try again."),
+    )
+}
+
+fn not_prepared() -> CoreError {
+    CoreError::new(
+        "stale_action",
+        "This action was not prepared on this iPhone. Do it again.",
+    )
+}
+
+/// The Face ID signature of the action string `text`. `prepared_key` is the answer key
+/// of this iPhone's row when the string was made, `row_key` the one it holds now: two
+/// keys are a real change of the key (`not_registered`); a signature that does not verify
+/// with the unchanged key is not of this string (`invalid_input`).
+fn face_id_signature(
+    prepared_key: Option<&[u8]>,
+    row_key: Option<&[u8]>,
+    text: &[u8],
+    signature: Option<&str>,
+) -> CoreResult<Vec<u8>> {
+    let Some(row_key) = row_key else {
+        return Err(CoreError::new(
+            "not_registered",
+            "Connect this iPhone again on a Mac to use Face ID here.",
+        ));
+    };
+    if prepared_key != Some(row_key) {
+        return Err(CoreError::new(
+            "not_registered",
+            "The answer key of this iPhone changed. Connect this iPhone again on a Mac.",
+        ));
+    }
+    let signature = signature
+        .and_then(decode_b64u)
+        .ok_or_else(|| CoreError::invalid("This action needs Face ID."))?;
+    if !verify_signature(row_key, text, &signature) {
+        return Err(CoreError::invalid(
+            "Face ID did not sign this action, so nothing was sent. Try again.",
+        ));
+    }
+    Ok(signature)
+}
+
+/// Whether the shown feed of `device_id` came before the keys of the context were last
+/// read from its vault.
+fn keys_after_feed(mirror: &Mirror, keys: &Arc<Keys>, device_id: u64) -> bool {
+    mirror
+        .under
+        .get(&device_id)
+        .is_some_and(|under| !std::ptr::eq(under.as_ptr(), Arc::as_ptr(keys)))
 }
 
 /// The error of a relay call of the feed for the owner.
@@ -951,15 +1061,10 @@ struct Using {
     keys: Arc<Keys>,
 }
 
-/// An action that passed the checks, ready to sign and seal.
+/// An action string that passed the checks, kept until `feed_action` signs and seals it.
 struct Ready {
     using: Using,
-    own: TrustedDevice,
-    to: String,
-    to_device: u64,
-    target: Target,
-    stale: bool,
-    prepared: Prepared,
+    pending: Pending,
 }
 
 impl Core {
@@ -986,7 +1091,7 @@ impl Core {
                     }
                 };
                 let time = input.time.unwrap_or_else(now);
-                Ok(ok(&self.prepare_action(&input, &action_id, time)?.prepared))
+                Ok(ok(&self.feed_action_string(&input, &action_id, time)?))
             }
             "feed_action" => {
                 let input: ActionIn = params(request)?;
@@ -1255,6 +1360,7 @@ impl Core {
                         mirror.hidden.retain(|hidden| hidden.device_id != device_id);
                         mirror.problems.remove(&device_id);
                         mirror.shown.insert(device_id, feed);
+                        mirror.under.insert(device_id, Arc::downgrade(&keys));
                         changed = true;
                     }
                     Read::Problem(problem) => {
@@ -1274,6 +1380,7 @@ impl Core {
             let before = mirror.shown.len() + mirror.problems.len();
             mirror.shown.retain(|id, _| present.contains(id));
             mirror.problems.retain(|id, _| present.contains(id));
+            mirror.under.retain(|id, _| present.contains(id));
             changed |= mirror.shown.len() + mirror.problems.len() != before;
             let next = if answer.more {
                 last
@@ -1314,7 +1421,13 @@ impl Core {
             titles: Option<BTreeMap<String, String>>,
             hidden: Vec<Target>,
             error: Option<&'static str>,
+            /// The Macs whose feed this iPhone can act on.
+            acts: BTreeSet<u64>,
         }
+        let selected_id = match &selected {
+            Selected::Unlocked(id) => Some(id.as_str()),
+            _ => None,
+        };
         let copies: Vec<Snapshot> = guard(&self.questions)
             .contexts
             .iter()
@@ -1326,6 +1439,16 @@ impl Core {
                 titles: context.feed.titles.clone(),
                 hidden: context.feed.hidden.clone(),
                 error: context.feed.error,
+                acts: context
+                    .feed
+                    .shown
+                    .keys()
+                    .copied()
+                    .filter(|device_id| {
+                        selected_id == Some(id.as_str())
+                            || keys_after_feed(&context.feed, &context.keys, *device_id)
+                    })
+                    .collect(),
             })
             .collect();
         let at = now();
@@ -1344,10 +1467,7 @@ impl Core {
                         copy.hidden.iter().any(|hidden| {
                             hidden.device_id == *device_id
                                 && hidden.feed_seq == feed.seq
-                                && hidden.agent == agent
-                                && exception.item.as_deref() == Some(hidden.item.as_str())
-                                && exception.kind == hidden.kind
-                                && exception.created_at == hidden.created_at
+                                && hidden.names(agent, exception)
                         })
                     };
                     let name = text(&row.name);
@@ -1355,6 +1475,7 @@ impl Core {
                         device: feed.mac.device.clone(),
                         relay_device_id: *device_id,
                         problem: copy.problems.get(device_id).map(|p| p.text(&name)),
+                        can_act: copy.acts.contains(device_id),
                         name,
                         seq: Some(feed.seq),
                         generated_at: Some(feed.generated_at),
@@ -1384,6 +1505,7 @@ impl Core {
                         device: row.uuid.clone(),
                         relay_device_id: *device_id,
                         problem: Some(problem.text(&name)),
+                        can_act: false,
                         name,
                         seq: None,
                         generated_at: None,
@@ -1428,6 +1550,7 @@ impl Core {
         let selected = self.feed_refresh()?;
         let using = self.feed_context(&input.vault_id, &selected)?;
         let own = using.keys.own_row()?;
+        let is_selected = matches!(&selected, Selected::Unlocked(id) if *id == input.vault_id);
         let shown = |core: &Self| {
             guard(&core.questions)
                 .contexts
@@ -1445,7 +1568,11 @@ impl Core {
                                     .publisher(&feed.mac.device, **device_id)
                                     .is_some()
                         })
-                        .map(|(device_id, feed)| (*device_id, Arc::clone(feed)))
+                        .map(|(device_id, feed)| {
+                            let acts = is_selected
+                                || keys_after_feed(&context.feed, &context.keys, *device_id);
+                            (*device_id, Arc::clone(feed), acts)
+                        })
                 })
         };
         let mut found = shown(self);
@@ -1454,7 +1581,12 @@ impl Core {
             self.feed_fetch_one(&using.vault_id, &using.member, Duration::ZERO, None)?;
             found = shown(self);
         }
-        let (to_device, feed) = found.ok_or_else(list_gone)?;
+        let (to_device, feed, acts) = found.ok_or_else(list_gone)?;
+        let mac_name = using
+            .keys
+            .publisher(&feed.mac.device, to_device)
+            .map(|row| text(&row.name))
+            .ok_or_else(list_gone)?;
         let agent = feed
             .agents
             .iter()
@@ -1476,6 +1608,13 @@ impl Core {
             })
             .ok_or_else(list_gone)?;
         let item = exception.item.clone().ok_or_else(list_gone)?;
+        if !acts {
+            // The keys of a vault that is not selected are a copy of its last unlock: the
+            // Mac may have been removed from it since this feed came.
+            return Err(CoreError::invalid(
+                "Select this vault on this iPhone to act on the agents of its Macs.",
+            ));
+        }
         let needs_face_id = exception.kind != "only";
         if needs_face_id && own.answer_key.is_none() {
             return Err(CoreError::new(
@@ -1510,16 +1649,48 @@ impl Core {
             face_id_reason: face_id_reason(&agent.name),
         };
         Ok(Ready {
-            stale: is_stale(feed.generated_at, now()),
-            to: feed.mac.device.clone(),
-            to_device,
-            target,
-            own,
+            pending: Pending {
+                prepared,
+                by: own.uuid.clone(),
+                to: feed.mac.device.clone(),
+                to_device,
+                mac_name,
+                target,
+                answer_key: own.answer_key.clone(),
+            },
             using,
-            prepared,
         })
     }
 
+    /// `feed_action_string`: the action string, kept by `action_id` for `feed_action`.
+    /// The same `action_id` and `time` for the same exception gives the same string.
+    fn feed_action_string(
+        &self,
+        input: &ActionIn,
+        action_id: &str,
+        time: u64,
+    ) -> CoreResult<Prepared> {
+        let Ready { using, pending } = self.prepare_action(input, action_id, time)?;
+        let mut state = guard(&self.questions);
+        let context = state.context_mut(&using.vault_id, &using.member)?;
+        let kept = &mut context.feed.prepared;
+        if let Some(earlier) = kept.get(action_id)
+            && earlier.is_for(input, time)
+        {
+            return Ok(earlier.prepared.clone());
+        }
+        let prepared = pending.prepared.clone();
+        kept.insert(action_id.to_owned(), pending);
+        while kept.len() > KEEP_ACTIONS {
+            kept.pop_first();
+        }
+        Ok(prepared)
+    }
+
+    /// `feed_action`: sign and seal the action that `feed_action_string` prepared, with
+    /// its exact string. A newer feed of the Mac in between is no reason to refuse: the
+    /// Mac takes any `feed_seq` up to its last one (section 9.5). The exception must still
+    /// be in the newest feed this iPhone holds.
     fn feed_action(&self, input: &ActionIn) -> CoreResult<SentOut> {
         let at = now();
         let time = input
@@ -1529,6 +1700,9 @@ impl Core {
             .action_id
             .as_deref()
             .ok_or_else(|| CoreError::invalid("The action needs its ID."))?;
+        if !valid_action_id(action_id) {
+            return Err(CoreError::invalid("The action ID is not valid."));
+        }
         if time + ACTION_RETRY_SECONDS < at {
             return Err(CoreError::new(
                 "stale_action",
@@ -1538,40 +1712,96 @@ impl Core {
         if time > at + ACTION_WINDOW_SECONDS {
             return Err(CoreError::invalid("The action has a time in the future."));
         }
-        let ready = self.prepare_action(input, action_id, time)?;
-        if ready.stale {
+        if guard(&self.list).get(&input.vault_id).is_none() {
+            return Err(not_open(false));
+        }
+        let selected = self.feed_refresh()?;
+        let using = self.feed_context(&input.vault_id, &selected)?;
+        let own = using.keys.own_row()?;
+        if !using.keys.is_removed() {
+            // The newest feeds; without the relay, the ones this iPhone holds.
+            let _ = self.feed_fetch_one(&using.vault_id, &using.member, Duration::ZERO, None);
+        }
+        let (pending, newest, hidden) = {
+            let state = guard(&self.questions);
+            let context = state
+                .contexts
+                .get(&input.vault_id)
+                .filter(|context| Arc::ptr_eq(&context.member, &using.member))
+                .ok_or_else(CoreError::locked)?;
+            let pending = context
+                .feed
+                .prepared
+                .get(action_id)
+                .cloned()
+                .ok_or_else(not_prepared)?;
+            let newest = context.feed.shown.get(&pending.to_device).cloned();
+            let hidden = context.feed.hidden.clone();
+            (pending, newest, hidden)
+        };
+        if !pending.is_for(input, time) {
+            return Err(CoreError::invalid(
+                "This action is not the one that was prepared.",
+            ));
+        }
+        let changed = || list_changed(&pending.mac_name);
+        let target = &pending.target;
+        let newest = newest
+            .filter(|feed| {
+                feed.mac.device == pending.to
+                    && using
+                        .keys
+                        .publisher(&feed.mac.device, pending.to_device)
+                        .is_some()
+            })
+            .ok_or_else(changed)?;
+        let agent = newest
+            .agents
+            .iter()
+            .find(|agent| agent.id == target.agent)
+            .ok_or_else(changed)?;
+        if agent.revoked {
+            return Err(CoreError::invalid("This agent is disconnected on the Mac."));
+        }
+        let exception = agent
+            .exceptions
+            .iter()
+            .find(|exception| target.names(&agent.id, exception))
+            .ok_or_else(changed)?;
+        if hidden.iter().any(|hidden| {
+            hidden.device_id == pending.to_device
+                && hidden.feed_seq == newest.seq
+                && hidden.names(&agent.id, exception)
+        }) {
+            return Err(changed());
+        }
+        if is_stale(newest.generated_at, at) {
             return Err(CoreError::new(
                 "stale_feed",
                 "The Mac has not reported for a day. Act on it when it reports again.",
             ));
         }
-        let member = &ready.using.member;
-        let keys = &ready.using.keys;
-        let text = ready.prepared.action_string.as_bytes();
-        let signature = if ready.prepared.needs_face_id {
-            let answer_key = ready.own.answer_key.as_deref().ok_or_else(|| {
-                CoreError::new(
-                    "not_registered",
-                    "Connect this iPhone again on a Mac to use Face ID here.",
-                )
-            })?;
-            let signature = input
-                .signature
-                .as_deref()
-                .and_then(decode_b64u)
-                .ok_or_else(|| CoreError::invalid("This action needs Face ID."))?;
-            if !verify_signature(answer_key, text, &signature) {
-                return Err(CoreError::new(
-                    "not_registered",
-                    "The answer key of this iPhone changed. Connect this iPhone again on a Mac.",
-                ));
-            }
-            signature
+        if own.uuid != pending.by {
+            return Err(CoreError::new(
+                "not_registered",
+                "The row of this iPhone changed in the vault. Connect this iPhone again on a Mac.",
+            ));
+        }
+        let member = &using.member;
+        let keys = &using.keys;
+        let text = pending.prepared.action_string.as_bytes();
+        let signature = if pending.prepared.needs_face_id {
+            face_id_signature(
+                pending.answer_key.as_deref(),
+                own.answer_key.as_deref(),
+                text,
+                input.signature.as_deref(),
+            )?
         } else {
             if input.signature.is_some() {
                 return Err(CoreError::invalid("This action is signed by the core."));
             }
-            if member.public_key() != ready.own.sign_key.as_slice() {
+            if member.public_key() != own.sign_key.as_slice() {
                 return Err(CoreError::new(
                     "not_registered",
                     "This iPhone cannot send actions yet: the vault must sync to this iPhone first.",
@@ -1585,9 +1815,9 @@ impl Core {
             .ok_or_else(|| CoreError::new("unreadable", "Sync this vault to act on its agents."))?;
         let plaintext = Zeroizing::new(action_plaintext(
             action_id,
-            &ready.own.uuid,
-            &ready.to,
-            &ready.target,
+            &pending.by,
+            &pending.to,
+            target,
             time,
             &encode_b64u(&signature),
         ));
@@ -1604,14 +1834,14 @@ impl Core {
             action_id,
             key_id,
             keys.device_id,
-            ready.to_device,
+            pending.to_device,
         );
         let sealed = envelope::seal(key, &nonce, &aad, &plaintext)
             .ok_or_else(|| CoreError::internal("The action cannot be sealed."))?;
         let body = json!({
             "v": 1,
             "action_id": action_id,
-            "to_device": ready.to_device,
+            "to_device": pending.to_device,
             "key_id": key_id,
             "nonce": encode_b64u(&nonce),
             "ciphertext": encode_b64u(&sealed),
@@ -1633,13 +1863,13 @@ impl Core {
         };
         {
             let mut state = guard(&self.questions);
-            if let Ok(context) = state.context_mut(&ready.using.vault_id, member) {
+            if let Ok(context) = state.context_mut(&using.vault_id, member) {
                 let actions = &mut context.feed.actions;
                 actions.insert(
                     action_id.to_owned(),
                     Posted {
-                        to_device: ready.to_device,
-                        target: ready.target.clone(),
+                        to_device: pending.to_device,
+                        target: target.clone(),
                     },
                 );
                 while actions.len() > KEEP_ACTIONS {
@@ -1732,22 +1962,40 @@ impl Core {
                     )?;
                     parse_settle(&plaintext, action_id, &outcome)
                 });
-                if let Some(settle) = settle {
-                    out.verified = true;
-                    out.reason = Some(text(&settle.reason)).filter(|reason| !reason.is_empty());
-                    out.feed_seq = settle.feed_seq;
-                    out.at = Some(settle.at);
-                    if outcome == "applied" {
-                        let mut state = guard(&self.questions);
-                        if let Ok(context) = state.context_mut(&owner, &using.member) {
-                            let mirror = &mut context.feed;
-                            if let Some(posted) = mirror.actions.get(action_id) {
-                                let target = posted.target.clone();
-                                // Hidden while the Mac shows the feed that the action saw.
-                                if mirror.shown.get(&target.device_id).map(|feed| feed.seq)
-                                    == Some(target.feed_seq)
-                                    && !mirror.hidden.contains(&target)
-                                {
+                let Some(settle) = settle else {
+                    // A settle that does not open is the relay's word only. The one that a
+                    // Mac seals so (it could not read the action) is a refusal: "applied"
+                    // or "stale" is never believed from it, and the row stays.
+                    out.outcome = "refused".to_owned();
+                    return Ok(out);
+                };
+                out.verified = true;
+                out.reason = Some(text(&settle.reason)).filter(|reason| !reason.is_empty());
+                out.feed_seq = settle.feed_seq;
+                out.at = Some(settle.at);
+                if outcome == "applied" {
+                    let mut state = guard(&self.questions);
+                    if let Ok(context) = state.context_mut(&owner, &using.member) {
+                        let mirror = &mut context.feed;
+                        if let Some(posted) = mirror.actions.get(action_id) {
+                            // Hidden while the Mac shows the feed that this iPhone holds now
+                            // (the one the action saw, or a newer one made before the Mac
+                            // applied it), until its next feed.
+                            let shown = mirror.shown.get(&posted.target.device_id);
+                            let holds = shown.filter(|feed| {
+                                feed.agents.iter().any(|agent| {
+                                    agent
+                                        .exceptions
+                                        .iter()
+                                        .any(|exception| posted.target.names(&agent.id, exception))
+                                })
+                            });
+                            if let Some(feed) = holds {
+                                let target = Target {
+                                    feed_seq: feed.seq,
+                                    ..posted.target.clone()
+                                };
+                                if !mirror.hidden.contains(&target) {
                                     mirror.hidden.push(target);
                                 }
                             }
@@ -1962,11 +2210,81 @@ mod tests {
     #[test]
     fn the_face_id_reason_is_cut_and_clean() {
         assert_eq!(
-            face_id_reason("Claude \"Code\"\n"),
+            face_id_reason("Claude \"Code\""),
             "remove an exception of agent \"Claude Code\""
         );
         let long = face_id_reason(&"a".repeat(80));
         assert_eq!(long.matches('a').count(), 40 + 2);
+        // The sanitizer of the list: a control character, U+202E, and the zero-width
+        // characters show as `?`, never as themselves.
+        assert_eq!(
+            face_id_reason("Claude\n\u{202E}edoC\u{200B}\u{200D}\u{2060}\u{FEFF}"),
+            "remove an exception of agent \"Claude??edoC????\""
+        );
+        let reason = face_id_reason(&format!("{}\u{202E}tail", "b".repeat(39)));
+        assert!(!reason.contains('\u{202E}'));
+        assert!(reason.ends_with(&format!("{}?\"", "b".repeat(39))));
+        assert!(
+            face_id_reason("x\u{202E}\u{200B}\u{200C}\u{200E}\u{061C}")
+                .chars()
+                .all(|c| !c.is_control() && !('\u{2000}'..='\u{206F}').contains(&c))
+        );
+    }
+
+    #[test]
+    fn a_face_id_signature_is_checked_against_the_prepared_key() {
+        let text = action_string(PHONE, MAC, TEAM, ACTION_ID, &vector_target(), 1_790_000_060);
+        let key = decode_b64u(ANSWER_PUBLIC).unwrap();
+        let other = {
+            let mut other = key.clone();
+            other[1] ^= 1;
+            other
+        };
+        let check = |prepared: Option<&[u8]>, row: Option<&[u8]>, signature: Option<&str>| {
+            face_id_signature(prepared, row, text.as_bytes(), signature).map_err(|e| e.code)
+        };
+        assert!(check(Some(&key), Some(&key), Some(SIGNATURE)).is_ok());
+        // A signature that is not of this string, with the key of the row unchanged, is
+        // no key change.
+        let changed = text.replace("1790000040", "1790000041");
+        assert_eq!(
+            face_id_signature(Some(&key), Some(&key), changed.as_bytes(), Some(SIGNATURE))
+                .map_err(|e| e.code)
+                .err(),
+            Some("invalid_input")
+        );
+        assert_eq!(
+            check(Some(&key), Some(&key), None).err(),
+            Some("invalid_input")
+        );
+        // The row holds another key than when the string was made: a real change.
+        assert_eq!(
+            check(Some(&key), Some(&other), Some(SIGNATURE)).err(),
+            Some("not_registered")
+        );
+        assert_eq!(
+            check(Some(&key), None, Some(SIGNATURE)).err(),
+            Some("not_registered")
+        );
+    }
+
+    #[test]
+    fn a_target_names_its_exception_in_either_uuid_form() {
+        let target = vector_target();
+        let exception = |item: &str, kind: &str, created_at: u64| Exception {
+            item: Some(item.to_owned()),
+            item_title: String::new(),
+            kind: kind.to_owned(),
+            created_at,
+        };
+        assert!(target.names("4", &exception(&target.item, "never", 1_789_990_000)));
+        assert!(target.names(
+            "4",
+            &exception(&plain_uuid(&target.item), "never", 1_789_990_000)
+        ));
+        assert!(!target.names("5", &exception(&target.item, "never", 1_789_990_000)));
+        assert!(!target.names("4", &exception(&target.item, "only", 1_789_990_000)));
+        assert!(!target.names("4", &exception(&target.item, "never", 1_789_990_001)));
     }
 
     #[test]
