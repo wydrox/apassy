@@ -28,12 +28,14 @@ import SwiftUI
     }
 
     extension View {
-        /// With `-ApassyPreviewAgentsScroll exceptions`, an agent's page scrolls to its exceptions.
-        func agentsScrollSeed(_ scroll: @escaping () -> Void) -> some View {
+        /// With `-ApassyPreviewAgentsScroll exceptions|sees`, an agent's page scrolls to that section.
+        func agentsScrollSeed(_ scroll: @escaping (String) -> Void) -> some View {
             task {
-                guard UserDefaults.standard.string(forKey: "ApassyPreviewAgentsScroll") == "exceptions" else { return }
+                guard let target = UserDefaults.standard.string(forKey: "ApassyPreviewAgentsScroll"),
+                    ["exceptions", "sees"].contains(target)
+                else { return }
                 try? await Task.sleep(for: .milliseconds(500))
-                scroll()
+                scroll(target)
             }
         }
     }

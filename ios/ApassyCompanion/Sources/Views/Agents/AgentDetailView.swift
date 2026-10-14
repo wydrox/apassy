@@ -88,7 +88,7 @@ struct AgentDetailView: View {
             }
             .refreshable { await model.refresh() }
             #if DEBUG && targetEnvironment(simulator)
-                .agentsScrollSeed { reader.scrollTo("exceptions", anchor: .top) }
+                .agentsScrollSeed { reader.scrollTo($0, anchor: .top) }
             #endif
         }
     }
@@ -191,6 +191,7 @@ struct AgentDetailView: View {
                 Text("The names only, never the values.")
             }
         }
+        .id("sees")
     }
 
     private func recent(_ entry: AgentEntry, now: Date) -> some View {

@@ -353,7 +353,10 @@ final class AgentsModel {
             removals[removal] = Self.result(of: outcome, mac: mac)
             // Hidden in the feed shown now (a newer one may have come during Face ID), until the
             // Mac sends its next one.
-            if outcome.outcome == .applied, outcome.verified { hidden[removal] = shownSeq(of: removal) ?? entry.mac.seq }
+            if outcome.outcome == .applied, outcome.verified {
+                let seq: UInt64? = shownSeq(of: removal) ?? entry.mac.seq
+                hidden[removal] = .some(seq)
+            }
         } catch is CancellationError {
             if started == generation { removals[removal] = nil }
             return
