@@ -198,7 +198,7 @@ impl Pending {
             && self.prepared.time == time
             && self.to == input.mac_device
             && self.target.agent == input.agent
-            && plain_uuid(&self.target.item) == plain_uuid(&input.item)
+            && self.target.item == input.item
             && self.target.kind == input.kind
             && self.target.created_at == input.created_at
     }
@@ -229,7 +229,7 @@ impl Target {
             && exception
                 .item
                 .as_deref()
-                .is_some_and(|item| plain_uuid(item) == plain_uuid(&self.item))
+                .is_some_and(|item| item == self.item)
             && exception.kind == self.kind
             && exception.created_at == self.created_at
     }
@@ -350,16 +350,11 @@ fn valid_agent_id(id: &str) -> bool {
         && (id == "0" || !id.starts_with('0'))
 }
 
-/// An item reference: the contract's 36 characters `8-4-4-4-12`, or the 32 lowercase hex
-/// characters that `item.uuid` holds in the vault.
+/// An item reference: the vault's own form of an item UUID (`item.uuid`), 32 lowercase hex
+/// characters, no hyphens (section 4). The only form: a hyphenated or upper-case UUID is
+/// refused, and references are compared byte for byte, never reformatted.
 fn valid_item(item: &str) -> bool {
-    envelope::valid_device_uuid(item)
-        || (item.len() == 32 && item.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-}
-
-/// The form of an item UUID that the vault stores: without hyphens.
-fn plain_uuid(item: &str) -> String {
-    item.chars().filter(|c| *c != '-').collect()
+    item.len() == 32 && item.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 impl Exception {
@@ -864,6 +859,10 @@ fn feed_unavailable() -> CoreError {
     )
 }
 
+fn bad_item() -> CoreError {
+    CoreError::invalid("The item reference is not valid.")
+}
+
 fn list_gone() -> CoreError {
     CoreError::new(
         "not_found",
@@ -955,7 +954,8 @@ fn call_error(error: RelayCallError) -> CoreError {
     }
 }
 
-/// The titles of the items of `vault` by item UUID (without hyphens).
+/// The titles of the items of `vault` by item UUID. An item whose stored UUID is not in the
+/// vault's own form (section 4) has no reference, so no feed names it.
 pub(super) fn item_titles(vault: &Vault) -> CoreResult<BTreeMap<String, String>> {
     let titles: BTreeMap<u64, String> = vault
         .search("")?
@@ -965,7 +965,8 @@ pub(super) fn item_titles(vault: &Vault) -> CoreResult<BTreeMap<String, String>>
     Ok(vault
         .item_uuids()?
         .into_iter()
-        .filter_map(|(id, uuid)| Some((plain_uuid(&uuid), titles.get(&id)?.clone())))
+        .filter(|(_, uuid)| valid_item(uuid))
+        .filter_map(|(id, uuid)| Some((uuid, titles.get(&id)?.clone())))
         .collect())
 }
 
@@ -977,7 +978,7 @@ fn local(
     match (titles, item) {
         (_, None) => (None, Some(false)),
         (None, Some(_)) => (None, None),
-        (Some(titles), Some(item)) => match titles.get(&plain_uuid(item)) {
+        (Some(titles), Some(item)) => match titles.get(item) {
             Some(title) => (Some(envelope::shown(title, usize::MAX)), Some(true)),
             None => (None, Some(false)),
         },
@@ -1544,6 +1545,9 @@ impl Core {
                 "The kind of the exception is not known.",
             ));
         }
+        if !valid_item(&input.item) {
+            return Err(bad_item());
+        }
         if guard(&self.list).get(&input.vault_id).is_none() {
             return Err(not_open(false));
         }
@@ -1602,7 +1606,7 @@ impl Core {
                 exception
                     .item
                     .as_deref()
-                    .is_some_and(|item| plain_uuid(item) == plain_uuid(&input.item))
+                    .is_some_and(|item| item == input.item)
                     && exception.kind == input.kind
                     && exception.created_at == input.created_at
             })
@@ -1702,6 +1706,9 @@ impl Core {
             .ok_or_else(|| CoreError::invalid("The action needs its ID."))?;
         if !valid_action_id(action_id) {
             return Err(CoreError::invalid("The action ID is not valid."));
+        }
+        if !valid_item(&input.item) {
+            return Err(bad_item());
         }
         if time + ACTION_RETRY_SECONDS < at {
             return Err(CoreError::new(
@@ -2135,10 +2142,21 @@ mod tests {
         let mut item = serde_json::from_str::<serde_json::Value>(FEED).unwrap();
         item["agents"][0]["exceptions"][0]["item"] = json!("7");
         assert!(!check(&item));
-        // The vault's own form of an item UUID is accepted.
-        let mut plain = serde_json::from_str::<serde_json::Value>(FEED).unwrap();
-        plain["agents"][0]["exceptions"][0]["item"] = json!("3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c");
-        assert!(check(&plain));
+        // The vault's own form of an item UUID is the only one: a hyphenated or upper-case
+        // UUID of the same item is refused, in an exception and in a recent use.
+        for (at, bad) in [
+            ("exceptions", "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c"),
+            ("exceptions", "3C9E1F7A2B4D4C6E8F0A1B3D5E7F9A2C"),
+            ("recent", "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e"),
+            ("recent", "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1"),
+        ] {
+            let mut other = serde_json::from_str::<serde_json::Value>(FEED).unwrap();
+            other["agents"][0][at][0]["item"] = json!(bad);
+            assert!(!check(&other), "{bad}");
+        }
+        let mut null = serde_json::from_str::<serde_json::Value>(FEED).unwrap();
+        null["agents"][0]["recent"][0]["item"] = serde_json::Value::Null;
+        assert!(check(&null));
     }
 
     #[test]
@@ -2269,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn a_target_names_its_exception_in_either_uuid_form() {
+    fn a_target_names_its_exception_byte_for_byte() {
         let target = vector_target();
         let exception = |item: &str, kind: &str, created_at: u64| Exception {
             item: Some(item.to_owned()),
@@ -2278,13 +2296,32 @@ mod tests {
             created_at,
         };
         assert!(target.names("4", &exception(&target.item, "never", 1_789_990_000)));
-        assert!(target.names(
-            "4",
-            &exception(&plain_uuid(&target.item), "never", 1_789_990_000)
-        ));
+        // The hyphenated or upper-case form of the same UUID is another reference.
+        for other in [
+            "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c",
+            "3C9E1F7A2B4D4C6E8F0A1B3D5E7F9A2C",
+        ] {
+            assert!(!target.names("4", &exception(other, "never", 1_789_990_000)));
+        }
         assert!(!target.names("5", &exception(&target.item, "never", 1_789_990_000)));
         assert!(!target.names("4", &exception(&target.item, "only", 1_789_990_000)));
         assert!(!target.names("4", &exception(&target.item, "never", 1_789_990_001)));
+    }
+
+    #[test]
+    fn item_references_have_one_form() {
+        assert!(valid_item("3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c"));
+        for bad in [
+            "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c",
+            "3C9E1F7A2B4D4C6E8F0A1B3D5E7F9A2C",
+            "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2",
+            "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c0",
+            "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2g",
+            "7",
+            "",
+        ] {
+            assert!(!valid_item(bad), "{bad}");
+        }
     }
 
     #[test]

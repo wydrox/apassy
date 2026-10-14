@@ -65,7 +65,7 @@ extension PreviewVaultService {
         let at = Int64(now.timeIntervalSince1970)
         let hour: Int64 = 3600
         let day: Int64 = 86400
-        func item(_ n: Int) -> String { "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a\(String(format: "%02d", n))" }
+        func item(_ n: Int) -> String { "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a\(String(format: "%02d", n))" }
 
         let claude = FeedAgent(
             id: "4", name: "Claude Code", host: .claude, tokenExpiresAt: at + 90 * day, lastUseAt: at - 2 * hour,

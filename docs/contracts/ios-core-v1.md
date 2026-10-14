@@ -509,9 +509,9 @@ A feed travels in the questions team of its vault, so the feeds use the question
          "projects": ["synthetic-shop"], "note": "Deploys only from the main branch.",
          "restricted": false,
          "actions": [{"action": "deploy", "allowed": 2, "not_allowed": 1, "projects": ["synthetic-shop"]}],
-         "exceptions": [{"item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "item_title": "Shop database",
+         "exceptions": [{"item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "item_title": "Shop database",
                          "title": null, "here": false, "kind": "never", "created_at": 1789990000}],
-         "recent": [{"at": 1790000010, "item": "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e",
+         "recent": [{"at": 1790000010, "item": "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e",
                      "item_title": "API token", "title": "API token", "here": true,
                      "action": "deploy", "project": "synthetic-shop",
                      "command": "npm run deploy -- --token [apassy:secret]",
@@ -526,7 +526,7 @@ A feed travels in the questions team of its vault, so the feeds use the question
 - `stale` is true when `generated_at` is more than 24 hours old on the iPhone's clock: the app dims the Mac ("The Mac has not reported since <date>") and offers no action. A `generated_at` in the future is not stale; the app shows it as "now".
 - The members of an agent are those of the feed (relay-feed-v1 section 7.1), every text with control and format characters replaced by `?`. For each exception and recent use, `item` and `item_title` are the feed's; `title` is the title of the item with that UUID in the vault on this iPhone, else null; `here` is whether the vault on this iPhone holds it (false for a null `item`; null when the items of the vault were not read in this session). The app shows `title`, else `item_title` with "not on this iPhone", and "A deleted credential" for a null `item` (with no action).
 - After an applied removal (`feed_action_wait` with `outcome: applied` and `verified: true`), the exception leaves the list at once (in the feed of that Mac shown then, which may be newer than the one the action named), until the next feed of that Mac.
-- An item reference is the contract's 36-character UUID, or the 32 lowercase hex characters that `item.uuid` holds in the vault (`Vault::item_uuids`); the core matches both forms against the vault.
+- An item reference is the vault's own form of an item UUID, 32 lowercase hex characters with no hyphens, as `item.uuid` holds it (`Vault::item_uuids`; relay-feed-v1 section 4). It is the only form: a feed with another form (a hyphenated or upper-case UUID) fails step 2 ("Update Apassy to see the agents of <Mac>."), `feed_action_string` and `feed_action` refuse it (`invalid_input`), and the core compares it byte for byte, never reformatted. An item of the vault on this iPhone whose stored UUID has another form has no `title` in the list.
 
 **The high-water mark.** The core keeps the highest `seq` accepted of each Mac, by team and relay device id, in `feed-seq.json` in the data folder (`{"version": 1, "teams": {"t_7k2m5q4x3c": {"2": 1790000040}}}`, written as `phone.json` is). It holds no secret and stays after a lock and a restart, so a relay cannot bring back an older feed. A feed with a lower `seq` is ignored; a feed with the same `seq` shows only when this process does not show that Mac (after a lock or a restart: the AAD binds the `seq`, so it is the same feed).
 
@@ -536,13 +536,13 @@ A feed travels in the questions team of its vault, so the feeds use the question
 
 ```json
 {"op": "feed_action_string", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
- "agent": "4", "item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "kind": "never", "created_at": 1789990000}
+ "agent": "4", "item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "kind": "never", "created_at": 1789990000}
 ```
 
 ```json
 {"vault_id": "4f1c0a2b-…", "team_id": "t_7k2m5q4x3c", "action_id": "sLGys7S1tre4ubq7vL2-vw",
  "time": 1790000060, "feed_seq": 1790000040,
- "action_string": "apassy-feed-action-v1\n6f1c0e2a-…\n0b7e5c3a-…\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060",
+ "action_string": "apassy-feed-action-v1\n6f1c0e2a-…\n0b7e5c3a-…\nt_7k2m5q4x3c\nsLGys7S1tre4ubq7vL2-vw\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060",
  "needs_face_id": true, "face_id_reason": "remove an exception of agent \"Claude Code\""}
 ```
 
@@ -558,7 +558,7 @@ A feed travels in the questions team of its vault, so the feeds use the question
 
 ```json
 {"op": "feed_action", "vault_id": "4f1c0a2b-…", "mac_device": "0b7e5c3a-…", "agent": "4",
- "item": "3c9e1f7a-…", "kind": "never", "created_at": 1789990000,
+ "item": "3c9e1f7a…", "kind": "never", "created_at": 1789990000,
  "action_id": "sLGys7S1tre4ubq7vL2-vw", "time": 1790000060, "signature": "MEUCIQ…"}
 ```
 

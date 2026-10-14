@@ -37,9 +37,9 @@ import Testing
                      "projects": ["synthetic-shop"], "note": "Deploys only from the main branch.",
                      "restricted": false,
                      "actions": [{"action": "deploy", "allowed": 2, "not_allowed": 1, "projects": ["synthetic-shop"]}],
-                     "exceptions": [{"item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "item_title": "Shop database",
+                     "exceptions": [{"item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "item_title": "Shop database",
                                      "title": null, "here": false, "kind": "never", "created_at": 1789990000}],
-                     "recent": [{"at": 1790000010, "item": "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e",
+                     "recent": [{"at": 1790000010, "item": "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e",
                                  "item_title": "API token", "title": "API token", "here": true,
                                  "action": "deploy", "project": "synthetic-shop",
                                  "command": "npm run deploy -- --token [apassy:secret]",
@@ -86,7 +86,7 @@ import Testing
         #expect(action.projects == ["synthetic-shop"])
 
         let exception = try #require(agent.exceptions.first)
-        #expect(exception.item == "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c")
+        #expect(exception.item == "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c")
         #expect(exception.itemTitle == "Shop database")
         #expect(exception.title == nil)
         #expect(exception.here == false)
@@ -95,7 +95,7 @@ import Testing
 
         let use = try #require(agent.recent.first)
         #expect(use.at == 1_790_000_010)
-        #expect(use.item == "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e")
+        #expect(use.item == "8d2a4c6e1f3b4d5a9c7e0b2d4f6a8c1e")
         #expect(use.title == "API token")
         #expect(use.here == true)
         #expect(use.action == .deploy)
@@ -123,9 +123,9 @@ import Testing
                        {"action": "launch", "allowed": 4},
                        {"action": "read", "allowed": 3, "later": 1}],
                      "exceptions": [
-                       {"item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", "item_title": "Sometimes", "kind": "sometimes",
+                       {"item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", "item_title": "Sometimes", "kind": "sometimes",
                         "created_at": 1789990000},
-                       {"item": "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a3d", "item_title": "Kept", "kind": "always_ask",
+                       {"item": "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a3d", "item_title": "Kept", "kind": "always_ask",
                         "created_at": 1789990001, "tag": 1}],
                      "recent": [{"at": 1790000010, "item": null, "item_title": "", "action": "read", "extra": []}]},
                     {"id": "7", "name": "Codex", "host": "codex"}]},
@@ -277,13 +277,13 @@ import Testing
     @Test func theRemovalHasTheParametersOfTheCore() {
         let removal = FeedRemoval(
             vaultID: "4f1c0a2b-9d8e-4f6a-8b4c-3d2e1f0a9b8c", macDevice: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
-            agent: "4", item: "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", kind: .alwaysAsk, createdAt: 1_789_990_000)
+            agent: "4", item: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", kind: .alwaysAsk, createdAt: 1_789_990_000)
         let parameters = removal.parameters
         #expect(Set(parameters.keys) == ["vault_id", "mac_device", "agent", "item", "kind", "created_at"])
         #expect(parameters["vault_id"] as? String == "4f1c0a2b-9d8e-4f6a-8b4c-3d2e1f0a9b8c")
         #expect(parameters["mac_device"] as? String == "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d")
         #expect(parameters["agent"] as? String == "4")
-        #expect(parameters["item"] as? String == "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c")
+        #expect(parameters["item"] as? String == "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c")
         #expect(parameters["kind"] as? String == "always_ask")
         #expect(parameters["created_at"] as? Int64 == 1_789_990_000)
     }

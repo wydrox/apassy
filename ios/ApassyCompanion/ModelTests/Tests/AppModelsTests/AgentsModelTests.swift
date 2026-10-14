@@ -261,7 +261,7 @@ struct AgentsModelTests {
         var feed = PreviewVaultService.sampleFeed()
         let at = Int64(Date().timeIntervalSince1970)
         feed[1].macs[0].agents[0].exceptions.append(
-            FeedException(item: "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b", itemTitle: "Sentry", kind: .never,
+            FeedException(item: "5e6f7a8b9c0d4e1f8a2b3c4d5e6f7a8b", itemTitle: "Sentry", kind: .never,
                 createdAt: at - 100))
         let fixture = await Fixture(feed: feed)
         await fixture.model.refresh()

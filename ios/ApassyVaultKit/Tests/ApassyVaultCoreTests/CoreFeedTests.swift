@@ -22,7 +22,7 @@ import Testing
 
         let removal = FeedRemoval(
             vaultID: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", macDevice: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
-            agent: "4", item: "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c", kind: .never, createdAt: 1_789_990_000)
+            agent: "4", item: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c", kind: .never, createdAt: 1_789_990_000)
         do {
             _ = try await core.feedActionString(removal, actionID: nil, time: nil)
             Issue.record("an action string was made for a vault that is not on this iPhone")

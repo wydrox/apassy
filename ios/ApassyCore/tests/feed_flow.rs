@@ -226,7 +226,7 @@ fn add_vault(
         conn.pragma_update(None, "key", PASS).unwrap();
         conn.execute(
             "UPDATE item SET uuid = ?1 WHERE id = ?2",
-            rusqlite::params![API_ITEM.replace('-', ""), item as i64],
+            rusqlite::params![API_ITEM, item as i64],
         )
         .unwrap();
     }
@@ -812,6 +812,96 @@ fn the_action_string_is_the_contract_vector() {
         ),
         "invalid_input"
     );
+}
+
+#[test]
+fn an_item_reference_has_one_form() {
+    let setup = setup();
+    let seq = fresh_feed(&setup);
+    // The hyphenated and the upper-case form of the shown item are refused, not
+    // reformatted, when the action string is made and when the action is sent.
+    let other_forms = [
+        "3c9e1f7a-2b4d-4c6e-8f0a-1b3d5e7f9a2c",
+        "3C9E1F7A2B4D4C6E8F0A1B3D5E7F9A2C",
+    ];
+    for other in other_forms {
+        let request = string_request(&setup, "never", 1_789_990_000, other);
+        assert_eq!(
+            failure(&setup.phone, request.clone()),
+            (
+                "invalid_input".to_owned(),
+                "The item reference is not valid.".to_owned()
+            )
+        );
+        let mut send = request;
+        send["op"] = json!("feed_action");
+        send["action_id"] = json!(ACTION_ID);
+        send["time"] = json!(now());
+        send["signature"] = json!(SIGNATURE);
+        assert_eq!(fails(&setup.phone, send), "invalid_input");
+    }
+    assert!(setup.a.relay.actions().is_empty());
+    // The vault's own form works.
+    let prepared = call(
+        &setup.phone,
+        string_request(&setup, "never", 1_789_990_000, SHOP_ITEM),
+    );
+    assert!(
+        prepared["action_string"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("remove_exception:4:{SHOP_ITEM}:never:"))
+    );
+
+    // A feed that names an item in another form fails step 2: the last good feed stays,
+    // with the text of that step.
+    for (next, at, other) in [
+        (seq + 1, "exceptions", other_forms[0]),
+        (seq + 2, "recent", "8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e"),
+    ] {
+        let text = feed(next, next, |value| {
+            value["agents"][0][at][0]["item"] = json!(other)
+        });
+        publish(&setup.a.relay, TEAM, &setup.a.key, 2, &text);
+        let mac = &macs(&setup.phone)[0];
+        assert_eq!(mac["seq"], seq, "{at}");
+        assert_eq!(
+            mac["problem"],
+            "Update Apassy to see the agents of MacBook Pro."
+        );
+    }
+    publish(
+        &setup.a.relay,
+        TEAM,
+        &setup.a.key,
+        2,
+        &feed(seq + 3, seq + 3, |_| {}),
+    );
+    let recent = &macs(&setup.phone)[0]["agents"][0]["recent"][0];
+    assert_eq!(recent["item"], API_ITEM);
+    assert_eq!(recent["here"], true);
+
+    // An item of this vault whose stored UUID has another form has no reference: the
+    // feed's 32-hex UUID of the same item does not find it.
+    call(&setup.phone, json!({"op": "lock"}));
+    {
+        let conn = rusqlite::Connection::open(&setup.a.file).unwrap();
+        conn.pragma_update(None, "key", PASS).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE item SET uuid = ?1 WHERE uuid = ?2",
+                rusqlite::params!["8d2a4c6e-1f3b-4d5a-9c7e-0b2d4f6a8c1e", API_ITEM],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+    call(&setup.phone, json!({"op": "unlock", "passphrase": PASS}));
+    let mac = &macs(&setup.phone)[0];
+    assert_eq!(mac["seq"], seq + 3);
+    let recent = &mac["agents"][0]["recent"][0];
+    assert_eq!(recent["item"], API_ITEM);
+    assert_eq!(recent["title"], Value::Null);
+    assert_eq!(recent["here"], false);
 }
 
 #[test]
