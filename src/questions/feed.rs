@@ -21,13 +21,14 @@
 //!   checks at most 20 of an answer, each id once (marked before its first check, so one
 //!   id gets one settle), as section 9.5 says, in order: it opens (an action that does
 //!   not open writes no Activity line of its own), it has the form, it is for this Mac,
-//!   from a live iPhone of the vault, in its 60 s window, for an agent and
-//!   an item that are here, with the names that this Mac has for them (a v2 action signs
-//!   the names the owner saw; a v1 action of an older iPhone signs ids only, and its
-//!   Activity line says so), signed by the right key of the iPhone (through the owner gate,
-//!   [`OwnerCheck::RemoteAction`], for a removal that gives authority back), for an
-//!   exception as the feed showed it. Then it removes the row as the Mac's own "Remove
-//!   exception" does, settles the action, and publishes a new feed.
+//!   from a live iPhone of the vault, in its 60 s window, for an agent and an item that
+//!   are here, signed by the right key of the iPhone, of v2 with the names that this Mac
+//!   has for them (a v1 action signs ids only: it may remove an `only` row, which takes
+//!   authority away, and nothing else), through the owner gate
+//!   ([`OwnerCheck::RemoteAction`]) for a removal that gives authority back, for an
+//!   exception as the feed showed it, with the names checked again under the lock of the
+//!   removal. Then it removes the row as the Mac's own "Remove exception" does, settles
+//!   the action, and publishes a new feed.
 //!
 //! The relay sees the routing only: it never gets a feed, an action, or the question key.
 //!
@@ -458,6 +459,52 @@ pub fn names_here(agent_name: &str, item_title: &str, mac_name: &str) -> Vec<Str
         out.push(cut);
     }
     out
+}
+
+/// [`names_here`] from the rows of `vault` as they are now: the agent `agent_id`, the item
+/// `item_id`, and the live `trusted_device` row `mac_uuid` of this Mac. `None` when one of
+/// them is not there.
+pub fn names_in_vault(
+    vault: &Vault,
+    agent_id: u64,
+    item_id: u64,
+    mac_uuid: &str,
+) -> VaultResult<Option<Vec<String>>> {
+    let agent = vault
+        .list_agents()?
+        .into_iter()
+        .find(|agent| agent.id == agent_id);
+    let title = vault.item_refs()?.remove(&item_id).map(|item| item.title);
+    let mac = vault.trusted_device(mac_uuid)?;
+    Ok(match (agent, title, mac) {
+        (Some(agent), Some(title), Some(mac)) => Some(names_here(&agent.name, &title, &mac.name)),
+        _ => None,
+    })
+}
+
+/// Whether `removal` may go on as to its names (section 9.5 steps 8a and 10): a v2 action
+/// whose `names` are among those of `vault` now; a v1 action (no names) only for an `only`
+/// row, which takes authority away. A read error is no match.
+pub fn names_hold(
+    vault: &Vault,
+    removal: &RemovalAction,
+    agent_id: u64,
+    item_id: u64,
+    mac_uuid: &str,
+) -> bool {
+    match &removal.names {
+        None => !removal.gives_authority(),
+        Some(names) => names_in_vault(vault, agent_id, item_id, mac_uuid)
+            .ok()
+            .flatten()
+            .is_some_and(|here| here.contains(names)),
+    }
+}
+
+/// The reason of the refusal of a v1 action that gives authority back (section 9.5 step
+/// 8a): the sender `iphone` signed ids only.
+pub fn v1_refusal(iphone: &str) -> String {
+    format!("update Apassy on {iphone} to remove this from it, or remove it on this Mac")
 }
 
 fn short_u32(value: u64) -> u64 {
@@ -1409,9 +1456,13 @@ impl Shared {
         } else {
             MAX_FEED_BYTES
         };
-        // One byte for the mark that this Mac checks the names of an action.
-        let mut plaintext = fit(&mut feed, max - 1, now)?;
+        // One byte for the mark that this Mac checks the names of an action, in a buffer
+        // made with room for it, so no copy of the plaintext is left behind unzeroed.
+        let fitted = fit(&mut feed, max - 1, now)?;
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(fitted.len() + 1));
+        plaintext.extend_from_slice(&fitted);
         plaintext.push(NAMES_MARK);
+        drop(fitted);
         let aad = feed_aad(&active.team_id, device_id, seq, &key_id);
         let nonce = new_nonce()?;
         Some(Sealing::Ready((
@@ -1695,8 +1746,8 @@ impl Shared {
         };
         let name = opened.sender.name.clone();
         let removal = &opened.removal;
-        // 7. An agent of this vault on this Mac that is not revoked, and a live item; in
-        // v2, with the names the iPhone showed.
+        let mac_uuid = active.me.uuid.as_str();
+        // 7. An agent of this vault on this Mac that is not revoked, and a live item.
         let resolved = {
             let mut guard = lock(&self.vault);
             let Some(vault) = Self::vault_of(&mut guard, active) else {
@@ -1712,27 +1763,48 @@ impl Shared {
                 })
                 .filter(|agent| !agent.revoked);
             let item = vault.item_by_uuid(&removal.item_uuid).ok().flatten();
-            let title = item.and_then(|item_id| {
-                vault
-                    .item_refs()
-                    .ok()
-                    .and_then(|refs| refs.get(&item_id).map(|item| item.title.clone()))
-            });
-            agent.zip(item).zip(title)
+            agent.zip(item)
         };
-        let Some(((agent, item_id), title)) = resolved else {
+        let Some((agent, item_id)) = resolved else {
             return self.refuse_action(active, record, key.as_ref(), &name, None, GONE);
         };
         let agent_line = Some((agent.id, agent.name.clone()));
-        // The name of this Mac as its row in the vault has it now: the iPhone shows the
-        // name of that row.
-        let mac_name = devices
-            .iter()
-            .find(|device| device.uuid == active.me.uuid)
-            .map_or(active.me.name.as_str(), |device| device.name.as_str());
-        if let Some(names) = &removal.names
-            && !names_here(&agent.name, &title, mac_name).contains(names)
+        // 8. The signature with the key of the kind, before anything that names the sender
+        // in Activity for what the action says: the answer key for a removal that gives
+        // authority back, the device key for an `only` row.
+        if let Err(error) =
+            verify_remote_action(&opened.sender, removal, &opened.signature, unix_now())
         {
+            return self.refuse_action(
+                active,
+                record,
+                key.as_ref(),
+                &name,
+                agent_line,
+                reason_of(&error),
+            );
+        }
+        // 8a. A v1 action signs ids only: it may take authority away (an `only` row), never
+        // give it back. A v2 action names what the owner saw: this Mac's names now.
+        if removal.names.is_none() && removal.gives_authority() {
+            return self.refuse_text(
+                active,
+                record,
+                key.as_ref(),
+                &name,
+                agent_line,
+                Outcome::Refused,
+                &v1_refusal(&name),
+            );
+        }
+        let names_ok = {
+            let mut guard = lock(&self.vault);
+            let Some(vault) = Self::vault_of(&mut guard, active) else {
+                return Handled::Aborted;
+            };
+            names_hold(vault, removal, agent.id, item_id, mac_uuid)
+        };
+        if !names_ok {
             return self.refuse_action(
                 active,
                 record,
@@ -1747,8 +1819,8 @@ impl Shared {
             item_id,
             kind: removal.kind,
         };
-        // 8. The signature: through the owner gate for a removal that gives authority
-        // back, with the device key for an `only` row.
+        // The owner check for a removal that gives authority back: the gate checks the
+        // signature, the team, the target, and the names again from the vault.
         let proof = if removal.gives_authority() {
             let check = OwnerCheck::RemoteAction {
                 signed: Box::new(removal.clone()),
@@ -1771,22 +1843,11 @@ impl Shared {
                 }
             }
         } else {
-            if let Err(error) =
-                verify_remote_action(&opened.sender, removal, &opened.signature, unix_now())
-            {
-                return self.refuse_action(
-                    active,
-                    record,
-                    key.as_ref(),
-                    &name,
-                    agent_line,
-                    reason_of(&error),
-                );
-            }
             None
         };
-        // 9 and 10 under one vault lock: the row as the feed showed it, then the removal
-        // as the Mac's own "Remove exception" does after its owner check.
+        // 9 and 10 under one vault lock: the row as the feed showed it, the names again
+        // (a rename that synced since the checks above is not what the owner saw), then
+        // the removal as the Mac's own "Remove exception" does after its owner check.
         let last_seq = lock(&self.feed).last_seq.unwrap_or(0);
         let done = {
             let mut guard = lock(&self.vault);
@@ -1799,46 +1860,54 @@ impl Shared {
                 return Handled::Aborted;
             }
             let exceptions = vault.agent_exceptions(agent.id).unwrap_or_default();
-            still_shown(removal, item_id, &exceptions, last_seq).and_then(|()| {
-                match vault.remove_agent_exception(agent.id, item_id, removal.kind) {
-                    Ok(true) => {
-                        let title = vault
-                            .item_refs()
-                            .ok()
-                            .and_then(|refs| refs.get(&item_id).map(|r| r.title.clone()))
-                            .unwrap_or_default();
-                        let mut reason = format!(
-                            "Removed on {name}: {} for {} and {title}",
-                            kind_words(removal.kind),
-                            agent.name
-                        );
-                        if removal.names.is_none() {
-                            // A v1 action signs ids only (section 15).
-                            reason.push_str(&format!(
-                                ". {name} did not sign the names it showed: update Apassy on it"
-                            ));
-                        }
-                        let _ = vault.record_activity(&NewActivity {
-                            agent_id: Some(agent.id),
-                            agent_name: agent.name.clone(),
-                            item_id: Some(item_id),
-                            operation: ACTIVITY_OPERATION.to_owned(),
-                            decision: ActivityDecision::Allow,
-                            reason,
-                        });
-                        if removal.gives_authority() {
-                            let _ = vault.record_interaction(
-                                InteractionKind::OwnerCheck,
-                                &action.reason(),
-                                &[item_id],
-                            );
-                        }
+            still_shown(removal, item_id, &exceptions, last_seq)
+                .and_then(|()| {
+                    if names_hold(vault, removal, agent.id, item_id, mac_uuid) {
                         Ok(())
+                    } else {
+                        Err(NAMES_CHANGED)
                     }
-                    Ok(false) => Err(CHANGED),
-                    Err(_) => Err(NOT_REMOVED),
-                }
-            })
+                })
+                .and_then(|()| {
+                    match vault.remove_agent_exception(agent.id, item_id, removal.kind) {
+                        Ok(true) => {
+                            let title = vault
+                                .item_refs()
+                                .ok()
+                                .and_then(|refs| refs.get(&item_id).map(|r| r.title.clone()))
+                                .unwrap_or_default();
+                            let mut reason = format!(
+                                "Removed on {name}: {} for {} and {title}",
+                                kind_words(removal.kind),
+                                agent.name
+                            );
+                            if removal.names.is_none() {
+                                // A v1 `only` removal: ids only (section 15).
+                                reason.push_str(&format!(
+                                    ". {name} did not sign the names; update Apassy on it"
+                                ));
+                            }
+                            let _ = vault.record_activity(&NewActivity {
+                                agent_id: Some(agent.id),
+                                agent_name: agent.name.clone(),
+                                item_id: Some(item_id),
+                                operation: ACTIVITY_OPERATION.to_owned(),
+                                decision: ActivityDecision::Allow,
+                                reason,
+                            });
+                            if removal.gives_authority() {
+                                let _ = vault.record_interaction(
+                                    InteractionKind::OwnerCheck,
+                                    &action.reason(),
+                                    &[item_id],
+                                );
+                            }
+                            Ok(())
+                        }
+                        Ok(false) => Err(CHANGED),
+                        Err(_) => Err(NOT_REMOVED),
+                    }
+                })
         };
         if let Err(refusal) = done {
             return self.refuse_action(active, record, key.as_ref(), &name, agent_line, refusal);
@@ -1900,13 +1969,36 @@ impl Shared {
         agent: Option<(u64, String)>,
         refusal: Refusal,
     ) -> Handled {
+        self.refuse_text(
+            active,
+            record,
+            key,
+            device,
+            agent,
+            refusal.outcome,
+            refusal.reason,
+        )
+    }
+
+    /// An action that opened and did not count, with a reason made for it.
+    #[allow(clippy::too_many_arguments)]
+    fn refuse_text(
+        &self,
+        active: &Active,
+        record: &FeedActionRecord,
+        key: Option<&QuestionKey>,
+        device: &str,
+        agent: Option<(u64, String)>,
+        outcome: Outcome,
+        reason: &str,
+    ) -> Handled {
         self.feed_activity(
             active,
             agent,
             "Apassy",
-            &format!("An action from {device} did not count: {}.", refusal.reason),
+            &format!("An action from {device} did not count: {reason}."),
         );
-        self.settle_action(active, record, key, refusal.outcome, refusal.reason, None);
+        self.settle_action(active, record, key, outcome, reason, None);
         Handled::Opened
     }
 

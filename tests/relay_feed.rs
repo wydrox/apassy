@@ -28,7 +28,7 @@ use apassy::questions::envelope::{Sealed, new_qid};
 use apassy::questions::feed::{
     ActionBody, Feed, FeedActionUse, FeedAgent, FeedException, FeedMac, FeedUse, FeedWeek,
     RemovalAction, SettleBody, Target, UNSUPPORTED, action_aad, build_feed, feed_aad, names_digest,
-    names_here, open_action, settle_aad, still_shown,
+    names_here, names_hold, names_in_vault, open_action, settle_aad, still_shown,
 };
 use apassy::questions::{FeedActionRecord, QuestionsClient, QuestionsConfig, QuestionsWorker};
 use apassy::relay::membership::{
@@ -673,6 +673,8 @@ struct Phone {
     answer: DeviceKey,
     /// The question key that the iPhone holds through the vault.
     key: QuestionKey,
+    /// The name of the Mac's row in the iPhone's copy of the vault.
+    mac_name: String,
 }
 
 fn world() -> World {
@@ -769,6 +771,7 @@ impl World {
             uuid: row.uuid,
             answer,
             key: self.key(),
+            mac_name: self.me().name,
         }
     }
 
@@ -879,8 +882,22 @@ impl Phone {
             .expect("the relay takes the action");
     }
 
-    /// The removal of the exception `exception` of the first agent of `feed`.
+    /// The removal of the exception `exception` of the first agent of `feed`, as a new
+    /// iPhone sends it (v2, section 9.3): it signs the names it showed, the agent's and the
+    /// title from the feed (this iPhone holds no copy of the item), and the Mac's from its
+    /// row.
     fn removal(&self, world: &World, feed: &Feed, exception: &FeedException) -> RemovalAction {
+        let mut removal = self.removal_v1(world, feed, exception);
+        removal.names = Some(names_digest(
+            &feed.agents[0].name,
+            &exception.item_title,
+            &self.mac_name,
+        ));
+        removal
+    }
+
+    /// The same removal as an iPhone of 0.5.2 sends it: v1, ids only.
+    fn removal_v1(&self, world: &World, feed: &Feed, exception: &FeedException) -> RemovalAction {
         RemovalAction {
             by: self.uuid.clone(),
             to: feed.mac.device.clone(),
@@ -894,19 +911,6 @@ impl Phone {
             time: now(),
             names: None,
         }
-    }
-
-    /// The same removal in v2, as a new iPhone sends it to a Mac whose feed checks the
-    /// names (section 9.3): it signs the names it showed, the agent's and the title from
-    /// the feed (this iPhone holds no copy of the item), and the Mac's from its row.
-    fn removal_v2(&self, world: &World, feed: &Feed, exception: &FeedException) -> RemovalAction {
-        let mut removal = self.removal(world, feed, exception);
-        removal.names = Some(names_digest(
-            &feed.agents[0].name,
-            &exception.item_title,
-            &world.me().name,
-        ));
-        removal
     }
 
     /// The settle of `action_id`, opened: its clear outcome and its body.
@@ -1298,20 +1302,145 @@ fn a_face_id_removal_is_applied_settled_and_published() {
         feed.seq >= shown_at
     });
     assert_eq!(after.agents[0].exceptions.len(), 1);
-    // A v1 action signs ids only: Activity says that the names were not checked.
     assert!(world.activity().iter().any(|line| line
-        == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database. \
-            Test iPhone did not sign the names it showed: update Apassy on it"));
+        == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database"));
 
-    // An "only these items" row goes with the relay key of the iPhone, no Face ID.
+    // An "only these items" row goes with the relay key of the iPhone, no Face ID. An
+    // iPhone of 0.5.2 sends it in v1, ids only: it takes authority away, so it applies,
+    // with a note in Activity.
     let only = after.agents[0].exceptions[0].clone();
     assert_eq!(only.kind, "only");
-    let removal = phone.removal(&world, &after, &only);
+    let removal = phone.removal_v1(&world, &after, &only);
     phone.send(&world, &removal, world.mac_id(), |text| {
         phone.client.sign(text).unwrap()
     });
     assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
     assert!(world.exceptions().is_empty());
+    assert!(world.activity().iter().any(|line| line
+        == "Removed on Test iPhone: “Only these items” for Claude Code and API token. \
+            Test iPhone did not sign the names; update Apassy on it"));
+}
+
+/// Section 9.5 step 8a: a v1 action signs ids only. One that gives authority back
+/// (`never`, `always_ask`) is refused, with what to do, and the row stays; the gate makes
+/// no proof for it either.
+#[test]
+fn a_v1_removal_that_gives_authority_back_is_refused() {
+    let mut world = world();
+    let [shop, api] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+        vault
+            .add_agent_exception(world.agent, api, ExceptionKind::AlwaysAsk)
+            .unwrap();
+    });
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(config());
+    let feed = phone.wait_feed(&world, "the exceptions", |feed| {
+        feed.agents
+            .first()
+            .is_some_and(|agent| agent.exceptions.len() == 2)
+    });
+    let rows = world.exceptions();
+    for exception in feed.agents[0].exceptions.clone() {
+        let removal = phone.removal_v1(&world, &feed, &exception);
+        phone.send(&world, &removal, world.mac_id(), |text| {
+            phone.answer.sign(text).unwrap()
+        });
+        let (outcome, settle) = phone.settle(&world, &removal.action_id);
+        assert_eq!(
+            (outcome.as_str(), settle.reason.as_str()),
+            (
+                "refused",
+                "update Apassy on Test iPhone to remove this from it, or remove it on this Mac"
+            ),
+            "{}",
+            exception.kind
+        );
+        assert_eq!(world.exceptions(), rows, "the row stays");
+    }
+    assert!(world.activity().iter().any(|line| line
+        == "An action from Test iPhone did not count: update Apassy on Test iPhone to remove \
+            this from it, or remove it on this Mac."));
+    // The gate refuses it too, whatever its caller checked.
+    let removal = phone.removal_v1(&world, &feed, &feed.agents[0].exceptions[0]);
+    let signature = answer_key()
+        .sign(removal.string().unwrap().as_bytes())
+        .unwrap();
+    let item_id = world.with(|vault| vault.item_by_uuid(&removal.item_uuid).unwrap().unwrap());
+    let gate = OwnerGate::new(Arc::clone(&world.shared), None);
+    assert_eq!(
+        gate.authorize(
+            OwnerAction::RemoveAgentException {
+                agent_id: world.agent,
+                item_id,
+                kind: removal.kind,
+            },
+            OwnerCheck::RemoteAction {
+                signed: Box::new(removal.clone()),
+                signature,
+            },
+        )
+        .unwrap_err(),
+        OwnerAuthError::RemoteRejected
+    );
+}
+
+/// Section 9.5 step 10: the names are checked again under the lock of the removal. A
+/// rename that syncs in after the first check is not what the owner saw.
+#[test]
+fn the_names_are_those_of_the_vault_at_the_removal() {
+    let world = world();
+    let [shop, _] = world.items;
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
+            .unwrap();
+    });
+    let me = world.me();
+    let item_uuid = world.with(|vault| vault.item_uuid(shop).unwrap().unwrap());
+    let removal = RemovalAction {
+        by: PHONE_UUID.to_owned(),
+        to: me.uuid.clone(),
+        team_id: world.team().to_owned(),
+        action_id: ACTION_ID.to_owned(),
+        agent_id: world.agent,
+        item_uuid,
+        kind: ExceptionKind::Never,
+        created_at: 1,
+        feed_seq: 1,
+        time: now(),
+        names: Some(names_digest("Claude Code", "Shop database", &me.name)),
+    };
+    let holds = |removal: &RemovalAction| {
+        world.with(|vault| names_hold(vault, removal, world.agent, shop, &me.uuid))
+    };
+    assert!(holds(&removal));
+    // A v1 action holds only for an `only` row.
+    let mut v1 = removal.clone();
+    v1.names = None;
+    assert!(!holds(&v1));
+    v1.kind = ExceptionKind::Only;
+    assert!(holds(&v1));
+    // The item is renamed (a sync from another device): the names the owner saw are gone.
+    world.with(|vault| {
+        let summary = vault
+            .search("")
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.id == shop)
+            .unwrap();
+        vault
+            .update(shop, summary.revision, secret_item("Test DB", SHOP_SECRET))
+            .unwrap();
+    });
+    assert!(!holds(&removal));
+    assert_eq!(
+        world.with(|vault| names_in_vault(vault, world.agent, shop, &me.uuid).unwrap()),
+        Some(vec![names_digest("Claude Code", "Test DB", &me.name)])
+    );
 }
 
 /// Section 9.3, v2: the feed of this Mac says that it checks the names (its plaintext
@@ -1346,7 +1475,7 @@ fn a_removal_that_signs_the_names_is_applied() {
         .find(|exception| exception.kind == "never")
         .unwrap()
         .clone();
-    let removal = phone.removal_v2(&world, &feed, &never);
+    let removal = phone.removal(&world, &feed, &never);
     assert_eq!(
         removal.names.as_deref(),
         Some(names_digest("Claude Code", "Shop database", "Synthetic MacBook").as_str())
@@ -1374,7 +1503,7 @@ fn a_removal_that_signs_the_names_is_applied() {
     });
     let only = after.agents[0].exceptions[0].clone();
     assert_eq!(only.kind, "only");
-    let removal = phone.removal_v2(&world, &after, &only);
+    let removal = phone.removal(&world, &after, &only);
     phone.send(&world, &removal, world.mac_id(), |text| {
         phone.client.sign(text).unwrap()
     });
@@ -1443,8 +1572,22 @@ fn a_feed_that_lies_about_the_names_is_stale() {
     }
     assert!(world.activity().iter().any(|line| line
         == "An action from Test iPhone did not count: the names on the iPhone did not match this Mac."));
+    // False names with a signature that does not verify: the signature fails first, so no
+    // line about names is ever blamed on an iPhone that did not sign.
+    let other = DeviceKey::generate().unwrap();
+    let mut forged = phone.removal(&world, &feed, &pick("never"));
+    forged.names = Some(names_digest("Scratch Bot", "Shop database", &mac));
+    phone.send(&world, &forged, world.mac_id(), |text| {
+        other.sign(text).unwrap()
+    });
+    let (outcome, settle) = phone.settle(&world, &forged.action_id);
+    assert_eq!(
+        (outcome.as_str(), settle.reason.as_str()),
+        ("refused", "its signature does not verify")
+    );
+    assert_eq!(world.exceptions(), rows, "the row stays");
     // The true names still work.
-    let removal = phone.removal_v2(&world, &feed, &pick("never"));
+    let removal = phone.removal(&world, &feed, &pick("never"));
     phone.send(&world, &removal, world.mac_id(), |text| {
         phone.answer.sign(text).unwrap()
     });
@@ -1486,7 +1629,7 @@ fn a_title_matches_in_either_form_that_an_iphone_shows() {
         ]
     );
     // The feed's form, as an iPhone without the item signs it.
-    let from_feed = phone.removal_v2(&world, &feed, &exception);
+    let from_feed = phone.removal(&world, &feed, &exception);
     assert_eq!(from_feed.names.as_ref(), Some(&here[1]));
     // The own title, as an iPhone with its own copy of the item shows it.
     let mut own = phone.removal(&world, &feed, &exception);
@@ -1643,7 +1786,7 @@ fn the_gate_makes_a_remote_action_proof_only_for_its_removal() {
         created_at: world.exceptions()[0].created_at,
         feed_seq: 1,
         time: now(),
-        names: None,
+        names: Some(names_digest("Claude Code", "Shop database", &me.name)),
     };
     let signature = answer_key()
         .sign(signed.string().unwrap().as_bytes())
@@ -2215,7 +2358,7 @@ fn the_gate_refuses_another_team_or_another_target() {
         created_at: world.exceptions()[0].created_at,
         feed_seq: 1,
         time: now(),
-        names: None,
+        names: Some(names_digest("Claude Code", "Shop database", &me.name)),
     };
     let authorize = |signed: &RemovalAction| {
         // The iPhone signs exactly what the caller says, so only the gate's own team and
@@ -2249,12 +2392,13 @@ fn the_gate_refuses_another_team_or_another_target() {
     );
     assert!(
         authorize(&signed).is_ok(),
-        "the vault's own team and target"
+        "the vault's own team, target, and names"
     );
-    // v2: the gate rebuilds the names from the vault too, whatever its caller checked.
-    let mut named = signed.clone();
-    named.names = Some(names_digest("Claude Code", "Shop database", &me.name));
-    assert!(authorize(&named).is_ok(), "the vault's own names");
+    // A v1 action (ids only) makes no proof.
+    let mut v1 = signed.clone();
+    v1.names = None;
+    assert_eq!(authorize(&v1).unwrap_err(), OwnerAuthError::RemoteRejected);
+    // The gate rebuilds the names from the vault, whatever its caller checked.
     for (agent, title, mac) in [
         ("Scratch Bot", "Shop database", me.name.as_str()),
         ("Claude Code", "Test DB", me.name.as_str()),
