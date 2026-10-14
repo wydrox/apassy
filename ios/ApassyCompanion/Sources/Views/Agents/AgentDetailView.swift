@@ -240,7 +240,10 @@ struct AgentDetailView: View {
                     ProgressView()
                         .accessibilityLabel(text)
                 } else if block == nil {
-                    Button("Remove") { confirming = exception }
+                    // On a vault that is not selected, Face ID reads its keys again first.
+                    Button("Remove") {
+                        Task { if await model.removeTapped(exception, in: entry) { confirming = exception } }
+                    }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.capsule)
                         .tint(.red)

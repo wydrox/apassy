@@ -505,6 +505,51 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
     super::set_feed_shown(&mut app, true);
     assert!(!app.ui.feed_off);
 
+    // An iPhone linked through the relay counts in the line of Devices, and its
+    // "Remove…" ends where the switches above end.
+    let devices = |app: &DesktopApp| super::status_line(app, SettingsSection::Devices);
+    assert!(
+        devices(&app).ends_with("No iPhone · Relay on"),
+        "{}",
+        devices(&app)
+    );
+    let sign = crate::sync::DeviceKey::generate().expect("key");
+    let answer = crate::sync::DeviceKey::generate().expect("key");
+    vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .expect("open vault")
+        .register_trusted_device(
+            "5d2c9e1a-7b3f-4c8d-9e0a-1b2c3d4e5f60",
+            "Synthetic iPhone",
+            crate::vault::TrustedDeviceKind::Iphone,
+            sign.public_key(),
+            Some(answer.public_key()),
+        )
+        .expect("iPhone row");
+    assert!(
+        devices(&app).ends_with("1 iPhone · Relay on"),
+        "{}",
+        devices(&app)
+    );
+    let (text, texts) = frames(&mut app, TALL);
+    assert!(text.contains("Synthetic iPhone"), "{text}");
+    let right_of = |label: &str| {
+        texts
+            .iter()
+            .find(|(painted, _)| painted == label)
+            .map(|(_, rect)| rect.right())
+            .unwrap_or_else(|| panic!("{label} is painted: {text}"))
+    };
+    // The relay switch, 32 points wide, is 8 points right of its value.
+    let switches = right_of("End-to-end encrypted") + 8.0 + 32.0;
+    let remove = right_of(super::REMOVE_DEVICE);
+    assert!(
+        (remove - switches).abs() <= 1.0,
+        "Remove… ends at {remove}, the switches at {switches}"
+    );
+
     // Off: stricter, no check.
     super::set_relay_questions(&mut app, false, None);
     assert!(app.owner.check.is_none(), "off needs no owner check");
@@ -525,6 +570,57 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
             team_id: "t_7k2m5q4x3c".to_owned()
         }
     );
+    drop(guard);
+    // The iPhone answers no question without the relay.
+    assert!(devices(&app).ends_with("No iPhone"), "{}", devices(&app));
+}
+
+/// The iPhones of Devices: the paired iPhones of this network and the iPhones of the
+/// relay, an iPhone in both once.
+#[test]
+fn devices_counts_each_iphone_once() {
+    use super::{iphone_count, iphones_words};
+    use crate::vault::{CompanionDevice, TrustedDevice, TrustedDeviceKind};
+    let paired = |name: &str| CompanionDevice {
+        device_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        name: name.to_owned(),
+        paired_at: 0,
+        last_seen_at: None,
+    };
+    let relay = |name: &str| TrustedDevice {
+        uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+        name: name.to_owned(),
+        kind: TrustedDeviceKind::Iphone,
+        relay_devices: Default::default(),
+        sign_key: vec![4; 65],
+        answer_key: None,
+        created_at: 0,
+        updated_at: 0,
+        updated_by: String::new(),
+    };
+    assert_eq!(iphone_count(&[], &[]), 0);
+    assert_eq!(iphone_count(&[paired("Synthetic iPhone")], &[]), 1);
+    assert_eq!(iphone_count(&[], &[relay("Synthetic iPhone")]), 1);
+    // The same iPhone, paired here and linked through the relay.
+    assert_eq!(
+        iphone_count(&[paired("Synthetic iPhone")], &[relay("Synthetic iPhone ")]),
+        1
+    );
+    assert_eq!(
+        iphone_count(&[paired("Synthetic iPhone")], &[relay("Work iPhone")]),
+        2
+    );
+    // Two iPhones of the relay with one name, and one of them paired here.
+    assert_eq!(
+        iphone_count(
+            &[paired("Synthetic iPhone")],
+            &[relay("Synthetic iPhone"), relay("Synthetic iPhone")]
+        ),
+        2
+    );
+    assert_eq!(iphones_words(0), "No iPhone");
+    assert_eq!(iphones_words(1), "1 iPhone");
+    assert_eq!(iphones_words(2), "2 iPhones");
 }
 
 /// What Devices says of each device of the questions: its kind, how it answers, and the

@@ -132,6 +132,25 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Remove Only: Deploy key"].exists)
     }
 
+    /// On a vault that is not selected, whose feed came after its keys were read, "Remove" shows
+    /// when its passphrase is behind Face ID (the preview passphrase stands in): the tap reads the
+    /// keys again, then asks as usual, and the Mac removes it.
+    func testRemovingOnAnotherVaultReadsItsKeysFirst() {
+        let app = launch(["-ApassyOpen", "agents", "-ApassyPreviewAgents", "othervault"])
+        XCTAssertTrue(app.navigationBars["Claude Code"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["On MacBook Pro · Work"].waitForExistence(timeout: 5))
+        let remove = app.buttons["Remove Only: Deploy key"]
+        for _ in 0..<6 where !(remove.exists && remove.isHittable) { app.swipeUp() }
+        XCTAssertTrue(remove.exists)
+        XCTAssertFalse(app.staticTexts["Select Work on this iPhone to remove exceptions of its agents."].exists)
+        remove.tap()
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 10))
+        XCTAssertTrue(alert.label.contains("Deploy key"))
+        alert.buttons["Remove"].tap()
+        XCTAssertTrue(app.staticTexts["Removed on MacBook Pro."].waitForExistence(timeout: 10))
+    }
+
     /// A Mac that has not reported for days is dimmed and offers no removal.
     func testAStaleMacOffersNoRemoval() {
         let app = launch(["-ApassyOpen", "agents", "-ApassyPreviewAgents", "stale"])

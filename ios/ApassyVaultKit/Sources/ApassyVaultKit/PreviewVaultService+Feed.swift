@@ -46,12 +46,18 @@ public struct PreviewFeed: Sendable {
     var nextActionError: VaultError?
     var listCalls = 0
     var waitCalls = 0
+    /// What `questionsUnlock` of a vault does to its feeds: they come before its keys now, so the
+    /// core can act on them (true), or a newer feed came meanwhile (false).
+    var canActAfterUnlock = true
 
     public init() {}
 }
 
 extension PreviewVaultService {
     /// The device UUIDs of the synthetic Macs.
+    /// The vault "Work" of `sampleFeed`, a second vault on this iPhone.
+    public static let workFeedVaultID = "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b"
+
     public enum PreviewMacs {
         public static let macMini = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d"
         public static let macBookPro = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
@@ -177,7 +183,7 @@ extension PreviewVaultService {
                         generatedAt: at - 3 * day, stale: true, week: FeedWeek(byYou: 1, automatic: 6), agents: [ci]),
                 ]),
             FeedVault(
-                vaultID: "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b", vaultName: "Work", teamID: "t_wq3k7m2p5x",
+                vaultID: workFeedVaultID, vaultName: "Work", teamID: "t_wq3k7m2p5x",
                 macs: [
                     FeedMac(
                         device: PreviewMacs.workMacBookPro, relayDeviceID: 3, name: "MacBook Pro",
@@ -199,6 +205,18 @@ extension PreviewVaultService {
     public func scriptFeedOutcomes(_ outcomes: [PreviewFeed.Scripted]) { feedState.outcomes = outcomes }
 
     public func failNextFeedList(_ error: VaultError) { feedState.nextListError = error }
+
+    /// After a `questionsUnlock` of a vault, its feeds stay ones that the core cannot act on (a
+    /// newer feed came after its keys were read), or become ones it can act on (the default).
+    public func scriptFeedCanActAfterUnlock(_ canAct: Bool) { feedState.canActAfterUnlock = canAct }
+
+    /// `questionsUnlock` read the keys of `vaultID` again: the feeds shown now came before them.
+    func feedKeysRead(vaultID: String) {
+        guard let at = feedState.vaults.firstIndex(where: { $0.vaultID == vaultID }) else { return }
+        for mac in feedState.vaults[at].macs.indices where feedState.vaults[at].macs[mac].problem == nil {
+            feedState.vaults[at].macs[mac].canAct = feedState.canActAfterUnlock
+        }
+    }
 
     public func failNextFeedActionString(_ error: VaultError) { feedState.nextStringError = error }
 
