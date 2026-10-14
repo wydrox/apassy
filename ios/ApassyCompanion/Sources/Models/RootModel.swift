@@ -260,9 +260,35 @@ final class RootModel {
         // The removals of exceptions sign with the answer key of the row in each vault's team.
         let agents = AgentsModel(
             service: vault.service, signers: answerSigners,
-            registeredKey: { [weak model] vaultID, team in model?.registeredAnswerKey(vaultID: vaultID, team: team) })
+            registeredKey: { [weak model] vaultID, team in model?.registeredAnswerKey(vaultID: vaultID, team: team) },
+            keys: Self.agentKeys(model, service: vault.service))
         vault.agents = agents
         self.agents = agents
+    }
+
+    /// The keys of a vault that is not selected, read again with Face ID before a removal on its
+    /// Macs (`QuestionsModel.readKeys`).
+    private static func agentKeys(_ questions: QuestionsModel, service: any VaultService) -> AgentKeys {
+        #if DEBUG && targetEnvironment(simulator)
+            // `-ApassyPreviewAgents othervault`: the Simulator has no Face ID, so the passphrase of
+            // the preview stands in for the one stored behind it, for Work only.
+            if UserDefaults.standard.string(forKey: "ApassyPreviewAgents") == "othervault",
+                let preview = service as? PreviewVaultService
+            {
+                return AgentKeys(
+                    canRead: { $0 == PreviewVaultService.workFeedVaultID },
+                    read: { vaultID, _, _ in
+                        do {
+                            _ = try await preview.questionsUnlock(
+                                vaultID: vaultID, passphrase: PreviewVaultService.passphrase)
+                            return .read
+                        } catch {
+                            return .failed(error.localizedDescription)
+                        }
+                    })
+            }
+        #endif
+        return questions.agentKeys
     }
 
     // MARK: The service

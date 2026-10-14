@@ -796,15 +796,17 @@ final class QuestionsModel {
         var cancelled = false
         /// The vaults that Face ID read, but whose questions did not open.
         var failed: Set<String> = []
+        /// The vaults whose questions the core opened: their keys were read again.
+        var opened: Set<String> = []
     }
 
     /// Read the stored passphrase of each of `targets` after one Face ID match (`reads`, or a new
-    /// one), and give it to the core for its questions. Each passphrase lives for its call only.
-    /// A vault that does not open stays locked.
+    /// one, whose prompt says `reason` or names the vaults), and give it to the core for its
+    /// questions. Each passphrase lives for its call only. A vault that does not open stays locked.
     @discardableResult
-    private func reopen(_ targets: [LockedVault], reads given: (any PassphraseReads)?, generation: Int) async
-        -> Reopened
-    {
+    private func reopen(
+        _ targets: [LockedVault], reads given: (any PassphraseReads)?, generation: Int, reason: String? = nil
+    ) async -> Reopened {
         var result = Reopened()
         guard let vault, isCurrent(generation) else {
             given?.end()
@@ -818,7 +820,8 @@ final class QuestionsModel {
             reads = given
         } else {
             do {
-                reads = try await vault.passphraseStore.readSession(reason: Self.reopenReason(targets.map(\.name)))
+                reads = try await vault.passphraseStore.readSession(
+                    reason: reason ?? Self.reopenReason(targets.map(\.name)))
             } catch {
                 result.cancelled = true
                 return result
@@ -833,6 +836,7 @@ final class QuestionsModel {
                 let status = try await service.questionsUnlock(vaultID: target.id, passphrase: passphrase)
                 if !status.enabled { withoutQuestions.insert(target.id) }
                 faceIDFailed.remove(target.id)
+                result.opened.insert(target.id)
             } catch let error as VaultError where error.code == .locked && !isCurrent(generation) {
                 break  // A lock or a suspend came first.
             } catch {
@@ -842,6 +846,39 @@ final class QuestionsModel {
         }
         if isCurrent(generation) { await refresh() }
         return result
+    }
+
+    // MARK: The keys of another vault, for its agents
+
+    /// Whether the keys of `vaultID`, a vault that is not selected, can be read again with Face ID
+    /// for an action on the agents of its Macs: "Unlock with Face ID" is on for it, its passphrase
+    /// is stored, and it did not fail. Never prompts.
+    func canReadKeys(_ vaultID: String) -> Bool {
+        guard let vault, vault.isUnlocked, vaultID != vault.vault?.id else { return false }
+        return canUseFaceID(vaultID) && !faceIDFailed.contains(vaultID)
+    }
+
+    /// Read the keys of `vaultID` (named `name`) again from its vault: its stored passphrase after
+    /// one Face ID that says `reason`, through `questions_unlock`, as "Unlock with Face ID" in
+    /// Decisions does. The core decides again which feeds this iPhone can act on. A cancelled Face
+    /// ID, or a lock meanwhile, does nothing.
+    func readKeys(vaultID: String, name: String, reason: String) async -> AgentKeysRead {
+        guard canReadKeys(vaultID) else { return .failed(AgentsText.selectVaultNote(name)) }
+        guard !opening.contains(vaultID) else { return .cancelled }
+        let result = await reopen(
+            [LockedVault(id: vaultID, name: name)], reads: nil, generation: openGeneration, reason: reason)
+        if result.opened.contains(vaultID) { return .read }
+        if result.failed.contains(vaultID) { return .failed(AgentsText.keysNotRead(name)) }
+        return .cancelled
+    }
+
+    /// The re-read of the keys for the Agents tab.
+    var agentKeys: AgentKeys {
+        AgentKeys(
+            canRead: { [weak self] vaultID in self?.canReadKeys(vaultID) ?? false },
+            read: { [weak self] vaultID, name, reason in
+                await self?.readKeys(vaultID: vaultID, name: name, reason: reason) ?? .cancelled
+            })
     }
 
     /// The text of the Face ID prompt for the questions of other vaults: it names each of them.

@@ -32,6 +32,29 @@ struct AgentSection: Equatable, Identifiable {
     var id: String { "\(vaultID)/\(mac.device)" }
 }
 
+/// What reading the keys of a vault that is not selected again gave (`AgentKeys.read`).
+enum AgentKeysRead: Equatable {
+    /// The core read them from the vault.
+    case read
+    /// Face ID was cancelled, or Apassy locked meanwhile: nothing happened.
+    case cancelled
+    /// They were not read; the text says why and what to do.
+    case failed(String)
+}
+
+/// Reads the keys of a vault that is not selected again, with Face ID and its stored passphrase
+/// (`QuestionsModel.readKeys`), so that its feeds can be acted on (contract ios-core-v1 section
+/// 5.12, `can_act`).
+struct AgentKeys {
+    /// Whether the keys of the vault can be read so: its passphrase is stored behind Face ID.
+    var canRead: @MainActor (_ vaultID: String) -> Bool
+    /// Read them, with a Face ID prompt that says `reason`.
+    var read: @MainActor (_ vaultID: String, _ vaultName: String, _ reason: String) async -> AgentKeysRead
+
+    /// No vault that is not selected can be read again: "Select <vault>…".
+    static let none = AgentKeys(canRead: { _ in false }, read: { _, _, _ in .cancelled })
+}
+
 /// The Agents tab on the relay feed (contract relay-feed-v1; ios-core-v1 section 5.12): the agents
 /// that each Mac publishes for each unlocked vault, read with `feed_list` and followed with the
 /// long poll `feed_wait` while the tab shows, and the removal of an exception of an agent.
@@ -76,6 +99,8 @@ final class AgentsModel {
     /// The answer key that the row of this iPhone holds in `team` for the vault (from the
     /// questions), so that the signer of that row signs; nil when it is not known.
     @ObservationIgnored private let registeredKey: @MainActor (_ vaultID: String, _ team: String) -> Data?
+    /// Reads the keys of a vault that is not selected again before a removal on its Macs.
+    @ObservationIgnored private let keys: AgentKeys
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let retryInterval: Duration
     /// The long poll of `feed_action_wait` (0 to 25 s).
@@ -91,12 +116,13 @@ final class AgentsModel {
     init(
         service: any VaultService, signers: any AnswerSigners,
         registeredKey: @escaping @MainActor (_ vaultID: String, _ team: String) -> Data? = { _, _ in nil },
-        now: @escaping @MainActor () -> Date = { Date() }, retryInterval: Duration = .seconds(2),
+        keys: AgentKeys = .none, now: @escaping @MainActor () -> Date = { Date() }, retryInterval: Duration = .seconds(2),
         actionWait: Int = 25
     ) {
         self.service = service
         self.signers = signers
         self.registeredKey = registeredKey
+        self.keys = keys
         self.now = now
         self.retryInterval = retryInterval
         self.actionWait = actionWait
@@ -314,8 +340,9 @@ final class AgentsModel {
         if entry.mac.stale { return "Remove it when \(entry.mac.name) reports again." }
         if entry.agent.revoked { return "This agent is disconnected." }
         // A vault that is not selected holds a copy of its keys from its last unlock: this list
-        // came after it, perhaps from a Mac removed since (the core refuses it too).
-        if !entry.mac.canAct { return AgentsText.selectVaultNote(entry.vaultName) }
+        // came after it, perhaps from a Mac removed since (the core refuses it too). With its
+        // passphrase behind Face ID, "Remove" reads them again first (`removeTapped`).
+        if !entry.mac.canAct, !keys.canRead(entry.vaultID) { return AgentsText.selectVaultNote(entry.vaultName) }
         if !entry.registered {
             return "This iPhone can remove exceptions once the vault has synced from the Mac that confirmed it."
         }
@@ -339,11 +366,48 @@ final class AgentsModel {
             .sorted { $0.removal.item < $1.removal.item }
     }
 
+    /// "Remove" of `exception` in `entry`: whether its confirmation shows. When the core cannot
+    /// act on this feed (`can_act: false`, a vault that is not selected), the keys of the vault are
+    /// read again first with Face ID, then the list; the confirmation shows only when the core now
+    /// can act on it. Nothing is prepared or signed here.
+    func removeTapped(_ exception: FeedException, in entry: AgentEntry) async -> Bool {
+        guard let removal = removal(of: exception, in: entry), removalBlock(of: exception, in: entry) == nil else {
+            return false
+        }
+        if case .working = removals[removal] { return false }
+        if entry.mac.canAct { return true }
+        let started = generation
+        removals[removal] = .working("Unlocking \(entry.vaultName)…")
+        let read = await keys.read(entry.vaultID, entry.vaultName, AgentsText.readKeysReason(entry.vaultName))
+        guard started == generation else { return false }
+        switch read {
+        case .cancelled:
+            removals[removal] = nil
+            return false
+        case .failed(let text):
+            removals[removal] = .failed(text)
+            return false
+        case .read:
+            break
+        }
+        await refresh()
+        guard started == generation else { return false }
+        guard let fresh = self.entry(entry.id), fresh.mac.canAct, fresh.agent.exceptions.contains(exception) else {
+            removals[removal] = .failed(AgentsText.listChanged(mac: entry.mac.name))
+            return false
+        }
+        removals[removal] = nil
+        return true
+    }
+
     /// Remove `exception` of `entry` on its Mac: the action string of the core; for a kind that
     /// gives authority back, Face ID and the answer key of the vault's team; the post; then the
-    /// outcome that the Mac settles. The owner confirmed it before.
+    /// outcome that the Mac settles. The owner confirmed it before. A feed that the core cannot act
+    /// on sends nothing: `removeTapped` reads the keys again first.
     func remove(_ exception: FeedException, in entry: AgentEntry) async {
-        guard let removal = removal(of: exception, in: entry), removalBlock(of: exception, in: entry) == nil else {
+        guard let removal = removal(of: exception, in: entry), removalBlock(of: exception, in: entry) == nil,
+            entry.mac.canAct
+        else {
             return
         }
         if case .working = removals[removal] { return }
@@ -556,6 +620,19 @@ enum AgentsText {
     static func selectVaultNote(_ vault: String) -> String {
         "Select \(vault) on this iPhone to remove exceptions of its agents."
     }
+
+    /// The reason of the Face ID that reads the keys of a vault that is not selected again.
+    static func readKeysReason(_ vault: String) -> String {
+        "Unlock the questions of \(vault) to remove this exception"
+    }
+
+    /// The stored passphrase did not open the vault.
+    static func keysNotRead(_ vault: String) -> String {
+        "Face ID did not open \(vault). \(selectVaultNote(vault))"
+    }
+
+    /// The core still cannot act on the list after the keys were read again: a newer one came.
+    static func listChanged(mac: String) -> String { "The list on \(mac) changed. Look at it again." }
 
     /// The footer of "Sees" for an agent with "only these items": the list holds its `only` rows.
     static func seesFooter(mac: String) -> String {
