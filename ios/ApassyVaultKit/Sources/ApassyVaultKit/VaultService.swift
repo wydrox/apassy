@@ -55,6 +55,16 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case pushUnavailable = "push_unavailable"
         /// The `vault_id` of an answer is not the vault of its question.
         case wrongVault = "wrong_vault"
+        // The agents of the Macs (section 5.12).
+        /// The relay does not carry the feeds yet.
+        case feedUnavailable = "feed_unavailable"
+        /// The time of the action is too old to send again: do it again, with Face ID again.
+        case staleAction = "stale_action"
+        /// The feed of the Mac is more than a day old: no action until it reports again.
+        case staleFeed = "stale_feed"
+        case tooManyActions = "too_many_actions"
+        /// The service has no such call (an older core; app side, not the core).
+        case unsupported
     }
 
     public var code: Code
@@ -214,6 +224,22 @@ public protocol VaultService: Sendable {
     /// the owner: ask for Face ID first when turning "Always ask me" off or choosing an
     /// environment other than production, as the Mac does.
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws
+
+    // 5.12 The agents of the Macs (contract relay-feed-v1). The app only. An older service throws
+    // `VaultError.feedUnsupported` (`Feed.swift`).
+    /// The agents of every vault with a questions context, as the feeds of their Macs show them.
+    func feedList() async throws -> FeedList
+    /// True when a feed changed (a long poll of at most 25 s). Only while the Agents tab shows.
+    func feedWait(timeout: Int) async throws -> Bool
+    /// The action string of a removal, to sign with the answer key of `teamID` after Face ID when
+    /// `needsFaceID`. `actionID` and `time`: those of an earlier try (a retry); nil for new ones.
+    func feedActionString(_ removal: FeedRemoval, actionID: String?, time: Int64?) async throws -> PreparedFeedAction
+    /// Seal and post a removal with the `actionID` and `time` of `feedActionString`. `signature`
+    /// (DER, by the answer key) for a Face ID kind; nil for `only`, which the core signs.
+    func feedAction(_ removal: FeedRemoval, actionID: String, time: Int64, signature: Data?) async throws
+        -> SentFeedAction
+    /// The state of a posted action; a long poll of `timeout` seconds (0 to 25) while it is open.
+    func feedActionWait(actionID: String, vaultID: String?, timeout: Int) async throws -> FeedActionOutcome
 }
 
 public extension VaultService {

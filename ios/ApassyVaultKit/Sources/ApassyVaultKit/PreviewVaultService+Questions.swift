@@ -143,6 +143,8 @@ extension PreviewVaultService {
     func dropQuestionContexts() {
         questionsState.ownOpen = false
         for at in questionsState.others.indices { questionsState.others[at].open = false }
+        // The actions that this process posted go with the contexts.
+        feedState.posted = [:]
     }
 
     /// The push token in the team of the vault `vaultID` (the selected vault: `currentPushToken`).

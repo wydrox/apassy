@@ -34,6 +34,8 @@ public actor PreviewVaultService: VaultService {
     var questionsState = PreviewQuestions()
     /// Folders and the options of each credential (`PreviewVaultService+Organize.swift`).
     var organizeState = PreviewOrganize()
+    /// The agents of the Macs (`PreviewVaultService+Feed.swift`).
+    var feedState = PreviewFeed()
 
     /// - Parameters:
     ///   - empty: no vault on this iPhone (the setup flow).
