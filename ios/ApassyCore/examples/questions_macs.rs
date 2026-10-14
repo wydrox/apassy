@@ -172,6 +172,8 @@ impl Mac {
                 question_wait: Duration::from_secs(300),
                 tick: Duration::from_millis(50),
                 device_name: name.to_owned(),
+                feed: false,
+                ..QuestionsConfig::default()
             },
         );
         Self {
