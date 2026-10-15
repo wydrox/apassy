@@ -32,7 +32,7 @@ rusqlite = { version = "=0.40.2", optional = true, default-features = false, fea
 tempfile = { version = "=3.27.0", optional = true }
 getrandom = { version = "=0.4.3", optional = true }
 # ADR 0005: TLS for connector destinations. ring backend, macOS trust store.
-rustls = { version = "=0.23.45", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.46", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = { version = "=0.7.0", optional = true }
 # ADR 0011: the certificate authority of each proxied run and its host certificates.
 rcgen = { version = "=0.14.10", optional = true, default-features = false, features = ["crypto", "pem", "ring"] }

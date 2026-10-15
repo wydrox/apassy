@@ -4,7 +4,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-## [0.5.3] - 2026-10-14
+## [0.5.3] - 2026-10-15
 
 ### Upgrade notes
 
@@ -12,6 +12,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Security
 
+- **TLS library:** rustls is updated from 0.23.45 to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348, and -0349 (published on 2026-10-14). The Mac and the iPhone use it for their connections to the relay.
 - **What you confirm is what is removed:** removing an exception from the iPhone now signs the names it showed (agent, credential, Mac) and the list they came from. The Mac checks those names against its own vault, again at the moment it removes the row, and removes nothing when they differ. A feed with false names on real exceptions no longer gets an exception removed ([relay feed v1](docs/contracts/relay-feed-v1.md) §9.3, §15).
 
 ### Fixed
