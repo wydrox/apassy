@@ -769,6 +769,11 @@ impl Section<'_> {
 
 // ---- Buttons. ----
 
+/// The side padding of a small borderless button ([`Style::Link`], [`Style::Destructive`])
+/// around its text. Its hover fill shows it; at rest only the text shows, so a trailing
+/// one moves right by it to line its text up with the controls above.
+pub(crate) const BORDERLESS_SMALL_PAD: f32 = 4.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
     /// `.borderedProminent`: the one main action of a view.
@@ -815,6 +820,23 @@ pub(crate) fn small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
     button_with(ui, None, label, style, Size::Small)
 }
 
+/// A small borderless button ([`Style::Link`] or [`Style::Destructive`]) at the trailing
+/// edge of a row: its text ends at the edge, as the switches of the rows above do. Its
+/// hover fill reaches past the edge by [`BORDERLESS_SMALL_PAD`], into the row's padding.
+pub(crate) fn trailing_small_button(ui: &mut Ui, label: &str, style: Style) -> Response {
+    debug_assert!(matches!(style, Style::Link | Style::Destructive));
+    button_named(
+        ui,
+        None,
+        label,
+        None,
+        style,
+        Size::Small,
+        0.0,
+        BORDERLESS_SMALL_PAD,
+    )
+}
+
 /// A full-width large button, for the start screens.
 pub(crate) fn wide_button(ui: &mut Ui, label: &str, style: Style) -> Response {
     let width = ui.available_width();
@@ -838,7 +860,7 @@ pub(crate) fn button_with(
 /// A button with an icon and no text. `name` is its name for VoiceOver and its
 /// tooltip.
 pub(crate) fn icon_button(ui: &mut Ui, icon: Icon, name: &str, size: Size) -> Response {
-    button_named(ui, Some(icon), "", Some(name), Style::Link, size, 0.0).on_hover_text(name)
+    button_named(ui, Some(icon), "", Some(name), Style::Link, size, 0.0, 0.0).on_hover_text(name)
 }
 
 fn button_sized(
@@ -849,7 +871,7 @@ fn button_sized(
     size: Size,
     min_width: f32,
 ) -> Response {
-    button_named(ui, icon, label, None, style, size, min_width)
+    button_named(ui, icon, label, None, style, size, min_width, 0.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -861,6 +883,8 @@ fn button_named(
     style: Style,
     size: Size,
     min_width: f32,
+    // The part of the right padding that is painted but not allocated (a trailing button).
+    bleed: f32,
 ) -> Response {
     let font = size.font();
     let strong = matches!(style, Style::Prominent | Style::DestructiveProminent);
@@ -877,12 +901,14 @@ fn button_named(
         0.0
     };
     let pad = match (style, size) {
-        (Style::Link | Style::Destructive, Size::Small) => 4.0,
+        (Style::Link | Style::Destructive, Size::Small) => BORDERLESS_SMALL_PAD,
         (_, Size::Small) => 8.0,
         _ => 12.0,
     };
-    let width = (galley.size().x + icon_space + 2.0 * pad).max(min_width);
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, size.height()), Sense::click());
+    let width = (galley.size().x + icon_space + 2.0 * pad - bleed).max(min_width);
+    let (allocated, response) =
+        ui.allocate_exact_size(Vec2::new(width, size.height()), Sense::click());
+    let rect = Rect::from_min_max(allocated.min, allocated.max + Vec2::new(bleed, 0.0));
     let enabled = ui.is_enabled();
     let name = name.unwrap_or(label);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));

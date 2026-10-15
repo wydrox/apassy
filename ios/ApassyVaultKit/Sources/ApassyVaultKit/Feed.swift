@@ -95,6 +95,10 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
     /// came after its keys were read (the Mac may have been removed from it since): select the
     /// vault first. Missing (an older core): true.
     public var canAct: Bool
+    /// The last feed of this Mac says that it checks the names of an action (relay-feed-v1
+    /// section 7.1). False: Apassy on that Mac is older (0.5.2) and takes no removal from this
+    /// iPhone; the app says to update it. Missing (an older core): true.
+    public var checksNames: Bool
     public var week: FeedWeek?
     public var agents: [FeedAgent]
 
@@ -103,7 +107,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
     public init(
         device: String, relayDeviceID: UInt64? = nil, name: String, seq: UInt64? = nil, generatedAt: Int64? = nil,
         stale: Bool = false, truncated: Bool = false, problem: String? = nil, canAct: Bool = true,
-        week: FeedWeek? = nil, agents: [FeedAgent] = []
+        checksNames: Bool = true, week: FeedWeek? = nil, agents: [FeedAgent] = []
     ) {
         self.device = device
         self.relayDeviceID = relayDeviceID
@@ -114,6 +118,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
         self.truncated = truncated
         self.problem = problem
         self.canAct = canAct
+        self.checksNames = checksNames
         self.week = week
         self.agents = agents
     }
@@ -123,6 +128,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
         case relayDeviceID = "relay_device_id"
         case generatedAt = "generated_at"
         case canAct = "can_act"
+        case checksNames = "checks_names"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -136,6 +142,7 @@ public struct FeedMac: Decodable, Sendable, Equatable, Identifiable {
         truncated = container.flag(forKey: .truncated)
         problem = container.optionalText(forKey: .problem)
         canAct = ((try? container.decodeIfPresent(Bool.self, forKey: .canAct)) ?? nil) ?? true
+        checksNames = ((try? container.decodeIfPresent(Bool.self, forKey: .checksNames)) ?? nil) ?? true
         week = try? container.decodeIfPresent(FeedWeek.self, forKey: .week)
         agents = container.lossy(FeedAgent.self, forKey: .agents)
     }
@@ -418,6 +425,9 @@ public struct FeedUse: Decodable, Sendable, Equatable {
 
 /// The removal of one exception of an agent, as the feed of its Mac shows it: the parameters of
 /// `feed_action_string` and `feed_action`.
+///
+/// Two removals are equal when they name the same exception: `feedSeq` (the feed whose list the
+/// owner confirmed) does not count, so a removal keeps its state while newer feeds come.
 public struct FeedRemoval: Sendable, Equatable, Hashable {
     public var vaultID: String
     /// The `device` of the Mac in `feed_list`.
@@ -426,23 +436,43 @@ public struct FeedRemoval: Sendable, Equatable, Hashable {
     public var item: String
     public var kind: FeedExceptionKind
     public var createdAt: Int64
+    /// The `seq` of the feed whose list the owner confirmed: the core refuses the action when it
+    /// shows another feed of that Mac now (contract section 5.12).
+    public var feedSeq: UInt64?
 
     public init(vaultID: String, macDevice: String, agent: String, item: String, kind: FeedExceptionKind,
-                createdAt: Int64) {
+                createdAt: Int64, feedSeq: UInt64? = nil) {
         self.vaultID = vaultID
         self.macDevice = macDevice
         self.agent = agent
         self.item = item
         self.kind = kind
         self.createdAt = createdAt
+        self.feedSeq = feedSeq
+    }
+
+    public static func == (lhs: FeedRemoval, rhs: FeedRemoval) -> Bool {
+        lhs.vaultID == rhs.vaultID && lhs.macDevice == rhs.macDevice && lhs.agent == rhs.agent
+            && lhs.item == rhs.item && lhs.kind == rhs.kind && lhs.createdAt == rhs.createdAt
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(vaultID)
+        hasher.combine(macDevice)
+        hasher.combine(agent)
+        hasher.combine(item)
+        hasher.combine(kind)
+        hasher.combine(createdAt)
     }
 
     /// The parameters of the core call.
     public var parameters: [String: Any] {
-        [
+        var parameters: [String: Any] = [
             "vault_id": vaultID, "mac_device": macDevice, "agent": agent, "item": item, "kind": kind.rawValue,
             "created_at": createdAt,
         ]
+        if let feedSeq { parameters["feed_seq"] = feedSeq }
+        return parameters
     }
 }
 
@@ -459,10 +489,16 @@ public struct PreparedFeedAction: Decodable, Sendable, Equatable {
     public var needsFaceID: Bool
     /// The text of the Face ID prompt.
     public var faceIDReason: String
+    /// The names that the action string signs, as the list shows them: the app sends nothing
+    /// when one is not the name its confirmation showed (relay-feed-v1 section 9.3).
+    public var agentName: String?
+    public var credentialName: String?
+    public var macName: String?
 
     public init(
         vaultID: String, teamID: String, actionID: String, time: Int64, feedSeq: UInt64? = nil, actionString: String,
-        needsFaceID: Bool, faceIDReason: String
+        needsFaceID: Bool, faceIDReason: String, agentName: String? = nil, credentialName: String? = nil,
+        macName: String? = nil
     ) {
         self.vaultID = vaultID
         self.teamID = teamID
@@ -472,6 +508,9 @@ public struct PreparedFeedAction: Decodable, Sendable, Equatable {
         self.actionString = actionString
         self.needsFaceID = needsFaceID
         self.faceIDReason = faceIDReason
+        self.agentName = agentName
+        self.credentialName = credentialName
+        self.macName = macName
     }
 
     enum CodingKeys: String, CodingKey {
@@ -483,6 +522,9 @@ public struct PreparedFeedAction: Decodable, Sendable, Equatable {
         case actionString = "action_string"
         case needsFaceID = "needs_face_id"
         case faceIDReason = "face_id_reason"
+        case agentName = "agent_name"
+        case credentialName = "credential_name"
+        case macName = "mac_name"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -496,6 +538,9 @@ public struct PreparedFeedAction: Decodable, Sendable, Equatable {
         // Missing: ask for Face ID. A wrong guess fails at the core, never silently.
         needsFaceID = (try? container.decodeIfPresent(Bool.self, forKey: .needsFaceID)) ?? true
         faceIDReason = container.text(forKey: .faceIDReason)
+        agentName = container.optionalText(forKey: .agentName)
+        credentialName = container.optionalText(forKey: .credentialName)
+        macName = container.optionalText(forKey: .macName)
     }
 }
 

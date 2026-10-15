@@ -39,8 +39,9 @@
 //! The check of an action of the feed through the relay ([`OwnerCheck::RemoteAction`],
 //! contract relay-feed-v1 section 9.5) verifies the Face ID answer key of a live iPhone
 //! of the vault over the action string, which the gate rebuilds with the item UUID of
-//! the action. It makes a proof for the removal of a "Not for this agent" or "Always ask
-//! for this agent" exception only.
+//! the action and with the names that the vault has for the agent, the item, and this
+//! Mac (v2; a v1 action signs ids only and makes no proof). It makes a proof for the
+//! removal of a "Not for this agent" or "Always ask for this agent" exception only.
 //!
 //! A notification, an inbox acknowledgment, or an agent request cannot make a proof
 //! (goal item N4).
@@ -1150,8 +1151,10 @@ impl OwnerGate {
     /// the signed ones and whose item has the signed UUID; the live trusted device from
     /// the vault in the session `epoch`; the team (the questions team of the vault) and
     /// the target (the trusted device of this Mac in it), rebuilt from the vault and not
-    /// taken from the caller; the window; and the signature of its answer key over the
-    /// action string. Only this action makes a proof through `RemoteAction`,
+    /// taken from the caller; a v2 action (a v1 action signs ids only and is refused),
+    /// whose `names` are among those rebuilt from the vault's agent, item, and this Mac
+    /// (`feed::names_in_vault`); the window; and the
+    /// signature of its answer key over the action string. Only this action makes a proof through `RemoteAction`,
     /// and no other remote check makes a proof for it.
     fn check_remote_action(
         &self,
@@ -1175,7 +1178,7 @@ impl OwnerGate {
             return Err(OwnerAuthError::RemoteRejected);
         }
         let other = |error: crate::vault::VaultError| OwnerAuthError::Other(error.to_string());
-        let (device, item_uuid, team_id, me) = {
+        let (device, item_uuid, team_id, me, names) = {
             let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
                 Some(vault) if !vault.is_locked() && vault.epoch() == epoch => {
@@ -1191,11 +1194,20 @@ impl OwnerGate {
                         }
                         None => None,
                     };
+                    // The names of the agent, the item, and this Mac, from the vault.
+                    let names = match &me {
+                        Some(me) => crate::questions::feed::names_in_vault(
+                            vault, *agent_id, *item_id, &me.uuid,
+                        )
+                        .map_err(other)?,
+                        None => None,
+                    };
                     (
                         vault.trusted_device(&signed.by).map_err(other)?,
                         vault.item_uuid(*item_id).map_err(other)?,
                         membership.map(|membership| membership.team_id),
                         me.map(|me| me.uuid),
+                        names,
                     )
                 }
                 _ => return Err(OwnerAuthError::SessionChanged),
@@ -1208,6 +1220,14 @@ impl OwnerGate {
             || team_id.as_deref() != Some(signed.team_id.as_str())
             || me.as_deref() != Some(signed.to.as_str())
         {
+            return Err(OwnerAuthError::RemoteRejected);
+        }
+        // Only a v2 action gives authority back, and it signs the names the owner saw:
+        // they must be this Mac's names. A v1 action signs ids only.
+        let Some(signed_names) = &signed.names else {
+            return Err(OwnerAuthError::RemoteRejected);
+        };
+        if !names.is_some_and(|names| names.contains(signed_names)) {
             return Err(OwnerAuthError::RemoteRejected);
         }
         let now = SystemTime::now()

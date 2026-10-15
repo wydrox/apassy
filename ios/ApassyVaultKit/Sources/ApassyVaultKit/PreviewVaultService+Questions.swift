@@ -273,6 +273,8 @@ extension PreviewVaultService {
             questionsState.ownOpen = true
             return questionsStatus
         }
+        // The core read the keys of this vault again: the feeds that it shows came before them.
+        feedKeysRead(vaultID: vaultID)
         guard let at = questionsState.others.firstIndex(where: { $0.id == vaultID }) else { return .off }
         questionsState.others[at].open = true
         return questionsState.others[at].status

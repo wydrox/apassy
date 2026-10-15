@@ -200,6 +200,36 @@ import Testing
         #expect(prepared.faceIDReason == "remove an exception of agent \"Claude Code\"")
     }
 
+    @Test func thePreparedActionNamesWhatItSigns() throws {
+        let json = #"""
+            {"vault_id": "4f1c0a2b-9d8e-4f6a-8b4c-3d2e1f0a9b8c", "team_id": "t_7k2m5q4x3c",
+             "action_id": "sLGys7S1tre4ubq7vL2-vw", "time": 1790000060, "feed_seq": 1790000040,
+             "action_string": "apassy-feed-action-v2\nsynthetic", "needs_face_id": true,
+             "face_id_reason": "remove an exception of agent \"Claude Code\"",
+             "agent_name": "Claude Code", "credential_name": "", "mac_name": "MacBook Pro"}
+            """#
+        let prepared = try decode(PreparedFeedAction.self, json)
+        #expect(prepared.agentName == "Claude Code")
+        #expect(prepared.credentialName == "")
+        #expect(prepared.macName == "MacBook Pro")
+        // Without them (an older core) they are nil: the app sends nothing then.
+        let older = try decode(
+            PreparedFeedAction.self,
+            """
+            {"vault_id": "v", "team_id": "t", "action_id": "a", "time": 1, "action_string": "s"}
+            """)
+        #expect(older.agentName == nil && older.credentialName == nil && older.macName == nil)
+    }
+
+    @Test func aMacSaysWhetherItChecksTheNames() throws {
+        let marked = try decode(FeedMac.self, #"{"device": "d", "name": "Mac mini", "checks_names": true}"#)
+        #expect(marked.checksNames)
+        let old = try decode(FeedMac.self, #"{"device": "d", "name": "Mac mini", "checks_names": false}"#)
+        #expect(!old.checksNames)
+        // Missing (an older core): true.
+        #expect(try decode(FeedMac.self, #"{"device": "d", "name": "Mac mini"}"#).checksNames)
+    }
+
     @Test func aPreparedActionWithoutTheFlagAsksForFaceID() throws {
         let json = """
             {"vault_id": "4f1c0a2b-9d8e-4f6a-8b4c-3d2e1f0a9b8c", "team_id": "t_7k2m5q4x3c",
@@ -286,6 +316,18 @@ import Testing
         #expect(parameters["item"] as? String == "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c")
         #expect(parameters["kind"] as? String == "always_ask")
         #expect(parameters["created_at"] as? Int64 == 1_789_990_000)
+
+        // With the `seq` of the confirmed list; the same exception at another `seq` is the same
+        // removal.
+        var confirmed = removal
+        confirmed.feedSeq = 1_790_000_040
+        #expect(confirmed.parameters["feed_seq"] as? UInt64 == 1_790_000_040)
+        #expect(Set(confirmed.parameters.keys).contains("feed_seq"))
+        var newer = confirmed
+        newer.feedSeq = 1_790_000_041
+        #expect(newer == confirmed)
+        #expect(newer.hashValue == confirmed.hashValue)
+        #expect(removal == confirmed)
     }
 
     @Test func theFeedCodesOfTheCoreDecode() {
@@ -321,6 +363,22 @@ import Testing
         let vaults = PreviewVaultService.sampleFeed()
         await service.setFeed(vaults)
         return (service, vaults)
+    }
+
+    @Test func thePreviewRefusesTheListOfAnotherFeedAndNamesWhatItSigns() async throws {
+        let (service, vaults) = await previewService()
+        var never = try removal(
+            vaults, vault: "Personal", mac: PreviewVaultService.PreviewMacs.macMini, agent: "Codex", agentID: "7",
+            kind: .never)
+        let shown = try #require(vaults[0].macs.first { $0.device == never.macDevice }?.seq)
+        never.feedSeq = shown + 1
+        #expect(await failure { _ = try await service.feedActionString(never, actionID: nil, time: nil) } == .notFound)
+        never.feedSeq = shown
+        let prepared = try await service.feedActionString(never, actionID: nil, time: nil)
+        #expect(prepared.agentName == "Codex")
+        #expect(prepared.macName == "Mac mini")
+        #expect(prepared.actionString.hasPrefix("apassy-feed-action-v2\n"))
+        #expect(prepared.actionString.split(separator: "\n").last?.hasPrefix("names:") == true)
     }
 
     @Test func thePreviewSignsOnlyTheFaceIDKinds() async throws {

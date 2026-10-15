@@ -36,6 +36,7 @@ use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::{HELPER_MISSING_NOTE, UnlockMethod};
 use crate::desktop::{BrokerState, DesktopApp};
 use crate::relay::membership::{QuestionsAvailability, questions_availability};
+use crate::vault::{CompanionDevice, TrustedDevice, TrustedDeviceKind};
 
 #[path = "settings_rows.rs"]
 pub(crate) mod rows;
@@ -104,20 +105,10 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
             if broken {
                 parts.push("Notifications off".to_owned());
             }
-            let iphones = app
-                .owner_ui
-                .session
-                .companion_devices()
-                .map_or(0, |devices| devices.len());
-            parts.push(match iphones {
-                0 => "No iPhone".to_owned(),
-                1 => "1 iPhone".to_owned(),
-                count => format!("{count} iPhones"),
-            });
-            if matches!(
-                relay_questions_state(app),
-                Some(QuestionsAvailability::On { .. })
-            ) {
+            let companions = app.owner_ui.session.companion_devices().unwrap_or_default();
+            let (relay_on, relay_iphones) = relay_iphones(app);
+            parts.push(iphones_words(iphone_count(&companions, &relay_iphones)));
+            if relay_on {
                 parts.push("Relay on".to_owned());
             }
             parts.join(" · ")
@@ -134,6 +125,58 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
             }
         }
         SettingsSection::Updates => format!("Version {}", app.updates.build().label()),
+    }
+}
+
+/// Whether the questions of the open, unlocked vault go through the relay, and then the
+/// live iPhones of its trusted devices: the iPhones that answer them there.
+fn relay_iphones(app: &DesktopApp) -> (bool, Vec<TrustedDevice>) {
+    let vault = app.owner_ui.session.shared_vault();
+    let guard = vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(vault) = guard.as_ref().filter(|vault| !vault.is_locked()) else {
+        return (false, Vec::new());
+    };
+    if !matches!(
+        questions_availability(vault),
+        Ok(QuestionsAvailability::On { .. })
+    ) {
+        return (false, Vec::new());
+    }
+    let iphones = vault
+        .trusted_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|device| device.kind == TrustedDeviceKind::Iphone)
+        .collect();
+    (true, iphones)
+}
+
+/// How many iPhones this Mac works with: the paired iPhones of this network and the
+/// iPhones of the relay. The two lists share no ID, so an iPhone of the relay with the
+/// name of a paired iPhone is that iPhone, once for each paired iPhone of that name.
+pub(super) fn iphone_count(companions: &[CompanionDevice], relay: &[TrustedDevice]) -> usize {
+    let mut unmatched: Vec<&str> = companions.iter().map(|device| device.name.trim()).collect();
+    let mut count = companions.len();
+    for device in relay {
+        let name = device.name.trim();
+        match unmatched.iter().position(|paired| *paired == name) {
+            Some(at) => {
+                unmatched.swap_remove(at);
+            }
+            None => count += 1,
+        }
+    }
+    count
+}
+
+/// "No iPhone", "1 iPhone", "2 iPhones".
+pub(super) fn iphones_words(count: usize) -> String {
+    match count {
+        0 => "No iPhone".to_owned(),
+        1 => "1 iPhone".to_owned(),
+        count => format!("{count} iPhones"),
     }
 }
 
@@ -448,8 +491,10 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     None,
                     Some(rows::note(&device.words)),
                     |ui| {
+                        // Its text ends where the switches above end.
                         if device.removable
-                            && kit::small_button(ui, REMOVE_DEVICE, Style::Destructive).clicked()
+                            && kit::trailing_small_button(ui, REMOVE_DEVICE, Style::Destructive)
+                                .clicked()
                         {
                             remove_device = Some(device.uuid.clone());
                         }

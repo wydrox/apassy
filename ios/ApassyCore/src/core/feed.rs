@@ -9,7 +9,12 @@
 //! by the Secure Enclave answer key after Face ID; the core builds the exact string first
 //! (`feed_action_string`) and checks the signature before it posts. The removal of an
 //! "only these items" row takes authority away: the core signs it with the relay key of
-//! the membership.
+//! the membership. The string is always of v2: it also signs the digest of the names that
+//! `feed_list` shows for the exception (the agent, the credential, the Mac), and the core
+//! makes it only for the feed whose list the owner confirmed (its `seq`). The Mac compares
+//! the names with its own rows, so a feed with false names on real ids does not count. A
+//! Mac of 0.5.2 takes no v2 action; the mark at the end of a feed (a line feed) tells
+//! the app which Macs do.
 //!
 //! What a feed shows lives in the questions context of its vault, so a `lock`, a
 //! `suspend`, and `remove_vault` drop it with the context. The highest `seq` accepted
@@ -41,8 +46,13 @@ use super::{Core, Role, guard, now};
 
 /// The tag of every AAD (section 6.1).
 const AAD_TAG: &str = "apassy-feed-v1";
-/// The tag of the action string (section 9.3).
-const ACTION_TAG: &str = "apassy-feed-action-v1";
+/// The tag of the action string of v2 (section 9.3), which signs the names the owner saw.
+/// This iPhone sends no other version.
+const ACTION_TAG_V2: &str = "apassy-feed-action-v2";
+/// The last byte of the plaintext of a feed whose Mac checks the names (section 7.1). Only
+/// a hint for the screen: a Mac without it (0.5.2) cannot take the removals that give
+/// authority back.
+const NAMES_MARK: u8 = b'\n';
 /// The largest plaintexts and the largest feed ciphertext (section 6.3).
 const MAX_FEED_BYTES: usize = 262_128;
 const MAX_FEED_CIPHERTEXT: usize = 262_144;
@@ -197,6 +207,8 @@ struct Pending {
     target: Target,
     /// The answer key of this iPhone's row when the string was made.
     answer_key: Option<Vec<u8>>,
+    /// The digest of the names that the action string signs.
+    names: String,
 }
 
 impl Pending {
@@ -209,6 +221,7 @@ impl Pending {
             && self.target.item == input.item
             && self.target.kind == input.kind
             && self.target.created_at == input.created_at
+            && input.feed_seq == Some(self.prepared.feed_seq)
     }
 }
 
@@ -264,6 +277,10 @@ pub(super) struct Feed {
     truncated: bool,
     week: Week,
     agents: Vec<Agent>,
+    /// Not a field: the plaintext ends in [`NAMES_MARK`], so its Mac checks the names. A
+    /// hint for the screen only, never the choice of what this iPhone signs.
+    #[serde(skip)]
+    checks_names: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -430,14 +447,17 @@ impl Feed {
 }
 
 /// The feed of `plaintext` when it has exactly the fields of section 7.1 within their
-/// limits (section 7.4, step 2).
+/// limits (section 7.4, step 2). JSON allows white space after the object; a plaintext
+/// that ends in [`NAMES_MARK`] is of a Mac that checks the names (section 9.3).
 fn parse_feed(plaintext: &[u8]) -> Option<Feed> {
     if plaintext.len() > MAX_FEED_BYTES {
         return None;
     }
-    serde_json::from_slice::<Feed>(plaintext)
+    let mut feed = serde_json::from_slice::<Feed>(plaintext)
         .ok()
-        .filter(Feed::is_valid)
+        .filter(Feed::is_valid)?;
+    feed.checks_names = plaintext.last() == Some(&NAMES_MARK);
+    Some(feed)
 }
 
 // ---- The envelopes (section 6). ----
@@ -478,7 +498,8 @@ fn valid_action_id(action_id: &str) -> bool {
     action_id.len() == 22 && decode_b64u(action_id).is_some_and(|bytes| bytes.len() == 16)
 }
 
-/// The action string of section 9.3: eight lines, no newline at the end.
+/// The action string of v2 (section 9.3): nine lines, no newline at the end, the last one
+/// `names:<digest>`.
 fn action_string(
     by: &str,
     to: &str,
@@ -486,9 +507,10 @@ fn action_string(
     action_id: &str,
     target: &Target,
     time: u64,
+    names: &str,
 ) -> String {
     [
-        ACTION_TAG,
+        ACTION_TAG_V2,
         by,
         to,
         team,
@@ -499,8 +521,31 @@ fn action_string(
         ),
         &target.feed_seq.to_string(),
         &time.to_string(),
+        &format!("names:{names}"),
     ]
     .join("\n")
+}
+
+/// The `names` of an action of v2 (section 9.3): the SHA-256, as 64 lowercase hex
+/// characters, of the names the owner sees, joined with one zero byte: the agent, the
+/// credential, and the Mac, each as the list shows it (so none holds a zero byte).
+fn names_digest(agent: &str, title: &str, mac: &str) -> String {
+    let joined = [agent, title, mac].join("\0");
+    ring::digest::digest(&ring::digest::SHA256, joined.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The title of the credential of `exception` as the list shows it: the title of the
+/// iPhone's own copy of the item when it has one that is not empty, else the feed's
+/// `item_title` (Swift's `AgentsModel.credential`, without its words around the name).
+fn shown_title(titles: Option<&BTreeMap<String, String>>, exception: &Exception) -> String {
+    local(titles, exception.item.as_deref())
+        .0
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| text(&exception.item_title))
 }
 
 /// The plaintext of an action (section 9.2), its fields in the contract's order.
@@ -516,6 +561,7 @@ struct ActionPlain<'a> {
     exception: ExceptionRef<'a>,
     feed_seq: u64,
     time: u64,
+    names: &'a str,
     signature: &'a str,
 }
 
@@ -525,16 +571,18 @@ struct ExceptionRef<'a> {
     created_at: u64,
 }
 
+/// The plaintext of an action of v2, with `names` before `signature`.
 fn action_plaintext(
     action_id: &str,
     by: &str,
     to: &str,
     target: &Target,
     time: u64,
+    names: &str,
     signature: &str,
 ) -> Vec<u8> {
     serde_json::to_vec(&ActionPlain {
-        v: 1,
+        v: 2,
         action_id,
         by,
         to,
@@ -547,6 +595,7 @@ fn action_plaintext(
         },
         feed_seq: target.feed_seq,
         time,
+        names,
         signature,
     })
     .unwrap_or_default()
@@ -741,6 +790,11 @@ struct MacOut {
     /// This iPhone can act on this feed: its vault is the selected one, or the keys of its
     /// vault were read after the feed came. False: select the vault first.
     can_act: bool,
+    /// The last feed of this Mac says that it checks the names of an action (it ends in
+    /// the mark of relay-feed-v1 section 7.1). False: a Mac of 0.5.2, which refuses every
+    /// action of this iPhone; the app offers no removal that needs Face ID and says to
+    /// update Apassy on it. A hint only: this iPhone signs the names for every Mac.
+    checks_names: bool,
     week: Option<Week>,
     agents: Vec<AgentOut>,
 }
@@ -816,6 +870,12 @@ struct Prepared {
     needs_face_id: bool,
     /// The reason of the Face ID prompt.
     face_id_reason: String,
+    /// The names that `names` of the action string signs, as `feed_list` shows them: the
+    /// agent, the credential, and the Mac. The app compares them byte for byte with the
+    /// names its confirmation showed, and sends nothing when one differs.
+    agent_name: String,
+    credential_name: String,
+    mac_name: String,
 }
 
 #[derive(Serialize)]
@@ -849,6 +909,10 @@ struct ActionIn {
     item: String,
     kind: String,
     created_at: u64,
+    /// The `seq` of the feed whose list the owner confirmed (the Mac's `seq` in
+    /// `feed_list`). The core refuses an action when the feed shown now is another one.
+    #[serde(default)]
+    feed_seq: Option<u64>,
     #[serde(default)]
     action_id: Option<String>,
     #[serde(default)]
@@ -890,6 +954,14 @@ fn list_changed(mac: &str) -> CoreError {
     CoreError::new(
         "not_found",
         format!("The list on {mac} changed. Try again."),
+    )
+}
+
+/// The feed of the Mac shown now is not the one whose list the owner confirmed.
+fn shown_changed(mac: &str) -> CoreError {
+    CoreError::new(
+        "not_found",
+        format!("The list on {mac} changed. Look at it again."),
     )
 }
 
@@ -1545,6 +1617,7 @@ impl Core {
                         relay_device_id: *device_id,
                         problem: copy.problems.get(device_id).map(|p| p.text(&name)),
                         can_act: copy.acts.contains(device_id),
+                        checks_names: feed.checks_names,
                         name,
                         seq: Some(feed.seq),
                         generated_at: Some(feed.generated_at),
@@ -1575,6 +1648,7 @@ impl Core {
                         relay_device_id: *device_id,
                         problem: Some(problem.text(&name)),
                         can_act: false,
+                        checks_names: false,
                         name,
                         seq: None,
                         generated_at: None,
@@ -1643,7 +1717,8 @@ impl Core {
                         .map(|(device_id, feed)| {
                             let acts = is_selected
                                 || keys_after_feed(&context.feed, &context.keys, *device_id);
-                            (*device_id, Arc::clone(feed), acts)
+                            let titles = context.feed.titles.clone();
+                            (*device_id, Arc::clone(feed), acts, titles)
                         })
                 })
         };
@@ -1653,12 +1728,17 @@ impl Core {
             self.feed_fetch_one(&using.vault_id, &using.member, Duration::ZERO, None)?;
             found = shown(self);
         }
-        let (to_device, feed, acts) = found.ok_or_else(list_gone)?;
+        let (to_device, feed, acts, titles) = found.ok_or_else(list_gone)?;
         let mac_name = using
             .keys
             .publisher(&feed.mac.device, to_device)
             .map(|row| text(&row.name))
             .ok_or_else(list_gone)?;
+        // The owner confirmed the list of one feed: a newer one (a relay can swap a feed in
+        // while the confirmation is up) may name the same ids with other names.
+        if input.feed_seq != Some(feed.seq) {
+            return Err(shown_changed(&mac_name));
+        }
         let agent = feed
             .agents
             .iter()
@@ -1702,6 +1782,12 @@ impl Core {
             kind: exception.kind.clone(),
             created_at: exception.created_at,
         };
+        // The names that `feed_list` shows for this exception: the Mac checks them against
+        // its own rows (section 9.5 steps 8a and 10). Signed for every Mac and every kind;
+        // a Mac of 0.5.2 refuses the action ("it has a bad form").
+        let agent_name = text(&agent.name);
+        let credential_name = shown_title(titles.as_ref(), exception);
+        let names = names_digest(&agent_name, &credential_name, &mac_name);
         let action_string = action_string(
             &own.uuid,
             &feed.mac.device,
@@ -1709,6 +1795,7 @@ impl Core {
             action_id,
             &target,
             time,
+            &names,
         );
         let prepared = Prepared {
             vault_id: using.vault_id.clone(),
@@ -1719,6 +1806,9 @@ impl Core {
             action_string,
             needs_face_id,
             face_id_reason: face_id_reason(&agent.name),
+            agent_name,
+            credential_name,
+            mac_name: mac_name.clone(),
         };
         Ok(Ready {
             pending: Pending {
@@ -1729,6 +1819,7 @@ impl Core {
                 mac_name,
                 target,
                 answer_key: own.answer_key.clone(),
+                names,
             },
             using,
         })
@@ -1894,6 +1985,7 @@ impl Core {
             &pending.to,
             target,
             time,
+            &pending.names,
             &encode_b64u(&signature),
         ));
         if plaintext.is_empty() || plaintext.len() > MAX_ACTION_BYTES {
@@ -2229,7 +2321,20 @@ mod tests {
 
     #[test]
     fn the_action_string_and_envelope_match_the_vectors() {
-        let text = action_string(PHONE, MAC, TEAM, ACTION_ID, &vector_target(), 1_790_000_060);
+        // The core builds only v2 (17.6); its first eight lines are those of the v1 string
+        // of 17.2 but the tag, which the Mac still checks for an iPhone of 0.5.2.
+        let v2 = action_string(
+            PHONE,
+            MAC,
+            TEAM,
+            ACTION_ID,
+            &vector_target(),
+            1_790_000_060,
+            NAMES,
+        );
+        let text = v2
+            .replacen(ACTION_TAG_V2, "apassy-feed-action-v1", 1)
+            .replace(&format!("\nnames:{NAMES}"), "");
         assert_eq!(text.len(), 222);
         assert_eq!(
             sha256(text.as_bytes()),
@@ -2241,15 +2346,8 @@ mod tests {
         let changed = text.replace(":never:", ":only:");
         assert!(!verify_signature(&public, changed.as_bytes(), &signature));
 
-        let plaintext = action_plaintext(
-            ACTION_ID,
-            PHONE,
-            MAC,
-            &vector_target(),
-            1_790_000_060,
-            SIGNATURE,
-        );
-        assert_eq!(String::from_utf8(plaintext.clone()).unwrap(), ACTION);
+        // The envelope of 17.3 (v1) with the AAD of every action.
+        let plaintext = ACTION.as_bytes().to_vec();
         assert_eq!(
             sha256(&plaintext),
             "22af11dac5c7a34b5ff375255a687d57b616f3307301bce022a82a7a9c74aa26"
@@ -2319,7 +2417,15 @@ mod tests {
 
     #[test]
     fn a_face_id_signature_is_checked_against_the_prepared_key() {
-        let text = action_string(PHONE, MAC, TEAM, ACTION_ID, &vector_target(), 1_790_000_060);
+        let text = action_string(
+            PHONE,
+            MAC,
+            TEAM,
+            ACTION_ID,
+            &vector_target(),
+            1_790_000_060,
+            NAMES,
+        );
         let key = decode_b64u(ANSWER_PUBLIC).unwrap();
         let other = {
             let mut other = key.clone();
@@ -2329,14 +2435,19 @@ mod tests {
         let check = |prepared: Option<&[u8]>, row: Option<&[u8]>, signature: Option<&str>| {
             face_id_signature(prepared, row, text.as_bytes(), signature).map_err(|e| e.code)
         };
-        assert!(check(Some(&key), Some(&key), Some(SIGNATURE)).is_ok());
+        assert!(check(Some(&key), Some(&key), Some(SIGNATURE_V2)).is_ok());
         // A signature that is not of this string, with the key of the row unchanged, is
         // no key change.
         let changed = text.replace("1790000040", "1790000041");
         assert_eq!(
-            face_id_signature(Some(&key), Some(&key), changed.as_bytes(), Some(SIGNATURE))
-                .map_err(|e| e.code)
-                .err(),
+            face_id_signature(
+                Some(&key),
+                Some(&key),
+                changed.as_bytes(),
+                Some(SIGNATURE_V2)
+            )
+            .map_err(|e| e.code)
+            .err(),
             Some("invalid_input")
         );
         assert_eq!(
@@ -2345,11 +2456,11 @@ mod tests {
         );
         // The row holds another key than when the string was made: a real change.
         assert_eq!(
-            check(Some(&key), Some(&other), Some(SIGNATURE)).err(),
+            check(Some(&key), Some(&other), Some(SIGNATURE_V2)).err(),
             Some("not_registered")
         );
         assert_eq!(
-            check(Some(&key), None, Some(SIGNATURE)).err(),
+            check(Some(&key), None, Some(SIGNATURE_V2)).err(),
             Some("not_registered")
         );
     }
@@ -2400,6 +2511,281 @@ mod tests {
         assert!(!marks.raise(TEAM, 2, 9));
         assert_eq!(marks.get(TEAM, 2), 10);
         assert_eq!(marks.get(TEAM, 3), 0);
+    }
+
+    /// The v2 values of section 17.6.
+    const NAMES: &str = "8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6";
+    const SIGNATURE_V2: &str = "MEUCIDZe_XeIFZkGUQjDaJg3Z5bviGeoqBIc-8R8aaFyCBGXAiEA7dTFzS2hkSFmp8wVG1jQTJR3DqpJlwzqEPofgU_SbBs";
+
+    #[test]
+    fn the_v2_vectors_match() {
+        // The feed of 17.1 with the mark: 920 bytes, read as of a Mac that checks names.
+        let marked = format!("{FEED}\n");
+        assert_eq!(marked.len(), 920);
+        assert_eq!(
+            sha256(marked.as_bytes()),
+            "140fa142ad88453b65e512ad2715f425c0800b73f445d2faeeee896d220c42a7"
+        );
+        let aad = feed_aad(TEAM, 2, 1_790_000_040, KEY_ID);
+        let sealed = envelope::seal(&unhex(KEY), &nonce(0x30), &aad, marked.as_bytes()).unwrap();
+        assert_eq!(sealed.len(), 936);
+        assert_eq!(
+            sha256(&sealed),
+            "86535f0d4be458344a31ac492dd860cae9698a5b3116bff239eddebb8c98d23e"
+        );
+        assert!(parse_feed(marked.as_bytes()).unwrap().checks_names);
+        assert!(!parse_feed(FEED.as_bytes()).unwrap().checks_names);
+        // Other white space is no mark.
+        assert!(
+            !parse_feed(format!("{FEED} ").as_bytes())
+                .unwrap()
+                .checks_names
+        );
+
+        // The names: the agent, the credential, and the Mac as the list shows them.
+        assert_eq!(
+            names_digest("Claude Code", "Shop database", "MacBook Pro"),
+            NAMES
+        );
+        assert_eq!(sha256(b"Claude Code\0Shop database\0MacBook Pro"), NAMES);
+        let text = action_string(
+            PHONE,
+            MAC,
+            TEAM,
+            ACTION_ID,
+            &vector_target(),
+            1_790_000_060,
+            NAMES,
+        );
+        assert_eq!(
+            text,
+            format!(
+                "apassy-feed-action-v2\n{PHONE}\n{MAC}\n{TEAM}\n{ACTION_ID}\nremove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000\n1790000040\n1790000060\nnames:{NAMES}"
+            )
+        );
+        assert_eq!(text.len(), 293);
+        assert_eq!(
+            sha256(text.as_bytes()),
+            "faee55b8a1050aac2b18711bdc15869dd35f454293319bd516044e56a941345c"
+        );
+        let public = decode_b64u(ANSWER_PUBLIC).unwrap();
+        let signature = decode_b64u(SIGNATURE_V2).unwrap();
+        assert!(verify_signature(&public, text.as_bytes(), &signature));
+        let other = text.replace(
+            NAMES,
+            &names_digest("Scratch Bot", "Shop database", "MacBook Pro"),
+        );
+        assert!(!verify_signature(&public, other.as_bytes(), &signature));
+        assert!(!verify_signature(
+            &public,
+            text.as_bytes(),
+            &decode_b64u(SIGNATURE).unwrap()
+        ));
+
+        let plaintext = action_plaintext(
+            ACTION_ID,
+            PHONE,
+            MAC,
+            &vector_target(),
+            1_790_000_060,
+            NAMES,
+            SIGNATURE_V2,
+        );
+        assert_eq!(
+            String::from_utf8(plaintext.clone()).unwrap(),
+            ACTION.replace(r#""v":1"#, r#""v":2"#).replace(
+                &format!(r#""signature":"{SIGNATURE}""#),
+                &format!(r#""names":"{NAMES}","signature":"{SIGNATURE_V2}""#)
+            )
+        );
+        assert_eq!(plaintext.len(), 490);
+        assert_eq!(
+            sha256(&plaintext),
+            "cde8c71bb7e7b61061fab82ec31a26718d0470539c5ccf6333d6bab1106b53c1"
+        );
+        let aad = action_aad(TEAM, ACTION_ID, KEY_ID, 3, 2);
+        let sealed = envelope::seal(&unhex(KEY), &nonce(0x40), &aad, &plaintext).unwrap();
+        assert_eq!(sealed.len(), 506);
+        assert_eq!(
+            sha256(&sealed),
+            "6b66949004172f5791d6f9e42f60a2d70f0ff1cac2a76c8fc5732eae53403e44"
+        );
+    }
+
+    #[test]
+    fn the_shown_title_is_the_own_copy_else_the_feed() {
+        let exception = Exception {
+            item: Some("3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c".to_owned()),
+            item_title: "Shop\u{202E} database".to_owned(),
+            kind: "never".to_owned(),
+            created_at: 1,
+        };
+        let titles = |title: &str| {
+            BTreeMap::from([(
+                "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c".to_owned(),
+                title.to_owned(),
+            )])
+        };
+        assert_eq!(shown_title(None, &exception), "Shop? database");
+        assert_eq!(
+            shown_title(Some(&BTreeMap::new()), &exception),
+            "Shop? database"
+        );
+        assert_eq!(
+            shown_title(Some(&titles("Shop\tdb")), &exception),
+            "Shop?db"
+        );
+        // An empty own title shows the feed's, as Swift does.
+        assert_eq!(shown_title(Some(&titles("")), &exception), "Shop? database");
+    }
+
+    #[test]
+    fn marks_hold_the_seq_only_and_a_file_with_more_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file with a key this core does not know (an earlier build kept the Macs that
+        // checked the names in it): the seq marks still load, and nothing else counts.
+        std::fs::write(
+            dir.path().join(MARKS_FILE),
+            format!(r#"{{"version":1,"teams":{{"{TEAM}":{{"2":10}}}},"names":{{"{TEAM}":[2]}}}}"#),
+        )
+        .unwrap();
+        let marks = Marks::load(dir.path());
+        assert_eq!(marks.get(TEAM, 2), 10);
+        let file = MarksFile {
+            version: 1,
+            teams: marks.teams.clone(),
+        };
+        assert_eq!(
+            serde_json::to_string(&file).unwrap(),
+            format!(r#"{{"version":1,"teams":{{"{TEAM}":{{"2":10}}}}}}"#)
+        );
+    }
+
+    /// The decoder of the feed plaintext of 0.5.2 (c7a9a9d), copied as it was: every
+    /// struct refuses an unknown field, and `v` must be 1. A feed of a Mac that checks
+    /// the names (the mark is one line feed after the object) still reads with it, so an
+    /// iPhone of 0.5.2 shows the feed of a new Mac. A new field or `v` 2 would not.
+    mod decoder_052 {
+        use super::super::required;
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        pub(super) struct Feed {
+            pub(super) v: u64,
+            mac: FeedMac,
+            pub(super) seq: u64,
+            generated_at: u64,
+            truncated: bool,
+            week: Week,
+            pub(super) agents: Vec<Agent>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct FeedMac {
+            device: String,
+            name: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Week {
+            by_you: u32,
+            automatic: u32,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        pub(super) struct Agent {
+            id: String,
+            pub(super) name: String,
+            host: String,
+            #[serde(rename = "where")]
+            place: String,
+            revoked: bool,
+            token_expires_at: u64,
+            #[serde(deserialize_with = "required")]
+            last_use_at: Option<u64>,
+            uses_this_week: u32,
+            projects: Vec<String>,
+            note: String,
+            restricted: bool,
+            actions: Vec<ActionUse>,
+            exceptions: Vec<Exception>,
+            recent: Vec<Recent>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct ActionUse {
+            action: String,
+            allowed: u64,
+            not_allowed: u64,
+            projects: Vec<String>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Exception {
+            #[serde(deserialize_with = "required")]
+            item: Option<String>,
+            item_title: String,
+            kind: String,
+            created_at: u64,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Recent {
+            at: u64,
+            #[serde(deserialize_with = "required")]
+            item: Option<String>,
+            item_title: String,
+            action: String,
+            project: String,
+            command: String,
+            outcome: String,
+            decided_by: String,
+            answered_on: String,
+        }
+
+        /// `parse_feed` of 0.5.2 up to its checks of the values, which a mark of white
+        /// space cannot change.
+        pub(super) fn parse(plaintext: &[u8]) -> Option<Feed> {
+            if plaintext.len() > super::MAX_FEED_BYTES {
+                return None;
+            }
+            serde_json::from_slice::<Feed>(plaintext)
+                .ok()
+                .filter(|feed| feed.v == 1)
+        }
+    }
+
+    #[test]
+    fn a_feed_of_a_mac_that_checks_names_reads_with_the_decoder_of_0_5_2() {
+        let marked = format!("{FEED}\n");
+        let old = decoder_052::parse(marked.as_bytes()).expect("0.5.2 reads the new feed");
+        assert_eq!(old.seq, 1_790_000_040);
+        assert_eq!(old.agents[0].name, "Claude Code");
+        assert!(decoder_052::parse(FEED.as_bytes()).is_some());
+        // The values that 0.5.2 then checks are the same as of the feed without the mark,
+        // and this core reads both.
+        assert!(parse_feed(marked.as_bytes()).is_some());
+        // The signals that were not chosen: a new field or `v` 2 make 0.5.2 refuse it.
+        let mut field: serde_json::Value = serde_json::from_str(FEED).unwrap();
+        field["names_v2"] = json!(true);
+        assert!(decoder_052::parse(field.to_string().as_bytes()).is_none());
+        let mut version: serde_json::Value = serde_json::from_str(FEED).unwrap();
+        version["v"] = json!(2);
+        assert!(decoder_052::parse(version.to_string().as_bytes()).is_none());
     }
 
     #[test]

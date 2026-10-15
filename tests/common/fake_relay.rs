@@ -573,6 +573,25 @@ impl FakeRelay {
         self.shared.1.notify_all();
     }
 
+    /// A relay that works with a holder of the question key serves another envelope as
+    /// the feed of `device_id`, at the `seq` that it stores: one that this holder sealed
+    /// with the key, the AAD of that device and `seq`, and false content. The long polls
+    /// wake.
+    pub fn plant_feed(&self, device_id: u64, key_id: &str, nonce: &str, ciphertext: &str) {
+        let id = self.team_id();
+        let mut relay = lock(&self.shared.0);
+        let team = relay.teams.get_mut(&id).expect("team");
+        team.feed_change += 1;
+        let change = team.feed_change;
+        let feed = team.feeds.get_mut(&device_id).expect("a feed");
+        feed.key_id = key_id.to_owned();
+        feed.nonce = nonce.to_owned();
+        feed.ciphertext = ciphertext.to_owned();
+        feed.change = change;
+        drop(relay);
+        self.shared.1.notify_all();
+    }
+
     /// A hostile relay replays the action `action_id`: open again, with a new `seq` and
     /// without its settle. The long polls wake.
     pub fn reopen_feed_action(&self, action_id: &str) {

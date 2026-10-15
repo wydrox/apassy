@@ -3,6 +3,8 @@
 Date: 2026-10-14.
 Status: proposed, for section D of the [stage 5 plan](../design/stage5-plan.md) ("The Mac feed"). The owner chose the relay feed (option b) on 2026-10-14, so that the Agents tab of the iPhone shows real data. The app side (the publisher `src/questions/feed.rs` and the action handler), the iPhone side (`ios/ApassyCore` calls `feed_*`, the Agents tab), and the relay side (`apassy-relay`, team schema 6, `docs/SPEC.md` section 27) implement it. A change to this document changes every side, one pull request on each; a change to a tag, to an AAD, to the action string, or to a check bumps its version. The app implements the client itself and does not depend on the relay crate (FSL license).
 
+Changed 2026-10-14: v2 actions sign the names that the owner saw, a new iPhone sends nothing else, and a new Mac takes no v1 action that gives authority back (sections 7.1, 9.2 to 9.6, 14, 15, 17.6). This changes the Mac and the iPhone only; the relay never reads a plaintext, and its routes, bodies, and limits stay.
+
 This document adds to [relay-questions-v1](relay-questions-v1.md), [relay-sync-v1](relay-sync-v1.md), and [relay-connect-v1](relay-connect-v1.md) (with [ADR 0027](../adr/0027-plans-and-connect.md), on branch `product/sync-plans` when this was written). The encodings (sync section 2, questions section 4), the transport and the Worker (sync section 3), the error envelope (sync section 4), the sign-in (sync section 5), the question key (questions section 5.1), the device keys (questions section 5.2), and the questions team (questions section 12.6) are the same here.
 
 ## 1. Purpose and scope
@@ -110,6 +112,8 @@ The relay refuses a larger ciphertext with `413 payload_too_large`. The publishe
 
 The plaintext of a feed is one JSON object, UTF-8, with exactly these fields. A reader refuses a feed with an unknown or missing field, or a value outside its form, and shows "Update Apassy to see the agents of <Mac>" (the Mac's name from its `trusted_device` row).
 
+**The mark of v2 actions** (added 2026-10-14). A Mac that checks the names of an action (section 9.3, v2) ends the plaintext with one line feed (0x0A) after the JSON object. The mark is a **hint for the screen only**, never a security signal: a reader sends v2 to every Mac whatever the feed says (section 9.3), and a holder of the question key can make a feed with or without it. A reader that sees no mark in the current feed of a Mac knows that Apassy on it is older (0.5.2) and refuses every v2 action; for `never` and `always_ask` it then offers no removal and says "Update Apassy on <Mac> to remove this from the iPhone". The mark is white space, which JSON allows after the value: the strict reader of 0.5.2 (`deny_unknown_fields` on every struct, `v` must be 1) still reads the feed, where a new field or a `v` of 2 would make every iPhone of 0.5.2 show "Update Apassy". A later `v` of the feed replaces it with a field.
+
 ```json
 {
   "v": 1,
@@ -209,7 +213,7 @@ A reader shows titles from its own copy of the item with the same `uuid`, and `i
 
 ### 7.3 Fitting the size
 
-The publisher builds the feed with every field at its limit, then, while the plaintext is over 262128 bytes (or over the size of section 14.2 for an old Worker), it leaves out, in this order, and sets `truncated` to true:
+The publisher builds the feed with every field at its limit, then, while the plaintext with its mark (section 7.1, one byte) is over 262128 bytes (or over the size of section 14.2 for an old Worker), it leaves out, in this order, and sets `truncated` to true:
 
 1. `recent` cut to 10 per agent, then to 5, then to 0;
 2. the revoked agents, the oldest `last_use_at` first;
@@ -251,7 +255,13 @@ Removing a `never` or `always_ask` row is the remote form of `OwnerAction::Remov
 
 ### 9.2 Schema
 
-The plaintext of an action is one JSON object with exactly these fields:
+The plaintext of an action is one JSON object with exactly these fields, in two versions. **v2** (added 2026-10-14) signs the names the owner saw and carries their digest in `names`, before `signature`:
+
+```json
+{"v":2,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"names":"<64 lowercase hex>","signature":"<b64u DER>"}
+```
+
+**v1**, of an iPhone of 0.5.2, has no `names`. A new iPhone never sends it. A new Mac takes it only for an `only` row (section 9.5 step 8a):
 
 ```json
 {"v":1,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"signature":"<b64u DER>"}
@@ -259,7 +269,7 @@ The plaintext of an action is one JSON object with exactly these fields:
 
 | Field | Rule |
 | --- | --- |
-| `v` | `1` |
+| `v` | `2` with `names`; `1` without. A `v` 1 with `names`, a `v` 2 without, or another `v` is a bad form. |
 | `action_id` | the `action_id` of the relay record |
 | `by` | the sender's `trusted_device.uuid` |
 | `to` | the target's `trusted_device.uuid`: the `mac.device` of the feed |
@@ -269,14 +279,15 @@ The plaintext of an action is one JSON object with exactly these fields:
 | `exception` | `{"kind": …, "created_at": …}` of the exception as the feed showed it |
 | `feed_seq` | the `seq` of the feed that showed the exception |
 | `time` | the sender's clock when it builds the action, before the Face ID prompt |
+| `names` | v2 only: the digest of the names of section 9.3, 64 lowercase hex characters |
 | `signature` | section 9.3, by the key of section 9.1 |
 
 ### 9.3 The action string
 
-The signed text: eight lines joined with `\n` (0x0A), no trailing newline, no `\r`:
+The signed text of v2: nine lines joined with `\n` (0x0A), no trailing newline, no `\r`:
 
 ```
-apassy-feed-action-v1
+apassy-feed-action-v2
 <by: sender device uuid>
 <to: target device uuid>
 <team id>
@@ -284,13 +295,27 @@ apassy-feed-action-v1
 remove_exception:<agent id>:<item uuid>:<exception kind>:<exception created_at>
 <feed_seq>
 <time>
+names:<names>
 ```
 
+The signed text of v1 is the first eight lines with the first line `apassy-feed-action-v1`, and no ninth line.
+
 - No field can hold `:` or a control character (their forms exclude them), so the target line is unambiguous.
+- **`names`** is the SHA-256, as 64 lowercase hex characters, of the three names that the reader showed next to the exception, as UTF-8 joined with one zero byte (0x00), in this order:
+  1. the agent's `name` of the feed;
+  2. the credential: the title of the reader's own copy of the item with that uuid when it has one that is not empty, else the feed's `item_title`;
+  3. the Mac: the name of its `trusted_device` row on the reader's copy of the vault.
+
+  Each name as the list shows it: control and format characters replaced by `?` (section 7.2, questions section 7.3), nothing cut, without the words that the app puts around a name ("not on this iPhone", "A credential"). So no name holds a zero byte, and the three are unambiguous. The Face ID prompt names the agent with the same name (section 9.4).
+- **Why the names.** The ids alone say which exception goes, not what the owner read. A holder of the question key (another device of the vault, or another member of a shared vault) who works with the relay can serve a feed that labels a real exception with false names. With the names signed, the target compares them with its own rows (section 9.5 steps 8a and 10), and such an action does not count. The digest binds the labels to the Mac's rows as they are when it removes the row; it does not stop a holder of the vault who renames the item or the agent through sync first, since the vault is the trust root (section 15).
+- **Which version.** A reader sends v2, for every kind and to every Mac: it keeps no memory of which Mac checks the names, and the mark of section 7.1 does not choose what it signs. A Mac of 0.5.2 refuses a v2 action ("it has a bad form", section 9.5 step 2); the reader shows "Update Apassy on <Mac> to remove this from the iPhone" for it, never "it has a bad form", and for `never` and `always_ask` it offers no removal on a Mac whose current feed lacks the mark. A new Mac refuses a v1 action that gives authority back (section 9.5 step 8a), so a feed without the mark gains a holder of the question key nothing.
+- **The list that the owner confirmed.** The reader makes the string only for the feed whose list the owner confirmed: the app passes the `seq` of that feed, and the reader refuses when it shows another feed of that Mac now (a relay can swap a feed in while the confirmation is up). It also returns the three names it signs, and the app sends nothing when one is not, byte for byte, the name its confirmation showed (contract ios-core-v1 section 5.12).
+- **Domain separation.** The first line of each signed text of the device keys of an iPhone is its own tag, and each is followed by its own separator: `apassy-feed-action-v1` and `apassy-feed-action-v2` (`\n`), `apassy-question-answer-v1` (`\n`, the answer string of relay-questions-v1), `apassy-relay-sync-head-v1` (`\n`, the signed head of relay-sync-v1), `apassy-relay sign-in v1` (`\0`, sync section 5), and the companion's `apassy-companion-pair-v1`, `-request-v1`, `-approve-v1`. No tag is a prefix of another, so a text of one kind never verifies as another; v1 and v2 differ in their first line, so a signature of one is never one of the other.
 - The investigation's sketch had seven lines and `remove_exception:<agent>:<item uuid>:<kind>`. This contract adds the line `<to>` and the exception's `created_at`:
   - **`to`.** Agent ids are per Mac and item uuids are the same on every Mac of the vault. Without the target, an action for agent 4 on one Mac would also verify on another Mac that has an agent 4 with the same exception.
   - **`created_at`.** It names this exception, not one made again later with the same agent, item, and kind. A removal that is replayed or late after the owner added the exception again does not match (section 9.5 step 9).
-- The target never parses this text: it rebuilds it from its own uuid, the team id of its membership, the relay's `action_id`, the action's fields after it resolved them against its rows, and verifies the signature over the rebuilt bytes.
+- The target never parses this text: it rebuilds it from its own uuid, the team id of its membership, the relay's `action_id`, the action's fields after it resolved them against its rows (for v2, `names` after it matched them with its own, section 9.5 step 7), and verifies the signature over the rebuilt bytes.
+- Both kinds of section 9.1 use the same string, so the names are signed for `only` too (with `sign_key`).
 
 ### 9.4 Face ID, the window, and replay
 
@@ -306,18 +331,19 @@ While the vault is unlocked and the feed is on, the target long-polls `GET /v1/f
 
 0. `action_id` was not handled before. Else nothing: no second settle. The target marks the id handled before step 1, so one id gets at most one settle, also when the relay serves a damaged copy of a real action first.
 1. It opens with its key named by `key_id` and the AAD with the stamped `from_device_id` and its own device id (section 6.1). Else `refused` ("it could not be read"), with no Activity line of its own: anyone on the path can make such a record. Activity says "Actions through the relay could not be read. They did not count." at most once per 10 minutes.
-2. The JSON has exactly the fields of section 9.2, `v` is 1, `action_id` is the relay's, `kind` is `remove_exception`. Else `refused`.
+2. The JSON has exactly the fields of section 9.2: `v` 2 with `names` of its form, or `v` 1 without `names`; `action_id` is the relay's, `kind` is `remove_exception`. Else `refused` ("it has a bad form").
 3. `to` is its own `trusted_device.uuid`. Else `refused`.
 4. `by` is a live `trusted_device` of kind `iphone`, whose device number in this team (`relay_devices[team id]`), when set, equals the stamped `from_device_id`. Else `refused`.
 5. `time` is within the window of section 9.4. Else `refused` ("too old").
 6. Once: the target checks it first, as step 0.
-7. `agent` is an agent of this vault on this Mac that is not revoked, and `item` is the `uuid` of a live item. Else `stale`.
-8. The signature verifies over the rebuilt action string (section 9.3):
-   - `never`, `always_ask`: through `OwnerGate::authorize(OwnerAction::RemoveAgentException { agent_id, item_id, kind }, OwnerCheck::RemoteAction { signed, signature })`. The gate loads the live `trusted_device`, rebuilds `to` (the `trusted_device.uuid` of this Mac in the questions team of the vault) and the team id (the questions team of the vault) from the vault and refuses an action whose `to` or team differs (`RemoteRejected`), whatever its caller passed; checks the window, rebuilds the string, verifies with `answer_key` (a NULL `answer_key` or a `mac` row is `RemoteRejected`), and checks the vault session before and after, as `OwnerCheck::Remote` (questions section 12.4). `CheckMethod::Remote` is recorded. A remote check can make a proof for `RemoveAgentException` with `never` or `always_ask` only through `RemoteAction`, and `RemoteAction` makes no other proof.
-   - `only`: the signature verifies with `sign_key`. No owner check.
-   - A signature by the other key of the device is invalid. Else `refused`.
+7. `agent` is an agent of this vault on this Mac that is not revoked, and `item` is the `uuid` of a live item. Else `stale` ("the agent or the credential is not on this Mac").
+8. The signature verifies over the rebuilt action string (section 9.3), with the key of the kind, before any check of what the action says, so that no Activity line about the names or the version is blamed on a device that did not sign: `answer_key` for `never` and `always_ask`, `sign_key` for `only`. A signature by the other key of the device is invalid. Else `refused` ("its signature does not verify").
+8a. **The version and the names.** A v1 action (no `names`) that gives authority back (`never`, `always_ask`) is `refused` ("update Apassy on <iPhone> to remove this from it, or remove it on this Mac"); a v1 action for an `only` row goes on, since removing it takes authority away and a false label errs on the safe side. For v2, `names` must be the digest of section 9.3 of this Mac's own names: the agent's name as its feed sends it (`agent.name` cleaned and cut to 64 bytes, "Agent" when empty), the name of its own `trusted_device` row as the vault holds it now, and the item's title in either form that a reader shows (its own copy: `item.title` whole; no copy: the feed's `item_title`, cleaned and cut to 128 bytes), each with control and format characters as `?`. The two forms of the title differ whenever the cleaning changes the title: a control character, white space at either end (Unicode white space is trimmed), or a title over 128 bytes. Else `stale` ("the names on the iPhone did not match this Mac"): the reader showed other names than this Mac's, from a lying feed or a copy of the vault that has not synced a rename yet. The sender then shows that the list changed (section 9.6).
+8b. The owner check, for `never` and `always_ask`:
+   - through `OwnerGate::authorize(OwnerAction::RemoveAgentException { agent_id, item_id, kind }, OwnerCheck::RemoteAction { signed, signature })`. The gate loads the live `trusted_device`, rebuilds `to` (the `trusted_device.uuid` of this Mac in the questions team of the vault) and the team id (the questions team of the vault) from the vault and refuses an action whose `to` or team differs (`RemoteRejected`), whatever its caller passed; refuses a v1 action, and rebuilds the names of step 8a from the vault and refuses other names (`RemoteRejected`); checks the window, rebuilds the string, verifies with `answer_key` (a NULL `answer_key` or a `mac` row is `RemoteRejected`), and checks the vault session before and after, as `OwnerCheck::Remote` (questions section 12.4). `CheckMethod::Remote` is recorded. A remote check can make a proof for `RemoveAgentException` with `never` or `always_ask` only through `RemoteAction`, and `RemoteAction` makes no other proof.
+   - `only`: no owner check; the signature of step 8 is its check. Else `refused`.
 9. `feed_seq` is at most its last published `seq`, and the row `(agent, item, kind)` exists with `created_at` equal to `exception.created_at`. Else `stale`.
-10. It removes the row (`Vault::remove_agent_exception`), writes the Activity line ("Removed on <iPhone name>: “Not for this agent” for <agent> and <item>"), counts one owner interaction for `never` and `always_ask` (ADR 0025 §1, as a remote answer), settles with `applied`, and publishes a new feed when section 12 allows.
+10. Under the vault lock of the removal, it checks the names of step 8a again (the proof of the owner check does not bind them, so a rename that synced in since is caught here; `stale` as in step 8a), removes the row (`Vault::remove_agent_exception`), writes the Activity line ("Removed on <iPhone name>: “Not for this agent” for <agent> and <item>"; for a v1 `only` removal the line goes on: ". <iPhone name> did not sign the names; update Apassy on it"), counts one owner interaction for `never` and `always_ask` (ADR 0025 §1, as a remote answer), settles with `applied`, and publishes a new feed when section 12 allows.
 
 - **The device in Activity** is the `trusted_device` that the opened action names in `by`, or "a device of this vault"; never the device that the relay stamped (`from_device_id`).
 - **A lock during the check.** When the vault locks (or its session changes) while the target handles an action, the action gets no settle and is not marked handled, and `after` stays before it: the target checks it again after the unlock, while it is in its window.
@@ -344,7 +370,7 @@ The sender shows:
 | Outcome | Text |
 | --- | --- |
 | `applied` | "Removed on <Mac>." The row leaves the list at once; the next feed confirms it. |
-| `stale` | "The list on <Mac> changed. Look at it again." |
+| `stale` | "The list on <Mac> changed. Look at it again." Also when the names did not match (section 9.5 step 7). |
 | `refused` | "<Mac> refused it: <reason>." |
 | a settle that does not open, any clear outcome | "Not applied, or unknown." (section 9.5) |
 | expired, no settle | "<Mac> did not answer. It may be asleep or locked." |
@@ -542,8 +568,8 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 
 ### 14.1 Versions
 
-- `v` is `1` in every request body, feed, action, and settle. The relay refuses another `v` with `400`. A reader that cannot read a feed's `v`, or a new field or value, shows "Update Apassy to see the agents of <Mac>". A new field in a feed, an action, or a settle is a new `v`.
-- The tags `apassy-feed-v1` (AAD) and `apassy-feed-action-v1` (action string) change with any change of their bytes.
+- `v` is `1` in every request body, feed, and settle, and `1` or `2` in an action plaintext (section 9.2: `2` carries `names`). The relay refuses another `v` with `400`; it never sees the `v` of a plaintext. A reader that cannot read a feed's `v`, or a new field or value, shows "Update Apassy to see the agents of <Mac>". A new field in a feed, an action, or a settle is a new `v`; the mark of section 7.1 is white space, not a field, so that readers of 0.5.2 still read the feed.
+- The tags `apassy-feed-v1` (AAD), `apassy-feed-action-v1` and `apassy-feed-action-v2` (action strings) change with any change of their bytes.
 - New optional fields in a relay result are ignored by the app.
 
 ### 14.2 Older relays, Workers, and apps
@@ -554,6 +580,9 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 | A Worker older than this contract | A `PUT /v1/feed` body over 128 KiB (131072 bytes) gets `413` from the Worker. The Mac then fits the feed to 95 KiB of plaintext (97280 bytes; section 7.3, `truncated: true`) until its next start: its ciphertext is 97296 bytes, their b64u 129728 characters, and the body with the other fields stays under 131072 bytes. (At 96 KiB the b64u of the ciphertext alone is 131094 characters, over the limit.) |
 | A Mac app older than this contract | It publishes no feed. The iPhone shows its interim screen for that Mac: "Agents of <Mac> show here after you update Apassy on it." |
 | An iPhone app older than this contract | It reads no feed. Nothing breaks; the Mac still publishes while the vault has a live iPhone row. |
+| An iPhone of 0.5.2 (before the names, section 9.3) and a new Mac | It reads the feed with the mark (white space). It sends v1 actions: the Mac applies those of `only` rows, with the Activity note of section 9.5 step 10, and refuses the others: "<Mac> refused it: update Apassy on <iPhone> to remove this from it, or remove it on this Mac." |
+| A new iPhone and a Mac of 0.5.2 | The feed has no mark. The iPhone offers no removal of `never` or `always_ask` there ("Update Apassy on <Mac> to remove this from the iPhone"); an `only` removal goes as v2, which that Mac refuses ("it has a bad form"), and the iPhone shows the same update text. Remove the exception on the Mac, or update it. |
+| A Mac put back to 0.5.2 | As a Mac of 0.5.2 above: its next feed has no mark. |
 | An iPhone without an answer key for the team (an old link) | It shows the feed and offers removals of `only` rows. For `never` and `always_ask` it says "Connect this iPhone again on a Mac to use Face ID here." |
 | A Connect team (relay-connect-v1) | Works as any team, with the `connect` preset's `feed_bytes` (1 MiB) and the Connect long-poll bound. |
 | The local-network companion (companion-v1) | Unchanged. It carries no feed in v1. |
@@ -564,7 +593,8 @@ The Worker goes first (relay OPERATIONS: the Worker always goes before the relay
 - **What other members learn.** The devices of another member of the team never get a feed or an action, but they can see that feeds and actions change: the team-wide `change` and action `seq` go up, and the team-wide limits refuse them when this member used them up (section 10.1). They cannot read any of it.
 - **What the relay cannot do.** Read a feed or an action (it has no question key). Forge a feed, an action, or a settle. Make an action count (it needs a signature by a key of `trusted_device`, and Face ID for a removal that gives authority back). Roll a feed back for a reader that has a mark for that Mac (the reader keeps the highest `seq`, and the AAD binds it). Move a feed to another Mac, or an action to another Mac or from another sender (the AADs bind the device ids, and the action string binds `to`). Change the outcome inside a settle that opens (the AAD binds it). Replay an action (one-time `action_id`, the 60 s window, the exception's `created_at`). Get more than one settle for one `action_id` (the target marks it before its first check). Wipe the Mac's Activity with actions that do not open (one line per 10 minutes for all of them, at most 20 handled per answer, and a wait when none opened).
 - **What the relay can do.** Withhold or delay feeds and actions, keep serving the last feed, or refuse to route. Serve an older feed to a reader with no highest-`seq` mark for that Mac (a new or reset iPhone): the bound is that the feed shows its age, and the Mac checks every action against its rows as they are now, the exception's `created_at` included (section 9.5 step 9) and `time` against its own clock (section 9.4). Make an action end `refused`: it can serve a damaged copy of a real action first, which the Mac settles `refused` ("it could not be read") and after which the real one gets no settle, or serve a settle that the sender cannot open. So the relay can turn an outcome into a refusal, never into `applied`: a settle that does not open shows "Not applied, or unknown" (section 9.5). The reader shows the age of each feed and dims it after 24 hours; an action that gets no settle shows "did not answer". The Mac's own Agents page always works.
-- **The names an action shows.** The iPhone signs ids (the agent id, the item uuid, the kind), not the names it shows next to them. A holder of the question key who works with the relay could serve a feed that labels a real exception with false agent and item names, so the owner removes another exception than the one they read. The Mac's Activity line records the true names of what it removed. A digest of the shown names in the action string is planned for v2.
+- **The names an action shows.** A v2 action signs the names that the iPhone showed (the agent, the credential, the Mac; section 9.3) with the ids, for the feed whose list the owner confirmed, and the Mac rebuilds them from its own rows (section 9.5 steps 8a and 10). A holder of the question key who works with the relay can still serve a feed that labels a real exception with false names, but the action that the owner confirms then ends `stale` and does not count; it cannot pick names that the Mac would accept for another exception, since the Mac compares with the names of the exception that the ids name. The digest binds the labels to the Mac's current rows, not to the truth: a holder of the vault who renames the item or the agent through sync (another device of the vault, or another member of a shared vault) can still mislead, because the vault is the trust root (questions section 18). (Until 2026-10-14 this was a known limit of v1: the iPhone signed ids only.)
+- **The v1 fallback.** A new Mac applies a v1 action (ids only) only for an `only` row: removing it takes authority away, so a false label errs on the safe side; Activity notes "<iPhone> did not sign the names; update Apassy on it". It refuses v1 for `never` and `always_ask`, and a new iPhone never sends v1. So a new or reset iPhone, a feed without the mark, and a lost marks file gain an attacker nothing. The `only` fallback can go once every iPhone of the owner's vaults runs an app with v2 (the first release after 0.5.2 that has it).
 - **The vault is the trust root** (questions section 18). Any device that holds the vault holds the question key: it can read the feeds and seal an action. It still cannot sign an action that gives authority back without the answer key of a live iPhone row, but a holder of the vault passphrase can write `trusted_device` rows.
 - **A Mac's agent rows go to the iPhone.** The feed copies local history (agent names, project labels, masked command summaries) to every iPhone of the vault. They are sealed on the wire, and the iPhone keeps only the `seq` high-water mark on disk. Masking catches the values that the vault knows; a secret that the vault does not hold, typed by an agent into a command, is not masked (the same limit as the use log).
 - **Display text.** Agent names, notes, and command summaries come from agents. A prompt injection there reaches the iPhone; it is shown as text, never as a link.
@@ -686,3 +716,44 @@ Settle ciphertext (hex, 130 bytes):
 - The signature of 17.2 verifies with the answer key over the action string, and fails after one changed character of it (for example `:only:` instead of `:never:`, or another `to`), and with the device key of relay-sync-v1 section 15. A new signature of the same string differs and still verifies.
 - The target (the publisher of 17.1, with the exception row `(4, Shop database, never, 1789990000)` and its last `seq` `1790000040`) applies the action with its clock at `1790000000` to `1790000120`, and refuses it at `1790000121` (`refused`, too old), with the row made again at `1789990001` (`stale`), on a target whose last published `seq` is `1790000039` (`stale`: the action names a feed it never published; `feed_seq` is signed, so a test changes the target, not the action), from a `trusted_device` row whose `answer_key` is another key (`refused`), from the iPhone's `sign_key` (`refused`), and a second time with the same `action_id` (no second settle).
 - The reader shows the feed of 17.1 once, ignores it again with the same `seq`, and ignores a feed of that device with a lower `seq`.
+- With the values of 17.6: the reader of the feed of 17.6 makes the action string of 17.6 for the exception of 17.2, with the names that it shows, and so does the reader of the feed of 17.1 (no mark), whose list says that the Mac lacks the mark; with no marks file, or an empty one, too. A newer feed of the Mac than the confirmed one makes the reader refuse the string. The decoder of 0.5.2 reads the feed of 17.6. The signature of 17.6 verifies over the string of 17.6, and not over it with other names, nor over the string of 17.2 (nor that of 17.2 over 17.6). The target opens the action of 17.6 with its `names`. A target applies a v2 action whose names are those of its rows, and settles it `stale` ("the names on the iPhone did not match this Mac") when the action names the agent "Scratch Bot", the item "Test DB", or the Mac "Scratch Mac" instead, for `never` and for `only`, and leaves the row; with a signature that does not verify it is `refused` for the signature first. Its gate refuses those names and any v1 action (`RemoteRejected`). It refuses a v1 action for `never` and `always_ask`, leaves the row, and applies a v1 action for `only`, with the Activity note. A rename of the item after the first check of the names fails the check under the lock of the removal.
+
+### 17.6 The names (v2)
+
+The feed of 17.1 from a Mac that checks the names: the same 919 bytes and one line feed, 920 bytes (SHA-256 `140fa142ad88453b65e512ad2715f425c0800b73f445d2faeeee896d220c42a7`). Sealed with the key, the nonce, and the AAD of 17.1: 936 bytes, SHA-256 `86535f0d4be458344a31ac492dd860cae9698a5b3116bff239eddebb8c98d23e`. Every byte but the last 17 is that of 17.1's ciphertext.
+
+The names that a reader shows for the exception of 17.2 (the agent of the feed, its `item_title` since the reader has no copy of the item, and the Mac's row "MacBook Pro"), joined with zero bytes (37 bytes, hex):
+
+```
+436c6175646520436f64650053686f70206461746162617365004d6163426f6f6b2050726f
+```
+
+`names` (their SHA-256): `8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6`
+
+The action string of v2 for the action of 17.2 (293 bytes; SHA-256 `faee55b8a1050aac2b18711bdc15869dd35f454293319bd516044e56a941345c`):
+
+```
+apassy-feed-action-v2
+6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b
+0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d
+t_7k2m5q4x3c
+sLGys7S1tre4ubq7vL2-vw
+remove_exception:4:3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c:never:1789990000
+1790000040
+1790000060
+names:8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6
+```
+
+Signature by the answer key, a verify vector as in 17.2 (b64u DER, 71 bytes; computed with `ring` in `tests/relay_feed.rs` on 2026-10-14 and checked with `openssl dgst -sha256 -verify`): `MEUCIDZe_XeIFZkGUQjDaJg3Z5bviGeoqBIc-8R8aaFyCBGXAiEA7dTFzS2hkSFmp8wVG1jQTJR3DqpJlwzqEPofgU_SbBs`
+
+The action plaintext of v2 (490 bytes, one line; SHA-256 `cde8c71bb7e7b61061fab82ec31a26718d0470539c5ccf6333d6bab1106b53c1`):
+
+```
+{"v":2,"action_id":"sLGys7S1tre4ubq7vL2-vw","by":"6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b","to":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","kind":"remove_exception","agent":"4","item":"3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c","exception":{"kind":"never","created_at":1789990000},"feed_seq":1790000040,"time":1790000060,"names":"8ef3d4125ebeb2d11adc19a4430a543178783fddd3c75dd1c20d2f9e2e9205c6","signature":"MEUCIDZe_XeIFZkGUQjDaJg3Z5bviGeoqBIc-8R8aaFyCBGXAiEA7dTFzS2hkSFmp8wVG1jQTJR3DqpJlwzqEPofgU_SbBs"}
+```
+
+Sealed with the key, the nonce, and the AAD of 17.3 (506 bytes; SHA-256 `6b66949004172f5791d6f9e42f60a2d70f0ff1cac2a76c8fc5732eae53403e44`):
+
+```
+83760aa34878c22339ac8269d48132a4d0ee593a37b006168d3b816a9e555f5e85d1e847500750db7c180d6b483697bcdb715aafcf15bd4ae9a322086a5f574cff551c3b7e2b861220235deaf24a170fee3da44fc9dfc2429f05c30f367eb216a95dbb391fe5384e66eaf6e93fd854db8fc1d6ceb0b2ab28d979941a463e3768ea501aefb6d699f22d9a1c02c99bfdddfd7c80e2a4cf67d726f759e70e92ee1a4208141f7e524fc951c2e256158fef5c05ebac29bccb949f0d5556311192fd84701066f8b6b1d160cd5a3a0d8cc0a9ac8028785ec8b7f216dd8b58da9aa4a5dbcee3f9aabbbecac7b127969d3df50afe36f1d0d31be580dd9f514a3e33856ce732838b014148ce97e02fc74e40468740e5e304915e362fbcbade163190a3845c06a2b25cb91d5ccdd2534702f1734ac5004caff7e05cc27edeb404cc44f9c1ae94f83e29e7020a2fbbcc4a93f51cf73dcfc46dc2bf29502dbfcb1ae0a5a6de45fe49637993745439798558add0b83b462eb0d710fa70f358481c59577f86b55cfcc0d6538c20efc4b5548ea0e32619c42cefee387641a756e1d977b0f0707783572692a9ff89b76b351bc46c360aee1e7b4bde3aac30a1fd551c71f43dc2987fa560141d430011623cef44d52bffbdd6356c43986d2f41d6c60798bfe08a7d0d9d4e81d377a3c82d33f8a825fc7dc560e3615270ec790433464b
+```

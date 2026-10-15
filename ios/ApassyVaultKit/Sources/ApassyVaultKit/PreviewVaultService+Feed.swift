@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The agents of the Macs in the preview vault (contract ios-core-v1 section 5.12): synthetic feeds
@@ -46,12 +47,18 @@ public struct PreviewFeed: Sendable {
     var nextActionError: VaultError?
     var listCalls = 0
     var waitCalls = 0
+    /// What `questionsUnlock` of a vault does to its feeds: they come before its keys now, so the
+    /// core can act on them (true), or a newer feed came meanwhile (false).
+    var canActAfterUnlock = true
 
     public init() {}
 }
 
 extension PreviewVaultService {
     /// The device UUIDs of the synthetic Macs.
+    /// The vault "Work" of `sampleFeed`, a second vault on this iPhone.
+    public static let workFeedVaultID = "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b"
+
     public enum PreviewMacs {
         public static let macMini = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d"
         public static let macBookPro = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
@@ -177,7 +184,7 @@ extension PreviewVaultService {
                         generatedAt: at - 3 * day, stale: true, week: FeedWeek(byYou: 1, automatic: 6), agents: [ci]),
                 ]),
             FeedVault(
-                vaultID: "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b", vaultName: "Work", teamID: "t_wq3k7m2p5x",
+                vaultID: workFeedVaultID, vaultName: "Work", teamID: "t_wq3k7m2p5x",
                 macs: [
                     FeedMac(
                         device: PreviewMacs.workMacBookPro, relayDeviceID: 3, name: "MacBook Pro",
@@ -199,6 +206,18 @@ extension PreviewVaultService {
     public func scriptFeedOutcomes(_ outcomes: [PreviewFeed.Scripted]) { feedState.outcomes = outcomes }
 
     public func failNextFeedList(_ error: VaultError) { feedState.nextListError = error }
+
+    /// After a `questionsUnlock` of a vault, its feeds stay ones that the core cannot act on (a
+    /// newer feed came after its keys were read), or become ones it can act on (the default).
+    public func scriptFeedCanActAfterUnlock(_ canAct: Bool) { feedState.canActAfterUnlock = canAct }
+
+    /// `questionsUnlock` read the keys of `vaultID` again: the feeds shown now came before them.
+    func feedKeysRead(vaultID: String) {
+        guard let at = feedState.vaults.firstIndex(where: { $0.vaultID == vaultID }) else { return }
+        for mac in feedState.vaults[at].macs.indices where feedState.vaults[at].macs[mac].problem == nil {
+            feedState.vaults[at].macs[mac].canAct = feedState.canActAfterUnlock
+        }
+    }
 
     public func failNextFeedActionString(_ error: VaultError) { feedState.nextStringError = error }
 
@@ -268,13 +287,19 @@ extension PreviewVaultService {
         return Found(vault: vault, mac: mac, agent: agent, exception: exception)
     }
 
-    private func actionString(_ removal: FeedRemoval, found: Found, actionID: String, time: Int64) -> String {
+    /// The string of v2 (relay-feed-v1 section 9.3), with the digest of `names`: the agent, the
+    /// credential, and the Mac as the list shows them.
+    private func actionString(
+        _ removal: FeedRemoval, found: Found, actionID: String, time: Int64, names: [String]
+    ) -> String {
         let vault = feedState.vaults[found.vault]
         let mac = vault.macs[found.mac]
+        let digest = SHA256.hash(data: Data(names.joined(separator: "\u{0}").utf8))
+            .map { String(format: "%02x", $0) }.joined()
         return [
-            "apassy-feed-action-v1", "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b", mac.device, vault.teamID, actionID,
+            "apassy-feed-action-v2", "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b", mac.device, vault.teamID, actionID,
             "remove_exception:\(removal.agent):\(removal.item):\(removal.kind.rawValue):\(removal.createdAt)",
-            String(mac.seq ?? 0), String(time),
+            String(mac.seq ?? 0), String(time), "names:\(digest)",
         ].joined(separator: "\n")
     }
 
@@ -292,6 +317,11 @@ extension PreviewVaultService {
         }
         let found = try find(removal)
         let vault = feedState.vaults[found.vault]
+        let mac = vault.macs[found.mac]
+        // The core makes the string only for the feed whose list the owner confirmed.
+        if let seq = removal.feedSeq, seq != mac.seq {
+            throw VaultError(.notFound, "The list on \(mac.name) changed. Look at it again.")
+        }
         guard vault.macs[found.mac].canAct else {
             throw VaultError(.invalidInput, "Select this vault on this iPhone to act on the agents of its Macs.")
         }
@@ -304,11 +334,15 @@ extension PreviewVaultService {
         let id = actionID ?? Self.newActionID()
         let at = time ?? Int64(Date().timeIntervalSince1970)
         let agent = vault.macs[found.mac].agents[found.agent]
+        let exception = agent.exceptions[found.exception]
+        let credential = exception.title.flatMap { $0.isEmpty ? nil : $0 } ?? exception.itemTitle
         let prepared = PreparedFeedAction(
-            vaultID: vault.vaultID, teamID: vault.teamID, actionID: id, time: at, feedSeq: vault.macs[found.mac].seq,
-            actionString: actionString(removal, found: found, actionID: id, time: at),
+            vaultID: vault.vaultID, teamID: vault.teamID, actionID: id, time: at, feedSeq: mac.seq,
+            actionString: actionString(
+                removal, found: found, actionID: id, time: at, names: [agent.name, credential, mac.name]),
             needsFaceID: removal.kind.needsFaceID,
-            faceIDReason: "remove an exception of agent \"\(String(agent.name.prefix(40)))\"")
+            faceIDReason: "remove an exception of agent \"\(String(agent.name.prefix(40)))\"",
+            agentName: agent.name, credentialName: credential, macName: mac.name)
         feedState.prepared.append(prepared)
         feedState.preparedByID[id] = prepared
         return prepared
@@ -323,7 +357,7 @@ extension PreviewVaultService {
         // The core sends the string that it prepared, also after a newer feed of the Mac; the
         // exception must still be in the newest feed.
         guard let prepared = feedState.preparedByID[actionID], prepared.time == time,
-            prepared.vaultID == removal.vaultID
+            prepared.vaultID == removal.vaultID, removal.feedSeq == nil || removal.feedSeq == prepared.feedSeq
         else {
             throw VaultError(.staleAction, "This action was not prepared on this iPhone. Do it again.")
         }

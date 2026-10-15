@@ -21,11 +21,14 @@
 //!   checks at most 20 of an answer, each id once (marked before its first check, so one
 //!   id gets one settle), as section 9.5 says, in order: it opens (an action that does
 //!   not open writes no Activity line of its own), it has the form, it is for this Mac,
-//!   from a live iPhone of the vault, in its 60 s window, for an agent and
-//!   an item that are here, signed by the right key of the iPhone (through the owner gate,
-//!   [`OwnerCheck::RemoteAction`], for a removal that gives authority back), for an
-//!   exception as the feed showed it. Then it removes the row as the Mac's own "Remove
-//!   exception" does, settles the action, and publishes a new feed.
+//!   from a live iPhone of the vault, in its 60 s window, for an agent and an item that
+//!   are here, signed by the right key of the iPhone, of v2 with the names that this Mac
+//!   has for them (a v1 action signs ids only: it may remove an `only` row, which takes
+//!   authority away, and nothing else), through the owner gate
+//!   ([`OwnerCheck::RemoteAction`]) for a removal that gives authority back, for an
+//!   exception as the feed showed it, with the names checked again under the lock of the
+//!   removal. Then it removes the row as the Mac's own "Remove exception" does, settles
+//!   the action, and publishes a new feed.
 //!
 //! The relay sees the routing only: it never gets a feed, an action, or the question key.
 //!
@@ -55,10 +58,20 @@ use crate::vault::{
 
 /// The tag of every AAD of the feed (section 6.1).
 pub const FEED_TAG: &str = "apassy-feed-v1";
-/// The first line of the action string (section 9.3).
+/// The first line of the action string of v1 (section 9.3), without the names.
 pub const ACTION_TAG: &str = "apassy-feed-action-v1";
+/// The first line of the action string of v2 (section 9.3), which signs the names that
+/// the owner saw.
+pub const ACTION_TAG_V2: &str = "apassy-feed-action-v2";
 /// The version of every feed, action, settle, and request body.
 pub const VERSION: u32 = 1;
+/// The version of an action body that carries `names` (section 9.2).
+pub const ACTION_VERSION_NAMES: u32 = 2;
+/// The last byte of the plaintext of a feed whose Mac checks the names of an action
+/// (section 7.1): one line feed after the JSON object. JSON allows white space after the
+/// value, so a reader of 0.5.2, which refuses any new field and any `v` but 1, still
+/// reads the feed; a new reader sends v2 actions to this Mac.
+pub const NAMES_MARK: u8 = b'\n';
 /// The only action kind of v1.
 pub const REMOVE_EXCEPTION: &str = "remove_exception";
 
@@ -305,6 +318,12 @@ impl Feed {
         Zeroizing::new(serde_json::to_vec(self).unwrap_or_default())
     }
 
+    /// Whether the Mac of the feed `plaintext` checks the names of an action: the
+    /// plaintext ends in [`NAMES_MARK`] (section 7.1). Its readers send v2 actions.
+    pub fn checks_names(plaintext: &[u8]) -> bool {
+        plaintext.last() == Some(&NAMES_MARK)
+    }
+
     /// Parse a feed plaintext with the reader's checks of section 7.4 step 2 and `v`.
     pub fn parse(plaintext: &[u8]) -> Option<Self> {
         if plaintext.len() > MAX_FEED_BYTES {
@@ -389,6 +408,105 @@ fn cut_clean(text: &str, max: usize) -> String {
     clean(text, max)
 }
 
+/// The name of an agent as the feed sends it (section 7.1): cleaned and cut to 64 bytes,
+/// "Agent" when nothing is left.
+fn feed_agent_name(name: &str) -> String {
+    match cut_clean(name, MAX_NAME_BYTES) {
+        name if name.is_empty() => "Agent".to_owned(),
+        name => name,
+    }
+}
+
+/// A name as the iPhone's list shows it: control and format characters as `?`, not cut
+/// (the iPhone core's `envelope::shown`, the Mac's `shown_path`).
+fn shown(text: &str) -> String {
+    crate::broker::approvals::shown_path(text, usize::MAX)
+}
+
+/// The `names` of an action string of v2 (section 9.3): the SHA-256, as 64 lowercase hex
+/// characters, of the names the owner saw, joined with one zero byte: the agent, the
+/// credential, the Mac. Each is shown text, so none holds a zero byte.
+pub fn names_digest(agent: &str, title: &str, mac: &str) -> String {
+    let joined = [agent, title, mac].join("\0");
+    ring::digest::digest(&ring::digest::SHA256, joined.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A `names` of the form of section 9.2: 64 lowercase hex characters.
+pub fn valid_names(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The `names` that an iPhone may sign for an exception of this Mac (section 9.5 step 7),
+/// rebuilt from its own rows: the agent's name as the feed sends it, the Mac's
+/// `trusted_device` name, and the credential's title in either form that an iPhone
+/// shows: its own copy of the item (the whole title), or the feed's `item_title` when it
+/// has no copy (cleaned and cut to 128 bytes). Each with the list's replacement of
+/// control and format characters. The two are one when the title is short and clean.
+pub fn names_here(agent_name: &str, item_title: &str, mac_name: &str) -> Vec<String> {
+    let agent = shown(&feed_agent_name(agent_name));
+    let mac = shown(mac_name);
+    let mut out = vec![names_digest(&agent, &shown(item_title), &mac)];
+    let cut = names_digest(
+        &agent,
+        &shown(&cut_clean(item_title, MAX_TITLE_BYTES)),
+        &mac,
+    );
+    if !out.contains(&cut) {
+        out.push(cut);
+    }
+    out
+}
+
+/// [`names_here`] from the rows of `vault` as they are now: the agent `agent_id`, the item
+/// `item_id`, and the live `trusted_device` row `mac_uuid` of this Mac. `None` when one of
+/// them is not there.
+pub fn names_in_vault(
+    vault: &Vault,
+    agent_id: u64,
+    item_id: u64,
+    mac_uuid: &str,
+) -> VaultResult<Option<Vec<String>>> {
+    let agent = vault
+        .list_agents()?
+        .into_iter()
+        .find(|agent| agent.id == agent_id);
+    let title = vault.item_refs()?.remove(&item_id).map(|item| item.title);
+    let mac = vault.trusted_device(mac_uuid)?;
+    Ok(match (agent, title, mac) {
+        (Some(agent), Some(title), Some(mac)) => Some(names_here(&agent.name, &title, &mac.name)),
+        _ => None,
+    })
+}
+
+/// Whether `removal` may go on as to its names (section 9.5 steps 8a and 10): a v2 action
+/// whose `names` are among those of `vault` now; a v1 action (no names) only for an `only`
+/// row, which takes authority away. A read error is no match.
+pub fn names_hold(
+    vault: &Vault,
+    removal: &RemovalAction,
+    agent_id: u64,
+    item_id: u64,
+    mac_uuid: &str,
+) -> bool {
+    match &removal.names {
+        None => !removal.gives_authority(),
+        Some(names) => names_in_vault(vault, agent_id, item_id, mac_uuid)
+            .ok()
+            .flatten()
+            .is_some_and(|here| here.contains(names)),
+    }
+}
+
+/// The reason of the refusal of a v1 action that gives authority back (section 9.5 step
+/// 8a): the sender `iphone` signed ids only.
+pub fn v1_refusal(iphone: &str) -> String {
+    format!("update Apassy on {iphone} to remove this from it, or remove it on this Mac")
+}
+
 fn short_u32(value: u64) -> u64 {
     value.min(U32_MAX)
 }
@@ -457,14 +575,10 @@ pub fn build_feed(vault: &Vault, me: &TrustedDevice, seq: u64, now: u64) -> Vaul
                 answered_on: cut_clean(&item_use.answered_on, MAX_NAME_BYTES),
             });
         }
-        let name = match cut_clean(&agent.name, MAX_NAME_BYTES) {
-            name if name.is_empty() => "Agent".to_owned(),
-            name => name,
-        };
         agents.push(FeedAgent {
             id: agent.id.to_string(),
             host: host_of(&agent.name).to_owned(),
-            name,
+            name: feed_agent_name(&agent.name),
             place: "mac".to_owned(),
             revoked: agent.revoked,
             token_expires_at: agent.token_expires_at,
@@ -608,15 +722,23 @@ pub struct ActionBody {
     pub exception: ActionException,
     pub feed_seq: u64,
     pub time: u64,
+    /// v2: the digest of the names the owner saw (section 9.3). Absent in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<String>,
     /// The DER ECDSA signature over the action string, as b64u.
     pub signature: String,
 }
 
 impl ActionBody {
-    /// The body of `removal`, signed with `signature` (DER).
+    /// The body of `removal`, signed with `signature` (DER): v2 when it signs the names,
+    /// else v1.
     pub fn new(removal: &RemovalAction, signature: &[u8]) -> Self {
         Self {
-            v: VERSION,
+            v: if removal.names.is_some() {
+                ACTION_VERSION_NAMES
+            } else {
+                VERSION
+            },
             action_id: removal.action_id.clone(),
             by: removal.by.clone(),
             to: removal.to.clone(),
@@ -629,6 +751,7 @@ impl ActionBody {
             },
             feed_seq: removal.feed_seq,
             time: removal.time,
+            names: removal.names.clone(),
             signature: crate::sync::encode_b64u(signature),
         }
     }
@@ -639,13 +762,18 @@ impl ActionBody {
         (bytes.len() <= MAX_ACTION_BYTES).then_some(bytes)
     }
 
-    /// Parse an action plaintext: exactly the fields, `v` 1, the kind of v1.
+    /// Parse an action plaintext: exactly the fields, the kind of v1, and either `v` 1
+    /// without `names` (an iPhone that does not sign the names yet) or `v` 2 with them.
     pub fn parse(plaintext: &[u8]) -> Option<Self> {
         if plaintext.len() > MAX_ACTION_BYTES {
             return None;
         }
         let body: Self = serde_json::from_slice(plaintext).ok()?;
-        (body.v == VERSION && body.kind == REMOVE_EXCEPTION).then_some(body)
+        let version = match &body.names {
+            None => body.v == VERSION,
+            Some(names) => body.v == ACTION_VERSION_NAMES && valid_names(names),
+        };
+        (version && body.kind == REMOVE_EXCEPTION).then_some(body)
     }
 
     /// The signed fields of the body for `team_id`, when each has its form. The
@@ -662,6 +790,7 @@ impl ActionBody {
             created_at: self.exception.created_at,
             feed_seq: self.feed_seq,
             time: self.time,
+            names: self.names.clone(),
         };
         (valid_uuid(&self.by)
             && valid_uuid(&self.to)
@@ -673,7 +802,8 @@ impl ActionBody {
 }
 
 /// What an action to remove an exception signs (section 9.3): the sender, the target,
-/// the team, the action, the exception, the feed it saw, and the sender's clock.
+/// the team, the action, the exception, the feed it saw, the sender's clock, and in v2
+/// the names the owner saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalAction {
     pub by: String,
@@ -686,12 +816,29 @@ pub struct RemovalAction {
     pub created_at: u64,
     pub feed_seq: u64,
     pub time: u64,
+    /// v2: [`names_digest`] of the names the iPhone showed. `None`: a v1 action, from an
+    /// iPhone that does not sign the names yet.
+    pub names: Option<String>,
 }
 
 impl RemovalAction {
-    /// The action string: eight lines joined with `\n`, no trailing newline. `None` when
-    /// a field is empty or holds `:` or a control character.
+    /// The action string: in v1 eight lines joined with `\n`, no trailing newline; in v2
+    /// the first line is [`ACTION_TAG_V2`] and a ninth line `names:<digest>` follows.
+    /// `None` when a field is empty or holds `:` or a control character, or `names` is
+    /// not 64 lowercase hex characters.
     pub fn string(&self) -> Option<String> {
+        let body = self.lines()?;
+        match &self.names {
+            None => Some(format!("{ACTION_TAG}\n{body}")),
+            Some(names) if valid_names(names) => {
+                Some(format!("{ACTION_TAG_V2}\n{body}\nnames:{names}"))
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// Lines 2 to 8 of the action string, the same in v1 and v2.
+    fn lines(&self) -> Option<String> {
         let fields = [
             self.by.as_str(),
             self.to.as_str(),
@@ -706,7 +853,7 @@ impl RemovalAction {
             return None;
         }
         Some(format!(
-            "{ACTION_TAG}\n{}\n{}\n{}\n{}\n{REMOVE_EXCEPTION}:{}:{}:{}:{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{REMOVE_EXCEPTION}:{}:{}:{}:{}\n{}\n{}",
             self.by,
             self.to,
             self.team_id,
@@ -817,6 +964,7 @@ pub const TOO_OLD: Refusal = refused("too old");
 pub const GONE: Refusal = stale("the agent or the credential is not on this Mac");
 pub const BAD_SIGNATURE: Refusal = refused("its signature does not verify");
 pub const CHANGED: Refusal = stale("the list on this Mac changed");
+pub const NAMES_CHANGED: Refusal = stale("the names on the iPhone did not match this Mac");
 pub const LOCKED: Refusal = refused("the vault was locked during the check");
 pub const NOT_REMOVED: Refusal = refused("the exception could not be removed");
 
@@ -1308,7 +1456,13 @@ impl Shared {
         } else {
             MAX_FEED_BYTES
         };
-        let plaintext = fit(&mut feed, max, now)?;
+        // One byte for the mark that this Mac checks the names of an action, in a buffer
+        // made with room for it, so no copy of the plaintext is left behind unzeroed.
+        let fitted = fit(&mut feed, max - 1, now)?;
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(fitted.len() + 1));
+        plaintext.extend_from_slice(&fitted);
+        plaintext.push(NAMES_MARK);
+        drop(fitted);
         let aad = feed_aad(&active.team_id, device_id, seq, &key_id);
         let nonce = new_nonce()?;
         Some(Sealing::Ready((
@@ -1592,6 +1746,7 @@ impl Shared {
         };
         let name = opened.sender.name.clone();
         let removal = &opened.removal;
+        let mac_uuid = active.me.uuid.as_str();
         // 7. An agent of this vault on this Mac that is not revoked, and a live item.
         let resolved = {
             let mut guard = lock(&self.vault);
@@ -1614,13 +1769,58 @@ impl Shared {
             return self.refuse_action(active, record, key.as_ref(), &name, None, GONE);
         };
         let agent_line = Some((agent.id, agent.name.clone()));
+        // 8. The signature with the key of the kind, before anything that names the sender
+        // in Activity for what the action says: the answer key for a removal that gives
+        // authority back, the device key for an `only` row.
+        if let Err(error) =
+            verify_remote_action(&opened.sender, removal, &opened.signature, unix_now())
+        {
+            return self.refuse_action(
+                active,
+                record,
+                key.as_ref(),
+                &name,
+                agent_line,
+                reason_of(&error),
+            );
+        }
+        // 8a. A v1 action signs ids only: it may take authority away (an `only` row), never
+        // give it back. A v2 action names what the owner saw: this Mac's names now.
+        if removal.names.is_none() && removal.gives_authority() {
+            return self.refuse_text(
+                active,
+                record,
+                key.as_ref(),
+                &name,
+                agent_line,
+                Outcome::Refused,
+                &v1_refusal(&name),
+            );
+        }
+        let names_ok = {
+            let mut guard = lock(&self.vault);
+            let Some(vault) = Self::vault_of(&mut guard, active) else {
+                return Handled::Aborted;
+            };
+            names_hold(vault, removal, agent.id, item_id, mac_uuid)
+        };
+        if !names_ok {
+            return self.refuse_action(
+                active,
+                record,
+                key.as_ref(),
+                &name,
+                agent_line,
+                NAMES_CHANGED,
+            );
+        }
         let action = OwnerAction::RemoveAgentException {
             agent_id: agent.id,
             item_id,
             kind: removal.kind,
         };
-        // 8. The signature: through the owner gate for a removal that gives authority
-        // back, with the device key for an `only` row.
+        // The owner check for a removal that gives authority back: the gate checks the
+        // signature, the team, the target, and the names again from the vault.
         let proof = if removal.gives_authority() {
             let check = OwnerCheck::RemoteAction {
                 signed: Box::new(removal.clone()),
@@ -1643,22 +1843,11 @@ impl Shared {
                 }
             }
         } else {
-            if let Err(error) =
-                verify_remote_action(&opened.sender, removal, &opened.signature, unix_now())
-            {
-                return self.refuse_action(
-                    active,
-                    record,
-                    key.as_ref(),
-                    &name,
-                    agent_line,
-                    reason_of(&error),
-                );
-            }
             None
         };
-        // 9 and 10 under one vault lock: the row as the feed showed it, then the removal
-        // as the Mac's own "Remove exception" does after its owner check.
+        // 9 and 10 under one vault lock: the row as the feed showed it, the names again
+        // (a rename that synced since the checks above is not what the owner saw), then
+        // the removal as the Mac's own "Remove exception" does after its owner check.
         let last_seq = lock(&self.feed).last_seq.unwrap_or(0);
         let done = {
             let mut guard = lock(&self.vault);
@@ -1671,39 +1860,54 @@ impl Shared {
                 return Handled::Aborted;
             }
             let exceptions = vault.agent_exceptions(agent.id).unwrap_or_default();
-            still_shown(removal, item_id, &exceptions, last_seq).and_then(|()| {
-                match vault.remove_agent_exception(agent.id, item_id, removal.kind) {
-                    Ok(true) => {
-                        let title = vault
-                            .item_refs()
-                            .ok()
-                            .and_then(|refs| refs.get(&item_id).map(|r| r.title.clone()))
-                            .unwrap_or_default();
-                        let _ = vault.record_activity(&NewActivity {
-                            agent_id: Some(agent.id),
-                            agent_name: agent.name.clone(),
-                            item_id: Some(item_id),
-                            operation: ACTIVITY_OPERATION.to_owned(),
-                            decision: ActivityDecision::Allow,
-                            reason: format!(
+            still_shown(removal, item_id, &exceptions, last_seq)
+                .and_then(|()| {
+                    if names_hold(vault, removal, agent.id, item_id, mac_uuid) {
+                        Ok(())
+                    } else {
+                        Err(NAMES_CHANGED)
+                    }
+                })
+                .and_then(|()| {
+                    match vault.remove_agent_exception(agent.id, item_id, removal.kind) {
+                        Ok(true) => {
+                            let title = vault
+                                .item_refs()
+                                .ok()
+                                .and_then(|refs| refs.get(&item_id).map(|r| r.title.clone()))
+                                .unwrap_or_default();
+                            let mut reason = format!(
                                 "Removed on {name}: {} for {} and {title}",
                                 kind_words(removal.kind),
                                 agent.name
-                            ),
-                        });
-                        if removal.gives_authority() {
-                            let _ = vault.record_interaction(
-                                InteractionKind::OwnerCheck,
-                                &action.reason(),
-                                &[item_id],
                             );
+                            if removal.names.is_none() {
+                                // A v1 `only` removal: ids only (section 15).
+                                reason.push_str(&format!(
+                                    ". {name} did not sign the names; update Apassy on it"
+                                ));
+                            }
+                            let _ = vault.record_activity(&NewActivity {
+                                agent_id: Some(agent.id),
+                                agent_name: agent.name.clone(),
+                                item_id: Some(item_id),
+                                operation: ACTIVITY_OPERATION.to_owned(),
+                                decision: ActivityDecision::Allow,
+                                reason,
+                            });
+                            if removal.gives_authority() {
+                                let _ = vault.record_interaction(
+                                    InteractionKind::OwnerCheck,
+                                    &action.reason(),
+                                    &[item_id],
+                                );
+                            }
+                            Ok(())
                         }
-                        Ok(())
+                        Ok(false) => Err(CHANGED),
+                        Err(_) => Err(NOT_REMOVED),
                     }
-                    Ok(false) => Err(CHANGED),
-                    Err(_) => Err(NOT_REMOVED),
-                }
-            })
+                })
         };
         if let Err(refusal) = done {
             return self.refuse_action(active, record, key.as_ref(), &name, agent_line, refusal);
@@ -1765,13 +1969,36 @@ impl Shared {
         agent: Option<(u64, String)>,
         refusal: Refusal,
     ) -> Handled {
+        self.refuse_text(
+            active,
+            record,
+            key,
+            device,
+            agent,
+            refusal.outcome,
+            refusal.reason,
+        )
+    }
+
+    /// An action that opened and did not count, with a reason made for it.
+    #[allow(clippy::too_many_arguments)]
+    fn refuse_text(
+        &self,
+        active: &Active,
+        record: &FeedActionRecord,
+        key: Option<&QuestionKey>,
+        device: &str,
+        agent: Option<(u64, String)>,
+        outcome: Outcome,
+        reason: &str,
+    ) -> Handled {
         self.feed_activity(
             active,
             agent,
             "Apassy",
-            &format!("An action from {device} did not count: {}.", refusal.reason),
+            &format!("An action from {device} did not count: {reason}."),
         );
-        self.settle_action(active, record, key, refusal.outcome, refusal.reason, None);
+        self.settle_action(active, record, key, outcome, reason, None);
         Handled::Opened
     }
 
@@ -2143,13 +2370,133 @@ mod tests {
             created_at: 1_789_990_000,
             feed_seq: 1_790_000_040,
             time: 1_790_000_060,
+            names: None,
         };
         assert_eq!(removal.string().unwrap().len(), 222);
         let mut bad = removal.clone();
         bad.item_uuid = "a:b".to_owned();
         assert_eq!(bad.string(), None);
-        let mut bad = removal;
+        let mut bad = removal.clone();
         bad.team_id = "t\n".to_owned();
         assert_eq!(bad.string(), None);
+        // v2: a ninth line with 64 lowercase hex characters, nothing else.
+        let digest = names_digest("Claude Code", "Shop database", "MacBook Pro");
+        let mut v2 = removal;
+        v2.names = Some(digest.clone());
+        let text = v2.string().unwrap();
+        assert!(text.starts_with("apassy-feed-action-v2\n"));
+        assert!(text.ends_with(&format!("\n1790000060\nnames:{digest}")));
+        assert_eq!(text.lines().count(), 9);
+        for bad_names in [
+            digest.to_uppercase(),
+            digest[..63].to_owned(),
+            format!("{digest}0"),
+            format!("{}\n", &digest[..63]),
+            String::new(),
+        ] {
+            v2.names = Some(bad_names);
+            assert_eq!(v2.string(), None);
+        }
+    }
+
+    #[test]
+    fn the_action_tags_are_apart_from_every_other_signed_text() {
+        // The texts that the keys of an iPhone sign: the sign-in and the sync head (relay
+        // key), the answers of questions (both keys), the actions of the feed (both
+        // keys). No tag is a prefix of another, and each is followed by its own
+        // separator, so a text of one kind never verifies as another.
+        let tags = [
+            ACTION_TAG,
+            ACTION_TAG_V2,
+            crate::questions::envelope::ANSWER_TAG,
+            crate::sync::relay_crypto::HEAD_TAG,
+            crate::sync::relay_crypto::SIGN_IN_TAG,
+            crate::companion::crypto::PAIR_TAG,
+            crate::companion::crypto::REQUEST_TAG,
+            crate::companion::crypto::APPROVE_TAG,
+        ];
+        for (at, tag) in tags.iter().enumerate() {
+            for (other_at, other) in tags.iter().enumerate() {
+                if at != other_at {
+                    assert!(!other.starts_with(tag), "{tag} is a prefix of {other}");
+                }
+            }
+        }
+        assert_ne!(ACTION_TAG.len(), 0);
+        assert_eq!(ACTION_TAG.len(), ACTION_TAG_V2.len());
+    }
+
+    #[test]
+    fn a_v1_or_v2_action_body_has_its_own_fields() {
+        let removal = |names: Option<String>| RemovalAction {
+            by: "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b".to_owned(),
+            to: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+            team_id: "t_7k2m5q4x3c".to_owned(),
+            action_id: "sLGys7S1tre4ubq7vL2-vw".to_owned(),
+            agent_id: 4,
+            item_uuid: "3c9e1f7a2b4d4c6e8f0a1b3d5e7f9a2c".to_owned(),
+            kind: ExceptionKind::Never,
+            created_at: 1_789_990_000,
+            feed_seq: 1_790_000_040,
+            time: 1_790_000_060,
+            names,
+        };
+        let digest = names_digest("Claude Code", "Shop database", "MacBook Pro");
+        let v1 = ActionBody::new(&removal(None), &[1, 2, 3]);
+        let v2 = ActionBody::new(&removal(Some(digest.clone())), &[1, 2, 3]);
+        let v1_text = String::from_utf8(v1.to_plaintext().unwrap().to_vec()).unwrap();
+        let v2_text = String::from_utf8(v2.to_plaintext().unwrap().to_vec()).unwrap();
+        assert!(v1_text.starts_with(r#"{"v":1,"#) && !v1_text.contains("names"));
+        assert!(v2_text.starts_with(r#"{"v":2,"#));
+        assert!(v2_text.contains(&format!(
+            r#""time":1790000060,"names":"{digest}","signature":"#
+        )));
+        assert_eq!(ActionBody::parse(v1_text.as_bytes()), Some(v1));
+        assert_eq!(ActionBody::parse(v2_text.as_bytes()), Some(v2));
+        // v1 with names, v2 without, v2 with names of another form, v3: refused.
+        for bad in [
+            v2_text.replace(r#""v":2"#, r#""v":1"#),
+            v1_text.replace(r#""v":1"#, r#""v":2"#),
+            v2_text.replace(&digest, &digest.to_uppercase()),
+            v2_text.replace(r#""v":2"#, r#""v":3"#),
+        ] {
+            assert_eq!(ActionBody::parse(bad.as_bytes()), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_names_here_follow_what_an_iphone_shows() {
+        let digest = |agent: &str, title: &str, mac: &str| names_digest(agent, title, mac);
+        // Short and clean: one digest.
+        assert_eq!(
+            names_here("Claude Code", "Shop database", "MacBook Pro"),
+            vec![digest("Claude Code", "Shop database", "MacBook Pro")]
+        );
+        // A control character: the iPhone's own copy shows `?`, the feed a space; a title
+        // over 128 bytes: the own copy whole, the feed cut.
+        assert_eq!(
+            names_here("Claude Code", " Shop\tdatabase", "MacBook Pro"),
+            vec![
+                digest("Claude Code", " Shop?database", "MacBook Pro"),
+                digest("Claude Code", "Shop database", "MacBook Pro"),
+            ]
+        );
+        let long = "Shop database ".repeat(12);
+        let here = names_here("Claude Code", &long, "MacBook Pro");
+        assert_eq!(here.len(), 2);
+        assert_eq!(here[0], digest("Claude Code", &long, "MacBook Pro"));
+        assert_eq!(
+            here[1],
+            digest("Claude Code", &clean(&long, MAX_TITLE_BYTES), "MacBook Pro")
+        );
+        // The agent's name as the feed sends it; format characters as `?`.
+        assert_eq!(
+            names_here("", "Shop database", "Mac\u{202E}Book")[0],
+            digest("Agent", "Shop database", "Mac?Book")
+        );
+        assert_eq!(
+            names_here(&"a".repeat(80), "Shop database", "MacBook Pro")[0],
+            digest(&"a".repeat(64), "Shop database", "MacBook Pro")
+        );
     }
 }
