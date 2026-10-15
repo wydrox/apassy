@@ -9,9 +9,10 @@ license = "FSL-1.1-ALv2"
 description = "The team relay of Apassy: a team vault, a decision per run, and a reverse proxy that swaps placeholders"
 
 [dependencies]
-# The core crate at public main. `vault` enables the broker: analysis, packs,
+# The core crate: public main 0.2.1 plus rustls 0.23.46 (app branch
+# relay-dep/0.2.1-rustls). `vault` enables the broker: analysis, packs,
 # bouncer glue, placeholders and host rules.
-apassy = { git = "https://github.com/wydrox/apassy", rev = "77f6628", default-features = false, features = ["vault"] }
+apassy = { git = "https://github.com/wydrox/apassy", rev = "73f3399", default-features = false, features = ["vault"] }
 # The same pins as the core, so there is one copy of each crate.
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -19,7 +20,7 @@ zeroize = "=1.9.0"
 # Exactly the core version and features: libsqlite3-sys is a `links` crate.
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 getrandom = "=0.4.3"
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "=0.7.0"
 # Token hashes.
 sha2 = "=0.11.0"
