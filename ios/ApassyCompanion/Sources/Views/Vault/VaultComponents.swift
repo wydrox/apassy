@@ -226,33 +226,56 @@ struct HiddenSecret: View {
     }
 }
 
-/// The state of the relay sync as a floating glass capsule. Selecting it syncs now.
+/// Sync status stays readable; problems open Settings with the recovery controls.
 struct SyncCapsule: View {
     @Environment(VaultModel.self) private var vault
+    @Environment(VaultUI.self) private var ui
 
     var body: some View {
         Button {
-            Task { await vault.syncNow() }
+            if showsProblem {
+                ui.sheet = .settings
+            } else {
+                Task { await vault.syncNow() }
+            }
         } label: {
-            HStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 if vault.isSyncing {
                     ProgressView()
                 } else {
                     Image(systemName: symbol)
                         .foregroundStyle(tint ?? .primary)
                 }
-                Text(title)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if showsProblem {
+                        Text("Open sync settings")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .multilineTextAlignment(.leading)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .glassEffect(.regular.tint(tint?.opacity(0.28)).interactive(), in: .capsule)
+            .glassEffect(.regular.tint(tint?.opacity(0.28)).interactive(),
+                         in: .rect(cornerRadius: 20))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-        .accessibilityHint("Syncs now")
+        .accessibilityHint(showsProblem ? "Opens sync settings" : "Syncs now")
+        .disabled(vault.isSyncing)
+    }
+
+    private var showsProblem: Bool {
+        guard !vault.isSyncing else { return false }
+        return switch vault.syncStatus?.state {
+        case .offline?, .needsPassphrase?, .removed?, .damaged?, .staleCopy?, .forkedCopy?, .error?: true
+        default: false
+        }
     }
 
     private var title: String {

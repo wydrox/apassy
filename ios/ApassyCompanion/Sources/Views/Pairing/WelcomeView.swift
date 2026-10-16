@@ -44,7 +44,8 @@ struct WelcomeView: View {
             Button {
                 model.startScanning()
             } label: {
-                Label("Scan the code", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
+                Label(model.hasScannedCode ? "Continue" : "Scan the code", systemImage: "qrcode.viewfinder")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .disabled(model.deviceNameProblem != nil)

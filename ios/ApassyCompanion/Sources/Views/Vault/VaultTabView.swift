@@ -154,6 +154,7 @@ struct HomeView: View {
                 if vault.vault?.syncs == true {
                     SyncCapsule()
                         .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                 }
             }

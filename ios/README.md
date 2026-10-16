@@ -65,7 +65,7 @@ The Secure Enclave keys are compiled out of a simulator build (`#if !targetEnvir
 
 For a personal vault, keep **iCloud Drive** selected on the Mac. On the iPhone, select **iCloud**, then select the matching `.apassy` file in **Files > iCloud Drive > Apassy**. Enter its passphrase. The app keeps an offline local vault and syncs changes in both directions while it is active and unlocked. iCloud does not need the companion QR code or a relay team. A "saved" result confirms the local iCloud file; receipt on another device needs a check on that device.
 
-If file access expires, use the file selection control in Sync settings to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. Unresolved iCloud file conflicts stop publication; the local vault and conflict versions stay intact.
+If file access expires, use the file selection control in Sync settings to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. For an already connected vault, sync merges iCloud conflict versions through the vault core and retains encrypted recovery copies before resolving the captured versions. Unreadable or incompatible versions stop publication; the provider versions stay intact. Importing or reconnecting a file with unresolved versions still requires resolving those versions first. Tap a sync problem on Home to open its full status and recovery controls in Settings.
 
 | Part | What it does |
 | --- | --- |
@@ -151,7 +151,8 @@ Use a synthetic vault for these checks.
 6. Edit the same credential differently on both devices before sync. Check the active item and the preserved conflict copy.
 7. Change the passphrase on the Mac. Check the new-passphrase path and Face ID unlock on the iPhone.
 8. Restart the iPhone app. Check that the bookmark still permits sync. Select the file again through Sync settings to check recovery.
-9. Remove the test vault from the iPhone. Check that its iCloud file and Mac vault remain.
+9. Create divergent iCloud file versions of a connected synthetic vault. Sync on the iPhone, then check that both changes reach the Mac and that same-item conflicts remain as conflict copies. A damaged or different-vault version must leave provider versions unresolved. These provider checks are distinct from the local merge tests.
+10. Remove the test vault from the iPhone. Check that its iCloud file and Mac vault remain.
 
 Local core and adapter tests do not prove iCloud delivery, persistent file access on a physical iPhone, or Face ID behavior. These checks need the updated app on a physical device.
 
@@ -203,6 +204,8 @@ The Secure Enclave and Face ID exist only on a device, so an approval can only b
 3. On the iPhone, open Apassy. Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
 4. The iPhone shows a 6-digit code such as `348 942`. Type it in Apassy on the Mac and select Pair. The Mac then asks for Touch ID or your passphrase.
 5. The iPhone says "Paired". Select Continue. Runs that wait show in the Inbox.
+
+If you scan the companion QR in the team-vault scanner, Apassy switches to companion pairing and asks you to select Continue before Face ID and the Mac confirmation. It does not join a relay vault. An existing companion pairing must be managed from Approvals before pairing another Mac.
 
 A wrong code pairs nothing, and three wrong codes close the window. If the iPhone says "This link does not work", another device may have used the link: select Cancel on the Mac and make a new code.
 

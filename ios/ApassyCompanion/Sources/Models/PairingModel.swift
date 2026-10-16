@@ -39,6 +39,10 @@ final class PairingModel {
     private let onPaired: @MainActor (PairingRecord, any CompanionKeys) -> Void
     private var task: Task<Void, Never>?
     private var finished: (record: PairingRecord, keys: any CompanionKeys)?
+    /// A QR from the vault scanner, held only until the owner confirms the companion flow.
+    private var scannedCode: String?
+
+    var hasScannedCode: Bool { scannedCode != nil }
 
     init(
         store: any PairingStore,
@@ -82,16 +86,42 @@ final class PairingModel {
         notice = nil
         scanNote = nil
         step = .scan
+        if let code = scannedCode {
+            scannedCode = nil
+            handleScan(code)
+        }
+    }
+
+    /// Receive a companion QR from another scanner. The welcome still asks for the iPhone name
+    /// and the owner's Continue before making keys or asking for Face ID.
+    func receiveCode(_ payload: String) -> String? {
+        switch step {
+        case .welcome, .scan, .denied, .expired, .failed: break
+        default: return "Finish or cancel the current companion pairing before scanning another code."
+        }
+        do {
+            _ = try PairingLink.parse(payload)
+        } catch {
+            return error.localizedDescription
+        }
+        scannedCode = payload
+        scanNote = nil
+        notice = "This code pairs the iPhone companion to approve agent runs on your Mac. Select Continue to pair."
+        step = .welcome
+        return nil
     }
 
     func backToWelcome() {
         cancel()
+        if scannedCode != nil { notice = nil }
+        scannedCode = nil
         step = .welcome
     }
 
     /// Cancel a pairing in progress, delete its keys, and scan again.
     func startAgain() {
         cancel()
+        scannedCode = nil
         scanNote = nil
         step = .scan
     }

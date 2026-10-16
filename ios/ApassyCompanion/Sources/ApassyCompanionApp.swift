@@ -66,6 +66,9 @@ struct RootView: View {
             }
         }
         .environment(root)
+        .onChange(of: root.companionIsPaired) { _, paired in
+            if paired { root.companionPairingFinished() }
+        }
         // Another app exports to Apassy (Apple's credential exchange).
         .onContinueUserActivity(ASCredentialExchangeActivity) { activity in
             root.receiveCredentialExchange(activity)
@@ -92,7 +95,7 @@ struct CompanionOnlyView: View {
                 // Before pairing, the owner can still go back and add a vault instead.
                 if !root.companionIsPaired {
                     HStack {
-                        Button("Back", systemImage: "chevron.backward") { root.route() }
+                        Button("Back", systemImage: "chevron.backward") { root.leaveCompanionPairing() }
                         Spacer()
                         Button("Add your vault") { root.addVault() }
                     }

@@ -104,7 +104,39 @@ final class RootModel {
                 biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
                 isAway: { [weak vault] in vault?.isInBackground ?? false },
                 onFinished: { [weak self] _ in self?.finishAddVault() },
-                onCancel: { [weak self] in self?.cancelAddVault() }))
+                onCancel: { [weak self] in self?.cancelAddVault() },
+                onCompanionCode: { [weak self] code in self?.pairCompanion(code: code) }))
+    }
+
+    /// A companion QR can arrive in the relay scanner. Keep its existing owner confirmation,
+    /// Face ID, and Mac confirmation; never replace a companion that is already paired.
+    private func pairCompanion(code: String) -> String? {
+        guard case .pairing(let model) = companion.phase else {
+            return "Open Approvals to check the existing companion pairing before pairing another Mac."
+        }
+        if let problem = model.receiveCode(code) { return problem }
+        vault?.startSync()
+        screen = .companion
+        return nil
+    }
+
+    /// Continue of the companion flow returns to the vault when this iPhone already has one.
+    func companionPairingFinished() {
+        guard case .companion = screen, companionIsPaired, vault?.hasVault == true else { return }
+        route()
+    }
+
+    /// Leaving the companion setup cancels any pending signing or polling. A completed pairing
+    /// is handed over instead of deleting the keys that were just saved.
+    func leaveCompanionPairing() {
+        if case .pairing(let model) = companion.phase {
+            if case .paired = model.step {
+                model.finish()
+            } else {
+                model.backToWelcome()
+            }
+        }
+        route()
     }
 
     func addICloudVault() {
