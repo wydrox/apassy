@@ -71,6 +71,14 @@
 //! all of them; the window never takes it. The plan, output, and wake mutexes are taken
 //! last, one at a time, and only for a copy.
 //!
+//! The health mutex (the sync log and the stuck notice, [`SyncHealth`]) and the hook
+//! mutex are taken last, alone; the notice hook runs with no lock held.
+//!
+//! Each failed sync of the open vault, and each status of it that says it waits or
+//! fails, goes to [`SyncHealth`]: a line in the sync log, and after some minutes one
+//! notification through the hook of the app ([`SyncWorker::set_stuck_notifier`]). A
+//! sync that works ends the streak (docs/operations/sync.md, section 7).
+//!
 //! The waiter thread never takes the op lock or the schedule mutex. It takes the plan
 //! mutex for a copy, then the vault mutex alone and only to see whether the vault is
 //! unlocked. It waits on the relay with no lock held, then sets the pull flag and takes
@@ -78,6 +86,7 @@
 //! the waiter mutex, which nothing else holds with another lock.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -86,6 +95,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::broker::SharedVault;
+use crate::desktop::sync_health::{LogDetails, StuckNotice, SyncHealth, SyncKind};
+use crate::native::SyncStuckReason;
 use crate::sync::{
     FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, SyncError, SyncOutcome, VaultSync,
 };
@@ -132,6 +143,10 @@ const MAX_EVENTS: usize = 32;
 /// The lock around each sync operation that changes files. Take it before the vault
 /// mutex.
 pub(crate) type SyncOpLock = Arc<Mutex<()>>;
+
+/// Posts the notification of a vault that does not sync: the list ID, the vault name,
+/// and the reason. It runs on the thread that saw it, with no lock of the worker held.
+pub(crate) type StuckHook = Arc<dyn Fn(&str, &str, SyncStuckReason) + Send + Sync>;
 
 /// The status of a synced vault in plain words.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +212,8 @@ struct Plan {
     open: Option<(String, VaultSync)>,
     /// Each synced vault of the list.
     synced: Vec<(String, VaultSync)>,
+    /// The name of each vault of the list, by list ID, for a notification.
+    names: BTreeMap<String, String>,
     /// The vault slot of the session.
     vault: Option<SharedVault>,
 }
@@ -257,6 +274,10 @@ struct Shared {
     /// Wakes the waiter: a stop, or another open vault. The waiter resets it.
     waiter_wake: Mutex<bool>,
     waiter_woken: Condvar,
+    /// The sync log and the streaks of failures.
+    health: Mutex<SyncHealth>,
+    /// The notification of a vault that does not sync.
+    stuck_hook: Mutex<Option<StuckHook>>,
     /// The download requests of the worker, for the tests.
     #[cfg(test)]
     downloads_asked: std::sync::atomic::AtomicUsize,
@@ -274,6 +295,50 @@ fn is_unlocked(vault: &SharedVault) -> bool {
 /// before the window tracks the new vault.
 fn same_vault(sync: &VaultSync, vault: &Vault) -> bool {
     std::fs::canonicalize(sync.vault_path()).is_ok_and(|path| path == vault.path())
+}
+
+/// How the vault of `sync` syncs, for the log.
+fn kind_of(sync: &VaultSync) -> SyncKind {
+    match sync {
+        VaultSync::Folder(_) => SyncKind::Folder,
+        VaultSync::Relay(_) => SyncKind::Relay,
+    }
+}
+
+/// What a line of the sync log says about the synced file of `sync`. A folder reads the
+/// status of its file (no key); a relay has the hash of its last copy only.
+fn log_details(sync: &VaultSync) -> LogDetails {
+    let last = || {
+        sync.state()
+            .ok()
+            .flatten()
+            .and_then(|state| state.last_file_sha256)
+    };
+    match sync {
+        VaultSync::Folder(folder) => match folder.status() {
+            Ok(report) => LogDetails {
+                file_status: Some(report.status),
+                file_sha256: report.file_sha256,
+                last_sha256: report.last_file_sha256,
+            },
+            Err(_) => LogDetails {
+                last_sha256: last(),
+                ..LogDetails::default()
+            },
+        },
+        VaultSync::Relay(_) => LogDetails {
+            last_sha256: last(),
+            ..LogDetails::default()
+        },
+    }
+}
+
+/// What a status of the open vault means for [`SyncHealth`].
+enum Observed {
+    /// Up to date.
+    Synced,
+    /// It waits or fails.
+    Failed(SyncError, LogDetails),
 }
 
 /// The wait after `failures` failed relay syncs in a row: 5 seconds, doubling up to 60.
@@ -346,6 +411,7 @@ impl Shared {
             (plan.generation, plan.open.clone(), plan.vault.clone())
         };
         self.catch_up(&mut schedule, generation);
+        lock(&self.health).retain(open.as_ref().map(|(id, _)| id.as_str()));
         let unlocked = vault.as_ref().is_some_and(is_unlocked);
         let relay = open.as_ref().and_then(|(_, sync)| sync.as_relay());
         if let Some(relay) = relay
@@ -455,7 +521,7 @@ impl Shared {
         open: Option<&(String, VaultSync)>,
         vault: Option<&SharedVault>,
     ) {
-        self.refresh();
+        self.refresh(now);
         // "Synced 2 minutes ago" changes with the time.
         self.repaint();
         let status = open.and_then(|(id, _)| lock(&self.out).statuses.get(id).cloned());
@@ -466,6 +532,7 @@ impl Shared {
                 CHECK_EVERY
             },
         );
+        self.ask_icloud_for_others(now, schedule, open.map(|(id, _)| id.as_str()));
         let (Some((id, any_sync)), Some(vault)) = (open, vault) else {
             return;
         };
@@ -493,6 +560,32 @@ impl Shared {
         );
         if unlocked && file_moved {
             self.sync_open(now, schedule, id, any_sync, vault);
+        }
+    }
+
+    /// Ask iCloud for the synced file of each other folder vault of the list that waits
+    /// for it (a newer version than the copy on this Mac, or no copy), so it is ready at
+    /// its unlock. Again every [`DOWNLOAD_AGAIN`] while it waits.
+    fn ask_icloud_for_others(&self, now: Instant, schedule: &mut Schedule, open: Option<&str>) {
+        let synced = lock(&self.plan).synced.clone();
+        let statuses = lock(&self.out).statuses.clone();
+        for (id, any_sync) in &synced {
+            let VaultSync::Folder(sync) = any_sync else {
+                continue;
+            };
+            if Some(id.as_str()) == open {
+                continue;
+            }
+            if statuses.get(id) != Some(&UiStatus::Waiting) {
+                schedule.downloads.remove(id);
+            } else if schedule
+                .downloads
+                .get(id)
+                .is_none_or(|asked| now.saturating_duration_since(*asked) >= DOWNLOAD_AGAIN)
+            {
+                schedule.downloads.insert(id.clone(), now);
+                let _ = sync.request_download();
+            }
         }
     }
 
@@ -558,6 +651,7 @@ impl Shared {
                 .flatten()
                 .and_then(|state| state.last_sync_at)
         });
+        self.record(now, id, sync, &result);
         let id = id.to_owned();
         {
             let mut out = lock(&self.out);
@@ -595,6 +689,44 @@ impl Shared {
         self.repaint();
     }
 
+    /// Tell [`SyncHealth`] the result of a sync of the vault `id`, and post its notice.
+    /// A sync that a lock ended (`Locked`) says nothing.
+    fn record(
+        &self,
+        now: Instant,
+        id: &str,
+        sync: &VaultSync,
+        result: &Result<SyncOutcome, SyncError>,
+    ) {
+        let notice = match result {
+            Err(SyncError::Vault(VaultErrorKind::Locked)) => None,
+            Ok(_) => {
+                lock(&self.health).success(id);
+                None
+            }
+            Err(err) => {
+                lock(&self.health).failure(now, id, kind_of(sync), *err, || log_details(sync))
+            }
+        };
+        self.announce(notice);
+    }
+
+    /// Post the notification of a vault that keeps failing, through the hook of the app.
+    fn announce(&self, notice: Option<StuckNotice>) {
+        let Some(notice) = notice else {
+            return;
+        };
+        let name = lock(&self.plan).names.get(&notice.id).cloned();
+        let hook = lock(&self.stuck_hook).clone();
+        if let Some(hook) = hook {
+            hook(
+                &notice.id,
+                name.as_deref().unwrap_or("Vault"),
+                notice.reason,
+            );
+        }
+    }
+
     /// The relay refused the device of the vault `id`: show "Removed from the relay" for
     /// it, once, with a note. The step before a lock does not push to it.
     fn show_removed(&self, id: &str) {
@@ -617,8 +749,10 @@ impl Shared {
         }
     }
 
-    /// See [`SyncWorker::refresh`].
-    fn refresh(&self) {
+    /// See [`SyncWorker::refresh`]. The status of the open folder vault goes to
+    /// [`SyncHealth`]: up to date ends a streak; waiting for iCloud, a folder that is
+    /// away, and a failed read count as failures.
+    fn refresh(&self, now: Instant) {
         let (synced, open) = {
             let plan = lock(&self.plan);
             (
@@ -628,6 +762,7 @@ impl Shared {
         };
         let previous = lock(&self.out).statuses.clone();
         let mut statuses = BTreeMap::new();
+        let mut observed = None;
         for (id, sync) in synced {
             let kept = previous.get(&id).filter(|status| {
                 matches!(
@@ -636,13 +771,41 @@ impl Shared {
                 )
             });
             let status = match &sync {
-                VaultSync::Folder(sync) => match (kept, sync.status()) {
-                    (Some(kept), Ok(report)) if report.status == FileStatus::UpToDate => {
-                        kept.clone()
+                VaultSync::Folder(sync) => {
+                    let report = sync.status();
+                    if open.as_deref() == Some(id.as_str()) {
+                        observed = match &report {
+                            Ok(report) => match report.status {
+                                FileStatus::UpToDate if kept.is_none() => Some(Observed::Synced),
+                                FileStatus::NotDownloaded | FileStatus::FolderUnavailable => {
+                                    let err = if report.status == FileStatus::NotDownloaded {
+                                        SyncError::NotDownloaded
+                                    } else {
+                                        SyncError::FolderUnavailable
+                                    };
+                                    Some(Observed::Failed(
+                                        err,
+                                        LogDetails {
+                                            file_status: Some(report.status),
+                                            file_sha256: report.file_sha256.clone(),
+                                            last_sha256: report.last_file_sha256.clone(),
+                                        },
+                                    ))
+                                }
+                                _ => None,
+                            },
+                            Err(err) => Some(Observed::Failed(*err, LogDetails::default())),
+                        }
+                        .map(|observed| (id.clone(), observed));
                     }
-                    (_, Ok(report)) => UiStatus::from_file(report.status, report.last_sync_at),
-                    (_, Err(err)) => UiStatus::from_error(err),
-                },
+                    match (kept, report) {
+                        (Some(kept), Ok(report)) if report.status == FileStatus::UpToDate => {
+                            kept.clone()
+                        }
+                        (_, Ok(report)) => UiStatus::from_file(report.status, report.last_sync_at),
+                        (_, Err(err)) => UiStatus::from_error(err),
+                    }
+                }
                 // The relay status needs the key: the last known state, or the result
                 // of the last sync of the worker.
                 VaultSync::Relay(sync) => match (kept, sync.state()) {
@@ -668,6 +831,21 @@ impl Shared {
         };
         if changed {
             self.repaint();
+        }
+        if let Some((id, observed)) = observed {
+            let notice = {
+                let mut health = lock(&self.health);
+                match observed {
+                    Observed::Synced => {
+                        health.success(&id);
+                        None
+                    }
+                    Observed::Failed(err, details) => {
+                        health.failure(now, &id, SyncKind::Folder, err, || details)
+                    }
+                }
+            };
+            self.announce(notice);
         }
     }
 }
@@ -916,7 +1094,40 @@ impl SyncWorker {
     /// Read the file status of each synced vault of the list. The open vault also
     /// counts a change of a credential that waits to sync.
     pub(crate) fn refresh(&self) {
-        self.shared.refresh();
+        self.shared.refresh(Instant::now());
+    }
+
+    /// Write the sync log at `log` ([`crate::desktop::sync_health::sync_log_path`]), or
+    /// no log.
+    pub(crate) fn set_log(&self, log: Option<PathBuf>) {
+        lock(&self.shared.health).set_log(log);
+    }
+
+    /// The name of each vault of the list, by list ID, for a notification.
+    pub(crate) fn set_names(&self, names: BTreeMap<String, String>) {
+        let mut plan = lock(&self.shared.plan);
+        if plan.names != names {
+            plan.names = names;
+        }
+    }
+
+    /// Post the notification of a vault that keeps failing with `hook`.
+    pub(crate) fn set_stuck_notifier(
+        &self,
+        hook: impl Fn(&str, &str, SyncStuckReason) + Send + Sync + 'static,
+    ) {
+        *lock(&self.shared.stuck_hook) = Some(Arc::new(hook));
+    }
+
+    /// A sync of the vault `id` that the window ran (the owner, or the unlock): its
+    /// result goes to the sync log and the streak of the vault, as a sync of the worker.
+    pub(crate) fn record(
+        &self,
+        id: &str,
+        sync: &VaultSync,
+        result: &Result<SyncOutcome, SyncError>,
+    ) {
+        self.shared.record(Instant::now(), id, sync, result);
     }
 
     /// A copy of the statuses.
@@ -1128,6 +1339,161 @@ mod tests {
         let waits: Vec<u64> = (1..=7).map(|n| relay_backoff(n).as_secs()).collect();
         assert_eq!(waits, [5, 10, 20, 40, 60, 60, 60]);
         assert_eq!(relay_backoff(0).as_secs(), 5);
+    }
+
+    mod icloud {
+        //! The worker and a stand-in for iCloud that calls the copy on this Mac old.
+
+        use super::*;
+        use crate::contracts::CredentialKind;
+        use crate::sync::{CloudDownload, CloudFileStatus, CloudProbe, SyncConfig};
+        use crate::vault::{Field, ItemDraft, SecretValue};
+
+        const CANARY: &str = "SYNTH-secret-canary-7f3a";
+        const PASSPHRASE: &str = "synthetic-worker-icloud-pass";
+        const NAME: &str = "Personal canary vault";
+
+        #[derive(Debug, Default)]
+        struct FakeCloud {
+            download: Mutex<Option<CloudDownload>>,
+            requests: std::sync::atomic::AtomicUsize,
+        }
+
+        impl CloudProbe for FakeCloud {
+            fn status(&self, _path: &std::path::Path) -> Option<CloudFileStatus> {
+                (*lock(&self.download)).map(|download| CloudFileStatus {
+                    download,
+                    downloading: false,
+                    download_error: false,
+                })
+            }
+
+            fn request_download(&self, _path: &std::path::Path) -> bool {
+                self.requests.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+        }
+
+        /// The open vault syncs with a folder; iCloud says that a newer version than the
+        /// materialized copy is on the server. The worker shows "Waiting", asks iCloud,
+        /// logs the wait without a secret, notifies once after 10 minutes, and logs the
+        /// recovery when the newest copy is there.
+        #[test]
+        fn an_old_icloud_copy_waits_logs_and_notifies_once() {
+            let dir = tempfile::TempDir::new().expect("dir");
+            let folder = dir.path().join("Mobile Documents").join("Apassy");
+            std::fs::create_dir_all(&folder).expect("folder");
+            let vault_path = dir.path().join("vault.db");
+            let mut vault = Vault::create(&vault_path, PASSPHRASE).expect("create");
+            vault.unlock(PASSPHRASE).expect("unlock");
+            vault
+                .add(ItemDraft {
+                    title: "Canary title".to_owned(),
+                    kind: CredentialKind::ApiKey,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: vec![Field {
+                        name: "token".to_owned(),
+                        value: SecretValue::new(CANARY.to_owned()),
+                        secret: true,
+                    }],
+                })
+                .expect("add");
+            let cloud = Arc::new(FakeCloud::default());
+            let sync = FolderSync::new(SyncConfig::in_data_dir(
+                dir.path(),
+                &vault_path,
+                &folder,
+                "v1",
+            ))
+            .with_cloud(cloud.clone());
+            sync.enable(&mut vault, NAME).expect("enable");
+            let vault: SharedVault = Arc::new(Mutex::new(Some(vault)));
+
+            let worker = SyncWorker::default();
+            let log = dir.path().join("logs").join("sync.log");
+            worker.set_log(Some(log.clone()));
+            worker.set_names(BTreeMap::from([("v1".to_owned(), NAME.to_owned())]));
+            let notices: Arc<Mutex<Vec<(String, String, SyncStuckReason)>>> = Arc::default();
+            {
+                let notices = Arc::clone(&notices);
+                worker.set_stuck_notifier(move |id, name, reason| {
+                    lock(&notices).push((id.to_owned(), name.to_owned(), reason));
+                });
+            }
+            worker.track(Some(("v1".to_owned(), sync.clone())), Arc::clone(&vault));
+            worker.set_synced_all(vec![("v1".to_owned(), sync.clone().into())]);
+
+            // iCloud says current: up to date, nothing logged.
+            *lock(&cloud.download) = Some(CloudDownload::Current);
+            let t0 = Instant::now();
+            worker.tick(t0);
+            assert!(matches!(
+                worker.statuses().get("v1"),
+                Some(UiStatus::UpToDate(_))
+            ));
+            assert!(!log.exists(), "nothing failed");
+
+            // A newer version on the server; the old copy stays on this Mac.
+            *lock(&cloud.download) = Some(CloudDownload::NotDownloaded);
+            let mut now = t0 + CHECK_EVERY;
+            let next = worker.tick(now).expect("next");
+            assert_eq!(worker.statuses().get("v1"), Some(&UiStatus::Waiting));
+            assert_eq!(cloud.requests.load(Ordering::SeqCst), 1, "asked iCloud");
+            assert!(next <= now + DOWNLOAD_EVERY, "looks again soon");
+            let text = std::fs::read_to_string(&log).expect("log");
+            assert_eq!(text.lines().count(), 1, "{text}");
+            assert!(
+                text.contains(" sync-failed vault=v1 kind=folder error=NotDownloaded ")
+                    && text.contains(" file=NotDownloaded "),
+                "{text}"
+            );
+
+            // Waiting for 10 minutes: one notification, then no more.
+            let until = now + Duration::from_secs(10 * 60);
+            while now < until {
+                now += DOWNLOAD_EVERY;
+                worker.tick(now);
+            }
+            assert_eq!(
+                *lock(&notices),
+                vec![(
+                    "v1".to_owned(),
+                    NAME.to_owned(),
+                    SyncStuckReason::WaitingForIcloud
+                )]
+            );
+            for _ in 0..10 {
+                now += CHECK_EVERY;
+                worker.tick(now);
+            }
+            assert_eq!(lock(&notices).len(), 1, "once for each streak");
+            assert!(cloud.requests.load(Ordering::SeqCst) > 1, "asked again");
+
+            // The newest copy is there: up to date, and the log says so.
+            *lock(&cloud.download) = Some(CloudDownload::Current);
+            now += CHECK_EVERY;
+            worker.tick(now);
+            assert!(matches!(
+                worker.statuses().get("v1"),
+                Some(UiStatus::UpToDate(_))
+            ));
+            let text = std::fs::read_to_string(&log).expect("log");
+            let last = text.lines().last().expect("a line");
+            assert!(
+                last.contains(" sync-ok vault=v1 kind=folder after="),
+                "{text}"
+            );
+            // The same wait repeated: a line at most every 10 minutes.
+            assert!(text.lines().count() <= 4, "{text}");
+            for secret in [CANARY, PASSPHRASE, NAME, "Canary title"] {
+                assert!(!text.contains(secret), "{secret} in the log: {text}");
+            }
+            assert!(
+                !text.contains(&dir.path().display().to_string()),
+                "no path: {text}"
+            );
+        }
     }
 
     mod live {

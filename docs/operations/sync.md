@@ -33,6 +33,7 @@ So each Mac registers its own agents. Their tokens are in the MCP configuration 
 | sync state | `<data folder>/sync/<list ID>.json` (mode `0600`) | the file name, the vault ID, the hash of the synced file and the digest of the synced content after the last sync, the folder, and the vault file. No secret. |
 | work copies | `<data folder>/sync/.<name>.*` | exist only during a merge or a push |
 | setting | `<data folder>/vaults.json`, field `sync` of the vault | the folder, the file name, and the name of the sync state |
+| sync log | `~/Library/Logs/Apassy/sync.log` (mode `0600`), and `sync.log.1` | one line for each failed sync and for the first sync that works after failures (section 7.2). No secret. |
 
 The folder is `<sync service>/Apassy` for a detected service, for example `~/Library/Mobile Documents/com~apple~CloudDocs/Apassy` (iCloud Drive) or `~/Library/CloudStorage/Dropbox/Apassy`. The data folder is `~/Library/Application Support/Apassy`. The live vault stays a local file there; SQLite never opens a file in the synced folder.
 
@@ -108,12 +109,59 @@ Settings > Vault > Sync shows each synced vault with a tag and a line:
 | --- | --- | --- |
 | Up to date | Up to date. Last sync 5 minutes ago. | nothing |
 | Syncing | a change waits to sync | nothing: it syncs within seconds |
-| Downloading | Waiting for iCloud to download the synced file. | wait; Apassy asked iCloud for the file (`brctl download`), and asks again every 30 seconds while the file stays in iCloud |
+| Downloading | Waiting for iCloud to download the synced file. | wait; Apassy asked iCloud for the newest version of the file, and asks again every 30 seconds while iCloud has not delivered it (section 7.1). After 10 minutes a notification says so (section 7.3). |
 | Needs the new passphrase | The passphrase changed on another Mac. Type the new passphrase. | section 8 |
 | Folder not available | The synced folder is not available. | connect the drive or the share, or turn the sync service on; Apassy syncs when it is back |
 | Damaged copy | The synced copy is damaged. | section 10 |
 
 The line also names the file and the folder. The unlock screen shows "Waiting for iCloud to download…" and "Folder not available"; you can unlock the vault on this Mac at once.
+
+"Up to date" means: the synced file on this Mac has the hash of the last sync, and, in iCloud Drive, iCloud says that this copy is the newest version. Apassy never shows "Up to date" while iCloud says that a newer version exists.
+
+### 7.1 A copy on this Mac that iCloud calls old
+
+A file that iCloud evicted is easy to see: a dataless file (macOS 14 and later) or a `.<name>.icloud` placeholder. A file that is on this Mac can still be an old version: another device wrote a newer one, and iCloud has not downloaded it yet. Only iCloud can tell. For a synced file in iCloud Drive (`~/Library/Mobile Documents`), Apassy asks iCloud for its download status (`NSURLUbiquitousItemDownloadingStatusKey`, through the native helper: `ubiquity_status` in [native-app.md](native-app.md)):
+
+| iCloud says | Status | What Apassy does |
+| --- | --- | --- |
+| `current`: this copy is the newest | from the hash: "Up to date" or "Syncing" | syncs as usual |
+| `downloaded` or `not_downloaded`: a newer version exists, or no copy is here | "Downloading" (Waiting for iCloud…) | asks iCloud for the newest version (`FileManager.startDownloadingUbiquitousItem` and `brctl download`), again every 30 seconds; a sync stops with "not on this Mac yet" before it merges or pushes, so it neither takes the old copy as the newest nor writes over the newer one |
+| no answer (no helper, a time-out, or an unknown status) | from the hash | as before this check |
+
+A folder outside iCloud Drive (Dropbox, Google Drive, OneDrive, a share) is not asked: the file on this Mac is the copy. The worker asks iCloud for the file of the open vault and for the files of the other synced vaults of the list that wait, so a vault is ready when you open it.
+
+### 7.2 The sync log
+
+Each failed sync writes one line to `~/Library/Logs/Apassy/sync.log`: a sync of the worker, "Sync now", and the sync at unlock (not the sync before a lock). A status of the open vault that says "Downloading" or "Folder not available" counts as a failure too. A line has:
+
+```
+2026-10-17T18:41:05Z sync-failed vault=<list ID> kind=folder error=NotDownloaded text="the synced file is not on this Mac yet; wait for the download" file=NotDownloaded hash=1a2b3c4d5e6f last=0f9e8d7c6b5a
+```
+
+- the time (UTC), the list ID of the vault (from `vaults.json`, not its name), and the kind of sync (`folder` or `relay`),
+- the name of the error and its text, the status of the synced file (`-` for the relay or when it cannot be read),
+- the first 12 hexadecimal digits of the hash of the synced file on this Mac (`hash`) and of the hash after the last sync (`last`).
+
+The same error of the same vault again writes at most one line every 10 minutes; that line ends with `repeats=N`, the count since the line before. Another error writes at once. The first sync that works after failures writes `sync-ok vault=<list ID> kind=folder after=<N> failures since=<time of the first failure>`.
+
+The log has no vault name, credential, value, passphrase, or path: the error texts are fixed. The file has mode `0600` in a folder with mode `0700`. At 256 KiB it becomes `sync.log.1` (the older one goes) and a new log starts. An app with another data folder (a test, `APASSY_DEBUG_DATA_DIR`) writes `<data folder>/logs/sync.log`. A failure to write the log changes nothing else.
+
+### 7.3 The notification of a vault that does not sync
+
+When the open vault keeps failing, Apassy posts one macOS notification:
+
+> **Sync stopped**
+> "Personal" has not synced for 5 minutes: the passphrase changed on another Mac. Open Settings > Vault > Sync.
+
+| What fails | Notification after | Reason in the text |
+| --- | --- | --- |
+| iCloud has not delivered the newest copy ("Downloading") | 10 minutes | iCloud has not downloaded the newest copy |
+| a new passphrase from another Mac | 5 minutes | the passphrase changed on another Mac |
+| a damaged synced copy | 5 minutes | the synced copy is damaged |
+| another error (the sync log has its name) | 5 minutes | a sync error |
+| the folder or the relay is not reachable | never: your drive or your network is away; the status says so | — |
+
+The time counts from the first failure since the last sync that worked. There is one notification for each streak of failures; a sync that works ends the streak, and a new streak can notify again. The notification uses the notifier of the app ([notifications.md](notifications.md)) with fixed text: only the vault name and a reason from the list above. It follows the macOS settings of Apassy (System Settings > Notifications > Apassy); Apassy never asks for permission for it. A notification of the same vault replaces the earlier one. Without the notifier (a build without `Apassy.app`) there is no notification; the status and the log stay.
 
 ## 8. A passphrase that changed on another Mac
 
@@ -199,6 +247,7 @@ The engine (`tests/folder_sync.rs`):
 | `a_variable_name_that_is_taken_here_is_left_out_and_reported` | The variable collision. |
 | `companion_files_refuse_the_push` | A journal, WAL, or SHM file stops a push. |
 | `status_reports_duplicates_and_names` | The status, duplicates, names, and the folders. |
+| `an_old_copy_on_this_mac_waits_for_the_newer_icloud_version` | A materialized old copy while a stand-in for iCloud says `not_downloaded` or `downloaded`: the status is `NotDownloaded`, never `UpToDate`; a download request; a sync stops before a merge or a push; when the newest copy comes and iCloud says `current`, it merges. |
 
 The app (`src/desktop/ui/sync_tests.rs`):
 
@@ -221,6 +270,19 @@ The app (`src/desktop/ui/sync_tests.rs`):
 | `the_worker_syncs_while_a_run_waits_for_the_owner` | While a run waits for the owner, the worker pushes a change of this Mac and merges a change of another Mac; the merge raises the revision that the broker checks after the answer. |
 | `the_worker_does_not_sync_a_locked_vault` | A locked vault neither pushes nor merges; the unlock syncs. |
 | `the_worker_asks_icloud_again_for_a_file_that_stays_in_icloud` | A change of another Mac stays in iCloud; the first download request goes nowhere; the worker asks again 30 seconds later and merges the change, with no "Sync now". |
+
+The sync log and the notification (`src/desktop/sync_health.rs`, `src/desktop/sync_worker.rs`, `src/sync/cloud.rs`, `cargo test --locked --all-features --lib -- sync_health sync_worker::tests::icloud sync::cloud`):
+
+| Test | What it shows |
+| --- | --- |
+| `an_old_icloud_copy_waits_logs_and_notifies_once` | The worker with a stand-in for iCloud: "Waiting" and a download request for a materialized old copy, one log line, one notification with the vault name after 10 minutes and no second one, a `sync-ok` line when iCloud says current, and no secret, vault name, or path in the log. |
+| `the_same_failure_logs_once_in_ten_minutes_with_its_count` | One line, then the same error again only after 10 minutes with `repeats=N`; another error at once; the `sync-ok` line; modes `0600` and `0700`. |
+| `a_line_has_only_fixed_words_ids_and_hash_digits` | Each error writes its name and fixed text; a value that is not a hash, a name, and a path do not get into the log. |
+| `a_full_log_moves_to_a_second_file` | The log moves to `sync.log.1` at 256 KiB. |
+| `a_stuck_vault_notifies_once_after_its_time` | 5 minutes for an error, 10 for waiting for iCloud, never for a folder or relay that is away; once for each streak. |
+| `a_folder_outside_icloud_drive_is_not_asked` | A folder outside `~/Library/Mobile Documents` keeps the plain rule. |
+
+The helper and the notifier (`tests/native_helper.rs`, `tests/notifications.rs`): `ubiquity_status_sends_the_path_and_reads_the_icloud_status` and `real_helper_reads_the_icloud_status_of_a_file` (the request, each status, a file outside iCloud, a missing file, bad requests); `a_sync_notification_sends_its_reason_code_only`, `swift_and_rust_previews_match` (each reason), `the_notifier_takes_no_free_text` (a reason only with `sync_stuck`, only from the list), and `a_vault_that_does_not_sync_notifies_with_its_name_and_reason_only` (the notification center).
 | `a_new_passphrase_found_by_the_worker_opens_the_sheet_in_the_next_frame` | The worker finds a new passphrase; the next frame asks for it. |
 | `the_worker_thread_starts_only_with_sync_and_stops` | No thread without sync; the thread stops. |
 | `the_picker_offers_the_relay_after_the_detected_folders` | The Sync menu: Off, the folders, "Apassy relay", "Choose folder…"; the Create screen has no relay. |
@@ -271,6 +333,7 @@ The tests use temporary folders. They do not test a sync service itself.
 - The unit of merge is a credential with all its settings: a change of the variable on one Mac and of the declaration of the same credential on another is a conflict.
 - A person with the passphrase and the synced folder can write a valid file with any content. The other Macs merge it. The passphrase is the root key of the vault (ADR 0003).
 - Evicted files: Apassy detects a `.<name>.icloud` placeholder and a dataless file (macOS 14 and later). The tests cover the placeholder only.
+- An old copy on this Mac (section 7.1): only iCloud Drive tells it, through the native helper of `Apassy.app`. The tests use a stand-in for iCloud and check the helper on a file outside iCloud; they do not run against iCloud itself. While iCloud says that a newer version exists, this Mac does not push: if iCloud never delivers it, the changes of this Mac wait (the notification after 10 minutes says so).
 - A merge and a push hold the vault while they read and write the copy (milliseconds for a small vault). The broker waits for them.
 - Apassy does not delete conflict copies, duplicates that a sync service made, or old synced files.
 

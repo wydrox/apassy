@@ -35,6 +35,9 @@ mod passkey_controller_tests;
 /// Passkeys for the macOS passkey sheet, through the signed credential bridge.
 #[cfg(feature = "vault")]
 pub(crate) mod passkey_socket;
+/// The sync log and the notice of a vault that does not sync.
+#[cfg(feature = "vault")]
+pub(crate) mod sync_health;
 /// Folder sync in the background (ADR 0014).
 #[cfg(feature = "vault")]
 pub(crate) mod sync_worker;

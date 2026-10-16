@@ -71,6 +71,8 @@ pub const MAX_SECRET_BYTES: usize = 4096;
 pub const MAX_REASON_CHARS: usize = 200;
 /// Largest agent name in a notification, in characters.
 pub const MAX_AGENT_NAME_CHARS: usize = 40;
+/// Largest path in a `ubiquity_status` request, in bytes. The helper has the same limit.
+pub const MAX_PATH_BYTES: usize = 1024;
 const MAX_IDENTIFIER_CHARS: usize = 64;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_MESSAGE_CHARS: usize = 400;
@@ -354,6 +356,37 @@ pub struct NotifyOutcome {
     pub status: NotificationStatus,
 }
 
+/// What iCloud Drive says about the copy of a file on this Mac
+/// (`NSURLUbiquitousItemDownloadingStatusKey`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UbiquityDownload {
+    /// The copy on this Mac is the newest version.
+    Current,
+    /// A copy is on this Mac, but iCloud has a newer version.
+    Downloaded,
+    /// iCloud has not downloaded the file. A copy on this Mac can still be an old
+    /// version.
+    NotDownloaded,
+    /// A status that this app does not know.
+    Unknown,
+}
+
+/// Result of `ubiquity_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UbiquityStatus {
+    /// False when the file is not in iCloud Drive. The other fields are then
+    /// `Unknown` and false.
+    pub ubiquitous: bool,
+    pub download: UbiquityDownload,
+    /// iCloud downloads the file now.
+    pub downloading: bool,
+    /// The last download of iCloud failed.
+    pub download_error: bool,
+    /// The helper asked iCloud for the newest version
+    /// (`startDownloadingUbiquitousItem`).
+    pub download_requested: bool,
+}
+
 /// Event types that can cause a notification (goal N1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationEvent {
@@ -361,6 +394,9 @@ pub enum NotificationEvent {
     ApprovalWaiting,
     /// The bouncer or a rule blocked a request.
     RequestBlocked,
+    /// A synced vault has not synced for minutes (docs/operations/sync.md, section 7).
+    /// Only [`Notification::sync_stuck`] makes one.
+    SyncStuck,
 }
 
 impl NotificationEvent {
@@ -370,15 +406,71 @@ impl NotificationEvent {
         match self {
             Self::ApprovalWaiting => "approval_waiting",
             Self::RequestBlocked => "request_blocked",
+            Self::SyncStuck => "sync_stuck",
+        }
+    }
+}
+
+/// Why a vault does not sync, for a [`NotificationEvent::SyncStuck`] notification. A
+/// fixed list: the notifier has the same texts (goal N2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStuckReason {
+    /// iCloud has a newer copy of the synced file but has not downloaded it.
+    WaitingForIcloud,
+    /// The passphrase changed on another Mac.
+    NeedsPassphrase,
+    /// The synced copy fails a check.
+    Damaged,
+    /// Another sync error. The sync log has its name.
+    Error,
+}
+
+impl SyncStuckReason {
+    pub const ALL: [Self; 4] = [
+        Self::WaitingForIcloud,
+        Self::NeedsPassphrase,
+        Self::Damaged,
+        Self::Error,
+    ];
+
+    /// The reason on the wire. It matches `SyncStuckReason` in
+    /// `native/ApassyNotify/Notify.swift`.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::WaitingForIcloud => "waiting_for_icloud",
+            Self::NeedsPassphrase => "needs_passphrase",
+            Self::Damaged => "damaged",
+            Self::Error => "error",
+        }
+    }
+
+    /// The words in the notification.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::WaitingForIcloud => "iCloud has not downloaded the newest copy",
+            Self::NeedsPassphrase => "the passphrase changed on another Mac",
+            Self::Damaged => "the synced copy is damaged",
+            Self::Error => "a sync error",
+        }
+    }
+
+    /// How long the vault has not synced when the notification comes: 10 minutes while
+    /// iCloud downloads, else 5.
+    pub fn minutes(self) -> u64 {
+        match self {
+            Self::WaitingForIcloud => 10,
+            Self::NeedsPassphrase | Self::Damaged | Self::Error => 5,
         }
     }
 }
 
 /// A notification preview. The only inputs are the agent name and the event
-/// type (goal N2). There is no constructor for free text, so a command, a
-/// user request, or a value cannot get into a preview through this type.
+/// type (goal N2), or for a sync notification the vault name and a reason from a
+/// fixed list. There is no constructor for free text, so a command, a user
+/// request, or a value cannot get into a preview through this type.
 ///
-/// The request to the notifier has the id, the event, and the agent name only.
+/// The request to the notifier has the id, the event, the agent (or vault) name,
+/// and for a sync notification the reason code only.
 /// The notifier builds the same title and body from its own fixed templates.
 /// The test `swift_and_rust_previews_match` compares the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +478,7 @@ pub struct Notification {
     id: String,
     event: NotificationEvent,
     agent: String,
+    reason: Option<SyncStuckReason>,
     title: String,
     body: String,
 }
@@ -400,14 +493,7 @@ impl Notification {
         event: NotificationEvent,
     ) -> Result<Self, NativeError> {
         check_identifier(event_id, EVENT_ID_RULE)?;
-        if agent_name.trim().is_empty()
-            || agent_name.chars().count() > MAX_AGENT_NAME_CHARS
-            || agent_name.chars().any(char::is_control)
-        {
-            return Err(NativeError::InvalidArgument(
-                "the agent name must have 1 to 40 characters and no control characters",
-            ));
-        }
+        check_preview_name(agent_name)?;
         let (title, body) = match event {
             NotificationEvent::ApprovalWaiting => (
                 "Approval waiting",
@@ -417,13 +503,43 @@ impl Notification {
                 "Request blocked",
                 format!("Apassy blocked a request from agent \"{agent_name}\"."),
             ),
+            NotificationEvent::SyncStuck => {
+                return Err(NativeError::InvalidArgument(
+                    "a sync notification has a reason: use Notification::sync_stuck",
+                ));
+            }
         };
         Ok(Self {
             id: event_id.to_owned(),
             event,
             agent: agent_name.to_owned(),
+            reason: None,
             title: title.to_owned(),
             body,
+        })
+    }
+
+    /// The notification of a vault that has not synced for minutes. The inputs are the
+    /// name of the vault (the `agent` field on the wire, with the same limits) and a
+    /// reason from a fixed list; the notifier builds the same text.
+    pub fn sync_stuck(
+        event_id: &str,
+        vault_name: &str,
+        reason: SyncStuckReason,
+    ) -> Result<Self, NativeError> {
+        check_identifier(event_id, EVENT_ID_RULE)?;
+        check_preview_name(vault_name)?;
+        Ok(Self {
+            id: event_id.to_owned(),
+            event: NotificationEvent::SyncStuck,
+            agent: vault_name.to_owned(),
+            reason: Some(reason),
+            title: "Sync stopped".to_owned(),
+            body: format!(
+                "\"{vault_name}\" has not synced for {} minutes: {}. Open Settings > Vault > Sync.",
+                reason.minutes(),
+                reason.text()
+            ),
         })
     }
 
@@ -437,6 +553,11 @@ impl Notification {
 
     pub fn agent(&self) -> &str {
         &self.agent
+    }
+
+    /// The reason of a [`NotificationEvent::SyncStuck`] notification.
+    pub fn reason(&self) -> Option<SyncStuckReason> {
+        self.reason
     }
 
     pub fn title(&self) -> &str {
@@ -755,6 +876,53 @@ impl NativeHelper {
         })
     }
 
+    /// The iCloud status of the file at `path`, an absolute path. With `download`, the
+    /// helper also asks iCloud for the newest version when the copy on this Mac is not
+    /// the newest one. It reads no file content. A file that is not there is the helper
+    /// error `not_found`.
+    pub fn ubiquity_status(
+        &self,
+        path: &Path,
+        download: bool,
+    ) -> Result<UbiquityStatus, NativeError> {
+        let path = path
+            .to_str()
+            .filter(|path| {
+                path.starts_with('/')
+                    && path.len() <= MAX_PATH_BYTES
+                    && !path.chars().any(char::is_control)
+            })
+            .ok_or(NativeError::InvalidArgument(
+                "the path must be absolute UTF-8 text of at most 1024 bytes without control characters",
+            ))?;
+        let mut req = request("ubiquity_status");
+        req.insert("path".into(), Value::String(path.to_owned()));
+        req.insert("download".into(), Value::Bool(download));
+        let response = self.call(&self.helper, req, self.timeouts.quick)?;
+        if !bool_field(&response, "ubiquitous")? {
+            return Ok(UbiquityStatus {
+                ubiquitous: false,
+                download: UbiquityDownload::Unknown,
+                downloading: false,
+                download_error: false,
+                download_requested: false,
+            });
+        }
+        let download = match str_field(&response, "status")? {
+            "current" => UbiquityDownload::Current,
+            "downloaded" => UbiquityDownload::Downloaded,
+            "not_downloaded" => UbiquityDownload::NotDownloaded,
+            _ => UbiquityDownload::Unknown,
+        };
+        Ok(UbiquityStatus {
+            ubiquitous: true,
+            download,
+            downloading: bool_field(&response, "downloading")?,
+            download_error: bool_field(&response, "download_error")?,
+            download_requested: bool_field(&response, "download_requested")?,
+        })
+    }
+
     /// Post a notification through the notifier. On first use, macOS asks the
     /// owner for permission. The request has the id, the event, and the agent
     /// name only; the notifier builds the text. A notification is not an
@@ -767,6 +935,9 @@ impl NativeHelper {
             Value::String(notification.event.as_wire().to_owned()),
         );
         req.insert("agent".into(), Value::String(notification.agent.clone()));
+        if let Some(reason) = notification.reason {
+            req.insert("reason".into(), Value::String(reason.as_wire().to_owned()));
+        }
         let response = self.call(&self.notifier, req, self.timeouts.notify)?;
         Ok(NotifyOutcome {
             delivered: bool_field(&response, "delivered")?,
@@ -895,6 +1066,19 @@ fn check_identifier(value: &str, rule: &'static str) -> Result<(), NativeError> 
     } else {
         Err(NativeError::InvalidArgument(rule))
     }
+}
+
+/// The agent name of a notification, or the vault name of a sync notification.
+fn check_preview_name(name: &str) -> Result<(), NativeError> {
+    if name.trim().is_empty()
+        || name.chars().count() > MAX_AGENT_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        return Err(NativeError::InvalidArgument(
+            "the agent name must have 1 to 40 characters and no control characters",
+        ));
+    }
+    Ok(())
 }
 
 fn check_reason(reason: &str) -> Result<(), NativeError> {

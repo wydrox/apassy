@@ -542,17 +542,35 @@ impl DesktopApp {
             .collect()
     }
 
-    /// Hand the synced vaults of the list to the worker. It keeps them when they did not
-    /// change.
+    /// Hand the synced vaults of the list to the worker, and the names of the vaults
+    /// for a notification. It keeps them when they did not change.
     fn sync_send_list(&self) {
         self.sync.worker.set_synced_all(self.sync_synced_list());
+        self.sync.worker.set_names(
+            self.vault_list
+                .registry
+                .entries()
+                .iter()
+                .map(|entry| (entry.id.clone(), entry.name.clone()))
+                .collect(),
+        );
     }
 
-    /// Start the sync worker, when the app offers sync. The window calls this once.
+    /// Start the sync worker, when the app offers sync. The window calls this once. The
+    /// worker writes the sync log, and posts the notification of a vault that does not
+    /// sync through the notification center, when there is one.
     pub(crate) fn start_sync_worker(&mut self, ctx: &egui::Context) {
         if self.sync.offered {
             // No relay call runs yet: the work files of a crash can go.
             crate::sync::clear_relay_work(&self.vault_list.data_dir);
+            self.sync
+                .worker
+                .set_log(Some(crate::desktop::sync_health::sync_log_path(
+                    &self.vault_list.data_dir,
+                )));
+            if let Some(center) = &self.owner.notifications {
+                self.sync.worker.set_stuck_notifier(center.sync_notifier());
+            }
             self.sync_send_list();
             self.sync.worker.start(ctx);
         }
@@ -835,6 +853,8 @@ impl DesktopApp {
             // A lock, a pause, or a quit ended it: nothing to tell, as for the worker.
             return;
         }
+        // The sync log and the streak of the vault, as for a sync of the worker.
+        self.sync.worker.record(id, sync, result);
         let id = id.to_owned();
         // No change waits now; the worker starts its schedule again.
         self.sync.worker.reset();

@@ -1,5 +1,6 @@
-// Apassy native helper: Touch ID and the data protection keychain for the
-// Rust app. The Rust crate forbids unsafe code, so these Apple APIs live here.
+// Apassy native helper: Touch ID, the data protection keychain, and the iCloud
+// status of a synced file for the Rust app. The Rust crate forbids unsafe
+// code, so these Apple APIs live here.
 // Notifications run in a separate program, native/ApassyNotify, because
 // macOS accepts a notification client only as the main program of its own
 // bundle.
@@ -35,6 +36,8 @@ func handle(_ request: Request) throws -> Fields {
         return try handleKeychainDelete(request)
     case "keychain_exists":
         return try handleKeychainExists(request)
+    case "ubiquity_status":
+        return try handleUbiquityStatus(request)
     case "notify", "notify_status", "notify_authorize":
         throw HelperError(.notificationsUnavailable, "Notifications run in Contents/Helpers/ApassyNotify.app, not in this helper.")
     default:
