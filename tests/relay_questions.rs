@@ -1397,8 +1397,11 @@ fn no_request_body_holds_a_command_an_item_name_or_a_secret() {
         "SYNTH-",
     ];
     for body in &bodies {
+        // A random nonce, key, or signature can hold a short word such as "npm" by
+        // chance. The words are looked for in the body without those values.
+        let plain = without_random_values(body);
         for word in forbidden {
-            assert!(!body.contains(word), "{word} in {body}");
+            assert!(!plain.contains(word), "{word} in {body}");
         }
         // Nor the secret values as b64u.
         for word in [SHOP_SECRET, API_SECRET] {
@@ -2145,4 +2148,31 @@ fn a_second_mac_joins_the_questions_team_of_the_vault() {
         }
     );
     assert_eq!(client_a.devices().unwrap().len(), 2, "one team, two Macs");
+}
+
+/// The JSON `body` without its string values that are long base64url text (random
+/// nonces, keys, signatures, and ciphertext). A body that is not JSON stays as it is.
+fn without_random_values(body: &str) -> String {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text)
+                if text.len() >= 22
+                    && text.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                    }) =>
+            {
+                text.clear();
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            serde_json::Value::Object(fields) => fields.values_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(mut value) => {
+            strip(&mut value);
+            value.to_string()
+        }
+        Err(_) => body.to_owned(),
+    }
 }
