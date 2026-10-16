@@ -1,9 +1,9 @@
 #![cfg(feature = "vault")]
 
 //! Rules and the bouncer (ADR 0007). Synthetic values only.
-//! The live Laya test is ignored by default: `cargo test --features vault --test bouncer_rules -- --ignored`.
+//! The live Laya test is ignored by default: `cargo test --all-features --test it bouncer_rules:: -- --ignored`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

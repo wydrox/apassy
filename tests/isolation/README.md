@@ -15,7 +15,7 @@ Real-secret gate: BLOCKED.
 Run it with the normal test command:
 
 ```
-cargo test --locked --features desktop,vault --test isolation_profile
+cargo test --locked --all-features --test it isolation_profile::
 ```
 
 It starts a real broker on a synthetic temporary vault. Then it runs processes

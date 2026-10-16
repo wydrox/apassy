@@ -6,6 +6,13 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
+/// The fake relay names the sync module of the app `relay_api` in its parent module.
+#[cfg(feature = "vault")]
+use apassy::sync as relay_api;
+
+#[cfg(feature = "vault")]
+pub mod fake_relay;
+
 /// A fake Jev-compatible bouncer (contract v2). By default it answers a clean,
 /// matching, read-only command: `task_match` 0.95 and every other fact 0.02.
 /// `overrides` sets other probabilities. It keeps each request body.

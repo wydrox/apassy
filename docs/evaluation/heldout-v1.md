@@ -327,5 +327,5 @@ three runs went from 387 to 336, because the rules decide more cases.
 APASSY_EVAL_MODEL=http://127.0.0.1:8771 \
   cargo run --locked --features vault --bin apassy-eval -- tests/evals/heldout-v1.jsonl
 APASSY_EVAL_MODEL=http://127.0.0.1:8771 \
-  cargo test --locked --features vault --test bouncer_eval -- --ignored --nocapture
+  cargo test --locked --all-features --test it bouncer_eval:: -- --ignored --nocapture
 ```

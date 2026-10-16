@@ -90,7 +90,7 @@ On an SSD, a deletion is not a secure wipe. The data can stay on the disk until 
 Run the tests from the repository root:
 
 ```
-cargo test --locked --features vault --test onepassword_import
+cargo test --locked --all-features --test it onepassword_import::
 cargo test --locked --features desktop,vault --lib import
 ```
 

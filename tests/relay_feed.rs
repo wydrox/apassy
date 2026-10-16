@@ -8,11 +8,7 @@
 //! opens the feed with the contract's AAD, and sends removals of exceptions back, signed
 //! with the P-256 answer key of the contract test vectors (Face ID) or its relay key.
 
-#[path = "common/fake_relay.rs"]
-mod fake_relay;
-
-/// The fake relay reads the app's sync module under this name.
-use apassy::sync as relay_api;
+use crate::common::fake_relay;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

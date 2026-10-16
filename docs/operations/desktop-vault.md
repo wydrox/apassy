@@ -26,7 +26,7 @@ Host: macOS, arm64. Rust: 1.97.0. Commands from the repository root.
 | `cargo clippy --offline --locked --all-features --all-targets -- -D warnings` | PASS |
 | `cargo test --offline --locked --all-features --all-targets -- --test-threads=1` | PASS. 97 tests: three egui drawing, one payload-counter, 14 contracts, 29 desktop model, five owner-vault, 12 SQLCipher probes, 28 vault lifecycle, five passphrase/redaction tests. |
 | `cargo test --offline --locked --features vault --doc` | PASS. Six compile-fail checks. |
-| `cargo test --offline --locked --features desktop --lib --test desktop_model` | PASS. Three drawing tests and 29 model tests. |
+| `cargo test --offline --locked --all-features --lib` and `cargo test --offline --locked --all-features --test it desktop_model::` | PASS. Three drawing tests and 29 model tests. |
 | `cargo run --locked --offline --features desktop,vault --bin apassy -- --smoke-test` | PASS. No window. Includes one synthetic vault round trip. |
 
 ## What this does not prove

@@ -5,8 +5,7 @@
 //! can check the time and the preview text. A real banner on the owner's screen is in
 //! the owner checklist in `docs/operations/native-app.md`. All data is synthetic.
 
-#[path = "support/fake_native.rs"]
-mod fake_native;
+use crate::support::fake_native;
 
 use std::path::PathBuf;
 use std::sync::Arc;

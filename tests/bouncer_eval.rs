@@ -5,7 +5,7 @@
 //! The split is fixed by a hash of each case: about 60% calibration, 40% test.
 //! Tune only on the calibration split. Report the test split.
 //!
-//! - `cargo test --features vault --test bouncer_eval` checks the rules only.
+//! - `cargo test --all-features --test it bouncer_eval::` checks the rules only.
 //! - With `APASSY_EVAL_MODEL=http://127.0.0.1:8770`, the ignored test also asks the
 //!   model, and `APASSY_EVAL_OUT=path.jsonl` saves the raw answers for tuning.
 
@@ -278,7 +278,7 @@ fn full_decision_report() {
 /// Print the command analysis of each case of an evaluation set in the `apassy-eval`
 /// format (JSONL: `id`, `category`, `command`, `user_request`, `env_names`). The purpose
 /// is the user request, as in `apassy-eval`. No model is called.
-/// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl cargo test --features vault --test bouncer_eval set_analysis -- --ignored --nocapture`
+/// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl cargo test --all-features --test it bouncer_eval::set_analysis -- --ignored --nocapture`
 #[test]
 #[ignore = "needs APASSY_EVAL_SET"]
 fn set_analysis_report() {
@@ -331,7 +331,7 @@ fn set_analysis_report() {
 /// declaration asks. Only pass 1 is read (the passes of a run are equal).
 /// `APASSY_REPLAY_CASES=1` also prints the replayed outcome and the decision note of each
 /// case.
-/// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl APASSY_REPLAY_IN=/tmp/v2-B1.jsonl APASSY_REPLAY_LEVELS=0.8,0.75 cargo test --features vault --test bouncer_eval dump_replay -- --ignored --nocapture`
+/// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl APASSY_REPLAY_IN=/tmp/v2-B1.jsonl APASSY_REPLAY_LEVELS=0.8,0.75 cargo test --all-features --test it bouncer_eval::dump_replay -- --ignored --nocapture`
 #[test]
 #[ignore = "needs APASSY_EVAL_SET and APASSY_REPLAY_IN"]
 fn dump_replay_report() {
@@ -471,7 +471,7 @@ fn dump_replay_report() {
 
 /// Run the command analysis on real agent commands from a local JSON file
 /// (`[{"cmd": "..."}]`). The file stays outside the repository.
-/// `APASSY_REAL_COMMANDS=in.json APASSY_REAL_OUT=out.jsonl cargo test --features vault --test bouncer_eval real -- --ignored`
+/// `APASSY_REAL_COMMANDS=in.json APASSY_REAL_OUT=out.jsonl cargo test --all-features --test it bouncer_eval::real -- --ignored`
 #[test]
 #[ignore = "needs APASSY_REAL_COMMANDS"]
 fn real_commands_report() {

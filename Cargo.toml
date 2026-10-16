@@ -7,6 +7,8 @@ publish = false
 license = "Apache-2.0"
 repository = "https://github.com/wydrox/apassy"
 description = "A personal credential manager with controlled agent access"
+# tests/it.rs is the only integration test program (see [[test]] below).
+autotests = false
 
 [workspace]
 members = [".", "ios/ApassyCore"]
@@ -113,70 +115,13 @@ name = "companion_dev"
 path = "examples/companion_dev.rs"
 required-features = ["vault"]
 
+# All integration tests are one test program: tests/it.rs declares each tests/*.rs
+# file as a module, with the feature gate of that file. One program links the crate
+# and its dependencies once, which keeps target/ small. Run one area with a module
+# filter: `cargo test --all-features --test it companion::`.
 [[test]]
-name = "sqlcipher_probe"
-path = "tests/sqlcipher_probe.rs"
-required-features = ["storage-probe"]
-
-[[test]]
-name = "vault_lifecycle"
-path = "tests/vault_lifecycle.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "bouncer_rules"
-path = "tests/bouncer_rules.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "agent_run"
-path = "tests/agent_run.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "agent_path"
-path = "tests/agent_path.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "access_model"
-path = "tests/access_model.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "run_proxy"
-path = "tests/run_proxy.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "vault_passphrase"
-path = "tests/vault_passphrase.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "host_hook"
-path = "tests/host_hook.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "companion"
-path = "tests/companion.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "onepassword_import"
-path = "tests/onepassword_import.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "isolation_profile"
-path = "tests/isolation/product_profile.rs"
-required-features = ["vault"]
-
-[[test]]
-name = "folder_sync"
-path = "tests/folder_sync.rs"
-required-features = ["vault"]
+name = "it"
+path = "tests/it.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

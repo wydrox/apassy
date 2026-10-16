@@ -4,7 +4,7 @@
 //! agent", "only these items", and the stricter answers to a question. Synthetic values
 //! only.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

@@ -87,12 +87,12 @@ A host reads the list only when it starts. After you add a vault in another fold
 ## 9. Tests
 
 ```
-cargo test --locked --features desktop,vault --lib vaults
-cargo test --locked --features desktop,vault --lib vault_tests
-cargo test --locked --features desktop,vault --test notifications another_vault
-cargo test --locked --features desktop,vault --test agent_run a_run_result
-cargo test --locked --bin apassy-sandbox
-cargo test --locked --features desktop,vault --test isolation_profile vault
+cargo test --locked --all-features --lib vaults
+cargo test --locked --all-features --lib vault_tests
+cargo test --locked --all-features --test it notifications::another_vault
+cargo test --locked --all-features --test it agent_run::a_run_result
+cargo test --locked --all-features --bin apassy-sandbox
+cargo test --locked --all-features --test it -- isolation_profile::launcher_fails_closed_on_a_bad_vault_list isolation_profile::launcher_passes_each_listed_vault isolation_profile::profile_denies_a_listed_vault
 ```
 
 | Test | What it shows |

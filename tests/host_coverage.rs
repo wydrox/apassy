@@ -5,7 +5,7 @@
 //! added with a `host` field of its choice cannot bring that host to an item of the
 //! owner. Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

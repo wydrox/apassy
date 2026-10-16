@@ -172,10 +172,10 @@ The Seatbelt profile denies read and write under the Apassy folder in iCloud Dri
 ## 15. Tests
 
 ```
-cargo test --locked --features vault --test folder_sync --test vault_migration
-cargo test --locked --features vault --test relay_sync
-cargo test --locked --features desktop,vault --lib sync
-cargo test --locked --features vault --test isolation_profile -- icloud synced launcher
+cargo test --locked --all-features --test it -- folder_sync:: vault_migration::
+cargo test --locked --all-features --test it relay_sync::
+cargo test --locked --all-features --lib sync
+cargo test --locked --all-features --test it -- isolation_profile::launcher_ isolation_profile::profile_denies_a_synced isolation_profile::profile_denies_the_icloud
 ```
 
 The engine (`tests/folder_sync.rs`):
@@ -247,7 +247,7 @@ The app (`src/desktop/ui/sync_tests.rs`):
 | `the_sync_setting_waits_while_relay_sync_turns_on` | A folder pick while "Turn on" runs is refused at once; relay sync then turns on and syncs. |
 | `a_lock_drops_the_relay_key_at_once` | A lock drops the relay key without a step of the worker. |
 
-A run that waits while a merge comes (`tests/agent_run.rs`, `cargo test --locked --features vault --test agent_run -- merged`):
+A run that waits while a merge comes (`tests/agent_run.rs`, `cargo test --locked --all-features --test it -- agent_run::a_merged agent_run::the_same_request_after_a_merged`):
 
 | Test | What it shows |
 | --- | --- |

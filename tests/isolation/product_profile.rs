@@ -48,8 +48,7 @@ use apassy::vault::{Field, ItemDraft, SecretValue, Vault};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const PASS: &str = "isolation-pass-ok";

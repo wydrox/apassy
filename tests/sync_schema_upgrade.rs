@@ -15,11 +15,7 @@
 //! The merge itself (the values of schema 18 of this vault, a mixed file, a header-only
 //! change) is in `vault::merge::schema17_tests`.
 
-#[path = "common/fake_relay.rs"]
-mod fake_relay;
-
-/// The fake relay reads the app's sync module under this name.
-use apassy::sync as relay_api;
+use crate::common::fake_relay;
 
 use std::fs;
 use std::path::{Path, PathBuf};

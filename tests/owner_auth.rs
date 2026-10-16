@@ -8,8 +8,7 @@
 //! ID answers `not_available` (the keyboard is not paired). A real Touch ID prompt is
 //! in the owner checklist in `docs/operations/native-app.md`. All data is synthetic.
 
-#[path = "support/fake_native.rs"]
-mod fake_native;
+use crate::support::fake_native;
 
 use std::path::PathBuf;
 

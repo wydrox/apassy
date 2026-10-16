@@ -10,11 +10,7 @@
 //! the key of the contract test vectors. Mac A also lists the questions of Mac B and
 //! answers them from its own waiter, as Decisions does.
 
-#[path = "common/fake_relay.rs"]
-mod fake_relay;
-
-/// The fake relay reads the app's sync module under this name.
-use apassy::sync as relay_api;
+use crate::common::fake_relay;
 
 use std::collections::BTreeSet;
 use std::fs;

@@ -2,7 +2,7 @@
 
 //! Process runs with secrets in the environment (ADR 0006). Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;

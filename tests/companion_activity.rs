@@ -5,8 +5,7 @@
 //! the desktop inbox classifies it as before (a unit test in `src/desktop/inbox.rs`). The answer to the agent keeps its
 //! `decided_by`. All data is synthetic.
 
-#[path = "support/companion.rs"]
-mod companion_support;
+use crate::support::companion as companion_support;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

@@ -419,8 +419,8 @@ fn a_bad_or_failed_trainer_makes_no_candidate() {
 /// with the gate and the time limit, wrapped in `/usr/bin/time -l` for the memory.
 ///
 /// `APASSY_TOOLS_DIR=$PWD/tools APASSY_FINETUNE_MODELS=<dir>
-/// cargo test --locked --release --features vault --test local_finetune
-/// local_training_on_a_synthetic_log -- --ignored --nocapture`
+/// cargo test --locked --release --all-features --test it
+/// local_finetune::local_training_on_a_synthetic_log -- --ignored --nocapture`
 #[test]
 #[ignore = "needs the Laya environment and the base checkpoint"]
 fn local_training_on_a_synthetic_log() {

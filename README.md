@@ -102,7 +102,7 @@ You need Xcode, Rust 1.97 (`rust-toolchain.toml` selects it), and an Apple Devel
 ```sh
 git clone https://github.com/wydrox/apassy && cd apassy
 scripts/build-app.sh                              # builds, signs, and checks target/Apassy.app
-cargo test --locked --features desktop,vault      # the test suite
+cargo test --locked --all-features                # the test suite
 ```
 
 `scripts/build-app.sh` signs every program with the hardened runtime and runs its checks, the agent profile included. See [native app](docs/operations/native-app.md).

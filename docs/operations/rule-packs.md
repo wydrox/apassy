@@ -260,7 +260,7 @@ Write a local pack:
 1. Select a tool name that no built-in pack has, for example `git-local` or `owner-rules`.
 2. List the programs, or use `["*"]`.
 3. Write one rule for each restriction. Use lowercase text in the lists.
-4. Check the file: `cargo run --locked --features vault --bin apassy-packs -- validate --local <file>`. It names the reason if the pack does not load. To check the whole directory as the broker reads it: `cargo test --features vault --test rule_packs owner_local_packs -- --ignored --nocapture`.
+4. Check the file: `cargo run --locked --features vault --bin apassy-packs -- validate --local <file>`. It names the reason if the pack does not load. To check the whole directory as the broker reads it: `cargo test --all-features --test it rule_packs::owner_local_packs -- --ignored --nocapture`.
 5. Restart the broker.
 
 ### Guarantees
@@ -382,12 +382,12 @@ Review a change: write a dump before and after with `APASSY_REPLAY_DUMP=path`, a
 
 The replay compares the analysis, not the final decision. The decision (`src/broker/bouncer.rs`) uses the analysis, the declarations, and the model answers. The same analysis gives the same decision.
 
-Run the replay: `cargo test --features vault --test analysis_replay -- --nocapture`.
+Run the replay: `cargo test --all-features --test it analysis_replay:: -- --nocapture`.
 
 ## 6. Change a built-in pack
 
 1. Change the JSON file in `packs/`. Increase `pack_version`.
-2. Run `cargo test --features vault --test analysis_replay`. A difference is a changed decision.
+2. Run `cargo test --all-features --test it analysis_replay::`. A difference is a changed decision.
 3. For an intended change, write the golden file again with `APASSY_REPLAY_WRITE=1` and review each changed line. `APASSY_REPLAY_DUMP=path` writes the full output of the generated set, to compare two versions.
 4. Add a command for a new rule to `coverage.tsv`, and a near miss. Add new lines at the end, so that the case numbers of the golden file stay. The unit test fails for a rule without a replay command.
 5. Write a `note` for each new rule: the reason in one or two sentences. A test fails for a rule without a note.

@@ -1839,7 +1839,7 @@ fn special_sqlite_names_are_regular_files() {
     let exe = env::current_exe().expect("current test executable");
     let output = Command::new(exe)
         .args([
-            "special_sqlite_names_are_regular_files",
+            "vault_lifecycle::special_sqlite_names_are_regular_files",
             "--exact",
             "--nocapture",
         ])
@@ -1853,6 +1853,12 @@ fn special_sqlite_names_are_regular_files() {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    // A wrong test name runs nothing and succeeds.
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+        "the isolated child did not run the test:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 

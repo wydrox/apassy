@@ -435,11 +435,45 @@ fn a_local_pack_does_not_make_a_program_known() {
     assert!(error.message.contains("built-in packs only"), "{error}");
 }
 
+/// Set in the child process of `a_rejected_local_directory_fails_closed`.
+const ISOLATED_ACTIVE_SET: &str = "APASSY_TEST_ISOLATED_ACTIVE_SET";
+
 /// A local directory with a pack that does not load: the loader names the file, and
 /// the active rules ask the owner for every command. This test changes the process-wide
-/// rule set, so it is the only test in this file that uses `analyze`.
+/// rule set, so it is the only test in this file that uses `analyze`. Other modules of
+/// the test program use `analyze` in parallel threads, so the test runs in a child
+/// process of its own.
 #[test]
 fn a_rejected_local_directory_fails_closed() {
+    if std::env::var_os(ISOLATED_ACTIVE_SET).is_some() {
+        rejected_local_directory_child();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test program"))
+        .args([
+            "rule_packs::a_rejected_local_directory_fails_closed",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ISOLATED_ACTIVE_SET, "1")
+        .output()
+        .expect("spawn the isolated child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "isolated child failed status={:?}\nstdout:\n{stdout}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A wrong test name runs nothing and succeeds.
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "the isolated child did not run the test:\n{stdout}"
+    );
+}
+
+fn rejected_local_directory_child() {
     let dir = tempfile::tempdir().expect("temporary directory");
     std::fs::write(dir.path().join("a-good.json"), ASK_BEFORE_PUSH).expect("write");
     std::fs::write(
@@ -485,7 +519,7 @@ fn a_rejected_local_directory_fails_closed() {
 }
 
 /// Check the owner's local packs in `APASSY_PACKS_DIR` or the default directory.
-/// `cargo test --features vault --test rule_packs owner_local_packs -- --ignored --nocapture`
+/// `cargo test --all-features --test it rule_packs::owner_local_packs -- --ignored --nocapture`
 #[test]
 #[ignore = "reads the owner's local pack directory"]
 fn owner_local_packs_load() {

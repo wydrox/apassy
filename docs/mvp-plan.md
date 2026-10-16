@@ -253,7 +253,7 @@ Default tests use synthetic credentials and local fixtures. They make no live mo
 | --- | --- |
 | Rust format | `cargo fmt --all -- --check` |
 | Static analysis | `cargo clippy --locked --all-targets -- -D warnings` |
-| Vault | `cargo test --locked --test vault_lifecycle` |
+| Vault | `cargo test --locked --all-features --test it vault_lifecycle::` |
 | Agent identity | `cargo test --locked --test agent_access` |
 | Rule interpretation contract | `cargo test --locked --test rules_contract` |
 | Deterministic policy | `cargo test --locked --test policy_contract` |
@@ -262,7 +262,7 @@ Default tests use synthetic credentials and local fixtures. They make no live mo
 | Mediated use | `cargo test --locked --test mediated_use` |
 | Bouncer | `cargo test --locked --test bouncer_contract` |
 | Approvals | `cargo test --locked --test approvals` |
-| Notifications | `cargo test --locked --test notifications` |
+| Notifications | `cargo test --locked --all-features --test it notifications::` |
 | Recovery | `cargo test --locked --test recovery` |
 | Default offline suite | `cargo test --locked --all-targets` |
 | Core build | `cargo build --locked --release` |

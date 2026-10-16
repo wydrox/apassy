@@ -42,7 +42,7 @@ Read [rule packs](docs/operations/rule-packs.md) first: what a pack is, the fiel
 8. **Refresh the replay** and read the diff:
 
    ```
-   APASSY_REPLAY_WRITE=1 cargo test --locked --features vault --test analysis_replay
+   APASSY_REPLAY_WRITE=1 cargo test --locked --all-features --test it analysis_replay::
    git diff --stat tests/fixtures/rule_packs/replay.golden.tsv
    ```
 
@@ -50,7 +50,7 @@ Read [rule packs](docs/operations/rule-packs.md) first: what a pack is, the fiel
 9. **Run the tests** that read the packs:
 
    ```
-   cargo test --locked --features vault --test rule_packs --test analysis_replay --test bouncer_rules
+   cargo test --locked --all-features --test it -- rule_packs:: analysis_replay:: bouncer_rules::
    ```
 10. **Add a line to `CHANGELOG.md`** under "Unreleased", and open the pull request.
 
@@ -58,7 +58,7 @@ A pack cannot parse a shell, follow a secret through a pipe, or read SQL. Those 
 
 ## Provider files
 
-A provider file tells Apassy how to recognise a credential of one provider (the shape of the value, the variable names, the hosts) and which declaration to suggest. Read [declarations](docs/operations/declarations.md), then start from `packs/providers/stripe.json`. The file name is `<id>.json`, and `signals` needs at least one entry with a `reason`. Register the file in the `BUILTIN` list of `src/vault/providers.rs`, check it with `apassy-packs validate`, and run `cargo test --locked --features vault --test declaration_suggestions`.
+A provider file tells Apassy how to recognise a credential of one provider (the shape of the value, the variable names, the hosts) and which declaration to suggest. Read [declarations](docs/operations/declarations.md), then start from `packs/providers/stripe.json`. The file name is `<id>.json`, and `signals` needs at least one entry with a `reason`. Register the file in the `BUILTIN` list of `src/vault/providers.rs`, check it with `apassy-packs validate`, and run `cargo test --locked --all-features --test it declaration_suggestions::`.
 
 A signal on the value (`value_starts`, `value_shape`) is stronger than a host, a host is stronger than a variable name, and a word is the weakest. Suggest `production` and `irreversible` only when the value itself says so, as `sk_live_` does.
 
@@ -96,6 +96,10 @@ git diff --check
 ```
 
 The isolation tests need macOS and `sandbox-exec`. The evaluation harness needs the local model; see [bouncer](docs/operations/bouncer.md).
+
+The integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file. Run one area with a module filter: `cargo test --all-features --test it companion::`. A new test file needs a `mod` line in `tests/it.rs`. The tests share one process and run in parallel: a test that changes process-wide state (the current directory, an environment variable, the active rule set) runs in a child process of the program, as `rule_packs::a_rejected_local_directory_fails_closed` does.
+
+Use one feature set for everyday commands, `--all-features`, the set that CI tests with. Each other feature set builds another copy of the crate and of the dependencies whose features change, and `target/` keeps every copy. The aliases in `.cargo/config.toml` pass it: `cargo t`, `cargo b`, `cargo c`, `cargo r`, and `cargo clippy-all -- -D warnings`. `cargo test -p apassy-core` (the iPhone core) builds the library with `vault` only, a second copy: run it when you change `ios/ApassyCore` or what it uses.
 
 ## Pull requests
 

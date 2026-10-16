@@ -263,11 +263,11 @@ APASSY_EVAL_MODEL=http://127.0.0.1:8772 APASSY_EVAL_DUMP=/tmp/v2-A1.jsonl target
 APASSY_EVAL_MODEL=http://127.0.0.1:8773 APASSY_EVAL_DUMP=/tmp/v2-B1.jsonl target/debug/apassy-eval tests/evals/heldout-v2.jsonl
 
 # The analysis of each case (flags, known safe, known command), without a model.
-APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl cargo test --locked --features vault --test bouncer_eval set_analysis -- --ignored --nocapture
+APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl cargo test --locked --all-features --test it bouncer_eval::set_analysis -- --ignored --nocapture
 
 # The replay at calibrated task_match levels, on a dump of one run.
 APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl APASSY_REPLAY_IN=/tmp/v2-B1.jsonl APASSY_REPLAY_LEVELS=0.8,0.75,0.7 \
-  cargo test --locked --features vault --test bouncer_eval dump_replay -- --ignored --nocapture
+  cargo test --locked --all-features --test it bouncer_eval::dump_replay -- --ignored --nocapture
 ```
 
 The estimate without the new packs: the same commit with the 13 new files in `packs/` removed and the list in `src/broker/packs.rs` made again from the files that remain. One run per model on v2.

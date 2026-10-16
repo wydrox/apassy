@@ -12,7 +12,7 @@ This desktop is a demo. It is not a secure vault. It does not encrypt data. It d
 Run the desktop model tests:
 
 ```
-cargo test --locked --features desktop --test desktop_model
+cargo test --locked --all-features --test it desktop_model::
 ```
 
 Open the native window:

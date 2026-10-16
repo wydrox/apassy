@@ -3,7 +3,7 @@
 //! Corrections from the use log (ADR 0025 §5): proposed once, never again after an
 //! ignore, and applied through the declaration on accept. Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -3,7 +3,7 @@
 //! Decision log, "Approve and remember", and calibration through the broker (ADR 0009,
 //! ADR 0010, goal items B3 and B5). Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

@@ -211,7 +211,7 @@ The frozen held-out set in `tests/evals/` is not used.
 
 Data: `tests/fixtures/bouncer/cases.tsv` and `independent.tsv` (270 cases). `ok` is an approval. `risk` is a denial. The sequence has 3,000 requests. A case of rank `r` has the weight `1 / (r + 1)`, because real agent traffic repeats (ADR 0009: 31 templates cover 50% of the real commands). Requests are 1 to 30 minutes apart, about 32 days. Staging declaration. The purpose plays the user request, as in `tests/bouncer_eval.rs`.
 
-`cargo test --locked --features vault --test learning_replay -- --nocapture`
+`cargo test --locked --all-features --test it learning_replay:: -- --nocapture`
 
 Without a model, the model step always asks. So only patterns lower the ask rate:
 
@@ -224,7 +224,7 @@ Ask rate per window of 300 requests, with learning: 70%, 68%, 62%, 59%, 56%, 64%
 
 With the local Laya model (zero-shot `convaiinnovations/laya`, `laya-serve` 0.3.20 on a loopback address):
 
-`APASSY_EVAL_MODEL=http://127.0.0.1:8770 cargo test --locked --release --features vault --test learning_replay fixture_replay_with_model -- --ignored --nocapture`
+`APASSY_EVAL_MODEL=http://127.0.0.1:8770 cargo test --locked --release --all-features --test it learning_replay::fixture_replay_with_model -- --ignored --nocapture`
 
 | Run | Asked | Rule flags | Model allowed | Pattern allowed | Denied, then allowed |
 | --- | --- | --- | --- | --- | --- |
@@ -246,7 +246,7 @@ The owner permitted a local run on the real odealo commands. Source: the Codex s
 - 483 session files, 19,275 runs, 18,015 unique commands, 14,417 with a user request, from 2026-09-05 to 2026-09-23.
 - The labels are not known. The simulated owner denies a request with a rule flag and approves the others. So this run measures the ask rate, not the safety. The safety check is the labeled sets above and the tests in section 3.
 
-`APASSY_REAL_CTX=OUT.json cargo test --locked --release --features vault --test learning_replay real_commands_replay -- --ignored --nocapture`
+`APASSY_REAL_CTX=OUT.json cargo test --locked --release --all-features --test it learning_replay::real_commands_replay -- --ignored --nocapture`
 
 Without a model, with the rule packs of `goal-v1` at commit 17b1095:
 
@@ -261,7 +261,7 @@ Patterns alone remove few asks on real commands. The commands vary much: 18,015 
 
 With the local Laya model, on the first 3,000 commands of up to 300 characters, in time order (2026-09-05 to 2026-09-11). This run and the model run on the labeled sets used the rule packs before commit 17b1095. A long script gives a long model state, and the model then takes seconds for each request. So this run skips commands over 300 characters. Model answers took about 1 second each. The run took 24 minutes.
 
-`APASSY_EVAL_MODEL=http://127.0.0.1:8770 APASSY_REAL_CTX=OUT.json APASSY_REPLAY_LIMIT=3000 APASSY_REPLAY_MAX_CHARS=300 APASSY_REPLAY_WINDOW=300 cargo test --locked --release --features vault --test learning_replay real_commands_replay -- --ignored --nocapture`
+`APASSY_EVAL_MODEL=http://127.0.0.1:8770 APASSY_REAL_CTX=OUT.json APASSY_REPLAY_LIMIT=3000 APASSY_REPLAY_MAX_CHARS=300 APASSY_REPLAY_WINDOW=300 cargo test --locked --release --all-features --test it learning_replay::real_commands_replay -- --ignored --nocapture`
 
 | Run | Asked | Rule flags | Model allowed | Pattern allowed | Denied, then allowed |
 | --- | --- | --- | --- | --- | --- |
