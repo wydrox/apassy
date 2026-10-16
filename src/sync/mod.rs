@@ -29,6 +29,7 @@
 //! stores one opaque, device-signed, versioned copy per vault and does a
 //! compare-and-swap on its version.
 
+mod cloud;
 mod directory;
 mod folder;
 pub(crate) mod relay;
@@ -42,9 +43,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+pub use cloud::{CloudDownload, CloudFileStatus, CloudProbe, SystemCloud};
 pub use folder::{
     FOLDER_NAME, FolderEntry, PUSH_SUFFIX, SYNC_FILE_EXTENSION, SyncFolder, detect_folders_in,
     file_name_for, list_folder_vaults, start_download,
@@ -200,7 +202,8 @@ pub enum FileStatus {
     Changed,
     /// The folder has no file. A sync writes it again.
     Missing,
-    /// The file is in iCloud but not on this Mac yet ([`FolderSync::request_download`]).
+    /// The file is in iCloud but not on this Mac yet, or iCloud has a newer version
+    /// than the copy on this Mac ([`FolderSync::request_download`]).
     NotDownloaded,
     /// The folder is not there: the drive, the share, or the sync service is away.
     FolderUnavailable,
@@ -219,6 +222,10 @@ pub struct StatusReport {
     pub duplicates: Vec<String>,
     /// The time of the last sync, in Unix seconds.
     pub last_sync_at: Option<u64>,
+    /// The lowercase hexadecimal SHA-256 of the file on this Mac, when it is there.
+    pub file_sha256: Option<String>,
+    /// The hash of the file after the last sync.
+    pub last_file_sha256: Option<String>,
 }
 
 /// What a sync did.
@@ -464,6 +471,8 @@ impl Drop for TempFile {
 pub struct FolderSync {
     config: SyncConfig,
     scope: SyncScope,
+    /// What iCloud says about the synced file ([`cloud`]).
+    cloud: Arc<dyn CloudProbe>,
 }
 
 impl FolderSync {
@@ -471,7 +480,22 @@ impl FolderSync {
         Self {
             config,
             scope: SyncScope::vault(),
+            cloud: SystemCloud::shared(),
         }
+    }
+
+    /// Ask `cloud` instead of the iCloud of this Mac. A test stands in for iCloud.
+    pub fn with_cloud(mut self, cloud: Arc<dyn CloudProbe>) -> Self {
+        self.cloud = cloud;
+        self
+    }
+
+    /// Whether iCloud says that the synced file at `path`, which is on this Mac, is not
+    /// the newest version. False outside iCloud Drive and when iCloud does not answer.
+    fn cloud_has_newer(&self, path: &Path) -> bool {
+        self.cloud
+            .status(path)
+            .is_some_and(|status| !status.is_current())
     }
 
     pub fn config(&self) -> &SyncConfig {
@@ -507,10 +531,18 @@ impl FolderSync {
         state::write(&self.config.state_path, &state)
     }
 
-    /// The state of the synced file. No key, no change to any file.
+    /// The state of the synced file. No key, no change to any file. A file on this Mac
+    /// that iCloud calls old is `NotDownloaded`, never `UpToDate`.
     pub fn status(&self) -> Result<StatusReport, SyncError> {
         let sync = self.clone();
-        directory::read(move || sync.status_inner())
+        let mut report = directory::read(move || sync.status_inner())?;
+        // The helper runs outside the bounded read worker: it has its own time limit.
+        if matches!(report.status, FileStatus::UpToDate | FileStatus::Changed)
+            && self.cloud_has_newer(&report.file_path)
+        {
+            report.status = FileStatus::NotDownloaded;
+        }
+        Ok(report)
     }
 
     fn status_inner(&self) -> Result<StatusReport, SyncError> {
@@ -521,12 +553,16 @@ impl FolderSync {
             Probe::Unavailable | Probe::NoFolder => Vec::new(),
             _ => folder::duplicates_of(&self.config.folder, name)?,
         };
+        let mut file_sha256 = None;
         let status = match &probe {
             Probe::Unavailable => FileStatus::FolderUnavailable,
             Probe::NoFolder | Probe::Missing => FileStatus::Missing,
             Probe::Evicted(_) => FileStatus::NotDownloaded,
             Probe::Present(path) => {
-                if Some(hash_path(path)?) == state.last_file_sha256 {
+                let hash = hash_path(path)?;
+                let same = Some(&hash) == state.last_file_sha256.as_ref();
+                file_sha256 = Some(hash);
+                if same {
                     FileStatus::UpToDate
                 } else {
                     FileStatus::Changed
@@ -539,6 +575,8 @@ impl FolderSync {
             file_path: self.config.folder.join(name),
             duplicates,
             last_sync_at: state.last_sync_at,
+            file_sha256,
+            last_file_sha256: state.last_file_sha256,
         })
     }
 
@@ -550,11 +588,13 @@ impl FolderSync {
         Ok(state.last_content.as_deref() != Some(content.as_str()))
     }
 
-    /// Ask iCloud Drive to download the synced file. Returns whether the request
-    /// started.
+    /// Ask iCloud Drive for the newest version of the synced file, also when an old
+    /// copy is on this Mac. Returns whether the request started.
     pub fn request_download(&self) -> Result<bool, SyncError> {
         let state = self.require_state()?;
-        Ok(start_download(&self.config.folder.join(&state.file_name)))
+        Ok(self
+            .cloud
+            .request_download(&self.config.folder.join(&state.file_name)))
     }
 
     /// Sync the unlocked vault: merge the synced file when it changed, then push when
@@ -582,6 +622,13 @@ impl FolderSync {
     ) -> Result<SyncOutcome, SyncError> {
         let confirmed_hash = state.last_file_sha256.clone();
         let name = state.file_name.clone();
+        // An old copy on this Mac while iCloud has a newer one: neither merge it as the
+        // newest nor push over the newer one. Wait for the download.
+        let path = self.config.folder.join(&name);
+        if self.cloud_has_newer(&path) {
+            self.cloud.request_download(&path);
+            return Err(SyncError::NotDownloaded);
+        }
         let transport = self.transport(&name);
         let head = match transport.head()? {
             Remote::Head(head) => head,
@@ -638,6 +685,10 @@ impl FolderSync {
     /// yet (a missing folder whose parent exists is made).
     fn probe_ready(&self, name: &str) -> Result<Option<PathBuf>, SyncError> {
         match folder::probe(&self.config.folder, name)? {
+            Probe::Present(path) if self.cloud_has_newer(&path) => {
+                self.cloud.request_download(&path);
+                Err(SyncError::NotDownloaded)
+            }
             Probe::Present(path) => Ok(Some(path)),
             Probe::Missing => Ok(None),
             Probe::NoFolder => {
@@ -645,7 +696,7 @@ impl FolderSync {
                 Ok(None)
             }
             Probe::Evicted(path) => {
-                start_download(&path);
+                self.cloud.request_download(&path);
                 Err(SyncError::NotDownloaded)
             }
             Probe::Unavailable => Err(SyncError::FolderUnavailable),
@@ -752,7 +803,7 @@ impl FolderSync {
                     });
                 }
                 Probe::Evicted(path) => {
-                    start_download(&path);
+                    self.cloud.request_download(&path);
                     return Err(SyncError::NotDownloaded);
                 }
                 Probe::Present(path) => {
@@ -816,7 +867,7 @@ impl FolderSync {
         let path = match folder::probe(&self.config.folder, file_name)? {
             Probe::Present(path) => path,
             Probe::Evicted(path) => {
-                start_download(&path);
+                self.cloud.request_download(&path);
                 return Err(SyncError::NotDownloaded);
             }
             Probe::Missing | Probe::NoFolder => {

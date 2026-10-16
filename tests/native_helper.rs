@@ -36,7 +36,8 @@ use std::time::{Duration, Instant};
 
 use apassy::native::{
     AlertStyle, Biometry, HelperErrorCode, KeychainSecret, NativeError, NativeHelper, Notification,
-    NotificationAuthorization, NotificationEvent, NotificationSetting, Timeouts,
+    NotificationAuthorization, NotificationEvent, NotificationSetting, Timeouts, UbiquityDownload,
+    UbiquityStatus,
 };
 use serde_json::Value;
 
@@ -113,6 +114,71 @@ fn helper_error(code: HelperErrorCode) -> String {
         r#"{{"ok":false,"error":"{}","message":"synthetic message"}}"#,
         code.as_str()
     )
+}
+
+/// `ubiquity_status` sends the path and the download flag, and reads each iCloud
+/// status. A file outside iCloud Drive has no other field.
+#[test]
+fn ubiquity_status_sends_the_path_and_reads_the_icloud_status() {
+    let fake = Fake::new("ubiquity");
+    let client = fake.client();
+    let path = Path::new(
+        "/Users/synthetic/Library/Mobile Documents/com~apple~CloudDocs/Apassy/Personal.apassy",
+    );
+    for (wire, download) in [
+        ("current", UbiquityDownload::Current),
+        ("downloaded", UbiquityDownload::Downloaded),
+        ("not_downloaded", UbiquityDownload::NotDownloaded),
+        ("something_new", UbiquityDownload::Unknown),
+    ] {
+        fake.respond(&format!(
+            r#"{{"ok":true,"ubiquitous":true,"status":"{wire}","downloading":true,"download_error":false,"download_requested":true}}"#
+        ));
+        let status = client.ubiquity_status(path, true).expect("status");
+        assert_eq!(
+            status,
+            UbiquityStatus {
+                ubiquitous: true,
+                download,
+                downloading: true,
+                download_error: false,
+                download_requested: true,
+            }
+        );
+    }
+    let request = fake.last_request();
+    assert_eq!(request["cmd"], "ubiquity_status");
+    assert_eq!(request["path"], path.to_str().unwrap());
+    assert_eq!(request["download"], true);
+
+    fake.respond(r#"{"ok":true,"ubiquitous":false}"#);
+    let status = client
+        .ubiquity_status(Path::new("/tmp/synthetic.apassy"), false)
+        .expect("status");
+    assert!(!status.ubiquitous);
+    assert_eq!(status.download, UbiquityDownload::Unknown);
+    assert_eq!(fake.last_request()["download"], false);
+
+    fake.respond(r#"{"ok":true,"ubiquitous":true,"status":"current"}"#);
+    assert!(matches!(
+        client.ubiquity_status(path, false),
+        Err(NativeError::Protocol(_))
+    ));
+
+    // The client refuses a relative path, a control character, and a long path before
+    // it starts the helper.
+    let before = fake.requests().len();
+    for bad in [
+        "relative/Personal.apassy".to_owned(),
+        "/tmp/two\nlines".to_owned(),
+        format!("/{}", "a".repeat(1024)),
+    ] {
+        assert!(matches!(
+            client.ubiquity_status(Path::new(&bad), false),
+            Err(NativeError::InvalidArgument(_))
+        ));
+    }
+    assert_eq!(fake.requests().len(), before);
 }
 
 #[test]
@@ -957,6 +1023,44 @@ fn swift_and_rust_previews_match() {
             assert_eq!(responses[0]["title"], rust.title(), "{event:?} {agent}");
             assert_eq!(responses[0]["body"], rust.body(), "{event:?} {agent}");
         }
+    }
+}
+
+/// The real helper reads the iCloud status of a file: a file outside iCloud Drive is
+/// not ubiquitous, a missing file is `not_found`, and a bad request is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn real_helper_reads_the_icloud_status_of_a_file() {
+    // A fresh folder under the target directory, not in iCloud Drive.
+    let fake = Fake::new("ubiquity-real");
+    let file = fake.dir.join("Synthetic.apassy");
+    fs::write(&file, b"synthetic encrypted bytes").expect("file");
+    let client = dev_client();
+    let status = client.ubiquity_status(&file, true).expect("status");
+    assert!(!status.ubiquitous, "{status:?}");
+    assert!(!status.download_requested);
+    assert_eq!(
+        client
+            .ubiquity_status(&fake.dir.join("missing.apassy"), false)
+            .unwrap_err()
+            .code(),
+        Some(HelperErrorCode::NotFound)
+    );
+    let bad = [
+        serde_json::json!({"cmd": "ubiquity_status"}),
+        serde_json::json!({"cmd": "ubiquity_status", "path": "relative"}),
+        serde_json::json!({"cmd": "ubiquity_status", "path": "/tmp/a\nb"}),
+        serde_json::json!({"cmd": "ubiquity_status", "path": "/tmp", "download": "yes"}),
+        serde_json::json!({"cmd": "ubiquity_status", "path": format!("/{}", "a".repeat(1100))}),
+    ];
+    let input: String = bad.iter().map(|request| format!("{request}\n")).collect();
+    let responses = raw_exchange(real_helper(), &input);
+    assert_eq!(responses.len(), bad.len(), "{responses:?}");
+    for (request, response) in bad.iter().zip(&responses) {
+        assert_eq!(
+            response["error"], "invalid_request",
+            "{request} gave {response}"
+        );
     }
 }
 

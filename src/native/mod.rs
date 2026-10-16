@@ -71,6 +71,8 @@ pub const MAX_SECRET_BYTES: usize = 4096;
 pub const MAX_REASON_CHARS: usize = 200;
 /// Largest agent name in a notification, in characters.
 pub const MAX_AGENT_NAME_CHARS: usize = 40;
+/// Largest path in a `ubiquity_status` request, in bytes. The helper has the same limit.
+pub const MAX_PATH_BYTES: usize = 1024;
 const MAX_IDENTIFIER_CHARS: usize = 64;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_MESSAGE_CHARS: usize = 400;
@@ -352,6 +354,37 @@ pub struct NotifyOutcome {
     /// True when Notification Center lists the notification.
     pub delivered: bool,
     pub status: NotificationStatus,
+}
+
+/// What iCloud Drive says about the copy of a file on this Mac
+/// (`NSURLUbiquitousItemDownloadingStatusKey`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UbiquityDownload {
+    /// The copy on this Mac is the newest version.
+    Current,
+    /// A copy is on this Mac, but iCloud has a newer version.
+    Downloaded,
+    /// iCloud has not downloaded the file. A copy on this Mac can still be an old
+    /// version.
+    NotDownloaded,
+    /// A status that this app does not know.
+    Unknown,
+}
+
+/// Result of `ubiquity_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UbiquityStatus {
+    /// False when the file is not in iCloud Drive. The other fields are then
+    /// `Unknown` and false.
+    pub ubiquitous: bool,
+    pub download: UbiquityDownload,
+    /// iCloud downloads the file now.
+    pub downloading: bool,
+    /// The last download of iCloud failed.
+    pub download_error: bool,
+    /// The helper asked iCloud for the newest version
+    /// (`startDownloadingUbiquitousItem`).
+    pub download_requested: bool,
 }
 
 /// Event types that can cause a notification (goal N1).
@@ -752,6 +785,53 @@ impl NativeHelper {
         Ok(KeychainItemState {
             exists: bool_field(&response, "exists")?,
             biometry_changed: bool_field(&response, "biometry_changed")?,
+        })
+    }
+
+    /// The iCloud status of the file at `path`, an absolute path. With `download`, the
+    /// helper also asks iCloud for the newest version when the copy on this Mac is not
+    /// the newest one. It reads no file content. A file that is not there is the helper
+    /// error `not_found`.
+    pub fn ubiquity_status(
+        &self,
+        path: &Path,
+        download: bool,
+    ) -> Result<UbiquityStatus, NativeError> {
+        let path = path
+            .to_str()
+            .filter(|path| {
+                path.starts_with('/')
+                    && path.len() <= MAX_PATH_BYTES
+                    && !path.chars().any(char::is_control)
+            })
+            .ok_or(NativeError::InvalidArgument(
+                "the path must be absolute UTF-8 text of at most 1024 bytes without control characters",
+            ))?;
+        let mut req = request("ubiquity_status");
+        req.insert("path".into(), Value::String(path.to_owned()));
+        req.insert("download".into(), Value::Bool(download));
+        let response = self.call(&self.helper, req, self.timeouts.quick)?;
+        if !bool_field(&response, "ubiquitous")? {
+            return Ok(UbiquityStatus {
+                ubiquitous: false,
+                download: UbiquityDownload::Unknown,
+                downloading: false,
+                download_error: false,
+                download_requested: false,
+            });
+        }
+        let download = match str_field(&response, "status")? {
+            "current" => UbiquityDownload::Current,
+            "downloaded" => UbiquityDownload::Downloaded,
+            "not_downloaded" => UbiquityDownload::NotDownloaded,
+            _ => UbiquityDownload::Unknown,
+        };
+        Ok(UbiquityStatus {
+            ubiquitous: true,
+            download,
+            downloading: bool_field(&response, "downloading")?,
+            download_error: bool_field(&response, "download_error")?,
+            download_requested: bool_field(&response, "download_requested")?,
         })
     }
 

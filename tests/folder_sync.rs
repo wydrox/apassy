@@ -10,11 +10,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use apassy::contracts::CredentialKind;
 use apassy::sync::{
-    FileStatus, FolderSync, PUSH_SUFFIX, SyncConfig, SyncError, detect_folders_in, device_name,
-    file_name_for, icloud_folder, list_folder_vaults,
+    CloudDownload, CloudFileStatus, CloudProbe, FileStatus, FolderSync, PUSH_SUFFIX, SyncConfig,
+    SyncError, detect_folders_in, device_name, file_name_for, icloud_folder, list_folder_vaults,
 };
 use apassy::vault::{
     ActivityDecision, EnvDelivery, Field, ItemDraft, ItemEventKind, LOCAL_TABLES, MAX_FOLDER_DEPTH,
@@ -706,6 +707,93 @@ fn a_folder_outside_icloud_is_made_and_an_unreachable_one_is_calm() {
     fs::remove_file(world.folder.join(format!(".{FILE}.icloud"))).expect("rm");
     assert_eq!(a.status(), FileStatus::Missing);
     assert!(a.sync.sync(&mut vault_a).expect("sync").pushed);
+}
+
+/// A stand-in for iCloud: the status that it gives for the synced file, and the
+/// download requests.
+#[derive(Debug, Default)]
+struct FakeCloud {
+    download: Mutex<Option<CloudDownload>>,
+    requests: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeCloud {
+    fn set(&self, download: Option<CloudDownload>) {
+        *self.download.lock().unwrap() = download;
+    }
+
+    fn requests(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+impl CloudProbe for FakeCloud {
+    fn status(&self, _path: &Path) -> Option<CloudFileStatus> {
+        (*self.download.lock().unwrap()).map(|download| CloudFileStatus {
+            download,
+            downloading: false,
+            download_error: false,
+        })
+    }
+
+    fn request_download(&self, path: &Path) -> bool {
+        self.requests.lock().unwrap().push(path.to_owned());
+        true
+    }
+}
+
+/// The incident of 0.5.3: the iPhone wrote a new copy; on this Mac the synced file
+/// stayed an old copy that is on disk (not dataless), and iCloud said that a newer
+/// version is on the server. The status is "waiting for iCloud", never "up to date";
+/// the sync asks iCloud for the newest version and neither merges the old copy as the
+/// newest nor pushes over the newer one. When the download comes, the sync merges it.
+#[test]
+fn an_old_copy_on_this_mac_waits_for_the_newer_icloud_version() {
+    let world = world();
+    let (mut a, mut vault_a, b, mut vault_b) = two_macs(&world);
+    let cloud = Arc::new(FakeCloud::default());
+    a.sync = a.sync.clone().with_cloud(cloud.clone());
+
+    // No answer from iCloud (a folder outside iCloud Drive): the plain rule.
+    assert_eq!(a.status(), FileStatus::UpToDate);
+    cloud.set(Some(CloudDownload::Current));
+    let report = a.sync.status().expect("status");
+    assert_eq!(report.status, FileStatus::UpToDate);
+    assert_eq!(report.file_sha256, report.last_file_sha256);
+    assert!(report.file_sha256.is_some());
+
+    // iCloud has a newer version; the old copy stays on this Mac.
+    let old_copy = fs::read(world.file()).expect("old copy");
+    for download in [CloudDownload::NotDownloaded, CloudDownload::Downloaded] {
+        cloud.set(Some(download));
+        let report = a.sync.status().expect("status");
+        assert_eq!(report.status, FileStatus::NotDownloaded, "{download:?}");
+        assert!(report.file_sha256.is_some(), "the old copy is on this Mac");
+    }
+    assert!(a.sync.request_download().expect("request"));
+    assert_eq!(cloud.requests(), 1);
+    assert_eq!(cloud.requests.lock().unwrap()[0], world.file());
+
+    // A change on this Mac does not go over the newer version, and the old copy is not
+    // merged as the newest one.
+    vault_a.add(item("From A", "SYNTH-a")).expect("add");
+    assert_eq!(
+        a.sync.sync(&mut vault_a).unwrap_err(),
+        SyncError::NotDownloaded
+    );
+    assert_eq!(cloud.requests(), 2, "the sync asked iCloud again");
+    assert_eq!(fs::read(world.file()).expect("file"), old_copy, "no push");
+
+    // The newer version arrives (the other device's push), and iCloud says current.
+    vault_b.add(item("From phone", "SYNTH-phone")).expect("add");
+    assert!(b.sync.sync(&mut vault_b).expect("sync b").pushed);
+    cloud.set(Some(CloudDownload::Current));
+    assert_eq!(a.status(), FileStatus::Changed);
+    let outcome = a.sync.sync(&mut vault_a).expect("sync a");
+    assert_eq!(outcome.merge.expect("merge").inserted, 1);
+    assert!(outcome.pushed);
+    assert_eq!(titles(&vault_a), vec!["Alpha", "From A", "From phone"]);
+    assert_eq!(a.status(), FileStatus::UpToDate);
 }
 
 #[test]

@@ -108,12 +108,26 @@ Settings > Vault > Sync shows each synced vault with a tag and a line:
 | --- | --- | --- |
 | Up to date | Up to date. Last sync 5 minutes ago. | nothing |
 | Syncing | a change waits to sync | nothing: it syncs within seconds |
-| Downloading | Waiting for iCloud to download the synced file. | wait; Apassy asked iCloud for the file (`brctl download`), and asks again every 30 seconds while the file stays in iCloud |
+| Downloading | Waiting for iCloud to download the synced file. | wait; Apassy asked iCloud for the newest version of the file, and asks again every 30 seconds while iCloud has not delivered it (section 7.1) |
 | Needs the new passphrase | The passphrase changed on another Mac. Type the new passphrase. | section 8 |
 | Folder not available | The synced folder is not available. | connect the drive or the share, or turn the sync service on; Apassy syncs when it is back |
 | Damaged copy | The synced copy is damaged. | section 10 |
 
 The line also names the file and the folder. The unlock screen shows "Waiting for iCloud to download…" and "Folder not available"; you can unlock the vault on this Mac at once.
+
+"Up to date" means: the synced file on this Mac has the hash of the last sync, and, in iCloud Drive, iCloud says that this copy is the newest version. Apassy never shows "Up to date" while iCloud says that a newer version exists.
+
+### 7.1 A copy on this Mac that iCloud calls old
+
+A file that iCloud evicted is easy to see: a dataless file (macOS 14 and later) or a `.<name>.icloud` placeholder. A file that is on this Mac can still be an old version: another device wrote a newer one, and iCloud has not downloaded it yet. Only iCloud can tell. For a synced file in iCloud Drive (`~/Library/Mobile Documents`), Apassy asks iCloud for its download status (`NSURLUbiquitousItemDownloadingStatusKey`, through the native helper: `ubiquity_status` in [native-app.md](native-app.md)):
+
+| iCloud says | Status | What Apassy does |
+| --- | --- | --- |
+| `current`: this copy is the newest | from the hash: "Up to date" or "Syncing" | syncs as usual |
+| `downloaded` or `not_downloaded`: a newer version exists, or no copy is here | "Downloading" (Waiting for iCloud…) | asks iCloud for the newest version (`FileManager.startDownloadingUbiquitousItem` and `brctl download`), again every 30 seconds; a sync stops with "not on this Mac yet" before it merges or pushes, so it neither takes the old copy as the newest nor writes over the newer one |
+| no answer (no helper, a time-out, or an unknown status) | from the hash | as before this check |
+
+A folder outside iCloud Drive (Dropbox, Google Drive, OneDrive, a share) is not asked: the file on this Mac is the copy. The worker asks iCloud for the file of the open vault and for the files of the other synced vaults of the list that wait, so a vault is ready when you open it.
 
 ## 8. A passphrase that changed on another Mac
 
@@ -199,6 +213,7 @@ The engine (`tests/folder_sync.rs`):
 | `a_variable_name_that_is_taken_here_is_left_out_and_reported` | The variable collision. |
 | `companion_files_refuse_the_push` | A journal, WAL, or SHM file stops a push. |
 | `status_reports_duplicates_and_names` | The status, duplicates, names, and the folders. |
+| `an_old_copy_on_this_mac_waits_for_the_newer_icloud_version` | A materialized old copy while a stand-in for iCloud says `not_downloaded` or `downloaded`: the status is `NotDownloaded`, never `UpToDate`; a download request; a sync stops before a merge or a push; when the newest copy comes and iCloud says `current`, it merges. |
 
 The app (`src/desktop/ui/sync_tests.rs`):
 
@@ -271,6 +286,7 @@ The tests use temporary folders. They do not test a sync service itself.
 - The unit of merge is a credential with all its settings: a change of the variable on one Mac and of the declaration of the same credential on another is a conflict.
 - A person with the passphrase and the synced folder can write a valid file with any content. The other Macs merge it. The passphrase is the root key of the vault (ADR 0003).
 - Evicted files: Apassy detects a `.<name>.icloud` placeholder and a dataless file (macOS 14 and later). The tests cover the placeholder only.
+- An old copy on this Mac (section 7.1): only iCloud Drive tells it, through the native helper of `Apassy.app`. The tests use a stand-in for iCloud and check the helper on a file outside iCloud; they do not run against iCloud itself. While iCloud says that a newer version exists, this Mac does not push: if iCloud never delivers it, the changes of this Mac wait.
 - A merge and a push hold the vault while they read and write the copy (milliseconds for a small vault). The broker waits for them.
 - Apassy does not delete conflict copies, duplicates that a sync service made, or old synced files.
 

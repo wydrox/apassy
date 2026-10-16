@@ -208,11 +208,13 @@ A message is English text for logs. It never contains a secret. Code must use `e
 | `keychain_read` | `account`, `reason` | `secret_b64` | keychain helper | Touch ID |
 | `keychain_delete` | `account` | `deleted` (bool) | keychain helper | no |
 | `keychain_exists` | `account` | `exists`, `biometry_changed` (bool) | keychain helper | no |
+| `ubiquity_status` | `path` (absolute, at most 1024 bytes, no control characters), `download` (bool, optional) | `ubiquitous` (bool); for an iCloud file also `status` (`current`, `downloaded`, `not_downloaded`, or `unknown`), `downloading`, `download_error`, and `download_requested` (bool). A file that is not there: `not_found`. | `apassy-helper` | no |
 | `notify` | `id`, `event` (`approval_waiting` or `request_blocked`), `agent` (1 to 40 characters). No other field. | `delivered` (bool) and the status fields | notifier | never |
 | `notify_status` | none | `authorization`, `alert`, `alert_style`, `notification_center`, `lock_screen`, `sound` | notifier | no |
 | `notify_authorize` | none | `granted`, `detail` (when the owner did not answer), and the status fields | notifier | permission, at most 120 s |
 | `preview` | `event`, `agent` | `title`, `body`: the text that `notify` shows. Posts nothing. | notifier | no |
 
+`ubiquity_status` reads `NSURLUbiquitousItemDownloadingStatusKey` and the download keys of the file (`native/ApassyHelper/Ubiquity.swift`). It reads no content. `current` means that the copy on this Mac is the newest version; `downloaded` and `not_downloaded` mean that iCloud has a newer version or no copy is here, also when an old copy is on disk. With `"download": true` and a status other than `current`, the helper also calls `FileManager.startDownloadingUbiquitousItem`; the download runs in the background. The sync engine uses it for a synced file in `~/Library/Mobile Documents` ([sync.md](sync.md), section 7).
 An `account` or an `id` has 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, `-`.
 Text fields have no control characters.
 The helpers answer each notification command with `notifications_unavailable`. The notifier answers only `ping` and the notification commands.
@@ -311,7 +313,7 @@ When LaunchServices starts the notifier (launchd is the parent), for example aft
 
 - `NativeHelper::locate()` finds the helpers and the notifier next to the running `apassy` in the bundle. Debug builds first read `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, and `APASSY_NATIVE_NOTIFIER`. Release builds ignore these variables, so a process that sets the app environment cannot replace Touch ID with a fake helper.
 - `NativeHelper::with_paths(helper, keychain_helper)` is for tests. It uses `helper` as the notifier too. `with_notifier(path)` sets the notifier.
-- Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. `notify`, `notify_status`, and `notify_authorize` use the notifier (`Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`). `ping` and `authenticate` use `apassy-helper`.
+- Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `ubiquity_status`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. `notify`, `notify_status`, and `notify_authorize` use the notifier (`Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`). `ping`, `authenticate`, and `ubiquity_status` use `apassy-helper`.
 - `notify` sends `id`, `event`, and `agent`. `NotificationStatus` has the same fields as before.
 - Time limits: 10 s for quick commands, 40 s for `notify`, 180 s for commands that wait for the owner. After the limit, the client stops the helper and returns `NativeError::Timeout`.
 - `apassy --notify-check status|authorize|post` (`src/native/check.rs`) runs the notifier through the real signed program. `scripts/n1-check.sh` uses it. `post` sends the two fixed templates with the agent name `n1-check`.

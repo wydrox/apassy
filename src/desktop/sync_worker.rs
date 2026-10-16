@@ -466,6 +466,7 @@ impl Shared {
                 CHECK_EVERY
             },
         );
+        self.ask_icloud_for_others(now, schedule, open.map(|(id, _)| id.as_str()));
         let (Some((id, any_sync)), Some(vault)) = (open, vault) else {
             return;
         };
@@ -493,6 +494,32 @@ impl Shared {
         );
         if unlocked && file_moved {
             self.sync_open(now, schedule, id, any_sync, vault);
+        }
+    }
+
+    /// Ask iCloud for the synced file of each other folder vault of the list that waits
+    /// for it (a newer version than the copy on this Mac, or no copy), so it is ready at
+    /// its unlock. Again every [`DOWNLOAD_AGAIN`] while it waits.
+    fn ask_icloud_for_others(&self, now: Instant, schedule: &mut Schedule, open: Option<&str>) {
+        let synced = lock(&self.plan).synced.clone();
+        let statuses = lock(&self.out).statuses.clone();
+        for (id, any_sync) in &synced {
+            let VaultSync::Folder(sync) = any_sync else {
+                continue;
+            };
+            if Some(id.as_str()) == open {
+                continue;
+            }
+            if statuses.get(id) != Some(&UiStatus::Waiting) {
+                schedule.downloads.remove(id);
+            } else if schedule
+                .downloads
+                .get(id)
+                .is_none_or(|asked| now.saturating_duration_since(*asked) >= DOWNLOAD_AGAIN)
+            {
+                schedule.downloads.insert(id.clone(), now);
+                let _ = sync.request_download();
+            }
         }
     }
 
