@@ -36,6 +36,7 @@ The helper calls run on worker threads only. The UI thread never calls the helpe
 | A request is refused (a hard rule, an exception of the agent, a token, a directory check) | Activity entry with decision `deny` | "Request blocked" |
 | The owner denied a run, the owner did not decide in time, or a lock ended the run | Activity entry with decision `deny` | None. The owner already knows. |
 | A run that the bouncer allowed | Activity entry with decision `allow` | None |
+| The open vault has not synced for 5 minutes (10 while iCloud downloads) | The sync worker ([sync.md](sync.md), section 7.3) | "Sync stopped", one for each streak of failures. It is not an inbox event. |
 
 The watcher reads the activity log only when the vault is unlocked. At the first read after an unlock, it takes the existing entries as history. They cause no notification.
 The broker cannot write the log while the vault is locked. So a request that arrives when the vault is locked causes no notification. The agent gets `vault_locked`.
@@ -48,10 +49,11 @@ The watcher finds an owner-caused denial by the start of its reason text (`src/d
 | --- | --- | --- |
 | Approval waiting | Approval waiting | Agent "NAME" waits for your decision. Open Apassy to review. |
 | Request blocked | Request blocked | Apassy blocked a request from agent "NAME". |
+| Sync stopped | Sync stopped | "VAULT" has not synced for MINUTES minutes: REASON. Open Settings > Vault > Sync. |
 
-NAME is the agent name from the vault, with control characters removed, at most 40 characters.
-The notification identifier is `run-<id>` or `activity-<id>`. It has no text from the request.
-The notifier builds this text itself from the event type and NAME. It refuses a request with a `title`, a `body`, or any other field.
+NAME is the agent name from the vault, with control characters removed, at most 40 characters. VAULT is the vault name with the same limits. REASON comes from a fixed list ([native-app.md](native-app.md#notification-preview-rule-n2)).
+The notification identifier is `run-<id>`, `activity-<id>`, or `sync-<list ID>`. It has no text from the request.
+The notifier builds this text itself from the event type, NAME, and the reason code of a sync notification. It refuses a request with a `title`, a `body`, or any other field.
 
 ### Inbox storage (N3)
 

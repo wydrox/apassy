@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 
 use apassy::native::{
     AlertStyle, Biometry, HelperErrorCode, KeychainSecret, NativeError, NativeHelper, Notification,
-    NotificationAuthorization, NotificationEvent, NotificationSetting, Timeouts, UbiquityDownload,
-    UbiquityStatus,
+    NotificationAuthorization, NotificationEvent, NotificationSetting, SyncStuckReason, Timeouts,
+    UbiquityDownload, UbiquityStatus,
 };
 use serde_json::Value;
 
@@ -179,6 +179,48 @@ fn ubiquity_status_sends_the_path_and_reads_the_icloud_status() {
         ));
     }
     assert_eq!(fake.requests().len(), before);
+}
+
+/// A sync notification has a reason from a fixed list and the vault name in the agent
+/// field; `Notification::new` does not make one without a reason.
+#[test]
+fn a_sync_notification_sends_its_reason_code_only() {
+    let fake = Fake::new("sync-notify");
+    fake.respond(&format!(
+        r#"{{"ok":true,"delivered":true,{STATUS_FIELDS}}}"#
+    ));
+    let notification = Notification::sync_stuck(
+        "sync-0123abcd",
+        "Personal",
+        SyncStuckReason::WaitingForIcloud,
+    )
+    .expect("notification");
+    assert_eq!(notification.title(), "Sync stopped");
+    assert_eq!(
+        notification.body(),
+        "\"Personal\" has not synced for 10 minutes: iCloud has not downloaded the newest copy. Open Settings > Vault > Sync."
+    );
+    assert!(
+        fake.client()
+            .notify(&notification)
+            .expect("notify")
+            .delivered
+    );
+    let request = fake.last_request();
+    assert_eq!(request["event"], "sync_stuck");
+    assert_eq!(request["agent"], "Personal");
+    assert_eq!(request["reason"], "waiting_for_icloud");
+    assert_eq!(request.as_object().unwrap().len(), 5, "{request}");
+    assert!(
+        Notification::new("sync-1", "Personal", NotificationEvent::SyncStuck).is_err(),
+        "a sync notification needs its reason"
+    );
+    assert!(Notification::sync_stuck("sync-1", "", SyncStuckReason::Error).is_err());
+    assert!(Notification::sync_stuck("bad id", "Personal", SyncStuckReason::Error).is_err());
+    let other = Notification::new("event-9", "Codex", NotificationEvent::RequestBlocked)
+        .expect("notification");
+    fake.client().notify(&other).expect("notify");
+    assert!(fake.last_request().get("reason").is_none());
 }
 
 #[test]
@@ -1024,6 +1066,22 @@ fn swift_and_rust_previews_match() {
             assert_eq!(responses[0]["body"], rust.body(), "{event:?} {agent}");
         }
     }
+    // The notice of a vault that does not sync: each reason.
+    for reason in SyncStuckReason::ALL {
+        for vault in ["Personal", "Work vault", "a \"quoted\" name"] {
+            let request = serde_json::json!({
+                "cmd": "preview",
+                "event": NotificationEvent::SyncStuck.as_wire(),
+                "agent": vault,
+                "reason": reason.as_wire(),
+            });
+            let responses = raw_exchange(real_notifier(), &format!("{request}\n"));
+            let rust = Notification::sync_stuck("sync-4", vault, reason).expect("notification");
+            assert_eq!(responses[0]["ok"], true, "{responses:?}");
+            assert_eq!(responses[0]["title"], rust.title(), "{reason:?} {vault}");
+            assert_eq!(responses[0]["body"], rust.body(), "{reason:?} {vault}");
+        }
+    }
 }
 
 /// The real helper reads the iCloud status of a file: a file outside iCloud Drive is
@@ -1083,6 +1141,12 @@ fn the_notifier_takes_no_free_text() {
         serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": long_name}),
         serde_json::json!({"cmd": "notify", "id": "bad id", "event": "request_blocked", "agent": "Codex"}),
         serde_json::json!({"cmd": "preview", "event": "approval_waiting", "agent": "Codex", "body": "x"}),
+        // A reason only with sync_stuck, and only from the fixed list.
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "Codex", "reason": "error"}),
+        serde_json::json!({"cmd": "notify", "id": "sync-5", "event": "sync_stuck", "agent": "Personal"}),
+        serde_json::json!({"cmd": "notify", "id": "sync-5", "event": "sync_stuck", "agent": "Personal", "reason": "rm -rf canary"}),
+        serde_json::json!({"cmd": "notify", "id": "sync-5", "event": "sync_stuck", "agent": "Personal", "reason": 3}),
+        serde_json::json!({"cmd": "preview", "event": "sync_stuck", "agent": "Personal", "reason": "error", "body": "x"}),
     ];
     let input: String = bad.iter().map(|request| format!("{request}\n")).collect();
     let responses = raw_exchange(real_notifier(), &input);

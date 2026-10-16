@@ -209,12 +209,13 @@ A message is English text for logs. It never contains a secret. Code must use `e
 | `keychain_delete` | `account` | `deleted` (bool) | keychain helper | no |
 | `keychain_exists` | `account` | `exists`, `biometry_changed` (bool) | keychain helper | no |
 | `ubiquity_status` | `path` (absolute, at most 1024 bytes, no control characters), `download` (bool, optional) | `ubiquitous` (bool); for an iCloud file also `status` (`current`, `downloaded`, `not_downloaded`, or `unknown`), `downloading`, `download_error`, and `download_requested` (bool). A file that is not there: `not_found`. | `apassy-helper` | no |
-| `notify` | `id`, `event` (`approval_waiting` or `request_blocked`), `agent` (1 to 40 characters). No other field. | `delivered` (bool) and the status fields | notifier | never |
+| `notify` | `id`, `event` (`approval_waiting`, `request_blocked`, or `sync_stuck`), `agent` (1 to 40 characters), and for `sync_stuck` only `reason` (`waiting_for_icloud`, `needs_passphrase`, `damaged`, or `error`). No other field. | `delivered` (bool) and the status fields | notifier | never |
 | `notify_status` | none | `authorization`, `alert`, `alert_style`, `notification_center`, `lock_screen`, `sound` | notifier | no |
 | `notify_authorize` | none | `granted`, `detail` (when the owner did not answer), and the status fields | notifier | permission, at most 120 s |
-| `preview` | `event`, `agent` | `title`, `body`: the text that `notify` shows. Posts nothing. | notifier | no |
+| `preview` | `event`, `agent`, and `reason` for `sync_stuck` | `title`, `body`: the text that `notify` shows. Posts nothing. | notifier | no |
 
 `ubiquity_status` reads `NSURLUbiquitousItemDownloadingStatusKey` and the download keys of the file (`native/ApassyHelper/Ubiquity.swift`). It reads no content. `current` means that the copy on this Mac is the newest version; `downloaded` and `not_downloaded` mean that iCloud has a newer version or no copy is here, also when an old copy is on disk. With `"download": true` and a status other than `current`, the helper also calls `FileManager.startDownloadingUbiquitousItem`; the download runs in the background. The sync engine uses it for a synced file in `~/Library/Mobile Documents` ([sync.md](sync.md), section 7).
+
 An `account` or an `id` has 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, `-`.
 Text fields have no control characters.
 The helpers answer each notification command with `notifications_unavailable`. The notifier answers only `ping` and the notification commands.
@@ -314,7 +315,7 @@ When LaunchServices starts the notifier (launchd is the parent), for example aft
 - `NativeHelper::locate()` finds the helpers and the notifier next to the running `apassy` in the bundle. Debug builds first read `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, and `APASSY_NATIVE_NOTIFIER`. Release builds ignore these variables, so a process that sets the app environment cannot replace Touch ID with a fake helper.
 - `NativeHelper::with_paths(helper, keychain_helper)` is for tests. It uses `helper` as the notifier too. `with_notifier(path)` sets the notifier.
 - Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `ubiquity_status`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. `notify`, `notify_status`, and `notify_authorize` use the notifier (`Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`). `ping`, `authenticate`, and `ubiquity_status` use `apassy-helper`.
-- `notify` sends `id`, `event`, and `agent`. `NotificationStatus` has the same fields as before.
+- `notify` sends `id`, `event`, and `agent`, and `reason` for a sync notification. `NotificationStatus` has the same fields as before.
 - Time limits: 10 s for quick commands, 40 s for `notify`, 180 s for commands that wait for the owner. After the limit, the client stops the helper and returns `NativeError::Timeout`.
 - `apassy --notify-check status|authorize|post` (`src/native/check.rs`) runs the notifier through the real signed program. `scripts/n1-check.sh` uses it. `post` sends the two fixed templates with the agent name `n1-check`.
 - Errors: `NativeError::Helper { code: HelperErrorCode, message }` for a helper error. `HelperErrorCode::CallerNotAllowed` is `caller_not_allowed`. Other variants: `InvalidArgument` (the client did not start the helper), `HelperMissing`, `Io`, `Timeout`, `Protocol`. The test `swift_and_rust_error_codes_match` compares the Swift and the Rust lists.
@@ -327,15 +328,18 @@ A call blocks the thread. The desktop must call the client from a worker thread,
 ## Notification preview rule (N2)
 
 A preview shows the agent name and the event type only. It never shows the command, the user request, or a value.
-`apassy::native::Notification::new(event_id, agent_name, event)` is the only constructor. It takes no free text.
+`apassy::native::Notification::new(event_id, agent_name, event)` is the constructor for the agent events. It takes no free text. `Notification::sync_stuck(event_id, vault_name, reason)` makes the notice of a vault that does not sync ([sync.md](sync.md), section 7): the vault name goes in the `agent` field, and the reason comes from a fixed list.
 
 | Event | Title | Body |
 | --- | --- | --- |
 | `ApprovalWaiting` | Approval waiting | Agent "NAME" waits for your decision. Open Apassy to review. |
 | `RequestBlocked` | Request blocked | Apassy blocked a request from agent "NAME". |
+| `SyncStuck` | Sync stopped | "VAULT" has not synced for MINUTES minutes: REASON. Open Settings > Vault > Sync. |
 
-The agent name has 1 to 40 characters and no control characters.
-The notifier builds the title and the body itself, from the same fixed templates (`native/ApassyNotify/Notify.swift`, `preview`). A request has only `id`, `event`, and `agent`. The notifier refuses a request with any other field, for example `title`, `body`, or `command` (`invalid_request`). So also a caller that uses the raw protocol cannot put free text into a notification. The test `swift_and_rust_previews_match` compares the Swift and the Rust text.
+The reasons of `SyncStuck`: `waiting_for_icloud` ("iCloud has not downloaded the newest copy", 10 minutes), `needs_passphrase` ("the passphrase changed on another Mac", 5), `damaged` ("the synced copy is damaged", 5), and `error` ("a sync error", 5).
+
+The agent name and the vault name have 1 to 40 characters and no control characters.
+The notifier builds the title and the body itself, from the same fixed templates (`native/ApassyNotify/Notify.swift`, `preview`). A request has only `id`, `event`, and `agent`, and `reason` for `sync_stuck` only. The notifier refuses a request with any other field, for example `title`, `body`, or `command` (`invalid_request`). So also a caller that uses the raw protocol cannot put free text into a notification. The test `swift_and_rust_previews_match` compares the Swift and the Rust text.
 A notification only tells the owner about an event. It is not an approval (N4).
 
 When Apassy is the front app, macOS can put the notification in Notification Center without a banner.

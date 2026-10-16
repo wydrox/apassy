@@ -20,6 +20,7 @@ use apassy::contracts::CredentialKind;
 use apassy::desktop::inbox::{self, EventKey, InboxKind};
 use apassy::desktop::notify::{Delivery, NotificationCenter};
 use apassy::desktop::owner_store::{ENDED_BY_QUIT, OwnerSession};
+use apassy::native::SyncStuckReason;
 use apassy::vault::exceptions::ExceptionKind;
 use apassy::vault::{ExecMode, Field, ItemDraft, SecretValue};
 use fake_native::{ALLOWED_STATUS, FakeNative};
@@ -270,6 +271,56 @@ fn waiting_approval_notifies_within_five_seconds() {
         fake.requests_for("notify").len(),
         1,
         "one notification per run"
+    );
+}
+
+/// The notice of a vault that does not sync (docs/operations/sync.md, section 7): the
+/// request has the vault name and a reason code only, one ID for each vault, and a
+/// stopped center posts nothing.
+#[test]
+fn a_vault_that_does_not_sync_notifies_with_its_name_and_reason_only() {
+    let fx = fixture(Duration::from_secs(3));
+    let fake = FakeNative::new("sync-stuck");
+    fake.respond(
+        "notify",
+        &format!(r#"{{"ok":true,"delivered":true,{ALLOWED_STATUS}}}"#),
+    );
+    fake.respond(
+        "notify_status",
+        &format!(r#"{{"ok":true,{ALLOWED_STATUS}}}"#),
+    );
+    let mut center = start_center(&fx, &fake);
+    let notify = center.sync_notifier();
+    let since = Instant::now();
+    notify(
+        "0123456789abcdef0123456789abcdef",
+        "Personal",
+        SyncStuckReason::WaitingForIcloud,
+    );
+    let (request, _) = notify_request(&fake, "sync-0123456789abcdef0123456789abcdef", since);
+    let mut fields: Vec<&String> = request.as_object().expect("object").keys().collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["agent", "cmd", "event", "id", "reason"],
+        "{request}"
+    );
+    assert_eq!(request["event"], "sync_stuck");
+    assert_eq!(request["agent"], "Personal");
+    assert_eq!(request["reason"], "waiting_for_icloud");
+    no_canary(&fake.raw_requests());
+
+    center.stop();
+    notify(
+        "0123456789abcdef0123456789abcdef",
+        "Personal",
+        SyncStuckReason::Error,
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fake.requests_for("notify").len(),
+        1,
+        "a stopped center posts nothing"
     );
 }
 

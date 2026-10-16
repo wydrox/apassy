@@ -11,8 +11,10 @@
 //!   to 40 s, so the sender never delays the watcher.
 //!
 //! A preview has the agent name and the event type only. [`Notification::new`] takes
-//! no other text (N2). The result of each delivery and the channel state are visible
-//! in the app. A failed delivery changes nothing in the queue: the run still waits,
+//! no other text (N2). The notice of a vault that does not sync
+//! ([`NotificationCenter::sync_notifier`], docs/operations/sync.md section 7) has the
+//! vault name and a reason from a fixed list ([`Notification::sync_stuck`]). The
+//! result of each delivery and the channel state are visible in the app. A failed delivery changes nothing in the queue: the run still waits,
 //! and the event stays in the inbox (N3). A notification is never an approval (N4):
 //! this module cannot make an owner proof.
 
@@ -30,7 +32,7 @@ use crate::desktop::inbox::{EventKey, needs_notification};
 use crate::native::{
     HelperErrorCode, MAX_AGENT_NAME_CHARS, NativeError, NativeHelper, Notification,
     NotificationAuthorization, NotificationEvent, NotificationSetting, NotificationStatus,
-    NotifyOutcome,
+    NotifyOutcome, SyncStuckReason,
 };
 
 /// How often the watcher reads the activity log.
@@ -212,6 +214,12 @@ enum Job {
         agent: String,
         event: NotificationEvent,
     },
+    /// A vault that does not sync. It is not an inbox event: no delivery is kept.
+    SyncStuck {
+        id: String,
+        vault: String,
+        reason: SyncStuckReason,
+    },
     Status,
     Authorize,
 }
@@ -256,7 +264,8 @@ impl Shared {
 /// The notification service of the desktop app.
 pub struct NotificationCenter {
     shared: Arc<Shared>,
-    jobs: Mutex<Option<Sender<Job>>>,
+    /// Shared with [`Self::sync_notifier`]: a stop closes the channel for both.
+    jobs: Arc<Mutex<Option<Sender<Job>>>>,
     watcher: Option<JoinHandle<()>>,
 }
 
@@ -329,8 +338,25 @@ impl NotificationCenter {
         };
         Self {
             shared,
-            jobs: Mutex::new(Some(sender)),
+            jobs: Arc::new(Mutex::new(Some(sender))),
             watcher,
+        }
+    }
+
+    /// A function that posts the notification of a vault that does not sync: the list
+    /// ID of the vault, its name, and the reason (docs/operations/sync.md, section 7).
+    /// The sync worker calls it from its thread. The same vault again replaces its
+    /// notification. After [`Self::stop`] it posts nothing.
+    pub fn sync_notifier(&self) -> impl Fn(&str, &str, SyncStuckReason) + Send + Sync + 'static {
+        let jobs = Arc::clone(&self.jobs);
+        move |id: &str, vault: &str, reason: SyncStuckReason| {
+            if let Some(jobs) = jobs.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                let _ = jobs.send(Job::SyncStuck {
+                    id: sync_notification_id(id),
+                    vault: preview_name(vault),
+                    reason,
+                });
+            }
         }
     }
 
@@ -426,6 +452,17 @@ impl Drop for NotificationCenter {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// The notification ID of the vault with the list ID `id`: `sync-<id>`, or `sync` for an
+/// ID that does not fit the notifier.
+fn sync_notification_id(id: &str) -> String {
+    let id = format!("sync-{id}");
+    let valid = id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if valid { id } else { "sync".to_owned() }
 }
 
 /// The agent name for a preview: printable characters, at most 40 characters.
@@ -645,6 +682,21 @@ fn send_loop(shared: &Shared, helper: &NativeHelper, jobs: &Receiver<Job>) {
                     }
                 });
             }
+            Job::SyncStuck { id, vault, reason } => {
+                let result = Notification::sync_stuck(&id, &vault, reason)
+                    .and_then(|notification| helper.notify(&notification));
+                let denied = matches!(&result, Err(err) if err.code() == Some(HelperErrorCode::NotificationsDenied));
+                // No delivery to keep: the status line of the vault in Settings shows the
+                // sync problem itself. The channel shows a problem with the notifier, and
+                // the real permission state after a refusal, as for an inbox event.
+                let (_, mut channel) = delivery_of(result);
+                if denied && let Ok(status) = helper.notify_status() {
+                    channel = Some(ChannelState::Ready(status));
+                }
+                if let Some(channel) = channel {
+                    shared.update(|view| view.channel = channel);
+                }
+            }
             Job::Status => {
                 let channel = channel_of(helper.notify_status());
                 shared.update(|view| view.channel = channel);
@@ -737,6 +789,28 @@ mod tests {
             notification_center: NotificationSetting::Enabled,
             lock_screen: NotificationSetting::Enabled,
             sound: NotificationSetting::Enabled,
+        }
+    }
+
+    /// Each vault has its own sync notification; an ID that does not fit the notifier
+    /// still gives one.
+    #[test]
+    fn each_vault_has_its_own_sync_notification_id() {
+        assert_eq!(
+            sync_notification_id("0123456789abcdef0123456789abcdef"),
+            "sync-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(sync_notification_id("bad id"), "sync");
+        assert_eq!(sync_notification_id(&"a".repeat(64)), "sync");
+        for id in ["v1", "bad id", ""] {
+            assert!(
+                Notification::sync_stuck(
+                    &sync_notification_id(id),
+                    "Personal",
+                    SyncStuckReason::Error
+                )
+                .is_ok()
+            );
         }
     }
 

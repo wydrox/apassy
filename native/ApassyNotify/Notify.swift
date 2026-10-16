@@ -1,9 +1,11 @@
 // Native notifications with UNUserNotificationCenter (goal items N1 and N2).
 //
 // Preview rule (ADR 0010, goal N2): the caller sends the event type and the
-// agent name only. The notifier builds the title and the body from fixed
-// templates. It refuses a request with any other field, so a caller cannot
-// put a command, a user request, or a value into a notification.
+// agent name only. A sync notification (`sync_stuck`) has the vault name in
+// the same field and a reason code from a fixed list. The notifier builds the
+// title and the body from fixed templates. It refuses a request with any other
+// field, so a caller cannot put a command, a user request, or a value into a
+// notification.
 //
 // Measured on macOS 27 (docs/operations/native-app.md, "Notification
 // research"):
@@ -42,39 +44,88 @@ let notifierBundleID = "com.wydrox.apassy.notify"
 /// Largest agent name, in characters. The Rust client has the same limit.
 let maxAgentNameCharacters = 40
 
-/// The event types of goal item N1. The raw value is the wire name.
+/// The event types of goal item N1, and the notice of a vault that does not
+/// sync. The raw value is the wire name.
 enum NotificationEvent: String {
     case approvalWaiting = "approval_waiting"
     case requestBlocked = "request_blocked"
+    case syncStuck = "sync_stuck"
+}
+
+/// Why a vault does not sync. The raw value is the wire name. The Rust client
+/// (`SyncStuckReason` in src/native/mod.rs) has the same list and texts.
+enum SyncStuckReason: String {
+    case waitingForIcloud = "waiting_for_icloud"
+    case needsPassphrase = "needs_passphrase"
+    case damaged = "damaged"
+    case error = "error"
+
+    var text: String {
+        switch self {
+        case .waitingForIcloud: return "iCloud has not downloaded the newest copy"
+        case .needsPassphrase: return "the passphrase changed on another Mac"
+        case .damaged: return "the synced copy is damaged"
+        case .error: return "a sync error"
+        }
+    }
+
+    var minutes: Int {
+        switch self {
+        case .waitingForIcloud: return 10
+        case .needsPassphrase, .damaged, .error: return 5
+        }
+    }
+}
+
+/// A checked request: the event, the agent (or vault) name, and the reason of a
+/// sync notification.
+struct NotificationInput {
+    let event: NotificationEvent
+    let agent: String
+    let reason: SyncStuckReason?
 }
 
 /// The only texts that the notifier shows (goal item N2).
-func preview(_ event: NotificationEvent, agent: String) -> (title: String, body: String) {
-    switch event {
+func preview(_ input: NotificationInput) -> (title: String, body: String) {
+    let agent = input.agent
+    switch input.event {
     case .approvalWaiting:
         return ("Approval waiting", "Agent \"\(agent)\" waits for your decision. Open Apassy to review.")
     case .requestBlocked:
         return ("Request blocked", "Apassy blocked a request from agent \"\(agent)\".")
+    case .syncStuck:
+        let reason = input.reason ?? .error
+        return ("Sync stopped", "\"\(agent)\" has not synced for \(reason.minutes) minutes: \(reason.text). Open Settings > Vault > Sync.")
     }
 }
 
-/// The fields that a `notify` or `preview` request can have.
-let notifyFields: Set<String> = ["cmd", "id", "event", "agent"]
+/// The fields that a `notify` or `preview` request can have. Only a
+/// `sync_stuck` request has `reason`.
+let notifyFields: Set<String> = ["cmd", "id", "event", "agent", "reason"]
 
-/// The event and the agent name of a request, checked.
-func eventAndAgent(_ request: Request) throws -> (NotificationEvent, String) {
+/// The event, the agent name, and the reason of a request, checked.
+func notificationInput(_ request: Request) throws -> NotificationInput {
     let extra = Set(request.fields.keys).subtracting(notifyFields)
     guard extra.isEmpty else {
-        throw HelperError(.invalidRequest, "The notifier builds the text itself. A request has only id, event, and agent.")
+        throw HelperError(.invalidRequest, "The notifier builds the text itself. A request has only id, event, agent, and the reason of a sync notification.")
     }
     guard let event = NotificationEvent(rawValue: try request.string("event")) else {
-        throw HelperError(.invalidRequest, "The field \"event\" must be approval_waiting or request_blocked.")
+        throw HelperError(.invalidRequest, "The field \"event\" must be approval_waiting, request_blocked, or sync_stuck.")
     }
     let agent = try request.text("agent", min: 1, max: maxAgentNameCharacters)
     guard !agent.trimmingCharacters(in: .whitespaces).isEmpty else {
         throw HelperError(.invalidRequest, "The field \"agent\" must not be blank.")
     }
-    return (event, agent)
+    var reason: SyncStuckReason?
+    if event == .syncStuck {
+        guard let code = request.fields["reason"] as? String, let known = SyncStuckReason(rawValue: code) else {
+            throw HelperError(.invalidRequest, "A sync_stuck request needs a known \"reason\".")
+        }
+        reason = known
+    } else if request.fields["reason"] != nil {
+        throw HelperError(.invalidRequest, "Only a sync_stuck request has a \"reason\".")
+    }
+    return NotificationInput(event: event, agent: agent, reason: reason)
 }
 
 /// Outside the notifier bundle, the notification commands return
@@ -228,20 +279,18 @@ func handleNotifyAuthorize(_ request: Request) throws -> Fields {
     return fields
 }
 
-/// `preview {event, agent}`: the title and the body that `notify` shows.
+/// `preview {event, agent, reason}`: the title and the body that `notify` shows.
 /// Posts nothing.
 func handlePreview(_ request: Request) throws -> Fields {
-    let (event, agent) = try eventAndAgent(request)
-    let text = preview(event, agent: agent)
+    let text = preview(try notificationInput(request))
     return ["ok": true, "title": text.title, "body": text.body]
 }
 
-/// `notify {id, event, agent}`: post one notification with the fixed text.
+/// `notify {id, event, agent, reason}`: post one notification with the fixed text.
 /// Never asks for permission (see the note at the top of this file).
 func handleNotify(_ request: Request) throws -> Fields {
     let id = try request.identifier("id")
-    let (event, agent) = try eventAndAgent(request)
-    let text = preview(event, agent: agent)
+    let text = preview(try notificationInput(request))
     let center = try checkedInNotificationCenter()
     guard let settings = currentSettings(center) else {
         throw HelperError(.failed, "The notification settings did not arrive in time.")

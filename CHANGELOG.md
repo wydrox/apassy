@@ -4,6 +4,11 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Added
+
+- **Sync log:** each failed folder or relay sync writes one line to `~/Library/Logs/Apassy/sync.log`: the time, the list ID of the vault, the kind of sync, the error, the status of the synced file, and the first digits of its hashes. The same error writes at most one line every 10 minutes, with a count; the first sync that works after failures writes one line too. No vault name, credential, value, or passphrase goes into the log. The file has mode `0600` and stays under 256 KiB (one older file, `sync.log.1`) ([sync](docs/operations/sync.md) §7.2).
+- **Mac, notification when sync stops:** when the open vault keeps failing to sync for 5 minutes (10 minutes while iCloud downloads), Apassy posts one notification: "Personal" has not synced for 5 minutes, with a short reason, and "Open Settings > Vault > Sync". One for each streak of failures; a folder or relay that is not reachable causes none ([sync](docs/operations/sync.md) §7.3).
+
 ### Changed
 
 - Development: the integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file (`cargo test --all-features --test it companion::`), and the aliases in `.cargo/config.toml` (`cargo t`, `cargo clippy-all`) use one feature set. `target/` keeps one copy of the crate and its dependencies instead of one per test file and feature set. CI still runs four serial test groups, now by module.
