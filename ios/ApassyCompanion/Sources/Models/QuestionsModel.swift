@@ -3,9 +3,21 @@ import ApassyVaultKit
 import Foundation
 import Observation
 
+/// Current system permission, read without showing the permission prompt.
+enum RequestNotificationAuthorization: Equatable {
+    case notDetermined, denied, allowed, quiet
+}
+
 /// Notification permission and the APNs registration (`PushRegistrar` in the app).
 @MainActor
 protocol PushPermission: AnyObject {
+    func authorization() async -> RequestNotificationAuthorization
+    func observeRegistrationFailures(_ handler: @escaping @MainActor (String) -> Void)
+    func setRequestsVisible(_ visible: Bool)
+    func observeForegroundRequests(_ handler: @escaping @MainActor () -> Void)
+    /// Snapshot only the delivered private request alerts before reading the request list.
+    func deliveredRequestIdentifiers() async -> [String]
+    func removeDeliveredRequests(identifiers: [String])
     /// Ask iOS once; true when the owner allows notifications.
     func requestAuthorization() async -> Bool
     /// Ask iOS for a device token. It arrives in `QuestionsModel.receivePushToken`.
@@ -173,6 +185,11 @@ final class QuestionsModel {
         case failed(String)
     }
 
+    enum NotificationStatus: Equatable {
+        case off, checking, permissionRequired, denied, registering, waitingForVault, ready, quiet
+        case failed(String)
+    }
+
     static let notificationsKey = "ApassyQuestionNotifications"
     /// The vaults on this iPhone that were seen with a questions team (vault IDs only). A relay
     /// vault always has one; an iCloud vault has one after "Connect this iPhone".
@@ -201,11 +218,13 @@ final class QuestionsModel {
     private(set) var attach: AttachStep?
     /// A problem with the answer key or the notifications, for a line under the list.
     private(set) var notice: String?
+    /// Owner preference. Effective delivery is described by `notificationStatus`.
     private(set) var notificationsOn: Bool
+    private(set) var notificationStatus: NotificationStatus = .off
     /// Notifications are off, but the teams of these vaults keep the token until each opens on this
     /// iPhone (names).
     private(set) var notificationsPending: [String] = []
-    /// Counts the notifications that the owner opened; Decisions then opens the newest question.
+    /// Counts private notification opens; Requests returns to its refreshed list.
     private(set) var focusRequests = 0
     /// The name of this iPhone that a connection gives the Mac, so that two devices are told apart.
     var deviceName: String
@@ -238,6 +257,15 @@ final class QuestionsModel {
     /// Whether the core lists every vault that it keeps (`QuestionsList.vaults`).
     @ObservationIgnored private var listsEveryVault = false
     @ObservationIgnored private var focusPending = false
+    private var sentAt: [String: Date] = [:]
+    @ObservationIgnored private var notificationAuthorization: RequestNotificationAuthorization?
+    @ObservationIgnored private var notificationStatusTask: Task<Void, Never>?
+    @ObservationIgnored private var alertReconciliationTask: Task<Void, Never>?
+    @ObservationIgnored private var registrationFailure: String?
+    @ObservationIgnored private var notificationGeneration = 0
+    @ObservationIgnored private var requestsVisible = false
+    /// Parent tab selection and sheet lifecycle. Local list appearance cannot bypass this gate.
+    @ObservationIgnored private var requestsPresented = false
     /// The vault model of this iPhone: its vaults, the lock, and the passphrases behind Face ID.
     @ObservationIgnored private(set) weak var vault: VaultModel?
     /// Opens the questions of the other vaults after the selected vault opened.
@@ -248,19 +276,13 @@ final class QuestionsModel {
     private var faceIDFailed: Set<String> = []
     /// The vaults whose questions_unlock said that they have no questions team, in this launch.
     @ObservationIgnored private var withoutQuestions: Set<String> = []
-    /// The locked vaults asked for in the round of the last notification (Face ID or the sheet),
-    /// and those whose sheet showed.
-    @ObservationIgnored private var focusAsked: Set<String> = []
-    @ObservationIgnored private var prompted: Set<String> = []
-    /// The passphrase sheet came from a notification: when it closes, the round goes on.
-    @ObservationIgnored private var focusAfterPrompt = false
 
     init(
         service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
         defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
-            "This code pairs the iPhone companion. Open Decisions > Devices > Mac on Wi-Fi to pair with your Mac."
+            "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
         },
         onDeviceName: @escaping @MainActor (String) -> Void = { _ in }
     ) {
@@ -274,7 +296,16 @@ final class QuestionsModel {
         self.retryInterval = retryInterval
         self.onCompanionCode = onCompanionCode
         notificationsOn = defaults.bool(forKey: Self.notificationsKey)
+        notificationStatus = notificationsOn ? .checking : .off
         push?.observeOpens { [weak self] in self?.notificationOpened() }
+        push?.observeForegroundRequests { [weak self] in
+            Task { await self?.refresh() }
+        }
+        push?.observeRegistrationFailures { [weak self] message in
+            guard let self, self.notificationsOn else { return }
+            self.registrationFailure = message
+            self.updateNotificationStatus()
+        }
     }
 
     /// One answer key for every team: the tests with one vault.
@@ -283,7 +314,7 @@ final class QuestionsModel {
         defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
-            "This code pairs the iPhone companion. Open Decisions > Devices > Mac on Wi-Fi to pair with your Mac."
+            "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
         }
     ) {
         self.init(
@@ -324,7 +355,7 @@ final class QuestionsModel {
     /// The questions that wait for an answer now.
     var waiting: [RemoteQuestion] {
         let at = Int64(now().timeIntervalSince1970)
-        return questions.filter { $0.state == .open && $0.expiresAt > at }
+        return questions.filter { $0.state == .open && $0.settle == nil && $0.answered == nil && $0.expiresAt > at }
     }
 
     var waitingCount: Int { waiting.count }
@@ -342,12 +373,24 @@ final class QuestionsModel {
             status = list.status
             vaults = list.vaults ?? []
             listsEveryVault = list.vaults != nil
-            questions = list.questions
+            for question in list.questions where question.settle != nil {
+                deliveries[question.qid] = nil
+                sentAt[question.qid] = nil
+            }
+            questions = list.questions.map { question in
+                var current = question
+                if current.settle == nil, case .sent(let answer) = deliveries[current.qid] {
+                    current.answered = answer
+                }
+                return current
+            }
             updateLockedVaults()
             let enabled = contexts.contains { $0.status.enabled }
             phase = enabled ? .ready : .off
+            setRequestsVisible(requestsVisible)
             if enabled { await checkAnswerKeys() }
             await updatePushToken()
+            scheduleAlertReconciliation()
         } catch let error as VaultError where error.code == .locked {
             // Nothing can be answered while the vault is locked: say so, never an empty list.
             showLocked()
@@ -360,8 +403,63 @@ final class QuestionsModel {
         }
     }
 
+    private var canReconcileAlerts: Bool {
+        guard phase == .ready, listsEveryVault, lockedVaults.isEmpty, waiting.isEmpty,
+            !questions.contains(where: needsConfirmation)
+        else { return false }
+        return !deliveries.contains { qid, delivery in
+            if case .sent = delivery { return !questions.contains { $0.qid == qid && $0.settle != nil } }
+            return false
+        }
+    }
+
+    /// OS notification services are optional housekeeping. An unresponsive notification daemon
+    /// must never delay reading a vault's connection state or requests. Only one cleanup runs at
+    /// once; it snapshots delivered IDs, then validates a fresh list before removing those IDs.
+    private func scheduleAlertReconciliation() {
+        guard alertReconciliationTask == nil, canReconcileAlerts, let push else { return }
+        let generation = openGeneration
+        alertReconciliationTask = Task { [weak self] in
+            let delivered = await push.deliveredRequestIdentifiers()
+            guard let self else { return }
+            defer { self.alertReconciliationTask = nil }
+            guard !delivered.isEmpty, generation == self.openGeneration, self.canReconcileAlerts else { return }
+            do {
+                let list = try await self.service.questionsList()
+                guard generation == self.openGeneration, self.canReconcileAlerts,
+                    let contexts = list.vaults
+                else { return }
+                let opened = Set(contexts.map(\.vaultID))
+                let hidden = (self.vault?.vaults ?? []).contains {
+                    self.isQuestionVault($0) && !opened.contains($0.id)
+                }
+                let at = Int64(self.now().timeIntervalSince1970)
+                let unresolved = list.questions.contains {
+                    $0.settle == nil && ($0.answered != nil || ($0.state == .open && $0.expiresAt > at))
+                }
+                guard !hidden, !unresolved else { return }
+                push.removeDeliveredRequests(identifiers: delivered)
+            } catch {
+                // Retain alerts when fresh validation fails. A later normal refresh retries.
+            }
+        }
+    }
+
+    /// Wait for optional delivered-alert housekeeping in synthetic tests; app flows never wait.
+    func alertReconciliationFinished() async { await alertReconciliationTask?.value }
+
+    private func scheduleNotificationStatusRefresh() {
+        guard notificationStatusTask == nil else { return }
+        notificationStatusTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.notificationStatusTask = nil }
+            await self.refreshNotificationStatus()
+        }
+    }
+
     /// Read the list, then wait for changes with the long poll while the task runs.
     func watch() async {
+        scheduleNotificationStatusRefresh()
         await refresh()
         askForTokenOnce()
         var pause = retryInterval
@@ -469,7 +567,10 @@ final class QuestionsModel {
     /// Send `choice` for `question`. An answer that gives authority asks for Face ID first; the
     /// others go at once. A network failure sends the same signed answer again while it is young.
     func send(_ choice: AnswerBar.Choice, for question: RemoteQuestion) async {
-        guard deliveries[question.qid] != .sending, let card = question.card else { return }
+        guard deliveries[question.qid] != .sending, question.answered == nil, question.settle == nil,
+            question.state == .open, question.expiresAt > Int64(now().timeIntervalSince1970),
+            let card = question.card else { return }
+        if case .sent = deliveries[question.qid] { return }
         // The row of this iPhone in the team of the question's vault: its key signs. A question
         // of a vault whose questions are not open now never goes out with another vault's key.
         if question.vaultID != nil, vault(of: question) == nil {
@@ -492,6 +593,8 @@ final class QuestionsModel {
             }
             let sent = try await post(question, choice.answer, prepared, signature)
             deliveries[question.qid] = .sent(sent.kind)
+            sentAt[question.qid] = now()
+            if let at = questions.firstIndex(where: { $0.qid == question.qid }) { questions[at].answered = sent.kind }
         } catch CompanionKeyError.cancelled {
             deliveries[question.qid] = nil
         } catch CompanionKeyError.biometryChanged {
@@ -528,7 +631,7 @@ final class QuestionsModel {
 
     static func notOpenText(_ vaultName: String?) -> String {
         let name = vaultName.map { $0.isEmpty ? "Its vault" : $0 } ?? "Its vault"
-        return "\(name) is locked on this iPhone. Unlock it in Decisions, then answer."
+        return "\(name) is locked on this iPhone. Unlock it in Requests, then answer."
     }
 
     static func message(for error: VaultError, asker: String) -> String {
@@ -546,15 +649,16 @@ final class QuestionsModel {
     func deliveryText(for question: RemoteQuestion) -> String? {
         if let settle = question.settle {
             if settle.outcome == "replaced" { return "The request changed. A new question follows." }
-            if let name = settle.deviceName { return "Answered on \(name)" }
-            return settle.outcome == "timed_out" ? "Expired" : "Ended on \(question.askerName)"
+            if settle.outcome == "timed_out" { return "Expired" }
+            if let name = settle.deviceName { return "Confirmed on \(name)" }
+            return "Ended on \(question.askerName)"
         }
         switch deliveries[question.qid] {
         case .sending: return "Sending…"
-        case .sent: return Self.sentText
+        case .sent: return unconfirmedText(for: question)
         case .failed(let message): return message
         case nil:
-            if question.answered != nil { return Self.sentText }
+            if question.answered != nil { return unconfirmedText(for: question) }
             if question.state == .expired { return "Expired" }
             return question.problem
         }
@@ -574,9 +678,9 @@ final class QuestionsModel {
             default: return QuestionOutcome(text: "Ended on \(question.askerName)", tone: .neutral)
             }
         }
-        if case .sent = deliveries[question.qid] { return QuestionOutcome(text: Self.sentText, tone: .neutral) }
+        if case .sent = deliveries[question.qid] { return QuestionOutcome(text: unconfirmedText(for: question), tone: .neutral) }
         if question.answered != nil, deliveries[question.qid] == nil {
-            return QuestionOutcome(text: Self.sentText, tone: .neutral)
+            return QuestionOutcome(text: unconfirmedText(for: question), tone: .neutral)
         }
         if question.state != .open || question.expiresAt <= Int64(now().timeIntervalSince1970) {
             return QuestionOutcome(text: "Expired", tone: .neutral)
@@ -584,65 +688,62 @@ final class QuestionsModel {
         return nil
     }
 
-    static let sentText = "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused."
+    static let sentText = "Sent. Waiting for the Mac to confirm."
+    static let unconfirmedText = "Not confirmed. The Mac may be offline. Check again for the result."
+
+    private func unconfirmedText(for question: RemoteQuestion) -> String {
+        if question.expiresAt <= Int64(now().timeIntervalSince1970)
+            || sentAt[question.qid].map({ now().timeIntervalSince($0) >= 60 }) == true
+        {
+            return Self.unconfirmedText
+        }
+        return Self.sentText
+    }
+
+    func needsConfirmation(for question: RemoteQuestion) -> Bool {
+        guard question.settle == nil else { return false }
+        if case .sent = deliveries[question.qid] { return true }
+        return question.answered != nil
+    }
 
     // MARK: Opening a notification
 
-    /// The owner opened a notification. It holds no question (contract section 14.1), so
-    /// Decisions opens the newest one that waits.
+    /// The private payload has no request or vault identifier. Refresh Requests, never guess
+    /// which question it announced and never start an unlock from this generic notification.
     func notificationOpened() {
-        focusAsked = []
-        prompted = []
-        focusAfterPrompt = false
         focusPending = true
         focusRequests += 1
     }
 
-    /// The question to open after a notification, once, or nil: the newest that waits after the
-    /// list is read again, so the question the notification announced opens even when the list
-    /// was old. `stillFree` is asked after the refresh: false when the owner opened something
-    /// meanwhile, and then nothing opens, so a question never changes under the owner's finger.
-    ///
-    /// The notification names no vault, so its question may wait in a locked vault. First the
-    /// locked vaults with a stored passphrase open with one Face ID; then the passphrase sheet
-    /// asks for each other locked vault, once. When the sheet closes, the round goes on, and the
-    /// newest question opens at its end.
+    /// Consume the notification open. Kept as a list refresh API for existing callers; it never
+    /// returns a detail target, even if a newer unrelated question arrived meanwhile.
     func takeFocus(stillFree: () -> Bool) async -> String? {
         guard focusPending else { return nil }
         focusPending = false
-        // The open of the vault may be asking Face ID right now: never a second prompt.
-        await reopenTask?.value
         await refresh()
-        let stored = lockedVaults.filter {
-            canUseFaceID($0.id) && !faceIDFailed.contains($0.id) && !focusAsked.contains($0.id)
-        }
-        if !stored.isEmpty {
-            focusAsked.formUnion(stored.map(\.id))
-            await reopen(stored, reads: nil, generation: openGeneration)
-        }
-        if let next = lockedVaults.first(where: {
-            (!focusAsked.contains($0.id) || faceIDFailed.contains($0.id)) && !prompted.contains($0.id)
-                && !opening.contains($0.id)
-        }) {
-            focusAsked.insert(next.id)
-            prompted.insert(next.id)
-            focusAfterPrompt = true
-            unlockPrompt = next
-            return nil
-        }
-        focusAsked = []
-        prompted = []
-        guard stillFree() else { return nil }
-        return waiting.max { $0.createdAt < $1.createdAt }?.qid
+        _ = stillFree()
+        return nil
     }
 
-    /// The passphrase sheet closed: a round of a notification goes on.
-    func unlockPromptClosed() {
-        unlockPrompt = nil
-        guard focusAfterPrompt else { return }
-        focusAfterPrompt = false
-        focusPending = true
-        focusRequests += 1
+    func unlockPromptClosed() { unlockPrompt = nil }
+
+    /// Only an active, unlocked Requests list can replace a foreground banner. A detail or sheet
+    /// does not stand in for the list, because the generic payload may concern another request.
+    func setRequestsVisible(_ visible: Bool) {
+        requestsVisible = visible
+        updateRequestsVisibility()
+    }
+
+    /// True only for the selected Requests tab after every parent sheet finished dismissal.
+    /// A parent sheet may cover a still-mounted list, so onAppear/onDisappear alone is insufficient.
+    func setRequestsPresented(_ presented: Bool) {
+        requestsPresented = presented
+        updateRequestsVisibility()
+    }
+
+    private func updateRequestsVisibility() {
+        push?.setRequestsVisible(
+            requestsPresented && requestsVisible && phase == .ready && listsEveryVault && lockedVaults.isEmpty)
     }
 
     // MARK: The other vaults
@@ -706,6 +807,7 @@ final class QuestionsModel {
         questions = []
         vaults = []
         phase = .locked
+        push?.setRequestsVisible(false)
         guard let vault else {
             lockedVaults = []
             return
@@ -766,7 +868,6 @@ final class QuestionsModel {
         reopenTask = nil
         opening = []
         unlockPrompt = nil
-        focusAfterPrompt = false
         showLocked()
     }
 
@@ -778,7 +879,6 @@ final class QuestionsModel {
         reopenTask = nil
         opening = []
         unlockPrompt = nil
-        focusAfterPrompt = false
     }
 
     /// Wait for the open of the other vaults (tests).
@@ -943,50 +1043,123 @@ final class QuestionsModel {
 
     // MARK: Notifications
 
-    /// "Notifications through the relay" on this iPhone. The permission is asked here, at the first
-    /// time it is turned on, never at launch (contract section 14.2).
+    /// Re-read system permission after returning from Settings, without asking for permission.
+    func refreshNotificationStatus() async {
+        let generation = notificationGeneration
+        guard let push else {
+            notificationStatus = notificationsOn ? .failed("Push notifications are unavailable in this build.") : .off
+            return
+        }
+        let authorization = await push.authorization()
+        guard generation == notificationGeneration else { return }
+        notificationAuthorization = authorization
+        updateNotificationStatus()
+    }
+
+    private func updateNotificationStatus() {
+        guard notificationsOn else { notificationStatus = .off; return }
+        guard let notificationAuthorization else { notificationStatus = .checking; return }
+        switch notificationAuthorization {
+        case .notDetermined: notificationStatus = .permissionRequired
+        case .denied: notificationStatus = .denied
+        case .allowed, .quiet:
+            if let registrationFailure { notificationStatus = .failed(registrationFailure) }
+            else if pushToken == nil { notificationStatus = .registering }
+            else if pushTeams.isEmpty || !pushTeams.isSubset(of: tokenTeams) { notificationStatus = .waitingForVault }
+            else { notificationStatus = notificationAuthorization == .quiet ? .quiet : .ready }
+        }
+    }
+
+    var notificationSettingsMessage: String {
+        switch notificationStatus {
+        case .off: "Notifications are off. Requests still appear while Apassy is open."
+        case .checking: "Checking notification settings…"
+        case .permissionRequired: "Notification permission has not been granted. Retry to allow notifications."
+        case .denied: "Notifications are off for Apassy in iOS Settings. Open Settings to allow them."
+        case .registering: "Waiting for Apple to register this iPhone. Requests still appear in Apassy."
+        case .waitingForVault: "Not connected to notifications yet. Unlock a connected vault to finish registration."
+        case .ready: "Registered for notifications. Focus and scheduled delivery may delay alerts."
+        case .quiet: "Registered. iOS alerts are limited or delivered quietly. Open Settings to change alerts."
+        case .failed(let message): "Notification registration failed. \(message) Requests still appear in Apassy."
+        }
+    }
+
+    var notificationNeedsSettings: Bool {
+        notificationStatus == .denied || notificationStatus == .quiet
+    }
+
+    var notificationCanRetry: Bool {
+        guard notificationsOn else { return false }
+        return switch notificationStatus {
+        case .permissionRequired, .registering, .waitingForVault, .failed: true
+        default: false
+        }
+    }
+
+    /// Permission is requested only for an explicit owner action, never at launch or resume.
     func setNotifications(_ on: Bool) async {
+        notificationGeneration += 1
+        let generation = notificationGeneration
         if on {
-            guard let push, await push.requestAuthorization() else {
-                notice = "Notifications are off for Apassy in Settings. Questions still show while Apassy is open."
-                notificationsOn = false
-                defaults.set(false, forKey: Self.notificationsKey)
-                return
-            }
             notificationsOn = true
             defaults.set(true, forKey: Self.notificationsKey)
+            notificationStatus = .checking
+            guard let push else { await refreshNotificationStatus(); return }
+            let allowed = await push.requestAuthorization()
+            guard generation == notificationGeneration else { return }
+            await refreshNotificationStatus()
+            guard generation == notificationGeneration else { return }
+            guard allowed else {
+                notice = "Notifications are off for Apassy in Settings. Requests still appear while Apassy is open."
+                return
+            }
+            registrationFailure = nil
             defaults.removeObject(forKey: Self.pushClearKey)
             defaults.removeObject(forKey: Self.pushClearedKey)
             defaults.removeObject(forKey: Self.pushPendingKey)
             notificationsPending = []
             tokenTeams = []
+            pushToken = nil
             push.registerForPushes()
             await updatePushToken()
         } else {
             notificationsOn = false
             defaults.set(false, forKey: Self.notificationsKey)
-            // iOS delivers nothing more, also from a team that still has the token.
             push?.unregisterForPushes()
             pushToken = nil
-            // Every team, also those of the vaults that are not open now: each is cleared when
-            // its vault is in the list.
+            registrationFailure = nil
             defaults.set(true, forKey: Self.pushClearKey)
             defaults.set([String](), forKey: Self.pushClearedKey)
             tokenTeams = []
+            updateNotificationStatus()
             await refresh()
         }
     }
 
-    /// At launch: a new token for the relay when notifications are on.
-    func registerPushesIfOn() {
-        if notificationsOn { push?.registerForPushes() }
+    func retryNotifications() async {
+        guard notificationsOn else { return }
+        await setNotifications(true)
     }
 
-    /// A device token from iOS. It is kept for this launch and goes to the relay of each questions
-    /// team in the list, now and when another vault opens.
+    /// At launch, ask for a fresh token only when notifications remain permitted by iOS.
+    func registerPushesIfOn() {
+        guard notificationsOn else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshNotificationStatus()
+            guard self.notificationsOn,
+                self.notificationAuthorization == .allowed || self.notificationAuthorization == .quiet
+            else { return }
+            self.push?.registerForPushes()
+        }
+    }
+
     func receivePushToken(_ token: Data) async {
+        guard notificationsOn else { return }
         if token != pushToken { tokenTeams = [] }
         pushToken = token
+        registrationFailure = nil
+        await refreshNotificationStatus()
         await updatePushToken()
     }
 
@@ -998,22 +1171,26 @@ final class QuestionsModel {
     private func updatePushToken() async {
         await clearPushToken()
         await sendPushToken()
+        updateNotificationStatus()
     }
 
     /// Send the token to the teams of the list that do not have it in this launch. A core that keeps
     /// every unlocked vault sends it to the team of each at once; an older core to the team of the
     /// selected vault, so the other teams get it when their vault is selected.
     private func sendPushToken() async {
-        guard notificationsOn, let push, let token = pushToken else { return }
+        guard notificationsOn,
+            notificationAuthorization == .allowed || notificationAuthorization == .quiet,
+            let push, let token = pushToken else { return }
         let teams = pushTeams
         guard !teams.isSubset(of: tokenTeams) else { return }
         do {
             try await service.pushTokenSet(token: token, environment: push.environment)
             tokenTeams.formUnion(teams)
+            registrationFailure = nil
         } catch let error as VaultError where error.code == .noQuestions || error.code == .locked {
             // No team yet, or the vault locked: the token goes at the next refresh.
         } catch {
-            notice = error.localizedDescription
+            registrationFailure = error.localizedDescription
         }
     }
 
@@ -1048,10 +1225,10 @@ final class QuestionsModel {
             ? [] : (vault?.vaults ?? []).filter { pending.contains($0.id) && isQuestionVault($0) }.map(\.name)
     }
 
-    /// "Notifications stay on for: Work, Family until you open them."
+    /// Local alerts are off; remote token removal waits for these vaults to open.
     var notificationsPendingText: String? {
         notificationsPending.isEmpty
-            ? nil : "Notifications stay on for: \(notificationsPending.joined(separator: ", ")) until you open them."
+            ? nil : "Alerts are off on this iPhone. Relay registration remains for: \(notificationsPending.joined(separator: ", ")) until you open them."
     }
 
     // MARK: Connecting a vault from iCloud Drive

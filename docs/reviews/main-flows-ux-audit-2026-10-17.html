@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Apassy flow audit</title>
+<style>
+:root{color-scheme:light dark;--radius:12px}*{box-sizing:border-box}body{margin:0;font:14px/1.5 var(--font-sans,system-ui,sans-serif);color:var(--foreground,#242424);background:transparent}p,h2,h3{margin:0}button{font:inherit;color:inherit}button:focus-visible,summary:focus-visible{outline:3px solid var(--ring,#1674df);outline-offset:3px}.lead{font-size:21px;font-weight:650;line-height:1.3;max-width:650px}.scope{margin:8px 0 18px;color:var(--muted-foreground,#666);font-size:13px}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px}.tabs button{min-height:44px;border:1px solid var(--border,#ccc);border-radius:8px;background:transparent;cursor:pointer;padding:9px 5px}.tabs button[aria-selected=true]{background:var(--primary,#222);color:var(--primary-foreground,#fff);border-color:transparent}.panel{padding:20px;border-radius:var(--radius);background:var(--card,#f7f7f7);border:1px solid var(--border,#ddd)}.eyebrow{font-size:12px;color:var(--muted-foreground,#666);margin-bottom:5px}.panel h2{font-size:18px;line-height:1.3;margin-bottom:8px}.problem{margin-bottom:17px}.flow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 17px}.step{padding:12px;border:1px solid var(--border,#d7d7d7);border-radius:9px;background:var(--background,#fff)}.step span{display:block;font-size:11px;color:var(--muted-foreground,#666);margin-bottom:4px}.step b{font-weight:600}.choices{display:grid;grid-template-columns:1fr 1fr;gap:18px}.choices h3{font-size:13px;margin-bottom:5px}.choices p{font-size:13px;color:var(--muted-foreground,#555)}.fixes{margin-top:20px}.fixes h2{font-size:16px;margin-bottom:5px}.fix{display:grid;grid-template-columns:94px 1fr;gap:12px;padding:11px 0;border-bottom:1px solid var(--border,#ddd)}.tag{font-size:12px;color:var(--muted-foreground,#555)}.fix p{font-size:13px}.fix strong{font-weight:600}details{margin-top:15px;font-size:12px;color:var(--muted-foreground,#666)}summary{cursor:pointer;min-height:32px;padding:5px 0}details p{margin:6px 0}code{font:11px var(--font-mono,monospace);overflow-wrap:anywhere}.note{margin-top:15px;color:var(--muted-foreground,#666);font-size:12px}[hidden]{display:none!important}@media(max-width:480px){.lead{font-size:19px}.panel{padding:16px}.flow{grid-template-columns:1fr}.step{padding:10px 12px}.step span{display:inline-block;margin-right:8px}.choices{grid-template-columns:1fr;gap:12px}.fix{grid-template-columns:70px 1fr;gap:8px}.tabs{gap:4px}.tabs button{font-size:12px}}
+</style></head>
+<body>
+<p class="lead">Put credentials and decisions back at the center of Apassy.</p>
+<p class="scope">Four-agent audit · Needs work · Proposed flows below are not implemented.</p>
+<div class="tabs" role="tablist" aria-label="Audited app flows">
+<button id="tab-ios" role="tab" aria-selected="true" aria-controls="panel-ios" tabindex="0">iOS</button>
+<button id="tab-desktop" role="tab" aria-selected="false" aria-controls="panel-desktop" tabindex="-1">Desktop</button>
+<button id="tab-requests" role="tab" aria-selected="false" aria-controls="panel-requests" tabindex="-1">Notifications</button>
+<button id="tab-browser" role="tab" aria-selected="false" aria-controls="panel-browser" tabindex="-1">Extension</button>
+</div>
+<section class="panel" id="panel-ios" role="tabpanel" aria-labelledby="tab-ios">
+<p class="eyebrow">Navigation and reading load</p><h2>Vault · Requests · Search</h2>
+<p class="problem">The current Vault starts with a directory and status. Credential details repeat unavailable Mac-only sections. Agents gives monitoring a primary destination.</p>
+<div class="flow" aria-label="Proposed iOS flow"><div class="step"><span>1</span><b>Unlock to credentials</b></div><div class="step"><span>2</span><b>Find or add an item</b></div><div class="step"><span>3</span><b>Use it and return</b></div></div>
+<div class="choices"><div><h3>Remove from the daily path</h3><p>Healthy sync banners, repeated “unlocked”, unavailable Agent Use / Rules sections, agent statistics.</p></div><div><h3>Keep within reach</h3><p>Agent Access in Settings and item/request context. Preserve revoke, freshness checks, security issues and sync recovery.</p></div></div>
+</section>
+<section class="panel" id="panel-desktop" role="tabpanel" aria-labelledby="tab-desktop" hidden>
+<p class="eyebrow">Daily organization and creation</p><h2>Make saving and cleanup dependable</h2>
+<p class="problem">Switching from paste to manual entry loses the chosen folder. Cleanup is one item at a time. Search and old filters can hide the result of saving.</p>
+<div class="flow" aria-label="Proposed desktop flow"><div class="step"><span>1</span><b>Choose Login or Paste</b></div><div class="step"><span>2</span><b>Enter fields + folder</b></div><div class="step"><span>3</span><b>See the saved item</b></div></div>
+<div class="choices"><div><h3>Add the missing controls</h3><p>Multi-select, bulk Move with Undo, Move Folder, clear search scope, and search by email or website.</p></div><div><h3>Keep the strong foundation</h3><p>Three-column library, batch paste detection, full folder paths and owner checks. Secret Copy needs an explicit product-policy decision.</p></div></div>
+</section>
+<section class="panel" id="panel-requests" role="tabpanel" aria-labelledby="tab-requests" hidden>
+<p class="eyebrow">Attention, routing and outcomes</p><h2>A notification should lead to useful work</h2>
+<p class="problem">Mac alerts open the app without an event destination. iOS can open the newest request after unrelated vault prompts. “Sent” asks the owner to infer the result.</p>
+<div class="flow" aria-label="Proposed request flow"><div class="step"><span>1</span><b>Open Requests</b></div><div class="step"><span>2</span><b>Review and decide</b></div><div class="step"><span>3</span><b>See confirmed outcome</b></div></div>
+<div class="choices"><div><h3>Quiet by default</h3><p>Visible requests update without duplicate banners. Suggestions stay nonurgent. Resolved work leaves Waiting and stays in Activity.</p></div><div><h3>Preserve privacy and truth</h3><p>iOS keeps its generic private push and opens a refreshed list. “Waiting for Mac” stays distinct from confirmed permission or command completion.</p></div></div>
+</section>
+<section class="panel" id="panel-browser" role="tabpanel" aria-labelledby="tab-browser" hidden>
+<p class="eyebrow">Missing interaction</p><h2>Choose a login beside the field</h2>
+<p class="problem">Inline login suggestions do not exist in the current extension. The toolbar picker is implemented; enabling passkeys does not add password suggestions.</p>
+<div class="flow" aria-label="Proposed extension flow"><div class="step"><span>1</span><b>Focus → matching accounts</b></div><div class="step"><span>2</span><b>Choose → owner check</b></div><div class="step"><span>3</span><b>Return to the filled form</b></div></div>
+<div class="choices"><div><h3>Design the recovery too</h3><p>Distinct unlock/connect/retry states. Bind to the chosen form. Handle username-first login and explicit password updates.</p></div><div><h3>Keep authorization narrow</h3><p>Opt-in site access, site-scoped metadata, browser-verified origin/frame/document, fresh approval and no automatic submission.</p></div></div>
+</section>
+<section class="fixes"><h2>Fix before visual polish</h2>
+<div class="fix"><span class="tag">Correctness</span><p><strong>Desktop folder choice:</strong> carry the destination through manual creation and save it atomically.</p></div>
+<div class="fix"><span class="tag">Correctness</span><p><strong>iOS editor:</strong> freeze the submitted draft, protect dirty dismissal, and save the pending tag.</p></div>
+<div class="fix"><span class="tag">Trust</span><p><strong>Request lifecycle:</strong> preserve context, distinguish sent from confirmed, and reconcile stale alerts on refresh.</p></div>
+</section>
+<details><summary>Evidence and limits</summary><p>Source: <code>e13c120</code>. Installed Mac inspection: <code>0.5.3 / 399a2b9</code>, an older build. Eight mocked extension routing/state checks passed. No live iOS, APNs or browser-fill acceptance.</p><p>The desktop AX probe exposed only window chrome despite visible content. AccessKit is enabled in source; verify the target build with VoiceOver before concluding the cause.</p><p>Design basis: Mental Model, Cognitive Load, Progressive Disclosure, Feedback Loop and Peak-End Rule. Exact file/line evidence and acceptance scenarios are in the accompanying report.</p></details>
+<p class="note">Audit and proposed changes only. Application code and vault data remain unchanged.</p>
+<script>
+const tabs=[...document.querySelectorAll('[role=tab]')];
+function selectTab(tab,focus=false){tabs.forEach(t=>{const active=t===tab;t.setAttribute('aria-selected',String(active));t.tabIndex=active?0:-1;document.getElementById(t.getAttribute('aria-controls')).hidden=!active});if(focus)tab.focus()}
+tabs.forEach((tab,i)=>{tab.addEventListener('click',()=>selectTab(tab));tab.addEventListener('keydown',e=>{let next;if(e.key==='ArrowRight')next=(i+1)%tabs.length;if(e.key==='ArrowLeft')next=(i+tabs.length-1)%tabs.length;if(e.key==='Home')next=0;if(e.key==='End')next=tabs.length-1;if(next!==undefined){e.preventDefault();selectTab(tabs[next],true)}})});
+let checked=0;for(const tab of tabs){selectTab(tab);if(document.querySelectorAll('[role=tabpanel]:not([hidden])').length!==1)throw Error('Panel visibility');if(document.querySelectorAll('[role=tab][aria-selected=true]').length!==1)throw Error('Tab selection');checked++}selectTab(tabs[0]);
+requestAnimationFrame(()=>console.log(JSON.stringify({tabsChecked:checked,viewport:innerWidth,horizontalOverflow:document.documentElement.scrollWidth>innerWidth,activePanel:document.querySelector('[role=tabpanel]:not([hidden])').id})));
+</script></body></html>

@@ -26,7 +26,9 @@ struct QuestionDetailView: View {
                     "This question could not be read", systemImage: "lock.trianglebadge.exclamationmark",
                     description: Text(question.problem ?? "Expired."))
             } else {
-                ContentUnavailableView("Expired", systemImage: "clock")
+                ContentUnavailableView(
+                    "Request unavailable", systemImage: "questionmark.circle",
+                    description: Text("Refresh Requests to check its current state. It may have ended or its vault may be locked."))
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -87,7 +89,14 @@ struct QuestionDetailView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if let outcome {
-                DecisionOutcomeBar(outcome: outcome)
+                VStack(spacing: 0) {
+                    DecisionOutcomeBar(outcome: outcome)
+                    if model.needsConfirmation(for: question) {
+                        Button("Check Again") { Task { await model.refresh() } }
+                            .buttonStyle(.bordered)
+                            .padding(.bottom, 8)
+                    }
+                }
             } else {
                 actions(question, card, bar)
             }

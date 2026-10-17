@@ -149,6 +149,108 @@ impl OwnerSession {
         Ok(found)
     }
 
+    /// Site-scoped permitted metadata, filtered before the result limit. A focus
+    /// query never reveals a password, seed, hidden detail, or arbitrary field.
+    pub fn suggestions_for_page(&self, page: &Page, username: &str) -> ModelResult<Vec<PageLogin>> {
+        let prefix = username.trim().to_lowercase();
+        let mut found = self.all_logins_for_page(page)?;
+        found.retain(|login| login.username.to_lowercase().starts_with(&prefix));
+        found.truncate(MAX_LOGINS);
+        Ok(found)
+    }
+
+    /// The exact existing account and its revision before an update approval.
+    pub fn page_login_update_target(
+        &self,
+        id: u64,
+        page: &Page,
+        username: &str,
+    ) -> ModelResult<(PageLogin, u64)> {
+        let login = self.page_login(id, page)?;
+        if login.username != username {
+            return Err(fail(
+                "no_match",
+                "The selected login has another username. Nothing was updated.",
+            ));
+        }
+        let revision = self
+            .unlocked()?
+            .details(id)
+            .map_err(map_err)?
+            .summary
+            .revision;
+        Ok((login, revision))
+    }
+
+    /// Password-only update after a fresh, exact, revision-bound owner check.
+    /// Vault::update preserves reserved passkey fields itself. Copy every ordinary
+    /// field unchanged, including Website, TOTP and fields unknown to this UI.
+    pub fn update_page_login(
+        &mut self,
+        id: u64,
+        revision: u64,
+        username: &str,
+        password: SecretText,
+        page: &Page,
+        proof: OwnerProof,
+    ) -> ModelResult<u64> {
+        let details = self.unlocked()?.details(id).map_err(map_err)?;
+        if details.summary.revision != revision {
+            drop(proof);
+            return Err(fail(
+                "stale_item",
+                "This login changed during approval. Review it and choose Update Login again. Nothing was updated.",
+            ));
+        }
+        let mut vault = self.unlocked_for(
+            proof,
+            &OwnerAction::UpdateLogin {
+                item_id: id,
+                login: details.summary.title.clone(),
+                username: username.to_owned(),
+                origin: page.origin(),
+                revision,
+            },
+        )?;
+        let current_username = fillable(&vault, id, page)?.ok_or_else(no_match)?;
+        if current_username != username {
+            return Err(fail(
+                "no_match",
+                "The selected login has another username. Nothing was updated.",
+            ));
+        }
+        let mut fields = Vec::with_capacity(details.fields.len());
+        for field in details.fields {
+            let value = if field.name == "password" {
+                crate::vault::SecretValue::new(password.expose().to_owned())
+            } else {
+                vault.reveal(id, &field.name).map_err(map_err)?
+            };
+            fields.push(crate::vault::Field {
+                name: field.name,
+                value,
+                secret: field.secret,
+            });
+        }
+        drop(password);
+        vault
+            .update(
+                id,
+                revision,
+                crate::vault::ItemDraft {
+                    title: details.summary.title,
+                    kind: details.summary.kind,
+                    notes: details.notes,
+                    tags: details.tags,
+                    fields,
+                },
+            )
+            .map_err(map_err)?;
+        drop(vault);
+        self.forget_item_reveals(id);
+        Ok(id)
+    }
+
     /// A login for `page` with `username`, without regard to case.
     pub fn login_with_username(
         &self,

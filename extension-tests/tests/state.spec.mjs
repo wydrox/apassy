@@ -52,7 +52,7 @@ test("an app that does not run asks to open Apassy", async ({ h }) => {
   expect(reply.message).toBe("Open Apassy to fill logins.");
 });
 
-test("a missing host manifest is host_missing", async ({ h }) => {
+test("a profile-local host denial is host_missing without system-host fallback", async ({ h }) => {
   await h.openGranted("/login");
   h.removeHost();
   h.clearRequests();

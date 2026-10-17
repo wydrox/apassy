@@ -240,6 +240,12 @@ pub enum OwnerRequest {
         item_id: u64,
         field: String,
     },
+    /// Copy an exact ordinary secret field without revealing it in the window.
+    CopyField {
+        item_id: u64,
+        field: String,
+        revision: u64,
+    },
     /// Fill one login in the browser (ADR 0021). Only the browser socket asks for it.
     /// The name and the username are for the dialog.
     FillLogin {
@@ -247,6 +253,14 @@ pub enum OwnerRequest {
         item_name: String,
         username: String,
         origin: String,
+    },
+    /// Replace one exact login password. The password waits only in its browser ticket.
+    UpdateLogin {
+        item_id: u64,
+        item_name: String,
+        username: String,
+        origin: String,
+        revision: u64,
     },
     /// Save the login that the owner typed on a page (ADR 0021). The password waits in
     /// the browser ticket of the dialog.
@@ -533,12 +547,14 @@ pub enum OwnerRequest {
 }
 
 impl OwnerRequest {
-    /// True for a request whose result goes only to a request that still waits: a code or
-    /// a passkey. Without a live ticket nothing signs and no code is made.
+    /// True for a request that requires a live browser or platform ticket. Without
+    /// one, no passkey signs, no code is made and no browser login is filled or updated.
     pub fn needs_live_ticket(&self) -> bool {
         matches!(
             self,
             Self::FillCode { .. }
+                | Self::FillLogin { .. }
+                | Self::UpdateLogin { .. }
                 | Self::SignPasskey { .. }
                 | Self::CreatePasskey { .. }
                 | Self::SystemFillLogin { .. }
@@ -653,6 +669,15 @@ impl OwnerRequest {
                 item_id: *item_id,
                 field: field.clone(),
             },
+            Self::CopyField {
+                item_id,
+                field,
+                revision,
+            } => OwnerAction::CopyField {
+                item_id: *item_id,
+                field: field.clone(),
+                revision: *revision,
+            },
             Self::FillLogin {
                 item_id,
                 item_name,
@@ -662,6 +687,19 @@ impl OwnerRequest {
                 item_id: *item_id,
                 login: item_name.clone(),
                 origin: origin.clone(),
+            },
+            Self::UpdateLogin {
+                item_id,
+                item_name,
+                username,
+                origin,
+                revision,
+            } => OwnerAction::UpdateLogin {
+                item_id: *item_id,
+                login: item_name.clone(),
+                username: username.clone(),
+                origin: origin.clone(),
+                revision: *revision,
             },
             Self::SaveLogin {
                 title,
@@ -848,6 +886,10 @@ impl OwnerRequest {
                 "Copy the current code of \"{}\". Apassy clears the clipboard when the code changes, if the clipboard still holds it.",
                 super::owner_store::field_label(field)
             ),
+            Self::CopyField { field, .. } => format!(
+                "Copy “{}” for 30 seconds. Other apps may read or retain it. Apassy clears only its own clipboard entry.",
+                page_text(&super::owner_store::field_label(field))
+            ),
             Self::FillLogin {
                 item_name,
                 username,
@@ -855,6 +897,11 @@ impl OwnerRequest {
                 ..
             } => format!(
                 "Fill the login \"{item_name}\" ({username}) on {origin} in your browser. The page gets the username and the password once."
+            ),
+            Self::UpdateLogin { item_name, username, origin, .. } => format!(
+                "For {origin}: update the password of \"{}\" ({}). The new password comes from the page. Other login details stay saved.",
+                page_text(item_name),
+                dialog_cut(username)
             ),
             // The site comes first: the title and the username come from the browser.
             Self::SaveLogin {
@@ -1273,6 +1320,8 @@ type RunningCheck = (
 
 /// The owner check dialog.
 pub(crate) struct CheckDialog {
+    /// Binds queued native text-edit commands to this exact confirmation.
+    pub(crate) identity: u64,
     pub(crate) request: OwnerRequest,
     /// The passphrase field. The app erases it after each try.
     pub(crate) passphrase: String,
@@ -1287,6 +1336,15 @@ pub(crate) struct CheckDialog {
     /// The request of the macOS passkey sheet that asked for this check. It gets the
     /// answer.
     pub(crate) platform: Option<super::passkey_socket::PlatformTicket>,
+}
+
+fn next_check_dialog_identity() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        value.checked_add(1)
+    })
+    .expect("owner confirmation identity exhausted")
 }
 
 /// Touch ID unlock state for the open vault file.
@@ -1432,6 +1490,7 @@ impl DesktopApp {
             other => other,
         };
         self.owner.check = Some(CheckDialog {
+            identity: next_check_dialog_identity(),
             request,
             passphrase: String::with_capacity(super::ui::PASSPHRASE_CAPACITY),
             running: None,
@@ -1468,6 +1527,7 @@ impl DesktopApp {
             return;
         }
         *chosen = index;
+        dialog.identity = next_check_dialog_identity();
         dialog.running = None;
         dialog.message = None;
     }
@@ -1572,9 +1632,15 @@ impl DesktopApp {
             OwnerRequest::CopyCode { item_id, field } => {
                 self.complete_copy_code(item_id, &field, proof)
             }
+            OwnerRequest::CopyField { item_id, field, revision } => {
+                self.complete_copy_field(item_id, &field, revision, proof)
+            }
             OwnerRequest::FillLogin {
                 item_id, origin, ..
             } => self.complete_fill(item_id, &origin, proof),
+            OwnerRequest::UpdateLogin { item_id, revision, username, origin, .. } => {
+                self.complete_browser_update(item_id, revision, &username, &origin, proof)
+            }
             OwnerRequest::SaveLogin {
                 title,
                 username,
@@ -2023,6 +2089,35 @@ impl DesktopApp {
         }
     }
 
+    /// Release only the exact approved field to the expiring clipboard. No revealed
+    /// value or reusable authorization is left in the view.
+    fn complete_copy_field(&mut self, item_id: u64, field: &str, revision: u64, proof: OwnerProof) {
+        let Some(epoch) = self.owner_ui.session.epoch() else {
+            self.set_err("The vault is locked. Nothing was copied.");
+            return;
+        };
+        let value = match self
+            .owner_ui
+            .session
+            .copy_field(item_id, field, revision, proof)
+        {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_err(err.message);
+                return;
+            }
+        };
+        match self
+            .owner
+            .clipboard
+            .copy_secret(value, epoch, std::time::Instant::now())
+        {
+            Ok(_) => self
+                .set_ok("Copied. Clears in 30 seconds if the clipboard still holds Apassy's copy."),
+            Err(err) => self.set_err(err.message()),
+        }
+    }
+
     /// Do the request of a passed check, and answer the command line or the browser when
     /// it asked.
     fn finish_owner_check(&mut self, dialog: CheckDialog, proof: OwnerProof) {
@@ -2369,6 +2464,7 @@ impl DesktopApp {
     /// Lock the vault. Waiting runs end and stay in the inbox. Typed secrets and their
     /// undo history are erased (key-memory review F1, F3).
     pub(crate) fn lock_vault(&mut self, ctx: Option<&egui::Context>) {
+        super::ui::invalidate_notifications(self);
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
         self.files.forget();

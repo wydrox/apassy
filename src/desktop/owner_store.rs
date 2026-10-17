@@ -38,6 +38,7 @@ use crate::vault::{
 
 mod add;
 mod browser;
+mod copy;
 mod decisions;
 pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
 pub use decisions::{ActionUse, AgentOverview, ExceptionRow, RecentUse, WeekCounts};
@@ -714,7 +715,7 @@ impl OwnerSession {
     pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
         let found = {
             let vault = self.unlocked()?;
-            vault.search(query).map_err(map_err)?
+            vault.search_identities(query).map_err(map_err)?
         };
         found
             .into_iter()
@@ -743,12 +744,61 @@ impl OwnerSession {
     }
 
     pub fn add(&mut self, draft: &ItemDraft, secrets: &SecretForm) -> ModelResult<OwnerSummary> {
+        self.add_in_folder(draft, secrets, None)
+    }
+
+    /// Save into the chosen folder atomically. A removed destination keeps the form
+    /// unsaved, so the owner can choose another folder without creating a duplicate.
+    pub fn add_in_folder(
+        &mut self,
+        draft: &ItemDraft,
+        secrets: &SecretForm,
+        folder: Option<&str>,
+    ) -> ModelResult<OwnerSummary> {
         let vault_draft = {
             let vault = self.unlocked()?;
             build_vault_draft(&vault, None, draft, secrets)?
         };
-        let summary = self.unlocked()?.add(vault_draft).map_err(map_err)?;
+        let summary = self
+            .unlocked()?
+            .add_in_folder(vault_draft, folder)
+            .map_err(|error| {
+                if error.kind() == VaultErrorKind::NotFound {
+                    fail("not_found", "The folder is gone. Select another folder.")
+                } else {
+                    map_err(error)
+                }
+            })?;
         self.row_from(summary)
+    }
+
+    /// Move only the specified credentials, or none, and return an Undo receipt.
+    pub fn move_items_to_folder(
+        &mut self,
+        item_ids: &[u64],
+        folder: Option<&str>,
+    ) -> ModelResult<Vec<crate::vault::ItemFolderMove>> {
+        self.unlocked()?
+            .move_items_to_folder(item_ids, folder)
+            .map_err(folder_operation_error)
+    }
+
+    /// Restore a batch only while every credential remains at its recorded move.
+    pub fn undo_item_folder_moves(
+        &mut self,
+        moves: &[crate::vault::ItemFolderMove],
+    ) -> ModelResult<()> {
+        self.unlocked()?
+            .undo_item_folder_moves(moves)
+            .map_err(folder_operation_error)
+    }
+
+    /// Reparent a folder with its subtree. Cycles, name collisions and excessive
+    /// depth fail without moving anything.
+    pub fn move_folder(&mut self, uuid: &str, parent: Option<&str>) -> ModelResult<()> {
+        self.unlocked()?
+            .move_folder(uuid, parent)
+            .map_err(folder_operation_error)
     }
 
     /// Add an item from an import (`crate::import`). The draft already has the layout of
@@ -2059,6 +2109,28 @@ fn map_err(err: VaultError) -> ModelError {
     ModelError {
         code,
         message: owner_message(err.kind()).to_owned(),
+    }
+}
+
+fn folder_operation_error(error: VaultError) -> ModelError {
+    match error.kind() {
+        VaultErrorKind::NotFound => fail(
+            "not_found",
+            "A credential or folder is gone. Refresh the list and select another folder.",
+        ),
+        VaultErrorKind::Conflict => fail(
+            "conflict",
+            "The credentials moved again or the vault session changed. Nothing was undone.",
+        ),
+        VaultErrorKind::AlreadyExists => fail(
+            "already_exists",
+            "This destination already has a folder with that name. Choose another destination.",
+        ),
+        VaultErrorKind::InvalidInput => fail(
+            "invalid_input",
+            "Select distinct credentials and a valid destination. A folder cannot move inside itself or exceed the nesting limit.",
+        ),
+        _ => map_err(error),
     }
 }
 

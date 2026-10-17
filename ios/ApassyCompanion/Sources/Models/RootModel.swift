@@ -129,7 +129,8 @@ final class RootModel {
     /// Prepare first, so a scanner sheet can finish dismissing before navigation changes.
     private func prepareCompanion(code: String) -> String? {
         guard case .pairing(let model) = companion.phase else {
-            return "This iPhone is already paired with a Mac on Wi-Fi, and that pairing is for one Mac. To answer several Macs, use Questions through the relay: on each Mac, open Settings > Devices > Notifications through the relay > Add an iPhone."
+            return
+                "This iPhone is already paired with a Mac on Wi-Fi, and that pairing is for one Mac. To answer several Macs, use Questions through the relay: on each Mac, open Settings > Devices > Notifications through the relay > Add an iPhone."
         }
         return model.receiveCode(code)
     }
@@ -166,6 +167,8 @@ final class RootModel {
                 service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
                 biometry: vault.gate.biometry,
                 isAway: { [weak vault] in vault?.isInBackground ?? false },
+                readAutoFillEnabled: { await ASCredentialIdentityStore.shared.state().isEnabled },
+                openAutoFillSettings: { try await ASSettingsHelper.openCredentialProviderAppSettings() },
                 onFinished: { [weak self] _ in self?.finishAddVault() },
                 onCancel: { [weak self] in self?.cancelAddVault() }))
     }
@@ -383,7 +386,9 @@ private final class ExportSession {
     private var current: Manager?
 
     func request() async throws -> ASExportedCredentialData.FormatVersion {
-        guard let window = Self.window() else { throw VaultError(.internal, "Apassy has no window to show the export in.") }
+        guard let window = Self.window() else {
+            throw VaultError(.internal, "Apassy has no window to show the export in.")
+        }
         let manager = Manager(manager: ASCredentialExportManager(presentationAnchor: window))
         current = manager
         return try await Self.request(manager, extensionID: Bundle.main.bundleIdentifier.map { $0 + ".autofill" })

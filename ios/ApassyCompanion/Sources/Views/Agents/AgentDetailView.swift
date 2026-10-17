@@ -37,10 +37,13 @@ struct AgentDetailView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { shown in
-                Text(AgentsText.confirmMessage(shown.exception, agent: shown.entry.agent.name, mac: shown.entry.mac.name))
+                Text(
+                    AgentsText.confirmMessage(shown.exception, agent: shown.entry.agent.name, mac: shown.entry.mac.name)
+                )
             }
             #if DEBUG && targetEnvironment(simulator)
                 .agentsConfirmSeed(entry) { confirming = Confirmation(exception: $0, entry: entry) }
+                .agentsUnverifiedSettleSeed(model, entry: entry)
             #endif
         } else {
             ContentUnavailableView(
@@ -68,10 +71,13 @@ struct AgentDetailView: View {
                     }
                 }
 
+                sees(entry)
+                    .opacity(dim)
+                exceptions(entry)
+
                 Group {
                     week(agent)
                     if !agent.projects.isEmpty { projects(agent) }
-                    sees(entry)
                     if !agent.recent.isEmpty { recent(entry, now: now) }
                     if !agent.note.isEmpty {
                         Section {
@@ -84,8 +90,6 @@ struct AgentDetailView: View {
                     }
                 }
                 .opacity(dim)
-
-                exceptions(entry)
 
                 Section {
                 } footer: {
@@ -117,7 +121,7 @@ struct AgentDetailView: View {
                 .foregroundStyle(.secondary)
             let caps = caps(entry)
             if !caps.isEmpty {
-                HStack(spacing: 6) {
+                FlowLayout {
                     ForEach(caps, id: \.label) { cap in CapView(label: cap.label, red: cap.red) }
                 }
             }
@@ -263,10 +267,10 @@ struct AgentDetailView: View {
                             confirming = Confirmation(exception: same ?? exception, entry: now)
                         }
                     }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .tint(.red)
-                        .accessibilityLabel("Remove \(AgentsText.exception(exception))")
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.red)
+                    .accessibilityLabel("Remove \(AgentsText.exception(exception))")
                 }
             }
             .opacity(entry.mac.stale ? 0.5 : 1)

@@ -93,7 +93,9 @@ test("a save for a tab that went to another origin reads nothing and asks nothin
   await page.goto(otherUrl);
   await typeLogin(page, "typed-user", TYPED_PASSWORD);
   const reply = await h.handle({ type: "save", tabId: state.tabId, url: state.url, title: "Typed site", username: "typed-user" });
-  expect(reply).toEqual({ ok: false, code: "page_changed", message: "The page changed. Nothing was saved." });
+  expect(reply.ok).toBe(false);
+  expect(reply.code).toBe("page_changed");
+  expect(reply.message).toContain("choose the account again");
   const peek = await h.handle({ type: "peek", tabId: state.tabId, url: state.url });
   expect(peek.code).toBe("page_changed");
   expect(h.requests()).toEqual([]);

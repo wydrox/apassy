@@ -3,6 +3,12 @@
 Date: 2026-10-06.
 Status: ACCEPTED in scope by the owner on 2026-10-06 ("czy możesz stworzyć chromium extension jak 1password?"). The owner set the rule for secrets: "agenci i automatyczne użycie nigdy nie widzi hasła. wyjątkiem jest użycie przez użytkownika (człowieka) czy to pokazanie sekretu w aplikacji czy wstawianie sekretów - Touch ID lub hasło przy każdym wypełnieniu". The other choices below are proposals; the open decisions are D1 to D6 in the last section.
 
+## Current supersession — 2026-10-17
+
+The owner approved the main-flow UX plan on 2026-10-17. The current [browser contract](../contracts/browser-v1.md) adds metadata-only `suggestions`, optional site access for an inline chooser, document/frame/form-bound filling, and an explicit password-only `update` after a fresh check for the exact login, username, origin, and revision. Same-origin frames are supported; a cross-origin form has an explicit open-in-own-tab recovery route. This supersedes the original top-frame-only, no-inline-menu, and no-existing-login-update limits below (D2 and the update part of D3); it does not authorize direct cross-origin frame filling (D4).
+
+The owner also explicitly accepted desktop Copy on 2026-10-17. [ADR 0027](0027-owner-desktop-copy.md) supersedes only the two-owner-routes restriction in §1 by adding freshly authenticated, expiring desktop Copy. Broker and owner socket APIs remain secret-free, and every browser fill still needs its own owner check. The sections below preserve the decisions and proposals as recorded on their original dates.
+
 ## Context
 
 - The [product vision](../product-vision-v1.md) left "universal autofill" out of the MVP. Login items exist (`username`, `password`), and the 1Password import keeps their addresses as a visible detail "Website" ([import](../operations/import-1password.md)). The owner must copy a password out of the window today.

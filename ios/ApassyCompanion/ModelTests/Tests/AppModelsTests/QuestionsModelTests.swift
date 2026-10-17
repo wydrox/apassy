@@ -51,6 +51,52 @@ final class ScriptedPush: PushPermission {
     private(set) var registrations = 0
     private var onOpen: (@MainActor () -> Void)?
     let environment = PushEnvironment.development
+    var quiet = false
+    var delivered: [String] = []
+    private(set) var removed: [String] = []
+    var afterDeliveredSnapshot: (() -> Void)?
+    private(set) var requestsVisible = false
+    private(set) var foregroundAlerts: [Bool] = []
+    private var onFailure: (@MainActor (String) -> Void)?
+    private var onForeground: (@MainActor () -> Void)?
+    var holdsAuthorization = false
+    var holdsDeliveredSnapshot = false
+    private(set) var authorizationReads = 0
+    private(set) var deliveredReads = 0
+    private var authorizationWaiter: CheckedContinuation<Void, Never>?
+    private var deliveredWaiter: CheckedContinuation<Void, Never>?
+
+    func authorization() async -> RequestNotificationAuthorization {
+        authorizationReads += 1
+        if holdsAuthorization { await withCheckedContinuation { authorizationWaiter = $0 } }
+        return allows ? (quiet ? .quiet : .allowed) : .denied
+    }
+    func releaseAuthorization() {
+        holdsAuthorization = false
+        authorizationWaiter?.resume()
+        authorizationWaiter = nil
+    }
+    func releaseDeliveredSnapshot() {
+        holdsDeliveredSnapshot = false
+        deliveredWaiter?.resume()
+        deliveredWaiter = nil
+    }
+    func observeRegistrationFailures(_ handler: @escaping @MainActor (String) -> Void) { onFailure = handler }
+    func observeForegroundRequests(_ handler: @escaping @MainActor () -> Void) { onForeground = handler }
+    func setRequestsVisible(_ visible: Bool) { requestsVisible = visible }
+    func deliveredRequestIdentifiers() async -> [String] {
+        deliveredReads += 1
+        if holdsDeliveredSnapshot { await withCheckedContinuation { deliveredWaiter = $0 } }
+        let snapshot = delivered
+        afterDeliveredSnapshot?()
+        return snapshot
+    }
+    func removeDeliveredRequests(identifiers: [String]) { removed += identifiers }
+    func failRegistration(_ message: String) { onFailure?(message) }
+    func foreground() {
+        foregroundAlerts.append(!requestsVisible)
+        onForeground?()
+    }
 
     init(allows: Bool) { self.allows = allows }
 
@@ -178,14 +224,14 @@ struct QuestionsModelTests {
         let defaults: UserDefaults
         let model: QuestionsModel
 
-        init(allows: Bool = true, onCompanionCode: @escaping @MainActor (String) -> String? = { _ in nil }) {
+        init(allows: Bool = true, now: @escaping @MainActor () -> Date = { Date() }, onCompanionCode: @escaping @MainActor (String) -> String? = { _ in nil }) {
             push = ScriptedPush(allows: allows)
             let suite = "questions-\(UUID().uuidString)"
             defaults = UserDefaults(suiteName: suite)!
             defaults.removePersistentDomain(forName: suite)
             model = QuestionsModel(
                 service: service, signer: signer, push: push, deviceName: "Test iPhone", defaults: defaults,
-                retryInterval: .milliseconds(10), onCompanionCode: onCompanionCode)
+                now: now, retryInterval: .milliseconds(10), onCompanionCode: onCompanionCode)
         }
 
         func withQuestion() async -> RemoteQuestion {
@@ -293,24 +339,25 @@ struct QuestionsModelTests {
         #expect(sent.map(\.answer.kind) == [.allowProduction])
         #expect(sent[0].signature == Data("signature".utf8))
         #expect(fixture.model.deliveries[question.qid] == .sent(.allowProduction))
-        #expect(fixture.model.deliveryText(for: fixture.model.questions[0]) 
-            == "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused.")
+        #expect(fixture.model.deliveryText(for: fixture.model.questions[0])
+            == QuestionsModel.sentText)
     }
 
     @Test("Deny and the stricter answers go without Face ID")
-    func stricterAnswersNeedNoFaceID() async {
-        let fixture = Fixture()
-        let question = await fixture.withQuestion()
-        let bar = AnswerBar.make(for: question.card!)
-        await fixture.model.send(bar.deny, for: fixture.model.questions[0])
-        let disconnect = bar.menu.first { $0.answer.kind == .disconnect }!
-        await fixture.model.send(disconnect, for: fixture.model.questions[0])
-        let production = bar.menu.first { $0.answer.environment == .production }!
-        await fixture.model.send(production, for: fixture.model.questions[0])
-        #expect(fixture.signer.reasons.isEmpty)
-        let sent = await fixture.service.sentAnswers()
-        #expect(sent.map(\.answer.kind) == [.deny, .disconnect, .correctEnvironment])
-        #expect(sent.allSatisfy { $0.signature == nil })
+    func stricterAnswersNeedNoFaceID() async throws {
+        for kind in [AnswerKind.deny, .disconnect, .correctEnvironment] {
+            let fixture = Fixture()
+            let question = await fixture.withQuestion()
+            let bar = AnswerBar.make(for: question.card!)
+            let choice = try #require(([bar.deny] + bar.menu).first {
+                $0.answer.kind == kind && (kind != .correctEnvironment || $0.answer.environment == .production)
+            })
+            await fixture.model.send(choice, for: question)
+            #expect(fixture.signer.reasons.isEmpty)
+            let sent = await fixture.service.sentAnswers()
+            #expect(sent.map(\.answer.kind) == [kind])
+            #expect(sent.allSatisfy { $0.signature == nil })
+        }
     }
 
     @Test("a cancelled Face ID sends nothing")
@@ -350,14 +397,20 @@ struct QuestionsModelTests {
         #expect(await fixture.service.sentAnswers().count == 1)
         #expect(fixture.model.deliveries[question.qid] == .sent(.deny))
 
-        await fixture.service.failNextAnswer(VaultError(.alreadyAnswered, "Already answered on another device."))
+        // A known accepted answer cannot be submitted a second time while its Mac is offline.
         await fixture.model.send(AnswerBar.make(for: question.card!).deny, for: fixture.model.questions[0])
-        #expect(fixture.model.deliveries[question.qid] == .failed("Already answered."))
+        #expect(await fixture.service.sentAnswers().count == 1)
+        #expect(fixture.model.deliveries[question.qid] == .sent(.deny))
+        let late = Fixture()
+        let lateQuestion = await late.withQuestion()
+        await late.service.failNextAnswer(VaultError(.alreadyAnswered, "Already answered on another device."))
+        await late.model.send(AnswerBar.make(for: lateQuestion.card!).deny, for: lateQuestion)
+        #expect(late.model.deliveries[lateQuestion.qid] == .failed("Already answered."))
 
         await fixture.service.settleQuestion(qid: question.qid, by: "Test iPhone")
         await fixture.model.refresh()
         #expect(fixture.model.waitingCount == 0)
-        #expect(fixture.model.deliveryText(for: fixture.model.questions[0]) == "Answered on Test iPhone")
+        #expect(fixture.model.deliveryText(for: fixture.model.questions[0]) == "Confirmed on Test iPhone")
     }
 
     @Test("a removed device gets a notice and no registration")
@@ -404,7 +457,9 @@ struct QuestionsModelTests {
         _ = await refused.withQuestion()
         await refused.model.setNotifications(true)
         #expect(refused.push.asked == 1)
-        #expect(!refused.model.notificationsOn)
+        #expect(refused.model.notificationsOn)
+        #expect(refused.model.notificationStatus == .denied)
+        #expect(refused.model.notificationNeedsSettings)
         #expect(refused.push.registrations == 0)
         #expect(refused.model.notice?.contains("Notifications are off") == true)
 
@@ -423,6 +478,161 @@ struct QuestionsModelTests {
         #expect(fixture.push.unregistrations == 1)
         await fixture.model.receivePushToken(Data([4]))
         #expect(await fixture.service.currentPushToken() == nil)
+    }
+
+    @Test("OS revocation and APNs failure are visible, and registration can recover")
+    func effectiveNotificationStatus() async {
+        let fixture = Fixture()
+        _ = await fixture.withQuestion()
+        await fixture.model.setNotifications(true)
+        #expect(fixture.model.notificationStatus == .registering)
+        fixture.push.failRegistration("Synthetic registration error.")
+        #expect(fixture.model.notificationStatus == .failed("Synthetic registration error."))
+        #expect(fixture.model.notificationCanRetry)
+        await fixture.model.retryNotifications()
+        #expect(fixture.push.registrations == 2)
+        await fixture.model.receivePushToken(Data([7]))
+        #expect(fixture.model.notificationStatus == .ready)
+        fixture.push.allows = false
+        let asks = fixture.push.asked
+        await fixture.model.refreshNotificationStatus()
+        #expect(fixture.model.notificationsOn)
+        #expect(fixture.model.notificationStatus == .denied)
+        #expect(fixture.model.notificationNeedsSettings)
+        #expect(fixture.push.asked == asks, "Refreshing settings must not request permission")
+        fixture.push.allows = true
+        fixture.push.quiet = true
+        await fixture.model.refreshNotificationStatus()
+        #expect(fixture.model.notificationStatus == .quiet)
+    }
+
+    @Test("settlement clears only the delivered snapshot when no request still waits")
+    func reconcileDeliveredAlerts() async {
+        let fixture = Fixture()
+        await fixture.service.addQuestionsVault(id: "complete-list", name: "Test", team: "t_test")
+        let question = await fixture.withQuestion()
+        fixture.push.delivered = ["old-private-alert"]
+        await fixture.model.refresh()
+        #expect(fixture.push.removed.isEmpty)
+        await fixture.model.send(AnswerBar.make(for: question.card!).deny, for: question)
+        #expect(fixture.push.removed.isEmpty, "Relay acceptance is not settlement")
+        await fixture.service.settleQuestion(qid: question.qid, by: "Test Mac")
+        fixture.push.afterDeliveredSnapshot = { fixture.push.delivered += ["new-alert-during-refresh"] }
+        await fixture.model.refresh()
+        await fixture.model.alertReconciliationFinished()
+        #expect(fixture.push.removed == ["old-private-alert"])
+        #expect(!fixture.push.removed.contains("new-alert-during-refresh"))
+    }
+
+    @Test("an offline Mac leaves a sent answer unconfirmed, never refused")
+    func offlineMacRemainsUnconfirmed() async {
+        var time = Date()
+        let fixture = Fixture(now: { time })
+        let question = await fixture.withQuestion()
+        await fixture.model.send(AnswerBar.make(for: question.card!).deny, for: question)
+        #expect(fixture.model.outcome(for: question)?.text == QuestionsModel.sentText)
+        #expect(fixture.model.waitingCount == 0)
+        time = time.addingTimeInterval(61)
+        #expect(fixture.model.outcome(for: question) == QuestionOutcome(text: QuestionsModel.unconfirmedText, tone: .neutral))
+        #expect(fixture.model.needsConfirmation(for: question))
+        time = time.addingTimeInterval(301)
+        #expect(fixture.model.outcome(for: question)?.text == QuestionsModel.unconfirmedText)
+        await fixture.model.refresh()
+        #expect(fixture.model.outcome(for: fixture.model.questions[0])?.text == QuestionsModel.unconfirmedText)
+        #expect(fixture.model.deliveries[question.qid] == .sent(.deny))
+    }
+
+    @Test("foreground quieting is limited to an unlocked visible list")
+    func visibleRequests() async {
+        let fixture = Fixture()
+        fixture.model.setRequestsPresented(true)
+        fixture.model.setRequestsVisible(true)
+        #expect(!fixture.push.requestsVisible)
+        await fixture.service.addQuestionsVault(id: "complete-list", name: "Test", team: "t_test")
+        _ = await fixture.withQuestion()
+        #expect(fixture.push.requestsVisible)
+        fixture.model.setRequestsVisible(false)
+        #expect(!fixture.push.requestsVisible)
+        fixture.model.setRequestsVisible(true)
+        fixture.model.vaultDidLock()
+        #expect(!fixture.push.requestsVisible)
+    }
+
+    @Test("parent Settings, dismissal, and tab changes retain foreground request alerts")
+    func coveredRequestsKeepAlerts() async {
+        let fixture = Fixture()
+        await fixture.service.addQuestionsVault(id: "complete-list", name: "Test", team: "t_test")
+        _ = await fixture.withQuestion()
+        fixture.model.setRequestsPresented(true)
+        fixture.model.setRequestsVisible(true)
+        fixture.push.foreground()
+        #expect(fixture.push.foregroundAlerts == [false], "The actual uncovered Requests list updates quietly")
+
+        // Requests remains mounted when Settings opens above it.
+        fixture.model.setRequestsPresented(false)
+        fixture.model.setRequestsVisible(true)
+        fixture.push.foreground()
+        #expect(!fixture.push.requestsVisible)
+        #expect(fixture.push.foregroundAlerts == [false, true])
+
+        // Parent ui.sheet becomes nil before its dismissal finishes. The parent gate stays false.
+        fixture.model.setRequestsPresented(false)
+        fixture.push.foreground()
+        #expect(fixture.push.foregroundAlerts == [false, true, true])
+        fixture.model.setRequestsPresented(true)  // Parent sheet onDismiss.
+        fixture.push.foreground()
+        #expect(fixture.push.foregroundAlerts == [false, true, true, false])
+
+        // A tab change must win even if the mounted list sends another appearance update.
+        fixture.model.setRequestsPresented(false)
+        fixture.model.setRequestsVisible(true)
+        fixture.push.foreground()
+        #expect(fixture.push.foregroundAlerts == [false, true, true, false, true])
+    }
+
+    @Test("a stalled OS permission read cannot block discovery of an unconnected vault")
+    func permissionReadDoesNotBlockConnectionState() async {
+        let fixture = Fixture()
+        fixture.push.holdsAuthorization = true
+        await fixture.service.setQuestions(enabled: false)
+        let watching = Task { await fixture.model.watch() }
+        for _ in 0..<1_000 {
+            if fixture.push.authorizationReads > 0 && fixture.model.phase == .off { break }
+            await Task.yield()
+        }
+        #expect(fixture.push.authorizationReads == 1)
+        #expect(fixture.model.phase == .off)
+        #expect(fixture.model.canConnect)
+        #expect(fixture.push.asked == 0)
+        fixture.push.releaseAuthorization()
+        watching.cancel()
+        await watching.value
+    }
+
+    @Test("stalled delivered-alert housekeeping cannot block connection discovery or clear a new request")
+    func deliveredReadDoesNotBlockConnectionState() async {
+        let fixture = Fixture()
+        await fixture.service.addQuestionsVault(id: "complete-list", name: "Test", team: "t_test")
+        let question = await fixture.withQuestion()
+        await fixture.service.settleQuestion(qid: question.qid, by: "Test Mac")
+        fixture.push.delivered = ["old-private-alert"]
+        fixture.push.holdsDeliveredSnapshot = true
+        await fixture.model.refresh()
+        for _ in 0..<1_000 {
+            if fixture.push.deliveredReads > 0 { break }
+            await Task.yield()
+        }
+        #expect(fixture.model.phase == .ready)
+        #expect(fixture.push.deliveredReads == 1)
+
+        // A new request arrives while the notification daemon still has not returned its snapshot.
+        let newer = PreviewVaultService.sampleQuestion(qid: "newer")
+        await fixture.service.setQuestions(enabled: true, questions: [newer])
+        await fixture.model.refresh()
+        #expect(fixture.model.waiting.map(\.qid) == ["newer"])
+        fixture.push.releaseDeliveredSnapshot()
+        await fixture.model.alertReconciliationFinished()
+        #expect(fixture.push.removed.isEmpty)
     }
 
     // MARK: The long poll
@@ -459,7 +669,7 @@ struct QuestionsModelTests {
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(
             fixture.model.deliveries[question.qid]
-                == .failed("Family is locked on this iPhone. Unlock it in Decisions, then answer."))
+                == .failed("Family is locked on this iPhone. Unlock it in Requests, then answer."))
         // Deny needs no Face ID, and it is refused too: never the key of the selected vault.
         await fixture.model.send(bar.deny, for: question)
         #expect(await fixture.service.sentAnswers().isEmpty)
@@ -664,8 +874,8 @@ struct QuestionsModelTests {
 
     // MARK: Opening a notification
 
-    @Test("an opened notification opens the newest waiting question, once")
-    func notificationOpensTheNewestQuestion() async {
+    @Test("a generic notification refreshes the list once without choosing a question")
+    func notificationOpensTheList() async {
         let fixture = Fixture()
         let older = PreviewVaultService.sampleQuestion(qid: "older", now: Date().addingTimeInterval(-60))
         let newer = PreviewVaultService.sampleQuestion(qid: "newer")
@@ -678,7 +888,7 @@ struct QuestionsModelTests {
 
         fixture.push.open()
         #expect(fixture.model.focusRequests == 1)
-        #expect(await fixture.model.takeFocus(stillFree: { true }) == "newer")
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
         #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
 
         await fixture.service.setQuestions(enabled: true, questions: [expired])
@@ -688,18 +898,22 @@ struct QuestionsModelTests {
         #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
     }
 
-    @Test("the target is picked after the refresh: the question the notification announced opens")
-    func notificationOpensTheQuestionAfterTheRefresh() async {
+    @Test("an old generic push never opens an unrelated newer request")
+    func staleNotificationRefreshesTheList() async {
         let fixture = Fixture()
         let older = PreviewVaultService.sampleQuestion(qid: "older", now: Date().addingTimeInterval(-60))
         await fixture.service.setQuestions(enabled: true, questions: [older])
         await fixture.model.refresh()
         // The list on the iPhone is old: the newer question reaches it only with the refresh.
         let newer = PreviewVaultService.sampleQuestion(qid: "newer")
-        await fixture.service.setQuestions(enabled: true, questions: [older, newer])
+        var settled = older
+        settled.state = .settled
+        settled.settle = QuestionSettle(outcome: "approved", deviceName: "Test Mac", at: 1)
+        await fixture.service.setQuestions(enabled: true, questions: [settled, newer])
         fixture.push.open()
-        #expect(await fixture.model.takeFocus(stillFree: { true }) == "newer")
-        #expect(fixture.model.waiting.count == 2)
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
+        #expect(fixture.model.waiting.map(\.qid) == ["newer"])
+        #expect(fixture.model.unlockPrompt == nil)
     }
 
     @Test("an opened notification opens nothing when the owner opened something during the refresh")

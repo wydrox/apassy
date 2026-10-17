@@ -92,6 +92,19 @@ class Harness {
     fs.writeFileSync(path.join(this.mockDir, "scenario.json"), JSON.stringify(scenario));
   }
 
+  holdReply(command) {
+    if (!["fill", "create"].includes(command)) throw new Error("unsupported synthetic reply barrier");
+    const token = `${command}-${++this.counter}`;
+    const scenario = this.scenario();
+    this.setScenario({ ...scenario, [command]: { ...scenario[command], holdReply: token } });
+    return token;
+  }
+
+  releaseReply(token) {
+    if (!/^[a-z0-9-]{1,80}$/.test(token)) throw new Error("invalid synthetic reply barrier");
+    fs.writeFileSync(path.join(this.mockDir, `release-${token}`), "released");
+  }
+
   clearRequests() {
     fs.writeFileSync(path.join(this.mockDir, "requests.jsonl"), "");
   }
@@ -104,7 +117,11 @@ class Harness {
   }
 
   removeHost() {
-    fs.rmSync(this.manifest, { force: true });
+    // Keep a valid profile-local deny manifest. Deleting it would let Chromium
+    // fall back to the owner's system native host, outside this synthetic test.
+    const manifest = JSON.parse(this.manifestBody);
+    manifest.allowed_origins = ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"];
+    fs.writeFileSync(this.manifest, JSON.stringify(manifest));
   }
 
   restoreHost() {
@@ -181,6 +198,14 @@ class Harness {
     return page;
   }
 
+  async actionResult(tabId) {
+    const worker = await this.worker();
+    return worker.evaluate(async (id) => {
+      const key = `login-result-${id}`;
+      return (await chrome.storage.session.get(key))[key] || null;
+    }, tabId);
+  }
+
   async badge() {
     const worker = await this.worker();
     return worker.evaluate(async () => ({
@@ -204,11 +229,23 @@ class Harness {
 }
 
 export const test = base.extend({
-  harness: [async ({}, use) => {
+  loginSiteAccess: [false, { option: true, scope: "worker" }],
+  harness: [async ({ loginSiteAccess }, use) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "apassy-ext-test-"));
     const profile = path.join(root, "profile");
     fs.mkdirSync(profile);
     const host = installHost(root, profile);
+    // Only a synthetic copy: stand in for the optional localhost grant, as the
+    // existing passkey fixture does. The shipped manifest remains optional.
+    let extensionDir = EXTENSION_DIR;
+    if (loginSiteAccess) {
+      extensionDir = path.join(root, "extension");
+      fs.cpSync(EXTENSION_DIR, extensionDir, { recursive: true });
+      const manifestPath = path.join(extensionDir, "manifest.json");
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      manifest.host_permissions = ["http://localhost/*"];
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    }
     const server = await startServer();
     const started = Date.now();
     const context = await chromium.launchPersistentContext(profile, {
@@ -216,8 +253,8 @@ export const test = base.extend({
       headless: HEADLESS,
       ignoreDefaultArgs: ["--disable-extensions"],
       args: [
-        `--disable-extensions-except=${EXTENSION_DIR}`,
-        `--load-extension=${EXTENSION_DIR}`,
+        `--disable-extensions-except=${extensionDir}`,
+        `--load-extension=${extensionDir}`,
         // Lets the tests click the toolbar button (Extensions.triggerAction).
         "--enable-unsafe-extension-debugging",
       ],

@@ -13,8 +13,9 @@
 // request. A notification has only the fixed text of Notify.swift.
 //
 // When LaunchServices starts the notifier (launchd is the parent), for
-// example after a click on a notification, it serves no request. It opens the
-// Apassy app that contains it and exits.
+// example after a click on a notification, it serves no stdin request. It
+// receives only the native notification response, queues its opaque local route,
+// opens the containing Apassy app, and exits.
 
 import Foundation
 
@@ -29,6 +30,12 @@ func handle(_ request: Request) throws -> Fields {
         ]
     case "notify":
         return try handleNotify(request)
+    case "notify_reconcile":
+        return try handleNotifyReconcile(request)
+    case "notify_remove":
+        return try handleNotifyRemove(request)
+    case "notify_activations":
+        return try handleNotifyActivations(request)
     case "notify_status":
         return try handleNotifyStatus(request)
     case "notify_authorize":
@@ -42,7 +49,7 @@ func handle(_ request: Request) throws -> Fields {
 
 // LaunchServices can pass its own arguments, so this check comes first.
 if getppid() == 1 {
-    openContainingApp()
+    runNotificationActivation()
 }
 
 if CommandLine.arguments.count > 1 {

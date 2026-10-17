@@ -260,12 +260,7 @@ fn add_one(
     .map_err(storage)?;
 
     if let Some(place) = place {
-        tx.execute(
-            "INSERT INTO item_folder (item_id, folder_uuid) VALUES (?1, ?2)",
-            (item, place.uuid.as_str()),
-        )
-        .map_err(storage)?;
-        history::record(tx, item, ItemEventKind::Moved, &place.path)?;
+        place_item(tx, item, place)?;
     }
 
     if let Some(origin) = origin {
@@ -355,6 +350,16 @@ fn bind_variable(tx: &Transaction<'_>, item: i64, detected: &Detected) -> VaultR
         None => display_name.to_owned(),
     };
     history::record(tx, item, ItemEventKind::Variable, &detail)
+}
+
+/// Place a newly inserted item. The caller checked the folder while holding the vault.
+pub(super) fn place_item(tx: &Transaction<'_>, item: i64, place: &Place) -> VaultResult<()> {
+    tx.execute(
+        "INSERT INTO item_folder (item_id, folder_uuid) VALUES (?1, ?2)",
+        (item, place.uuid.as_str()),
+    )
+    .map_err(|_| err(VaultErrorKind::Storage))?;
+    history::record(tx, item, ItemEventKind::Moved, &place.path)
 }
 
 /// The field of the main secret: the token, the password, the private key, or the

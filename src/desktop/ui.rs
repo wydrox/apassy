@@ -36,7 +36,7 @@ mod demo;
 mod detail_rows;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
-/// The two first steps of a new vault (ADR 0026 §7).
+/// First credential actions, with optional agent setup.
 #[cfg(feature = "vault")]
 mod first_steps;
 mod focus;
@@ -50,8 +50,7 @@ mod items;
 #[cfg(all(test, feature = "vault"))]
 mod keyboard_tests;
 pub(crate) mod kit;
-/// "New Credential" (ADR 0026 §4): a stub that leads to the kind picker until paste
-/// detection lands.
+/// New credential entry points and local paste detection.
 #[cfg(feature = "vault")]
 mod new_credential;
 /// One-time passwords (TOTP) on the credential pages.
@@ -286,6 +285,26 @@ pub(crate) struct UiState {
     /// The folder that the Move sheet selects. `None`: the top level.
     #[cfg(feature = "vault")]
     pub(crate) move_target: Option<String>,
+    #[cfg(feature = "vault")]
+    pub(crate) create_folder: Option<String>,
+    #[cfg(feature = "vault")]
+    pub(crate) selected_items: BTreeSet<u64>,
+    /// The focused library row, captured by the list for native Select All.
+    #[cfg(feature = "vault")]
+    pub(crate) native_library_focus: Option<egui::Id>,
+    #[cfg(feature = "vault")]
+    pub(crate) selection_anchor: Option<u64>,
+    /// Scroll a newly saved row into view once, without moving keyboard focus.
+    #[cfg(feature = "vault")]
+    pub(crate) reveal_item: Option<u64>,
+    #[cfg(feature = "vault")]
+    pub(crate) search_all: bool,
+    #[cfg(feature = "vault")]
+    pub(crate) move_undo: Vec<crate::vault::ItemFolderMove>,
+    #[cfg(feature = "vault")]
+    pub(crate) notification_destination: Option<crate::desktop::notify::NotificationDestination>,
+    #[cfg(feature = "vault")]
+    notification_epoch: Option<[u8; 32]>,
     /// `ui.json`. Only the window sets it, so a test never writes the real folder.
     #[cfg(feature = "vault")]
     prefs_path: Option<std::path::PathBuf>,
@@ -295,6 +314,8 @@ pub(crate) struct UiState {
     /// ⌘F: the search field takes the focus in the next frame.
     #[cfg(feature = "vault")]
     pub(crate) focus_search: bool,
+    #[cfg(feature = "vault")]
+    pub(crate) credential_search_focused: bool,
     /// The Name field of the add form takes the focus in the next frame, after the
     /// owner picked a kind with the keyboard.
     #[cfg(feature = "vault")]
@@ -431,13 +452,21 @@ pub(crate) enum Sheet {
     /// Remove every paired iPhone and make a new certificate (ADR 0020).
     #[cfg(feature = "vault")]
     ResetCompanion,
-    /// "+" and ⌘N: a new credential from a paste (ADR 0026 §4). A stub for now.
+    /// "+" and ⌘N: Login, Paste, or Other creation entry points.
     #[cfg(feature = "vault")]
     NewCredential,
     /// Move a credential to a folder (ADR 0026 §5).
     #[cfg(feature = "vault")]
     MoveToFolder {
         item_id: u64,
+    },
+    #[cfg(feature = "vault")]
+    MoveItemsToFolder {
+        item_ids: Vec<u64>,
+    },
+    #[cfg(feature = "vault")]
+    MoveFolder {
+        uuid: String,
     },
     /// A new folder in `parent` (`None`: the top level).
     #[cfg(feature = "vault")]
@@ -464,11 +493,211 @@ pub(crate) fn apply_style(ctx: &egui::Context) {
     kit::apply_theme(ctx);
 }
 
+#[cfg(feature = "vault")]
+pub(crate) fn invalidate_notifications(app: &mut DesktopApp) {
+    if app.ui.notification_destination.is_some() {
+        app.ui.notification_destination =
+            Some(crate::desktop::notify::NotificationDestination::Requests);
+    }
+    app.ui.decisions = Default::default();
+}
+
+#[cfg(feature = "vault")]
+pub(crate) fn poll_notifications(app: &mut DesktopApp) {
+    let epoch = app.owner_ui.session.epoch();
+    if app.ui.notification_epoch.is_some() && app.ui.notification_epoch != epoch {
+        invalidate_notifications(app);
+    }
+    app.ui.notification_epoch = epoch;
+    if let Some(destination) = app
+        .owner
+        .notifications
+        .as_ref()
+        .and_then(|center| center.take_activation())
+    {
+        app.ui.notification_destination = Some(destination);
+    }
+}
+
+#[cfg(all(feature = "vault", any(target_os = "macos", test)))]
+pub(super) fn native_menu_context(
+    app: &DesktopApp,
+    ctx: &egui::Context,
+) -> super::native_menu::Context {
+    let focus = ctx.memory(|memory| memory.focused());
+    let owner_busy = app.owner.check.is_some()
+        || app.owner_ui.fresh_token.is_some()
+        || app.learning.inspected.is_some();
+    let blocked = owner_busy
+        || app.ui.sheet.is_some()
+        || app.pending_delete
+        || ctx.memory(|memory| memory.top_modal_layer()).is_some()
+        || egui::Popup::is_any_open(ctx);
+    let selected: Vec<u64> = if app.ui.selected_items.is_empty() {
+        app.selected_item_id
+            .as_deref()
+            .and_then(|id| id.parse().ok())
+            .into_iter()
+            .collect()
+    } else {
+        app.ui.selected_items.iter().copied().collect()
+    };
+    let folder_exists = match &app.place {
+        super::Place::Folder(Some(uuid)) => folders::FolderTree::load(app).get(uuid).is_some(),
+        _ => false,
+    };
+    // One metadata-only ID listing, regardless of selection size. This includes
+    // archived/legacy items without requiring a sync UUID or loading their fields.
+    let selection_exists = !selected.is_empty()
+        && app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.items_in_folder(None, true))
+            .is_some_and(|result| {
+                result.is_ok_and(|ids| selected.iter().all(|id| ids.binary_search(id).is_ok()))
+            });
+    super::native_menu::Context {
+        epoch: app.owner_ui.session.epoch(),
+        path: app
+            .owner_ui
+            .session
+            .location()
+            .map(std::path::Path::to_path_buf),
+        place: app.place.clone(),
+        selected,
+        detail: app.selected_item_id.clone(),
+        search: app.search.clone(),
+        filter: match app.ui.credential_filter {
+            items::Filter::All => 0,
+            items::Filter::Conflicts => 1,
+            items::Filter::Archived => 2,
+        },
+        search_all: app.ui.search_all,
+        sheet: app.ui.sheet.clone(),
+        focus,
+        text: ctx.text_edit_focused(),
+        library: app.place.is_credentials()
+            && focus.is_some()
+            && focus == app.ui.native_library_focus,
+        blocked,
+        owner_busy,
+        owner_identity: app.owner.check.as_ref().map(|dialog| dialog.identity),
+        owner_text_input: ctx.text_edit_focused()
+            && focus == Some(secret_field_id(OWNER_CHECK_FIELD))
+            && app
+                .owner
+                .check
+                .as_ref()
+                .is_some_and(|dialog| dialog.running.is_none() && dialog.request.is_ready()),
+        folder_exists,
+        selection_exists,
+        undo: app.ui.move_undo.clone(),
+    }
+}
+
+#[cfg(all(feature = "vault", any(target_os = "macos", test)))]
+pub(super) fn native_menu_command(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    command: super::native_menu::Command,
+    text: bool,
+) {
+    use super::native_menu::Command;
+    use egui::{Event, Key, Modifiers};
+    let key = match command {
+        Command::NewCredential => Some((Key::N, false)),
+        Command::MoveItems => Some((Key::M, true)),
+        Command::Undo => Some((Key::Z, false)),
+        Command::Redo => Some((Key::Z, true)),
+        Command::SelectAll => Some((Key::A, false)),
+        Command::Cut => Some((Key::X, false)),
+        Command::Copy => Some((Key::C, false)),
+        Command::Paste => Some((Key::V, false)),
+        _ => None,
+    };
+    // AppKit normally consumes accelerators; also discard a duplicate delivery
+    // before injecting egui text/list input or invoking an organization action.
+    if let Some((key, shift)) = key {
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                !matches!(event,
+            Event::Key { key: event_key, modifiers, .. }
+                if *event_key == key && modifiers.command && modifiers.shift == shift)
+            })
+        });
+    }
+    let event = match command {
+        Command::Cut => Some(Event::Cut),
+        Command::Copy => Some(Event::Copy),
+        Command::Paste => {
+            match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+                Ok(value) => Some(Event::Paste(value)),
+                Err(_) => {
+                    app.set_err("Text could not be pasted from the clipboard.");
+                    None
+                }
+            }
+        }
+        Command::Undo | Command::Redo if text => key.map(|(key, shift)| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: if shift {
+                Modifiers::COMMAND | Modifiers::SHIFT
+            } else {
+                Modifiers::COMMAND
+            },
+        }),
+        Command::SelectAll => Some(Event::Key {
+            key: Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }),
+        Command::Undo => {
+            folders::undo_move(app);
+            None
+        }
+        Command::NewCredential => {
+            app.show_credentials();
+            app.ui.sheet = Some(Sheet::NewCredential);
+            None
+        }
+        Command::NewFolder => {
+            let parent = folders::FolderTree::load(app).folder_of_place(&app.place);
+            folders::open_new(app, parent);
+            None
+        }
+        Command::MoveItems => {
+            folders::open_move_many(app);
+            None
+        }
+        Command::RenameFolder | Command::MoveFolder | Command::DeleteFolder => {
+            if let super::Place::Folder(Some(uuid)) = app.place.clone() {
+                match command {
+                    Command::RenameFolder => folders::open_rename(app, &uuid),
+                    Command::MoveFolder => folders::open_move_folder(app, uuid),
+                    Command::DeleteFolder => folders::open_delete(app, &uuid),
+                    _ => unreachable!(),
+                }
+            }
+            None
+        }
+        Command::Redo => None,
+    };
+    if let Some(event) = event {
+        ctx.input_mut(|input| input.events.push(event));
+    }
+}
+
 pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     focus::begin_frame(&mut app.ui.focus, &ctx);
     #[cfg(feature = "vault")]
     {
+        poll_notifications(app);
         app.poll_owner_flows(&ctx);
         app.poll_sync(&ctx);
         if let Some(id) = app.sync.adopted_vault.take() {
@@ -478,20 +707,25 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.ui.setup_vault = None;
         }
         close_sheet_after_check(app);
-        let session = &app.owner_ui.session;
-        if !session.has_file() || session.is_locked() {
+        if !app.owner_ui.session.has_file() || app.owner_ui.session.is_locked() {
             // A lock also hides a token that the owner did not dismiss, and leaves
             // Settings: it shows the settings of the open vault.
             app.owner_ui.fresh_token = None;
             app.ui.agent_setup = Default::default();
             app.ui.agent_onboarding = Default::default();
             app.ui.agents = Default::default();
-            app.ui.decisions = Default::default();
+            invalidate_notifications(app);
+            app.ui.move_undo.clear();
+            app.ui.selected_items.clear();
+            app.ui.selection_anchor = None;
+            app.ui.reveal_item = None;
             app.ui.sheet = None;
             if app.place == crate::desktop::Place::Settings {
                 app.place = crate::desktop::Place::CREDENTIALS;
             }
             app.import.forget();
+            #[cfg(target_os = "macos")]
+            super::native_menu::process(app, &ctx);
             start::draw(app, ui);
         } else {
             shell::draw(app, ui);
@@ -1289,6 +1523,8 @@ mod tests {
             .expect("add");
         app.select_item(item.id.to_string());
         app.ui
+            .set_expanded(&format!("credential-agent-settings-{}", item.id), true);
+        app.ui
             .set_expanded(&format!("credential-access-{}", item.id), true);
         let form = &app.owner_ui.declaration_form;
         assert!(!form.stored);
@@ -1416,7 +1652,7 @@ mod tests {
             "Host",
             "Database name",
             "Password",
-            "Where it is used",
+            "Agent Settings (Optional)",
         ] {
             assert!(text.contains(field), "missing {field}: {text}");
         }
@@ -1569,6 +1805,8 @@ mod tests {
         );
         app.ui.sheet = None;
         app.select_item(item_id.to_string());
+        app.ui
+            .set_expanded(&format!("credential-agent-settings-{}", item_id), true);
         app.ui
             .set_expanded(&format!("credential-access-{}", item_id), true);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 2);

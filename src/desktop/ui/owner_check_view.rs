@@ -67,6 +67,15 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     };
     let action = dialog.request.describe();
+    let copy_item_name = match &dialog.request {
+        OwnerRequest::CopyField { item_id, .. } => app
+            .owner_ui
+            .session
+            .details(*item_id)
+            .ok()
+            .map(|details| page_text(&details.name)),
+        _ => None,
+    };
     // The item name and the variable of each binding (ADR 0017, D1).
     let variables: Vec<(String, String)> = match &dialog.request {
         OwnerRequest::BindVariables { variables } => variables
@@ -96,6 +105,10 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             ui.label(kit::text("Confirm that it is you", Font::Title3).color(kit::LABEL));
         });
         ui.add_space(8.0);
+        if let Some(name) = &copy_item_name {
+            ui.label(kit::text(name, Font::Headline).color(kit::LABEL));
+            ui.add_space(4.0);
+        }
         kit::paragraph(ui, action, Font::Body, kit::LABEL);
         if !variables.is_empty() {
             ui.add_space(4.0);
@@ -121,11 +134,6 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             ui.add_space(4.0);
             picked = account_list(ui, choice);
         }
-        ui.add_space(4.0);
-        kit::note(
-            ui,
-            "Apassy asks for Touch ID or the passphrase for each reveal, browser fill and save, approval, iPhone pairing, new Mac for relay sync, access change, rule change, token rotation, and command-line session. A notification or \"Mark as seen\" is never an approval.",
-        );
         ui.add_space(10.0);
         match running {
             Some(CheckMethod::TouchId) => kit::tone_note(
@@ -197,7 +205,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
 
     if cancel || (response.escape && running.is_none()) {
         app.close_owner_check(Some(ctx));
-        app.set_note("The owner check is cancelled. Apassy did nothing.");
+        app.set_note("The owner check is cancelled.");
     } else if let Some(index) = picked {
         // The call drops a check that runs for the account before: its proof never signs.
         app.choose_passkey(index);

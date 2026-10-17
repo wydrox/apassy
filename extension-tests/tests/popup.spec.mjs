@@ -22,7 +22,7 @@ test("the popup lists the logins and fills one with the keyboard", async ({ h })
   h.setScenario({ vault: "unlocked", logins: LOGINS, fill: { delayMs: 800 } });
   await popup.keyboard.press("Enter");
   await expect(popup.locator("#note")).toHaveText("Confirm with Touch ID or your passphrase in Apassy.");
-  await expect(popup.locator("#note")).toHaveText("Filled.");
+  await expect(popup.locator("#note")).toHaveText("Username and password filled. Submit the form on the page.");
   expect(h.requests("fill")).toEqual([{ v: 1, cmd: "fill", url: page.url(), item: 7 }]);
   expect(await page.locator("#password").inputValue()).toBe(PASSWORD);
   expect(await popup.content()).not.toContain(PASSWORD);
@@ -64,7 +64,7 @@ test("the popup explains an empty list", async ({ h }) => {
   const popup = await h.openPopupPage();
   const host = new URL(page.url()).host;
   await expect(popup.locator("#note")).toHaveText(
-    `No login for ${host}. Add a detail named Website with this address to a login in Apassy.`);
+    `No login for ${host}. Edit the login’s built-in Website field in Apassy and add this address.`);
 });
 
 test("the popup asks to open Apassy when it does not run", async ({ h }) => {

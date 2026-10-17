@@ -105,7 +105,12 @@ impl LineWire for BrowserWire {
     }
 
     fn watch(request: &BrowserRequest) -> Option<PeerGone> {
-        guarded(&request.command).then(|| request.gone.clone())
+        (guarded(&request.command)
+            || matches!(
+                request.command,
+                Command::Fill { .. } | Command::Update { .. }
+            ))
+        .then(|| request.gone.clone())
     }
 }
 
@@ -122,6 +127,10 @@ pub(crate) struct BrowserHost {
     pending: Option<SecretText>,
     /// The login that the last save added.
     saved: Option<u64>,
+    /// A completed password-only update; it returns no secret.
+    updated: Option<(u64, String, String)>,
+    /// Preserve precise model failures across the owner-check handoff.
+    failure: Option<ModelError>,
     /// The code of the fill that the last owner check passed.
     code: Option<FilledCode>,
     /// The result of the passkey check that passed, for the browser or for the macOS
@@ -146,6 +155,8 @@ impl BrowserHost {
         self.filled = None;
         self.pending = None;
         self.saved = None;
+        self.updated = None;
+        self.failure = None;
         self.code = None;
         self.passkey = None;
     }
@@ -237,7 +248,7 @@ impl Drop for BrowserTicket {
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(Response::error(
                 "cancelled",
-                "The owner check closed before it passed. Nothing was filled.",
+                "The owner check closed before it passed. Nothing was filled or updated.",
             ));
         }
     }
@@ -310,10 +321,23 @@ impl DesktopApp {
             }
             Command::Show => {
                 bring_to_front(ctx);
-                ticket.send(Response::ok("Apassy is in front.", Data::None));
+                ticket.send(Response::ok("Apassy was asked to open.", Data::None));
             }
             Command::Logins { url } => {
-                ticket.send(self.browser_logins(&url));
+                ticket.send(self.browser_logins(&url, None));
+            }
+            Command::Suggestions { url, username } => {
+                ticket.send(self.browser_logins(&url, Some(&username)));
+            }
+            Command::Update {
+                url,
+                item,
+                username,
+                password,
+            } => {
+                let mut ticket = ticket;
+                ticket.secret = Some(password);
+                self.browser_update(&url, item, &username, ticket, ctx);
             }
             Command::Fill { url, item } => self.browser_fill(&url, item, ticket, ctx),
             Command::Save {
@@ -395,12 +419,16 @@ impl DesktopApp {
         Page::parse(url).map_err(|err| WireError::new("unsupported_page", err.message()))
     }
 
-    fn browser_logins(&self, url: &str) -> Response {
+    fn browser_logins(&self, url: &str, username: Option<&str>) -> Response {
         let page = match self.browser_page(url) {
             Ok(page) => page,
             Err(error) => return error.into(),
         };
-        match self.owner_ui.session.logins_for_page(&page) {
+        let found = match username {
+            Some(username) => self.owner_ui.session.suggestions_for_page(&page, username),
+            None => self.owner_ui.session.logins_for_page(&page),
+        };
+        match found {
             Ok(found) => {
                 let message = match found.len() {
                     0 => format!("No login is for {}.", page.host()),
@@ -469,6 +497,43 @@ impl DesktopApp {
         if !self.owner.touch_id_ready() {
             bring_to_front(ctx);
         }
+    }
+
+    /// Explicit password update. Browser target attestation stays in the extension;
+    /// this host checks the exact vault item/account/site before and after approval.
+    fn browser_update(
+        &mut self,
+        url: &str,
+        item: u64,
+        username: &str,
+        ticket: BrowserTicket,
+        ctx: &egui::Context,
+    ) {
+        let target = self.browser_page(url).and_then(|page| {
+            self.owner_ui
+                .session
+                .page_login_update_target(item, &page, username)
+                .map(|(login, revision)| (page, login, revision))
+                .map_err(|err| WireError::new(err.code, err.message))
+        });
+        let (page, login, revision) = match target {
+            Ok(target) => target,
+            Err(error) => {
+                ticket.send(error.into());
+                return;
+            }
+        };
+        self.ask_owner_for_browser(
+            OwnerRequest::UpdateLogin {
+                item_id: item,
+                item_name: login.title,
+                username: login.username,
+                origin: page.origin(),
+                revision,
+            },
+            ticket,
+            ctx,
+        );
     }
 
     /// Open the owner check dialog for a new login: a save (`generate` is `None`) or a
@@ -869,6 +934,35 @@ impl DesktopApp {
         }
     }
 
+    /// Complete the exact update with the secret held by its live browser ticket.
+    pub(crate) fn complete_browser_update(
+        &mut self,
+        item: u64,
+        revision: u64,
+        username: &str,
+        origin: &str,
+        proof: OwnerProof,
+    ) {
+        let (Some(password), Ok(page)) = (self.browser.pending.take(), Page::parse(origin)) else {
+            drop(proof);
+            return self.set_err("The password from the page is gone. Nothing was updated.");
+        };
+        match self
+            .owner_ui
+            .session
+            .update_page_login(item, revision, username, password, &page, proof)
+        {
+            Ok(item) => {
+                self.browser.updated = Some((item, page.origin(), username.to_owned()));
+                self.set_ok("The login password is updated in Apassy.");
+            }
+            Err(err) => {
+                self.set_err(err.message.clone());
+                self.browser.failure = Some(err);
+            }
+        }
+    }
+
     /// Add the login of a create after the owner check. Its values wait for the ticket.
     pub(crate) fn complete_create(
         &mut self,
@@ -982,6 +1076,23 @@ impl DesktopApp {
     /// sequence before the action.
     pub(crate) fn answer_browser_ticket(&mut self, ticket: BrowserTicket, before: u64) {
         self.browser.pending = None;
+        if let Some(error) = self.browser.failure.take() {
+            ticket.send(Response::error(error.code, error.message));
+            return;
+        }
+        if let Some((item, origin, username)) = self.browser.updated.take() {
+            if !ticket.send(Response::ok(
+                "Updated in Apassy.",
+                Data::Updated {
+                    item,
+                    origin,
+                    username,
+                },
+            )) {
+                self.set_err("The password is updated in Apassy, but the browser stopped waiting for the answer. Check the login before trying again.");
+            }
+            return;
+        }
         if let Some(result) = self.browser.passkey.take() {
             return self.answer_browser_passkey(ticket, result);
         }
@@ -1004,7 +1115,7 @@ impl DesktopApp {
                 let origin = filled.origin.clone();
                 let created = filled.created;
                 let delivered = ticket.send(Response::ok(
-                    "Filled.",
+                    "Login values sent to the browser. The extension checks the form before filling.",
                     Data::Fill {
                         item,
                         origin: filled.origin,
@@ -1028,12 +1139,12 @@ impl DesktopApp {
                 match self.owner_ui.session.record_fill(item, &origin) {
                     Ok(()) => self.set_ok(match created {
                         Some(title) => format!(
-                            "The new login \"{title}\" is in Apassy and filled in your browser on {site}."
+                            "The new login \"{title}\" is in Apassy. Its values were sent to your browser for {site}."
                         ),
-                        None => format!("The login is filled in your browser on {site}."),
+                        None => format!("Login values were sent to your browser for {site}."),
                     }),
                     Err(err) => self.set_err(format!(
-                        "The login is filled in your browser on {site}, but the history did not save it: {}",
+                        "Login values were sent to your browser for {site}, but the history did not save it: {}",
                         err.message
                     )),
                 }

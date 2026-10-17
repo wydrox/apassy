@@ -18,6 +18,12 @@ final class ICloudVaultModel {
     private(set) var message: String?
     private(set) var isWorking = false
     let biometry: Biometry
+    /// OS readback, never inferred from opening Settings.
+    private(set) var autoFillEnabled: Bool?
+    private(set) var autoFillMessage: String?
+    private(set) var cleanupPending = false
+    @ObservationIgnored private let readAutoFillEnabled: @MainActor () async -> Bool
+    @ObservationIgnored private let openAutoFillSettings: @MainActor () async throws -> Void
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let store: any PassphraseStore
     @ObservationIgnored private let settings: VaultSettings
@@ -30,14 +36,21 @@ final class ICloudVaultModel {
     @ObservationIgnored private var ended = false
     @ObservationIgnored private var away = false
     @ObservationIgnored private var backgroundEpoch = 0
+    @ObservationIgnored private var autoFillReadEpoch = 0
 
-    init(service: any VaultService, passphraseStore: any PassphraseStore, settings: VaultSettings,
-         biometry: Biometry, isAway: @escaping @MainActor () -> Bool = { false },
-         onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void) {
+    init(
+        service: any VaultService, passphraseStore: any PassphraseStore, settings: VaultSettings,
+        biometry: Biometry, isAway: @escaping @MainActor () -> Bool = { false },
+        readAutoFillEnabled: @escaping @MainActor () async -> Bool = { false },
+        openAutoFillSettings: @escaping @MainActor () async throws -> Void = {},
+        onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void
+    ) {
         self.service = service
         store = passphraseStore
         self.settings = settings
         self.biometry = biometry
+        self.readAutoFillEnabled = readAutoFillEnabled
+        self.openAutoFillSettings = openAutoFillSettings
         self.isAway = isAway
         self.onFinished = onFinished
         self.onCancel = onCancel
@@ -69,7 +82,10 @@ final class ICloudVaultModel {
         message = nil
         let epoch = backgroundEpoch
         let task = Task { [self] in
-            defer { isWorking = false; operation = nil }
+            defer {
+                isWorking = false
+                operation = nil
+            }
             do {
                 let name = url.deletingPathExtension().lastPathComponent
                 let entry = try await service.openICloudVault(url: url, name: name, passphrase: passphrase)
@@ -88,7 +104,13 @@ final class ICloudVaultModel {
                 }
             } catch {
                 guard !ended else { return }
-                message = error.localizedDescription + " Select the file in Files > iCloud Drive > Apassy, then try again."
+                if let problem = error as? VaultError,
+                    problem.code == .wrongPassphrase || problem.code == .needsPassphrase
+                {
+                    message = problem.message + " Try the passphrase that opens this vault on your Mac."
+                } else {
+                    message = error.localizedDescription
+                }
             }
         }
         operation = task
@@ -115,6 +137,30 @@ final class ICloudVaultModel {
         step = .done(entry)
     }
 
+    func refreshAutoFillState() async {
+        guard case .done = step, !ended, !away, !isAway() else { return }
+        autoFillReadEpoch += 1
+        let readEpoch = autoFillReadEpoch
+        let epoch = backgroundEpoch
+        let enabled = await readAutoFillEnabled()
+        guard case .done = step, !ended, !away, !isAway(),
+            readEpoch == autoFillReadEpoch, epoch == backgroundEpoch
+        else { return }
+        autoFillEnabled = enabled
+    }
+
+    func enableAutoFill() async {
+        guard case .done = step, !ended, !away, !isAway() else { return }
+        autoFillMessage = nil
+        do {
+            try await openAutoFillSettings()
+        } catch {
+            autoFillMessage =
+                "AutoFill settings could not open. Open Settings > General > AutoFill & Passwords and turn on Apassy."
+        }
+        await refreshAutoFillState()
+    }
+
     func complete() {
         guard case .done(let entry) = step, !ended, !isWorking else { return }
         ended = true
@@ -138,7 +184,10 @@ final class ICloudVaultModel {
                 settings.forget(vaultID: entry.id)
                 openedVault = nil
             } catch {
-                message = "The vault is closed. Apassy could not remove its local copy. " + error.localizedDescription
+                cleanupPending = true
+                message =
+                    "The vault is closed. Apassy could not remove its local copy. "
+                    + error.localizedDescription
                 ended = false
                 step = .done(entry)
                 return

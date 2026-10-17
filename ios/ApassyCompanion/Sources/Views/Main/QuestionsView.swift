@@ -1,5 +1,6 @@
 import ApassyVaultKit
 import SwiftUI
+import UIKit
 
 /// Connect a vault from iCloud Drive to its notifications team: the link of the Mac, the two
 /// safety words while the Mac confirms, then done.
@@ -114,8 +115,47 @@ struct ApprovalsHub: View {
     let questions: QuestionsModel?
     let companion: AppModel
     var onSettings: (() -> Void)?
+    var isPresented = false
 
     var body: some View {
-        DecisionsView(questions: questions, companion: companion, onSettings: onSettings)
+        DecisionsView(questions: questions, companion: companion, onSettings: onSettings, isPresented: isPresented)
+    }
+}
+
+/// Owner preference and the effective OS/registration state, shared by General settings.
+struct RequestsNotificationSettings: View {
+    let model: QuestionsModel
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        Section {
+            Toggle("Request Notifications", isOn: Binding(
+                get: { model.notificationsOn },
+                set: { enabled in Task { await model.setNotifications(enabled) } }))
+            Text(model.notificationSettingsMessage)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.notificationNeedsSettings {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+            }
+            if model.notificationCanRetry {
+                Button("Retry Registration") { Task { await model.retryNotifications() } }
+            }
+            if let pending = model.notificationsPendingText {
+                Text(pending).font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Alerts say only “A question is waiting”. Apple receives no request, vault, or agent details. An alert opens the Requests list. Registration does not guarantee delivery.")
+        }
+        .task { await model.refreshNotificationStatus() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await model.refreshNotificationStatus() } }
+        }
     }
 }

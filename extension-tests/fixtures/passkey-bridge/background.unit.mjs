@@ -615,7 +615,7 @@ test("turning off ends an open passkey request", async () => {
 test("the manifest asks for the passkey site access only as optional", async () => {
   const manifest = loadBackground().chrome.runtime.getManifest();
   assert.deepEqual(manifest.optional_host_permissions, ["https://*/*", "http://localhost/*"]);
-  assert.deepEqual(manifest.permissions, ["nativeMessaging", "activeTab", "scripting"]);
+  assert.deepEqual(manifest.permissions, ["nativeMessaging", "activeTab", "scripting", "storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.content_scripts, undefined);
   assert.ok(!JSON.stringify(manifest).includes("webAuthenticationProxy"));
@@ -648,17 +648,23 @@ test("state: the popup gets hasTotp only as a flag, and the login shape is uncha
   assert.ok(!JSON.stringify(state).includes("JBSWY3DPEHPK3PXP"));
 });
 
-test("a password fill still sends the same request and fills with fillLogin", async () => {
+test("a password fill keeps the native request but targets one exact browser document", async () => {
   const bg = setup();
   loginHost(bg, {
     fill: (r) => ok({ type: "fill", item: r.item, origin: ORIGIN, username: "u", password: "p4ss" }),
   });
-  bg.scripts.result = () => ({ ok: true, username: true, password: true });
-  const reply = await bg.handle({ type: "fill", tabId: 5, url: `${ORIGIN}/login`, item: 7 });
-  assert.deepEqual(reply, { ok: true, code: "ok", message: "Filled.", filled: { username: true, password: true } });
+  const scripts = [];
+  bg.chrome.scripting.executeScript = async (details) => {
+    scripts.push(details);
+    return [{ documentId: "DOC-1", result: { ok: true, username: true, password: true } }];
+  };
+  const target = { tabId: 5, frameId: 0, documentId: "DOC-1", token: "11111111-1111-4111-8111-111111111111", url: `${ORIGIN}/login`, origin: ORIGIN };
+  const reply = await bg.handle({ type: "fill", tabId: 5, url: `${ORIGIN}/login`, item: 7, target });
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.filled, { username: true, password: true });
   assert.deepEqual(bg.natives[0].sent, [{ v: 1, cmd: "fill", url: `${ORIGIN}/login`, item: 7 }]);
-  assert.equal(bg.scripts[0].func.name, "fillLogin");
-  assert.deepEqual(bg.scripts[0].target, { tabId: 5, frameIds: [0] });
+  assert.ok(scripts.every((s) => s.target.documentIds[0] === "DOC-1"));
+  assert.equal(scripts.at(-1).args[2], "fill");
 });
 
 test("fill code: the request, the fill in frame 0 with the code, and a reply without the code", async () => {

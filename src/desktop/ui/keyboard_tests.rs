@@ -1421,3 +1421,159 @@ fn wrong_synced_passphrase_shows_clear_error_and_allows_keyboard_retry() {
         Some("Team on this Mac")
     );
 }
+
+#[test]
+fn command_a_in_editor_name_and_password_selects_text_without_selecting_library_items() {
+    use crate::contracts::CredentialKind;
+    use crate::desktop::model::ItemDraft;
+    use crate::desktop::owner_store::SecretForm;
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let mut secrets = SecretForm::default();
+    secrets.password = "EXAMPLE-original-password".to_owned();
+    let login = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                name: "Synthetic login".to_owned(),
+                kind: CredentialKind::Login,
+                username: "owner@example.com".to_owned(),
+                ..Default::default()
+            },
+            &secrets,
+        )
+        .expect("login");
+    app.select_item(login.id.to_string());
+    let mut window = Window::new();
+    window.idle(&mut app);
+    window.tab_to(&mut app, "Edit", 40);
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.ui.sheet, Some(Sheet::EditItem));
+    assert!(window.ctx.text_edit_focused());
+    let before = app.ui.selected_items.clone();
+    window.press(&mut app, Key::A, Modifiers::COMMAND);
+    window.frame(&mut app, vec![Event::Text("Replacement name".to_owned())]);
+    assert_eq!(
+        app.edit_form.name, "Replacement name",
+        "CmdA belongs to the focused name field"
+    );
+    assert_eq!(app.ui.selected_items, before);
+    window
+        .ctx
+        .memory_mut(|memory| memory.request_focus(super::secret_field_id("edit-password")));
+    window.idle(&mut app);
+    window.frame(&mut app, vec![Event::Text("EXAMPLE-before".to_owned())]);
+    window.press(&mut app, Key::A, Modifiers::COMMAND);
+    window.frame(&mut app, vec![Event::Text("EXAMPLE-after".to_owned())]);
+    assert_eq!(
+        app.owner_ui.edit_secrets.password, "EXAMPLE-after",
+        "CmdA belongs to the focused secret field"
+    );
+    assert_eq!(app.ui.selected_items, before);
+}
+
+#[test]
+fn saved_rows_scroll_into_view_once_from_a_previous_large_library_offset_without_taking_focus() {
+    use crate::desktop::model::ItemDraft;
+    use crate::desktop::owner_store::SecretForm;
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let mut secrets = SecretForm::default();
+    secrets.token = "EXAMPLE-library-token".to_owned();
+    for index in 0..60 {
+        app.owner_ui
+            .session
+            .add(
+                &ItemDraft {
+                    name: format!("Middle library {index:03}"),
+                    ..Default::default()
+                },
+                &secrets,
+            )
+            .expect("library item");
+    }
+    app.place = Place::CREDENTIALS;
+    app.selected_item_id = None;
+    let mut window = Window::new();
+    window.idle(&mut app);
+    let list_right = kit::SIDEBAR_WIDTH + kit::LIST_WIDTH;
+    let visible_row = |window: &Window, name: &str| {
+        window.text_bounds.iter().any(|(text, rect, clip)| {
+            text == name && rect.right() <= list_right && clip.contains_rect(*rect)
+        })
+    };
+    let wheel = || Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Page,
+        delta: Vec2::new(0.0, -2.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    };
+    for name in ["A saved result", "Z saved result"] {
+        window.frame(
+            &mut app,
+            vec![Event::PointerMoved(Pos2::new(
+                kit::SIDEBAR_WIDTH + 100.0,
+                400.0,
+            ))],
+        );
+        window.frame(&mut app, vec![wheel()]);
+        window.idle(&mut app);
+        assert!(
+            !visible_row(&window, "Middle library 000"),
+            "The list starts from an existing nonzero offset"
+        );
+        let item = app
+            .owner_ui
+            .session
+            .add(
+                &ItemDraft {
+                    name: name.to_owned(),
+                    ..Default::default()
+                },
+                &secrets,
+            )
+            .expect("saved item");
+        let focus_before = window.focused();
+        super::items::reveal_saved(&mut app, item.id, None);
+        for _ in 0..12 {
+            window.frame(&mut app, Vec::new());
+        }
+        assert!(
+            visible_row(&window, name),
+            "The saved result must be visible in the list: {name}"
+        );
+        assert_eq!(
+            app.ui.reveal_item, None,
+            "The scroll request is consumed once"
+        );
+        assert_eq!(
+            window.focused(),
+            focus_before,
+            "Revealing a saved row must not steal focus"
+        );
+    }
+    window.frame(
+        &mut app,
+        vec![Event::PointerMoved(Pos2::new(
+            kit::SIDEBAR_WIDTH + 100.0,
+            400.0,
+        ))],
+    );
+    window.frame(
+        &mut app,
+        vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Page,
+            delta: Vec2::new(0.0, 2.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    for _ in 0..12 {
+        window.frame(&mut app, Vec::new());
+    }
+    assert!(
+        !visible_row(&window, "Z saved result"),
+        "The owner can scroll away after the one-time reveal"
+    );
+}

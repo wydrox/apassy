@@ -1052,6 +1052,7 @@ fn swift_and_rust_previews_match() {
     for event in [
         NotificationEvent::ApprovalWaiting,
         NotificationEvent::RequestBlocked,
+        NotificationEvent::Suggestion,
     ] {
         for agent in ["Codex", "Claude Code", "n1-check", "a \"quoted\" name"] {
             let request = serde_json::json!({

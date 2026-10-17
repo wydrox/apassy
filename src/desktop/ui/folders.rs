@@ -285,26 +285,157 @@ pub(crate) fn delete(app: &mut DesktopApp, uuid: &str) -> bool {
 /// Put a credential in `folder` (`None`: the top level). Sharing, rules, and history
 /// stay.
 pub(crate) fn move_item(app: &mut DesktopApp, item_id: u64, folder: Option<&str>) -> bool {
+    move_items(app, &[item_id], folder)
+}
+
+/// A bulk move is one transaction and leaves the source context open.
+pub(crate) fn move_items(app: &mut DesktopApp, ids: &[u64], folder: Option<&str>) -> bool {
+    match app.owner_ui.session.move_items_to_folder(ids, folder) {
+        Ok(receipt) => {
+            let count = receipt.len();
+            app.ui.move_undo = receipt;
+            app.ui.selected_items.clear();
+            app.ui.selection_anchor = None;
+            app.selected_item_id = None;
+            let place = FolderTree::load(app).path_label(folder);
+            app.set_ok(format!("Moved {count} credentials to {place}."));
+            true
+        }
+        Err(error) => {
+            app.set_err(error.message);
+            false
+        }
+    }
+}
+
+pub(super) fn undo_move(app: &mut DesktopApp) {
+    if app.ui.move_undo.is_empty() {
+        return;
+    }
     match app
         .owner_ui
         .session
-        .with_vault(|vault| vault.set_item_folder(item_id, folder))
+        .undo_item_folder_moves(&app.ui.move_undo)
     {
-        Some(Ok(())) => {
-            let place = FolderTree::load(app).path_label(folder);
-            // The list follows the credential, so it stays selected and in view.
-            if let Place::Folder(Some(_)) = &app.place {
-                app.place = Place::Folder(folder.map(str::to_owned));
-            }
-            app.set_ok(format!("Moved to {place}."));
-            true
+        Ok(()) => {
+            app.ui.move_undo.clear();
+            app.set_ok("Move undone. Credentials are back in their original folders.");
         }
-        Some(Err(error)) => {
-            app.set_err(folder_error(&error));
-            false
-        }
-        None => false,
+        Err(error) => app.set_err(error.message),
     }
+}
+
+pub(super) fn open_move_many(app: &mut DesktopApp) {
+    let ids: Vec<u64> = if app.ui.selected_items.is_empty() {
+        app.selected_item_id
+            .as_deref()
+            .and_then(|v| v.parse().ok())
+            .into_iter()
+            .collect()
+    } else {
+        app.ui.selected_items.iter().copied().collect()
+    };
+    if ids.is_empty() {
+        return;
+    }
+    app.ui.move_target = FolderTree::load(app).folder_of(ids[0]).map(str::to_owned);
+    app.ui.sheet = Some(Sheet::MoveItemsToFolder { item_ids: ids });
+}
+
+pub(super) fn open_move_folder(app: &mut DesktopApp, uuid: String) {
+    app.ui.move_target = FolderTree::load(app)
+        .get(&uuid)
+        .and_then(|f| f.parent.clone());
+    app.ui.sheet = Some(Sheet::MoveFolder { uuid });
+}
+
+pub(super) fn move_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, ids: &[u64]) -> bool {
+    destination_sheet(
+        app,
+        ctx,
+        &format!("Move {} Credentials", ids.len()),
+        None,
+        |app, target| move_items(app, ids, target),
+    )
+}
+
+pub(super) fn move_folder_sheet(app: &mut DesktopApp, ctx: &egui::Context, uuid: &str) -> bool {
+    let tree = FolderTree::load(app);
+    let name = tree
+        .name(uuid)
+        .unwrap_or_else(|| "Missing Folder".to_owned());
+    let excluded = tree.subtree(uuid);
+    destination_sheet(
+        app,
+        ctx,
+        &format!("Move Folder “{name}”"),
+        Some(&excluded),
+        |app, target| match app.owner_ui.session.move_folder(uuid, target) {
+            Ok(()) => {
+                let fresh = FolderTree::load(app);
+                let mut above = target;
+                while let Some(parent) = above {
+                    app.ui.open_folders.insert(parent.to_owned());
+                    above = fresh
+                        .get(parent)
+                        .and_then(|folder| folder.parent.as_deref());
+                }
+                app.set_ok(format!("Moved folder “{name}”."));
+                true
+            }
+            Err(error) => {
+                app.set_err(error.message);
+                false
+            }
+        },
+    )
+}
+
+fn destination_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    title: &str,
+    excluded: Option<&BTreeSet<String>>,
+    apply: impl FnOnce(&mut DesktopApp, Option<&str>) -> bool,
+) -> bool {
+    let tree = FolderTree::load(app);
+    let options: Vec<_> = tree
+        .choices()
+        .into_iter()
+        .filter(|(uuid, _)| {
+            !uuid
+                .as_ref()
+                .is_some_and(|id| excluded.is_some_and(|set| set.contains(id)))
+        })
+        .collect();
+    let mut choice = app.ui.move_target.clone();
+    let mut confirm = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "move-destination", 440.0, |ui| {
+        kit::sheet_title(
+            ui,
+            title,
+            Some("Choose a destination. Sharing, rules, and history stay the same."),
+        );
+        kit::sheet_body(ui, |ui| {
+            for (uuid, label) in &options {
+                ui.selectable_value(&mut choice, uuid.clone(), label);
+            }
+        });
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                confirm = kit::button(ui, "Move", Style::Prominent).clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    app.ui.move_target = choice.clone();
+    if (confirm || save_pressed(app, ctx)) && apply(app, choice.as_deref()) || cancel {
+        close_sheet(app, ctx);
+    }
+    response.escape
 }
 
 /// The name field of New Folder and Rename.

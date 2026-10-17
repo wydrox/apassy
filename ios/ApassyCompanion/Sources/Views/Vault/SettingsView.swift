@@ -8,6 +8,7 @@ struct SettingsView: View {
     /// A group page of Settings.
     enum Page: String, Hashable {
         case general
+        case agents
         case devices
         case security
         case advanced
@@ -15,6 +16,7 @@ struct SettingsView: View {
 
     @Environment(RootModel.self) private var root
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var path: [Page] = []
 
     init(initialPage: Page? = nil) {
@@ -27,7 +29,13 @@ struct SettingsView: View {
                 Section {
                     NavigationLink(value: Page.general) {
                         SettingsGroupRow(
-                            title: "General", detail: "Vault, import, AutoFill", symbol: "gearshape.fill", tint: .gray)
+                            title: "General", detail: "Vault, import, AutoFill", symbol: "gearshape.fill",
+                            tint: .gray)
+                    }
+                    NavigationLink(value: Page.agents) {
+                        SettingsGroupRow(
+                            title: "Agent Access", detail: "Permissions and exceptions", symbol: "cpu",
+                            tint: .indigo)
                     }
                     NavigationLink(value: Page.devices) {
                         SettingsGroupRow(
@@ -67,10 +75,22 @@ struct SettingsView: View {
             .navigationDestination(for: Page.self) { group in
                 switch group {
                 case .general: GeneralSettingsView(close: dismiss)
+                case .agents:
+                    AgentsView(
+                        model: root.agents, questions: root.questions, companion: root.companion,
+                        embedded: true, close: { dismiss() })
                 case .devices: DevicesSettingsView(close: dismiss)
                 case .security: SecuritySettingsView(close: dismiss)
                 case .advanced: AdvancedSettingsView()
                 }
+            }
+        }
+        // Own the feed for the whole access flow, including a pushed agent detail.
+        .task(id: path.contains(.agents) && CoverPolicy.polls(in: AppPhase(scenePhase))) {
+            if path.contains(.agents), CoverPolicy.polls(in: AppPhase(scenePhase)),
+                let agents = root.agents
+            {
+                await agents.watch()
             }
         }
         #if targetEnvironment(simulator)

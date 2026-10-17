@@ -525,3 +525,324 @@ fn a_lock_outside_the_app_flow_clears_at_the_next_frame() {
     assert_eq!(board.text(), None);
     assert!(!app.owner.clipboard.is_pending());
 }
+
+// ---- Ordinary secret Copy. The existing TOTP path above stays separate. ----
+
+fn copy_field_action(item_id: u64, field: &str, revision: u64) -> OwnerAction {
+    OwnerAction::CopyField {
+        item_id,
+        field: field.to_owned(),
+        revision,
+    }
+}
+
+fn field_request(app: &DesktopApp, item_id: u64, field: &str) -> OwnerRequest {
+    OwnerRequest::CopyField {
+        item_id,
+        field: field.to_owned(),
+        revision: app
+            .owner_ui
+            .session
+            .details(item_id)
+            .expect("details")
+            .revision,
+    }
+}
+
+#[test]
+fn copy_field_names_the_exact_snapshot_and_discloses_local_clipboard_access() {
+    let request = OwnerRequest::CopyField {
+        item_id: 7,
+        field: "password".into(),
+        revision: 9,
+    };
+    assert_eq!(request.action(), copy_field_action(7, "password", 9));
+    assert!(request.describe().contains("Other apps"));
+    assert!(request.describe().contains("30 seconds"));
+    assert!(!request.describe().contains(PASSWORD));
+    assert_ne!(request.action(), copy_field_action(7, "password", 8));
+    assert_ne!(request.action(), copy_field_action(7, "token", 9));
+}
+
+#[test]
+fn ordinary_copy_checks_now_without_revealing_and_each_copy_checks_again() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, id, board) = app_with_login(&dir);
+    let request = field_request(&app, id, "password");
+    app.ask_owner(request.clone(), None);
+    assert_eq!(board.with(|b| b.writes), 0);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("check");
+    assert_eq!(board.text().as_deref(), Some(PASSWORD));
+    assert_eq!(
+        board.with(|b| (b.concealed, b.transient, b.local_only)),
+        (true, true, true)
+    );
+    assert_eq!(app.owner_ui.session.revealed_value(id, "password"), None);
+    assert!(!app.status_text.contains(PASSWORD));
+    assert!(app.status_text.contains("Copied"));
+    app.ask_owner(request, None);
+    assert_eq!(board.with(|b| b.writes), 1);
+    app.close_owner_check(None);
+    assert_eq!(board.with(|b| b.writes), 1);
+    app.lock_vault(None);
+    assert_eq!(board.text(), None);
+}
+
+#[test]
+fn ordinary_copy_rejects_reveal_code_other_field_revision_item_and_expired_proofs() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, id, board) = app_with_login(&dir);
+    let revision = app.owner_ui.session.details(id).expect("details").revision;
+    let recovery = detail_field_name("Recovery code");
+    let actions = [
+        OwnerAction::Reveal { item_id: id },
+        copy(id, &otp_field()),
+        copy_field_action(id, &recovery, revision),
+        copy_field_action(id, "password", revision + 1),
+        copy_field_action(id + 1, "password", revision),
+    ];
+    for action in actions {
+        let proof = proof(&app, action);
+        let err = app
+            .owner_ui
+            .session
+            .copy_field(id, "password", revision, proof)
+            .expect_err("wrong proof");
+        assert_eq!(err.code, "owner_check_required");
+        assert!(!err.message.contains(PASSWORD));
+    }
+    let old = Instant::now() - PROOF_LIFETIME - Duration::from_secs(1);
+    let expired = OwnerProof::issue_for_test(
+        copy_field_action(id, "password", revision),
+        app.owner_ui.session.epoch().expect("epoch"),
+        old,
+    );
+    assert!(
+        app.owner_ui
+            .session
+            .copy_field(id, "password", revision, expired)
+            .is_err()
+    );
+    assert_eq!(board.with(|b| b.writes), 0);
+}
+
+#[test]
+fn ordinary_and_custom_secret_copy_excludes_setup_keys_and_reserved_passkey_fields() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, id, _) = app_with_login(&dir);
+    let revision = app.owner_ui.session.details(id).expect("details").revision;
+    let recovery = detail_field_name("Recovery code");
+    assert!(
+        app.owner_ui
+            .session
+            .can_copy_field(id, "password", revision)
+    );
+    assert!(app.owner_ui.session.can_copy_field(id, &recovery, revision));
+    for field in [
+        otp_field(),
+        detail_field_name(OTP_EIGHT),
+        "passkey_key".into(),
+        "username".into(),
+    ] {
+        assert!(!app.owner_ui.session.can_copy_field(id, &field, revision));
+        let proof = proof(&app, copy_field_action(id, &field, revision));
+        assert!(
+            app.owner_ui
+                .session
+                .copy_field(id, &field, revision, proof)
+                .is_err()
+        );
+    }
+    let proof = checked_proof(&app, copy_field_action(id, &recovery, revision));
+    let value = app
+        .owner_ui
+        .session
+        .copy_field(id, &recovery, revision, proof)
+        .expect("custom secret");
+    assert_eq!(value.as_str(), RECOVERY);
+    assert_eq!(app.owner_ui.session.revealed_value(id, &recovery), None);
+}
+
+#[test]
+fn ordinary_copy_revalidates_changes_deletion_lock_and_vault_switch() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, id, board) = app_with_login(&dir);
+    let revision = app.owner_ui.session.details(id).expect("details").revision;
+    let approved = proof(&app, copy_field_action(id, "password", revision));
+    let draft = app
+        .owner_ui
+        .session
+        .details(id)
+        .expect("details")
+        .to_draft();
+    let mut secrets = SecretForm::default();
+    secrets.password = "changed-synthetic-password".into();
+    app.owner_ui
+        .session
+        .update(id, revision, &draft, &secrets)
+        .expect("update");
+    assert!(
+        !app.owner_ui
+            .session
+            .can_copy_field(id, "password", revision)
+    );
+    assert_eq!(
+        app.owner_ui
+            .session
+            .copy_field(id, "password", revision, approved)
+            .expect_err("stale")
+            .code,
+        "stale_item"
+    );
+    let revision = app.owner_ui.session.details(id).expect("details").revision;
+    let approved = proof(&app, copy_field_action(id, "password", revision));
+    app.owner_ui.session.lock().expect("lock");
+    assert!(
+        app.owner_ui
+            .session
+            .copy_field(id, "password", revision, approved)
+            .is_err()
+    );
+    app.owner_ui.session.unlock(PASS).expect("unlock");
+    let approved = proof(&app, copy_field_action(id, "password", revision));
+    app.owner_ui.session.delete(id, revision).expect("delete");
+    assert!(
+        app.owner_ui
+            .session
+            .copy_field(id, "password", revision, approved)
+            .is_err()
+    );
+    let approved = proof(&app, copy_field_action(id, "password", revision));
+    app.owner_ui
+        .session
+        .create_file(&dir.path().join("other-synthetic.db"), PASS)
+        .expect("new vault");
+    assert!(
+        app.owner_ui
+            .session
+            .copy_field(id, "password", revision, approved)
+            .is_err()
+    );
+    assert_eq!(board.with(|b| b.writes), 0);
+}
+
+#[test]
+fn ordinary_copy_cancellation_wrong_passphrase_and_pasteboard_failure_are_secret_free() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, id, board) = app_with_login(&dir);
+    let request = field_request(&app, id, "password");
+    app.ask_owner(request.clone(), None);
+    app.close_owner_check(None);
+    assert_eq!(board.with(|b| b.writes), 0);
+    app.ask_owner(request.clone(), None);
+    assert!(
+        app.confirm_owner_now(OwnerCheck::passphrase("wrong synthetic phrase"))
+            .is_err()
+    );
+    assert_eq!(board.with(|b| b.writes), 0);
+    app.ask_owner(request, None);
+    board.with(|b| b.fail_write = true);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("check");
+    assert_eq!(board.with(|b| b.writes), 0);
+    assert!(!app.owner.clipboard.is_pending());
+    assert!(app.status_text.contains("clipboard may contain the value"));
+    assert!(!app.status_text.contains(PASSWORD));
+}
+
+#[test]
+fn ordinary_field_copy_rejects_totp_uris_in_passwords_tokens_and_custom_secrets() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, login_id, board) = app_with_login(&dir);
+    let totp_uri = format!("otpauth://totp/Synthetic?secret={SEED}");
+    for (kind, field) in [
+        (CredentialKind::Login, "password"),
+        (CredentialKind::ApiKey, "token"),
+    ] {
+        for (is_setup, value) in [
+            (true, totp_uri.as_str()),
+            (false, "ordinary-synthetic-value"),
+        ] {
+            let mut secrets = SecretForm::default();
+            secrets.details[0] = value.to_owned();
+            match kind {
+                CredentialKind::Login => secrets.password = value.to_owned(),
+                CredentialKind::ApiKey => secrets.token = value.to_owned(),
+                _ => unreachable!(),
+            }
+            let item = app
+                .owner_ui
+                .session
+                .add(
+                    &ItemDraft {
+                        name: format!("Synthetic {field} {is_setup}"),
+                        kind,
+                        username: "user@example.test".to_owned(),
+                        details: vec![hidden("Arbitrary detail")],
+                        ..ItemDraft::default()
+                    },
+                    &secrets,
+                )
+                .expect("add synthetic item");
+            assert_eq!(
+                app.owner_ui
+                    .session
+                    .can_copy_field(item.id, field, item.revision),
+                !is_setup
+            );
+            let approved = proof(&app, copy_field_action(item.id, field, item.revision));
+            let result = app
+                .owner_ui
+                .session
+                .copy_field(item.id, field, item.revision, approved);
+            if is_setup {
+                assert_eq!(result.expect_err("setup key").code, "unsupported_field");
+            } else {
+                assert_eq!(result.expect("ordinary value").as_str(), value);
+            }
+            let custom = detail_field_name("Arbitrary detail");
+            assert_eq!(
+                app.owner_ui
+                    .session
+                    .can_copy_field(item.id, &custom, item.revision),
+                !is_setup
+            );
+            let approved = proof(&app, copy_field_action(item.id, &custom, item.revision));
+            let result = app
+                .owner_ui
+                .session
+                .copy_field(item.id, &custom, item.revision, approved);
+            if is_setup {
+                assert_eq!(
+                    result.expect_err("custom setup URI").code,
+                    "unsupported_field"
+                );
+            } else {
+                assert_eq!(result.expect("ordinary custom value").as_str(), value);
+            }
+        }
+    }
+    let revision = app
+        .owner_ui
+        .session
+        .details(login_id)
+        .expect("details")
+        .revision;
+    let custom_uri = detail_field_name(OTP_EIGHT);
+    assert!(
+        !app.owner_ui
+            .session
+            .can_copy_field(login_id, &custom_uri, revision)
+    );
+    let approved = proof(&app, copy_field_action(login_id, &custom_uri, revision));
+    assert_eq!(
+        app.owner_ui
+            .session
+            .copy_field(login_id, &custom_uri, revision, approved)
+            .expect_err("custom URI")
+            .code,
+        "unsupported_field"
+    );
+    assert_eq!(board.with(|b| b.writes), 0);
+}

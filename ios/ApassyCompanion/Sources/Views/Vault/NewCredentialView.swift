@@ -1,27 +1,89 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// "New Credential", in a sheet: paste (or scan a QR code), then Add (ADR 0025 §4, ADR 0026 §4
-/// and §8). "Fill in by hand" turns the sheet into the full editor of a kind.
+/// Choose Login, Paste, or Other while keeping the selected destination.
+/// Paste also supports QR codes and batches (ADR 0025 §4, ADR 0026 §4 and §8).
 struct NewCredentialView: View {
     /// The folder that the sheet opened in; nil: the top level.
     let folder: String?
+    var onSaved: ([(id: UInt64, title: String)], String?) -> Void
     @Environment(VaultModel.self) private var vault
-    /// The kind of the full editor, after "Fill in by hand".
+    /// The kind chosen for the full editor.
     @State private var manualKind: ItemKind?
     @State private var manualFolder: String?
+    @State private var initialFolder: String?
+    @State private var isPasting = false
+    @State private var folders: [Folder] = []
+    @State private var confirmsChooserDiscard = false
+    @Environment(\.dismiss) private var dismiss
 
-    init(folder: String?) {
+    init(
+        folder: String?,
+        onSaved: @escaping ([(id: UInt64, title: String)], String?) -> Void = { _, _ in }
+    ) {
         self.folder = folder
+        self.onSaved = onSaved
+        _manualFolder = State(initialValue: folder)
+        _initialFolder = State(initialValue: folder)
     }
 
     var body: some View {
         if let manualKind {
-            ItemEditorView(model: ItemEditorModel(kind: manualKind, folder: manualFolder))
-        } else {
-            PasteSheet(model: NewCredentialModel(service: vault.service, folder: folder)) { kind, folder in
+            ItemEditorView(model: ItemEditorModel(kind: manualKind, folder: manualFolder), onSaved: onSaved)
+        } else if isPasting {
+            PasteSheet(
+                model: NewCredentialModel(service: vault.service, folder: manualFolder), onSaved: onSaved
+            ) { kind, folder in
                 manualFolder = folder
                 manualKind = kind
+            }
+        } else {
+            NavigationStack {
+                Form {
+                    Section {
+                        Button("Login", systemImage: "person.crop.rectangle") { manualKind = .login }
+                        Button("Paste", systemImage: "doc.on.clipboard") { isPasting = true }
+                        Menu("Other", systemImage: "ellipsis.circle") {
+                            ForEach(ItemKind.allCases.filter { $0 != .login }) { kind in
+                                Button(kind.label, systemImage: kind.symbol) { manualKind = kind }
+                            }
+                        }
+                    } footer: {
+                        Text(
+                            "Save a username and password with Login. Paste a key, a .env file or several credentials. Choose Other for an SSH key, database or custom item."
+                        )
+                    }
+                    if !folders.isEmpty || manualFolder != nil {
+                        Section {
+                            FolderMenuRow(folders: folders, selection: $manualFolder)
+                        }
+                    }
+                }
+                .navigationTitle("New Credential")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", role: .cancel) {
+                            if manualFolder != initialFolder { confirmsChooserDiscard = true } else { dismiss() }
+                        }
+                        .confirmationDialog(
+                            "Discard changes?", isPresented: $confirmsChooserDiscard, titleVisibility: .visible
+                        ) {
+                            Button("Discard Changes", role: .destructive) { dismiss() }
+                            Button("Keep Editing") { confirmsChooserDiscard = false }
+                        }
+                    }
+                }
+            }
+            .interactiveDismissDisabled(manualFolder != initialFolder)
+            .task {
+                do {
+                    folders = try await vault.service.folders()
+                } catch let error as VaultError where VaultModel.lacksFolders(error) {
+                    folders = []
+                    manualFolder = nil
+                    initialFolder = nil
+                } catch {}
             }
         }
     }
@@ -31,16 +93,25 @@ struct NewCredentialView: View {
 private struct PasteSheet: View {
     @State private var model: NewCredentialModel
     let onManual: (ItemKind, String?) -> Void
+    let onSaved: ([(id: UInt64, title: String)], String?) -> Void
     @Environment(VaultModel.self) private var vault
     @Environment(\.dismiss) private var dismiss
     @FocusState private var editing: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var scanning = false
+    @State private var confirmsDiscard = false
+    @State private var pendingManualKind: ItemKind?
     /// Three lines of the field, so the card keeps its size when the mask shows.
     @ScaledMetric(relativeTo: .body) private var maskHeight: CGFloat = 60
 
-    init(model: NewCredentialModel, onManual: @escaping (ItemKind, String?) -> Void) {
+    init(
+        model: NewCredentialModel,
+        onSaved: @escaping ([(id: UInt64, title: String)], String?) -> Void,
+        onManual: @escaping (ItemKind, String?) -> Void
+    ) {
         _model = State(initialValue: model)
         self.onManual = onManual
+        self.onSaved = onSaved
     }
 
     var body: some View {
@@ -62,7 +133,7 @@ private struct PasteSheet: View {
                     }
                 }
                 Section {
-                    if !model.folders.isEmpty {
+                    if !model.folders.isEmpty || model.folder != nil {
                         FolderMenuRow(folders: model.folders, selection: $model.folder)
                     }
                 } footer: {
@@ -74,33 +145,42 @@ private struct PasteSheet: View {
                             .foregroundStyle(.red)
                     }
                 }
-                Section {
-                    Menu {
-                        ForEach(ItemKind.allCases) { kind in
-                            Button(kind.label, systemImage: kind.symbol) {
-                                let folder = model.folder
-                                model.clear()
-                                onManual(kind, folder)
-                            }
+                Section("Create another way") {
+                    Button("Login", systemImage: "person.crop.rectangle") { chooseManual(.login) }
+                    Menu("Other", systemImage: "ellipsis.circle") {
+                        ForEach(ItemKind.allCases.filter { $0 != .login }) { kind in
+                            Button(kind.label, systemImage: kind.symbol) { chooseManual(kind) }
                         }
-                    } label: {
-                        Label("Fill in by hand", systemImage: "square.and.pencil")
                     }
-                } footer: {
-                    Text("A login, an SSH key, or another kind, field by field.")
                 }
             }
-            .navigationTitle("New Credential")
+            .disabled(model.isAdding)
+            .navigationTitle("Paste Credentials")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", role: .cancel) { close() }
+                    Button("Cancel", role: .cancel, action: cancel)
+                        .disabled(model.isAdding)
+                        .confirmationDialog(
+                            "Discard changes?", isPresented: $confirmsDiscard, titleVisibility: .visible
+                        ) {
+                            Button("Discard Changes", role: .destructive, action: discard)
+                            Button("Keep Editing") {
+                                confirmsDiscard = false
+                                pendingManualKind = nil
+                            }
+                        } message: {
+                            Text("The pasted text and your choices will be lost.")
+                        }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(role: .confirm) {
                         editing = false
                         Task {
-                            if await model.add(in: vault) != nil { dismiss() }
+                            if let added = await model.add(in: vault) {
+                                onSaved(added.map { (id: $0.id, title: $0.title) }, model.savedFolder)
+                                dismiss()
+                            }
                         }
                     } label: {
                         if model.isAdding { ProgressView() } else { Text(model.addLabel) }
@@ -110,12 +190,12 @@ private struct PasteSheet: View {
             }
             .sheet(isPresented: $scanning) { scanner }
         }
-        .interactiveDismissDisabled(model.isAdding)
+        .interactiveDismissDisabled(model.preventsDismissal)
         .task { await model.loadFolders() }
         #if targetEnvironment(simulator)
             .task { await fillFromLaunchArgument() }
         #endif
-        // Each way out drops the paste: Cancel, Add, a swipe down, and the lock.
+        // Explicit discard, successful Add, and the lock drop the paste.
         .onDisappear { model.clear() }
         .onChange(of: vault.isUnlocked) { _, unlocked in
             if !unlocked { close() }
@@ -125,6 +205,33 @@ private struct PasteSheet: View {
         .onChange(of: vault.revealEpoch, initial: true) { _, epoch in
             editing = false
             model.follow(revealEpoch: epoch)
+        }
+    }
+
+    private func cancel() {
+        guard !model.isAdding else { return }
+        pendingManualKind = nil
+        if model.hasChanges { confirmsDiscard = true } else { close() }
+    }
+
+    private func chooseManual(_ kind: ItemKind) {
+        guard !model.isAdding else { return }
+        if model.hasText {
+            pendingManualKind = kind
+            confirmsDiscard = true
+        } else {
+            onManual(kind, model.folder)
+        }
+    }
+
+    private func discard() {
+        guard !model.isAdding else { return }
+        if let kind = pendingManualKind {
+            let folder = model.folder
+            model.clear()
+            onManual(kind, folder)
+        } else {
+            close()
         }
     }
 
@@ -174,7 +281,11 @@ private struct PasteSheet: View {
             }
             .padding(.vertical, 4)
         } footer: {
-            HStack(spacing: 8) {
+            let layout =
+                dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                : AnyLayout(HStackLayout(spacing: 8))
+            layout {
                 PasteButton(payloadType: String.self) { strings in
                     guard let pasted = strings.first else { return }
                     Task { @MainActor in
@@ -307,6 +418,11 @@ private struct FoundRow: View {
                         .accessibilityLabel("Title of the credential on row \(row.id + 1)")
                     if let cap = row.found.cap { EnvironmentCap(label: cap.label, red: cap.red) }
                 }
+                if row.keep, let message = row.nameValidationMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
                 Text(row.found.rowLine)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -333,7 +449,9 @@ private struct EnvironmentCap: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
             .foregroundStyle(red ? Color.red : Color.secondary)
-            .background(red ? Color.red.opacity(0.12) : Color.secondary.opacity(0.12), in: .rect(cornerRadius: 7))
+            .background(
+                red ? Color.red.opacity(0.12) : Color.secondary.opacity(0.12), in: .rect(cornerRadius: 7)
+            )
             .fixedSize()
     }
 }
@@ -343,6 +461,11 @@ private struct EnvironmentCap: View {
 struct FolderMenuRow: View {
     let folders: [Folder]
     @Binding var selection: String?
+
+    private var destinationLabel: String {
+        if let selection, !folders.contains(where: { $0.uuid == selection }) { return "Unavailable folder" }
+        return FolderMenu.label(folders, selection)
+    }
 
     var body: some View {
         LabeledContent("Folder") {
@@ -356,13 +479,13 @@ struct FolderMenuRow: View {
                 .pickerStyle(.inline)
             } label: {
                 HStack(spacing: 4) {
-                    Text(FolderMenu.label(folders, selection))
+                    Text(destinationLabel)
                         .lineLimit(1)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption)
                 }
             }
-            .accessibilityLabel("Folder, \(FolderMenu.label(folders, selection))")
+            .accessibilityLabel("Folder, \(destinationLabel)")
         }
     }
 }

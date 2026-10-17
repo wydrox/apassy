@@ -8,10 +8,10 @@ test("the loaded extension has the fixed ID", async ({ h }) => {
   expect(await worker.evaluate(() => chrome.runtime.id)).toBe(EXTENSION_ID);
 });
 
-test("the manifest asks only for nativeMessaging, activeTab, and scripting", async ({ h }) => {
+test("the manifest keeps site access optional and uses session storage for nonsecret results", async ({ h }) => {
   const manifest = await (await h.worker()).evaluate(() => chrome.runtime.getManifest());
   expect(manifest.manifest_version).toBe(3);
-  expect(manifest.permissions).toEqual(["nativeMessaging", "activeTab", "scripting"]);
+  expect(manifest.permissions).toEqual(["nativeMessaging", "activeTab", "scripting", "storage"]);
   expect(manifest.host_permissions).toBeUndefined();
   expect(manifest.content_scripts).toBeUndefined();
   expect(manifest.optional_permissions).toBeUndefined();

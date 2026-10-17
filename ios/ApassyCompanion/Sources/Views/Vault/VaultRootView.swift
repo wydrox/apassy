@@ -1,9 +1,7 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// The root of the Vault tab, like the Mac sidebar (ADR 0026 §8): Watchtower as a card, "All
-/// credentials", the favorites (when there are some), the archive, the password generator, the
-/// folders, and the sync state. "+" opens New Credential.
+/// Credentials are immediately available; organization and healthy status are secondary.
 struct VaultRootView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(VaultUI.self) private var ui
@@ -11,94 +9,74 @@ struct VaultRootView: View {
     var body: some View {
         @Bindable var ui = ui
         NavigationStack(path: $ui.homePath) {
-            List {
-                Section {
-                    NavigationLink(value: VaultRoute.watchtower) {
-                        if let report = vault.watchtower, report.issueCount > 0 {
-                            WatchtowerCard(report: report)
-                        } else {
-                            WatchtowerClearRow(checked: vault.watchtower != nil)
-                        }
-                    }
+            ItemsView(isRoot: true)
+                .id(ui.libraryRevealEpoch)
+                .vaultDestinations()
+                .refreshable { await vault.syncNow() }
+                .folderPrompts()
+                .onChange(of: vault.folders) { _, folders in
+                    guard vault.hasFolders,
+                        let gone = ui.homePath.firstIndex(where: { route in
+                            if case .folder(let uuid) = route {
+                                !folders.contains { $0.uuid == uuid }
+                            } else {
+                                false
+                            }
+                        })
+                    else { return }
+                    ui.homePath.removeSubrange(gone...)
                 }
-                Section {
-                    NavigationLink(value: VaultRoute.allCredentials) {
-                        PlaceRow(
-                            title: "All credentials", symbol: "key.horizontal.fill", color: .accentColor,
-                            count: vault.activeItems.count)
-                    }
-                    let favorites = vault.favoriteItems.count
-                    if favorites > 0 {
-                        NavigationLink(value: VaultRoute.favorites) {
-                            PlaceRow(title: "Favorites", symbol: "star.fill", color: .yellow, count: favorites)
-                        }
-                    }
-                    let archived = VaultQuery.archived(vault.items).count
-                    if archived > 0 {
-                        NavigationLink(value: VaultRoute.category(.archive)) {
-                            PlaceRow(title: "Archive", symbol: "archivebox.fill", color: .gray, count: archived)
-                        }
+        }
+    }
+}
+
+/// Organization and tools remain one tap from the credential list.
+struct VaultFoldersView: View {
+    @Environment(VaultModel.self) private var vault
+    @Environment(VaultUI.self) private var ui
+
+    var body: some View {
+        List {
+            Section {
+                NavigationLink(value: VaultRoute.allCredentials) {
+                    PlaceRow(
+                        title: "All credentials", symbol: "key.horizontal.fill", color: .accentColor,
+                        count: vault.activeItems.count)
+                }
+                NavigationLink(value: VaultRoute.favorites) {
+                    PlaceRow(
+                        title: "Favorites", symbol: "star.fill", color: .yellow,
+                        count: vault.favoriteItems.count)
+                }
+                NavigationLink(value: VaultRoute.category(.archive)) {
+                    PlaceRow(
+                        title: "Archive", symbol: "archivebox.fill", color: .gray,
+                        count: VaultQuery.archived(vault.items).count)
+                }
+                NavigationLink(value: VaultRoute.watchtower) {
+                    Label("Watchtower", systemImage: "checkmark.shield")
+                }
+                Button {
+                    ui.sheet = .generator
+                } label: {
+                    Label("Password generator", systemImage: "dice")
+                }
+            }
+            if vault.hasFolders {
+                Section("Folders") {
+                    let tree = vault.folderTree
+                    ForEach(tree.children(of: nil)) { folder in
+                        FolderListRow(folder: folder, tree: tree)
                     }
                     Button {
-                        ui.sheet = .generator
+                        ui.folderPrompt = .create(parent: nil)
                     } label: {
-                        PlaceRow(title: "Password generator", symbol: "dice.fill", color: .indigo)
+                        Label("New Folder", systemImage: "folder.badge.plus")
                     }
-                    .foregroundStyle(.primary)
-                    .accessibilityHint("Makes a new password")
-                }
-                if vault.hasFolders { folders }
-                // Shared vaults (ADR 0026 §6) come with V3: a "Shared" section shows here only
-                // when the core reports shared vaults. There is no such call yet.
-            }
-            .navigationTitle("Vault")
-            .navigationSubtitle(subtitle)
-            .toolbar { VaultToolbar(ui: ui, showsLock: true, vault: vault) }
-            .vaultDestinations()
-            .refreshable { await vault.syncNow() }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if vault.vault?.syncs == true {
-                    SyncCapsule()
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
                 }
             }
-            .folderPrompts()
-            // A folder that is gone (deleted here or on a Mac) leaves the stack with the screens
-            // above it.
-            .onChange(of: vault.folders) { _, folders in
-                guard vault.hasFolders,
-                    let gone = ui.homePath.firstIndex(where: { route in
-                        if case .folder(let uuid) = route { !folders.contains { $0.uuid == uuid } } else { false }
-                    })
-                else { return }
-                ui.homePath.removeSubrange(gone...)
-            }
         }
-    }
-
-    /// "Personal · 8 items · unlocked", as in the mockup.
-    private var subtitle: String {
-        let count = vault.activeItems.count
-        let items = count == 1 ? "1 item" : "\(count) items"
-        return [vault.vault?.name, items, "unlocked"].compactMap { $0 }.joined(separator: " · ")
-    }
-
-    private var folders: some View {
-        let tree = vault.folderTree
-        return Section {
-            ForEach(tree.children(of: nil)) { folder in
-                FolderListRow(folder: folder, tree: tree)
-            }
-            Button {
-                ui.folderPrompt = .create(parent: nil)
-            } label: {
-                Label("New Folder", systemImage: "folder.badge.plus")
-            }
-        } header: {
-            Text("Folders")
-        }
+        .navigationTitle("Folders and tools")
     }
 }
 
@@ -191,75 +169,5 @@ struct FolderListRow: View {
             .tint(.gray)
         }
         .contextMenu { FolderMenuItems(folder: folder, tree: tree) }
-    }
-}
-
-/// Watchtower on the Vault root when nothing needs a look (or the check has not finished yet).
-private struct WatchtowerClearRow: View {
-    let checked: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            WatchtowerTile(issues: false)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Watchtower")
-                    .font(.headline)
-                Text(checked ? "Nothing needs a look" : "Checking")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens Watchtower")
-    }
-}
-
-/// "Watchtower: 2 weak passwords · 1 reused" on the Vault root.
-struct WatchtowerCard: View {
-    let report: WatchtowerReport
-
-    var body: some View {
-        HStack(spacing: 12) {
-            WatchtowerTile(issues: true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Watchtower")
-                    .font(.headline)
-                Text(summary)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens Watchtower")
-    }
-
-    private var summary: String {
-        var parts: [String] = []
-        if !report.weak.isEmpty {
-            parts.append(report.weak.count == 1 ? "1 weak password" : "\(report.weak.count) weak passwords")
-        }
-        let reused = report.reused.flatMap(\.self).count
-        if reused > 0 { parts.append("\(reused) reused") }
-        if !report.old.isEmpty { parts.append("\(report.old.count) old") }
-        if !report.conflicts.isEmpty {
-            parts.append(report.conflicts.count == 1 ? "1 conflict copy" : "\(report.conflicts.count) conflict copies")
-        }
-        return parts.joined(separator: " · ")
-    }
-}
-
-/// The shield of Watchtower: green when nothing needs a look, orange otherwise.
-private struct WatchtowerTile: View {
-    let issues: Bool
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 36
-
-    var body: some View {
-        let tint: Color = issues ? .orange : .green
-        Image(systemName: issues ? "exclamationmark.shield.fill" : "checkmark.shield.fill")
-            .font(.system(size: size * 0.55, weight: .medium))
-            .foregroundStyle(tint)
-            .frame(width: size, height: size)
-            .background(tint.opacity(0.15), in: .rect(cornerRadius: size * 0.26, style: .continuous))
-            .accessibilityHidden(true)
     }
 }

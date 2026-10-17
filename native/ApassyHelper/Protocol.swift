@@ -12,7 +12,8 @@ import Foundation
 
 let protocolVersion = 1
 let helperVersion = "0.1.0"
-let maxRequestBytes = 64 * 1024
+// A 64 KiB vault field needs about 86 KiB when base64 encoded for owner Copy.
+let maxRequestBytes = 128 * 1024
 
 /// Stable error codes. The Rust client maps each code to a typed variant.
 enum ErrorCode: String {

@@ -57,21 +57,24 @@ function renderState(reply) {
       show(note(reply.message), how, command);
       break;
     }
+    case "not_running":
     case "none_open":
     case "vault_locked": {
       const button = element("button", "action", "Open Apassy");
       button.id = "open";
       button.addEventListener("click", async () => {
         button.disabled = true;
-        await send({ type: "show" });
-        window.close();
+        const result = await send({ type: "show" });
+        button.disabled = false;
+        if (result.ok) show(note("Apassy was asked to open. Return after opening or unlocking your vault, then choose an account to fill."), backLink(true));
+        else show(note(result.message || "Apassy could not open. Open it from Applications, then return here.", true), backLink(true));
       });
       show(note(reply.message), button);
       button.focus();
       break;
     }
     case "empty":
-      show(note(`No login for ${reply.host}. Add a detail named Website with this address to a login in Apassy.`), actions());
+      show(note(`No login for ${reply.host}. Edit the login’s built-in Website field in Apassy and add this address.`), actions());
       break;
     case "list":
       renderList();
@@ -82,6 +85,7 @@ function renderState(reply) {
 }
 
 function renderList(message, isError) {
+  if (!message && current.recent) { message = current.recent.message; isError = !current.recent.ok; }
   const list = element("ul");
   list.id = "logins";
   list.setAttribute("aria-label", "Logins");
@@ -103,6 +107,11 @@ function renderList(message, isError) {
       row.classList.add("with-code");
       row.append(code);
     }
+    const update = element("button", "secondary update-login", "Update login");
+    update.type = "button";
+    update.setAttribute("aria-label", `Update password for ${login.username} in ${login.title || "Login"}`);
+    update.addEventListener("click", () => openForm((page) => renderUpdate(page, login), "update"));
+    row.append(update);
     list.append(row);
   }
   list.addEventListener("keydown", moveFocus);
@@ -127,7 +136,7 @@ async function fill(login) {
   if (!current || main.dataset.busy === "1") return;
   main.dataset.busy = "1";
   show(note("Confirm with Touch ID or your passphrase in Apassy."));
-  const result = await send({ type: "fill", tabId: current.tabId, url: current.url, item: login.item });
+  const result = await send({ type: "fill", tabId: current.tabId, url: current.url, target: current.target, item: login.item });
   delete main.dataset.busy;
   if (result && result.ok) {
     show(note(result.message || "Filled."));
@@ -142,7 +151,7 @@ async function fillCode(login) {
   if (!current || main.dataset.busy === "1") return;
   main.dataset.busy = "1";
   show(note("Confirm with Touch ID or your passphrase in Apassy."));
-  const result = await send({ type: "fill_code", tabId: current.tabId, url: current.url, item: login.item });
+  const result = await send({ type: "fill_code", tabId: current.tabId, url: current.url, target: current.target, item: login.item });
   delete main.dataset.busy;
   if (result && result.ok) {
     show(note(result.message || "Code filled."));
@@ -214,12 +223,12 @@ function clampLength(raw) {
 
 // Reads the page (the typed username, and whether it has a password), then
 // draws one of the two forms.
-async function openForm(render) {
+async function openForm(render, purpose = "login") {
   if (!current || main.dataset.busy === "1") return;
   show(note("Reading the page…"), backLink());
   onEscape = () => goBack();
   const mine = view;
-  const page = await send({ type: "peek", tabId: current.tabId, url: current.url });
+  const page = await send({ type: "peek", tabId: current.tabId, url: current.url, target: current.target, purpose });
   if (mine !== view) return;
   if (!page || !page.ok) {
     show(note((page && page.message) || "Apassy could not read this page.", true), backLink());
@@ -296,6 +305,7 @@ async function submitSave(page, values) {
     type: "save",
     tabId: current.tabId,
     url: current.url,
+    target: current.target,
     title: values.title.trim(),
     username: values.username.trim(),
   });
@@ -309,6 +319,27 @@ async function submitSave(page, values) {
   } else {
     renderSave(page, values, (result && result.message) || "Apassy could not save this login.", true);
   }
+}
+
+function renderUpdate(page, login) {
+  const submit = element("button", "action", "Update this login");
+  submit.type = "button";
+  submit.disabled = !page.hasPassword;
+  submit.addEventListener("click", async () => {
+    if (main.dataset.busy === "1") return;
+    main.dataset.busy = "1";
+    show(note("Confirm the password update in Apassy."));
+    const result = await send({ type: "update", tabId: current.tabId, url: current.url, target: current.target,
+      item: login.item, username: login.username });
+    delete main.dataset.busy;
+    // After an uncertain answer, require review in Apassy. Never retry or create a duplicate automatically.
+    show(note(result.message || "Check this login in Apassy before trying again.", !result.ok), backLink(true));
+    onEscape = () => goBack(true);
+  });
+  show(note(`Update the password for ${login.username} in ${login.title || "Login"}?`),
+    element("p", page.hasPassword ? "hint" : "note error", page.hasPassword ? "The password comes from the selected form on this page. Website, passkey and one-time code stay in Apassy." : NO_PASSWORD), submit, backLink());
+  onEscape = () => goBack();
+  submit.focus();
 }
 
 function renderNew(page, values, message, isError) {
@@ -376,6 +407,7 @@ async function submitNew(page, values) {
     type: "create",
     tabId: current.tabId,
     url: current.url,
+    target: current.target,
     title: values.title.trim(),
     username: values.username.trim(),
     length: values.length,
@@ -428,9 +460,8 @@ passkeysBox.addEventListener("change", async () => {
     drawPasskeys(await send(granted ? { type: "passkeys", on: true } : { type: "passkeys_state" }));
   } else {
     const reply = await send({ type: "passkeys", on: false });
-    try {
-      await chrome.permissions.remove({ origins: PASSKEY_ORIGINS });
-    } catch (_) { /* already removed */ }
+    // Site access can also serve the separately enabled login suggestions.
+    // Turning off passkeys unregisters their scripts without revoking another feature's grant.
     drawPasskeys(reply);
   }
 });
@@ -441,3 +472,31 @@ send({ type: "passkeys_state" }).then((reply) => {
 });
 
 send({ type: "state" }).then(renderState);
+
+const suggestionsRow = document.getElementById("suggestions-row");
+const suggestionsBox = document.getElementById("suggestions");
+const suggestionsNote = document.getElementById("suggestions-note");
+let suggestionsUrl = "";
+send({ type: "login_access_state" }).then((reply) => {
+  suggestionsUrl = reply.url || "";
+  suggestionsBox.checked = reply.on === true;
+  suggestionsBox.disabled = !/^https:\/\//.test(suggestionsUrl) && !/^http:\/\/localhost(?::[0-9]+)?\//.test(suggestionsUrl);
+  suggestionsRow.hidden = false;
+});
+suggestionsBox.addEventListener("change", async () => {
+  const on = suggestionsBox.checked;
+  suggestionsBox.disabled = true;
+  let granted = !on;
+  if (on) {
+    const siteUrl = new URL(suggestionsUrl);
+    const asking = chrome.permissions.request({ origins: [`${siteUrl.protocol}//${siteUrl.hostname}/*`] });
+    send({ type: "login_access", url: suggestionsUrl, on: true });
+    try { granted = await asking; } catch (_) { granted = false; }
+  }
+  const reply = await send({ type: "login_access", url: suggestionsUrl, on: on && granted });
+  suggestionsBox.checked = reply.on === true;
+  suggestionsBox.disabled = false;
+  suggestionsNote.textContent = reply.ok === false ? reply.message : reply.on
+    ? "Login suggestions are on for this site. Each fill needs your account choice and approval."
+    : "Off. Use the Apassy toolbar to fill a login. Site access can be removed in browser extension settings.";
+});

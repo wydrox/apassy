@@ -3,6 +3,12 @@
 Date: 2026-10-12.
 Status: ACCEPTED by the owner on 2026-10-12 ("jest już ok. działaj z implementacją"). Shipped in 0.5.0: the Mac app (§1–§5, §7) and the iPhone app (§8). Shared vaults (§6) are not built yet. On the iPhone, the agents, agent use, rules, requests, and suggestions wait for the feed from the Mac ([stage 5 plan](../design/stage5-plan.md), section D), and questions through the relay need the relay's team schema 5, which is not deployed yet. The approved mockup is [docs/design/app-v2-mockup.html](../design/app-v2-mockup.html). It goes with [ADR 0025](0025-low-friction-access.md).
 
+## Current supersession — 2026-10-17
+
+The owner approved the main-flow UX plan on 2026-10-17. Current implementation supersedes the affected navigation and entry points in §2, §4, §7, and §8: iPhone tabs are Vault (the actual credential list), Requests, and Search; Agent Access is in Settings and credential context. Both apps offer Login, Paste, and Other creation routes, preserve the selected folder, and expose the saved result. Credential fields and notes precede optional agent information. Adding or importing credentials completes first-value setup; connecting an agent and enabling iPhone AutoFill remain optional. Desktop organization adds selection, bulk Move with Undo, and folder reparenting. Requests distinguish sent answers from confirmed outcomes and revalidate notification destinations. See [desktop UI](../operations/desktop-ui.md), [iOS](../../ios/README.md), and [relay questions](../contracts/relay-questions-v1.md) for current behavior. These changes do not implement shared vaults or alter agent authority.
+
+[ADR 0027](0027-owner-desktop-copy.md) records the separately accepted desktop Copy disclosure. The dated original decisions below remain historical context.
+
 ## Context
 
 On 2026-10-12 the owner said that the app has "many hidden corners" and that its navigation is not clear. A survey of the code found:

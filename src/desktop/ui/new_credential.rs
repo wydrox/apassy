@@ -203,30 +203,37 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             rows: Vec::new(),
         };
     }
-    // A folder that another Mac deleted gives way to the top level.
-    if choices
-        .folder
-        .as_deref()
-        .is_some_and(|uuid| tree.get(uuid).is_none())
-    {
-        choices.folder = None;
-    }
     let detected = detect::detect(&app.owner_ui.add_secrets.custom_value);
     choices.follow(&detected);
     let kept = choices.rows.iter().filter(|(_, _, keep)| *keep).count();
     let typed = !app.owner_ui.add_secrets.custom_value.trim().is_empty();
     let folder_choices = tree.choices();
-    let folder_label = tree.path_label(choices.folder.as_deref());
+    let folder_label = if choices
+        .folder
+        .as_deref()
+        .is_some_and(|id| tree.get(id).is_none())
+    {
+        "Missing Folder".to_owned()
+    } else {
+        tree.path_label(choices.folder.as_deref())
+    };
 
     let mut add = false;
     let mut cancel = false;
     let mut by_hand = false;
+    let mut login = false;
     let response = kit::sheet(ctx, "new-credential", SHEET_WIDTH, |ui| {
         // The mockup's sheet is gray (#f6f6f7) under its white field and group. The kit
         // sheet is white: paint the gray inside its edge, under the content.
         let backdrop = ui.painter().add(egui::Shape::Noop);
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.label(kit::text("New Credential", Font::Body).variation(b"wght", 700.0));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            login = push_button(ui, "Login").clicked();
+            ui.label(kit::text("Paste", Font::Body).color(kit::LABEL));
+            by_hand = push_button(ui, "Other…").clicked();
+        });
         ui.add_space(3.0);
         kit::paragraph(
             ui,
@@ -242,7 +249,18 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             ui.add_space(4.0);
             paste_field(ui, &mut app.owner_ui.add_secrets.custom_value, &detected);
             ui.add_space(8.0);
-            by_hand = examples(ui, &mut app.owner_ui.add_secrets.custom_value);
+            by_hand |= examples(ui, &mut app.owner_ui.add_secrets.custom_value);
+            if choices
+                .folder
+                .as_deref()
+                .is_some_and(|id| tree.get(id).is_none())
+            {
+                kit::tone_note(
+                    ui,
+                    "The selected folder is gone. Choose another folder before adding.",
+                    Tone::Warning,
+                );
+            }
             if typed && detected.is_empty() {
                 ui.add_space(10.0);
                 kit::tone_note(ui, NOTHING_FOUND, Tone::Warning);
@@ -297,15 +315,23 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
         );
     });
     let ready = kept > 0;
+    app.ui.create_folder = choices.folder.clone();
     choices.store(ctx);
     if ready && !add && save_pressed(app, ctx) {
         add = true;
     }
     if add {
         add_kept(app, ctx, detected);
-    } else if by_hand {
+    } else if by_hand || login {
+        let folder = app.ui.create_folder.clone();
         forget(app, ctx);
         super::items::open_add(app);
+        app.ui.create_folder = folder;
+        if login {
+            app.add_form.kind = CredentialKind::Login;
+            app.ui.sheet = Some(super::Sheet::AddItem { kind_chosen: true });
+            app.ui.focus_form_name = true;
+        }
     } else if cancel {
         forget(app, ctx);
         close_sheet(app, ctx);
@@ -578,7 +604,7 @@ fn push_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 /// The Folder pop-up of the footer, as the mockup's `.pop`: a gray fill without an
 /// edge, 22 points high. A choice with Return or Space closes the menu, and the focus
 /// goes back to the button after a choice or Escape, as with [`kit::picker`].
-fn folder_menu(
+pub(super) fn folder_menu(
     ui: &mut egui::Ui,
     value: &mut Option<String>,
     options: &[(Option<String>, String)],
@@ -840,9 +866,8 @@ fn add_kept(app: &mut DesktopApp, ctx: &egui::Context, detected: Vec<Detected>) 
         .unwrap_or_default();
     forget(app, ctx);
     close_sheet(app, ctx);
-    app.place = Place::Folder(folder.clone());
     if let Some(first) = added.first() {
-        app.select_item(first.id.to_string());
+        super::items::reveal_saved(app, first.id, folder.clone());
     }
     let place = FolderTree::load(app).path_label(folder.as_deref());
     match lines.as_slice() {

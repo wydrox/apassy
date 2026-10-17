@@ -1,21 +1,26 @@
 import ApassyVaultKit
 import SwiftUI
-import UniformTypeIdentifiers
 import UIKit
+import UniformTypeIdentifiers
 
 struct AddVaultChoiceView: View {
     @Environment(RootModel.self) private var root
 
     var body: some View {
         PairingScreen {
-            PairingHero(symbol: "externaldrive.badge.plus", title: "Add a vault",
-                        message: "Use iCloud for your personal vault. Use the Apassy relay for a team vault.")
+            PairingHero(
+                symbol: "externaldrive.badge.plus", title: "Add a vault",
+                message: "Use iCloud for your personal vault. Use the Apassy relay for a team vault.")
         } actions: {
-            Button { root.addICloudVault() } label: {
+            Button {
+                root.addICloudVault()
+            } label: {
                 Label("iCloud · Personal · Free", systemImage: "icloud").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
-            Button { root.joinTeam() } label: {
+            Button {
+                root.joinTeam()
+            } label: {
                 Label("Join a team · Apassy relay", systemImage: "person.2").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
@@ -36,13 +41,19 @@ struct ICloudVaultFlowView: View {
             VStack(spacing: 24) {
                 switch model.step {
                 case .instructions:
-                    PairingHero(symbol: "icloud", title: "Your personal vault in iCloud",
-                        message: "Personal sync with iCloud is free. On your Mac, select iCloud Drive in Settings > Vault > Sync.")
-                    Text("In Files, select iCloud Drive > Apassy > Personal.apassy. If you changed the filename, select that .apassy file.")
-                        .multilineTextAlignment(.center)
+                    PairingHero(
+                        symbol: "icloud", title: "Your personal vault in iCloud",
+                        message:
+                            "Personal sync with iCloud is free. On your Mac, select iCloud Drive in Settings > Vault > Sync."
+                    )
+                    Text(
+                        "In Files, select iCloud Drive > Apassy > Personal.apassy. If you changed the filename, select that .apassy file."
+                    )
+                    .multilineTextAlignment(.center)
                 case .passphrase(let url):
-                    PairingHero(symbol: "key.fill", title: "Open “\(url.deletingPathExtension().lastPathComponent)”",
-                                message: "Type the passphrase that opens this vault on your Mac.")
+                    PairingHero(
+                        symbol: "key.fill", title: "Open “\(url.deletingPathExtension().lastPathComponent)”",
+                        message: "Type the passphrase that opens this vault on your Mac.")
                     SecureField("Passphrase", text: $passphrase)
                         .textFieldStyle(.roundedBorder)
                         .textInputAutocapitalization(.never)
@@ -50,11 +61,26 @@ struct ICloudVaultFlowView: View {
                         .disabled(model.isWorking)
                         .onSubmit(open)
                 case .faceID:
-                    PairingHero(symbol: model.biometry.symbol, title: "Unlock with \(model.biometry.name)?",
-                        message: "Apassy keeps the passphrase in the keychain of this iPhone. \(model.biometry.name) protects it. You can change this in Settings.")
+                    PairingHero(
+                        symbol: model.biometry.symbol, title: "Unlock with \(model.biometry.name)?",
+                        message:
+                            "Apassy keeps the passphrase in the keychain of this iPhone. \(model.biometry.name) protects it. You can change this in Settings."
+                    )
                 case .done(let entry):
-                    PairingHero(symbol: "checkmark.seal.fill", tint: .green, title: "“\(entry.name)” is on this iPhone",
-                                message: "Apassy syncs this vault through iCloud Drive.")
+                    PairingHero(
+                        symbol: "checkmark.seal.fill", tint: .green, title: "“\(entry.name)” is on this iPhone",
+                        message: "Open its credentials now, or enable Apassy to fill them in Safari and apps.")
+                    LabeledContent(
+                        "AutoFill", value: model.autoFillEnabled.map { $0 ? "On" : "Off" } ?? "Checking")
+                    if model.autoFillEnabled != true {
+                        Text(
+                            "Turn on Apassy in AutoFill settings. A vault passphrase or \(model.biometry == .none ? "device authentication" : model.biometry.name) may be needed when using a credential."
+                        )
+                        .multilineTextAlignment(.center)
+                    }
+                    if let message = model.autoFillMessage {
+                        CalloutView(symbol: "exclamationmark.triangle", text: message)
+                    }
                 case .cancelled:
                     ProgressView()
                 }
@@ -88,8 +114,14 @@ struct ICloudVaultFlowView: View {
                 Button("Not now") { model.notNow() }.buttonStyle(.glass)
                 cancel
             case .done:
-                Button("Continue") { model.complete() }.buttonStyle(.glassProminent)
-                cancel
+                if model.autoFillEnabled == true {
+                    Button("Open credentials") { model.complete() }.buttonStyle(.glassProminent)
+                } else {
+                    Button("Enable AutoFill") { Task { await model.enableAutoFill() } }
+                        .buttonStyle(.glassProminent)
+                    Button("Later") { model.complete() }.buttonStyle(.glass)
+                }
+                if model.cleanupPending { cancel }
             case .cancelled:
                 EmptyView()
             }
@@ -100,6 +132,10 @@ struct ICloudVaultFlowView: View {
                 if let url { model.selectFile(url) }
             }
         }
+        .task(id: scenePhase) {
+            if scenePhase == .active { await model.refreshAutoFillState() }
+        }
+        .task(id: model.step) { await model.refreshAutoFillState() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 passphrase = ""
@@ -145,6 +181,8 @@ struct ICloudVaultFilePicker: UIViewControllerRepresentable {
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             onSelected(urls.first)
         }
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { onSelected(nil) }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onSelected(nil)
+        }
     }
 }

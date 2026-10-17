@@ -694,33 +694,53 @@ fn production_declaration_always_waits_for_the_owner() {
     assert_eq!(code(&mixed), "approval_timeout");
     assert!(last_reason(&fx).contains("is a production credential"));
 
-    // The rule asks the owner. It does not deny: the owner can approve the run after a
-    // fresh passphrase check (goal item A4).
-    let approvals = Arc::clone(fx.broker.approvals());
+    assert_eq!(
+        certain.bodies.lock().expect("bodies").len(),
+        1,
+        "mixed production and staging credentials do not reach the model"
+    );
+}
+
+/// A real fresh passphrase check must fit inside the approval window. The short
+/// timeout cases above deliberately expire; this positive case allows the KDF to run.
+#[test]
+fn a_production_run_can_be_approved_after_a_fresh_owner_check() {
+    let certain = common::fake_bouncer(&[
+        ("task_match", 1.0),
+        ("writes", 0.0),
+        ("remote", 0.0),
+        ("leak", 0.0),
+        ("destroy", 0.0),
+    ]);
+    let mut declaration = staging_declaration();
+    declaration.environment = Environment::Production;
+    let fx = build(
+        Some(&certain.url),
+        declaration,
+        None,
+        Duration::from_secs(15),
+    );
+    let runner = run_later(&fx, &["echo", "hi"]);
+    // `waiting` polls for at most ten seconds; a missing prompt cannot hang the test.
+    let pending = waiting(&fx);
+    assert!(pending.risk.contains("is a production credential"));
     let gate = OwnerGate::new(Arc::clone(&fx.vault), None);
-    let approver = std::thread::spawn(move || {
-        loop {
-            if let Some(pending) = approvals.pending().into_iter().next() {
-                assert!(pending.risk.contains("is a production credential"));
-                let proof = gate
-                    .authorize(
-                        OwnerAction::ApproveRun(pending),
-                        OwnerCheck::passphrase(PASS),
-                    )
-                    .expect("owner check");
-                assert_eq!(approvals.approve(proof), Ok(()));
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    });
-    let approved = run(&fx, &["echo", "hi"], "Print.");
-    approver.join().expect("approver");
+    let proof = gate
+        .authorize(
+            OwnerAction::ApproveRun(pending),
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("fresh owner check");
+    assert_eq!(fx.broker.approvals().approve(proof), Ok(()));
+    let approved = runner.join().expect("run worker");
     assert!(approved.ok, "{approved:?}");
     let result = approved.result.expect("result");
     assert_eq!(result["decided_by"], "Owner approved");
     assert_eq!(result["stdout"], "hi\n");
-    assert_eq!(certain.bodies.lock().expect("bodies").len(), 1);
+    assert!(
+        certain.bodies.lock().expect("bodies").is_empty(),
+        "a production run requires the owner and never reaches the model"
+    );
 }
 
 #[test]

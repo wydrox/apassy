@@ -17,7 +17,7 @@ const values = (page, ids) => page.evaluate((list) => Object.fromEntries(list.ma
 test("a fill on a plain form fills the username and the password", async ({ h }) => {
   const page = await h.openGranted("/login");
   const { reply } = await fillFirst(h);
-  expect(reply).toEqual({ ok: true, code: "ok", message: "Filled.", filled: { username: true, password: true } });
+  expect(reply).toEqual({ ok: true, code: "ok", message: "Username and password filled. Submit the form on the page.", filled: { username: true, password: true } });
   expect(await values(page, ["username", "password", "search", "trap", "newsletter"])).toEqual({
     username: USERNAME, password: PASSWORD, search: "", trap: "", newsletter: "",
   });
@@ -53,8 +53,9 @@ test("a form in an open shadow root is filled", async ({ h }) => {
   })).toEqual({ username: USERNAME, password: PASSWORD });
 });
 
-test("the current-password field wins over a new-password field", async ({ h }) => {
+test("the focused current-password form wins over a new-password form", async ({ h }) => {
   const page = await h.openGranted("/new-and-current");
+  await page.focus("#username");
   const { reply } = await fillFirst(h);
   expect(reply.ok).toBe(true);
   expect(await values(page, ["username", "password", "join-email", "new-password"])).toEqual({
@@ -65,17 +66,21 @@ test("the current-password field wins over a new-password field", async ({ h }) 
 test("a page that goes to another origin during the owner check gets nothing", async ({ h }) => {
   const page = await h.openGranted("/login");
   const state = await h.handle({ type: "state" });
-  h.setScenario({ vault: "unlocked", logins: LOGINS, fill: { delayMs: 1500 } });
+  h.setScenario({ vault: "unlocked", logins: LOGINS });
+  const barrier = h.holdReply("fill");
   const pending = h.handle({ type: "fill", tabId: state.tabId, url: state.url, item: 7 });
   // The owner check waits; meanwhile the tab goes to another origin.
-  await expect.poll(() => h.requests("fill").length).toBe(1);
   const otherUrl = h.url("/login", "localhost");
-  await page.evaluate((url) => { location.href = url; }, otherUrl);
-  await page.waitForURL(otherUrl);
+  try {
+    await expect.poll(() => h.requests("fill").length).toBe(1);
+    await page.evaluate((url) => { location.href = url; }, otherUrl);
+    await page.waitForURL(otherUrl);
+  } finally {
+    h.releaseReply(barrier);
+  }
   const reply = await pending;
   expect(reply).toEqual({ ok: false, code: "page_changed", message: "The page changed. Nothing was filled." });
   expect(h.requests("fill")).toEqual([{ v: 1, cmd: "fill", url: state.url, item: 7 }]);
-  await page.waitForTimeout(100);
   expect(await values(page, ["username", "password"])).toEqual({ username: "", password: "" });
 });
 

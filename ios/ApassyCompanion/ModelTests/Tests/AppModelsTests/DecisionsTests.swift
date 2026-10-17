@@ -61,6 +61,18 @@ struct DecisionsTests {
         #expect(both.count == 2)
     }
 
+    @Test("a sent question is recent and its matching run cannot be answered again")
+    func sentQuestionIsNotActionable() {
+        var question = Self.question("sent", waited: 5, runID: "77")
+        question.answered = .approveOnce
+        let card = question.card!.run
+        let run = Self.run("77", waited: 5, agent: card.agent, command: card.command)
+        let rows = Decisions.waiting(
+            questions: [question], runs: [run], runTimeout: 120, fetchedAt: Self.now,
+            pairedMac: Self.mac, now: Self.now)
+        #expect(rows.isEmpty)
+    }
+
     @Test("a question from another Mac never hides a run of the paired Mac")
     func noDuplicatesAcrossMacs() {
         let question = Self.question("q", waited: 5, runID: "77")

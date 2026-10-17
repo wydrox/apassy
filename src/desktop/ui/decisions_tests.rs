@@ -1860,3 +1860,72 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
     no_project.question.project = None;
     assert!(decisions::remote_choice(&no_project, &Answer::InProject(ActionKind::Read)).is_none());
 }
+
+#[test]
+fn notification_navigation_never_replaces_a_settled_request_with_a_newer_one() {
+    use crate::desktop::inbox::EventKey;
+    use crate::desktop::notify::NotificationDestination;
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let (_, newer) = ask_for_key(
+        &mut app,
+        "Synthetic agent",
+        "Newer request",
+        "https://example.com",
+    );
+    let destination = NotificationDestination::Event {
+        key: EventKey::Request(u64::MAX),
+        vault_path: app.owner_ui.session.vault_path().unwrap(),
+        session_epoch: app.owner_ui.session.epoch().unwrap(),
+    };
+    decisions::route_notification(&mut app, destination);
+    frames(&mut app, DEFAULT, 3);
+    assert_eq!(decisions::selected_key(&app), None);
+    decisions::route_notification(&mut app, NotificationDestination::Requests);
+    frames(&mut app, DEFAULT, 3);
+    assert_eq!(decisions::selected_key(&app), None);
+    let destination = NotificationDestination::Event {
+        key: EventKey::Request(newer),
+        vault_path: app.owner_ui.session.vault_path().unwrap(),
+        session_epoch: app.owner_ui.session.epoch().unwrap(),
+    };
+    decisions::route_notification(&mut app, destination);
+    frames(&mut app, DEFAULT, 3);
+    assert_eq!(decisions::selected_key(&app), Some(Key::Request(newer)));
+}
+
+#[test]
+fn queued_notification_is_downgraded_across_lock_and_vault_switch_with_reused_id() {
+    use crate::desktop::inbox::EventKey;
+    use crate::desktop::notify::NotificationDestination;
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let (_, request_a) = ask_for_key(&mut app, "Agent A", "Request A", "https://example.com");
+    super::poll_notifications(&mut app);
+    app.ui.notification_destination = Some(NotificationDestination::Event {
+        key: EventKey::Request(request_a),
+        vault_path: app.owner_ui.session.vault_path().unwrap(),
+        session_epoch: app.owner_ui.session.epoch().unwrap(),
+    });
+    app.lock_vault(None);
+    super::poll_notifications(&mut app);
+    assert!(matches!(
+        app.ui.notification_destination,
+        Some(NotificationDestination::Requests)
+    ));
+    app.owner_ui
+        .session
+        .create_file(&dir.path().join("other-notification-vault.db"), PASS)
+        .expect("create B");
+    app.owner_ui.session.unlock(PASS).expect("unlock B");
+    app.reset_vault_state(None);
+    let (_, request_b) = ask_for_key(&mut app, "Agent B", "Request B", "https://example.com");
+    assert_eq!(request_a, request_b, "Independent vaults reuse numeric IDs");
+    frames(&mut app, DEFAULT, 3);
+    assert_eq!(app.place, Place::Decisions);
+    assert_eq!(
+        decisions::selected_key(&app),
+        None,
+        "A must never open B's request"
+    );
+}

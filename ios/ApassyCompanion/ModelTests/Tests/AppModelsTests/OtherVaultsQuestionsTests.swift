@@ -256,57 +256,32 @@ struct OtherVaultsQuestionsTests {
         #expect(fixture.questions.unlockPrompt == nil)
     }
 
-    @Test("a notification for a closed vault asks to unlock it, then opens its question")
-    func notificationAsksToUnlock() async throws {
-        let fixture = try await Fixture()
-        try fixture.storeFaceID(Self.work.id)
-        await fixture.unlock()
-        let family = try #require(fixture.locked(Self.family.id))
-
-        fixture.questions.notificationOpened()
-        let before = fixture.questions.focusRequests
-        #expect(await fixture.questions.takeFocus(stillFree: { true }) == nil)
-        #expect(fixture.questions.unlockPrompt == family)
-
-        #expect(await fixture.questions.unlockQuestions(family, passphrase: PreviewVaultService.passphrase) == nil)
-        // The sheet closes (its onDismiss), and the round goes on.
-        fixture.questions.unlockPromptClosed()
-        #expect(fixture.questions.focusRequests == before + 1)
-        let qid = await fixture.questions.takeFocus(stillFree: { true })
-        #expect(qid == fixture.familyQuestion.qid)
-        #expect(fixture.questions.questions.first { $0.qid == qid }?.vaultID == Self.family.id)
-    }
-
-    @Test("a notification opens a closed vault with Face ID when its passphrase is stored, then its question")
-    func notificationUsesFaceID() async throws {
+    @Test("generic notifications never unlock hidden vaults or start a passphrase carousel")
+    func notificationRequiresExplicitUnlock() async throws {
         let fixture = try await Fixture()
         try fixture.storeFaceID(Self.work.id)
         try fixture.storeFaceID(Self.family.id)
         await fixture.unlock()
-        #expect(fixture.questions.lockedVaults.count == 2)
-        #expect(fixture.store.prompts.isEmpty)
-
-        // A tapped notification is the owner's action: Face ID asks at once.
+        fixture.push.delivered = ["private-alert"]
         fixture.questions.notificationOpened()
-        let qid = await fixture.questions.takeFocus(stillFree: { true })
-        #expect(qid == fixture.familyQuestion.qid)
-        #expect(fixture.store.prompts == ["Unlock the questions of Work and Family"])
-        #expect(fixture.questions.unlockPrompt == nil)
-        #expect(fixture.questions.lockedVaults.isEmpty)
-    }
-
-    @Test("a cancelled sheet of a notification still opens the newest question of the open vaults")
-    func notificationSheetCancelled() async throws {
-        let fixture = try await Fixture()
-        try fixture.storeFaceID(Self.work.id)
-        await fixture.unlock()
-
-        fixture.questions.notificationOpened()
+        let before = fixture.questions.focusRequests
         #expect(await fixture.questions.takeFocus(stillFree: { true }) == nil)
-        #expect(fixture.questions.unlockPrompt?.id == Self.family.id)
-        fixture.questions.unlockPromptClosed()
-        #expect(await fixture.questions.takeFocus(stillFree: { true }) == fixture.workQuestion.qid)
+        #expect(fixture.store.prompts.isEmpty)
         #expect(fixture.questions.unlockPrompt == nil)
+        #expect(fixture.questions.lockedVaults.count == 2)
+        #expect(await fixture.service.questionsUnlocks().isEmpty)
+        #expect(fixture.push.removed.isEmpty, "A locked vault prevents aggregate-alert reconciliation")
+        fixture.questions.setRequestsVisible(true)
+        #expect(!fixture.push.requestsVisible, "A generic push can concern a hidden vault")
+
+        // Only the explicit row action unlocks; closing its sheet cannot open another vault.
+        let family = try #require(fixture.locked(Self.family.id))
+        #expect(await fixture.questions.unlockQuestions(family, passphrase: PreviewVaultService.passphrase) == nil)
+        fixture.questions.unlockPromptClosed()
+        #expect(fixture.questions.focusRequests == before)
+        #expect(await fixture.questions.takeFocus(stillFree: { true }) == nil)
+        #expect(fixture.questions.questions.contains { $0.qid == fixture.familyQuestion.qid })
+        #expect(fixture.questions.lockedVaults.map(\.id) == [Self.work.id])
     }
 
     @Test("a lock shows every other vault as locked, and drops every question")
@@ -382,7 +357,7 @@ struct OtherVaultsQuestionsTests {
         #expect(fixture.questions.notificationsPending == ["Work", "Family"])
         #expect(
             fixture.questions.notificationsPendingText
-                == "Notifications stay on for: Work, Family until you open them.")
+                == "Alerts are off on this iPhone. Relay registration remains for: Work, Family until you open them.")
 
         // Work opens: its team drops the token, and it leaves the line.
         let work = try #require(fixture.locked(Self.work.id))

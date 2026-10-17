@@ -16,7 +16,7 @@ default-members = ["."]
 
 [features]
 default = []
-desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit"]
+desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2", "dep:ciborium", "dep:psl"]
 
@@ -55,6 +55,10 @@ flate2 = { version = "=1.1.10", optional = true, default-features = false, featu
 # process. The same version is already in Cargo.lock through tempfile. `termios`:
 # the owner command line turns off the echo when it reads a secret (ADR 0017).
 rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Main-process native menus through a safe API; no application framework or GTK.
+muda = { version = "=0.21.2", optional = true, default-features = false }
 
 [[bin]]
 name = "apassy"

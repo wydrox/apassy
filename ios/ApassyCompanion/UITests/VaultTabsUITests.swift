@@ -12,13 +12,103 @@ final class VaultTabsUITests: XCTestCase {
         return app
     }
 
+    func testNewLoginKeepsDraftUntilExplicitDiscard() throws {
+        let app = launch(["-ApassyOpen", "vault"])
+        let add = app.buttons["New Credential"]
+        XCTAssertTrue(add.waitForExistence(timeout: 15))
+        add.tap()
+        let login = app.buttons["Login"]
+        XCTAssertTrue(login.waitForExistence(timeout: 5))
+        login.tap()
+
+        let name = app.textFields["Name (required)"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        let title = "Synthetic unsaved login"
+        name.typeText(title)
+        XCTAssertEqual(name.value as? String, title)
+        app.buttons["Cancel"].tap()
+        let confirmation = app.sheets["Discard changes?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        let keep = confirmation.buttons["Keep Editing"]
+        XCTAssertTrue(keep.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirmation.buttons["Discard Changes"].exists)
+        keep.tap()
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertEqual(name.value as? String, title)
+
+        app.buttons["Cancel"].tap()
+        let discard = confirmation.buttons["Discard Changes"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 5))
+        discard.tap()
+        XCTAssertTrue(name.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Vault"].waitForExistence(timeout: 5))
+
+        add.tap()
+        XCTAssertTrue(login.waitForExistence(timeout: 5))
+        login.tap()
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        let emptyValue = try XCTUnwrap(name.value as? String)
+        XCTAssertTrue(emptyValue.isEmpty || emptyValue == name.placeholderValue)
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(name.waitForNonExistence(timeout: 5))
+    }
+
+    func testNewLoginRetainsFolderAndCanBeFoundAfterSaving() {
+        let app = launch(["-ApassyOpen", "folder:Billing"])
+        XCTAssertTrue(app.navigationBars["Billing"].waitForExistence(timeout: 15))
+        app.buttons["New Credential"].tap()
+        // LabeledContent combines the visible label and the menu's accessible label.
+        let inheritedFolder = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Folder,", "Acme › Billing")
+        ).firstMatch
+        XCTAssertTrue(inheritedFolder.waitForExistence(timeout: 5))
+        app.buttons["Login"].tap()
+
+        let title = "Synthetic Billing account"
+        let username = "billing-flow@example.invalid"
+        enter(title, into: app.textFields["Name (required)"], in: app)
+        enter(username, into: app.textFields["Username"], in: app)
+        enter("Synthetic-only-password-47!", into: app.secureTextFields["Password"], in: app)
+        app.buttons["Save"].tap()
+
+        XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts[username].waitForExistence(timeout: 5))
+        let folder = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Folder", "Acme › Billing")
+        ).firstMatch
+        for _ in 0..<4 where !folder.isHittable { app.swipeUp() }
+        XCTAssertTrue(folder.exists, "The saved credential must retain its inherited Billing destination")
+
+        app.tabBars.buttons["Search"].tap()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText(username)
+        let result = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title))
+        XCTAssertTrue(result.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(result.count, 1, "One Save must create one searchable credential")
+        result.firstMatch.tap()
+        XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[username].waitForExistence(timeout: 5))
+    }
+
+    private func enter(_ text: String, into field: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<4 where !field.isHittable { app.swipeUp() }
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertTrue(field.isHittable)
+        field.tap()
+        field.typeText(text)
+    }
+
     /// An iPhone with an iCloud vault and nothing connected: Agents says where the agents are and
     /// offers to connect, never "when the Mac is connected".
-    func testAgentsTabSaysWhereTheAgentsAre() {
+    func testAgentAccessSaysWhereTheAgentsAre() {
         let app = launch(["-ApassyOpen", "agents"])
         XCTAssertTrue(app.staticTexts["Agents run on your Mac"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
-        XCTAssertTrue(app.buttons["Connect this iPhone"].exists)
+        // The feed and connection state load independently; wait for the actionable state.
+        XCTAssertTrue(app.buttons["Connect this iPhone"].waitForExistence(timeout: 10))
     }
 
     /// The search field belongs to the Search tab only; Vault and Decisions do not show one when
@@ -28,13 +118,11 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(app.tabBars.buttons["Vault"].waitForExistence(timeout: 15))
         app.swipeDown()
         XCTAssertEqual(app.searchFields.count, 0, "Vault")
-        app.tabBars.buttons["Decisions"].tap()
-        XCTAssertTrue(app.navigationBars["Decisions"].waitForExistence(timeout: 5))
+        app.tabBars.buttons["Requests"].tap()
+        XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 5))
         app.swipeDown()
-        XCTAssertEqual(app.searchFields.count, 0, "Decisions")
-        app.tabBars.buttons["Agents"].tap()
-        XCTAssertTrue(app.navigationBars["Agents"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.searchFields.count, 0, "Agents")
+        XCTAssertEqual(app.searchFields.count, 0, "Requests")
+        XCTAssertFalse(app.tabBars.buttons["Agents"].exists)
     }
 
     /// The Search tab still searches the vault.
@@ -51,27 +139,62 @@ final class VaultTabsUITests: XCTestCase {
     /// offers the pairing on Wi-Fi that brings the requests.
     func testDecisionsSaysWhereRequestsAndSuggestionsAre() {
         let app = launch(["-ApassyOpen", "decisions"])
-        XCTAssertTrue(app.navigationBars["Decisions"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 15))
         let suggestions = app.staticTexts["Suggestions come from your Mac. They show in Apassy on the Mac."]
         for _ in 0..<3 where !suggestions.exists { app.swipeUp() }
         XCTAssertTrue(suggestions.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts.matching(Self.starts("Requests from agents show in Apassy on your Mac.")).firstMatch.exists)
+        XCTAssertTrue(
+            app.staticTexts.matching(Self.starts("Requests from agents show in Apassy on your Mac.")).firstMatch.exists)
         XCTAssertTrue(app.buttons["Pair with the Mac on Wi-Fi"].exists)
         XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
     }
 
-    /// A credential's Agent use and Rules say that they are on the Mac.
-    func testCredentialSaysWhereAgentUseIs() {
+    /// Fields remain useful without two unavailable Mac-only sections.
+    func testCredentialLinksToAgentAccessWithoutMacOnlyPlaceholders() {
         let app = launch(["-ApassyOpen", "item:100"])
-        let agentUse = app.staticTexts.matching(Self.starts("Which agents used this credential is on your Mac.")).firstMatch
-        let rules = app.staticTexts.matching(Self.starts("The rules from your answers are kept on your Mac.")).firstMatch
         XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 15))
-        for _ in 0..<4 where !agentUse.exists { app.swipeUp() }
-        XCTAssertTrue(agentUse.waitForExistence(timeout: 5))
-        // The list loads the rows below as they scroll in.
-        for _ in 0..<3 where !rules.exists { app.swipeUp() }
-        XCTAssertTrue(rules.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
+        let access = app.buttons["Agent Access"]
+        for _ in 0..<4 where !access.isHittable { app.swipeUp() }
+        XCTAssertTrue(access.exists)
+        XCTAssertFalse(app.staticTexts["Agent use"].exists)
+        XCTAssertFalse(app.staticTexts["Rules from your answers"].exists)
+        access.tap()
+        XCTAssertTrue(app.navigationBars["Agent Access"].waitForExistence(timeout: 5))
+    }
+
+    func testVaultRootShowsCredentialsAndOrganization() {
+        let app = launch(["-ApassyOpen", "vault"])
+        XCTAssertTrue(app.navigationBars["Vault"].waitForExistence(timeout: 15))
+        let firstCredential = app.staticTexts["OpenAI"]
+        XCTAssertTrue(firstCredential.waitForExistence(timeout: 5))
+        XCTAssertTrue(firstCredential.isHittable, "The root must show a credential before scrolling")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Watchtower")).firstMatch.exists)
+        let credential = app.staticTexts["Stripe live key"]
+        for _ in 0..<4 where !credential.exists { app.swipeUp() }
+        XCTAssertTrue(credential.exists)
+        XCTAssertTrue(app.buttons["New Credential"].exists)
+        app.buttons["Folders and tools"].tap()
+        XCTAssertTrue(app.navigationBars["Folders and tools"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Watchtower"].exists)
+    }
+
+    func testSettingsReachesAgentAccessAndRevocation() {
+        let app = launch(["-ApassyOpen", "vault", "-ApassyPreviewAgents", "list"])
+        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.tabBars.buttons["Agents"].exists)
+        app.buttons["Settings"].tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Agent Access")).firstMatch
+            .tap()
+        XCTAssertTrue(app.navigationBars["Agent Access"].waitForExistence(timeout: 5))
+        let agent = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "8 uses this week"))
+            .firstMatch
+        for _ in 0..<4 where !agent.isHittable { app.swipeUp() }
+        agent.tap()
+        let remove = app.buttons["Remove Only: Deploy key"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        app.alerts.firstMatch.buttons["Remove"].tap()
+        XCTAssertTrue(app.staticTexts["Removed on MacBook Pro."].waitForExistence(timeout: 10))
     }
 
     /// A vault whose questions are not open shows one row with Unlock; its passphrase opens its
@@ -103,11 +226,15 @@ final class VaultTabsUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.navigationBars["Claude Code"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["On Mac mini · Personal"].exists)
-        XCTAssertTrue(app.staticTexts["This week"].exists)
+        XCTAssertTrue(app.staticTexts["Sees"].exists)
+        XCTAssertTrue(app.staticTexts["Exceptions"].exists)
         let exception = app.staticTexts["Always ask: Production Postgres"]
         for _ in 0..<6 where !exception.isHittable { app.swipeUp() }
         XCTAssertTrue(exception.exists)
         XCTAssertTrue(app.buttons["Remove Always ask: Production Postgres"].exists)
+        for _ in 0..<5 where !app.staticTexts["Deploys only from the main branch."].isHittable {
+            app.swipeUp()
+        }
         XCTAssertTrue(app.staticTexts["Deploys only from the main branch."].exists)
     }
 

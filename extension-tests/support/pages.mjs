@@ -121,6 +121,37 @@ const PAGES = {
       <button type="submit">Sign in</button>
     </form>`),
 
+  "/journey-login": page("Synthetic account sign-in", `
+    <form id="login">
+      <label>Username<input id="username" name="username" autocomplete="username"></label>
+      <label>Password<input id="password" name="password" type="password" autocomplete="current-password"></label>
+      <button>Sign in</button>
+    </form><p id="status" role="status"></p>
+    <script>
+      document.querySelector("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const response = await fetch("/journey-auth", { method: "POST", headers: {"content-type":"application/json"}, body: JSON.stringify({ username: document.querySelector("#username").value, password: document.querySelector("#password").value }) });
+        const result = await response.json();
+        document.querySelector("#status").textContent = result.authenticated ? "Signed in as " + result.username : "Sign-in failed";
+        document.querySelector("#status").dataset.authenticated = String(result.authenticated);
+      });
+    </script>`),
+  "/journey-password": page("Synthetic password change", `
+    <form>
+      <label>Username<input id="username" name="username" autocomplete="username"></label>
+      <label>Current password<input id="current" type="password" autocomplete="current-password"></label>
+      <label>New password<input id="password" type="password" autocomplete="new-password"></label>
+      <button>Change password</button>
+    </form><p id="status" role="status"></p>
+    <script>
+      document.querySelector("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const response = await fetch("/journey-rotate", { method: "POST", headers: {"content-type":"application/json"}, body: JSON.stringify({ username: document.querySelector("#username").value, password: document.querySelector("#current").value, newPassword: document.querySelector("#password").value }) });
+        document.querySelector("#status").textContent = (await response.json()).updated ? "Password changed on this site" : "Password change failed";
+      });
+    </script>`),
+  "/same-frame": page("Same origin frame", `<iframe id="frame" src="/typed"></iframe>`),
+  "/cross-frame": page("Cross origin frame", `<iframe id="frame" src="http://127.0.0.1:PORT/typed"></iframe>`),
   "/blank": page("Nothing here", `<p>No login form.</p>`),
 
   // A sign-in form whose password field a "show password" button turned into a
@@ -132,9 +163,25 @@ const PAGES = {
     </form>`),
 };
 
-function handle(request, response) {
+function handle(request, response, accounts) {
+  if (request.method === "POST" && ["/journey-auth", "/journey-rotate"].includes(request.url)) {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; if (body.length > 8192) request.destroy(); });
+    request.on("end", () => {
+      let data;
+      try { data = JSON.parse(body); } catch { data = {}; }
+      const authenticated = typeof data.username === "string" && accounts.get(data.username) === data.password;
+      const rotate = request.url === "/journey-rotate";
+      const updated = authenticated && typeof data.newPassword === "string" && data.newPassword.length > 0;
+      if (rotate && updated) accounts.set(data.username, data.newPassword);
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(rotate ? { updated } : { authenticated, ...(authenticated ? { username: data.username } : {}) }));
+    });
+    return;
+  }
   const { pathname } = new URL(request.url, "http://127.0.0.1");
-  const body = PAGES[pathname];
+  const template = PAGES[pathname];
+  const body = template && template.replace("127.0.0.1:PORT", `127.0.0.1:${request.headers.host.split(":").pop()}`);
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.setHeader("cache-control", "no-store");
   if (!body) {
@@ -156,9 +203,11 @@ function listen(server, port, host) {
 // reaches it whichever address the browser tries first. Nothing else can reach
 // it.
 export async function startServer() {
-  const v4 = http.createServer(handle);
+  const accounts = new Map([["rafal@example.com", "Tr0ub4dor&3-never-in-a-reply"]]);
+  const serve = (request, response) => handle(request, response, accounts);
+  const v4 = http.createServer(serve);
   const port = await listen(v4, 0, "127.0.0.1");
-  const v6 = http.createServer(handle);
+  const v6 = http.createServer(serve);
   try {
     await listen(v6, port, "::1");
   } catch {

@@ -18,7 +18,7 @@ use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::desktop::inbox::{self, EventKey, InboxKind};
-use apassy::desktop::notify::{Delivery, NotificationCenter};
+use apassy::desktop::notify::{Delivery, NotificationCenter, NotificationDestination, OwnerEvent};
 use apassy::desktop::owner_store::{ENDED_BY_QUIT, OwnerSession};
 use apassy::native::SyncStuckReason;
 use apassy::vault::exceptions::ExceptionKind;
@@ -157,6 +157,9 @@ fn send_run_for(fx: &Fixture, item_id: u64, cwd: PathBuf) -> std::thread::JoinHa
 }
 
 fn start_center(fx: &Fixture, fake: &FakeNative) -> NotificationCenter {
+    fake.respond("notify_remove", r#"{"ok":true}"#);
+    fake.respond("notify_reconcile", r#"{"ok":true}"#);
+    fake.respond("notify_activations", r#"{"ok":true,"routes":[]}"#);
     let center = NotificationCenter::start(
         Arc::clone(fx.broker.approvals()),
         Arc::clone(&fx.vault),
@@ -213,7 +216,15 @@ fn wait_for_delivery(center: &NotificationCenter, key: EventKey) -> Delivery {
 fn assert_preview_fields(request: &Value, event: &str) {
     let mut fields: Vec<&String> = request.as_object().expect("object").keys().collect();
     fields.sort();
-    assert_eq!(fields, ["agent", "cmd", "event", "id"], "{request}");
+    let expected = if event == "approval_waiting" {
+        vec!["agent", "cmd", "event", "id", "route", "waiting_key"]
+    } else {
+        vec!["agent", "cmd", "event", "id", "route"]
+    };
+    assert_eq!(fields, expected, "{request}");
+    let route = request["route"].as_str().expect("opaque local route");
+    assert_eq!(route.len(), 64);
+    assert!(route.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_eq!(request["event"], event);
     assert_eq!(request["agent"], AGENT);
 }
@@ -627,4 +638,283 @@ fn old_or_changed_request_cannot_be_approved() {
         Err(ApprovalRefusal::NotWaiting)
     );
     assert!(!fx.project.join("ran").exists());
+}
+
+fn activation(center: &NotificationCenter) -> NotificationDestination {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(destination) = center.take_activation() {
+            return destination;
+        }
+        assert!(Instant::now() < deadline, "no local activation");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// J5: an exact live A is navigable; after A settles, tapping its old capability
+/// opens an unselected list even while B waits. Removal never targets B's token.
+#[test]
+fn settled_a_never_routes_to_newer_b_and_reconciles_only_its_alert() {
+    let fx = fixture(Duration::from_secs(30));
+    let fake = FakeNative::new("old-a-new-b");
+    fake.respond(
+        "notify",
+        &format!(r#"{{"ok":true,"delivered":true,{ALLOWED_STATUS}}}"#),
+    );
+    fake.respond(
+        "notify_status",
+        &format!(r#"{{"ok":true,{ALLOWED_STATUS}}}"#),
+    );
+    let center = start_center(&fx, &fake);
+    let waiter_a = send_run(&fx, fx.project.clone());
+    let (a, _) = first_pending(&fx);
+    let (notice_a, _) = notify_request(
+        &fake,
+        &EventKey::Run(a.id).notification_id(),
+        Instant::now(),
+    );
+    let token_a = notice_a["route"].as_str().expect("route A");
+    fake.respond(
+        "notify_activations",
+        &format!(r#"{{"ok":true,"routes":["{token_a}"]}}"#),
+    );
+    assert_eq!(
+        activation(&center),
+        NotificationDestination::Event {
+            key: EventKey::Run(a.id),
+            vault_path: fx.session.vault_path().expect("path"),
+            session_epoch: fx.session.epoch().expect("epoch")
+        }
+    );
+    fake.respond("notify_activations", r#"{"ok":true,"routes":[]}"#);
+    assert!(fx.broker.approvals().deny(a.id));
+    assert_eq!(code(&waiter_a.join().expect("A waiter")), "approval_denied");
+
+    let waiter_b = send_run(&fx, fx.project.clone());
+    let (b, _) = first_pending(&fx);
+    assert_ne!(a.id, b.id);
+    let (notice_b, _) = notify_request(
+        &fake,
+        &EventKey::Run(b.id).notification_id(),
+        Instant::now(),
+    );
+    let token_b = notice_b["route"].as_str().expect("route B");
+    assert_ne!(token_a, token_b);
+    fake.respond(
+        "notify_activations",
+        &format!(r#"{{"ok":true,"routes":["{token_a}"]}}"#),
+    );
+    assert_eq!(activation(&center), NotificationDestination::Requests);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let removals = fake.requests_for("notify_remove");
+        if removals.iter().any(|request| {
+            request["ids"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == token_a))
+        }) {
+            assert!(removals.iter().all(|request| {
+                !request["ids"]
+                    .as_array()
+                    .expect("ids")
+                    .iter()
+                    .any(|id| id == token_b)
+            }));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "settled alert was not reconciled"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fx.broker.approvals().pending(), vec![b.clone()]);
+    let history = inbox::collect(&fx.session, std::slice::from_ref(&b)).expect("history");
+    assert!(
+        history
+            .iter()
+            .any(|event| matches!(event.kind, InboxKind::ApprovalEnded { approved: false }))
+    );
+    no_canary(&fake.raw_requests());
+    assert!(!fx.project.join("ran").exists());
+    assert!(fx.broker.approvals().deny(b.id));
+    assert_eq!(code(&waiter_b.join().expect("B waiter")), "approval_denied");
+}
+
+/// A capability from an earlier app session is not guessed from a numeric ID.
+/// Suggestions have a separate fixed template and never claim an agent is blocked.
+#[test]
+fn unknown_activation_opens_unselected_list_and_suggestions_are_nonurgent() {
+    let fx = fixture(Duration::from_secs(10));
+    let fake = FakeNative::new("unknown-and-suggestion");
+    fake.respond(
+        "notify",
+        &format!(r#"{{"ok":true,"delivered":true,{ALLOWED_STATUS}}}"#),
+    );
+    fake.respond(
+        "notify_status",
+        &format!(r#"{{"ok":true,{ALLOWED_STATUS}}}"#),
+    );
+    let center = start_center(&fx, &fake);
+    fake.respond(
+        "notify_activations",
+        &format!(r#"{{"ok":true,"routes":["{}"]}}"#, "0".repeat(64)),
+    );
+    assert_eq!(activation(&center), NotificationDestination::Requests);
+    center.announce(OwnerEvent::CorrectionProposed, 77, "ignored agent");
+    let (notice, _) = notify_request(&fake, "correction-77", Instant::now());
+    assert_eq!(notice["event"], "suggestion");
+    assert_eq!(notice["agent"], "Apassy");
+    let preview = apassy::native::Notification::new(
+        "correction-77",
+        "Apassy",
+        OwnerEvent::CorrectionProposed.native(),
+    )
+    .expect("preview");
+    assert_eq!(preview.title(), "Suggestion available");
+    assert!(!preview.body().contains("waits"));
+    assert!(!preview.body().contains("Agent"));
+    no_canary(&fake.raw_requests());
+}
+
+/// The local transport accepts no URL/path/command and malformed helper data never
+/// becomes a destination. These calls use a fake process and do not contact macOS.
+#[test]
+fn notification_navigation_transport_rejects_untrusted_fields() {
+    let fake = FakeNative::new("routing-validation");
+    let helper = fake.helper();
+    let notice =
+        apassy::native::Notification::new("run-1", AGENT, OwnerEvent::QuestionWaiting.native())
+            .expect("preview");
+    for invalid in [
+        "run-1",
+        "apassy://approve/1",
+        "../../other",
+        "$(touch marker)",
+    ] {
+        assert!(helper.notify_routed(&notice, Some(invalid), None).is_err());
+        assert!(helper.notify_routed(&notice, None, Some(invalid)).is_err());
+    }
+    assert!(helper.notify_remove(&["../run-1".to_owned()]).is_err());
+    assert!(helper.notify_reconcile(&["run-1".to_owned()]).is_err());
+    assert!(
+        fake.requests().is_empty(),
+        "invalid input reached the helper"
+    );
+    for response in [
+        r#"{"ok":true,"routes":["run-1"]}"#,
+        r#"{"ok":true,"routes":[3]}"#,
+        r#"{"ok":true,"routes":null}"#,
+    ] {
+        fake.respond("notify_activations", response);
+        assert!(
+            helper.notify_activations().is_err(),
+            "malformed activation accepted: {response}"
+        );
+    }
+}
+
+/// A route may wait in UI state after polling. Final consumption must retain both
+/// vault identity and unlocked-session identity, even when the watcher never sees
+/// the intermediate lock and the next vault reuses the same local activity ID.
+#[test]
+fn queued_destination_is_rejected_after_lock_reunlock_or_vault_switch_with_reused_id() {
+    use apassy::vault::{ActivityDecision, NewActivity};
+
+    let mut fx = fixture(Duration::from_secs(10));
+    let fake = FakeNative::new("queued-route-vault-switch");
+    fake.respond(
+        "notify",
+        &format!(r#"{{"ok":true,"delivered":true,{ALLOWED_STATUS}}}"#),
+    );
+    fake.respond(
+        "notify_status",
+        &format!(r#"{{"ok":true,{ALLOWED_STATUS}}}"#),
+    );
+    let center = start_center(&fx, &fake);
+    send_blocked(&fx);
+    let id = fx
+        .vault
+        .lock()
+        .expect("vault")
+        .as_ref()
+        .expect("open")
+        .recent_activity(1)
+        .expect("activity")[0]
+        .id;
+    let (notice, _) = notify_request(
+        &fake,
+        &EventKey::Activity(id).notification_id(),
+        Instant::now(),
+    );
+    let token = notice["route"].as_str().expect("route");
+    fake.respond(
+        "notify_activations",
+        &format!(r#"{{"ok":true,"routes":["{token}"]}}"#),
+    );
+    let queued_a = activation(&center);
+    assert!(
+        matches!(queued_a, NotificationDestination::Event { key: EventKey::Activity(actual), .. } if actual == id)
+    );
+    fake.respond("notify_activations", r#"{"ok":true,"routes":[]}"#);
+
+    // A lock invalidates a queued destination immediately, without a watcher pass.
+    let epoch_a = fx.session.epoch().expect("A epoch");
+    fx.session
+        .lock_ending_runs(None, ENDED_BY_QUIT)
+        .expect("lock A");
+    assert_eq!(
+        center.revalidate_destination(&queued_a),
+        NotificationDestination::Requests
+    );
+    fx.session.unlock(PASS).expect("reunlock A");
+    assert_ne!(fx.session.epoch(), Some(epoch_a));
+    assert_eq!(
+        center.revalidate_destination(&queued_a),
+        NotificationDestination::Requests
+    );
+
+    // B has an existing eligible event with exactly the same vault-local numeric ID.
+    fx.session
+        .lock_ending_runs(None, ENDED_BY_QUIT)
+        .expect("lock A again");
+    let path_b = fx.dir.path().join("other-route.db");
+    fx.session.create_file(&path_b, PASS).expect("create B");
+    fx.session.unlock(PASS).expect("unlock B");
+    {
+        let mut guard = fx.vault.lock().expect("vault");
+        let open = guard.as_mut().expect("B open");
+        for _ in 0..id {
+            open.record_activity(&NewActivity {
+                agent_id: None,
+                agent_name: "Other agent".to_owned(),
+                item_id: None,
+                operation: "run synthetic".to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: "Synthetic blocked request.".to_owned(),
+            })
+            .expect("B activity");
+        }
+        assert!(
+            open.recent_activity(50)
+                .expect("B activity")
+                .iter()
+                .any(|row| row.id == id)
+        );
+    }
+    assert_eq!(
+        center.revalidate_destination(&queued_a),
+        NotificationDestination::Requests
+    );
+    let current_b = NotificationDestination::Event {
+        key: EventKey::Activity(id),
+        vault_path: fx.session.vault_path().expect("B path"),
+        session_epoch: fx.session.epoch().expect("B epoch"),
+    };
+    assert_eq!(
+        center.revalidate_destination(&current_b),
+        current_b,
+        "the reused ID really is eligible in B"
+    );
+    no_canary(&fake.raw_requests());
 }

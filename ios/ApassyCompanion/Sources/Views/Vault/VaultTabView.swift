@@ -1,12 +1,14 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// The unlocked vault: Vault, Decisions (the questions through the relay and the companion),
-/// Agents, and Search (ADR 0026 §8). Watchtower and all items open from the Vault tab.
+/// Daily destinations: credentials, requests through the relay and companion, and Search.
+/// Agent Access is available through Settings and credential context.
 struct VaultTabView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(RootModel.self) private var root
     @State private var ui = VaultUI()
+    /// Keep an incoming credential exchange queued until the current sheet finishes dismissal.
+    @State private var presentedSheetID: String?
 
     var body: some View {
         @Bindable var ui = ui
@@ -14,31 +16,43 @@ struct VaultTabView: View {
             Tab("Vault", systemImage: "key.horizontal", value: VaultTab.vault) {
                 VaultRootView()
             }
-            Tab("Decisions", systemImage: "checkmark.circle", value: VaultTab.decisions) {
+            Tab("Requests", systemImage: "checkmark.circle", value: VaultTab.decisions) {
                 ApprovalsHub(
-                    questions: root.questions, companion: root.companion, onSettings: { ui.sheet = .settings })
+                    questions: root.questions, companion: root.companion,
+                    onSettings: { ui.sheet = .settings },
+                    isPresented: ui.tab == .decisions && ui.sheet == nil && presentedSheetID == nil
+                        && vault.alert == nil)
             }
             .badge(waitingCount)
-            Tab("Agents", systemImage: "cpu", value: VaultTab.agents) {
-                AgentsView(model: root.agents, questions: root.questions, companion: root.companion)
-            }
             Tab(value: VaultTab.search, role: .search) {
                 SearchView()
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .environment(ui)
-        .sheet(item: $ui.sheet) { sheet in
+        .sheet(
+            item: $ui.sheet,
+            onDismiss: {
+                // Swiping away the import is the same deferral as Not Now, not a new offer.
+                if presentedSheetID == VaultSheet.exchange.id, root.exchange?.state == .importWaiting {
+                    root.exchange?.cancelImport()
+                }
+                presentedSheetID = nil
+                presentWaitingImport()
+            }
+        ) { sheet in
             Group {
                 switch sheet {
                 case .settings:
                     SettingsView()
+                case .agentAccess:
+                    SettingsView(initialPage: .agents)
                 case .syncSettings:
                     SettingsView(initialPage: .devices)
                 case .new(let kind):
-                    ItemEditorView(model: ItemEditorModel(kind: kind))
+                    ItemEditorView(model: ItemEditorModel(kind: kind), onSaved: showSaved)
                 case .edit(let detail):
-                    ItemEditorView(model: ItemEditorModel(detail: detail))
+                    ItemEditorView(model: ItemEditorModel(detail: detail), onSaved: showSaved)
                 case .generator:
                     GeneratorView(model: GeneratorModel(service: vault.service), onUse: nil)
                 case .exchange:
@@ -46,7 +60,7 @@ struct VaultTabView: View {
                         NavigationStack { CredentialExchangeView(model: exchange, mode: .importing) }
                     }
                 case .newCredential(let folder):
-                    NewCredentialView(folder: folder)
+                    NewCredentialView(folder: folder, onSaved: showSaved)
                 case .moveItem(let item):
                     FolderPicker(
                         title: "Move “\(item.title)”", selected: vault.folderTree.folder(of: item),
@@ -66,6 +80,7 @@ struct VaultTabView: View {
             .environment(vault)
             .environment(ui)
             .environment(root)
+            .onAppear { presentedSheetID = sheet.id }
         }
         .alert(
             "Apassy could not finish",
@@ -80,20 +95,51 @@ struct VaultTabView: View {
         // The owner opened the notification of a question.
         .onChange(of: root.questionsRequested, initial: true) { _, requested in
             guard requested else { return }
+            // A Settings destination must not cover the refreshed request list.
+            // Creation and edit sheets keep their drafts until the owner dismisses them.
+            switch ui.sheet {
+            case .settings?, .syncSettings?, .agentAccess?: ui.sheet = nil
+            default: break
+            }
             ui.tab = .decisions
             root.questionsRequested = false
         }
-        // Another app sent its logins: offer the import once the vault is open (it is, here).
-        .onChange(of: root.exchange?.state, initial: true) { _, state in
-            if state == .importWaiting, ui.sheet?.id != VaultSheet.exchange.id { ui.sheet = .exchange }
+        // Retain the exchange token in its model while an editor or another sheet is open.
+        // A dirty draft or an in-flight save must never be replaced by an incoming import.
+        .onChange(of: root.exchange?.state, initial: true) { _, _ in
+            presentWaitingImport()
         }
         #if targetEnvironment(simulator)
             .task { openFromLaunchArgument() }
         #endif
-        // On the tabs, not on Decisions: the Agents tab shows the seeded state too.
+        // On the tabs, not on Decisions: Settings Agent Access shares the seeded state.
         #if DEBUG && targetEnvironment(simulator)
             .decisionsPreviewSeed(root.questions)
         #endif
+    }
+
+    private func presentWaitingImport() {
+        guard root.exchange?.state == .importWaiting,
+            ui.sheet == nil, presentedSheetID == nil
+        else { return }
+        ui.sheet = .exchange
+    }
+
+    private func showSaved(_ items: [(id: UInt64, title: String)], folder: String?) {
+        guard !items.isEmpty else { return }
+        ui.sheet = nil
+        ui.tab = .vault
+        ui.libraryRevealEpoch += 1
+        if items.count == 1, let item = items.first {
+            ui.homePath = [.item(item.id)]
+        } else {
+            ui.homePath = folder.map { [.folder($0)] } ?? []
+        }
+        let destination =
+            folder.map { vault.folderTree.folder($0) == nil ? "the selected folder" : vault.folderTree.pathLabel($0) }
+            ?? FolderTree.noFolder
+        let description = items.count == 1 ? "“\(items[0].title)”" : "\(items.count) credentials"
+        Toast.shared.show("\(description) saved in \(destination).")
     }
 
     /// The rows of Decisions, as it lists them: a run that a question shows counts once.
@@ -126,7 +172,7 @@ struct VaultTabView: View {
             case "newcredential": ui.sheet = .newCredential(folder: nil)
             case "decisions", "approvals": ui.tab = .decisions
             case "questions": ui.tab = .decisions
-            case "agents": ui.tab = .agents
+            case "agents": ui.sheet = .agentAccess
             case "settings": ui.sheet = .settings
             case "generator": ui.sheet = .generator
             case "search":
@@ -175,9 +221,11 @@ struct VaultTabView: View {
 
 /// "All credentials": every credential that is not archived, grouped by folder as on the Mac
 /// (ADR 0026 §1), with filters and a sort. The headers stay at the top while the list scrolls. The
-/// Vault root pushes it.
+/// Vault root renders this list directly; Folders also offers its unfiltered destination.
 struct ItemsView: View {
     @Environment(VaultModel.self) private var vault
+    var isRoot = false
+    @Environment(VaultUI.self) private var ui
     @State private var kind: ItemKind?
     @State private var tag: String?
     @State private var sort = ItemSort.title
@@ -188,55 +236,75 @@ struct ItemsView: View {
 
     var body: some View {
         content
-            .navigationTitle(kind?.pluralLabel ?? "All credentials")
-            .navigationSubtitle(subtitle)
+            .navigationTitle(isRoot ? "Vault" : (kind?.pluralLabel ?? "All credentials"))
+            .navigationSubtitle(isRoot ? (vault.vault?.name ?? "") : subtitle)
             .toolbar {
+                if isRoot {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            ui.sheet = .settings
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+                    }
+                    ToolbarItem(placement: .topBarLeading) {
+                        NavigationLink(value: VaultRoute.folders) {
+                            Label("Folders and tools", systemImage: "folder")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) { filterMenu }
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 ToolbarItem(placement: .topBarTrailing) { NewCredentialButton(folder: nil) }
             }
     }
 
-    @ViewBuilder
     private var content: some View {
-        let items = shown
-        if vault.activeItems.isEmpty {
-            ContentUnavailableView {
-                Label("No credentials yet", systemImage: "key")
-            } description: {
-                Text("Paste a key, a .env file, or a password with the + button, or add it on your Mac.")
-            }
-        } else if items.isEmpty {
-            ContentUnavailableView {
-                Label("No items match", systemImage: "line.3.horizontal.decrease.circle")
-            } description: {
-                Text("No item has this category and this tag.")
-            } actions: {
-                Button("Show all items") {
-                    kind = nil
-                    tag = nil
+        List {
+            if isRoot {
+                if showsSyncProblem {
+                    Section { SyncCapsule() }
                 }
-                .buttonStyle(.bordered)
             }
-        } else if sort == .title {
-            // As on the Mac: no folder first, then each folder by its path, A–Z inside.
-            List {
-                ForEach(vault.folderTree.groups(items)) { group in
-                    Section {
-                        ForEach(group.items) { item in
-                            ItemListRow(item: item)
-                        }
-                    } header: {
-                        Text(group.title)
+            if vault.activeItems.isEmpty {
+                ContentUnavailableView {
+                    Label("No credentials yet", systemImage: "key")
+                } description: {
+                    Text("Use New Credential to add a login, paste a key, or import from your Mac.")
+                } actions: {
+                    NewCredentialButton(folder: nil)
+                }
+            } else if shown.isEmpty {
+                ContentUnavailableView {
+                    Label("No items match", systemImage: "line.3.horizontal.decrease.circle")
+                } description: {
+                    Text("No item has this category and this tag.")
+                } actions: {
+                    Button("Show all items") {
+                        kind = nil
+                        tag = nil
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else if sort == .title {
+                ForEach(vault.folderTree.groups(shown)) { group in
+                    Section(group.title) {
+                        ForEach(group.items) { item in ItemListRow(item: item) }
                     }
                 }
+            } else {
+                ForEach(VaultQuery.sorted(shown, by: .changed)) { item in ItemListRow(item: item) }
             }
-            .listStyle(.plain)
-        } else {
-            List(VaultQuery.sorted(items, by: .changed)) { item in
-                ItemListRow(item: item)
-            }
-            .listStyle(.plain)
+        }
+        .listStyle(.plain)
+    }
+
+    private var showsSyncProblem: Bool {
+        guard vault.vault?.syncs == true else { return false }
+        return switch vault.syncStatus?.state {
+        case .offline?, .needsPassphrase?, .removed?, .damaged?, .staleCopy?, .forkedCopy?, .error?:
+            true
+        default: false
         }
     }
 
@@ -269,6 +337,10 @@ struct ItemsView: View {
                 }
             }
             .pickerStyle(.menu)
+            if isRoot {
+                Divider()
+                Button("Lock now", systemImage: "lock") { Task { await vault.lock() } }
+            }
         } label: {
             Label(
                 "Filter and sort",

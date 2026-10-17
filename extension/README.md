@@ -1,8 +1,8 @@
 # Apassy for Chromium browsers
 
-This extension fills a login or a one-time code on a website from your Apassy vault, and can answer passkey requests with the passkeys in Apassy. You choose the login in the toolbar popup. Apassy asks for Touch ID or your passphrase before each fill. Agents never get a password through it.
+This extension fills a login or a one-time code on a website from your Apassy vault, and can answer passkey requests with the passkeys in Apassy. You choose the login in the toolbar popup or in the optional field suggestions. Apassy asks for Touch ID or your passphrase before each fill. Agents never get a password through it.
 
-It fills the top frame of the page only.
+Toolbar actions fill the top frame. Optional field suggestions also support independently bound same-origin frames. For a cross-origin embedded sign-in, open that sign-in page in its own tab and enable its own site access. Passkeys and one-time codes remain top-frame only.
 
 | Feature | Browsers |
 | --- | --- |
@@ -18,9 +18,15 @@ For passkeys and codes, Apassy checks that the browser is the signed Helium or G
 
 Without the store: turn on Developer mode on the extensions page of the browser, and drag this folder (`/Applications/Apassy.app/Contents/Resources/browser-extension`) onto the page. An update of Apassy updates the folder. The browser loads the new version at its next start. Logins work this way; passkeys and codes need Helium or Chrome (see above).
 
-To fill a login, click the Apassy button in the toolbar, or press Command-Shift-L. Choose a login, then confirm with Touch ID or your passphrase in Apassy.
+To fill a login, focus its username or password field, then click the Apassy button in the toolbar, or press Command-Shift-L. Choose a login, then confirm with Touch ID or your passphrase in Apassy. When a page has several forms, the focused field determines the form. A navigation or a replaced form cancels delivery. Apassy never submits the website form.
+
+For suggestions beside login fields, turn on **Show login suggestions on this site** in the popup. This is separate from passkeys and asks for optional site access. Focusing a field retrieves matching account titles and usernames only. It never asks for owner approval or fills. Type part of the username to filter accounts, or choose **Show all accounts for this site**. Press Option-Down to move into the account menu, use the arrow keys, and press Enter to choose. Escape dismisses it. Each choice still asks for Touch ID or your passphrase. Open shadow roots are supported; closed page shadow roots are not.
+
+A username-first page reports **Username filled**. Continue on the site, then explicitly choose the account again for its password. Unlocking Apassy alone does not fill. The toolbar retains a nonsecret result for the same document for up to five minutes, including after the approval closes the popup.
 
 To save a login that you typed on a page, click "Save this login". The extension reads the username and the password from the page and sends them to Apassy, which asks you to confirm.
+
+To replace a saved password, select **Update login** beside the exact existing account in the popup. Review the account, then choose **Update this login**. Apassy reads the password from the selected form and asks for fresh owner approval. It selects the new-password field in a change-password form and requires matching confirmation values. If several unmarked password fields make the source unclear, update the login in Apassy. It updates only that account’s password; Website, passkey, one-time code and other details are preserved. If a save or update answer is lost, check the account in Apassy before trying again. The extension never retries by creating a duplicate.
 
 To sign up with a new password, click "New password". Choose the length and whether it has symbols, then click "Create and fill". After you confirm, Apassy makes the password, saves the login, and fills it into the page. The extension never makes a password itself.
 
@@ -46,9 +52,14 @@ The extension does not use the browser's `webAuthenticationProxy`, keeps no pass
 | --- | --- |
 | `nativeMessaging` | To talk to the Apassy app on this Mac. |
 | `activeTab` | To read the address of the page and fill it, only after you click the Apassy button. |
+| `storage` | To retain a short-lived nonsecret action result in extension-only browser session storage. No password, account label or page query is stored. |
 | `scripting` | To put the username, the password, or a one-time code into the fields of that page, and to run the passkey scripts. |
-| Site access to https sites and `localhost` (optional) | Only after you turn on passkeys in the popup: the passkey scripts run in the top frame of these pages. |
+| Site access to https sites and `localhost` (optional) | Only after your explicit choice: login suggestions run on selected sites; passkey scripts run on their granted sites. Turning either feature off stops its scripts. Remove site access in browser extension settings to revoke the grant. |
 
-Without passkeys turned on, the extension has no access to a site until you click its button. It sends nothing to the internet, keeps no password, passkey, or code, and does not use the clipboard.
+Without optional login suggestions or passkeys turned on, the extension has no access to a site until you click its button. It sends nothing to the internet, keeps no password, passkey, or code, and does not use the clipboard.
 
 Each extension with this folder has the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Apassy answers only this ID.
+
+## Synthetic checks
+
+From `extension-tests/`, run `node --test fixtures/login-journey/*.unit.mjs fixtures/passkey-bridge/*.unit.mjs` for worker and synthetic DOM checks. After the existing `npm ci --ignore-scripts`, run `npx playwright test tests/login-journey.spec.mjs --workers=1` for isolated Helium with the mock host. `support/fixtures.mjs` creates and deletes its temporary browser profile and profile-local native-host manifest. It does not use the owner's profile or vault. These checks do not establish real native owner approval, signed-browser passkeys, or real vault acceptance.

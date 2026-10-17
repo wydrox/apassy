@@ -16,22 +16,77 @@ struct ICloudVaultModelTests {
         var finished: [VaultEntry] = []
         var cancelled = 0
         var away = false
+        var autoFillOn = false
+        var settingsOpenCount = 0
+        var settingsOpenError: VaultError?
         var model: ICloudVaultModel!
 
         init(biometry: Biometry = .faceID) {
-            model = ICloudVaultModel(service: service, passphraseStore: store, settings: settings,
+            model = ICloudVaultModel(
+                service: service, passphraseStore: store, settings: settings,
                 biometry: biometry, isAway: { [unowned self] in away },
+                readAutoFillEnabled: { [unowned self] in autoFillOn },
+                openAutoFillSettings: { [unowned self] in
+                    settingsOpenCount += 1
+                    if let settingsOpenError { throw settingsOpenError }
+                },
                 onFinished: { [unowned self] in finished.append($0) },
                 onCancel: { [unowned self] in cancelled += 1 })
             model.selectFile(url)
         }
     }
 
+    @Test("AutoFill is optional and opening Settings does not mark it enabled")
+    func optionalAutoFillUsesOSReadback() async {
+        let f = Fixture(biometry: .none)
+        await f.model.open(passphrase: "passphrase")
+        await f.model.refreshAutoFillState()
+        #expect(f.model.autoFillEnabled == false)
+        await f.model.enableAutoFill()
+        #expect(f.settingsOpenCount == 1)
+        #expect(f.model.autoFillEnabled == false)
+        #expect(f.finished.isEmpty)
+        f.autoFillOn = true
+        await f.model.refreshAutoFillState()
+        #expect(f.model.autoFillEnabled == true)
+        f.model.complete()
+        #expect(f.finished.count == 1)
+    }
+
+    @Test("Later completes import with AutoFill off, and failed settings has recovery")
+    func autoFillFailureCanBeSkipped() async {
+        let f = Fixture(biometry: .none)
+        await f.model.open(passphrase: "passphrase")
+        f.settingsOpenError = VaultError(.io, "Settings unavailable")
+        await f.model.enableAutoFill()
+        #expect(f.model.autoFillMessage?.contains("Settings > General") == true)
+        #expect(f.model.autoFillEnabled == false)
+        f.model.complete()
+        #expect(f.finished.count == 1)
+        #expect(f.service.iCloudOpenCount == 1)
+    }
+
+    @Test("AutoFill setup cannot bypass the passphrase or biometry choice")
+    func autoFillOnlyAfterImport() async {
+        let f = Fixture()
+        await f.model.enableAutoFill()
+        #expect(f.settingsOpenCount == 0)
+        await f.model.open(passphrase: "passphrase")
+        await f.model.enableAutoFill()
+        #expect(f.settingsOpenCount == 0)
+        f.model.notNow()
+        await f.model.enableAutoFill()
+        #expect(f.settingsOpenCount == 1)
+    }
+
     @Test("the filename gives the name and Face ID needs the owner choice")
     func validOpen() async throws {
         let f = Fixture()
         await f.model.open(passphrase: "passphrase")
-        guard case .faceID(let entry) = f.model.step else { Issue.record("No Face ID offer"); return }
+        guard case .faceID(let entry) = f.model.step else {
+            Issue.record("No Face ID offer")
+            return
+        }
         #expect(entry.name == "Personal")
         #expect(entry.isICloud)
         #expect(f.store.stored(vaultID: entry.id) == nil)
@@ -49,9 +104,13 @@ struct ICloudVaultModelTests {
         let f = Fixture(biometry: .none)
         await f.model.open(passphrase: "wrong")
         #expect(f.model.step == .passphrase(f.url))
-        #expect(f.model.message != nil)
+        #expect(f.model.message?.contains("passphrase") == true)
+        #expect(f.model.message?.contains("Select the file") == false)
         await f.model.open(passphrase: "passphrase")
-        guard case .done = f.model.step else { Issue.record("Did not open"); return }
+        guard case .done = f.model.step else {
+            Issue.record("Did not open")
+            return
+        }
     }
 
     @Test("two open actions make one import")
@@ -91,7 +150,10 @@ struct ICloudVaultModelTests {
         f.model.enterBackground()
         f.model.enterForeground()
         await first.value
-        guard case .done(let entry) = f.model.step else { Issue.record("No closed completion"); return }
+        guard case .done(let entry) = f.model.step else {
+            Issue.record("No closed completion")
+            return
+        }
         #expect(try await !f.service.coreUnlocked())
         #expect(f.store.stored(vaultID: entry.id) == nil)
         f.model.turnOnFaceID()
@@ -102,7 +164,10 @@ struct ICloudVaultModelTests {
     func cancelFaceID() async throws {
         let f = Fixture()
         await f.model.open(passphrase: "passphrase")
-        guard case .faceID(let entry) = f.model.step else { Issue.record("No offer"); return }
+        guard case .faceID(let entry) = f.model.step else {
+            Issue.record("No offer")
+            return
+        }
         await f.model.cancel()
         #expect(try await !f.service.coreUnlocked())
         f.model.turnOnFaceID()
@@ -128,7 +193,10 @@ struct ICloudVaultModelTests {
     func backgroundFaceID() async throws {
         let f = Fixture()
         await f.model.open(passphrase: "passphrase")
-        guard case .faceID(let entry) = f.model.step else { Issue.record("No offer"); return }
+        guard case .faceID(let entry) = f.model.step else {
+            Issue.record("No offer")
+            return
+        }
         f.model.enterBackground()
         for _ in 0..<50 {
             if try await !f.service.coreUnlocked() { break }
@@ -150,7 +218,10 @@ struct ICloudVaultModelTests {
         #expect(try await !f.service.coreUnlocked())
         #expect(f.cancelled == 0)
         #expect(f.model.message != nil)
-        guard case .done = f.model.step else { Issue.record("No cleanup error screen"); return }
+        guard case .done = f.model.step else {
+            Issue.record("No cleanup error screen")
+            return
+        }
         f.service.removeError = nil
         await f.model.cancel()
         #expect(f.cancelled == 1)

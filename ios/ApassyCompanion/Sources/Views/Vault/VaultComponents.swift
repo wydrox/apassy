@@ -5,7 +5,6 @@ import SwiftUI
 enum VaultTab: Hashable {
     case vault
     case decisions
-    case agents
     case search
 }
 
@@ -16,6 +15,7 @@ enum VaultRoute: Hashable {
     /// A folder by its UUID.
     case folder(String)
     case allCredentials
+    case folders
     /// The favorites, from the Vault root.
     case favorites
     case watchtower
@@ -24,6 +24,7 @@ enum VaultRoute: Hashable {
 /// A sheet of the vault tabs.
 enum VaultSheet: Identifiable {
     case settings
+    case agentAccess
     case syncSettings
     case new(ItemKind)
     case edit(ItemDetail)
@@ -41,6 +42,7 @@ enum VaultSheet: Identifiable {
     var id: String {
         switch self {
         case .settings: "settings"
+        case .agentAccess: "agent-access"
         case .syncSettings: "sync-settings"
         case .new(let kind): "new-\(kind.rawValue)"
         case .edit(let detail): "edit-\(detail.id)"
@@ -64,6 +66,8 @@ final class VaultUI {
     var homePath: [VaultRoute] = []
     var itemsPath: [VaultRoute] = []
     var searchText = ""
+    /// A completed save clears transient list filters before revealing its result.
+    var libraryRevealEpoch = 0
     #if targetEnvironment(simulator)
         /// A development aid: the item screen reveals its first secret once, or shows it in large
         /// type (after the owner check).
@@ -217,6 +221,7 @@ struct CapView: View {
 struct ItemRowView: View {
     let item: ItemRow
     var favorite = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(spacing: 12) {
@@ -225,7 +230,8 @@ struct ItemRowView: View {
                 HStack(spacing: 4) {
                     Text(item.title)
                         .font(.body)
-                        .lineLimit(1)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
                     if favorite {
                         Image(systemName: "star.fill")
                             .font(.caption2)
@@ -236,7 +242,8 @@ struct ItemRowView: View {
                 Text(CredentialLooks.detailLine(item))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    .fixedSize(horizontal: false, vertical: dynamicTypeSize.isAccessibilitySize)
             }
             Spacer(minLength: 4)
             if item.conflictOf != nil {
@@ -288,7 +295,9 @@ struct ItemListRow: View {
             Button {
                 Task { await vault.setArchived(item, !item.archived) }
             } label: {
-                Label(item.archived ? "Restore" : "Archive", systemImage: item.archived ? "tray.and.arrow.up" : "archivebox")
+                Label(
+                    item.archived ? "Restore" : "Archive",
+                    systemImage: item.archived ? "tray.and.arrow.up" : "archivebox")
             }
             .tint(.orange)
             if !item.archived {
@@ -322,7 +331,9 @@ struct ItemListRow: View {
                     systemImage: vault.isFavorite(item.id) ? "star.slash" : "star"
                 ) { vault.toggleFavorite(item.id) }
             }
-            Button(item.archived ? "Restore" : "Archive", systemImage: item.archived ? "tray.and.arrow.up" : "archivebox") {
+            Button(
+                item.archived ? "Restore" : "Archive", systemImage: item.archived ? "tray.and.arrow.up" : "archivebox"
+            ) {
                 Task { await vault.setArchived(item, !item.archived) }
             }
         }
@@ -391,8 +402,9 @@ struct SyncCapsule: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .glassEffect(.regular.tint(tint?.opacity(0.28)).interactive(),
-                         in: .rect(cornerRadius: 20))
+            .glassEffect(
+                .regular.tint(tint?.opacity(0.28)).interactive(),
+                in: .rect(cornerRadius: 20))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
@@ -488,6 +500,7 @@ extension View {
             case .category(let category): CategoryListView(category: category)
             case .folder(let uuid): FolderView(uuid: uuid)
             case .allCredentials: ItemsView()
+            case .folders: VaultFoldersView()
             case .favorites: FavoritesView()
             case .watchtower: WatchtowerView()
             }
@@ -506,7 +519,8 @@ struct CategoryListView: View {
             if items.isEmpty {
                 ContentUnavailableView(
                     "No items in “\(category.label)”", systemImage: category.symbol,
-                    description: Text(category == .archive ? "Archived credentials show here." : "Add one with the + button."))
+                    description: Text(
+                        category == .archive ? "Archived credentials show here." : "Add one with the + button."))
             } else {
                 List(items) { item in
                     ItemListRow(item: item)

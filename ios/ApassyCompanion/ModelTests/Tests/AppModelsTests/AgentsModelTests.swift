@@ -50,7 +50,8 @@ struct AgentsModelTests {
         #expect(fixture.model.phase == .ready)
         #expect(fixture.model.screen == .list)
         #expect(fixture.model.vaults.count == 2)
-        #expect(fixture.model.connectedCount == 5)
+        #expect(fixture.model.agentCount == 6)
+        #expect(fixture.model.agentCount == fixture.model.sections.flatMap(\.agents).count)
     }
 
     @Test func withoutAFeedTheTabSaysWhereTheAgentsAre() async throws {
@@ -131,7 +132,10 @@ struct AgentsModelTests {
         await fixture.model.refresh()
         let sections = fixture.model.sections
         #expect(fixture.model.namesVaults)
-        #expect(sections.map(\.title) == ["Personal · Mac mini", "Personal · MacBook Pro", "Work · MacBook Pro"])
+        #expect(
+            sections.map(\.title) == [
+                "Personal · Mac mini", "Personal · MacBook Pro", "Work · MacBook Pro",
+            ])
         #expect(sections[0].agents.map(\.agent.name) == ["Claude Code", "Codex", "T3 Code"])
         #expect(sections[2].agents.map(\.agent.name) == ["Claude Code", "Release bot"])
         // The same agent name on two Macs are two rows.
@@ -168,7 +172,8 @@ struct AgentsModelTests {
         #expect(AgentsText.exception(gone) == "Never: A deleted credential")
         let away = FeedException(item: "i", itemTitle: "Cloudflare API", here: false, kind: .only, createdAt: 1)
         #expect(AgentsText.exception(away) == "Only: Cloudflare API (not on this iPhone)")
-        let here = FeedException(item: "i", itemTitle: "Old name", title: "Stripe live key", here: true, kind: .alwaysAsk,
+        let here = FeedException(
+            item: "i", itemTitle: "Old name", title: "Stripe live key", here: true, kind: .alwaysAsk,
             createdAt: 1)
         #expect(AgentsText.exception(here) == "Always ask: Stripe live key")
         #expect(
@@ -176,7 +181,8 @@ struct AgentsModelTests {
                 == "Remove “Always ask” for Stripe live key from Codex on Mac mini?")
         #expect(AgentsText.confirmMessage(here, agent: "Codex", mac: "Mac mini").contains("Face ID"))
         #expect(!AgentsText.confirmMessage(away, agent: "Codex", mac: "Mac mini").contains("Face ID"))
-        let byYou = FeedUse(at: 1, item: "i", itemTitle: "t", outcome: .allowed, decidedBy: .owner, answeredOn: "iPhone")
+        let byYou = FeedUse(
+            at: 1, item: "i", itemTitle: "t", outcome: .allowed, decidedBy: .owner, answeredOn: "iPhone")
         #expect(AgentsText.mark(byYou) == .allowedByYou)
         #expect(AgentsText.outcome(byYou) == "You allowed it on iPhone")
         #expect(AgentsText.mark(FeedUse(at: 1, item: nil, itemTitle: "", outcome: .refused)) == .denied)
@@ -218,7 +224,8 @@ struct AgentsModelTests {
             fixture.model.removalBlock(of: try fixture.exception(claude, .alwaysAsk), in: claude)
                 == "Connect this iPhone again on a Mac to use Face ID here.")
         let work = try fixture.entry(vault: "Work", mac: "MacBook Pro", agent: "Claude Code")
-        #expect(fixture.model.removalBlock(of: try fixture.exception(work, .only), in: work)?.contains("synced") == true)
+        #expect(
+            fixture.model.removalBlock(of: try fixture.exception(work, .only), in: work)?.contains("synced") == true)
         let deleted = FeedException(item: nil, itemTitle: "", kind: .never, createdAt: 1)
         #expect(fixture.model.removal(of: deleted, in: claude) == nil)
     }
@@ -261,7 +268,8 @@ struct AgentsModelTests {
         var feed = PreviewVaultService.sampleFeed()
         let at = Int64(Date().timeIntervalSince1970)
         feed[1].macs[0].agents[0].exceptions.append(
-            FeedException(item: "5e6f7a8b9c0d4e1f8a2b3c4d5e6f7a8b", itemTitle: "Sentry", kind: .never,
+            FeedException(
+                item: "5e6f7a8b9c0d4e1f8a2b3c4d5e6f7a8b", itemTitle: "Sentry", kind: .never,
                 createdAt: at - 100))
         let fixture = await Fixture(feed: feed)
         await fixture.model.refresh()
@@ -430,7 +438,9 @@ struct AgentsModelTests {
         await fixture.model.refresh()
         let codex = try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex")
         let never = try fixture.exception(codex, .never)
-        #expect(fixture.model.removalBlock(of: never, in: codex) == "Update Apassy on Mac mini to remove this from the iPhone.")
+        #expect(
+            fixture.model.removalBlock(of: never, in: codex)
+                == "Update Apassy on Mac mini to remove this from the iPhone.")
         await fixture.model.remove(never, in: codex)
         #expect(await fixture.service.sentFeedActions().isEmpty)
 
@@ -508,7 +518,8 @@ struct AgentsModelTests {
     @Test func aRowWithAnotherKeyIsNotSigned() async throws {
         let signer = ScriptedSigner()
         let other = Data([4] + [UInt8](repeating: 9, count: 64))
-        let fixture = await Fixture(registered: [Self.personalTeam: other], signers: SharedAnswerSigners(signer: signer))
+        let fixture = await Fixture(
+            registered: [Self.personalTeam: other], signers: SharedAnswerSigners(signer: signer))
         await fixture.model.refresh()
         let codex = try fixture.entry(vault: "Personal", mac: "Mac mini", agent: "Codex")
         let never = try fixture.exception(codex, .never)

@@ -146,6 +146,10 @@ impl Drop for Paste {
 pub(crate) struct State {
     /// The selected decision.
     selected: Option<Key>,
+    /// Notification navigation never substitutes a newer request.
+    routed: bool,
+    activity_id: Option<u64>,
+    show_activity: bool,
     /// Its place in the list in the last frame. When it goes (an answer, a time-out), the
     /// decision that takes its place is selected.
     index: usize,
@@ -761,6 +765,9 @@ pub(super) fn selected_key(app: &DesktopApp) -> Option<Key> {
 /// Select a decision, as a click on its row does.
 #[cfg(test)]
 pub(super) fn select_key(app: &mut DesktopApp, key: Key) {
+    app.ui.decisions.routed = false;
+    app.ui.decisions.show_activity = false;
+    app.ui.decisions.activity_id = None;
     app.ui.decisions.selected = Some(key);
     app.ui.decisions.disconnect = None;
 }
@@ -787,13 +794,63 @@ pub(super) fn disconnecting(app: &DesktopApp) -> bool {
 
 /// Select a question, for example from the banner of another view.
 pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
+    app.ui.decisions.routed = false;
+    app.ui.decisions.show_activity = false;
+    app.ui.decisions.activity_id = None;
     app.ui.decisions.selected = Some(Key::Run(run_id));
     app.ui.decisions.disconnect = None;
 }
 
+/// A notification is a hint to one exact request, never an approval or a next-item action.
+pub(super) fn route_notification(
+    app: &mut DesktopApp,
+    destination: crate::desktop::notify::NotificationDestination,
+) {
+    use crate::desktop::inbox::EventKey;
+    use crate::desktop::notify::NotificationDestination;
+    app.ui.decisions.paste.erase();
+    app.ui.decisions.disconnect = None;
+    app.ui.decisions.form = None;
+    app.ui.decisions.routed = true;
+    app.ui.decisions.activity_id = None;
+    app.ui.decisions.show_activity = false;
+    app.ui.decisions.selected = match destination {
+        NotificationDestination::Event {
+            key: EventKey::Run(id),
+            ..
+        } => Some(Key::Run(id)),
+        NotificationDestination::Event {
+            key: EventKey::Request(id),
+            ..
+        } => Some(Key::Request(id)),
+        NotificationDestination::Event {
+            key: EventKey::Correction(id),
+            ..
+        } => Some(Key::Suggestion(id)),
+        NotificationDestination::Event {
+            key: EventKey::Activity(id),
+            ..
+        } => {
+            app.ui.decisions.activity_id = Some(id);
+            app.ui.decisions.show_activity = true;
+            None
+        }
+        NotificationDestination::Requests => {
+            app.set_note("This request is no longer waiting. Review current requests or Activity.");
+            None
+        }
+    };
+    app.place = crate::desktop::Place::Decisions;
+    app.ui.sidebar_float = false;
+}
+
 fn sync_selection(state: &mut State, open: &Open) {
     let keys = open.keys();
-    state.selected = next_selection(&keys, state.selected, state.index);
+    state.selected = if state.routed {
+        state.selected.filter(|key| keys.contains(key))
+    } else {
+        next_selection(&keys, state.selected, state.index)
+    };
     if let Some(selected) = state.selected {
         state.index = keys.iter().position(|key| *key == selected).unwrap_or(0);
     }
@@ -917,7 +974,25 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         .week_counts()
         .map(|counts| counts.line())
         .unwrap_or_default();
-    columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
+    let mut history = false;
+    columns::list_toolbar(ui, "Decisions", &subtitle, |ui| {
+        history = kit::small_button(ui, "Activity", Style::Bordered).clicked();
+    });
+    if history {
+        app.ui.decisions.selected = None;
+        app.ui.decisions.routed = true;
+        app.ui.decisions.activity_id = None;
+        app.ui.decisions.show_activity = true;
+    }
+    if app.ui.decisions.routed
+        && app.ui.decisions.selected.is_none()
+        && !app.ui.decisions.show_activity
+    {
+        columns::list_note(
+            ui,
+            "This request is no longer waiting. Review current requests or Activity.",
+        );
+    }
     // The rows come first in the layout, so ⌘2 and Tab reach them before the footer.
     let notice = notifications_off(app);
     let area = ui.available_rect_before_wrap();
@@ -968,6 +1043,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     }
     ui.allocate_rect(area, Sense::hover());
     if let Some(key) = chosen {
+        app.ui.decisions.routed = false;
+        app.ui.decisions.show_activity = false;
+        app.ui.decisions.activity_id = None;
         app.ui.decisions.selected = Some(key);
         app.ui.decisions.disconnect = None;
     }
@@ -1072,6 +1150,31 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
 pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
     let mut open = open(app, pending);
     sync_selection(&mut app.ui.decisions, &open);
+    if app.ui.decisions.show_activity {
+        let activity_id = app.ui.decisions.activity_id;
+        columns::detail_toolbar(ui, |_| {});
+        columns::detail_body(ui, ("notification-activity", activity_id), |ui| {
+            let rows = app
+                .owner_ui
+                .session
+                .activity(crate::vault::MAX_ACTIVITY_ROWS)
+                .unwrap_or_default();
+            let exact: Vec<_> = rows
+                .into_iter()
+                .filter(|row| activity_id.is_none_or(|id| row.id == id))
+                .collect();
+            super::timeline::access_timeline(
+                app,
+                ui,
+                &exact,
+                "notification-activity-history",
+                "Activity",
+                "This activity is no longer available.",
+                true,
+            );
+        });
+        return;
+    }
     match app.ui.decisions.selected {
         Some(Key::Run(id)) => {
             if let Some(current) = open.waiting.into_iter().find(|w| w.run.id == id) {
@@ -1111,8 +1214,16 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         columns::nothing_selected(
             ui,
             Icon::CheckCircle,
-            "All clear",
-            "Nothing waits for you. A new question also shows as a macOS notification.",
+            if app.ui.decisions.routed {
+                "Select a Request"
+            } else {
+                "All clear"
+            },
+            if app.ui.decisions.routed {
+                "Review a current request from the list. Activity keeps completed outcomes."
+            } else {
+                "Nothing waits for you. A new question also shows as a macOS notification."
+            },
         );
     });
 }

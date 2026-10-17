@@ -1,7 +1,6 @@
-//! The first steps of a new vault (ADR 0026 §7): paste the first credential, and
-//! connect an agent. Each step reads its state from the vault, so a step shows done
-//! once it is true, and the steps go away when both are done. A vault from another Mac
-//! has its own panel (`agents::next_steps_panel`), so the steps wait until that closes.
+//! First value for a credential owner: add a login, paste a credential, or import.
+//! A credential completes these steps. Connecting an agent is optional and remains
+//! available in the Agents destination. An adopted vault has its own setup panel.
 
 use eframe::egui;
 
@@ -30,13 +29,15 @@ impl Progress {
     }
 
     pub(super) fn complete(self) -> bool {
-        self.credential && self.agent
+        self.credential
     }
 }
 
 /// The action of a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Go {
+    Login,
+    Import,
     Paste,
     Connect,
 }
@@ -60,7 +61,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
             ui.add_space(2.0);
             ui.label(
                 kit::text(
-                    "Agents use a credential through Apassy and never see its value.",
+                    "Add a login or import your existing credentials.",
                     Font::Callout,
                 )
                 .color(kit::SECONDARY),
@@ -69,6 +70,18 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
         });
     }
     let header = progress.credential.then_some("First steps");
+    let mut primary = None;
+    ui.horizontal_wrapped(|ui| {
+        if kit::small_button(ui, "Add Login…", Style::Prominent).clicked() {
+            primary = Some(Go::Login);
+        }
+        if kit::small_button(ui, "Import…", Style::Bordered).clicked() {
+            primary = Some(Go::Import);
+        }
+    });
+    if let Some(go) = primary {
+        act(app, go);
+    }
     let mut go = None;
     kit::section(ui, header, None, |s| {
         let rows = [
@@ -81,7 +94,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
             ),
             (
                 progress.agent,
-                "Connect an agent",
+                "Connect an agent (optional)",
                 "Claude Code, Codex, or another host. You confirm once.",
                 "Connect…",
                 Go::Connect,
@@ -142,6 +155,12 @@ fn step_mark(ui: &mut egui::Ui, done: bool) {
 
 fn act(app: &mut DesktopApp, go: Go) {
     match go {
+        Go::Login => {
+            super::items::open_add(app);
+            app.add_form.kind = crate::contracts::CredentialKind::Login;
+            app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
+        }
+        Go::Import => app.ui.sheet = Some(Sheet::Import),
         Go::Paste => app.ui.sheet = Some(Sheet::NewCredential),
         Go::Connect => super::agent_onboarding::open(app),
     }
@@ -201,14 +220,12 @@ mod tests {
         let progress = Progress::read(&app);
         assert!(progress.credential && !progress.agent);
         let text = app_frame(&egui::Context::default(), &mut app);
-        assert!(text.contains("First steps"), "{text}");
-        assert!(text.contains("Paste your first credential"), "{text}");
         assert!(
-            !text.contains("Paste…"),
-            "a done step has no button: {text}"
+            progress.complete(),
+            "A credential completes first value without an agent"
         );
-        assert!(text.contains("Connect…"), "{text}");
-        assert!(!text.contains("No credentials yet"), "{text}");
+        assert!(!text.contains("First steps"), "{text}");
+        assert!(!text.contains("Connect…"), "{text}");
         // The list still shows the credential.
         assert!(text.contains("Guarded key"), "{text}");
     }
@@ -256,7 +273,7 @@ mod tests {
         for step in [
             "First steps",
             "Paste your first credential",
-            "Connect an agent",
+            "Connect an agent (optional)",
             "Paste…",
             "Connect…",
         ] {
