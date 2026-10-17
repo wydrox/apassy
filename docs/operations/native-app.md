@@ -3,7 +3,7 @@
 Date: 2026-09-26.
 Host: Mac16,10 (Mac mini, Apple M4), macOS 27.0 (26A428), arm64. Xcode 26.3 (17C529), Swift 6.2.4, Rust 1.97.0.
 Scope: goal item A1, and the native side of A3, A4, N1, and N2 ([goal](../goal.md), [ADR 0010](../adr/0010-closing-open-decisions.md)).
-The desktop app calls the helper for the unlock method (A2, A3), the owner check (A4), and notifications (N1 to N3). See [Desktop integration](#desktop-integration) and [notifications.md](notifications.md).
+The desktop app calls the helper for the unlock method (A2, A3), the owner check (A4), authenticated owner Copy ([ADR 0027](../adr/0027-owner-desktop-copy.md)), and notifications (N1 to N3). See [Desktop integration](#desktop-integration) and [notifications.md](notifications.md).
 This document does not open the real-secret gate.
 
 ## What this is
@@ -21,7 +21,7 @@ The protocol is one JSON line in and one JSON line out.
 | `MacOS/apassy` | Rust desktop app, main executable | `com.wydrox.apassy` | none. With the provider: AutoFill, and the profile in `embedded.provisionprofile` |
 | `MacOS/apassy-mcp` | Rust MCP adapter for agents | `com.wydrox.apassy.mcp` | none |
 | `MacOS/apassy-browser-guard` | Swift caller check of the browser host (`native/ApassyBrowserGuard`) | `com.wydrox.apassy.browser-guard` | none |
-| `MacOS/apassy-helper` | Swift helper: `authenticate` | `com.wydrox.apassy.helper` | none |
+| `MacOS/apassy-helper` | Swift helper: `authenticate`, clipboard, iCloud status | `com.wydrox.apassy.helper` | none |
 | `MacOS/apassy-credential-bridge` | Swift bridge of the AutoFill extension. Only with the provider | `com.wydrox.apassy.credential-bridge` | app group only |
 | `PlugIns/ApassyAutoFill.appex` | Mac AutoFill credential provider. Only with the provider | `com.wydrox.apassy.autofill` | sandbox, AutoFill, app group. Needs a profile |
 | `Helpers/ApassyKeychain.app` | the same Swift helper, in its own bundle: keychain commands | `com.wydrox.apassy.keychain` | keychain entitlements, only with a profile |
@@ -194,7 +194,7 @@ build-app: FAILED: APASSY_KEYCHAIN_PROFILE is not usable: the App ID is "7S3F976
 
 The helper and the notifier read JSON lines on stdin. They write exactly one JSON line on stdout for each request. They skip empty lines and exit at end of input.
 It takes no arguments. It writes nothing to stderr during normal work.
-A request is an object with `cmd` and the fields of the command. The largest request is 64 KiB.
+A request is an object with `cmd` and the fields of the command. The largest request is 128 KiB, including base64 clipboard text. The browser wire retains its separate 64 KiB limit.
 Before each request, the helper checks its caller ([Caller check](#caller-check)). When the caller is not allowed, each request, also `ping` and a malformed request, gets `caller_not_allowed`.
 
 A success has `"ok": true` and the result fields. A failure has `"ok": false`, `"error"`, and `"message"`.
@@ -204,15 +204,22 @@ A message is English text for logs. It never contains a secret. Code must use `e
 | --- | --- | --- | --- | --- |
 | `ping` | none | `protocol` (1), `helper_version`, `bundle_id` (or null); the helpers also `keychain_access_group` (or null) and `biometry` (`available` or an error code) | all | no |
 | `authenticate` | `reason` (1 to 200 characters) | none | `apassy-helper` | Touch ID |
+| `clipboard_write` | `secret_b64` (standard base64 of UTF-8, at most 65536 decoded bytes), `owner` (caller-generated random 128-bit marker as 32 lowercase hex characters) | `owner` (the same marker), `change_count` (pasteboard write identity); no value | `apassy-helper` | none; the desktop must obtain a fresh exact-field owner proof first |
+| `clipboard_clear` | `owner`, optional `change_count` from that write; owner-only is for lost-acknowledgement cleanup | none | `apassy-helper` | no |
 | `keychain_store` | `account`, `secret_b64` (standard base64, 1 to 4096 bytes) | `access_group` | keychain helper | no |
 | `keychain_read` | `account`, `reason` | `secret_b64` | keychain helper | Touch ID |
 | `keychain_delete` | `account` | `deleted` (bool) | keychain helper | no |
 | `keychain_exists` | `account` | `exists`, `biometry_changed` (bool) | keychain helper | no |
 | `ubiquity_status` | `path` (absolute, at most 1024 bytes, no control characters), `download` (bool, optional) | `ubiquitous` (bool); for an iCloud file also `status` (`current`, `downloaded`, `not_downloaded`, or `unknown`), `downloading`, `download_error`, and `download_requested` (bool). A file that is not there: `not_found`. | `apassy-helper` | no |
-| `notify` | `id`, `event` (`approval_waiting`, `request_blocked`, or `sync_stuck`), `agent` (1 to 40 characters), and for `sync_stuck` only `reason` (`waiting_for_icloud`, `needs_passphrase`, `damaged`, or `error`). No other field. | `delivered` (bool) and the status fields | notifier | never |
+| `notify` | `id`, `event` (`approval_waiting`, `request_blocked`, `suggestion`, or `sync_stuck`), `agent` (1 to 40 characters), and for `sync_stuck` only `reason` (`waiting_for_icloud`, `needs_passphrase`, `damaged`, or `error`). Optional `route` (opaque 64-character lowercase hex capability) and `waiting_key` (same form; approval/suggestion only). No other field. | `delivered` (bool) and the status fields | notifier | never |
+| `notify_remove` | `ids` (at most 512 notification identifiers) | none; removes pending and delivered matching IDs | notifier | no |
+| `notify_reconcile` | `waiting_keys` (at most 512 opaque 64-character lowercase hex keys) | none; removes delivered waiting alerts whose key is absent | notifier | no |
+| `notify_activations` | none | `routes` (at most the latest opaque route) | notifier | no |
 | `notify_status` | none | `authorization`, `alert`, `alert_style`, `notification_center`, `lock_screen`, `sound` | notifier | no |
 | `notify_authorize` | none | `granted`, `detail` (when the owner did not answer), and the status fields | notifier | permission, at most 120 s |
 | `preview` | `event`, `agent`, and `reason` for `sync_stuck` | `title`, `body`: the text that `notify` shows. Posts nothing. | notifier | no |
+
+`clipboard_write` is a deliberate owner disclosure, not an automatic secret API. The caller check runs before dispatch. The desktop obtains a new `CopyField { item_id, field, revision }` proof before reading a supported secret and sends it in an erasing request buffer; the helper writes no value to stdout or logs. It adds the caller's fresh `com.wydrox.apassy.copy-owner` marker, concealed/transient/autogenerated markers, and the remote-clipboard exclusion marker. Those privacy markers are advisory: another local app can read or retain the text. `clipboard_clear` checks the owner marker and `changeCount`, so a later copy of identical text is a different write. If a write response is lost or malformed, the caller attempts immediate cleanup with its known marker and no expected count; the helper checks the marker and a stable current count. If expiry clearing fails, the app erases its local text and retains only the identity for a retry while it runs. `NSPasteboard` has no interprocess atomic compare-and-clear: a concurrent write in the final interval cannot be excluded. The app requests clearing at 30 seconds and on lock/switch/quit; process termination or a helper failure can prevent it. Swift/AppKit and OS copies are outside the erasing-buffer guarantee. [ADR 0027](../adr/0027-owner-desktop-copy.md) defines the authorization and exposure boundary.
 
 `ubiquity_status` reads `NSURLUbiquitousItemDownloadingStatusKey` and the download keys of the file (`native/ApassyHelper/Ubiquity.swift`). It reads no content. `current` means that the copy on this Mac is the newest version; `downloaded` and `not_downloaded` mean that iCloud has a newer version or no copy is here, also when an old copy is on disk. With `"download": true` and a status other than `current`, the helper also calls `FileManager.startDownloadingUbiquitousItem`; the download runs in the background. The sync engine uses it for a synced file in `~/Library/Mobile Documents` ([sync.md](sync.md), section 7).
 
@@ -314,8 +321,8 @@ When LaunchServices starts the notifier (launchd is the parent), for example aft
 
 - `NativeHelper::locate()` finds the helpers and the notifier next to the running `apassy` in the bundle. Debug builds first read `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, and `APASSY_NATIVE_NOTIFIER`. Release builds ignore these variables, so a process that sets the app environment cannot replace Touch ID with a fake helper.
 - `NativeHelper::with_paths(helper, keychain_helper)` is for tests. It uses `helper` as the notifier too. `with_notifier(path)` sets the notifier.
-- Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `ubiquity_status`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. `notify`, `notify_status`, and `notify_authorize` use the notifier (`Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`). `ping`, `authenticate`, and `ubiquity_status` use `apassy-helper`.
-- `notify` sends `id`, `event`, and `agent`, and `reason` for a sync notification. `NotificationStatus` has the same fields as before.
+- Methods: `ping`, `ping_keychain`, `authenticate`, `clipboard_write`, `clipboard_clear_if_unchanged`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `ubiquity_status`, `notify`, `notify_status`, `notify_authorize`, `notify_remove`, `notify_reconcile`, `notify_activations`. Keychain methods use the keychain helper. Notification methods use the notifier (`Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`). `ping`, `authenticate`, the clipboard methods, and `ubiquity_status` use `apassy-helper`. The Rust method `clipboard_clear_if_unchanged` sends the wire command `clipboard_clear`.
+- `notify` sends `id`, `event`, and `agent`, `reason` for a sync notification, and optional opaque `route`/`waiting_key` for local navigation and reconciliation. These carry no command, secret, vault path, or question content. A capability is revalidated by the app against its live session and waiting target; a stale click opens the unselected list. `notify_reconcile` requires a successful complete refresh of waiting sources; locked or failed sources are not settlement. Suggestion notices are passive and use their own fixed text. `NotificationStatus` retains its fields.
 - Time limits: 10 s for quick commands, 40 s for `notify`, 180 s for commands that wait for the owner. After the limit, the client stops the helper and returns `NativeError::Timeout`.
 - `apassy --notify-check status|authorize|post` (`src/native/check.rs`) runs the notifier through the real signed program. `scripts/n1-check.sh` uses it. `post` sends the two fixed templates with the agent name `n1-check`.
 - Errors: `NativeError::Helper { code: HelperErrorCode, message }` for a helper error. `HelperErrorCode::CallerNotAllowed` is `caller_not_allowed`. Other variants: `InvalidArgument` (the client did not start the helper), `HelperMissing`, `Io`, `Timeout`, `Protocol`. The test `swift_and_rust_error_codes_match` compares the Swift and the Rust lists.
@@ -333,6 +340,7 @@ A preview shows the agent name and the event type only. It never shows the comma
 | Event | Title | Body |
 | --- | --- | --- |
 | `ApprovalWaiting` | Approval waiting | Agent "NAME" waits for your decision. Open Apassy to review. |
+| `Suggestion` | Suggestion available | Apassy has a suggestion to review when convenient. |
 | `RequestBlocked` | Request blocked | Apassy blocked a request from agent "NAME". |
 | `SyncStuck` | Sync stopped | "VAULT" has not synced for MINUTES minutes: REASON. Open Settings > Vault > Sync. |
 
@@ -425,6 +433,7 @@ These calls take a proof. Without a matching proof, they refuse with `owner_chec
 | Owner action | Call | Proof action |
 | --- | --- | --- |
 | Reveal | `OwnerSession::reveal` | `Reveal { item_id }` |
+| Copy one desktop secret field | `OwnerSession::copy_field` | `CopyField { item_id, field, revision }` |
 | Approval of a run | `ApprovalQueue::approve` | `ApproveRun(run)` |
 | "Approve and remember" | `ApprovalQueue::approve` | `ApproveAndRemember(run)` |
 | New connector operation | `OwnerSession::allow_operation` | `ChangeGrant { agent_id, item_id }` |

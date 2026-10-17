@@ -224,7 +224,7 @@ struct NewCredentialModelTests {
         #expect(paste.text == Paste.env)
     }
 
-    @Test("a folder that is gone gives way to the top level")
+    @Test("loading folder choices preserves an explicit destination even when it is gone")
     func folderDefault() async {
         let none = model()
         await none.loadFolders()
@@ -234,7 +234,7 @@ struct NewCredentialModelTests {
 
         let gone = model(folder: "a-folder-that-is-not-there")
         await gone.loadFolders()
-        #expect(gone.folder == nil)
+        #expect(gone.folder == "a-folder-that-is-not-there")
     }
 
     @Test("closing drops the paste and the rows")
@@ -363,7 +363,7 @@ struct ItemEditorFolderTests {
         #expect(!editor.movesFolder)
     }
 
-    @Test("a failed move keeps the saved item and shows the alert of the vault once the sheet is gone")
+    @Test("a failed move retains a saved identity and retries the same item without a duplicate")
     func failedMove() async throws {
         let service = PreviewVaultService(unlocked: true)
         let (vault, _) = makeVault(service: service)
@@ -375,14 +375,154 @@ struct ItemEditorFolderTests {
         editor.title = "Example"
         editor.values["username"] = "u"
         editor.values["password"] = "p"
-        let saved = try #require(await editor.save(in: vault))
+        let before = vault.items.count
+        #expect(await editor.save(in: vault) == nil)
+        let saved = try #require(editor.savedItem)
         #expect(vault.item(saved.id) != nil)
-        #expect(editor.error == nil)
-        // Not while the sheet is up: the alert of the tabs cannot show above it.
+        #expect(vault.item(saved.id)?.folder == nil)
+        #expect(vault.items.count == before + 1)
+        #expect(editor.error?.contains("Saved “Example”, but could not move it to Personal.") == true)
+        #expect(editor.moveFailure == editor.error)
+        #expect(editor.preventsDismissal)
         #expect(vault.alert == nil)
-        let message = try #require(editor.moveFailure)
-        editor.reportMoveFailure(to: vault)
-        #expect(vault.alert == message)
+
+        // Retry changes destination; no second create and no duplicate content revision.
+        editor.folder = acme
+        let retried = try #require(await editor.save(in: vault))
+        #expect(retried.id == saved.id)
+        #expect(retried.revision == saved.revision)
+        #expect(vault.items.count == before + 1)
+        #expect(vault.item(saved.id)?.folder == acme)
+        #expect(editor.error == nil)
         #expect(editor.moveFailure == nil)
+    }
+}
+
+@MainActor
+@Suite("Paste submission safety")
+struct PasteSubmissionTests {
+    @Test("a delayed Add freezes row choices and submits its original text and folder once")
+    func stablePaste() async throws {
+        let service = SpyVaultService(organize: true)
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let billing = PreviewOrganize.FolderID.billing
+        let paste = NewCredentialModel(service: service, folder: billing, debounce: .seconds(30))
+        paste.text = Paste.env
+        await paste.detectNow()
+        paste.setTitle("Submitted Stripe", row: 0)
+        paste.setKeep(false, row: 1)
+        let gate = VaultCallGate()
+        await service.setPasteHook { await gate.wait() }
+        defer { gate.release() }
+        let task = Task { await paste.add(in: vault) }
+        #expect(await waitUntil { gate.isWaiting })
+        #expect(paste.isAdding)
+        #expect(paste.preventsDismissal)
+        #expect(await paste.add(in: vault) == nil)
+        paste.setTitle("Later title", row: 0)
+        paste.setKeep(true, row: 1)
+        #expect(paste.rows[0].title == "Submitted Stripe")
+        #expect(!paste.rows[1].keep)
+        paste.folder = PreviewOrganize.FolderID.personal
+        gate.release()
+        let added = try #require(await task.value)
+        #expect(added.count == 2)
+        #expect(added.first?.title == "Submitted Stripe")
+        for item in added { #expect(vault.item(item.id)?.folder == billing) }
+        #expect(paste.savedFolder == billing)
+        #expect(await service.pasteCalls.count == 1)
+        #expect(!paste.isAdding)
+    }
+
+    @Test("blank selected names are explained before persistence and preserve the paste")
+    func blankName() async {
+        let service = SpyVaultService(organize: true)
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let paste = NewCredentialModel(service: service, folder: nil)
+        paste.text = Paste.stripe
+        await paste.detectNow()
+        paste.setTitle("   ", row: 0)
+        #expect(!paste.canAdd)
+        #expect(paste.rows[0].nameValidationMessage == "Name is required.")
+        #expect(await paste.add(in: vault) == nil)
+        #expect(paste.error == "Name is required.")
+        #expect(paste.text == Paste.stripe)
+        #expect(paste.rows[0].title == "   ")
+        #expect(await service.pasteCalls.isEmpty)
+    }
+
+    @Test("failed Add retains text, row choices and a missing destination until explicitly changed")
+    func failedAddRetainsDestination() async throws {
+        let service = PreviewVaultService(unlocked: true)
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let personal = PreviewOrganize.FolderID.personal
+        let paste = NewCredentialModel(service: service, folder: personal)
+        await paste.loadFolders()
+        paste.text = Paste.env
+        await paste.detectNow()
+        paste.setTitle("Kept Stripe", row: 0)
+        paste.setKeep(false, row: 1)
+        _ = try await service.deleteFolder(uuid: personal)
+        let before = vault.items.count
+        #expect(await paste.add(in: vault) == nil)
+        #expect(paste.error?.contains("folder is gone") == true)
+        #expect(paste.text == Paste.env)
+        #expect(paste.rows[0].title == "Kept Stripe")
+        #expect(!paste.rows[1].keep)
+        #expect(paste.folder == personal)
+        #expect(paste.preventsDismissal)
+        #expect(vault.items.count == before)
+        #expect(await paste.add(in: vault) == nil)
+        paste.folder = nil
+        let added = try #require(await paste.add(in: vault))
+        #expect(added.count == 2)
+    }
+
+    @Test("background clearing during a suspended detection cannot submit stale pasted text")
+    func clearedDuringDetection() async {
+        let service = SpyVaultService(organize: true)
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let paste = NewCredentialModel(service: service, folder: nil, debounce: .seconds(30))
+        paste.text = Paste.stripe
+        let gate = VaultCallGate()
+        await service.setDetectHook { await gate.wait() }
+        defer { gate.release() }
+        let task = Task { await paste.add(in: vault) }
+        #expect(await waitUntil { gate.isWaiting })
+        paste.clear()
+        gate.release()
+        #expect(await task.value == nil)
+        #expect(await service.pasteCalls.isEmpty)
+        #expect(paste.text.isEmpty)
+        #expect(paste.rows.isEmpty)
+        #expect(!paste.isAdding)
+    }
+
+    @Test("an older core without folder capability clears inherited destination and keeps the unavailable message")
+    func noFolderCapability() async {
+        let service = SpyVaultService.olderCore()
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let paste = NewCredentialModel(service: service, folder: PreviewOrganize.FolderID.billing)
+        await paste.loadFolders()
+        #expect(paste.folder == nil)
+        #expect(paste.folders.isEmpty)
+        #expect(!paste.hasChanges)
+        #expect(!paste.preventsDismissal)
+        paste.text = Paste.stripe
+        await paste.detectNow()
+        #expect(paste.detectError == "This vault cannot add a pasted credential. Update Apassy.")
+        #expect(await paste.add(in: vault) == nil)
+        #expect(paste.error == paste.detectError)
+        #expect(await service.pasteCalls.isEmpty)
     }
 }

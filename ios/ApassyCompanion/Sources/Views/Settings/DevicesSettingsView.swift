@@ -19,7 +19,7 @@ struct DevicesSettingsView: View {
                 QuestionsStateRow()
                 MacPairingRow()
                 if let ui {
-                    Button("Open Decisions", systemImage: "checkmark.circle") {
+                    Button("Open Requests", systemImage: "checkmark.circle") {
                         ui.tab = .decisions
                         close()
                     }
@@ -27,7 +27,9 @@ struct DevicesSettingsView: View {
             } header: {
                 Text("Approve agent runs")
             } footer: {
-                Text("Questions through the relay reach this iPhone on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. Both show in Decisions.")
+                Text(
+                    "Questions through the relay reach this iPhone on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. Both show in Decisions."
+                )
             }
         }
         .navigationTitle("Devices")
@@ -155,7 +157,9 @@ private struct SyncSettingsSections: View {
             Text("Sync of “\(vault.vault?.name ?? "")”")
         } footer: {
             if vault.vault?.isICloud == true {
-                Text("Personal sync through iCloud Drive is free. The iCloud file stays when you remove this local vault.")
+                Text(
+                    "Personal sync through iCloud Drive is free. The iCloud file stays when you remove this local vault."
+                )
             } else if vault.vault?.isRelay == true {
                 Text("Team sync uses the Apassy relay.")
             }
@@ -204,9 +208,11 @@ private struct SyncSettingsSections: View {
         case (.removed?, true):
             Section {
                 Label("A Mac removed this iPhone from the vault.", systemImage: "iphone.slash")
-                Text("This iPhone does not sync any more. Remove the vault in General, then add it again from the Mac if you need it.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Text(
+                    "This iPhone does not sync any more. Remove the vault in General, then add it again from the Mac if you need it."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
         default:
             EmptyView()

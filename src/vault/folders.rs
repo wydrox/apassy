@@ -42,6 +42,18 @@ pub struct Folder {
     pub position: i64,
 }
 
+/// One credential changed by a batch move. The receipt is bound to this unlocked
+/// session and the exact move event, so a later move cannot be overwritten by Undo.
+/// Read the destinations for feedback; pass the unchanged receipt back to Undo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemFolderMove {
+    pub item_id: u64,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    epoch: [u8; 32],
+    move_event: i64,
+}
+
 /// The folders that are not deleted, with each parent resolved (see the module
 /// documentation).
 struct Tree {
@@ -254,6 +266,15 @@ fn stored_folder(conn: &Connection, item: i64) -> VaultResult<Option<String>> {
         |row| row.get(0),
     )
     .optional()
+    .map_err(|_| err(VaultErrorKind::Storage))
+}
+
+fn last_move_event(conn: &Connection, item: i64) -> VaultResult<Option<i64>> {
+    conn.query_row(
+        "SELECT MAX(id) FROM item_event WHERE item_id = ?1 AND kind = 'moved'",
+        [item],
+        |row| row.get(0),
+    )
     .map_err(|_| err(VaultErrorKind::Storage))
 }
 
@@ -498,6 +519,90 @@ impl Vault {
         }
         move_item(&tx, &tree, item, folder)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    /// Move each distinct ID into `folder` in one transaction. Every item and the
+    /// destination are checked before writing. Unchanged items are omitted from the
+    /// Undo receipt. Credentials, grants, revisions and existing history are retained;
+    /// each changed item gets the usual `Moved` event.
+    ///
+    /// `InvalidInput`: repeated/invalid IDs. `NotFound`: an item or folder is gone.
+    pub fn move_items_to_folder(
+        &mut self,
+        item_ids: &[u64],
+        folder: Option<&str>,
+    ) -> VaultResult<Vec<ItemFolderMove>> {
+        let epoch = self.epoch();
+        let storage = |_| err(VaultErrorKind::Storage);
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let tree = Tree::load(&tx)?;
+        if let Some(folder) = folder {
+            tree.get(folder)?;
+        }
+        let mut seen = BTreeSet::new();
+        let mut moves = Vec::new();
+        for &item_id in item_ids {
+            let item = to_sql_id(item_id)?;
+            if !seen.insert(item) {
+                return Err(err(VaultErrorKind::InvalidInput));
+            }
+            agents::require_item(&tx, item)?;
+            let from = tree.resolve(stored_folder(&tx, item)?);
+            if from.as_deref() != folder {
+                moves.push(ItemFolderMove {
+                    item_id,
+                    from,
+                    to: folder.map(str::to_owned),
+                    epoch,
+                    move_event: 0,
+                });
+            }
+        }
+        for moved in &mut moves {
+            let item = to_sql_id(moved.item_id)?;
+            move_item(&tx, &tree, item, moved.to.as_deref())?;
+            moved.move_event =
+                last_move_event(&tx, item)?.ok_or_else(|| err(VaultErrorKind::Storage))?;
+        }
+        tx.commit().map_err(storage)?;
+        Ok(moves)
+    }
+
+    /// Undo an unchanged batch receipt atomically. Any deleted item/original folder,
+    /// later move (even away and back), or lock/switch/reopen rejects the whole Undo.
+    /// Existing metadata, access and history are retained, with a new `Moved` event.
+    pub fn undo_item_folder_moves(&mut self, moves: &[ItemFolderMove]) -> VaultResult<()> {
+        let epoch = self.epoch();
+        let storage = |_| err(VaultErrorKind::Storage);
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let tree = Tree::load(&tx)?;
+        let mut seen = BTreeSet::new();
+        for moved in moves {
+            let item = to_sql_id(moved.item_id)?;
+            if !seen.insert(item) {
+                return Err(err(VaultErrorKind::InvalidInput));
+            }
+            agents::require_item(&tx, item)?;
+            if let Some(folder) = &moved.from {
+                tree.get(folder)?;
+            }
+            if moved.epoch != epoch
+                || tree.resolve(stored_folder(&tx, item)?) != moved.to
+                || last_move_event(&tx, item)? != Some(moved.move_event)
+            {
+                return Err(err(VaultErrorKind::Conflict));
+            }
+        }
+        for moved in moves {
+            move_item(&tx, &tree, to_sql_id(moved.item_id)?, moved.from.as_deref())?;
+        }
+        tx.commit().map_err(storage)
     }
 
     /// The names from the top level to `folder`; empty for `None`. `NotFound`: not a

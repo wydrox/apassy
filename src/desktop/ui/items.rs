@@ -121,14 +121,39 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .filter(|item| !archived.contains_key(&item.id))
         .count();
     let mut add = false;
+    let mut folder_more = false;
     columns::list_toolbar(
         ui,
         &title,
         &columns::count_label(active, "item", "items"),
         |ui| {
             add = kit::plain_icon_button(ui, Icon::Plus, "New credential  ⌘N").clicked();
+            if let Place::Folder(Some(uuid)) = &place {
+                let uuid = uuid.clone();
+                ui.menu_button("More", |ui| {
+                    if ui.button("New Subfolder…").clicked() {
+                        super::folders::open_new(app, Some(uuid.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Rename Folder…").clicked() {
+                        super::folders::open_rename(app, &uuid);
+                        ui.close();
+                    }
+                    if ui.button("Move Folder…").clicked() {
+                        folder_more = true;
+                        ui.close();
+                    }
+                    if ui.button("Delete Folder…").clicked() {
+                        super::folders::open_delete(app, &uuid);
+                        ui.close();
+                    }
+                });
+            }
         },
     );
+    if folder_more && let Place::Folder(Some(uuid)) = &place {
+        super::folders::open_move_folder(app, uuid.clone());
+    }
     if add {
         app.ui.sheet = Some(Sheet::NewCredential);
     }
@@ -138,7 +163,34 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         columns::list_note(ui, "No items");
         return;
     }
-    columns::list_inset(ui, |ui| toolbar(app, ui));
+    columns::list_inset(ui, |ui| {
+        toolbar(app, ui);
+        if !app.ui.selected_items.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                kit::note(ui, format!("{} selected", app.ui.selected_items.len()));
+                if kit::small_button(ui, "Move…", Style::Bordered)
+                    .on_hover_text("Move selected credentials  ⇧⌘M")
+                    .clicked()
+                {
+                    super::folders::open_move_many(app);
+                }
+                if kit::small_button(ui, "Clear Selection", Style::Link).clicked() {
+                    app.ui.selected_items.clear();
+                }
+            });
+        }
+        if !app.ui.move_undo.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                kit::note(ui, format!("{} credentials moved", app.ui.move_undo.len()));
+                if kit::small_button(ui, "Undo Move", Style::Bordered)
+                    .on_hover_text("⌘Z")
+                    .clicked()
+                {
+                    super::folders::undo_move(app);
+                }
+            });
+        }
+    });
 
     let session = &app.owner_ui.session;
     let query = app.search.trim().to_owned();
@@ -147,14 +199,16 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .iter()
         .filter(|item| archived.contains_key(&item.id) && !conflicts.contains_key(&item.id))
         .count();
-    let found: Vec<OwnerSummary> = if query.is_empty() {
+    let found: Vec<OwnerSummary> = if query.is_empty() && app.ui.search_all {
+        session.search("").unwrap_or_default()
+    } else if query.is_empty() {
         in_place
     } else {
         session
             .search(&query)
             .unwrap_or_default()
             .into_iter()
-            .filter(|item| tree.contains(&place, item.id))
+            .filter(|item| app.ui.search_all || tree.contains(&place, item.id))
             .collect()
     };
     let mut items: Vec<OwnerSummary> = found
@@ -237,9 +291,15 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         _ => "No credential matches the filter.".to_owned(),
     });
+    let visible: Vec<u64> = groups
+        .iter()
+        .flat_map(|group| group.rows.iter().map(|item| item.id))
+        .collect();
+    app.ui.selected_items.retain(|id| visible.contains(id));
     let selected = selected_id(app);
     let mut open = None;
     let mut show_archived = false;
+    let mut list_focused = false;
     columns::grouped_rows(
         ui,
         ("credential-list", &place),
@@ -248,10 +308,28 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         |ui, item| {
             let response = ui
                 .push_id(("credential-row", item.id), |ui| {
-                    credential_row(ui, item, selected == Some(item.id))
+                    credential_row(
+                        ui,
+                        item,
+                        app.ui.selected_items.contains(&item.id) || selected == Some(item.id),
+                    )
                 })
                 .inner;
+            if app.ui.reveal_item == Some(item.id) {
+                response.scroll_to_me(Some(Align::Center));
+                app.ui.reveal_item = None;
+            }
             if response.clicked() {
+                response.request_focus();
+            }
+            list_focused |= response.has_focus();
+            let range_key = response.gained_focus()
+                && ui.input(|input| {
+                    input.modifiers.shift
+                        && (input.key_pressed(egui::Key::ArrowUp)
+                            || input.key_pressed(egui::Key::ArrowDown))
+                });
+            if response.clicked() || range_key {
                 open = Some(item.id);
             }
         },
@@ -274,12 +352,79 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         },
     );
+    let list_can_select = list_focused
+        && ui.is_enabled()
+        && !ui.ctx().text_edit_focused()
+        && app.ui.sheet.is_none()
+        && app.owner.check.is_none()
+        && !app.pending_delete
+        && app.owner_ui.fresh_token.is_none()
+        && app.learning.inspected.is_none()
+        && ui.ctx().memory(|memory| memory.top_modal_layer()).is_none()
+        && !egui::Popup::is_any_open(ui.ctx());
+    app.ui.native_library_focus = if list_can_select {
+        ui.ctx().memory(|memory| memory.focused())
+    } else {
+        None
+    };
+    if list_can_select && kit::shortcut(ui.ctx(), egui::Modifiers::COMMAND, egui::Key::A) {
+        app.ui.selected_items = visible.iter().copied().collect();
+        app.ui.selection_anchor = visible.first().copied();
+    }
     if show_archived {
         app.ui.credential_filter = Filter::Archived;
     }
     if let Some(id) = open {
-        app.select_item(id.to_string());
+        let modifiers = ui.input(|input| input.modifiers);
+        update_selection(
+            &mut app.ui.selected_items,
+            &mut app.ui.selection_anchor,
+            &visible,
+            id,
+            modifiers.command,
+            modifiers.shift,
+        );
+        let selection = app.ui.selected_items.clone();
+        if selection.contains(&id) {
+            app.select_item(id.to_string());
+        } else if let Some(next) = selection.iter().next().copied() {
+            app.select_item(next.to_string());
+        } else {
+            app.selected_item_id = None;
+        }
+        app.ui.selected_items = selection;
     }
+}
+
+/// Selection follows displayed order, including folder grouping.
+fn update_selection(
+    selected: &mut std::collections::BTreeSet<u64>,
+    anchor: &mut Option<u64>,
+    visible: &[u64],
+    id: u64,
+    command: bool,
+    shift: bool,
+) {
+    if shift
+        && let Some((start, end)) = anchor
+            .and_then(|a| visible.iter().position(|v| *v == a))
+            .zip(visible.iter().position(|v| *v == id))
+    {
+        if !command {
+            selected.clear();
+        }
+        selected.extend(visible[start.min(end)..=start.max(end)].iter().copied());
+        return;
+    }
+    if command {
+        if !selected.remove(&id) {
+            selected.insert(id);
+        }
+    } else {
+        selected.clear();
+        selected.insert(id);
+    }
+    *anchor = Some(id);
 }
 
 /// The list of a shared vault: "From you" and "From others" (ADR 0026 §6). Shared vaults
@@ -296,11 +441,18 @@ fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
 /// says so under the field, with "Show All" to go back.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
-        .on_hover_text("Search by name, project, service, or notes  ⌘F");
+        .on_hover_text("Search by name, username, website, host, project, service, or notes  ⌘F");
     ui.ctx()
         .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
+    app.ui.credential_search_focused = field.has_focus();
     if std::mem::take(&mut app.ui.focus_search) {
         field.request_focus();
+    }
+    if matches!(app.place, Place::Folder(Some(_))) {
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut app.ui.search_all, false, "This Folder");
+            ui.selectable_value(&mut app.ui.search_all, true, "All Credentials");
+        });
     }
     if app.ui.credential_filter != Filter::All {
         ui.add_space(4.0);
@@ -504,8 +656,28 @@ fn field_kind(kind: CredentialKind, variable: Option<&str>) -> String {
 /// Open the add sheet with an empty form. ⌘N does the same.
 pub(super) fn open_add(app: &mut DesktopApp) {
     app.add_form = ItemDraft::default();
+    app.ui.create_folder = FolderTree::load(app).folder_of_place(&app.place);
     app.owner_ui.add_secrets.clear();
     app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
+}
+
+/// Reveal the actual saved result, even after a search or archive filter.
+pub(super) fn reveal_saved(app: &mut DesktopApp, id: u64, folder: Option<String>) {
+    app.search.clear();
+    app.ui.credential_filter = Filter::All;
+    app.ui.search_all = false;
+    let tree = FolderTree::load(app);
+    let mut above = folder.as_deref();
+    while let Some(uuid) = above {
+        app.ui.open_folders.insert(uuid.to_owned());
+        above = tree.get(uuid).and_then(|f| f.parent.as_deref());
+    }
+    app.place = Place::Folder(folder);
+    app.select_item(id.to_string());
+    app.ui.selected_items.clear();
+    app.ui.selected_items.insert(id);
+    app.ui.selection_anchor = Some(id);
+    app.ui.reveal_item = Some(id);
 }
 
 /// Items from a restored backup that wait for the owner review (goal item V4).
@@ -695,13 +867,11 @@ fn history_key(id: u64) -> String {
     format!("credential-history-{id}")
 }
 
-/// The toolbar of a credential: Share, Edit, and "⋯" with the rare actions: Move to
-/// Folder, Share, Add Custom Detail, the history, Archive, and Delete (ADR 0026 §1).
+/// Edit and the More menu: Move to Folder, custom details, history, Archive, and Delete.
 fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let history_open = app.ui.is_expanded(&history_key(id));
     let mut edit = false;
-    let mut share = false;
     let mut move_to = false;
     let mut add_detail = false;
     let mut history = false;
@@ -713,7 +883,6 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
         egui::Popup::menu(&more).show(|ui| {
             ui.set_min_width(200.0);
             move_to = ui.selectable_label(false, "Move to Folder…").clicked();
-            share |= ui.selectable_label(false, "Share…").clicked();
             if details.details.len() < MAX_DETAILS {
                 add_detail = ui.selectable_label(false, "Add Custom Detail…").clicked();
             }
@@ -729,24 +898,21 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
             }
             delete = ui.selectable_label(false, "Delete…").clicked();
             // A choice with Return or Space closes the menu, as a click does.
-            if move_to || share || add_detail || history || archive || delete {
+            if move_to || add_detail || history || archive || delete {
                 ui.close();
             }
         });
         // A choice closes the menu. For a keyboard user the focus goes back to "⋯", so
         // a sheet or an alert that the choice opens gives it back there, not to an item
         // of the closed menu.
-        let chosen = move_to || share || add_detail || history || archive || delete;
+        let chosen = move_to || add_detail || history || archive || delete;
         if chosen && kit::keyboard_mode(ui.ctx()) {
             more.request_focus();
         }
         edit = kit::toolbar_button(ui, None, "Edit", "Edit").clicked();
-        share |= kit::toolbar_button(ui, Some(Icon::Share), "Share", "Share").clicked();
     });
     if edit {
         open_edit(app, details, false);
-    } else if share {
-        app.ui.sheet = Some(Sheet::Share { item_id: id });
     } else if move_to {
         super::folders::open_move(app, id);
     } else if add_detail {
@@ -990,8 +1156,17 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .is_empty();
     if agents_use_it {
         agent_use_group(app, ui, id);
-        rules_group(app, ui, &details);
-        agent_settings_group(app, ui, &details);
+        if !rules_of(app, id).is_empty() {
+            rules_group(app, ui, &details);
+        }
+        let key = format!("credential-agent-settings-{id}");
+        let mut open = app.ui.is_expanded(&key);
+        if kit::disclosure(ui, &mut open, "Agent Access").changed() {
+            app.ui.set_expanded(&key, open);
+        }
+        if open {
+            agent_settings_group(app, ui, &details);
+        }
     }
     // The history comes from "Show History" in the "⋯" menu: a rare look back.
     if app.ui.is_expanded(&history_key(id)) {
@@ -1131,17 +1306,18 @@ fn pair_row(group: &mut rows::Group<'_>, label: &str, value: RichText) {
     group.pair(label, value);
 }
 
-/// The masked secret row, as in the mockup: the label, the dots, and Show or Hide. A
-/// shown value goes under the row, in its own scroll area. Returns true when Show or
-/// Hide is pressed.
+/// A masked secret with Show/Hide and a separately authenticated field Copy action.
+/// A shown value uses its own scroll area. Copy records only the field identity.
 fn secret_row(
     app: &DesktopApp,
     group: &mut rows::Group<'_>,
-    id: u64,
+    details: &OwnerDetails,
     label: &str,
     name: &str,
     revealed: bool,
+    copy: &mut Option<String>,
 ) -> bool {
+    let id = details.id;
     let shown = app.owner_ui.session.revealed_value(id, name).is_some();
     group.row(|ui| {
         let width = ui.available_width();
@@ -1155,6 +1331,10 @@ fn secret_row(
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let toggle = mask_button(ui, revealed);
+                        if app.owner_ui.session.can_copy_field(id, name, details.revision)
+                            && rows::pill_button(ui, "Copy", &format!("Copy {label}")).on_hover_text("Confirm with Touch ID or passphrase. Clipboard clears after 30 seconds if unchanged.").clicked() {
+                            *copy = Some(name.to_owned());
+                        }
                         if !shown {
                             ui.label(
                                 kit::text(MASKED_VALUE, Font::Body)
@@ -1236,6 +1416,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
     let revealed = details.any_revealed();
     let footer = revealed.then(|| details.reveal_warning());
     let mut toggle = false;
+    let mut copy = None;
     rows::group(ui, |s| {
         if !username.is_empty() {
             pair_row(
@@ -1252,7 +1433,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                 }
                 _ => field_label(&line.name),
             };
-            toggle |= secret_row(app, s, id, &label, &line.name, revealed);
+            toggle |= secret_row(app, s, details, &label, &line.name, revealed, &mut copy);
         }
         if let Some(variable) = &variable {
             pair_row(
@@ -1281,7 +1462,15 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                         kit::text(value, Font::Body).color(kit::SECONDARY),
                     ),
                     None => {
-                        toggle |= secret_row(app, s, id, &detail.label, &detail.name, revealed);
+                        toggle |= secret_row(
+                            app,
+                            s,
+                            details,
+                            &detail.label,
+                            &detail.name,
+                            revealed,
+                            &mut copy,
+                        );
                     }
                 }
             }
@@ -1302,7 +1491,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                     .iter()
                     .filter(|detail| is_import_data(detail))
                 {
-                    toggle |= custom_value_row(app, s, id, detail, revealed);
+                    toggle |= custom_value_row(app, s, details, detail, revealed, &mut copy);
                 }
             });
         });
@@ -1314,7 +1503,16 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         });
         ui.add_space(rows::GROUP_GAP);
     }
-    if toggle {
+    if let Some(field) = copy {
+        app.ask_owner(
+            OwnerRequest::CopyField {
+                item_id: id,
+                field,
+                revision: details.revision,
+            },
+            Some(ui.ctx()),
+        );
+    } else if toggle {
         toggle_values(app, ui.ctx());
     }
 }
@@ -1325,22 +1523,20 @@ fn shared_vaults(_app: &DesktopApp, _item_id: u64) -> Vec<String> {
     Vec::new()
 }
 
-/// The second group: the folder (Move to Folder) and the shared vaults (Share).
+/// The folder action and shared destinations when sharing is available.
 fn place_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let tree = FolderTree::load(app);
     let folder = tree.path_label(tree.folder_of(id));
     let shared = shared_vaults(app, id);
-    let shared = if shared.is_empty() {
-        "Not shared".to_owned()
-    } else {
-        shared.join(", ")
-    };
+    let shared = shared.join(", ");
     let mut move_to = false;
     let mut share = false;
     rows::group(ui, |s| {
         move_to = s.chevron("Folder", &folder).clicked();
-        share = s.chevron("Shared in", &shared).clicked();
+        if !shared.is_empty() {
+            share = s.chevron("Shared in", &shared).clicked();
+        }
     });
     ui.add_space(rows::GROUP_GAP);
     if move_to {
@@ -1398,6 +1594,9 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
         .with_vault(|vault| vault.item_uses(id, if all { ALL_USES } else { RECENT_USES + 1 }))
         .and_then(Result::ok)
         .unwrap_or_default();
+    if uses.is_empty() {
+        return;
+    }
     let link = if all {
         Some(("Show Less", "Show fewer agent uses"))
     } else if !uses.is_empty() {
@@ -1922,10 +2121,12 @@ fn is_import_data(detail: &DetailLine) -> bool {
 fn custom_value_row(
     app: &DesktopApp,
     section: &mut Section<'_>,
-    id: u64,
+    details: &OwnerDetails,
     detail: &DetailLine,
     revealed: bool,
+    copy: &mut Option<String>,
 ) -> bool {
+    let id = details.id;
     match &detail.value {
         Some(value) => {
             value_row(section, &detail.label, value);
@@ -1936,7 +2137,13 @@ fn custom_value_row(
             egui::Sides::new().show(
                 ui,
                 |ui| ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY)),
-                |ui| toggle = mask_button(ui, revealed),
+                |ui| {
+                    toggle = mask_button(ui, revealed);
+                    if app.owner_ui.session.can_copy_field(id, &detail.name, details.revision)
+                        && rows::pill_button(ui, "Copy", &format!("Copy {}", detail.label)).on_hover_text("Confirm with Touch ID or passphrase. Clipboard clears after 30 seconds if unchanged.").clicked() {
+                        *copy = Some(detail.name.clone());
+                    }
+                },
             );
             secret_value(ui, app, id, &detail.name);
             toggle
@@ -2402,6 +2609,34 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
                 false,
             );
         });
+        let tree = FolderTree::load(app);
+        let label = if app
+            .ui
+            .create_folder
+            .as_deref()
+            .is_some_and(|id| tree.get(id).is_none())
+        {
+            "Missing Folder".to_owned()
+        } else {
+            tree.path_label(app.ui.create_folder.as_deref())
+        };
+        let options = tree.choices();
+        if app
+            .ui
+            .create_folder
+            .as_deref()
+            .is_some_and(|id| tree.get(id).is_none())
+        {
+            kit::tone_note(
+                ui,
+                "The selected folder is gone. Choose another folder before adding.",
+                Tone::Warning,
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label("Folder");
+            super::new_credential::folder_menu(ui, &mut app.ui.create_folder, &options, &label);
+        });
         kit::sheet_buttons(
             ui,
             |_| {},
@@ -2452,24 +2687,20 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
                 return response.escape;
             }
             // Borrow the form. A clone would be one more copy of each secret (F3).
-            match app.owner_ui.session.add(&draft, &app.owner_ui.add_secrets) {
+            let folder = app.ui.create_folder.clone();
+            match app.owner_ui.session.add_in_folder(
+                &draft,
+                &app.owner_ui.add_secrets,
+                folder.as_deref(),
+            ) {
                 Ok(item) => {
                     app.owner_ui.add_secrets.clear();
                     forget_secret_form(ctx, "add");
                     app.add_form = ItemDraft::default();
                     app.ui.sheet = None;
-                    // The credential goes to the folder that the list shows (ADR 0026 §4).
-                    if let Some(folder) = FolderTree::load(app).folder_of_place(&app.place) {
-                        let _ = app
-                            .owner_ui
-                            .session
-                            .with_vault(|vault| vault.set_item_folder(item.id, Some(&folder)));
-                    }
-                    app.set_ok(format!(
-                        "{} is stored. Next, set up agent access.",
-                        item.name
-                    ));
-                    app.select_item(item.id.to_string());
+                    reveal_saved(app, item.id, folder.clone());
+                    let place = FolderTree::load(app).path_label(folder.as_deref());
+                    app.set_ok(format!("Added {} in {place}.", item.name));
                 }
                 Err(err) => app.set_err(err.message),
             }
@@ -2644,6 +2875,22 @@ fn item_form(
     passkey_only: bool,
 ) {
     let kind = form.kind;
+    if !editing {
+        kit::note(
+            ui,
+            match kind {
+                CredentialKind::Login => {
+                    "Required: Name, Username, Password. Website is needed for browser filling (https://example.com)."
+                }
+                CredentialKind::ApiKey => "Required: Name and API token.",
+                CredentialKind::SshKey => "Required: Name and private key. Passphrase is optional.",
+                CredentialKind::Database => "Required: Name, Host, Database, Username, Password.",
+                CredentialKind::Custom => {
+                    "Required: Name, field name (letters, digits, underscores), and value."
+                }
+            },
+        );
+    }
     let focus_name = std::mem::take(&mut state.focus_form_name);
     // A setup key is never a plain detail: hide it before the first draw.
     otp::protect_form(ui.ctx(), salt, form, secrets);
@@ -2687,24 +2934,32 @@ fn item_form(
             otp::form_row(s, salt, form, secrets);
         });
     }
-    kit::section(
-        ui,
-        Some("Where it is used"),
-        Some("Apassy suggests safe agent settings from the service and the project."),
-        |s| {
-            s.field("Service", |ui| {
-                kit::text_input(
-                    ui,
-                    &mut form.service,
-                    &format!("{salt}-service"),
-                    "stripe, github, supabase…",
-                )
-            });
-            s.field("Project", |ui| {
-                kit::text_input(ui, &mut form.project, &format!("{salt}-project"), "shop")
-            });
-        },
-    );
+    let agent_key = format!("{salt}-agent-fields");
+    let mut agent_open =
+        state.is_expanded(&agent_key) || !form.service.is_empty() || !form.project.is_empty();
+    if kit::disclosure(ui, &mut agent_open, "Agent Settings (Optional)").changed() {
+        state.set_expanded(&agent_key, agent_open);
+    }
+    if agent_open {
+        kit::section(
+            ui,
+            Some("Where it is used"),
+            Some("Apassy suggests safe agent settings from the service and the project."),
+            |s| {
+                s.field("Service", |ui| {
+                    kit::text_input(
+                        ui,
+                        &mut form.service,
+                        &format!("{salt}-service"),
+                        "stripe, github, supabase…",
+                    )
+                });
+                s.field("Project", |ui| {
+                    kit::text_input(ui, &mut form.project, &format!("{salt}-project"), "shop")
+                });
+            },
+        );
+    }
     detail_rows(ui, form, secrets, salt);
     let key = format!("{salt}-notes");
     let mut open = state.is_expanded(&key) || !form.notes.is_empty();
@@ -3774,6 +4029,20 @@ mod conflict_tests {
 
     const PASS: &str = "conflict-ui-test-pass";
     const CANARY: &str = "conflict-ui-secret-canary";
+
+    #[test]
+    fn command_and_shift_selection_follow_the_visible_order() {
+        let visible = [8, 2, 14, 6, 9];
+        let mut selected = std::collections::BTreeSet::new();
+        let mut anchor = None;
+        super::update_selection(&mut selected, &mut anchor, &visible, 2, false, false);
+        super::update_selection(&mut selected, &mut anchor, &visible, 6, false, true);
+        assert_eq!(selected, [2, 14, 6].into_iter().collect());
+        super::update_selection(&mut selected, &mut anchor, &visible, 14, true, false);
+        assert_eq!(selected, [2, 6].into_iter().collect());
+        super::update_selection(&mut selected, &mut anchor, &visible, 9, true, false);
+        assert_eq!(selected, [2, 6, 9].into_iter().collect());
+    }
 
     #[test]
     fn conflict_filter_separates_verified_copies_and_preserves_search() {

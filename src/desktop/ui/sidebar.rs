@@ -48,6 +48,13 @@ pub(crate) fn shared_vault(app: &DesktopApp, uuid: &str) -> SharedVaultRow {
 /// narrow window the floating sidebar closes.
 pub(super) fn navigate(app: &mut DesktopApp, place: Place) {
     #[cfg(feature = "vault")]
+    if app.place != place {
+        app.ui.selected_items.clear();
+        app.ui.selection_anchor = None;
+        app.ui.reveal_item = None;
+        app.ui.search_all = false;
+    }
+    #[cfg(feature = "vault")]
     if let Place::Folder(_) = &place
         && let Some(id) = app
             .selected_item_id
@@ -336,6 +343,7 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Toggle(String),
         New(String),
         Rename(String),
+        Move(String),
         Delete(String),
     }
     let mut act = None;
@@ -390,6 +398,9 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
             if ui.button("Rename…").clicked() {
                 act = Some(Act::Rename(folder.uuid.clone()));
             }
+            if ui.button("Move Folder…").clicked() {
+                act = Some(Act::Move(folder.uuid.clone()));
+            }
             ui.separator();
             if ui.button("Delete…").clicked() {
                 act = Some(Act::Delete(folder.uuid.clone()));
@@ -401,6 +412,7 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(Act::Toggle(uuid)) => app.ui.toggle_folder(&uuid),
         Some(Act::New(uuid)) => super::folders::open_new(app, Some(uuid)),
         Some(Act::Rename(uuid)) => super::folders::open_rename(app, &uuid),
+        Some(Act::Move(uuid)) => super::folders::open_move_folder(app, uuid),
         Some(Act::Delete(uuid)) => super::folders::open_delete(app, &uuid),
         None => {}
     }

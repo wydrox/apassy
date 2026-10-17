@@ -1,5 +1,6 @@
 :root {
-  --accent: #0a77fe;
+  --accent: #0061d6;
+  --button-bg: #0061d6;
   --text: #0e1820;
   --muted: #5b6670;
   --line: #e3e7eb;
@@ -96,7 +97,7 @@ main {
   padding: 6px 14px;
   border: 0;
   border-radius: 6px;
-  background: var(--accent);
+  background: var(--button-bg);
   color: #ffffff;
   font: inherit;
   font-weight: 600;

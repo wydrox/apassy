@@ -150,6 +150,29 @@ final class MemoryPassphraseStore: PassphraseStore {
 /// sync. `sync()` is counted and answers with the current status at once (the preview waits
 /// 600 ms), and `syncWait` answers from a script.
 actor SpyVaultService: VaultService {
+    struct SaveCall: Sendable {
+        let id: UInt64?
+        let revision: UInt64?
+        let draft: ItemDraft
+    }
+
+    struct PasteCall: Sendable {
+        let text: String
+        let folder: String?
+        let pick: [Int]?
+        let titles: [Int: String]
+    }
+
+    private(set) var saveCalls: [SaveCall] = []
+    private(set) var pasteCalls: [PasteCall] = []
+    private var saveHook: (@Sendable () async throws -> Void)?
+    private var detectHook: (@Sendable () async throws -> Void)?
+    private var pasteHook: (@Sendable () async throws -> Void)?
+
+    func setSaveHook(_ hook: (@Sendable () async throws -> Void)?) { saveHook = hook }
+    func setDetectHook(_ hook: (@Sendable () async throws -> Void)?) { detectHook = hook }
+    func setPasteHook(_ hook: (@Sendable () async throws -> Void)?) { pasteHook = hook }
+
     private struct State {
         var syncCount = 0
         var syncWaits: [Bool]
@@ -275,7 +298,9 @@ actor SpyVaultService: VaultService {
         }
         if let delay { try? await Task.sleep(for: delay) }
         if let error = iCloudError { throw error }
-        guard passphrase == "passphrase" else { throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.") }
+        guard passphrase == "passphrase" else {
+            throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
+        }
         var entry = try await inner.createLocalVault(name: name, passphrase: "test passphrase for local fixture")
         entry.syncSource = "icloud"
         return entry
@@ -314,7 +339,9 @@ actor SpyVaultService: VaultService {
     }
     func joinPoll() async throws -> JoinInfo { try await inner.joinPoll() }
     func joinCancel() async throws { try await inner.joinCancel() }
-    func joinFinish(passphrase: String) async throws -> VaultEntry { try await inner.joinFinish(passphrase: passphrase) }
+    func joinFinish(passphrase: String) async throws -> VaultEntry {
+        try await inner.joinFinish(passphrase: passphrase)
+    }
 
     // 5.3
     func items(archived: ArchiveFilter) async throws -> [ItemRow] {
@@ -336,7 +363,9 @@ actor SpyVaultService: VaultService {
     func totp(id: UInt64, field: String) async throws -> TotpCode { try await inner.totp(id: id, field: field) }
     func history(id: UInt64) async throws -> [ItemEvent] { try await inner.history(id: id) }
     func save(id: UInt64?, revision: UInt64?, draft: ItemDraft) async throws -> SavedItem {
-        try await inner.save(id: id, revision: revision, draft: draft)
+        saveCalls.append(SaveCall(id: id, revision: revision, draft: draft))
+        try await saveHook?()
+        return try await inner.save(id: id, revision: revision, draft: draft)
     }
     func archive(id: UInt64, archived: Bool) async throws { try await inner.archive(id: id, archived: archived) }
     func delete(id: UInt64, revision: UInt64) async throws { try await inner.delete(id: id, revision: revision) }
@@ -353,8 +382,10 @@ actor SpyVaultService: VaultService {
             return state.syncError
         }
         if let title = syncMutationTitle {
-            _ = try await inner.save(id: nil, revision: nil,
-                draft: ItemDraft(title: title, kind: .login, notes: "", tags: [],
+            _ = try await inner.save(
+                id: nil, revision: nil,
+                draft: ItemDraft(
+                    title: title, kind: .login, notes: "", tags: [],
                     fields: [.named("username", "synced-user", secret: false)]))
         }
         if let delay = syncDelay { try? await Task.sleep(for: delay) }
@@ -407,7 +438,9 @@ actor SpyVaultService: VaultService {
     func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
         try await inner.passkeyImport(accounts)
     }
-    func passkeyRemove(id: UInt64, revision: UInt64) async throws { try await inner.passkeyRemove(id: id, revision: revision) }
+    func passkeyRemove(id: UInt64, revision: UInt64) async throws {
+        try await inner.passkeyRemove(id: id, revision: revision)
+    }
     func credentialExport() async throws -> CredentialExport { try await inner.credentialExport() }
 
     // 5.11, with `organize` only; else the answers of the defaults of `VaultService`.
@@ -447,10 +480,13 @@ actor SpyVaultService: VaultService {
     }
     func detect(text: String) async throws -> [DetectedCredential] {
         try requireOrganize("add a pasted credential")
+        try await detectHook?()
         return try await inner.detect(text: text)
     }
     func addPasted(text: String, folder: String?, pick: [Int]?, titles: [Int: String]) async throws -> [PastedItem] {
         try requireOrganize("add a pasted credential")
+        pasteCalls.append(PasteCall(text: text, folder: folder, pick: pick, titles: titles))
+        try await pasteHook?()
         return try await inner.addPasted(text: text, folder: folder, pick: pick, titles: titles)
     }
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
@@ -546,4 +582,28 @@ func makeRow(
     ItemRow(
         id: id, revision: 1, title: title, kind: kind, subtitle: subtitle, websites: websites, tags: tags,
         archived: archived, hasTotp: false, conflictOf: nil, addedAt: nil, changedAt: changedAt, usedAt: nil)
+}
+
+/// Pause a synthetic service call until a test explicitly releases it.
+@MainActor
+final class VaultCallGate {
+    private(set) var isWaiting = false
+    private var released = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            isWaiting = true
+            continuations.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        isWaiting = false
+        let waiting = continuations
+        continuations = []
+        for continuation in waiting { continuation.resume() }
+    }
 }

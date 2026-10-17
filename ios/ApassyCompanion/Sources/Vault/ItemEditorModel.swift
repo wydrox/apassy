@@ -62,6 +62,7 @@ final class ItemEditorModel {
     var title: String
     var notes: String
     private(set) var tags: [String]
+    var pendingTag = ""
     /// The built-in fields by name.
     var values: [String: String] = [:]
     /// A login: the website and the one-time password.
@@ -80,10 +81,12 @@ final class ItemEditorModel {
     /// The folders of the vault, depth first. Empty until `loadFolders`, and with a core without
     /// folders: the form then shows no folder row.
     private(set) var folders: [Folder] = []
+    private var foldersLoaded = false
     /// Optional built-in secrets of the stored item that the owner removes.
     var removedSecrets: Set<String> = []
     private(set) var error: String?
-    /// The message of a move into the folder that failed after the save (`reportMoveFailure`).
+    /// The content was saved, but its destination could not be changed. Keep this visible
+    /// until the owner retries successfully or explicitly leaves the editor.
     private(set) var moveFailure: String?
     private(set) var tagMessage: String?
     private(set) var isSaving = false
@@ -94,6 +97,101 @@ final class ItemEditorModel {
     private var otpKey = Key.label("One-time password")
     /// Fields of the stored item that the form does not show.
     private var extras: [DraftField] = []
+    @ObservationIgnored private var initialForm: FormState?
+    /// A successful write survives a later folder failure; retries address this exact item.
+    private(set) var savedItem: SavedItem?
+    private var savedDraft: ItemDraft?
+    var savedTitle: String? { savedDraft?.title }
+    var savedFolder: String? { storedFolder }
+
+    /// Report only persisted content and its actual retained location. This also lets an owner
+    /// explicitly leave after a folder failure and find the saved item through the same route.
+    /// Draft edits made after that write are deliberately absent from the result.
+    @discardableResult
+    func reportSavedResult(to report: ([(id: UInt64, title: String)], String?) -> Void) -> Bool {
+        guard !isSaving, let savedItem, let savedTitle else { return false }
+        report([(id: savedItem.id, title: savedTitle)], savedFolder)
+        return true
+    }
+
+    private struct FormState: Equatable {
+        var title: String
+        var notes: String
+        var tags: [String]
+        var pendingTag: String
+        var values: [String: String]
+        var website: String
+        var otp: String
+        var otpRemoved: Bool
+        var customName: String
+        var customValue: String
+        var details: [Detail]
+        var folder: String?
+        var removedSecrets: Set<String>
+    }
+
+    private var form: FormState {
+        FormState(
+            title: title, notes: notes, tags: tags, pendingTag: pendingTag, values: values,
+            website: website, otp: otp, otpRemoved: otpRemoved, customName: customName,
+            customValue: customValue, details: details, folder: folder, removedSecrets: removedSecrets)
+    }
+
+    var hasChanges: Bool { initialForm.map { $0 != form } ?? false }
+    var preventsDismissal: Bool { isSaving || hasChanges || moveFailure != nil }
+
+    /// Visible requirements, before Save. The core remains the final validator.
+    var validationMessages: [String] {
+        var messages: [String] = []
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { messages.append("Enter a name.") }
+        if name.utf8.count > 128 { messages.append("Use a shorter name.") }
+        for spec in specs where spec.required {
+            let value = values[spec.name] ?? ""
+            let empty =
+                spec.secret ? value.isEmpty : value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if empty && !(spec.secret && isUnchanged(spec.name)) {
+                messages.append("Enter \(VaultText.phrase(spec.label)).")
+            }
+        }
+        if kind == .custom {
+            let name = customName.trimmingCharacters(in: .whitespaces)
+            if customValue.isEmpty && !(storedSecrets.contains(name) && !isNew) {
+                messages.append("Enter a secret value.")
+            }
+            if name.isEmpty {
+                messages.append("Enter a field name.")
+            } else if name.utf8.count > 64
+                || !name.utf8.allSatisfy({
+                    (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 95
+                })
+            {
+                messages.append(
+                    "Use letters, numbers or underscores for the field name (at most 64 characters).")
+            }
+        }
+        if let folder, foldersLoaded, !folders.contains(where: { $0.uuid == folder }) {
+            messages.append("Choose an available folder.")
+        }
+        if detailCount > Self.detailLimit { messages.append("An item has at most 10 custom details.") }
+        if details.contains(where: {
+            !$0.value.isEmpty && $0.label.trimmingCharacters(in: .whitespaces).isEmpty
+        }) {
+            messages.append("Give each custom detail a label.")
+        }
+        return messages
+    }
+
+    @discardableResult
+    func commitPendingTag() -> Bool {
+        guard !pendingTag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            pendingTag = ""
+            return true
+        }
+        guard addTag(pendingTag) else { return false }
+        pendingTag = ""
+        return true
+    }
 
     /// A new item of `kind`, in `folder` (the folder that the owner adds in).
     init(kind: ItemKind, folder: String? = nil) {
@@ -104,6 +202,7 @@ final class ItemEditorModel {
         notes = ""
         tags = []
         self.folder = folder
+        initialForm = form
     }
 
     /// An existing item. Secret values are not read: they start empty ("Unchanged").
@@ -119,7 +218,11 @@ final class ItemEditorModel {
         let specs = Self.specs(kind)
         for field in detail.fields {
             if !field.custom, specs.contains(where: { $0.name == field.name }) {
-                if field.secret { storedSecrets.insert(field.name) } else { values[field.name] = field.value ?? "" }
+                if field.secret {
+                    storedSecrets.insert(field.name)
+                } else {
+                    values[field.name] = field.value ?? ""
+                }
             } else if kind == .login, field.role == .website, website.isEmpty, !field.secret {
                 website = field.value ?? ""
                 websiteKey = field.custom ? .label(field.label) : .name(field.name)
@@ -140,12 +243,14 @@ final class ItemEditorModel {
                 extras.append(.named(field.name, field.secret ? nil : field.value, secret: field.secret))
             }
         }
+        initialForm = form
     }
 
     var isNew: Bool { existing == nil }
 
     static let builtInNames: Set<String> = [
-        "username", "password", "token", "private_key", "passphrase", "host", "database", "public_key", "service",
+        "username", "password", "token", "private_key", "passphrase", "host", "database", "public_key",
+        "service",
         "project", "website", "url",
     ]
 
@@ -154,21 +259,27 @@ final class ItemEditorModel {
         switch kind {
         case .login:
             [
-                FieldSpec(name: "username", label: "Username", secret: false, required: true, role: .username),
-                FieldSpec(name: "password", label: "Password", secret: true, required: true, role: .password),
+                FieldSpec(
+                    name: "username", label: "Username", secret: false, required: true, role: .username),
+                FieldSpec(
+                    name: "password", label: "Password", secret: true, required: true, role: .password),
             ]
         case .apiKey:
             [
                 FieldSpec(name: "token", label: "Token", secret: true, required: true, role: .token),
-                FieldSpec(name: "service", label: "Service", secret: false, required: false, role: .service),
-                FieldSpec(name: "project", label: "Project", secret: false, required: false, role: .project),
+                FieldSpec(
+                    name: "service", label: "Service", secret: false, required: false, role: .service),
+                FieldSpec(
+                    name: "project", label: "Project", secret: false, required: false, role: .project),
             ]
         case .sshKey:
             [
                 FieldSpec(
                     name: "private_key", label: "Private key", secret: true, required: true, multiline: true,
                     role: .privateKey),
-                FieldSpec(name: "passphrase", label: "Key passphrase", secret: true, required: false, role: .keyPassphrase),
+                FieldSpec(
+                    name: "passphrase", label: "Key passphrase", secret: true, required: false,
+                    role: .keyPassphrase),
                 FieldSpec(
                     name: "public_key", label: "Public key", secret: false, required: false, multiline: true,
                     role: .publicKey),
@@ -176,9 +287,12 @@ final class ItemEditorModel {
         case .database:
             [
                 FieldSpec(name: "host", label: "Host", secret: false, required: true, role: .host),
-                FieldSpec(name: "database", label: "Database", secret: false, required: true, role: .database),
-                FieldSpec(name: "username", label: "Username", secret: false, required: true, role: .username),
-                FieldSpec(name: "password", label: "Password", secret: true, required: true, role: .password),
+                FieldSpec(
+                    name: "database", label: "Database", secret: false, required: true, role: .database),
+                FieldSpec(
+                    name: "username", label: "Username", secret: false, required: true, role: .username),
+                FieldSpec(
+                    name: "password", label: "Password", secret: true, required: true, role: .password),
             ]
         case .custom:
             []
@@ -261,13 +375,32 @@ final class ItemEditorModel {
 
     // MARK: The folder
 
-    /// Read the folders. A folder that another device deleted reads as the top level, as the
-    /// core reads it, so it is no change.
+    /// Read the folder choices. A deleted stored folder follows the core to the top level;
+    /// an explicit destination for a new item stays selected until the owner replaces it.
     func loadFolders(from service: any VaultService) async {
-        folders = (try? await service.folders()) ?? []
+        do {
+            folders = try await service.folders()
+            foldersLoaded = true
+        } catch let error as VaultError where VaultModel.lacksFolders(error) {
+            // An older core cannot represent any folder; preserve its documented fallback.
+            folders = []
+            foldersLoaded = false
+            folder = nil
+            storedFolder = nil
+            initialForm?.folder = nil
+            return
+        } catch {
+            // Reading folders must never silently redirect an explicitly chosen destination.
+            return
+        }
         let known = Set(folders.map(\.uuid))
-        if let folder, !known.contains(folder) { self.folder = nil }
-        if let storedFolder, !known.contains(storedFolder) { self.storedFolder = nil }
+        if !isNew {
+            if let folder, folder == storedFolder, !known.contains(folder) { self.folder = nil }
+            if let initialFolder = initialForm?.folder, initialFolder == storedFolder, !known.contains(initialFolder) {
+                initialForm?.folder = nil
+            }
+            if let storedFolder, !known.contains(storedFolder) { self.storedFolder = nil }
+        }
     }
 
     /// Save moves the item: a new item that goes into a folder, or a stored item whose folder
@@ -331,23 +464,58 @@ final class ItemEditorModel {
         }
         fields += extras
         return ItemDraft(
-            title: title.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind, notes: notes, tags: tags,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind, notes: notes,
+            tags: tags,
             fields: fields)
     }
 
-    /// Save through the vault. The core's message shows on failure.
+    /// Capture the complete submission before the first suspension, including its destination.
+    /// A failed move retains the saved identity, so retry cannot create the item twice.
     func save(in vault: VaultModel) async -> SavedItem? {
         guard !isSaving else { return nil }
-        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            error = "Type a title."
+        guard commitPendingTag() else {
+            error = tagMessage
             return nil
         }
+        if let message = validationMessages.first {
+            error = message
+            return nil
+        }
+        let submitted = draft()
+        let destination = folder
+        let destinationLabel = folderLabel
         isSaving = true
         defer { isSaving = false }
         do {
-            let saved = try await vault.save(id: existing?.id, revision: existing?.revision, draft: draft())
+            let saved: SavedItem
+            if let savedItem, savedDraft == submitted {
+                saved = savedItem
+            } else {
+                saved = try await vault.save(
+                    id: savedItem?.id ?? existing?.id,
+                    revision: savedItem?.revision ?? existing?.revision, draft: submitted)
+                savedItem = saved
+                savedDraft = submitted
+            }
+            if destination != storedFolder {
+                do {
+                    try await vault.service.setItemFolder(id: saved.id, folder: destination)
+                    storedFolder = destination
+                    await vault.didImport()
+                } catch {
+                    let message =
+                        "Saved “\(submitted.title)”, but could not move it to \(destinationLabel). \(error.localizedDescription) Choose a folder and retry Save; the same item will be used."
+                    moveFailure = message
+                    self.error = message
+                    if let retained = try? await vault.service.item(id: saved.id) {
+                        storedFolder = retained.row.folder
+                    }
+                    if (error as? VaultError)?.code == .locked { vault.report(error) }
+                    return nil
+                }
+            }
             error = nil
-            await moveIfNeeded(saved, in: vault)
+            moveFailure = nil
             return saved
         } catch {
             self.error = error.localizedDescription
@@ -355,28 +523,4 @@ final class ItemEditorModel {
         }
     }
 
-    /// Put the saved item in the chosen folder. The item is saved already, so the sheet closes on
-    /// a failure too (a second save would add a new item twice): the message waits in
-    /// `moveFailure` until the sheet is gone, as the alert of the tabs cannot show above a sheet.
-    private func moveIfNeeded(_ saved: SavedItem, in vault: VaultModel) async {
-        guard movesFolder else { return }
-        do {
-            try await vault.service.setItemFolder(id: saved.id, folder: folder)
-            storedFolder = folder
-            await vault.didImport()
-        } catch let error as VaultError where error.code == .locked {
-            vault.report(error)
-        } catch {
-            moveFailure = error.localizedDescription
-        }
-    }
-
-    /// The sheet is gone: show a failed move as an alert of the vault. Not when the sheet went
-    /// away because the vault locked: the message would show after the next unlock, out of place.
-    func reportMoveFailure(to vault: VaultModel) {
-        guard let moveFailure else { return }
-        self.moveFailure = nil
-        guard vault.isUnlocked else { return }
-        vault.alert = moveFailure
-    }
 }

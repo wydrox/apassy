@@ -8,14 +8,25 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Added
 
+- **Mac, native menus:** File, Edit, Item and Folder menus expose credential/folder creation, text editing, bulk Move/Undo and folder reparenting, with current-session and focus guards.
+
+- **Mac, Copy a secret:** each supported secret field has Copy, with a fresh Touch ID or vault-passphrase check for that item, field, and revision. No reveal is needed first. Apassy requests clipboard clearing after 30 seconds and on lock, vault switch, or quit while its write still matches. Other local apps can read or retain a copied value; clipboard privacy markers are advisory. Passkey keys and one-time-password setup keys are excluded ([ADR 0027](docs/adr/0027-owner-desktop-copy.md)).
+- **Browser, account suggestions and password updates:** optional site access enables an account chooser at login fields. Focus retrieves matching account metadata; selecting an account still needs its own owner check before fill. Update Login changes only the selected login's password after a fresh check. The extension retains the result across the app handoff and explains recovery for changed pages, unsupported frames, a locked app, or a missing host.
+
 - **Sync log:** each failed folder or relay sync writes one line to `~/Library/Logs/Apassy/sync.log`: the time, the list ID of the vault, the kind of sync, the error, the status of the synced file, and the first digits of its hashes. The same error writes at most one line every 10 minutes, with a count; the first sync that works after failures writes one line too. No vault name, credential, value, or passphrase goes into the log. The file has mode `0600` and stays under 256 KiB (one older file, `sync.log.1`) ([sync](docs/operations/sync.md) §7.2).
 - **Mac, notification when sync stops:** when the open vault keeps failing to sync for 5 minutes (10 minutes while iCloud downloads), Apassy posts one notification: "Personal" has not synced for 5 minutes, with a short reason, and "Open Settings > Vault > Sync". One for each streak of failures; a folder or relay that is not reachable causes none ([sync](docs/operations/sync.md) §7.3).
 
 ### Changed
 
+- **iPhone, daily destinations:** Vault opens the credential list directly, alongside Requests and Search. Agent Access is in Settings and credential context. Healthy sync and organization tools are secondary; sync and security problems retain direct recovery. iCloud setup offers optional AutoFill with Later.
+- **Mac and iPhone, adding credentials:** Login, Paste, and Other entry points keep the chosen folder. Save reports the actual saved item and destination; failed saves retain the draft. iPhone editors protect unsaved changes and freeze the submitted input while saving.
+- **Mac, finding and organizing:** search includes visible account identities and websites, with an explicit folder or all-credentials scope. Command-click and Shift-click select credentials for one bulk Move; Undo Move restores their original folders. Folder menus include Move Folder with cycle and name-collision checks. Saved credentials become visible after creation, and connecting an agent is optional during setup.
+
 - Development: the integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file (`cargo test --all-features --test it companion::`), and the aliases in `.cargo/config.toml` (`cargo t`, `cargo clippy-all`) use one feature set. `target/` keeps one copy of the crate and its dependencies instead of one per test file and feature set. CI still runs four serial test groups, now by module.
 
 ### Fixed
+
+- **Requests and notifications:** a generic iPhone push opens a refreshed Requests list without choosing a newer question or starting an unlock. A sent answer stays waiting or unconfirmed until the Mac confirms it. Notification settings report current iOS permission and registration, with recovery actions. Mac notifications carry an opaque local route that is revalidated before opening an exact request; stale routes open the list. Settled alerts are reconciled conservatively, and suggestions use quieter attention than blocked work.
 
 - **Mac, iCloud Drive sync:** a synced file that is on the Mac but older than the version in iCloud (iCloud says "not downloaded" or "downloaded", not "current") no longer shows "Up to date". Apassy shows "Waiting for iCloud…", asks iCloud for the newest version, and waits for it before it merges or pushes, so it does not take the old copy as the newest one or write over the newer one. Before, Apassy asked iCloud only for a file that was not on the Mac at all, and a change from the iPhone could stay unsynced on a Mac that showed "synced" ([sync](docs/operations/sync.md) §7.1).
 

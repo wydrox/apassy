@@ -16,6 +16,8 @@ pub mod inbox;
 #[cfg(feature = "vault")]
 mod learning_ui;
 pub mod model;
+#[cfg(all(feature = "vault", any(target_os = "macos", test)))]
+mod native_menu;
 #[cfg(feature = "vault")]
 pub mod notify;
 /// Tests of the guarded show and copy of one-time codes.
@@ -173,6 +175,8 @@ pub struct DesktopApp {
     #[cfg(feature = "vault")]
     pub(crate) model_server: Option<std::sync::Arc<crate::broker::model_server::ModelServer>>,
     styled: bool,
+    #[cfg(all(feature = "vault", target_os = "macos"))]
+    native_menu: Option<native_menu::NativeMenu>,
 }
 
 /// Broker state for the Agents view.
@@ -197,6 +201,8 @@ impl DesktopApp {
     pub fn new() -> Self {
         Self {
             model: DesktopModel::new(),
+            #[cfg(all(feature = "vault", target_os = "macos"))]
+            native_menu: None,
             place: Place::CREDENTIALS,
             selected_item_id: None,
             search: String::new(),
@@ -479,6 +485,7 @@ impl eframe::App for DesktopApp {
             self.poll_cli(ctx);
             self.poll_browser(ctx);
             self.poll_platform(ctx);
+            ui::poll_notifications(self);
         }
         #[cfg(not(feature = "vault"))]
         let _ = ctx;
@@ -489,11 +496,22 @@ impl eframe::App for DesktopApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(all(feature = "vault", target_os = "macos"))]
+        if self.native_menu.is_none() {
+            self.native_menu = Some(native_menu::NativeMenu::install(ui.ctx()));
+        }
         if !self.styled {
             ui::apply_style(ui.ctx());
             self.styled = true;
         }
         ui::draw(self, ui);
+        #[cfg(all(feature = "vault", target_os = "macos"))]
+        {
+            let state = ui::native_menu_context(self, ui.ctx());
+            if let Some(menu) = &mut self.native_menu {
+                menu.refresh(state);
+            }
+        }
     }
 }
 

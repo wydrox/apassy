@@ -24,6 +24,7 @@ pub mod exceptions;
 mod folders;
 mod history;
 mod learning;
+mod library;
 mod merge;
 pub mod overview;
 pub mod passkey;
@@ -75,7 +76,7 @@ pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
     DEFAULT_COMPANION_PORT, MAX_COMPANION_DEVICES, MIN_COMPANION_PORT,
 };
-pub use folders::{Folder, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES};
+pub use folders::{Folder, ItemFolderMove, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES};
 pub use history::{
     EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
 };
@@ -104,14 +105,15 @@ pub use trusted_device::{
     ItemHome, MAX_TRUSTED_DEVICE_NAME_BYTES, MembershipPurpose, RelayMembership, TrustedDevice,
     TrustedDeviceKind,
 };
+pub(crate) use types::is_passkey_field;
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
     MIN_PASSPHRASE_BYTES, PASSKEY_FIELD_PREFIX, SCHEMA_VERSION, SecretValue, VaultError,
     VaultErrorKind, VaultResult,
 };
 use types::{
-    MAX_SEARCH_RESULTS, err, is_passkey_field, kind_as_str, kind_from_str,
-    validate_create_passphrase, validate_draft, validate_draft_with, validate_unlock_passphrase,
+    MAX_SEARCH_RESULTS, err, kind_as_str, kind_from_str, validate_create_passphrase,
+    validate_draft, validate_draft_with, validate_unlock_passphrase,
 };
 pub use waiting::{ENDED_BY_RESTART, WaitTicket};
 
@@ -287,8 +289,19 @@ impl Vault {
     }
 
     pub fn add(&mut self, draft: ItemDraft) -> VaultResult<ItemSummary> {
+        self.add_in_folder(draft, None)
+    }
+
+    /// Add an item and its chosen folder in one transaction. A missing or deleted
+    /// folder is `NotFound`; failure leaves no new item or history behind.
+    pub fn add_in_folder(
+        &mut self,
+        draft: ItemDraft,
+        folder: Option<&str>,
+    ) -> VaultResult<ItemSummary> {
         self.require_unlocked()?;
         let draft = validate_draft(draft)?;
+        let place = self.add_place(folder)?;
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -305,6 +318,9 @@ impl Vault {
         let id = tx.last_insert_rowid();
         insert_tags_and_fields(&tx, id, &draft)?;
         history::record(&tx, id, ItemEventKind::Created, "")?;
+        if let Some(place) = place {
+            add::place_item(&tx, id, &place)?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         summary_from_parts(id, draft.title, draft.kind, 1)
     }

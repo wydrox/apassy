@@ -11,6 +11,9 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
+            if let questions = root.questions {
+                RequestsNotificationSettings(model: questions)
+            }
             if let vault = root.vault, vault.hasVault, vault.isUnlocked {
                 GeneralVaultSections(vault: vault, close: close)
             } else {
@@ -41,6 +44,7 @@ private struct GeneralVaultSections: View {
     @State private var confirmingRemove = false
     @State private var removeError: VaultError?
     @State private var autoFillOn: Bool?
+    @State private var autoFillError: String?
 
     var body: some View {
         Group {
@@ -71,9 +75,10 @@ private struct GeneralVaultSections: View {
             } header: {
                 Text("Vault")
             } footer: {
-                Text(vault.vault?.isICloud == true
-                    ? "This removes the local vault and stored passphrase. The file in iCloud Drive stays."
-                    : "This removes the vault from this iPhone and from the relay. The vault stays on your Macs.")
+                Text(
+                    vault.vault?.isICloud == true
+                        ? "This removes the local vault and stored passphrase. The file in iCloud Drive stays."
+                        : "This removes the vault from this iPhone and from the relay. The vault stays on your Macs.")
             }
             if let exchange = root.exchange {
                 Section {
@@ -85,7 +90,9 @@ private struct GeneralVaultSections: View {
                 } header: {
                     Text("Import and export")
                 } footer: {
-                    Text("Logins, one-time passwords, and passkeys move between Apassy and another app through iOS, after Face ID. To import, start the export in the other app and pick Apassy.")
+                    Text(
+                        "Logins, one-time passwords, and passkeys move between Apassy and another app through iOS, after Face ID. To import, start the export in the other app and pick Apassy."
+                    )
                 }
             }
             autoFill
@@ -96,9 +103,11 @@ private struct GeneralVaultSections: View {
         ) {
             Button("Remove", role: .destructive) { remove(force: false) }
         } message: {
-            Text(vault.vault?.isICloud == true
-                ? "This removes the local vault, sync state, and stored passphrase. The file in iCloud Drive stays."
-                : "This removes the vault, sync state, and stored passphrase from this iPhone. Your Macs keep the vault.")
+            Text(
+                vault.vault?.isICloud == true
+                    ? "This removes the local vault, sync state, and stored passphrase. The file in iCloud Drive stays."
+                    : "This removes the vault, sync state, and stored passphrase from this iPhone. Your Macs keep the vault."
+            )
         }
         .alert(
             "The relay did not answer",
@@ -119,11 +128,20 @@ private struct GeneralVaultSections: View {
     private var autoFill: some View {
         Section {
             Text(
-                "Apassy can fill your passwords and one-time codes, sign in with passkeys, and save new passkeys in Safari and in apps. Turn on Apassy in Settings > General > AutoFill & Passwords. Each one asks for Face ID."
+                "Apassy can fill your passwords and one-time codes, sign in with passkeys, and save new passkeys in Safari and in apps. Turn on Apassy in Settings > General > AutoFill & Passwords. Using a credential requires an owner check with device authentication or the vault passphrase."
             )
             LabeledContent("AutoFill", value: autoFillOn == nil ? "Checking" : (autoFillOn == true ? "On" : "Off"))
             Button("Open AutoFill settings", systemImage: "gear") {
-                Task { try? await ASSettingsHelper.openCredentialProviderAppSettings() }
+                Task {
+                    do { try await ASSettingsHelper.openCredentialProviderAppSettings() } catch {
+                        autoFillError =
+                            "AutoFill settings could not open. Open Settings > General > AutoFill & Passwords and turn on Apassy."
+                    }
+                }
+            }
+            if let autoFillError {
+                Label(autoFillError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
             }
         } header: {
             Text("AutoFill")

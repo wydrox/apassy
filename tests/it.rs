@@ -53,6 +53,8 @@ mod isolation_profile;
 mod item_history;
 mod learning;
 mod learning_replay;
+#[cfg(feature = "vault")]
+mod library_organization;
 mod local_finetune;
 mod native_auth_cancel;
 mod native_helper;

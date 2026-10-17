@@ -1,6 +1,6 @@
 # Browser wire version 1
 
-Date: 2026-10-06. Section 8 (save and create) added the same day. Section 9 (passkeys and one-time codes) added 2026-10-09. Decision: [ADR 0021](../adr/0021-browser-extension.md). Code: `src/browser/` (types, site match, host relay), `src/bin/apassy-browser-host.rs` (native messaging host), `src/desktop/browser.rs` (app side), `extension/` (the extension).
+Date: 2026-10-06. Section 8 (save and create) added the same day. Section 9 (passkeys and one-time codes) added 2026-10-09. Suggestions, explicit updates, and target binding added 2026-10-17. Decision: [ADR 0021](../adr/0021-browser-extension.md). Code: `src/browser/` (types, site match, host relay), `src/bin/apassy-browser-host.rs` (native messaging host), `src/desktop/browser.rs` (app side), `extension/` (the extension).
 
 ## 1. Transport
 
@@ -31,16 +31,25 @@ When the socket is missing or refuses the connection, the host answers `not_runn
 | Field | Value |
 | --- | --- |
 | `v` | `1`. Another value gets `bad_version`. |
-| `cmd` | `status`, `show`, `logins`, `fill`, `save`, or `create`. Section 9 adds `passkey_get`, `passkey_create`, and `fill_code`, each with its own strict packet. |
+| `cmd` | `status`, `show`, `logins`, `fill`, `save`, or `create`. `suggestions` and `update` below, and section 9 commands `passkey_get`, `passkey_create`, and `fill_code`, each use their own strict packet. |
 | `url` | The address of the active tab, from the browser. At most 2048 bytes. `logins`, `fill`, `save`, and `create` only. |
 | `item` | The item ID from `logins`. `fill` only. |
 | `title` | The title of a new login: 1 to 128 bytes after trim. `save` and `create` only. |
 | `username` | The username of a new login: 1 to 1024 bytes after trim. `save` and `create` only. A title or a username with a control character (also a line break) or a bidirectional format character gets `bad_request`. |
-| `password` | The password that the owner typed on the page: 1 to 4096 bytes. `save` only. The only request field with a secret value. |
+| `password` | The password that the owner typed on the page: 1 to 4096 bytes. `save` only. Also used by the strict `update` packet below; these requests carry a secret value. |
 | `length` | The length of a new password: 12 to 64. `create` only. |
 | `symbols` | `true` when a new password has symbols. `create` only. |
 
 An unknown field gets `bad_request`.
+
+The added commands use separate strict packets; they do not extend the legacy request with permissive combinations:
+
+```json
+{ "v": 1, "cmd": "suggestions", "url": "https://example.com/login", "username": "raf" }
+{ "v": 1, "cmd": "update", "url": "https://example.com/password", "item": 7, "username": "rafal", "password": "<typed password>" }
+```
+
+`suggestions.username` is optional (default empty); it is a visible username prefix, at most 1024 bytes, trimmed and compared without regard to case. `update` requires `item`, the exact stored `username`, and `password` (1 to 4096 bytes); it has no title, generator, or other editable fields. Both keep the URL limit and reject unknown fields, missing required fields, wrong types, control/bidirectional characters in usernames, and another version.
 
 ## 3. Response
 
@@ -48,7 +57,7 @@ An unknown field gets `bad_request`.
 { "ok": true, "code": "ok", "message": "Filled.", "data": { "type": "fill", "item": 7, "origin": "https://github.com", "username": "rafal", "password": "…" } }
 ```
 
-`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `logins`, `fill`, `saved`, and from section 9 `passkey`, `passkey_created`, `code`. Only `fill` and `code` hold a secret value.
+`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `logins`, `fill`, `saved`, `updated`, and from section 9 `passkey`, `passkey_created`, `code`. Only `fill` and `code` hold a secret value.
 
 ## 4. Commands
 
@@ -59,6 +68,8 @@ C: asks for the owner check in the app, then answers.
 | `status` | | | `{ "type": "status", "vault": "unlocked" \| "locked" \| "none", "version": "0.3.2" }` |
 | `show` | | | `none`. Brings the window to the front, for example to unlock. |
 | `logins` | `url` | | `{ "type": "logins", "origin": "https://github.com", "host": "github.com", "logins": [ { "item": 7, "title": "GitHub", "username": "rafal", "has_totp": false } ] }`. At most 50, by title. An empty list is `ok`. `has_totp` (default `false`) says that `fill_code` can fill a one-time code; never the code or the seed. |
+| `suggestions` | `url`, optional `username` | | The same whitelisted `logins` response: only item, title, username, and `has_totp`. Site matching and username-prefix filtering happen before the 50-result limit. Focus does not authorize a fill. |
+| `update` | `url`, `item`, `username`, `password` | C | `{ "type": "updated", "item": 7, "origin": "https://example.com", "username": "rafal" }`. No secret in the response. |
 | `fill` | `url`, `item` | C | `{ "type": "fill", "item": 7, "origin": "https://github.com", "username": "rafal", "password": "…" }` |
 | `save` | `url`, `title`, `username`, `password` | C | `{ "type": "saved", "item": 12 }`. A new login with the website `origin`. |
 | `create` | `url`, `title`, `username`, `length`, `symbols` | C | `fill`, for the new login. Apassy makes the password. |
@@ -67,7 +78,7 @@ C: asks for the owner check in the app, then answers.
 
 ## 5. The site match
 
-`logins` and `fill` use the same match. The app checks it at the request, before the owner check, and after the owner check.
+`logins`, `suggestions`, `fill`, and `update` use the same site match. The app checks it at the request, before the owner check, and after the owner check.
 
 - The page must be `https:`. `http:` works only for `localhost`, `127.0.0.1`, and `[::1]`. Another page gets `unsupported_page`.
 - The websites of a login: its visible fields `website` and `url`, and its visible custom details whose label, without regard to case, starts with `website` or `url`. A value without `://` counts as `https://` and the value.
@@ -142,7 +153,17 @@ The extension makes these codes itself. They never cross the wire.
 
 The password of `create` comes from the random generator of the Mac (`getrandom`). It has at least one lowercase letter, one uppercase letter, and one digit, and one symbol when `symbols` is `true`. The symbols are `!#$%&*+-.:;=?@^_~`.
 
-A changed password of an existing login is not in version 1. The owner changes it in the app.
+**`update`: “Update login”.** The owner explicitly chooses an existing account and the password typed in the bound page form. The app checks the exact item, its site match, its exact stored username, and its revision before opening a fresh owner check. Approval binds that snapshot and origin. It revalidates them after approval, then replaces only the password; title, username, websites, tags, notes, folder, custom details, passkey material, and TOTP remain. A changed or deleted item fails instead of updating another account. A missing password or ambiguous/stale target at capture changes nothing. Save and update use the explicit captured-snapshot semantics below. `updated` confirms the vault change, not website acceptance; the extension never submits the page.
+
+### 8.1 Page target and optional suggestions
+
+The toolbar popup remains available without permanent host permission. The owner may separately enable login suggestions for a supported site; optional host access installs the isolated login chooser there. Focusing an eligible field requests only site-scoped account metadata, optionally narrowed by the typed username. It neither releases nor fills a secret. Selection asks for the same fresh owner check as toolbar fill.
+
+For `fill` and the page-delivery part of `create`, the extension captures the tab, browser document, frame, and form/field identity before approval. After the app answers, it checks that the same connected, eligible fields and form still belong to that document and origin. Navigation, replacement fields, a changed form, or a stale account selection prevents delivery to the page. Account choice is explicit for multiple forms and accounts, including username-first pages and supported open shadow roots. A login fill changes only its chosen form; it never auto-submits. A created login can already be saved when delivery fails; recovery reports that vault result without claiming the page was filled.
+
+Explicit `save` and `update` instead request a vault write from captured page fields. The extension checks source eligibility and the selected form at capture. Navigation during the fresh owner check does not cancel that requested write: after approval, the app may finish saving the captured login or updating the exact captured password. It revalidates the intended vault item, exact username, origin/site eligibility, and revision where applicable before committing. Neither operation follows the write with a fill or secret release. `saved` and `updated` confirm only the vault write; neither claims website acceptance.
+
+Toolbar actions target the top frame; optional field suggestions also support same-origin frame targets with their own frame/document identity. Passkeys and one-time codes remain top-frame only. A form of another origin is not filled through its parent: recovery directs the owner to open that sign-in page in its own tab and grant its own site access for an explicit new choice. The extension stores only a secret-free result and recovery state for the tab and document for up to five minutes across popup closure and an Open Apassy handoff, clears stale state on navigation, and checks that opening the app succeeded. The UI distinguishes missing host, stopped app, locked vault, no matching account, missing fields, cancellation, and page/target changes rather than reporting a successful fill.
 
 
 ## 9. Passkeys and one-time codes

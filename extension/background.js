@@ -27,7 +27,7 @@ const MESSAGES = {
   host_failed: "Apassy did not answer. Try again.",
   timeout: "Apassy did not answer in time. Nothing was filled.",
   not_running: "Open Apassy to fill logins.",
-  none_open: "Unlock Apassy to fill logins.",
+  none_open: "Open a vault in Apassy to use logins.",
   vault_locked: "Unlock Apassy to fill logins.",
   unsupported_page: "Apassy fills logins on https pages only.",
   no_page: "Open a login page, then click Apassy.",
@@ -35,6 +35,10 @@ const MESSAGES = {
   no_fields: "Apassy found no login fields on this page.",
   fill_failed: "Apassy could not fill this page.",
   no_password: "Type your password on the page first.",
+  ambiguous_password: "Apassy cannot identify the new password in this form. Open the login in Apassy to update it.",
+  password_confirmation: "The new password and confirmation do not match. Enter matching values, then update the login.",
+  no_match: "This login no longer matches this site or username. Refresh the list in Apassy.",
+  stale_item: "This login changed during the check. Review it in Apassy, then choose it again.",
   bad_request: "Apassy did not understand the request.",
   no_code_field: "Apassy found no field for a one-time code on this page.",
 };
@@ -135,7 +139,9 @@ function hostOf(url) {
 async function state() {
   const tab = await targetTab();
   const url = tab && tab.url ? tab.url : "";
-  const base = { tabId: tab ? tab.id : null, url, host: hostOf(url), logins: [] };
+  const target = tab && isWebPage(url) ? await captureLoginTarget(tab.id, url) : null;
+  const recent = await recentLoginResult(tab);
+  const base = { tabId: tab ? tab.id : null, url, host: hostOf(url), logins: [], target, recent };
   const reply = (fields) => ({ ...base, ...fields, message: fields.message || MESSAGES[fields.state] || "" });
 
   const status = await ask({ cmd: "status" });
@@ -144,8 +150,16 @@ async function state() {
     return reply({ state: code, message: MESSAGES[code] || messageOf(status) });
   }
   const vault = status.data && status.data.vault;
-  if (vault === "locked") return reply({ state: "vault_locked" });
-  if (vault !== "unlocked") return reply({ state: "none_open" });
+  if (vault === "locked") {
+    loginOffers.clear();
+    if (tab && chrome.storage?.session) await chrome.storage.session.remove(`login-result-${tab.id}`);
+    return reply({ state: "vault_locked", recent: null });
+  }
+  if (vault !== "unlocked") {
+    loginOffers.clear();
+    if (tab && chrome.storage?.session) await chrome.storage.session.remove(`login-result-${tab.id}`);
+    return reply({ state: "none_open", recent: null });
+  }
 
   if (!tab || !url) return reply({ state: "no_page" });
   if (!isWebPage(url)) return reply({ state: "unsupported_page" });
@@ -181,65 +195,62 @@ async function pageOrigin(tabId) {
 
 // Asks the app for one login, then fills it into the top frame of the tab.
 // The reply has a code and a message, never a value.
-async function fill(tabId, url, item) {
-  const startOrigin = await pageOrigin(tabId);
-  if (!startOrigin || startOrigin !== originOf(url)) {
-    return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
-  }
-  let tab;
-  try {
-    tab = await chrome.tabs.get(tabId);
-  } catch (_) {
-    return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
-  }
-
-  const answer = await ask({ cmd: "fill", url: tab.url, item });
-  if (!answer || !answer.ok) {
-    return { ok: false, code: (answer && answer.code) || "host_failed", message: messageOf(answer) };
-  }
-  const data = answer.data || {};
-  let origin = typeof data.origin === "string" ? data.origin : "";
-  let username = typeof data.username === "string" ? data.username : "";
-  let password = typeof data.password === "string" ? data.password : "";
-  answer.data = null;
-  try {
-    if (data.type !== "fill" || data.item !== item || !origin) {
-      return { ok: false, code: "host_failed", message: MESSAGES.host_failed };
-    }
-    // The tab may have gone to another site while the owner check waited.
-    if ((await pageOrigin(tabId)) !== origin) {
+async function fill(tabId, url, item, suppliedTarget) {
+  const target = await resolveLoginTarget(tabId, url, suppliedTarget);
+  return boundLoginAction(target, async () => {
+    const startOrigin = await pageOrigin(tabId);
+    if (!startOrigin || startOrigin !== originOf(url)) {
       return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
     }
-    let results;
+    let tab;
     try {
-      results = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
-        func: fillLogin,
-        args: [origin, username, password],
-      });
+      tab = await chrome.tabs.get(tabId);
     } catch (_) {
-      return { ok: false, code: "fill_failed", message: MESSAGES.fill_failed };
-    }
-    const result = (results && results[0] && results[0].result) || {};
-    if (result.reason === "origin") {
       return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
     }
-    if (!result.ok) {
-      return { ok: false, code: "no_fields", message: MESSAGES.no_fields };
+
+    const answer = await ask({ cmd: "fill", url: tab.url, item });
+    if (!answer || !answer.ok) {
+      return { ok: false, code: (answer && answer.code) || "host_failed", message: messageOf(answer) };
     }
-    return {
-      ok: true,
-      code: "ok",
-      message: "Filled.",
-      filled: { username: result.username === true, password: result.password === true },
-    };
-  } finally {
-    data.username = "";
-    data.password = "";
-    username = "";
-    password = "";
-    origin = "";
-  }
+    const data = answer.data || {};
+    let origin = typeof data.origin === "string" ? data.origin : "";
+    let username = typeof data.username === "string" ? data.username : "";
+    let password = typeof data.password === "string" ? data.password : "";
+    answer.data = null;
+    try {
+      if (data.type !== "fill" || data.item !== item || !origin) {
+        return { ok: false, code: "host_failed", message: MESSAGES.host_failed };
+      }
+      // The tab may have gone to another site while the owner check waited.
+      if ((await pageOrigin(tabId)) !== origin) {
+        return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
+      }
+      const result = await targetCall(target, "fill", [origin, username, password]) || { ok: false, reason: "target" };
+      if (result.reason === "target") return failure("page_changed", "The page or form changed. The password was not filled. Choose the account again.");
+      if (result.reason === "origin") {
+        return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
+      }
+      if (!result.ok) {
+        return { ok: false, code: "no_fields", message: MESSAGES.no_fields };
+      }
+      return {
+        ok: true,
+        code: "ok",
+        message: result.password
+          ? (result.username ? "Username and password filled. Submit the form on the page." : "Password filled. Submit the form on the page.")
+          : "Username filled. Continue on the page, then choose this account again for the password.",
+        filled: { username: result.username === true, password: result.password === true },
+      };
+    } finally {
+      data.username = "";
+      data.password = "";
+      username = "";
+      password = "";
+      origin = "";
+    }
+
+  });
 }
 
 function failure(code, message) {
@@ -276,13 +287,15 @@ const count = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
 
 // What the popup needs for "Save this login" and "New password": the typed
 // username and whether a password was typed. Never the password.
-async function peek(tabId, url) {
+async function peek(tabId, url, suppliedTarget, purpose = "login") {
+  const target = await resolveLoginTarget(tabId, url, suppliedTarget);
+  if (!target || target.failure) return failure(target?.failure || "page_changed", "Focus the login field, then open Apassy again.");
   const changed = "The page changed. Open Apassy again.";
   const tab = await tabOn(tabId, url);
   if (!tab) return failure("page_changed", changed);
-  const page = await readPage(tabId, originOf(tab.url), false);
+  const page = await targetCall(target, "read", [false, purpose]);
   if (!page) return failure("fill_failed", READ_FAILED);
-  if (!page.ok) return failure("page_changed", changed);
+  if (!page.ok) return failure(["ambiguous_password", "password_confirmation"].includes(page.reason) ? page.reason : "page_changed");
   return {
     ok: true,
     code: "ok",
@@ -297,90 +310,90 @@ async function peek(tabId, url) {
 // Reads the login that the owner typed on the page and asks Apassy to save
 // it. The password goes from the page to the host only. The reply has a code
 // and a message, never a value.
-async function save(tabId, url, title, username) {
-  const changed = "The page changed. Nothing was saved.";
-  const tab = await tabOn(tabId, url);
-  if (!tab) return failure("page_changed", changed);
-  const page = await readPage(tabId, originOf(tab.url), true);
-  if (!page) return failure("fill_failed", READ_FAILED);
-  let password = typeof page.password === "string" ? page.password : "";
-  page.password = "";
-  let request = null;
-  try {
-    if (!page.ok) return failure("page_changed", changed);
-    if (!password) return failure("no_password");
-    // The tab may have gone to another site while the page was read. The
-    // password must not be saved for another site.
-    const fresh = await tabOn(tabId, tab.url);
-    if (!fresh) return failure("page_changed", changed);
-    request = { cmd: "save", url: fresh.url, title, username, password };
-    const answer = await ask(request);
-    if (!answer || !answer.ok) {
-      return failure((answer && answer.code) || "host_failed", messageOf(answer));
+async function save(tabId, url, title, username, suppliedTarget) {
+  const target = await resolveLoginTarget(tabId, url, suppliedTarget);
+  return boundLoginAction(target, async () => {
+    const changed = "The page changed. Nothing was saved.";
+    const tab = await tabOn(tabId, url);
+    if (!tab) return failure("page_changed", changed);
+    const page = await targetCall(target, "read", [true]);
+    if (!page) return failure("fill_failed", READ_FAILED);
+    let password = typeof page.password === "string" ? page.password : "";
+    page.password = "";
+    let request = null;
+    try {
+      if (!page.ok) return failure("page_changed", changed);
+      if (!password) return failure("no_password");
+      // The tab may have gone to another site while the page was read. The
+      // password must not be saved for another site.
+      const fresh = await tabOn(tabId, tab.url);
+      if (!fresh || !(await targetCall(target, "read"))?.ok) return failure("page_changed", changed);
+      request = { cmd: "save", url: fresh.url, title, username, password };
+      const answer = await ask(request);
+      if (!answer || !answer.ok) {
+        return failure((answer && answer.code) || "host_failed", ["timeout", "host_failed"].includes(answer?.code)
+          ? "Apassy did not confirm the save. Check for this login in Apassy before trying again." : messageOf(answer));
+      }
+      const data = answer.data || {};
+      if (data.type !== "saved" || !Number.isInteger(data.item)) return failure("host_failed");
+      return { ok: true, code: "ok", message: "Saved.", item: data.item };
+    } finally {
+      password = "";
+      if (request) request.password = "";
     }
-    const data = answer.data || {};
-    if (data.type !== "saved" || !Number.isInteger(data.item)) return failure("host_failed");
-    return { ok: true, code: "ok", message: "Saved.", item: data.item };
-  } finally {
-    password = "";
-    if (request) request.password = "";
-  }
+
+  });
 }
 
 // Asks Apassy to make a new password and add the login, then fills it into
 // each new password field of the page, as fill() does. The reply has a code
 // and a message, never a value.
-async function create(tabId, url, fields) {
-  const tab = await tabOn(tabId, url);
-  if (!tab) return failure("page_changed");
-  const startOrigin = originOf(tab.url);
+async function create(tabId, url, fields, suppliedTarget) {
+  const target = await resolveLoginTarget(tabId, url, suppliedTarget);
+  return boundLoginAction(target, async () => {
+    const tab = await tabOn(tabId, url);
+    if (!tab) return failure("page_changed");
+    const startOrigin = originOf(tab.url);
 
-  const answer = await ask({ cmd: "create", url: tab.url, ...fields });
-  if (!answer || !answer.ok) {
-    const code = (answer && answer.code) || "host_failed";
-    if (code === "host_failed" || code === "timeout") return failure(code, MAYBE_CREATED);
-    return failure(code, messageOf(answer));
-  }
-  const data = answer.data || {};
-  let origin = typeof data.origin === "string" ? data.origin : "";
-  let username = typeof data.username === "string" ? data.username : "";
-  let password = typeof data.password === "string" ? data.password : "";
-  answer.data = null;
-  try {
-    if (data.type !== "fill" || !Number.isInteger(data.item) || !origin || !password) {
-      return failure("host_failed", CREATED_BUT.host_failed);
+    const answer = await ask({ cmd: "create", url: tab.url, ...fields });
+    if (!answer || !answer.ok) {
+      const code = (answer && answer.code) || "host_failed";
+      if (code === "host_failed" || code === "timeout") return failure(code, MAYBE_CREATED);
+      return failure(code, messageOf(answer));
     }
-    const item = data.item;
-    const failed = (code) => ({ ...failure(code, CREATED_BUT[code]), item });
-    // The tab may have gone to another site while the owner check waited.
-    if (origin !== startOrigin || (await pageOrigin(tabId)) !== origin) return failed("page_changed");
-    let results;
+    const data = answer.data || {};
+    let origin = typeof data.origin === "string" ? data.origin : "";
+    let username = typeof data.username === "string" ? data.username : "";
+    let password = typeof data.password === "string" ? data.password : "";
+    answer.data = null;
     try {
-      results = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
-        func: fillLogin,
-        args: [origin, username, password, "new"],
-      });
-    } catch (_) {
-      return failed("fill_failed");
+      if (data.type !== "fill" || !Number.isInteger(data.item) || !origin || !password) {
+        return failure("host_failed", CREATED_BUT.host_failed);
+      }
+      const item = data.item;
+      const failed = (code) => ({ ...failure(code, CREATED_BUT[code]), item });
+      // The tab may have gone to another site while the owner check waited.
+      if (origin !== startOrigin || (await pageOrigin(tabId)) !== origin) return failed("page_changed");
+      const result = await targetCall(target, "fill", [origin, username, password, "new"]) || { ok: false, reason: "target" };
+      if (result.reason === "target") return failed("page_changed");
+      if (result.reason === "origin") return failed("page_changed");
+      if (!result.ok || !result.password) return failed("no_fields");
+      return {
+        ok: true,
+        code: "ok",
+        message: CREATED,
+        item,
+        filled: { username: result.username === true, passwords: count(result.passwords) },
+      };
+    } finally {
+      data.username = "";
+      data.password = "";
+      username = "";
+      password = "";
+      origin = "";
     }
-    const result = (results && results[0] && results[0].result) || {};
-    if (result.reason === "origin") return failed("page_changed");
-    if (!result.ok || !result.password) return failed("no_fields");
-    return {
-      ok: true,
-      code: "ok",
-      message: CREATED,
-      item,
-      filled: { username: result.username === true, passwords: count(result.passwords) },
-    };
-  } finally {
-    data.username = "";
-    data.password = "";
-    username = "";
-    password = "";
-    origin = "";
-  }
+
+  });
 }
 
 // Asks Apassy for the one-time code of a login, then fills it into the
@@ -560,17 +573,17 @@ async function handleMessage(message) {
       return state();
     case "fill": {
       if (!onPage || !Number.isInteger(message.item)) return bad();
-      return withBadge(() => fill(message.tabId, message.url, message.item));
+      return withBadge(() => fill(message.tabId, message.url, message.item, message.target));
     }
     case "peek": {
-      if (!onPage) return bad();
-      return peek(message.tabId, message.url);
+      if (!onPage || (message.purpose !== undefined && !["login", "update"].includes(message.purpose))) return bad();
+      return peek(message.tabId, message.url, message.target, message.purpose);
     }
     case "save": {
       const title = field(message && message.title, 128);
       const username = field(message && message.username, 1024);
       if (!onPage || !title || !username) return bad();
-      return withBadge(() => save(message.tabId, message.url, title, username));
+      return withBadge(() => save(message.tabId, message.url, title, username, message.target));
     }
     case "create": {
       const title = field(message && message.title, 128);
@@ -580,11 +593,25 @@ async function handleMessage(message) {
           !Number.isInteger(length) || length < NEW_LENGTH.min || length > NEW_LENGTH.max) {
         return bad();
       }
-      return withBadge(() => create(message.tabId, message.url, { title, username, length, symbols }));
+      return withBadge(() => create(message.tabId, message.url, { title, username, length, symbols }, message.target));
     }
     case "fill_code": {
       if (!onPage || !Number.isInteger(message.item)) return bad();
       return withBadge(() => fillCode(message.tabId, message.url, message.item));
+    }
+    case "update": {
+      if (!onPage || !Number.isInteger(message.item) || typeof message.username !== "string" || bytes(message.username) > 1024) return bad();
+      const target = await resolveLoginTarget(message.tabId, message.url, message.target);
+      return withBadge(() => updateLogin(message.tabId, message.url, message.item, message.username, target));
+    }
+    case "login_access_state": {
+      const tab = await targetTab();
+      return { ok: true, url: tab?.url || "", on: tab ? await loginAccess(tab.url) : false };
+    }
+    case "login_access": {
+      const tab = await targetTab();
+      if (typeof message.on !== "boolean" || !tab || originOf(tab.url) !== originOf(message.url)) return bad();
+      return loginAccessChange(tab.url, message.on);
     }
     case "passkeys_state":
       return passkeyState();
@@ -1253,8 +1280,14 @@ chrome.runtime.onConnect.addListener((port) => {
   acceptPasskeyPort(port);
 });
 
+importScripts("login-worker.js");
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (sender.id !== chrome.runtime.id || !sender.url || !sender.url.startsWith(chrome.runtime.getURL(""))) {
+  if (message && ["login_suggestions", "login_fill", "login_show"].includes(message.type)) {
+    handleLoginField(message, sender).then(sendResponse, () => sendResponse(localError("host_failed")));
+    return true;
+  }
+  if (sender.id !== chrome.runtime.id || !sender.url || sender.url !== chrome.runtime.getURL("popup.html")) {
     return false;
   }
   handleMessage(message).then(sendResponse, () => sendResponse(localError("host_failed")));
@@ -1265,3 +1298,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 self.apassyHandle = handleMessage;
 // The unit checks reach the passkey parts the same way. Nothing secret is in them.
 self.apassyPasskeyTest = { passkeyPeer, passkeyRpId, parsePasskeyRequest, clientDataFor, checkPasskeyAnswer, cleanText };
+
+self.apassyLoginTest = { handleLoginField, captureLoginTarget, targetCall, resolveLoginTarget, updateLogin, loginAccessChange, recentLoginResult, rememberLoginResult };

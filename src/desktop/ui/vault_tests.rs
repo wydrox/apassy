@@ -277,14 +277,44 @@ fn settings_show_how_the_bouncer_model_starts() {
         BouncerSettings, Host, Layout, ModelServer, ServerState, StartMode,
     };
 
+    // The supervisor honors these variables. Remove them only in a child process,
+    // so this fixture cannot probe the owner's model or use its API key.
+    if std::env::var_os("APASSY_BOUNCER_URL").is_some()
+        || std::env::var_os("APASSY_BOUNCER_KEY").is_some()
+    {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("desktop::ui::vault_tests::settings_show_how_the_bouncer_model_starts")
+            .env_remove("APASSY_BOUNCER_URL")
+            .env_remove("APASSY_BOUNCER_KEY")
+            .output()
+            .expect("isolated model settings fixture");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated model settings fixture must run and pass exactly one test: {stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let dir = TempDir::new().expect("temp dir");
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
     let settings_path = dir.path().join("bouncer.json");
-    // No uv and no LaunchAgent: the test does not read this Mac.
+    // Keep a synthetic port reserved. The external-mode probe times out against this
+    // listener instead of finding an installed bouncer and warming it for 60 seconds.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("synthetic listener");
+    let fixture_url = format!(
+        "http://{}",
+        listener.local_addr().expect("synthetic address")
+    );
+    // No uv, no LaunchAgent, and no installed model.
     let server = ModelServer::start_with_host(
         Some(settings_path.clone()),
-        BouncerSettings::load(&settings_path),
+        BouncerSettings {
+            url: Some(fixture_url.clone()),
+            ..BouncerSettings::load(&settings_path)
+        },
         Layout {
             script: None,
             laya_dir: dir.path().join("laya"),
@@ -306,6 +336,7 @@ fn settings_show_how_the_bouncer_model_starts() {
         server
             .set_settings(BouncerSettings {
                 start: mode,
+                url: Some(fixture_url.clone()),
                 ..BouncerSettings::default()
             })
             .expect("save");
@@ -1421,6 +1452,8 @@ fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner(
         record_use(&mut app, id, agent, command);
     }
     app.select_item(id.to_string());
+    app.ui
+        .set_expanded(&format!("credential-agent-settings-{id}"), true);
     let text = frames(&mut app);
     for expected in [
         "Agent use",
@@ -1435,8 +1468,6 @@ fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner(
         "Environment",
         "Hosts and risk",
         "Folder",
-        "Shared in",
-        "Not shared",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -1500,8 +1531,8 @@ fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner(
     assert!(answers.is_empty(), "{answers:?}");
     let text = frames(&mut app);
     assert!(
-        text.contains("None. The bouncer decides each use."),
-        "{text}"
+        !text.contains("Rules from your answers"),
+        "Empty rules stay hidden: {text}"
     );
 }
 
@@ -1572,6 +1603,8 @@ fn the_development_key_question_and_its_answers() {
     let (_, _, risk_before) = state(&app, first);
 
     app.select_item(first.to_string());
+    app.ui
+        .set_expanded(&format!("credential-agent-settings-{first}"), true);
     let text = frames(&mut app);
     assert!(text.contains("Is this a development key?"), "{text}");
     assert!(text.contains("api.anthropic.com"), "{text}");
@@ -1768,6 +1801,8 @@ fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
         );
     }
     app.ui
+        .set_expanded(&format!("credential-agent-settings-{ruled}"), true);
+    app.ui
         .set_expanded(&format!("credential-access-{ruled}"), true);
     app.ui
         .set_expanded(&format!("credential-uses-{ruled}"), true);
@@ -1799,6 +1834,8 @@ fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
     }
     app.ui.sidebar_hidden = false;
     app.select_item(ruled.to_string());
+    app.ui
+        .set_expanded(&format!("credential-agent-settings-{ruled}"), true);
     let text = frames(&mut app);
     for expected in ["Always ask me", "Agent use"] {
         assert!(text.contains(expected), "{expected}: {text}");

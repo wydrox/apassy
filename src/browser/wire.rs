@@ -91,6 +91,18 @@ pub enum Command {
         url: String,
         item: u64,
     },
+    /// Site-scoped metadata only. Focus does not authorize secret release.
+    Suggestions {
+        url: String,
+        username: String,
+    },
+    /// Replace only the password of this exact existing login after a fresh check.
+    Update {
+        url: String,
+        item: u64,
+        username: String,
+        password: SecretText,
+    },
     /// Save the login that the owner typed on the page.
     Save {
         url: String,
@@ -229,6 +241,16 @@ impl Request {
         // `Request` keeps its fields, so the old commands parse as before.
         if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(line) {
             match cmd.as_str() {
+                "suggestions" => {
+                    let packet: SuggestionsPacket =
+                        serde_json::from_slice(line).map_err(|_| invalid())?;
+                    return packet.command();
+                }
+                "update" => {
+                    let packet: UpdatePacket =
+                        serde_json::from_slice(line).map_err(|_| invalid())?;
+                    return packet.command();
+                }
                 "passkey_get" => {
                     let packet: PasskeyGetPacket =
                         serde_json::from_slice(line).map_err(|_| invalid())?;
@@ -327,6 +349,80 @@ impl Request {
             )),
         }
     }
+}
+
+/// The extension, not the native host, binds these requests to a trusted browser
+/// sender, origin, frame, document and focused form. These values do not attest a
+/// webpage or authorize a fill. The app independently checks vault site eligibility.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestionsPacket {
+    v: u32,
+    #[allow(dead_code)]
+    cmd: String,
+    url: String,
+    #[serde(default)]
+    username: String,
+}
+
+impl SuggestionsPacket {
+    fn command(self) -> Result<Command, WireError> {
+        check_version(self.v)?;
+        check_page_url(&self.url)?;
+        page_text(&self.username, MAX_USERNAME_BYTES)?;
+        Ok(Command::Suggestions {
+            url: self.url,
+            username: self.username.trim().to_owned(),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdatePacket {
+    v: u32,
+    #[allow(dead_code)]
+    cmd: String,
+    url: String,
+    item: u64,
+    username: String,
+    password: SecretText,
+}
+
+impl UpdatePacket {
+    fn command(self) -> Result<Command, WireError> {
+        check_version(self.v)?;
+        check_page_url(&self.url)?;
+        page_text(&self.username, MAX_USERNAME_BYTES)?;
+        if self.item == 0
+            || self.password.is_empty()
+            || self.password.expose().len() > MAX_PASSWORD_BYTES
+        {
+            return Err(WireError::new(
+                "bad_request",
+                "An update needs an exact login ID and a password of at most 4096 bytes.",
+            ));
+        }
+        Ok(Command::Update {
+            url: self.url,
+            item: self.item,
+            // Preserve the exact account identity; an update never changes it.
+            username: self.username,
+            password: self.password,
+        })
+    }
+}
+
+fn check_page_url(url: &str) -> Result<(), WireError> {
+    if url.is_empty() || url.len() > MAX_URL_BYTES {
+        return Err(WireError::new(
+            "bad_request",
+            "The request needs the address of the page.",
+        ));
+    }
+    super::site::Page::parse(url)
+        .map(|_| ())
+        .map_err(|err| WireError::new("unsupported_page", err.message()))
 }
 
 /// True for a character that can change how a line reads in the owner check dialog: a
@@ -622,6 +718,12 @@ pub enum Data {
     Saved {
         item: u64,
     },
+    /// A password-only update. It never returns the password to the page.
+    Updated {
+        item: u64,
+        origin: String,
+        username: String,
+    },
     /// The answer of `passkey_get`. Byte fields are standard base64 with padding.
     Passkey {
         rid: String,
@@ -689,6 +791,16 @@ impl std::fmt::Debug for Data {
                 .field("password", password)
                 .finish(),
             Self::Saved { item } => f.debug_struct("Saved").field("item", item).finish(),
+            Self::Updated {
+                item,
+                origin,
+                username,
+            } => f
+                .debug_struct("Updated")
+                .field("item", item)
+                .field("origin", origin)
+                .field("username", username)
+                .finish(),
             Self::Passkey { rid, .. } => f
                 .debug_struct("Passkey")
                 .field("rid", rid)
@@ -746,6 +858,50 @@ mod tests {
 
     fn parse(text: &str) -> Result<Command, WireError> {
         Request::parse(text.as_bytes())
+    }
+
+    #[test]
+    fn suggestions_and_updates_use_strict_packets_and_hide_passwords() {
+        assert_eq!(
+            parse(r#"{"v":1,"cmd":"suggestions","url":"https://a.example","username":" AL "}"#)
+                .unwrap(),
+            Command::Suggestions {
+                url: "https://a.example".to_owned(),
+                username: "AL".to_owned()
+            }
+        );
+        let update = parse(r#"{"v":1,"cmd":"update","url":"https://a.example","item":7,"username":"alice","password":"update-canary"}"#).unwrap();
+        assert!(
+            matches!(&update, Command::Update { item: 7, username, .. } if username == "alice")
+        );
+        assert!(!format!("{update:?}").contains("update-canary"));
+        for text in [
+            r#"{"v":1,"cmd":"update","url":"https://a.example","username":"alice","password":"x"}"#,
+            r#"{"v":1,"cmd":"update","url":"https://a.example","item":0,"username":"alice","password":"x"}"#,
+            r#"{"v":1,"cmd":"update","url":"https://a.example","item":7,"username":"alice","password":""}"#,
+            r#"{"v":1,"cmd":"update","url":"https://a.example","item":7,"username":"alice","password":"x","title":"overwrite"}"#,
+            r#"{"v":1,"cmd":"suggestions","url":"https://a.example","username":"alice","password":"x"}"#,
+        ] {
+            assert_eq!(parse(text).unwrap_err().code, "bad_request");
+        }
+        assert_eq!(parse(r#"{"v":2,"cmd":"update","url":"https://a.example","item":7,"username":"alice","password":"x"}"#).unwrap_err().code, "bad_version");
+        assert_eq!(
+            parse(r#"{"v":1,"cmd":"suggestions","url":"file:///test"}"#)
+                .unwrap_err()
+                .code,
+            "unsupported_page"
+        );
+        let response = Response::ok(
+            "Updated.",
+            Data::Updated {
+                item: 7,
+                origin: "https://a.example".to_owned(),
+                username: "alice".to_owned(),
+            },
+        );
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["data"]["type"], "updated");
+        assert!(json["data"].get("password").is_none());
     }
 
     #[test]

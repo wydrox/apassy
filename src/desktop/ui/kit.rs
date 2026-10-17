@@ -2870,8 +2870,6 @@ pub(crate) enum Icon {
     Search,
     /// Three dots: the menu of rare actions.
     More,
-    /// An arrow out of a box.
-    Share,
     /// A laptop: Settings > Devices.
     #[cfg(feature = "vault")]
     Laptop,
@@ -3098,18 +3096,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             for x in [0.22, 0.5, 0.78] {
                 painter.circle_filled(p(x, 0.5), stroke.width * 1.1, color);
             }
-        }
-        Icon::Share => {
-            line(&[(0.5, 0.62), (0.5, 0.1)]);
-            line(&[(0.33, 0.26), (0.5, 0.1), (0.67, 0.26)]);
-            line(&[
-                (0.32, 0.42),
-                (0.18, 0.42),
-                (0.18, 0.9),
-                (0.82, 0.9),
-                (0.82, 0.42),
-                (0.68, 0.42),
-            ]);
         }
         #[cfg(feature = "vault")]
         Icon::Laptop => {

@@ -12,8 +12,7 @@ struct ItemDetailScreen: View {
 }
 
 /// A credential, in the groups of the Mac (ADR 0026 §2, §8): the header with the provider tile and
-/// tags; the fields in their order with the variable and the folder; agent use and rules (on the
-/// Mac only for now); the options; then notes, tags, times, and history.
+/// tags; fields and use actions; notes and real controls; contextual access, times, and history.
 struct ItemDetailView: View {
     @State private var model: ItemDetailModel
     @Environment(VaultModel.self) private var vault
@@ -24,7 +23,6 @@ struct ItemDetailView: View {
     @State private var pendingPasskeyRemoval: PasskeyRemovalPlan?
     @State private var showsHistory = false
     @Environment(RootModel.self) private var root: RootModel?
-    @State private var showsConnect = false
 
     init(model: ItemDetailModel) {
         _model = State(initialValue: model)
@@ -38,17 +36,6 @@ struct ItemDetailView: View {
             .task(id: vault.itemsVersion) { await model.load() }
             .onChange(of: vault.revealEpoch) { model.dropSecrets() }
             .onDisappear { model.dropSecrets() }
-            // The same sheet as "Connect this iPhone" in Decisions.
-            .sheet(
-                isPresented: $showsConnect,
-                onDismiss: {
-                    let opensCompanion = root?.questions?.attach == .companion
-                    root?.questions?.dismissAttach()
-                    if opensCompanion { root?.openPreparedCompanion() }
-                }
-            ) {
-                if let questions = root?.questions { ConnectQuestionsView(model: questions) }
-            }
             .fullScreenCover(
                 item: Binding(get: { model.largeType }, set: { if $0 == nil { model.closeLargeType() } })
             ) { large in
@@ -63,7 +50,9 @@ struct ItemDetailView: View {
                     }
                 }
             } message: {
-                Text("The item is deleted on this iPhone and, at the next sync, on your Macs. To keep it out of the way instead, archive it.")
+                Text(
+                    "The item is deleted on this iPhone and, at the next sync, on your Macs. To keep it out of the way instead, archive it."
+                )
             }
             .confirmationDialog(
                 pendingPasskeyRemoval?.dialogTitle ?? "",
@@ -110,13 +99,20 @@ struct ItemDetailView: View {
                         }
                     }
                     if let passkey = detail.passkey { passkeySection(passkey) }
-                    Section("Agent use") { macRow(.agentUse) }
-                    Section("Rules from your answers") { macRow(.rules) }
-                    if CredentialOptions.isAvailable(detail) { options(detail).id("options") }
                     if !detail.notes.isEmpty {
                         Section("Notes") {
                             Text(detail.notes)
                                 .textSelection(.enabled)
+                        }
+                    }
+                    if CredentialOptions.isAvailable(detail) { options(detail).id("options") }
+                    if root?.agents != nil {
+                        Section {
+                            Button {
+                                ui.sheet = .agentAccess
+                            } label: {
+                                Label("Agent Access", systemImage: "cpu")
+                            }
                         }
                     }
                     if !detail.row.tags.isEmpty {
@@ -167,7 +163,7 @@ struct ItemDetailView: View {
                 .foregroundStyle(.secondary)
             let caps = caps(row)
             if !caps.isEmpty {
-                HStack(spacing: 6) {
+                FlowLayout {
                     ForEach(caps) { cap in
                         CapView(label: cap.label, red: cap.red)
                     }
@@ -182,7 +178,9 @@ struct ItemDetailView: View {
     /// and Favorite in gray.
     private func caps(_ row: ItemRow) -> [CredentialLooks.Cap] {
         var caps: [CredentialLooks.Cap] = []
-        if let detail = model.detail, let environment = CredentialLooks.environmentCap(detail) { caps.append(environment) }
+        if let detail = model.detail, let environment = CredentialLooks.environmentCap(detail) {
+            caps.append(environment)
+        }
         if row.hasPasskey || model.detail?.passkey != nil { caps.append(.init(label: "Passkey", red: false)) }
         if row.archived { caps.append(.init(label: "Archived", red: false)) }
         if model.isFavorite { caps.append(.init(label: "Favorite", red: false)) }
@@ -294,9 +292,10 @@ struct ItemDetailView: View {
             CalloutView(
                 symbol: "exclamationmark.triangle.fill",
                 text:
-                    "A sync kept both versions of “\(original?.title ?? "the item")”. Keep the one you need and archive the other.")
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
+                    "A sync kept both versions of “\(original?.title ?? "the item")”. Keep the one you need and archive the other."
+            )
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
             if let original {
                 NavigationLink(value: VaultRoute.item(original.id)) {
                     Label("Open “\(original.title)”", systemImage: "arrow.uturn.backward")
@@ -335,9 +334,12 @@ struct ItemDetailView: View {
                     ForEach(Array(events.enumerated()), id: \.offset) { _, event in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(event.detail)
-                            Text(Date(timeIntervalSince1970: TimeInterval(event.at)), format: .relative(presentation: .named))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text(
+                                Date(timeIntervalSince1970: TimeInterval(event.at)),
+                                format: .relative(presentation: .named)
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
                         .accessibilityElement(children: .combine)
                     }
@@ -385,19 +387,6 @@ struct ItemDetailView: View {
         }
     }
 
-    /// Agent use and rules live in the Mac's vault and do not sync: the row says where they are,
-    /// with no invented data, and offers what this iPhone can do now (`AgentsReach`).
-    private func macRow(_ place: AgentsReach.Place) -> some View {
-        let reach = AgentsReach(questions: root?.questions, companion: root?.companion)
-        return MacPlaceRow(note: reach.note(place), action: reach.action(place)) { action in
-            switch action {
-            case .openDecisions: ui.tab = .decisions
-            case .connect: showsConnect = true
-            case .pairOnWiFi: break
-            }
-        }
-    }
-
     #if targetEnvironment(simulator)
         private func demoReveal() async {
             guard let field = model.detail?.fields.first(where: { $0.secret && $0.role != .totp }) else { return }
@@ -413,7 +402,6 @@ struct ItemDetailView: View {
         }
     #endif
 }
-
 
 /// A tag as a chip.
 struct TagChip: View {
@@ -528,7 +516,9 @@ struct FieldRow: View {
                 Image(systemName: model.isRevealed(field) ? "eye.slash" : "eye")
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel(model.isRevealed(field) ? "Hide the \(VaultText.phrase(field.label))" : "Show the \(VaultText.phrase(field.label))")
+            .accessibilityLabel(
+                model.isRevealed(field)
+                    ? "Hide the \(VaultText.phrase(field.label))" : "Show the \(VaultText.phrase(field.label))")
             Button {
                 Task { await model.copy(field) }
             } label: {

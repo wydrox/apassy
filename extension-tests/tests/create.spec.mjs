@@ -48,12 +48,17 @@ test("create sends one request and fills the username and both new password fiel
 });
 
 test("a page that goes to another origin during the owner check gets nothing", async ({ h }) => {
-  const { page, state } = await onPage(h, "/signup", { delayMs: 1500 });
+  const { page, state } = await onPage(h, "/signup");
+  const barrier = h.holdReply("create");
   const pending = h.handle(request(state, { symbols: true, length: 64 }));
-  await expect.poll(() => h.requests("create").length).toBe(1);
   const otherUrl = h.url("/signup", "localhost");
-  await page.evaluate((url) => { location.href = url; }, otherUrl);
-  await page.waitForURL(otherUrl);
+  try {
+    await expect.poll(() => h.requests("create").length).toBe(1);
+    await page.evaluate((url) => { location.href = url; }, otherUrl);
+    await page.waitForURL(otherUrl);
+  } finally {
+    h.releaseReply(barrier);
+  }
   const reply = await pending;
   expect(reply).toEqual({
     ok: false, code: "page_changed", message: "The page changed. Nothing was filled. The new login is in Apassy.", item: 13,
@@ -61,7 +66,6 @@ test("a page that goes to another origin during the owner check gets nothing", a
   expect(h.requests()).toEqual([{
     v: 1, cmd: "create", url: state.url, title: "Sign-up test", username: "new@example.com", length: 64, symbols: true,
   }]);
-  await page.waitForTimeout(100);
   expect(await values(page, SIGNUP_FIELDS)).toEqual(EMPTY_SIGNUP);
 });
 

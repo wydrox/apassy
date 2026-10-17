@@ -1,17 +1,19 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// The Agents tab (ADR 0026 §8, mockup screen 9) on the relay feed (contract relay-feed-v1): the
+/// Agent Access in Settings uses the relay feed (contract relay-feed-v1): the
 /// agents that each Mac publishes for the unlocked vaults, by Mac, and by vault when there are two
 /// or more. Read only, except the removal of an exception in an agent's page.
 ///
-/// While no Mac publishes its agents to this iPhone, the tab shows no list and no invented data:
+/// While no Mac publishes its agents to this iPhone, the page shows no list and no invented data:
 /// it says where the agents are, by the state of this iPhone (`AgentsReach`), with the one action
-/// that helps now. The long poll of the feeds runs only while this tab is on the screen.
+/// that helps now. Settings owns the long poll while this access flow is on screen.
 struct AgentsView: View {
     let model: AgentsModel?
     let questions: QuestionsModel?
     let companion: AppModel
+    var embedded = false
+    var close: (() -> Void)?
     @Environment(RootModel.self) private var root: RootModel?
     @Environment(VaultUI.self) private var ui: VaultUI?
     @Environment(\.scenePhase) private var scenePhase
@@ -19,17 +21,23 @@ struct AgentsView: View {
     @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack(path: $path) {
-            content
-                .navigationTitle("Agents")
-                .navigationSubtitle(subtitle)
-                .navigationDestination(for: String.self) { id in
-                    if let model { AgentDetailView(model: model, id: id) }
+        Group {
+            if embedded {
+                page
+                    .navigationDestination(item: seededAgent) { id in
+                        if let model { AgentDetailView(model: model, id: id) }
+                    }
+            } else {
+                NavigationStack {
+                    page.navigationDestination(item: seededAgent) { id in
+                        if let model { AgentDetailView(model: model, id: id) }
+                    }
                 }
+            }
         }
         // Here, not on the tabs: the feeds are followed only while Agents shows (contract 5.12).
         .task(id: CoverPolicy.polls(in: AppPhase(scenePhase))) {
-            if CoverPolicy.polls(in: AppPhase(scenePhase)), let model { await model.watch() }
+            if !embedded, CoverPolicy.polls(in: AppPhase(scenePhase)), let model { await model.watch() }
         }
         // The same sheet as "Connect this iPhone" in Decisions.
         .sheet(
@@ -47,10 +55,21 @@ struct AgentsView: View {
         #endif
     }
 
+    private var page: some View {
+        content
+            .navigationTitle("Agent Access")
+            .navigationSubtitle(subtitle)
+    }
+
+    // Simulator routes use the same Settings destination as a user tap.
+    private var seededAgent: Binding<String?> {
+        Binding(get: { path.first }, set: { path = $0.map { [$0] } ?? [] })
+    }
+
     private var subtitle: String {
         guard let model, model.screen == .list else { return "" }
-        let count = model.connectedCount
-        return count == 1 ? "1 connected" : "\(count) connected"
+        let count = model.agentCount
+        return count == 1 ? "1 agent" : "\(count) agents"
     }
 
     @ViewBuilder
@@ -87,8 +106,11 @@ struct AgentsView: View {
                 Button("Connect this iPhone") { showsConnect = true }
                     .buttonStyle(.borderedProminent)
             case .openDecisions:
-                Button("Open Decisions") { ui?.tab = .decisions }
-                    .buttonStyle(.bordered)
+                Button("Open Requests") {
+                    ui?.tab = .decisions
+                    close?()
+                }
+                .buttonStyle(.bordered)
             case .pairOnWiFi, nil:
                 EmptyView()
             }
@@ -113,7 +135,9 @@ private struct AgentsList: View {
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(section.agents) { entry in
-                            NavigationLink(value: entry.id) {
+                            NavigationLink {
+                                AgentDetailView(model: model, id: entry.id)
+                            } label: {
                                 AgentRow(entry: entry, now: context.date)
                             }
                             .opacity(section.mac.stale ? 0.5 : 1)
@@ -143,7 +167,9 @@ private struct AgentsList: View {
                 }
                 Section {
                 } footer: {
-                    Text("Agents see the names of credentials, never the values. The bouncer on each Mac decides each use.")
+                    Text(
+                        "Agents see the names of credentials, never the values. The bouncer on each Mac decides each use."
+                    )
                 }
             }
         }

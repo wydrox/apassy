@@ -207,6 +207,12 @@ impl DesktopApp {
     /// unlock or change that still runs, inbox marks, the learning view, and a parsed
     /// 1Password export. A training stops: it reads and writes the vault that was open.
     pub(crate) fn reset_vault_state(&mut self, ctx: Option<&egui::Context>) {
+        super::invalidate_notifications(self);
+        self.ui.notification_epoch = None;
+        self.ui.move_undo.clear();
+        self.ui.selected_items.clear();
+        self.ui.selection_anchor = None;
+        self.ui.reveal_item = None;
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
         self.files.forget();

@@ -392,6 +392,8 @@ pub struct UbiquityStatus {
 pub enum NotificationEvent {
     /// A run waits for the owner.
     ApprovalWaiting,
+    /// A nonurgent declaration suggestion; no agent waits for it.
+    Suggestion,
     /// The bouncer or a rule blocked a request.
     RequestBlocked,
     /// A synced vault has not synced for minutes (docs/operations/sync.md, section 7).
@@ -406,6 +408,7 @@ impl NotificationEvent {
         match self {
             Self::ApprovalWaiting => "approval_waiting",
             Self::RequestBlocked => "request_blocked",
+            Self::Suggestion => "suggestion",
             Self::SyncStuck => "sync_stuck",
         }
     }
@@ -498,6 +501,10 @@ impl Notification {
             NotificationEvent::ApprovalWaiting => (
                 "Approval waiting",
                 format!("Agent \"{agent_name}\" waits for your decision. Open Apassy to review."),
+            ),
+            NotificationEvent::Suggestion => (
+                "Suggestion available",
+                "Apassy has a suggestion to review when convenient.".to_owned(),
             ),
             NotificationEvent::RequestBlocked => (
                 "Request blocked",
@@ -809,6 +816,82 @@ impl NativeHelper {
             .map(drop)
     }
 
+    /// Write a deliberate desktop owner copy. The text travels through the existing
+    /// erased `secret_b64` stdin field, never command arguments or a response.
+    /// The returned count and random marker identify this exact pasteboard write.
+    #[cfg(all(feature = "desktop", feature = "vault"))]
+    pub(crate) fn clipboard_write(&self, text: &str) -> Result<(u64, String), NativeError> {
+        // The vault permits 64 KiB fields; base64 fits the helper's 128 KiB limit.
+        if text.len() > 65_536 {
+            return Err(NativeError::Protocol("clipboard value is too large".into()));
+        }
+        let mut entropy = [0_u8; 16];
+        getrandom::fill(&mut entropy)
+            .map_err(|_| NativeError::Protocol("clipboard identity is unavailable".into()))?;
+        let owner: String = entropy.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut req = request("clipboard_write");
+        req.insert("owner".into(), Value::String(owner.clone()));
+        req.insert(
+            "secret_b64".into(),
+            Value::String(base64::encode(text.as_bytes())),
+        );
+        let result = self
+            .call(
+                &self.helper,
+                req,
+                self.timeouts.quick.min(Duration::from_secs(2)),
+            )
+            .and_then(|response| {
+                let count = response
+                    .get("change_count")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        NativeError::Protocol("clipboard write has no identity".into())
+                    })?;
+                if response.get("owner").and_then(Value::as_str) != Some(owner.as_str()) {
+                    return Err(NativeError::Protocol(
+                        "clipboard write has a different owner".into(),
+                    ));
+                }
+                Ok(count)
+            });
+        match result {
+            Ok(count) => Ok((count, owner)),
+            Err(err) => {
+                // A write can succeed before its reply is lost. We already know its
+                // random marker, so attempt cleanup without reading any clipboard text.
+                let mut cleanup = request("clipboard_clear");
+                cleanup.insert("owner".into(), Value::String(owner));
+                let _ = self.call(
+                    &self.helper,
+                    cleanup,
+                    self.timeouts.quick.min(Duration::from_secs(1)),
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Clear only an unchanged exact owner write. The helper never reads clipboard
+    /// text and never returns any value from another app.
+    #[cfg(all(feature = "desktop", feature = "vault"))]
+    pub(crate) fn clipboard_clear_if_unchanged(
+        &self,
+        count: u64,
+        owner: &str,
+    ) -> Result<(), NativeError> {
+        check_identifier(owner, "clipboard write owner")?;
+        let mut req = request("clipboard_clear");
+        req.insert("change_count".into(), Value::from(count));
+        req.insert("owner".into(), Value::String(owner.to_owned()));
+        self.call(
+            &self.helper,
+            req,
+            self.timeouts.quick.min(Duration::from_secs(2)),
+        )
+        .map(drop)
+    }
+
     /// Store `secret` under `account`. The item needs the current
     /// fingerprints. A stored item with the same account is replaced.
     pub fn keychain_store(
@@ -923,12 +1006,30 @@ impl NativeHelper {
         })
     }
 
-    /// Post a notification through the notifier. On first use, macOS asks the
-    /// owner for permission. The request has the id, the event, and the agent
-    /// name only; the notifier builds the text. A notification is not an
-    /// approval (goal N4).
+    /// Post a notification through the notifier. Never asks for permission.
+    /// The notifier builds fixed text; a notification is not an approval (N4).
     pub fn notify(&self, notification: &Notification) -> Result<NotifyOutcome, NativeError> {
+        self.notify_routed(notification, None, None)
+    }
+
+    /// A local opaque capability identifies the destination. An optional one-way
+    /// waiting key supports settlement reconciliation across app launches. Neither
+    /// field contains a vault path, command, purpose, or credential value.
+    pub fn notify_routed(
+        &self,
+        notification: &Notification,
+        route: Option<&str>,
+        waiting_key: Option<&str>,
+    ) -> Result<NotifyOutcome, NativeError> {
         let mut req = request("notify");
+        if let Some(route) = route {
+            check_route_token(route)?;
+            req.insert("route".into(), Value::String(route.to_owned()));
+        }
+        if let Some(waiting_key) = waiting_key {
+            check_route_token(waiting_key)?;
+            req.insert("waiting_key".into(), Value::String(waiting_key.to_owned()));
+        }
         req.insert("id".into(), Value::String(notification.id.clone()));
         req.insert(
             "event".into(),
@@ -943,6 +1044,70 @@ impl NativeHelper {
             delivered: bool_field(&response, "delivered")?,
             status: parse_status(&response)?,
         })
+    }
+
+    /// Remove delivered/pending local alerts only. Activity remains in the vault.
+    pub fn notify_remove(&self, ids: &[String]) -> Result<(), NativeError> {
+        if ids.len() > 512 {
+            return Err(NativeError::InvalidArgument(
+                "too many notification identifiers",
+            ));
+        }
+        for id in ids {
+            check_identifier(id, EVENT_ID_RULE)?;
+        }
+        let mut req = request("notify_remove");
+        req.insert(
+            "ids".into(),
+            Value::Array(ids.iter().cloned().map(Value::String).collect()),
+        );
+        self.call(&self.notifier, req, self.timeouts.quick)?;
+        Ok(())
+    }
+
+    /// Reconcile waiting alerts, including alerts delivered before this app launch.
+    /// Keys are one-way local identifiers; they contain no path or request text.
+    pub fn notify_reconcile(&self, waiting_keys: &[String]) -> Result<(), NativeError> {
+        if waiting_keys.len() > 512 {
+            return Err(NativeError::InvalidArgument(
+                "too many waiting notification keys",
+            ));
+        }
+        for key in waiting_keys {
+            check_route_token(key)?;
+        }
+        let mut req = request("notify_reconcile");
+        req.insert(
+            "waiting_keys".into(),
+            Value::Array(waiting_keys.iter().cloned().map(Value::String).collect()),
+        );
+        self.call(&self.notifier, req, self.timeouts.quick)?;
+        Ok(())
+    }
+
+    /// Read opaque click capabilities through the signed caller-only helper channel.
+    pub fn notify_activations(&self) -> Result<Vec<String>, NativeError> {
+        let response = self.call(
+            &self.notifier,
+            request("notify_activations"),
+            self.timeouts.quick,
+        )?;
+        let tokens = response
+            .get("routes")
+            .and_then(Value::as_array)
+            .filter(|tokens| tokens.len() <= 128)
+            .ok_or_else(|| NativeError::Protocol("invalid notification activations".into()))?;
+        tokens
+            .iter()
+            .map(|token| {
+                let token = token
+                    .as_str()
+                    .ok_or_else(|| NativeError::Protocol("invalid activation token".into()))?;
+                check_route_token(token)
+                    .map_err(|_| NativeError::Protocol("invalid activation token".into()))?;
+                Ok(token.to_owned())
+            })
+            .collect()
     }
 
     /// Notification permission and settings of the notifier bundle. Never
@@ -982,6 +1147,12 @@ impl NativeHelper {
         timeout: Duration,
         cancel: Option<&AuthCancel>,
     ) -> Result<Map<String, Value>, NativeError> {
+        // Clipboard exchanges include post-response exit waiting in their deadline.
+        // Other helper commands retain the existing independent exit grace.
+        let bounded_exit = matches!(
+            req.get("cmd").and_then(Value::as_str),
+            Some("clipboard_write" | "clipboard_clear")
+        );
         let line = serde_json::to_vec(&req);
         if let Some(Value::String(secret)) = req.remove("secret_b64") {
             wipe_string(secret);
@@ -989,7 +1160,7 @@ impl NativeHelper {
         let mut line =
             line.map_err(|err| NativeError::Protocol(format!("cannot encode: {err}")))?;
         line.push(b'\n');
-        let mut raw = exchange(program, line, timeout, cancel)?;
+        let mut raw = exchange(program, line, timeout, cancel, bounded_exit)?;
         let parsed = serde_json::from_slice::<Value>(&raw);
         wipe(&mut raw);
         let Ok(Value::Object(mut fields)) = parsed else {
@@ -1015,6 +1186,20 @@ impl NativeHelper {
             }
             _ => Err(NativeError::Protocol("the response has no ok flag".into())),
         }
+    }
+}
+
+fn check_route_token(token: &str) -> Result<(), NativeError> {
+    if token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Ok(())
+    } else {
+        Err(NativeError::InvalidArgument(
+            "a notification route must be 64 lowercase hex digits",
+        ))
     }
 }
 
@@ -1185,7 +1370,9 @@ fn exchange(
     mut line: Vec<u8>,
     timeout: Duration,
     cancel: Option<&AuthCancel>,
+    bounded_exit: bool,
 ) -> Result<Vec<u8>, NativeError> {
+    let started = Instant::now();
     if !program.is_file() {
         wipe(&mut line);
         return Err(NativeError::HelperMissing(program.to_path_buf()));
@@ -1239,9 +1426,19 @@ fn exchange(
         _ => RunningHelper::Own(Some(child)),
     };
     drop(state);
-    let result = match receiver.recv_timeout(timeout) {
+    let wait = if bounded_exit {
+        timeout.saturating_sub(started.elapsed())
+    } else {
+        timeout
+    };
+    let result = match receiver.recv_timeout(wait) {
         Ok(Wake::Response(Ok(response))) => {
-            helper.reap();
+            let grace = if bounded_exit {
+                timeout.saturating_sub(started.elapsed()).min(EXIT_GRACE)
+            } else {
+                EXIT_GRACE
+            };
+            helper.reap(grace);
             Ok(response)
         }
         Ok(Wake::Response(Err(err))) => {
@@ -1305,13 +1502,15 @@ impl RunningHelper<'_> {
     }
 
     /// Wait for the helper to exit after its response. Stop it after a grace time.
-    fn reap(&mut self) {
+    fn reap(&mut self, grace: Duration) {
         let start = Instant::now();
-        while start.elapsed() < EXIT_GRACE {
+        while start.elapsed() < grace {
             if self.exited() {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(
+                Duration::from_millis(10).min(grace.saturating_sub(start.elapsed())),
+            );
         }
         self.stop();
     }
@@ -1353,6 +1552,129 @@ fn stop(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(unix, feature = "desktop", feature = "vault"))]
+    #[test]
+    fn clipboard_transport_uses_stdin_and_returns_only_exact_write_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary fixture");
+        let path = dir.path().join("fake-clipboard-helper");
+        // A synthetic process only. It cannot import AppKit or touch a pasteboard.
+        std::fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import base64, json, sys
+assert len(sys.argv) == 1
+req = json.loads(sys.stdin.readline())
+if req['cmd'] == 'clipboard_write':
+    assert base64.b64decode(req['secret_b64']) == b'synthetic-copy-canary'
+    assert 'secret' not in req and 'text' not in req
+    print(json.dumps({'ok': True, 'change_count': 41, 'owner': req['owner']}))
+elif req['cmd'] == 'clipboard_clear':
+    assert req['change_count'] == 41 and len(req['owner']) == 32
+    assert 'secret_b64' not in req
+    print(json.dumps({'ok': True}))
+else:
+    raise AssertionError('unexpected fixture command')
+"#,
+        )
+        .expect("write fake helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("fixture permissions");
+        let client = NativeHelper::with_paths(&path, &path);
+        let (count, owner) = client
+            .clipboard_write("synthetic-copy-canary")
+            .expect("write transport");
+        assert_eq!(count, 41);
+        assert_eq!(owner.len(), 32);
+        client
+            .clipboard_clear_if_unchanged(count, &owner)
+            .expect("clear transport");
+    }
+
+    #[cfg(all(unix, feature = "desktop", feature = "vault"))]
+    #[test]
+    fn clipboard_missing_acknowledgement_attempts_cleanup_by_preissued_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary fixture");
+        let path = dir.path().join("fake-lost-ack-helper");
+        std::fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+req = json.loads(sys.stdin.readline())
+if req['cmd'] == 'clipboard_write':
+    assert 'secret_b64' in req
+    (root / 'owner').write_text(req['owner'])
+    print(json.dumps({'ok': True}))
+elif req['cmd'] == 'clipboard_clear':
+    assert req['owner'] == (root / 'owner').read_text()
+    assert 'change_count' not in req and 'secret_b64' not in req
+    (root / 'cleaned').write_text('yes')
+    print(json.dumps({'ok': True}))
+"#,
+        )
+        .expect("write fake helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("fixture permissions");
+        let client = NativeHelper::with_paths(&path, &path);
+        let err = client
+            .clipboard_write("synthetic-copy-canary")
+            .expect_err("missing write identity");
+        assert!(matches!(err, NativeError::Protocol(_)));
+        assert!(!format!("{err:?}").contains("synthetic-copy-canary"));
+        assert!(dir.path().join("cleaned").exists());
+    }
+
+    #[cfg(all(unix, feature = "desktop", feature = "vault"))]
+    #[test]
+    fn clipboard_deadline_includes_exit_wait_and_failed_ack_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary fixture");
+        let path = dir.path().join("fake-slow-exit-helper");
+        // Reply immediately, then remain alive. Each exchange must stop the process
+        // within its short injected budget instead of waiting the 2s exit grace.
+        std::fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys, time
+req = json.loads(sys.stdin.readline())
+print(json.dumps({'ok': True}), flush=True)
+time.sleep(0.8)
+"#,
+        )
+        .expect("write fake helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("fixture permissions");
+        let client = NativeHelper::with_paths(&path, &path).with_timeouts(Timeouts {
+            quick: Duration::from_millis(100),
+            ..Timeouts::default()
+        });
+        let started = Instant::now();
+        assert!(client.clipboard_write("synthetic-copy-canary").is_err());
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "clipboard exit and cleanup exceeded their injected budgets"
+        );
+    }
+
+    #[cfg(all(feature = "desktop", feature = "vault"))]
+    #[test]
+    fn clipboard_invalid_identity_and_oversized_value_start_no_helper() {
+        let client = NativeHelper::with_paths(
+            "/nonexistent/synthetic/helper",
+            "/nonexistent/synthetic/helper",
+        );
+        assert!(matches!(
+            client.clipboard_clear_if_unchanged(1, "bad owner"),
+            Err(NativeError::InvalidArgument(_))
+        ));
+        let value = "x".repeat(65_537);
+        let err = client.clipboard_write(&value).expect_err("oversized");
+        assert!(matches!(err, NativeError::Protocol(_)));
+        assert!(!format!("{err:?}").contains(&value));
+    }
 
     #[test]
     fn error_codes_round_trip() {

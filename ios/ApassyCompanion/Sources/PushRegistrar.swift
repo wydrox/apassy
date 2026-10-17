@@ -2,25 +2,23 @@ import ApassyVaultKit
 import UIKit
 import UserNotifications
 
-/// Notifications of questions through the relay (contract relay-questions-v1, section 14.2). The
-/// relay asks Apple to show a fixed text, "A question is waiting"; the notification holds no
-/// question. Opening it opens the Decisions tab (`onOpen`, through `RootModel`), and Decisions opens
-/// the newest question that waits (`QuestionsModel.notificationOpened`). The app makes no local
-/// notification of its own.
-///
-/// The permission is asked when the owner turns notifications on in Questions, never at launch.
-/// Each launch with notifications on asks iOS for the device token again, and the token goes to
-/// the relay (`PUT /v1/push/token`).
+/// Private aggregate question alerts through the relay. The payload identifies no request,
+/// vault, or agent. Opening an alert opens the refreshed Requests list. The app creates no local
+/// notification and never adds private metadata to an APNs payload.
+/// Permission is requested only when the owner enables notifications.
 @MainActor
 final class PushRegistrar: NSObject, PushPermission {
     static let shared = PushRegistrar()
 
     /// Where a new device token goes (`QuestionsModel.receivePushToken`).
     var onToken: ((Data) -> Void)?
-    /// The owner opened a notification: show the Decisions tab.
+    /// The owner opened a notification: show the Requests tab.
     var onOpen: (() -> Void)?
-    /// The owner opened a notification: open the newest question (`QuestionsModel`).
+    /// The owner opened a notification: refresh the Requests list (`QuestionsModel`).
     private var onOpenQuestion: (@MainActor () -> Void)?
+    private var onRegistrationFailure: (@MainActor (String) -> Void)?
+    private var onForeground: (@MainActor () -> Void)?
+    private var requestsVisible = false
 
     /// The `aps-environment` of this build: a debug build is signed for the development
     /// environment, TestFlight and the App Store for production.
@@ -30,6 +28,48 @@ final class PushRegistrar: NSObject, PushPermission {
         #else
             .production
         #endif
+    }
+
+    func authorization() async -> RequestNotificationAuthorization {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined: return .notDetermined
+        case .denied: return .denied
+        case .provisional, .ephemeral: return .quiet
+        case .authorized:
+            return settings.alertSetting == .enabled ? .allowed : .quiet
+        @unknown default: return .denied
+        }
+    }
+
+    func observeRegistrationFailures(_ handler: @escaping @MainActor (String) -> Void) {
+        onRegistrationFailure = handler
+    }
+
+    func observeForegroundRequests(_ handler: @escaping @MainActor () -> Void) {
+        onForeground = handler
+    }
+
+    func setRequestsVisible(_ visible: Bool) { requestsVisible = visible }
+
+    func deliveredRequestIdentifiers() async -> [String] {
+        await UNUserNotificationCenter.current().deliveredNotifications()
+            .filter { $0.request.trigger is UNPushNotificationTrigger }
+            .map { $0.request.identifier }
+    }
+
+    func removeDeliveredRequests(identifiers: [String]) {
+        guard !identifiers.isEmpty else { return }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
+    fileprivate func registrationFailed(_ error: any Error) {
+        onRegistrationFailure?(error.localizedDescription)
+    }
+
+    fileprivate func foregroundPresentation() -> UNNotificationPresentationOptions {
+        onForeground?()
+        return requestsVisible ? [] : [.banner, .sound]
     }
 
     func requestAuthorization() async -> Bool {
@@ -63,12 +103,12 @@ final class PushRegistrar: NSObject, PushPermission {
 }
 
 extension PushRegistrar: UNUserNotificationCenterDelegate {
-    /// In the foreground the Decisions list updates by itself; the banner still shows, so the owner
-    /// sees a question that arrives while another tab is open.
+    /// Refresh quietly only when the relevant unlocked list is visible. A detail, another tab,
+    /// or a hidden vault still gets a banner; the private payload cannot identify its request.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter, willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        await MainActor.run { PushRegistrar.shared.foregroundPresentation() }
     }
 
     nonisolated func userNotificationCenter(
@@ -103,7 +143,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: any Error) {
-        // No token (no network, or no aps-environment in a build without the capability): the
-        // questions still show while Apassy is open.
+        PushRegistrar.shared.registrationFailed(error)
     }
 }

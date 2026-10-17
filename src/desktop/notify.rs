@@ -18,11 +18,11 @@
 //! and the event stays in the inbox (N3). A notification is never an approval (N4):
 //! this module cannot make an owner proof.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -105,10 +105,12 @@ impl OwnerEvent {
         }
     }
 
-    /// The template of the notifier. It has two fixed templates; each of these events
-    /// waits for a decision of the owner, so each uses "waits for your decision".
+    /// Agent requests need a decision; suggestions have a nonurgent template.
     pub fn native(self) -> NotificationEvent {
-        NotificationEvent::ApprovalWaiting
+        match self {
+            Self::CorrectionProposed => NotificationEvent::Suggestion,
+            Self::QuestionWaiting | Self::CredentialRequested => NotificationEvent::ApprovalWaiting,
+        }
     }
 
     /// The name in the preview: the agent, or "Apassy" for a correction, which no agent
@@ -208,11 +210,88 @@ pub struct CenterView {
     pub deliveries: BTreeMap<EventKey, Delivery>,
 }
 
+/// A click is a navigation hint, never an owner decision. Exact events have been
+/// checked against the current unlocked vault and the current waiting items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationDestination {
+    Event {
+        key: EventKey,
+        vault_path: PathBuf,
+        session_epoch: [u8; 32],
+    },
+    /// Unknown, settled, locked, or another vault: show the list, select nothing.
+    Requests,
+}
+
+#[derive(Default)]
+struct RoutingState {
+    routes: BTreeMap<String, NotificationDestination>,
+    order: VecDeque<String>,
+    active: BTreeMap<EventKey, (PathBuf, String)>,
+    activations: VecDeque<String>,
+    removals: BTreeSet<String>,
+}
+
+impl RoutingState {
+    fn register(
+        &mut self,
+        path: PathBuf,
+        key: EventKey,
+        session_epoch: [u8; 32],
+    ) -> Option<String> {
+        let destination = NotificationDestination::Event {
+            key,
+            vault_path: path.clone(),
+            session_epoch,
+        };
+        if let Some((_, token)) = self.active.get(&key)
+            && self.routes.get(token) == Some(&destination)
+        {
+            return Some(token.clone());
+        }
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).ok()?;
+        let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        self.routes.insert(token.clone(), destination);
+        self.order.push_back(token.clone());
+        self.active.insert(key, (path, token.clone()));
+        while self.order.len() > 512 {
+            if let Some(old) = self.order.pop_front() {
+                self.routes.remove(&old);
+                self.active.retain(|_, (_, token)| *token != old);
+            }
+        }
+        Some(token)
+    }
+
+    fn settled(&mut self, path: &std::path::Path, live: &BTreeSet<EventKey>) -> Vec<String> {
+        let removed: Vec<_> = self
+            .active
+            .iter()
+            .filter_map(|(key, (event_path, _))| {
+                // Activity is history, not a waiting question. A vault switch removes
+                // its old waiting alerts, but must never settle events in the new vault.
+                (!matches!(key, EventKey::Activity(_))
+                    && (event_path.as_path() != path || !live.contains(key)))
+                .then_some(*key)
+            })
+            .collect();
+        for key in &removed {
+            if let Some((_, token)) = self.active.remove(key) {
+                self.removals.insert(token);
+            }
+        }
+        self.removals.iter().take(512).cloned().collect()
+    }
+}
+
 enum Job {
     Notify {
         key: EventKey,
         agent: String,
         event: NotificationEvent,
+        route: Option<String>,
+        waiting_key: Option<String>,
     },
     /// A vault that does not sync. It is not an inbox event: no delivery is kept.
     SyncStuck {
@@ -220,6 +299,9 @@ enum Job {
         vault: String,
         reason: SyncStuckReason,
     },
+    Remove(Vec<String>),
+    PollActivations,
+    Reconcile,
     Status,
     Authorize,
 }
@@ -231,6 +313,10 @@ struct Shared {
     wake: Mutex<bool>,
     woken: Condvar,
     on_change: Box<dyn Fn() + Send + Sync>,
+    routing: Mutex<RoutingState>,
+    vault: SharedVault,
+    approvals: Weak<ApprovalQueue>,
+    run_epoch: String,
     /// Also called when a run starts to wait: the questions waiter posts it through the
     /// relay ([`NotificationCenter::set_question_hook`]).
     question_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -267,6 +353,7 @@ pub struct NotificationCenter {
     /// Shared with [`Self::sync_notifier`]: a stop closes the channel for both.
     jobs: Arc<Mutex<Option<Sender<Job>>>>,
     watcher: Option<JoinHandle<()>>,
+    approvals: Arc<ApprovalQueue>,
 }
 
 impl std::fmt::Debug for NotificationCenter {
@@ -295,6 +382,18 @@ impl NotificationCenter {
             woken: Condvar::new(),
             on_change: Box::new(on_change),
             question_hook: Mutex::new(None),
+            routing: Mutex::new(RoutingState::default()),
+            vault: Arc::clone(&vault),
+            approvals: Arc::downgrade(&approvals),
+            // Run IDs belong to this process; persistent request/correction IDs do not.
+            run_epoch: {
+                let mut random = [0u8; 32];
+                if getrandom::fill(&mut random).is_ok() {
+                    crate::companion::crypto::hex(&random)
+                } else {
+                    format!("{}-{:?}", std::process::id(), std::time::SystemTime::now())
+                }
+            },
         });
         {
             let shared = Arc::clone(&shared);
@@ -331,6 +430,7 @@ impl NotificationCenter {
         let watcher = {
             let shared = Arc::clone(&shared);
             let jobs = sender.clone();
+            let approvals = Arc::clone(&approvals);
             std::thread::Builder::new()
                 .name("apassy-notify-watch".to_owned())
                 .spawn(move || watch_loop(&shared, &approvals, &vault, &jobs))
@@ -340,6 +440,7 @@ impl NotificationCenter {
             shared,
             jobs: Arc::new(Mutex::new(Some(sender))),
             watcher,
+            approvals,
         }
     }
 
@@ -384,6 +485,68 @@ impl NotificationCenter {
         self.view().deliveries.get(&key).cloned()
     }
 
+    /// Consume one click, re-reading live state before exposing an exact event.
+    /// UI must clear its previous selection for Requests, and must not substitute
+    /// the newest waiting item. No method here can approve or unlock a vault.
+    pub fn take_activation(&self) -> Option<NotificationDestination> {
+        let route = {
+            let mut routing = self
+                .shared
+                .routing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let token = routing.activations.pop_front()?;
+            routing.routes.get(&token).cloned()
+        };
+        Some(
+            route.map_or(NotificationDestination::Requests, |destination| {
+                self.revalidate_destination(&destination)
+            }),
+        )
+    }
+
+    /// Revalidate immediately before the UI consumes a queued navigation hint.
+    /// Paths and vault-local numeric IDs alone are insufficient: the session epoch
+    /// also changes when the same vault is locked and unlocked between UI frames.
+    pub fn revalidate_destination(
+        &self,
+        destination: &NotificationDestination,
+    ) -> NotificationDestination {
+        let NotificationDestination::Event {
+            key,
+            vault_path,
+            session_epoch,
+        } = destination
+        else {
+            return NotificationDestination::Requests;
+        };
+        let vault = self
+            .shared
+            .vault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let live = vault.as_ref().filter(|open| {
+            !open.is_locked() && open.path() == vault_path && open.epoch() == *session_epoch
+        });
+        let valid = live.is_some_and(|open| match *key {
+            EventKey::Run(id) => self.approvals.pending().iter().any(|run| run.id == id),
+            EventKey::Request(id) => open
+                .credential_requests(true)
+                .is_ok_and(|items| items.iter().any(|item| item.id == id)),
+            EventKey::Correction(id) => open
+                .corrections(true)
+                .is_ok_and(|items| items.iter().any(|item| item.id == id)),
+            EventKey::Activity(id) => open
+                .recent_activity(ACTIVITY_WINDOW)
+                .is_ok_and(|items| items.iter().any(|item| item.id == id)),
+        });
+        if valid {
+            destination.clone()
+        } else {
+            NotificationDestination::Requests
+        }
+    }
+
     /// Forget the deliveries of activity entries. Another vault has other entries with
     /// the same IDs (ADR 0013). Waiting runs keep theirs.
     pub fn forget_activity(&self) {
@@ -411,7 +574,15 @@ impl NotificationCenter {
     pub fn announce(&self, event: OwnerEvent, id: u64, agent: &str) {
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(jobs) = jobs.as_ref() {
-            queue_event(&self.shared, jobs, event, id, agent);
+            let path = self
+                .shared
+                .vault
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .filter(|open| !open.is_locked())
+                .map(|open| open.path().to_path_buf());
+            queue_event(&self.shared, jobs, event, id, agent, path.as_ref());
         }
     }
 
@@ -529,10 +700,24 @@ fn announce_owner_items(
             .iter()
             .find(|(request, _)| *request == id)
             .map_or("", |(_, agent)| agent.as_str());
-        queue_event(shared, jobs, OwnerEvent::CredentialRequested, id, agent);
+        queue_event(
+            shared,
+            jobs,
+            OwnerEvent::CredentialRequested,
+            id,
+            agent,
+            Some(&path),
+        );
     }
     for id in corrections {
-        queue_event(shared, jobs, OwnerEvent::CorrectionProposed, id, "");
+        queue_event(
+            shared,
+            jobs,
+            OwnerEvent::CorrectionProposed,
+            id,
+            "",
+            Some(&path),
+        );
     }
     OwnerMarks {
         path,
@@ -551,19 +736,6 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
     let mut owner_marks: Option<OwnerMarks> = None;
     loop {
         let pending = approvals.pending();
-        for run in &pending {
-            if notified_runs.insert(run.id) {
-                queue_event(
-                    shared,
-                    jobs,
-                    OwnerEvent::QuestionWaiting,
-                    run.id,
-                    &run.agent,
-                );
-            }
-        }
-        notified_runs.retain(|id| pending.iter().any(|run| run.id == *id));
-
         let (rows, owner_items) = {
             let guard = vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
@@ -596,6 +768,40 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
                 _ => (None, None),
             }
         };
+        // Reconcile only from a successful unlocked refresh. Locking or an I/O
+        // failure is not evidence that a waiting request has settled.
+        if let Some((path, items)) = owner_items.as_ref() {
+            let live: BTreeSet<_> = pending
+                .iter()
+                .map(|run| EventKey::Run(run.id))
+                .chain(items.requests.iter().map(|(id, _)| EventKey::Request(*id)))
+                .chain(items.corrections.iter().map(|id| EventKey::Correction(*id)))
+                .collect();
+            let removed = shared
+                .routing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .settled(path, &live);
+            if !removed.is_empty() {
+                let _ = jobs.send(Job::Remove(removed));
+            }
+            let _ = jobs.send(Job::Reconcile);
+        }
+        for run in &pending {
+            if notified_runs.insert(run.id) {
+                queue_event(
+                    shared,
+                    jobs,
+                    OwnerEvent::QuestionWaiting,
+                    run.id,
+                    &run.agent,
+                    owner_items.as_ref().map(|(path, _)| path),
+                );
+            }
+        }
+        notified_runs.retain(|id| pending.iter().any(|run| run.id == *id));
+
+        let _ = jobs.send(Job::PollActivations);
         owner_marks = owner_items.map(|(path, items)| {
             announce_owner_items(shared, jobs, owner_marks.take(), path, &items)
         });
@@ -616,6 +822,7 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
                                 EventKey::Activity(row.id),
                                 &row.agent_name,
                                 NotificationEvent::RequestBlocked,
+                                Some(&path),
                             );
                         }
                     }
@@ -629,15 +836,22 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
     }
 }
 
-fn queue_event(shared: &Shared, jobs: &Sender<Job>, event: OwnerEvent, id: u64, agent: &str) {
-    shared.update(|view| {
-        view.deliveries.insert(event.key(id), Delivery::Sending);
-    });
-    let _ = jobs.send(Job::Notify {
-        key: event.key(id),
-        agent: event.preview_name(agent),
-        event: event.native(),
-    });
+fn queue_event(
+    shared: &Shared,
+    jobs: &Sender<Job>,
+    event: OwnerEvent,
+    id: u64,
+    agent: &str,
+    path: Option<&PathBuf>,
+) {
+    queue_notification(
+        shared,
+        jobs,
+        event.key(id),
+        &event.preview_name(agent),
+        event.native(),
+        path,
+    );
 }
 
 fn queue_notification(
@@ -646,26 +860,93 @@ fn queue_notification(
     key: EventKey,
     agent: &str,
     event: NotificationEvent,
+    path: Option<&PathBuf>,
 ) {
     shared.update(|view| {
         view.deliveries.insert(key, Delivery::Sending);
     });
+    let route = {
+        let vault = shared.vault.lock().unwrap_or_else(PoisonError::into_inner);
+        vault
+            .as_ref()
+            .filter(|open| !open.is_locked() && path.is_some_and(|path| open.path() == path))
+            .and_then(|open| {
+                shared
+                    .routing
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .register(open.path().to_path_buf(), key, open.epoch())
+            })
+    };
+    let waiting_key = path
+        .filter(|_| !matches!(key, EventKey::Activity(_)))
+        .map(|path| waiting_key(path, key, &shared.run_epoch));
     let _ = jobs.send(Job::Notify {
         key,
         agent: preview_name(agent),
         event,
+        route,
+        waiting_key,
     });
 }
 
+fn waiting_key(path: &std::path::Path, key: EventKey, run_epoch: &str) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut input = path.as_os_str().as_bytes().to_vec();
+    input.push(0);
+    input.extend_from_slice(key.notification_id().as_bytes());
+    if matches!(key, EventKey::Run(_)) {
+        input.extend_from_slice(run_epoch.as_bytes());
+    }
+    crate::companion::crypto::sha256_hex(&input)
+}
+
+fn current_waiting_keys(shared: &Shared) -> Option<Vec<String>> {
+    let guard = shared.vault.lock().unwrap_or_else(PoisonError::into_inner);
+    let open = guard.as_ref().filter(|open| !open.is_locked())?;
+    let requests = open.credential_requests(true).ok()?;
+    let corrections = open.corrections(true).ok()?;
+    let approvals = shared.approvals.upgrade()?;
+    let mut keys: Vec<_> = approvals
+        .pending()
+        .iter()
+        .map(|run| EventKey::Run(run.id))
+        .chain(requests.iter().map(|item| EventKey::Request(item.id)))
+        .chain(corrections.iter().map(|item| EventKey::Correction(item.id)))
+        .map(|key| waiting_key(open.path(), key, &shared.run_epoch))
+        .collect();
+    keys.sort();
+    (keys.len() <= 512).then_some(keys)
+}
+
 fn send_loop(shared: &Shared, helper: &NativeHelper, jobs: &Receiver<Job>) {
+    let mut reconciled = None;
     while let Ok(job) = jobs.recv() {
         if shared.stop.load(Ordering::SeqCst) {
             return;
         }
         match job {
-            Job::Notify { key, agent, event } => {
-                let result = Notification::new(&key.notification_id(), &agent, event)
-                    .and_then(|notification| helper.notify(&notification));
+            Job::Notify {
+                key,
+                agent,
+                event,
+                route,
+                waiting_key,
+            } => {
+                // A delayed send can race settlement after a previous reconciliation.
+                // Force a new delivered-alert read on the next successful refresh.
+                if waiting_key.is_some() {
+                    reconciled = None;
+                }
+                let result = Notification::new(&key.notification_id(), &agent, event).and_then(
+                    |notification| {
+                        helper.notify_routed(
+                            &notification,
+                            route.as_deref(),
+                            waiting_key.as_deref(),
+                        )
+                    },
+                );
                 let denied = matches!(&result, Err(err) if err.code() == Some(HelperErrorCode::NotificationsDenied));
                 let (delivery, mut channel) = delivery_of(result);
                 if denied {
@@ -697,6 +978,64 @@ fn send_loop(shared: &Shared, helper: &NativeHelper, jobs: &Receiver<Job>) {
                     shared.update(|view| view.channel = channel);
                 }
             }
+            Job::Remove(ids) => {
+                if let Err(error) = helper.notify_remove(&ids) {
+                    shared.update(|view| {
+                        view.channel = ChannelState::Problem(format!(
+                            "Old notifications could not be cleared: {}",
+                            failure_text(&error)
+                        ))
+                    });
+                } else {
+                    let mut routing = shared
+                        .routing
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    for id in ids {
+                        routing.removals.remove(&id);
+                    }
+                }
+            }
+            Job::Reconcile => {
+                // Re-read at execution, so an announcement queued since the watcher
+                // snapshot cannot be removed as stale. One sender orders both calls.
+                match current_waiting_keys(shared) {
+                    Some(keys) if reconciled.as_ref() != Some(&keys) => {
+                        match helper.notify_reconcile(&keys) {
+                            Ok(()) => reconciled = Some(keys),
+                            Err(error) => shared.update(|view| {
+                                view.channel = ChannelState::Problem(format!(
+                                    "Old notifications could not be reconciled: {}",
+                                    failure_text(&error)
+                                ))
+                            }),
+                        }
+                    }
+                    Some(_) => {}
+                    None => reconciled = None,
+                }
+            }
+            Job::PollActivations => match helper.notify_activations() {
+                Ok(tokens) if !tokens.is_empty() => {
+                    let mut routing = shared
+                        .routing
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    routing.activations.extend(tokens);
+                    while routing.activations.len() > 128 {
+                        routing.activations.pop_front();
+                    }
+                    drop(routing);
+                    (shared.on_change)();
+                }
+                Ok(_) => {}
+                Err(error) => shared.update(|view| {
+                    view.channel = ChannelState::Problem(format!(
+                        "Notification opening is unavailable: {} Open Requests in Apassy.",
+                        failure_text(&error)
+                    ))
+                }),
+            },
             Job::Status => {
                 let channel = channel_of(helper.notify_status());
                 shared.update(|view| view.channel = channel);
@@ -781,6 +1120,54 @@ fn failure_text(err: &NativeError) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn waiting_identity_separates_vaults_and_process_local_run_ids() {
+        let a = std::path::Path::new("/synthetic/a.db");
+        let b = std::path::Path::new("/synthetic/b.db");
+        assert_ne!(
+            waiting_key(a, EventKey::Run(1), "launch-a"),
+            waiting_key(a, EventKey::Run(1), "launch-b")
+        );
+        assert_ne!(
+            waiting_key(a, EventKey::Request(1), "launch-a"),
+            waiting_key(b, EventKey::Request(1), "launch-a")
+        );
+        assert_eq!(
+            waiting_key(a, EventKey::Request(1), "launch-a"),
+            waiting_key(a, EventKey::Request(1), "launch-b")
+        );
+    }
+
+    #[test]
+    fn removal_retries_keep_the_exact_settled_capability_and_history() {
+        let mut routes = RoutingState::default();
+        let path = PathBuf::from("/synthetic/a.db");
+        let a = routes
+            .register(path.clone(), EventKey::Run(1), [1; 32])
+            .expect("entropy");
+        let b = routes
+            .register(path.clone(), EventKey::Run(2), [1; 32])
+            .expect("entropy");
+        let activity = routes
+            .register(path.clone(), EventKey::Activity(3), [1; 32])
+            .expect("entropy");
+        let live = BTreeSet::from([EventKey::Run(2)]);
+        assert_eq!(routes.settled(&path, &live), vec![a.clone()]);
+        assert_eq!(routes.settled(&path, &live), vec![a.clone()]);
+        assert_eq!(
+            routes.routes.get(&a),
+            Some(&NotificationDestination::Event {
+                key: EventKey::Run(1),
+                vault_path: path.clone(),
+                session_epoch: [1; 32]
+            })
+        );
+        assert!(routes.active.values().any(|(_, token)| token == &b));
+        assert!(routes.active.values().any(|(_, token)| token == &activity));
+        routes.removals.remove(&a);
+        assert!(routes.settled(&path, &live).is_empty());
+    }
+
     fn status(authorization: NotificationAuthorization) -> NotificationStatus {
         NotificationStatus {
             authorization,
@@ -833,7 +1220,14 @@ mod tests {
             let preview = Notification::new(&event.key(4).notification_id(), &name, event.native())
                 .expect("a valid preview");
             assert!(!preview.body().contains('\u{7}'), "{}", preview.body());
-            assert_eq!(preview.title(), "Approval waiting");
+            assert_eq!(
+                preview.title(),
+                if event == OwnerEvent::CorrectionProposed {
+                    "Suggestion available"
+                } else {
+                    "Approval waiting"
+                }
+            );
         }
         assert_eq!(
             OwnerEvent::QuestionWaiting.preview_name("Claude Code"),

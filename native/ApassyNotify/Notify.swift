@@ -49,6 +49,7 @@ let maxAgentNameCharacters = 40
 enum NotificationEvent: String {
     case approvalWaiting = "approval_waiting"
     case requestBlocked = "request_blocked"
+    case suggestion = "suggestion"
     case syncStuck = "sync_stuck"
 }
 
@@ -91,6 +92,8 @@ func preview(_ input: NotificationInput) -> (title: String, body: String) {
     switch input.event {
     case .approvalWaiting:
         return ("Approval waiting", "Agent \"\(agent)\" waits for your decision. Open Apassy to review.")
+    case .suggestion:
+        return ("Suggestion available", "Apassy has a suggestion to review when convenient.")
     case .requestBlocked:
         return ("Request blocked", "Apassy blocked a request from agent \"\(agent)\".")
     case .syncStuck:
@@ -101,7 +104,7 @@ func preview(_ input: NotificationInput) -> (title: String, body: String) {
 
 /// The fields that a `notify` or `preview` request can have. Only a
 /// `sync_stuck` request has `reason`.
-let notifyFields: Set<String> = ["cmd", "id", "event", "agent", "reason"]
+let notifyFields: Set<String> = ["cmd", "id", "event", "agent", "reason", "route", "waiting_key"]
 
 /// The event, the agent name, and the reason of a request, checked.
 func notificationInput(_ request: Request) throws -> NotificationInput {
@@ -290,7 +293,18 @@ func handlePreview(_ request: Request) throws -> Fields {
 /// Never asks for permission (see the note at the top of this file).
 func handleNotify(_ request: Request) throws -> Fields {
     let id = try request.identifier("id")
-    let text = preview(try notificationInput(request))
+    let input = try notificationInput(request)
+    let text = preview(input)
+    let route: String?
+    if request.fields["route"] != nil {
+        let token = try request.string("route")
+        guard validRouteToken(token) else {
+            throw HelperError(.invalidRequest, "Invalid local notification route.")
+        }
+        route = token
+    } else {
+        route = nil
+    }
     let center = try checkedInNotificationCenter()
     guard let settings = currentSettings(center) else {
         throw HelperError(.failed, "The notification settings did not arrive in time.")
@@ -306,8 +320,23 @@ func handleNotify(_ request: Request) throws -> Fields {
     content.title = text.title
     content.body = text.body
     content.threadIdentifier = "apassy-events"
-    content.sound = .default
-    let notification = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+    if input.event == .suggestion {
+        content.interruptionLevel = .passive
+    } else {
+        content.sound = .default
+    }
+    if let route { content.userInfo["route"] = route }
+    if request.fields["waiting_key"] != nil {
+        let key = try request.string("waiting_key")
+        guard validRouteToken(key), input.event == .approvalWaiting || input.event == .suggestion else {
+            throw HelperError(.invalidRequest, "Invalid waiting notification key.")
+        }
+        content.userInfo["waiting_key"] = key
+    }
+    // Capabilities also scope OS identifiers, so a retry removing settled A can
+    // never remove a newer alert B whose vault-local numeric ID was reused.
+    let deliveredID = route ?? id
+    let notification = UNNotificationRequest(identifier: deliveredID, content: content, trigger: nil)
 
     let done = DispatchSemaphore(value: 0)
     let box = ResultBox<Error?>()
@@ -328,7 +357,7 @@ func handleNotify(_ request: Request) throws -> Fields {
 
     var fields = statusFields(settings)
     fields["ok"] = true
-    fields["delivered"] = delivered(center, id: id)
+    fields["delivered"] = delivered(center, id: deliveredID)
     return fields
 }
 

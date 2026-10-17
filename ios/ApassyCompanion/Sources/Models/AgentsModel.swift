@@ -116,7 +116,8 @@ final class AgentsModel {
     init(
         service: any VaultService, signers: any AnswerSigners,
         registeredKey: @escaping @MainActor (_ vaultID: String, _ team: String) -> Data? = { _, _ in nil },
-        keys: AgentKeys = .none, now: @escaping @MainActor () -> Date = { Date() }, retryInterval: Duration = .seconds(2),
+        keys: AgentKeys = .none, now: @escaping @MainActor () -> Date = { Date() },
+        retryInterval: Duration = .seconds(2),
         actionWait: Int = 25
     ) {
         self.service = service
@@ -178,8 +179,8 @@ final class AgentsModel {
         return nil
     }
 
-    /// The agents that are connected (not disconnected), for "4 connected".
-    var connectedCount: Int { sections.flatMap(\.agents).filter { !$0.agent.revoked }.count }
+    /// All listed agents, including revoked and stale reports. This is not live connectivity.
+    var agentCount: Int { sections.flatMap(\.agents).count }
 
     /// The agent without the exceptions whose removal its Mac applied, until that Mac reports again.
     private func visible(_ agent: FeedAgent, vaultID: String, mac: FeedMac) -> FeedAgent {
@@ -366,7 +367,10 @@ final class AgentsModel {
     /// The results of the removals of `entry` that ended, for the lines under its exceptions.
     func results(of entry: AgentEntry) -> [(removal: FeedRemoval, state: Removal)] {
         removals
-            .filter { $0.key.vaultID == entry.vaultID && $0.key.macDevice == entry.mac.device && $0.key.agent == entry.agent.id }
+            .filter {
+                $0.key.vaultID == entry.vaultID && $0.key.macDevice == entry.mac.device
+                    && $0.key.agent == entry.agent.id
+            }
             .map { (removal: $0.key, state: $0.value) }
             .sorted { $0.removal.item < $1.removal.item }
     }
@@ -462,7 +466,8 @@ final class AgentsModel {
         } catch CompanionKeyError.biometryChanged {
             guard started == generation else { return }
             removals[removal] = .failed(
-                "Face ID changed on this iPhone, so Apassy made a new answer key. On a Mac, remove this iPhone in Settings › Devices, then connect it again. Remove the exception on the Mac for now.")
+                "Face ID changed on this iPhone, so Apassy made a new answer key. On a Mac, remove this iPhone in Settings › Devices, then connect it again. Remove the exception on the Mac for now."
+            )
             // A new key for this team only: the rows of the other vaults keep theirs.
             _ = try? signers.renew(team: entry.teamID)
             return
@@ -622,10 +627,10 @@ enum AgentsText {
         guard let at = mac.generatedAt else { return "From \(mac.name)" }
         let seconds = Int64(now.timeIntervalSince1970) - at
         let when: String =
-            if seconds < 60 { "just now" }
-            else if seconds < 3600 { "\(seconds / 60) min ago" }
-            else if seconds < 86400 { seconds / 3600 == 1 ? "1 hour ago" : "\(seconds / 3600) hours ago" }
-            else { seconds / 86400 == 1 ? "1 day ago" : "\(seconds / 86400) days ago" }
+            if seconds < 60 { "just now" } else if seconds < 3600 { "\(seconds / 60) min ago" } else if seconds < 86400
+            { seconds / 3600 == 1 ? "1 hour ago" : "\(seconds / 3600) hours ago" } else {
+                seconds / 86400 == 1 ? "1 day ago" : "\(seconds / 86400) days ago"
+            }
         return "From \(mac.name), \(when)"
     }
 
@@ -674,7 +679,8 @@ enum AgentsText {
     static func staleNote(_ mac: FeedMac) -> String {
         guard let at = mac.generatedAt else { return "\(mac.name) has not reported yet." }
         let date = Date(timeIntervalSince1970: TimeInterval(at))
-        return "\(mac.name) has not reported since \(date.formatted(.dateTime.month(.wide).day())). Open Apassy on it to update this list."
+        return
+            "\(mac.name) has not reported since \(date.formatted(.dateTime.month(.wide).day())). Open Apassy on it to update this list."
     }
 
     /// The name of a credential of the feed: the title on this iPhone, else the Mac's title "not on

@@ -93,6 +93,13 @@ pub enum OwnerAction {
     /// Copy the current code of one one-time password of one item. The app computes the
     /// code itself. The seed never leaves the session.
     CopyCode { item_id: u64, field: String },
+    /// Copy one ordinary secret field after a fresh local owner check. The proof names
+    /// its exact revision; it never contains the value or authorizes an agent read.
+    CopyField {
+        item_id: u64,
+        field: String,
+        revision: u64,
+    },
     /// Give the username and the password of one login to the browser, for one site
     /// (ADR 0021). `login` is the title of the login as the owner saw it, and `origin` is
     /// the origin of the page, for example `https://github.com`.
@@ -100,6 +107,14 @@ pub enum OwnerAction {
         item_id: u64,
         login: String,
         origin: String,
+    },
+    /// Replace a password for an exact site/account/revision. No secret is in the proof.
+    UpdateLogin {
+        item_id: u64,
+        login: String,
+        username: String,
+        origin: String,
+        revision: u64,
     },
     /// Add a login that the owner typed on a page (ADR 0021). The password is not in the
     /// action: it waits in the app while the dialog is open.
@@ -308,8 +323,14 @@ impl OwnerAction {
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
             Self::ShowCode { .. } => "show a one-time code".to_owned(),
             Self::CopyCode { .. } => "copy a one-time code".to_owned(),
+            Self::CopyField { .. } => "copy a secret field to the clipboard".to_owned(),
             Self::FillLogin { login, origin, .. } => format!(
                 "fill \"{}\" on {}",
+                short_device_name(login),
+                short_site(origin)
+            ),
+            Self::UpdateLogin { login, origin, .. } => format!(
+                "update the password of \"{}\" for {}",
                 short_device_name(login),
                 short_site(origin)
             ),

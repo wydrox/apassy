@@ -93,14 +93,18 @@ enum Decisions {
         namesVaults: Bool = false, now: Date
     ) -> [WaitingDecision] {
         let at = Int64(now.timeIntervalSince1970)
-        let open = questions.filter { $0.state == .open && $0.expiresAt > at }
+        let open = questions.filter {
+            $0.state == .open && $0.settle == nil && $0.answered == nil && $0.expiresAt > at
+        }
         var rows = open.map { question in
             WaitingDecision(
                 source: .question(question), createdAt: Date(timeIntervalSince1970: TimeInterval(question.createdAt)),
                 deadline: Date(timeIntervalSince1970: TimeInterval(question.expiresAt)),
                 vault: namesVaults ? question.vaultLine : nil)
         }
-        for run in runs where !open.contains(where: { shows($0, run, pairedMac: pairedMac) }) {
+        for run in runs where !questions.contains(where: {
+            $0.state == .open && $0.expiresAt > at && shows($0, run, pairedMac: pairedMac)
+        }) {
             var created: Date?
             var deadline: Date?
             if let fetchedAt, let waited = run.waitingSeconds {

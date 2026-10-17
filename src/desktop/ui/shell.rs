@@ -23,6 +23,16 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let pending = watch_approvals(app, &ctx);
     #[cfg(not(feature = "vault"))]
     let pending = ();
+    #[cfg(feature = "vault")]
+    if let Some(destination) = app.ui.notification_destination.take() {
+        let destination = app.owner.notifications.as_ref().map_or(
+            crate::desktop::notify::NotificationDestination::Requests,
+            |center| center.revalidate_destination(&destination),
+        );
+        super::decisions::route_notification(app, destination);
+    }
+    #[cfg(all(feature = "vault", target_os = "macos"))]
+    crate::desktop::native_menu::process(app, &ctx);
     shortcuts(app, &ctx);
     let columns = Columns::of(app, ctx.content_rect().width());
     if !columns.narrow {
@@ -226,6 +236,16 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
         if app.place.is_credentials() && app.selected_item_id.is_some() {
             super::items::toggle_masking(app, ctx);
         }
+    } else if matches!(app.place, Place::Folder(_))
+        && !ctx.text_edit_focused()
+        && kit::shortcut(ctx, Modifiers::COMMAND, Key::Z)
+    {
+        super::folders::undo_move(app);
+    } else if matches!(app.place, Place::Folder(_))
+        && !ctx.text_edit_focused()
+        && kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::M)
+    {
+        super::folders::open_move_many(app);
     } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::N) {
         app.show_credentials();
         app.ui.sheet = Some(Sheet::NewCredential);
@@ -358,6 +378,12 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::NewCredential => super::new_credential::sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::MoveToFolder { item_id } => super::folders::move_sheet(app, ctx, item_id),
+        #[cfg(feature = "vault")]
+        Sheet::MoveItemsToFolder { item_ids } => {
+            super::folders::move_many_sheet(app, ctx, &item_ids)
+        }
+        #[cfg(feature = "vault")]
+        Sheet::MoveFolder { uuid } => super::folders::move_folder_sheet(app, ctx, &uuid),
         #[cfg(feature = "vault")]
         Sheet::NewFolder { parent } => {
             super::folders::new_folder_sheet(app, ctx, parent.as_deref())

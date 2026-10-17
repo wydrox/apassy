@@ -794,3 +794,423 @@ fn settings_show_the_browser_extension_and_the_last_request() {
     let _ = now(&ask(&mut app, &ctx, Command::Status));
     assert!(app.browser.last_seen.is_some(), "a request counts as seen");
 }
+
+fn update_login(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    item: u64,
+    url: &str,
+    username: &str,
+) -> Receiver<Response> {
+    ask(
+        app,
+        ctx,
+        Command::Update {
+            url: url.to_owned(),
+            item,
+            username: username.to_owned(),
+            password: crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
+        },
+    )
+}
+
+#[test]
+fn field_suggestions_filter_metadata_without_an_owner_check() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let alice = add_login(
+        &mut app,
+        "Example Alice",
+        "alice@example.test",
+        &["example.test"],
+    );
+    add_login(
+        &mut app,
+        "Example Bob",
+        "bob@example.test",
+        &["example.test"],
+    );
+    add_login(
+        &mut app,
+        "Other Alice",
+        "alice@example.test",
+        &["other.test"],
+    );
+    let response = now(&ask(
+        &mut app,
+        &ctx,
+        Command::Suggestions {
+            url: "https://example.test/login".to_owned(),
+            username: " ALI ".to_owned(),
+        },
+    ));
+    assert!(response.ok);
+    assert!(app.owner.check.is_none());
+    let packet = serde_json::to_value(&response).unwrap();
+    let Data::Logins { logins, .. } = response.data else {
+        panic!("no metadata");
+    };
+    assert_eq!(
+        logins.iter().map(|row| row.item).collect::<Vec<_>>(),
+        vec![alice]
+    );
+    let keys: Vec<_> = packet["data"]["logins"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["has_totp", "item", "title", "username"]);
+    assert!(!packet.to_string().contains(PASSWORD));
+}
+
+#[test]
+fn update_requires_exact_account_and_preserves_unrelated_fields_and_passkey() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let item = app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            let item = vault
+                .add(crate::vault::ItemDraft {
+                    title: "Synthetic login".to_owned(),
+                    kind: CredentialKind::Login,
+                    notes: "Keep notes".to_owned(),
+                    tags: vec!["keep-tag".to_owned()],
+                    fields: vec![
+                        crate::vault::Field {
+                            name: "username".to_owned(),
+                            value: crate::vault::SecretValue::new("alice".to_owned()),
+                            secret: false,
+                        },
+                        crate::vault::Field {
+                            name: "password".to_owned(),
+                            value: crate::vault::SecretValue::new(PASSWORD.to_owned()),
+                            secret: true,
+                        },
+                        crate::vault::Field {
+                            name: "website".to_owned(),
+                            value: crate::vault::SecretValue::new(
+                                "https://example.test/path".to_owned(),
+                            ),
+                            secret: false,
+                        },
+                        crate::vault::Field {
+                            name: crate::desktop::owner_store::detail_field_name("OTP"),
+                            value: crate::vault::SecretValue::new(
+                                "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP".to_owned(),
+                            ),
+                            secret: true,
+                        },
+                        crate::vault::Field {
+                            name: crate::desktop::owner_store::detail_field_name("Extra"),
+                            value: crate::vault::SecretValue::new("keep-secret-detail".to_owned()),
+                            secret: true,
+                        },
+                    ],
+                })
+                .unwrap();
+            vault
+                .create_passkey(crate::vault::PasskeyCreate {
+                    rp_id: "example.test",
+                    user_handle: &[7; 16],
+                    user_name: "alice",
+                    user_display_name: "Alice",
+                    client_data_hash: &[1; 32],
+                    algorithms: &[],
+                    exclude: &[],
+                    target: crate::vault::PasskeyTarget::Attach {
+                        item_id: item.id,
+                        revision: item.revision,
+                    },
+                })
+                .unwrap();
+            item.id
+        })
+        .unwrap();
+    let (before, passkey, fields) = app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            let details = vault.details(item).unwrap();
+            let fields: Vec<_> = details
+                .fields
+                .iter()
+                .filter(|field| field.name != "password")
+                .map(|field| {
+                    (
+                        field.name.clone(),
+                        field.secret,
+                        vault.reveal(item, &field.name).unwrap().expose().to_owned(),
+                    )
+                })
+                .collect();
+            (details, vault.passkey_info(item).unwrap(), fields)
+        })
+        .unwrap();
+    let other = add_login(&mut app, "Other account", "bob", &["example.test"]);
+    let answer = update_login(&mut app, &ctx, item, "https://example.test/change", "alice");
+    assert!(answer.try_recv().is_err());
+    let request = &app.owner.check.as_ref().unwrap().request;
+    assert!(request.needs_live_ticket());
+    assert!(matches!(request, OwnerRequest::UpdateLogin { item_id, .. } if *item_id == item));
+    assert!(!request.describe().contains(OTHER_PASSWORD));
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    let response = now(&answer);
+    assert!(response.ok, "{response:?}");
+    assert!(matches!(response.data, Data::Updated { item: updated, .. } if updated == item));
+    assert!(!json(&response).contains(OTHER_PASSWORD));
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            let after = vault.details(item).unwrap();
+            assert_eq!(after.summary.revision, before.summary.revision + 1);
+            assert_eq!(after.summary.title, before.summary.title);
+            assert_eq!(after.notes, before.notes);
+            assert_eq!(after.tags, before.tags);
+            assert_eq!(after.fields, before.fields);
+            for (field, secret, value) in fields {
+                assert_eq!(vault.reveal(item, &field).unwrap().expose(), value);
+                assert_eq!(
+                    after
+                        .fields
+                        .iter()
+                        .find(|f| f.name == field)
+                        .unwrap()
+                        .secret,
+                    secret
+                );
+            }
+            let after_key = vault.passkey_info(item).unwrap();
+            assert_eq!(after_key.credential_id, passkey.credential_id);
+            assert_eq!(after_key.user_handle, passkey.user_handle);
+        })
+        .unwrap();
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test/", item),
+        OTHER_PASSWORD
+    );
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test/", other),
+        PASSWORD
+    );
+}
+
+#[test]
+fn update_refuses_wrong_site_account_stale_item_and_cancelled_requests() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let item = add_login(&mut app, "Example", "alice", &["example.test"]);
+    for (url, username) in [
+        ("https://other.test", "alice"),
+        ("https://example.test", "ALICE"),
+    ] {
+        assert_eq!(
+            now(&update_login(&mut app, &ctx, item, url, username)).code,
+            "no_match"
+        );
+        assert!(app.owner.check.is_none());
+    }
+    let answer = update_login(&mut app, &ctx, item, "https://example.test", "alice");
+    app.close_owner_check(Some(&ctx));
+    assert_eq!(now(&answer).code, "cancelled");
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test", item),
+        PASSWORD
+    );
+
+    let answer = update_login(&mut app, &ctx, item, "https://example.test", "alice");
+    // A separate edit during the owner check invalidates the approved revision.
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            let current = vault.details(item).unwrap();
+            let fields = current
+                .fields
+                .iter()
+                .map(|field| crate::vault::Field {
+                    name: field.name.clone(),
+                    secret: field.secret,
+                    value: vault.reveal(item, &field.name).unwrap(),
+                })
+                .collect();
+            vault
+                .update(
+                    item,
+                    current.summary.revision,
+                    crate::vault::ItemDraft {
+                        title: current.summary.title,
+                        kind: current.summary.kind,
+                        notes: "changed during approval".to_owned(),
+                        tags: current.tags,
+                        fields,
+                    },
+                )
+                .unwrap();
+        })
+        .unwrap();
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    assert_eq!(now(&answer).code, "stale_item");
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test", item),
+        PASSWORD
+    );
+}
+
+#[test]
+fn a_fill_proof_cannot_authorize_a_password_update() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let item = add_login(&mut app, "Example", "alice", &["example.test"]);
+    let page = Page::parse("https://example.test").unwrap();
+    let revision = app.owner_ui.session.details(item).unwrap().revision;
+    let proof = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::FillLogin {
+                item_id: item,
+                login: "Example".to_owned(),
+                origin: page.origin(),
+            },
+            OwnerCheck::passphrase(PASS),
+        )
+        .unwrap();
+    let err = app
+        .owner_ui
+        .session
+        .update_page_login(
+            item,
+            revision,
+            "alice",
+            crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
+            &page,
+            proof,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "owner_check_required");
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test", item),
+        PASSWORD
+    );
+}
+
+#[test]
+fn field_suggestions_filter_before_the_limit() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    for index in 0..crate::browser::wire::MAX_LOGINS {
+        add_login(
+            &mut app,
+            &format!("A account {index:03}"),
+            "other",
+            &["example.test"],
+        );
+    }
+    let selected = add_login(&mut app, "Z account", "needle", &["example.test"]);
+    let response = now(&ask(
+        &mut app,
+        &ctx,
+        Command::Suggestions {
+            url: "https://example.test".to_owned(),
+            username: "need".to_owned(),
+        },
+    ));
+    let Data::Logins { logins, .. } = response.data else {
+        panic!("no metadata");
+    };
+    assert_eq!(logins.len(), 1);
+    assert_eq!(logins[0].item, selected);
+}
+
+#[test]
+fn update_proof_names_the_exact_item_site_account_and_revision() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let item = add_login(&mut app, "Example", "alice", &["example.test"]);
+    let page = Page::parse("https://example.test").unwrap();
+    let revision = app.owner_ui.session.details(item).unwrap().revision;
+    let expected = OwnerAction::UpdateLogin {
+        item_id: item,
+        login: "Example".to_owned(),
+        username: "alice".to_owned(),
+        origin: page.origin(),
+        revision,
+    };
+    for mismatch in 0..4 {
+        let mut action = expected.clone();
+        if let OwnerAction::UpdateLogin {
+            item_id,
+            username,
+            origin,
+            revision,
+            ..
+        } = &mut action
+        {
+            match mismatch {
+                0 => *item_id += 1,
+                1 => *username = "bob".to_owned(),
+                2 => *origin = "https://other.test".to_owned(),
+                _ => *revision += 1,
+            }
+        }
+        let proof = app
+            .owner_gate()
+            .authorize(action, OwnerCheck::passphrase(PASS))
+            .unwrap();
+        let error = app
+            .owner_ui
+            .session
+            .update_page_login(
+                item,
+                revision,
+                "alice",
+                crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
+                &page,
+                proof,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "owner_check_required");
+    }
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test", item),
+        PASSWORD
+    );
+}
+
+#[test]
+fn an_update_that_loses_its_browser_ticket_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let item = add_login(&mut app, "Example", "alice", &["example.test"]);
+    let gone = crate::desktop::owner_socket::PeerGone::default();
+    let (reply, answer) = mpsc::channel();
+    app.handle_browser_watched(
+        Envelope {
+            request: Command::Update {
+                url: "https://example.test".to_owned(),
+                item,
+                username: "alice".to_owned(),
+                password: crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
+            },
+            reply,
+        },
+        Some(gone.clone()),
+        &ctx,
+    );
+    gone.set();
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    assert_eq!(now(&answer).code, "cancelled");
+    assert!(app.browser_pending_is_empty());
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test", item),
+        PASSWORD
+    );
+}

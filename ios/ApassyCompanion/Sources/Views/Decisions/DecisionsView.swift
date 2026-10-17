@@ -25,24 +25,25 @@ enum DecisionRoute: Hashable {
 /// vault whose questions are not open shows one row with Unlock.
 struct DecisionsView: View {
     @Environment(RootModel.self) private var root: RootModel?
+    @Environment(\.scenePhase) private var scenePhase
     let questions: QuestionsModel?
     let companion: AppModel
     var onSettings: (() -> Void)?
+    /// Parent tab selection and sheet presentation/dismissal gate.
+    var isPresented = false
     @State private var path: [DecisionRoute] = []
     @State private var showsConnect = false
     @State private var showsMac = false
+    @State private var localSheetPresented = false
 
     private var session: SessionModel? {
         if case .paired(let session) = companion.phase { return session }
         return nil
     }
 
-    /// Whether a pushed screen shows something that still waits for an answer.
-    private func opensWaiting(_ route: DecisionRoute, questions: QuestionsModel) -> Bool {
-        switch route {
-        case .question(let qid): questions.waiting.contains { $0.qid == qid }
-        case .run(let run): session?.runs.contains { $0.id == run.id } ?? false
-        }
+    private var requestsListVisible: Bool {
+        scenePhase == .active && path.isEmpty && !showsConnect && !showsMac && !localSheetPresented
+            && questions?.unlockPrompt == nil && session?.actionError == nil
     }
 
     var body: some View {
@@ -51,7 +52,7 @@ struct DecisionsView: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 list(now: context.date)
             }
-            .navigationTitle("Decisions")
+            .navigationTitle("Requests")
             .toolbar { toolbar }
             .navigationDestination(for: DecisionRoute.self) { route in
                 switch route {
@@ -68,35 +69,49 @@ struct DecisionsView: View {
             }
         }
         .sheet(isPresented: $showsConnect, onDismiss: {
+            localSheetPresented = false
             let opensCompanion = questions?.attach == .companion
             questions?.dismissAttach()
             if opensCompanion { root?.openPreparedCompanion() }
         }) {
-            if let questions { ConnectQuestionsView(model: questions) }
+            if let questions {
+                ConnectQuestionsView(model: questions)
+                    .onAppear { localSheetPresented = true }
+            }
         }
-        .sheet(isPresented: $showsMac) {
+        .sheet(isPresented: $showsMac, onDismiss: { localSheetPresented = false }) {
             ApprovalsView(app: companion)
                 .presentationDragIndicator(.visible)
+                .onAppear { localSheetPresented = true }
         }
         // The passphrase of a locked vault, for its questions only: the vault on screen stays.
         .sheet(
             item: Binding(get: { questions?.unlockPrompt }, set: { questions?.unlockPrompt = $0 }),
-            onDismiss: { questions?.unlockPromptClosed() }
+            onDismiss: {
+                localSheetPresented = false
+                questions?.unlockPromptClosed()
+            }
         ) { locked in
-            if let questions { QuestionsUnlockSheet(model: questions, locked: locked) }
+            if let questions {
+                QuestionsUnlockSheet(model: questions, locked: locked)
+                    .onAppear { localSheetPresented = true }
+            }
         }
-        // The owner opened a notification: it holds no question, so open the newest one. Only on
-        // a free screen: never when the owner opened something while the list was read again, and
-        // never over a question or a run that still waits, which the owner may be about to answer.
+        .onAppear {
+            questions?.setRequestsPresented(isPresented)
+            questions?.setRequestsVisible(requestsListVisible)
+        }
+        .onDisappear { questions?.setRequestsVisible(false) }
+        .onChange(of: isPresented, initial: true) { _, presented in
+            questions?.setRequestsPresented(presented)
+        }
+        .onChange(of: requestsListVisible) { _, visible in questions?.setRequestsVisible(visible) }
+        // A generic push identifies no request. Return to the list and refresh it; picking a
+        // newer request could make an old alert appear to authorize something unrelated.
         .onChange(of: questions?.focusRequests ?? 0, initial: true) { _, requests in
             guard requests > 0, let questions else { return }
-            let before = path
-            Task {
-                let qid = await questions.takeFocus(stillFree: {
-                    path == before && !path.contains { opensWaiting($0, questions: questions) }
-                })
-                if let qid { path = [.question(qid)] }
-            }
+            path = []
+            Task { _ = await questions.takeFocus(stillFree: { true }) }
         }
         .alert(
             "Apassy could not finish",
@@ -163,7 +178,7 @@ struct DecisionsView: View {
             }
             Section("Suggestions") { macPlace(.suggestions) }
             if !ended.isEmpty, let questions {
-                Section("Ended") {
+                Section("Recent") {
                     ForEach(ended) { question in
                         NavigationLink(value: DecisionRoute.question(question.qid)) {
                             EndedRow(model: questions, question: question)
@@ -285,17 +300,6 @@ struct DecisionsView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 if let questions {
-                    if questions.phase == .ready {
-                        Section {
-                            Toggle(
-                                "Notifications",
-                                isOn: Binding(
-                                    get: { questions.notificationsOn },
-                                    set: { on in Task { await questions.setNotifications(on) } }))
-                        } footer: {
-                            Text("A notification says only \u{201C}A question is waiting\u{201D}. Apple sees no question.")
-                        }
-                    }
                     if questions.canConnect {
                         Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
                     }

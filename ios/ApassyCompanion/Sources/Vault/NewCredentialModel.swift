@@ -26,6 +26,13 @@ final class NewCredentialModel {
 
         var id: Int { found.index }
 
+        var nameValidationMessage: String? {
+            let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty { return "Name is required." }
+            if name.utf8.count > 128 { return "Use a shorter name." }
+            return nil
+        }
+
         /// The identity of a row across detections, as the Mac's `row_key`: its line, its variable,
         /// and its detected title. A row that stays keeps its title and its checkbox.
         var key: String { "\(found.line ?? 0)|\(found.envName ?? "")|\(found.title)" }
@@ -57,6 +64,7 @@ final class NewCredentialModel {
     static let nothingFound =
         "Apassy found no credential in the text. Paste a secret, a KEY=value line, a .env file, a URL with a password, or an otpauth:// link."
 
+    private var initialFolder: String?
     let service: any VaultService
 
     /// The paste. Each change starts a new detection after `debounce`.
@@ -74,6 +82,8 @@ final class NewCredentialModel {
     /// The folders of the vault, depth first. Empty with a core without folders.
     private(set) var folders: [Folder] = []
     private(set) var isAdding = false
+    /// Destination of the completed submission, including nil for the top level.
+    private(set) var savedFolder: String?
     /// The message of a failed "Add".
     private(set) var error: String?
 
@@ -90,10 +100,14 @@ final class NewCredentialModel {
     init(service: any VaultService, folder: String?, debounce: Duration = .milliseconds(300)) {
         self.service = service
         self.folder = folder
+        initialFolder = folder
         self.debounce = debounce
     }
 
     // MARK: State for the sheet
+
+    var hasChanges: Bool { hasText || folder != initialFolder }
+    var preventsDismissal: Bool { isAdding || hasChanges }
 
     var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -105,13 +119,17 @@ final class NewCredentialModel {
 
     var keptCount: Int { rows.filter(\.keep).count }
 
-    var canAdd: Bool { !isAdding && hasText && keptCount > 0 }
+    var canAdd: Bool {
+        !isAdding && hasText && keptCount > 0 && !rows.contains { $0.keep && $0.nameValidationMessage != nil }
+    }
 
     /// "Add", or "Add 3" for several rows.
     var addLabel: String { keptCount > 1 ? "Add \(keptCount)" : "Add" }
 
     /// A text with no credential: the calm hint, not an error.
-    var showsNothingFound: Bool { hasText && isCurrent && !isDetecting && rows.isEmpty && detectError == nil }
+    var showsNothingFound: Bool {
+        hasText && isCurrent && !isDetecting && rows.isEmpty && detectError == nil
+    }
 
     /// The paste as the field shows it while it is not edited: one masked line for each row.
     var maskedText: String {
@@ -182,11 +200,13 @@ final class NewCredentialModel {
     // MARK: Choices
 
     func setKeep(_ keep: Bool, row id: Int) {
+        guard !isAdding else { return }
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
         rows[index].keep = keep
     }
 
     func setTitle(_ title: String, row id: Int) {
+        guard !isAdding else { return }
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
         rows[index].title = title
     }
@@ -206,10 +226,17 @@ final class NewCredentialModel {
 
     // MARK: Folders
 
-    /// Read the folders. A folder that another device deleted gives way to the top level.
+    /// Read the choices without replacing an explicit destination. Only an explicit lack of
+    /// folder capability clears the inherited destination for compatibility with older cores.
+    /// Missing folders and temporary read errors keep the owner's choice for recovery.
     func loadFolders() async {
-        folders = (try? await service.folders()) ?? []
-        if let folder, !folders.contains(where: { $0.uuid == folder }) { self.folder = nil }
+        do {
+            folders = try await service.folders()
+        } catch let error as VaultError where VaultModel.lacksFolders(error) {
+            folders = []
+            folder = nil
+            initialFolder = nil
+        } catch {}
     }
 
     // MARK: Add
@@ -223,8 +250,12 @@ final class NewCredentialModel {
         defer { isAdding = false }
         // The rows that the owner saw and checked. When the text changed since, the detection
         // below may give other rows: then nothing is added, and the owner checks the new rows.
+        let submittedText = text
+        let submittedFolder = folder
+        let submittedGeneration = generation
         let shown = rows.map { RowIdentity(index: $0.id, key: $0.key) }
         await detectNow()
+        guard generation == submittedGeneration else { return nil }
         guard rows.map({ RowIdentity(index: $0.id, key: $0.key) }) == shown else {
             if !rows.isEmpty { error = Self.rowsChanged }
             return nil
@@ -233,16 +264,26 @@ final class NewCredentialModel {
             error = rows.isEmpty ? (detectError ?? Self.nothingFound) : "Pick at least one credential."
             return nil
         }
+        if let invalid = rows.first(where: { $0.keep && $0.nameValidationMessage != nil }) {
+            error = invalid.nameValidationMessage
+            return nil
+        }
+        let submittedPick = pick
+        let submittedTitles = titles
         do {
-            let added = try await service.addPasted(text: text, folder: folder, pick: pick, titles: titles)
+            let added = try await service.addPasted(
+                text: submittedText, folder: submittedFolder, pick: submittedPick, titles: submittedTitles)
             error = nil
+            savedFolder = submittedFolder
             clear()
             await vault.didImport()
             return added
         } catch {
             self.error = error.localizedDescription
             // "The folder is gone": the menu shows the folders that are there.
-            if (error as? VaultError)?.code == .notFound { await loadFolders() }
+            if (error as? VaultError)?.code == .notFound {
+                folders = (try? await service.folders()) ?? folders
+            }
             return nil
         }
     }

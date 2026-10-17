@@ -364,3 +364,256 @@ fn the_paste_shows_masked_and_a_stripe_test_key_is_development() {
         assert!(!window.text.contains(secret), "{secret}: {}", window.text);
     }
 }
+
+/// Destination survives the Paste → Login transition and a hidden saved result is revealed.
+#[test]
+fn paste_destination_survives_manual_login_and_reveals_the_actual_result() {
+    use crate::contracts::CredentialKind;
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let a = folders::create(&mut app, None, "A").expect("A");
+    let b = folders::create(&mut app, None, "B").expect("B");
+    app.place = Place::Folder(Some(a.uuid));
+    let mut window = Window::new();
+    open_with(&mut app, &mut window, "");
+    Choices::set_folder(&window.ctx, Some(b.uuid.clone()));
+    window.click(&mut app, "Login");
+    assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: true }));
+    assert_eq!(app.add_form.kind, CredentialKind::Login);
+    assert_eq!(app.ui.create_folder.as_deref(), Some(b.uuid.as_str()));
+    app.add_form.name = "Synthetic account".to_owned();
+    app.add_form.username = "owner@example.com".to_owned();
+    app.add_form.website = "https://example.com/login".to_owned();
+    app.owner_ui.add_secrets.password = "EXAMPLE-password".to_owned();
+    app.search = "unrelated query".to_owned();
+    app.ui.credential_filter = crate::desktop::ui::items::Filter::Archived;
+    window.command_s(&mut app);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    let items = app.owner_ui.session.search("").expect("items");
+    assert_eq!(items.len(), 1);
+    let id = items[0].id;
+    assert_eq!(
+        app.owner_ui
+            .session
+            .with_vault(|v| v.item_folder(id))
+            .unwrap()
+            .unwrap(),
+        Some(b.uuid.clone())
+    );
+    assert_eq!(app.place, Place::Folder(Some(b.uuid)));
+    assert_eq!(app.selected_item_id, Some(id.to_string()));
+    assert!(app.search.is_empty());
+    assert_eq!(
+        app.ui.credential_filter,
+        crate::desktop::ui::items::Filter::All
+    );
+    assert!(window.text.contains("Synthetic account"));
+    assert!(!window.text.contains("EXAMPLE-password"));
+    assert!(app.owner.check.is_none());
+}
+
+#[test]
+fn deleted_create_destination_retains_manual_draft_and_does_not_redirect() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let b = folders::create(&mut app, None, "B").expect("B");
+    let mut window = Window::new();
+    open_with(&mut app, &mut window, "");
+    Choices::set_folder(&window.ctx, Some(b.uuid.clone()));
+    window.click(&mut app, "Login");
+    assert_eq!(app.ui.create_folder.as_deref(), Some(b.uuid.as_str()));
+    app.owner_ui
+        .session
+        .with_vault(|v| v.delete_folder(&b.uuid))
+        .unwrap()
+        .unwrap();
+    app.add_form.name = "Retained draft".to_owned();
+    app.add_form.username = "owner@example.com".to_owned();
+    app.owner_ui.add_secrets.password = "EXAMPLE-password".to_owned();
+    window.command_s(&mut app);
+    assert!(app.ui.sheet.is_some());
+    assert_eq!(app.add_form.name, "Retained draft");
+    assert_eq!(app.owner_ui.add_secrets.password, "EXAMPLE-password");
+    assert!(app.owner_ui.session.search("").unwrap().is_empty());
+    assert_eq!(app.ui.create_folder, Some(b.uuid));
+}
+
+#[test]
+fn twenty_known_ids_move_once_and_undo_without_leaving_source() {
+    use crate::desktop::model::ItemDraft;
+    use crate::desktop::owner_store::SecretForm;
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let source = folders::create(&mut app, None, "Source").expect("source");
+    let other = folders::create(&mut app, Some(&source.uuid), "Other").expect("other");
+    let dest = folders::create(&mut app, None, "Destination").expect("dest");
+    let mut originals = Vec::new();
+    let mut secrets = SecretForm::default();
+    secrets.token = "EXAMPLE-key".to_owned();
+    for index in 0..21 {
+        let original = if index == 20 {
+            dest.uuid.clone()
+        } else if index % 2 == 0 {
+            source.uuid.clone()
+        } else {
+            other.uuid.clone()
+        };
+        let item = app
+            .owner_ui
+            .session
+            .add_in_folder(
+                &ItemDraft {
+                    name: format!("Synthetic {index}"),
+                    ..Default::default()
+                },
+                &secrets,
+                Some(&original),
+            )
+            .expect("add");
+        originals.push((item.id, original));
+    }
+    app.place = Place::Folder(Some(source.uuid));
+    let context = app.place.clone();
+    let ids: Vec<_> = originals[..20].iter().map(|(id, _)| *id).collect();
+    let mut window = Window::new();
+    window.idle(&mut app);
+    window.click(&mut app, "Synthetic 0");
+    let command = |key, modifiers| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    window.frame(
+        &mut app,
+        vec![command(egui::Key::A, egui::Modifiers::COMMAND)],
+    );
+    window.idle(&mut app);
+    assert_eq!(app.ui.selected_items, ids.iter().copied().collect());
+    window.frame(
+        &mut app,
+        vec![command(
+            egui::Key::M,
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        )],
+    );
+    window.idle(&mut app);
+    assert_eq!(
+        app.ui.sheet,
+        Some(Sheet::MoveItemsToFolder {
+            item_ids: ids.clone()
+        })
+    );
+    window.click(&mut app, "Destination");
+    window.click(&mut app, "Move");
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(app.place, context);
+    assert_eq!(app.ui.move_undo.len(), 20);
+    for id in &ids {
+        assert_eq!(
+            app.owner_ui
+                .session
+                .with_vault(|v| v.item_folder(*id))
+                .unwrap()
+                .unwrap(),
+            Some(dest.uuid.clone())
+        );
+    }
+    window.click(&mut app, "Undo Move");
+    assert!(app.ui.move_undo.is_empty());
+    for (id, original) in originals {
+        assert_eq!(
+            app.owner_ui
+                .session
+                .with_vault(|v| v.item_folder(id))
+                .unwrap()
+                .unwrap(),
+            Some(original)
+        );
+    }
+    assert_eq!(app.place, context);
+}
+
+#[test]
+fn field_copy_starts_a_fresh_owner_check_without_revealing_or_using_clipboard() {
+    use crate::contracts::CredentialKind;
+    use crate::desktop::model::ItemDraft;
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::desktop::owner_store::SecretForm;
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let mut secrets = SecretForm::default();
+    secrets.password = "EXAMPLE-password".to_owned();
+    let item = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                name: "Synthetic login".to_owned(),
+                kind: CredentialKind::Login,
+                username: "owner@example.com".to_owned(),
+                ..Default::default()
+            },
+            &secrets,
+        )
+        .expect("login");
+    let revision = app.owner_ui.session.details(item.id).unwrap().revision;
+    app.select_item(item.id.to_string());
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.text.contains("Show"));
+    assert!(window.text.contains("Copy"));
+    assert!(
+        app.owner_ui
+            .session
+            .revealed_value(item.id, "password")
+            .is_none()
+    );
+    window.click(&mut app, "Copy");
+    assert!(
+        matches!(&app.owner.check.as_ref().expect("fresh check").request,
+        OwnerRequest::CopyField { item_id, field, revision: submitted }
+        if *item_id == item.id && field == "password" && *submitted == revision)
+    );
+    assert!(
+        app.owner_ui
+            .session
+            .revealed_value(item.id, "password")
+            .is_none()
+    );
+    assert!(!window.text.contains("EXAMPLE-password"));
+}
+
+#[test]
+fn visible_folder_more_menu_moves_a_subtree_and_reveals_its_new_ancestry() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let source = folders::create(&mut app, None, "Source").expect("source");
+    let child = folders::create(&mut app, Some(&source.uuid), "Child").expect("child");
+    let destination = folders::create(&mut app, None, "Destination").expect("destination");
+    app.place = Place::Folder(Some(source.uuid.clone()));
+    let mut window = Window::new();
+    window.click(&mut app, "More");
+    window.click(&mut app, "Move Folder…");
+    assert_eq!(
+        app.ui.sheet,
+        Some(Sheet::MoveFolder {
+            uuid: source.uuid.clone()
+        })
+    );
+    window.click(&mut app, "Destination");
+    window.click(&mut app, "Move");
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    let tree = folders::FolderTree::load(&app);
+    assert_eq!(
+        tree.get(&source.uuid).unwrap().parent.as_deref(),
+        Some(destination.uuid.as_str())
+    );
+    assert_eq!(
+        tree.get(&child.uuid).unwrap().parent.as_deref(),
+        Some(source.uuid.as_str())
+    );
+    assert!(app.ui.open_folders.contains(&destination.uuid));
+    assert_eq!(app.place, Place::Folder(Some(source.uuid)));
+}

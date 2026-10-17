@@ -10,7 +10,7 @@
 //   vault        "unlocked" | "locked" | "none"
 //   logins       [{ item, title, username, password, site }]; site is a host
 //   loginsCode   an error code to answer to logins
-//   fill         { code: "ok" | "cancelled" | ..., delayMs, origin }
+//   fill         { code: "ok" | "cancelled" | ..., delayMs, origin, holdReply }
 //   save         { code: "ok" | "exists" | "cancelled" | ..., delayMs, item, message }
 //   create       { code: "ok" | "cancelled" | ..., delayMs, item, origin, password }
 //
@@ -50,6 +50,8 @@ const FIELDS = {
   status: {},
   show: {},
   logins: { url: true },
+  suggestions: { url: true, username: false },
+  update: { url: true, item: true, username: true, password: true },
   fill: { url: true, item: true },
   save: { url: true, title: true, username: true, password: true },
   create: { url: true, title: true, username: true, length: true, symbols: true },
@@ -67,8 +69,9 @@ function wellFormed(request) {
   const text = (value, max) => typeof value === "string" && value.trim().length > 0 &&
     Buffer.byteLength(value.trim()) <= max;
   if ("title" in fields && !text(request.title, 128)) return false;
-  if ("username" in fields && !text(request.username, 1024)) return false;
-  if (request.cmd === "save" && !(typeof request.password === "string" &&
+  if ("username" in fields && request.cmd !== "suggestions" && !text(request.username, 1024)) return false;
+  if (request.cmd === "suggestions" && "username" in request && (typeof request.username !== "string" || Buffer.byteLength(request.username) > 1024)) return false;
+  if (["save", "update"].includes(request.cmd) && !(typeof request.password === "string" &&
     request.password.length > 0 && Buffer.byteLength(request.password) <= 4096)) return false;
   if (request.cmd === "create" && !(Number.isInteger(request.length) &&
     request.length >= 12 && request.length <= 64 && typeof request.symbols === "boolean")) return false;
@@ -116,6 +119,20 @@ function matches(login, page) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// A test releases approval only after navigation/replacement has actually
+// completed. The barrier is synthetic fixture state, never a wire field.
+async function waitForReplyRelease(config) {
+  if (!config.holdReply) return true;
+  if (typeof config.holdReply !== "string" || !/^[a-z0-9-]{1,80}$/.test(config.holdReply)) return false;
+  const release = path.join(dir, `release-${config.holdReply}`);
+  const deadline = Date.now() + 30000;
+  while (!fs.existsSync(release)) {
+    if (Date.now() >= deadline) return false; // fail closed; never release a secret on timeout
+    await sleep(10);
+  }
+  return true;
+}
+
 async function answer(request) {
   const s = scenario();
   if (!request || request.v !== 1) return error("bad_version");
@@ -128,6 +145,7 @@ async function answer(request) {
       return { ok: true, code: "ok", message: "Apassy runs.", data: { type: "status", vault, version: "0.3.2" } };
     case "show":
       return { ok: true, code: "ok", message: "Apassy is in front.", data: { type: "none" } };
+    case "suggestions":
     case "logins": {
       if (vault === "locked") return error("vault_locked");
       if (vault === "none") return error("none_open");
@@ -136,6 +154,8 @@ async function answer(request) {
       if (!page) return error("unsupported_page");
       const logins = (s.logins || [])
         .filter((login) => matches(login, page))
+        .filter((login) => request.cmd !== "suggestions" || login.username.toLowerCase().startsWith((request.username || "").trim().toLowerCase()))
+        .slice(0, 50)
         .map(({ item, title, username }) => ({ item, title, username }));
       return { ok: true, code: "ok", message: "", data: { type: "logins", origin: page.origin, host: page.host, logins } };
     }
@@ -146,6 +166,7 @@ async function answer(request) {
       const login = (s.logins || []).find((l) => l.item === request.item && matches(l, page));
       if (!login) return error("no_match");
       const fill = s.fill || {};
+      if (!(await waitForReplyRelease(fill))) return error("timeout");
       if (fill.delayMs) await sleep(fill.delayMs);
       if (fill.code && fill.code !== "ok") return error(fill.code);
       return {
@@ -160,6 +181,19 @@ async function answer(request) {
           password: login.password,
         },
       };
+    }
+    case "update": {
+      if (vault === "locked") return error("vault_locked");
+      if (vault === "none") return error("none_open");
+      const page = pageOf(request.url);
+      if (!page) return error("unsupported_page");
+      const index = (s.logins || []).findIndex((l) => l.item === request.item && l.username === request.username && matches(l, page));
+      if (index < 0) return error("no_match");
+      if (s.update?.delayMs) await sleep(s.update.delayMs);
+      if (s.update?.code && s.update.code !== "ok") return error(s.update.code);
+      s.logins[index] = { ...s.logins[index], password: request.password };
+      fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify(s));
+      return { ok: true, code: "ok", message: "Updated.", data: { type: "updated", item: request.item, origin: page.origin, username: request.username } };
     }
     case "save": {
       if (vault === "locked") return error("vault_locked");
@@ -177,6 +211,7 @@ async function answer(request) {
       const page = pageOf(request.url);
       if (!page) return error("unsupported_page");
       const create = s.create || {};
+      if (!(await waitForReplyRelease(create))) return error("timeout");
       if (create.delayMs) await sleep(create.delayMs);
       // The host dies after the app made the login: no answer reaches the browser.
       if (create.crash) process.exit(0);

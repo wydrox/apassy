@@ -4,12 +4,14 @@ import SwiftUI
 /// The form of a new or an edited item, in a sheet.
 struct ItemEditorView: View {
     @State private var model: ItemEditorModel
+    var onSaved: ([(id: UInt64, title: String)], String?) -> Void
     @Environment(VaultModel.self) private var vault
     @Environment(\.dismiss) private var dismiss
     /// The built-in field that the generator fills.
     @State private var generatorField: GeneratorTarget?
     @State private var scanningCode = false
-    @State private var newTag = ""
+    @State private var confirmsDiscard = false
+    @State private var showsOptionalDetails = false
     @State private var scanNote: String?
 
     struct GeneratorTarget: Identifiable {
@@ -17,41 +19,73 @@ struct ItemEditorView: View {
         var id: String { name }
     }
 
-    init(model: ItemEditorModel) {
+    init(
+        model: ItemEditorModel,
+        onSaved: @escaping ([(id: UInt64, title: String)], String?) -> Void = { _, _ in }
+    ) {
         _model = State(initialValue: model)
+        self.onSaved = onSaved
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Title", text: $model.title)
+                    TextField("Name (required)", text: $model.title)
                         .font(.headline)
                 } header: {
-                    Text("Title")
-                }
-                if !model.folders.isEmpty {
-                    Section {
-                        FolderMenuRow(folders: model.folders, selection: $model.folder)
-                    }
+                    Text("Name")
                 }
                 mainFields
                 if let passkey = model.passkey {
                     Section {
                         LabeledContent("Website", value: passkey.rpID)
-                        if !passkey.accountName.isEmpty { LabeledContent("Account", value: passkey.accountName) }
+                        if !passkey.accountName.isEmpty {
+                            LabeledContent("Account", value: passkey.accountName)
+                        }
                     } header: {
                         Label("Passkey", systemImage: "person.badge.key")
                     } footer: {
-                        Text("The passkey stays as it is, and the password is optional. Remove the passkey on the item screen.")
+                        Text(
+                            "The passkey stays as it is, and the password is optional. Remove the passkey on the item screen."
+                        )
                     }
                 }
-                if model.kind == .login { loginExtras }
-                detailsSection
-                tagsSection
-                Section("Notes") {
-                    TextField("Notes", text: $model.notes, axis: .vertical)
-                        .lineLimit(3...12)
+                if model.kind == .login {
+                    Section {
+                        TextField("https://example.com", text: $model.website)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("Website (optional)")
+                    } footer: {
+                        Text("Add a website to find this login in AutoFill and browser suggestions.")
+                    }
+                }
+                if !model.folders.isEmpty || model.folder != nil {
+                    Section {
+                        FolderMenuRow(folders: model.folders, selection: $model.folder)
+                    }
+                }
+                Section {
+                    DisclosureGroup("Optional details", isExpanded: $showsOptionalDetails) { EmptyView() }
+                }
+                if showsOptionalDetails {
+                    if model.kind == .login { loginExtras }
+                    detailsSection
+                    tagsSection
+                    Section("Notes") {
+                        TextField("Notes", text: $model.notes, axis: .vertical)
+                            .lineLimit(3...12)
+                    }
+                }
+                if model.isNew, !model.validationMessages.isEmpty {
+                    Section("Still needed") {
+                        ForEach(model.validationMessages, id: \.self) { message in
+                            Text(message).foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 if let error = model.error {
                     Section {
@@ -60,16 +94,39 @@ struct ItemEditorView: View {
                     }
                 }
             }
+            .disabled(model.isSaving)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", role: .cancel) { dismiss() }
+                    Button("Cancel", role: .cancel, action: cancel)
+                        .disabled(model.isSaving)
+                        .confirmationDialog(
+                            model.moveFailure == nil ? "Discard changes?" : "Leave the saved item?",
+                            isPresented: $confirmsDiscard, titleVisibility: .visible
+                        ) {
+                            Button(
+                                model.moveFailure == nil ? "Discard Changes" : "Close Editor", role: .destructive
+                            ) {
+                                leaveEditor()
+                            }
+                            Button("Keep Editing") { confirmsDiscard = false }
+                        } message: {
+                            if model.moveFailure != nil {
+                                Text(
+                                    "The last saved version stays in \(FolderMenu.label(model.folders, model.savedFolder)). Any later edits will be discarded."
+                                )
+                            } else {
+                                Text("Your unsaved changes will be lost.")
+                            }
+                        }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(role: .confirm) {
                         Task {
-                            if await model.save(in: vault) != nil { dismiss() }
+                            if await model.save(in: vault) != nil {
+                                leaveEditor()
+                            }
                         }
                     } label: {
                         if model.isSaving { ProgressView() } else { Text("Save") }
@@ -79,23 +136,29 @@ struct ItemEditorView: View {
             }
             .sheet(item: $generatorField) { target in
                 GeneratorView(model: GeneratorModel(service: vault.service)) { value in
+                    guard !model.isSaving else { return }
                     model.values[target.name] = value
                 }
                 .environment(vault)
             }
             .sheet(isPresented: $scanningCode) { otpScanner }
         }
-        .interactiveDismissDisabled(model.isSaving)
-        .task { await model.loadFolders(from: vault.service) }
-        // A move into the folder that failed after the save: its alert shows once the sheet is
-        // gone, a moment after the end of the dismissal.
-        .onDisappear {
-            guard model.moveFailure != nil else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(150))
-                model.reportMoveFailure(to: vault)
-            }
+        .interactiveDismissDisabled(model.preventsDismissal)
+        .task {
+            showsOptionalDetails = !model.isNew
+            await model.loadFolders(from: vault.service)
         }
+    }
+
+    private func leaveEditor() {
+        guard !model.isSaving else { return }
+        model.reportSavedResult(to: onSaved)
+        dismiss()
+    }
+
+    private func cancel() {
+        guard !model.isSaving else { return }
+        if model.preventsDismissal { confirmsDiscard = true } else { dismiss() }
     }
 
     private var title: String {
@@ -110,7 +173,7 @@ struct ItemEditorView: View {
         Section {
             if model.kind == .custom {
                 if model.isNew {
-                    TextField("Field name, such as wifi_password", text: $model.customName)
+                    TextField("Field name (required), such as wifi_password", text: $model.customName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.body.monospaced())
@@ -118,12 +181,13 @@ struct ItemEditorView: View {
                     LabeledContent("Field name", value: model.customName)
                 }
                 SecretInput(
-                    placeholder: model.isNew ? "Secret value" : "Unchanged", text: $model.customValue)
+                    placeholder: model.isNew ? "Secret value (required)" : "Unchanged",
+                    text: $model.customValue)
             }
             ForEach(model.specs) { spec in
                 if spec.secret {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(spec.label)
+                        Text(spec.required ? "\(spec.label) (required)" : spec.label)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if model.removedSecrets.contains(spec.name) {
@@ -141,7 +205,9 @@ struct ItemEditorView: View {
                                 onGenerate: spec.role == .password
                                     ? { generatorField = GeneratorTarget(name: spec.name) } : nil)
                         }
-                        if !spec.required, model.storedSecrets.contains(spec.name), !model.removedSecrets.contains(spec.name) {
+                        if !spec.required, model.storedSecrets.contains(spec.name),
+                            !model.removedSecrets.contains(spec.name)
+                        {
                             Button("Remove \(VaultText.phrase(spec.label))", role: .destructive) {
                                 model.values[spec.name] = nil
                                 model.removedSecrets.insert(spec.name)
@@ -152,14 +218,16 @@ struct ItemEditorView: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(spec.label)
+                        Text(spec.required ? "\(spec.label) (required)" : spec.label)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextField(spec.label, text: value(spec.name), axis: spec.multiline ? .vertical : .horizontal)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(spec.multiline ? .footnote.monospaced() : .body)
-                            .keyboardType(spec.role == .username ? .emailAddress : .default)
+                        TextField(
+                            spec.label, text: value(spec.name), axis: spec.multiline ? .vertical : .horizontal
+                        )
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(spec.multiline ? .footnote.monospaced() : .body)
+                        .keyboardType(spec.role == .username ? .emailAddress : .default)
                     }
                 }
             }
@@ -173,41 +241,34 @@ struct ItemEditorView: View {
     }
 
     private var loginExtras: some View {
-        Group {
-            Section("Website") {
-                TextField("https://example.com", text: $model.website)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            }
-            Section {
-                if model.otpRemoved {
-                    HStack {
-                        Text("Removed on save")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Undo") { model.otpRemoved = false }
-                            .buttonStyle(.borderless)
-                    }
-                } else {
-                    SecretInput(
-                        placeholder: model.otpStored ? "Unchanged" : "otpauth:// link or setup key", text: $model.otp)
-                    Button("Scan QR code", systemImage: "qrcode.viewfinder") {
-                        scanNote = nil
-                        scanningCode = true
-                    }
-                    if model.otpStored {
-                        Button("Remove one-time password", role: .destructive) {
-                            model.otp = ""
-                            model.otpRemoved = true
-                        }
+        Section {
+            if model.otpRemoved {
+                HStack {
+                    Text("Removed on save")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Undo") { model.otpRemoved = false }
+                        .buttonStyle(.borderless)
+                }
+            } else {
+                SecretInput(
+                    placeholder: model.otpStored ? "Unchanged" : "otpauth:// link or setup key",
+                    text: $model.otp)
+                Button("Scan QR code", systemImage: "qrcode.viewfinder") {
+                    scanNote = nil
+                    scanningCode = true
+                }
+                if model.otpStored {
+                    Button("Remove one-time password", role: .destructive) {
+                        model.otp = ""
+                        model.otpRemoved = true
                     }
                 }
-            } header: {
-                Text("One-time password")
-            } footer: {
-                Text("The setup code of the website: the QR code, or the key under it.")
             }
+        } header: {
+            Text("One-time password")
+        } footer: {
+            Text("The setup code of the website: the QR code, or the key under it.")
         }
     }
 
@@ -215,7 +276,8 @@ struct ItemEditorView: View {
         NavigationStack {
             VStack(spacing: 16) {
                 CodeScannerPanel(
-                    accessibilityLabel: "Camera for the setup code", use: "to read the setup code of the one-time password"
+                    accessibilityLabel: "Camera for the setup code",
+                    use: "to read the setup code of the one-time password"
                 ) { text in
                     if let uri = VaultText.otpURI(from: text) {
                         model.otp = uri
@@ -280,14 +342,14 @@ struct ItemEditorView: View {
                 .padding(.vertical, 4)
             }
             HStack {
-                TextField("Add a tag", text: $newTag)
+                TextField("Add a tag", text: $model.pendingTag)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.done)
                     .onSubmit(addTag)
                 Button("Add", action: addTag)
                     .buttonStyle(.borderless)
-                    .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(model.pendingTag.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             if let message = model.tagMessage {
                 Text(message)
@@ -300,7 +362,7 @@ struct ItemEditorView: View {
     }
 
     private func addTag() {
-        if model.addTag(newTag) { newTag = "" }
+        model.commitPendingTag()
     }
 
     private func value(_ name: String) -> Binding<String> {

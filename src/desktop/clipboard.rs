@@ -1,19 +1,11 @@
-//! The clipboard of a copied one-time code (TOTP).
+//! Explicit desktop copies with conditional expiration. Ordinary secret fields need a
+//! fresh item/field/revision owner proof; one-time codes keep their separate action.
 //!
-//! Apassy copies one thing only: the current code of a one-time password, after a fresh
-//! owner check for that field ([`crate::broker::approvals::OwnerAction::CopyCode`]). A
-//! password or another secret value is never copied.
-//!
-//! - The code goes to the system pasteboard as plain text with the
-//!   `org.nspasteboard.ConcealedType` marker, so clipboard managers do not keep it.
-//! - Apassy keeps the copied text in an erasing buffer until the clear. At the clear it
-//!   reads the pasteboard and clears it only when it still holds the same text. A newer
-//!   copy of the owner, in Apassy or in another app, stays.
-//! - The clear comes when the code changes, after [`MIN_CLEAR`] at the earliest and
-//!   [`MAX_CLEAR`] at the latest, at a lock, at a switch to another vault, and at quit.
-//!
-//! The check and the clear are two pasteboard calls, so a copy of another app between
-//! them is lost. The window is a few microseconds.
+//! The native helper writes plain text with concealed, transient, and device-local
+//! markers. These are advisory: another local process can still read or retain it.
+//! Clears compare the exact write identity, never text equality, so a later copy of
+//! the same text survives. NSPasteboard has no cross-process compare-and-clear API;
+//! another app can still write during the final native check/clear interval.
 
 use std::time::{Duration, Instant};
 
@@ -31,23 +23,38 @@ pub(crate) struct PasteboardError;
 
 impl PasteboardError {
     pub(crate) fn message(&self) -> &'static str {
-        "Apassy could not use the clipboard. Nothing was copied."
+        "Apassy could not confirm the copy. The clipboard may contain the value; replace its contents if needed."
+    }
+}
+
+// A failed acknowledgement can follow a successful write, and cleanup can fail too.
+// The desktop never forwards helper errors, which could contain unexpected text.
+impl From<crate::native::NativeError> for PasteboardError {
+    fn from(_: crate::native::NativeError) -> Self {
+        Self
     }
 }
 
 /// The system pasteboard, or a pasteboard in memory for the tests.
 pub(crate) trait Pasteboard {
-    /// Make `text` the only content, as plain text with the concealed marker.
-    fn write_concealed(&mut self, text: &str) -> Result<(), PasteboardError>;
-    /// True when the pasteboard holds exactly `text` as plain text.
-    fn holds(&mut self, text: &str) -> bool;
-    /// Remove all content.
-    fn clear(&mut self) -> Result<(), PasteboardError>;
+    /// Make `text` the only content with privacy markers and return its exact identity.
+    fn write_concealed(&mut self, text: &str) -> Result<WriteIdentity, PasteboardError>;
+    /// Remove content only if this exact write remains. Never read another app's text.
+    fn clear_if_unchanged(&mut self, identity: &WriteIdentity) -> Result<(), PasteboardError>;
 }
 
-/// A copied code that waits for its clear.
+/// Nonsecret native write identity. A random owner marker prevents another app's
+/// write racing the write acknowledgement from becoming ours.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WriteIdentity {
+    change_count: u64,
+    owner: String,
+}
+
+/// A copied value that waits for its clear.
 struct PendingClear {
-    text: Zeroizing<String>,
+    _text: Option<Zeroizing<String>>,
+    identity: WriteIdentity,
     clear_at: Instant,
     /// The vault session of the copy. Another session clears at once.
     epoch: [u8; 32],
@@ -81,16 +88,35 @@ impl CodeClipboard {
         epoch: [u8; 32],
         now: Instant,
     ) -> Result<Duration, PasteboardError> {
-        // The new copy replaces an earlier one, so its buffer goes now.
-        self.pending = None;
+        self.copy_for(code, clear_delay(left), epoch, now)
+    }
+
+    /// Copy an ordinary secret for exactly 30 seconds, without changing TOTP timing.
+    pub(crate) fn copy_secret(
+        &mut self,
+        value: Zeroizing<String>,
+        epoch: [u8; 32],
+        now: Instant,
+    ) -> Result<Duration, PasteboardError> {
+        self.copy_for(value, MAX_CLEAR, epoch, now)
+    }
+
+    fn copy_for(
+        &mut self,
+        value: Zeroizing<String>,
+        after: Duration,
+        epoch: [u8; 32],
+        now: Instant,
+    ) -> Result<Duration, PasteboardError> {
+        // A failed replacement must not abandon the lifetime of the previous copy.
         if self.board.is_none() {
             self.board = Some(open_board()?);
         }
         let board = self.board.as_mut().ok_or(PasteboardError)?;
-        board.write_concealed(&code)?;
-        let after = clear_delay(left);
+        let identity = board.write_concealed(&value)?;
         self.pending = Some(PendingClear {
-            text: code,
+            _text: Some(value),
+            identity,
             clear_at: now + after,
             epoch,
         });
@@ -103,7 +129,8 @@ impl CodeClipboard {
         let pending = self.pending.as_ref()?;
         if epoch != Some(pending.epoch) || now >= pending.clear_at {
             self.clear_now();
-            return None;
+            // A native transport failure gets another attempt while the app lives.
+            return self.pending.as_ref().map(|_| Duration::from_secs(1));
         }
         Some(pending.clear_at - now)
     }
@@ -121,14 +148,17 @@ impl CodeClipboard {
     }
 
     fn clear_now(&mut self) {
-        // `pending.text` erases itself when it drops at the end of this call.
-        let Some(pending) = self.pending.take() else {
+        // `pending._text` erases itself when it drops at the end of this call.
+        let Some(mut pending) = self.pending.take() else {
             return;
         };
+        // Even when a native clear fails, lock/switch erases the app's value buffer.
+        // Keep only the nonsecret identity so a later frame can retry safely.
+        pending._text = None;
         if let Some(board) = self.board.as_mut()
-            && board.holds(&pending.text)
+            && board.clear_if_unchanged(&pending.identity).is_err()
         {
-            let _ = board.clear();
+            self.pending = Some(pending);
         }
     }
 }
@@ -150,45 +180,39 @@ fn open_board() -> Result<Box<dyn Pasteboard>, PasteboardError> {
     Ok(Box::new(memory::MemoryBoard::default()))
 }
 
-/// The system pasteboard through `arboard` (NSPasteboard on macOS).
+/// The signed helper supplies NSPasteboard write identity and privacy markers, which
+/// the existing arboard API cannot expose. It receives the value only through stdin.
 #[cfg(not(test))]
 mod native {
-    use zeroize::Zeroizing;
+    use super::{Pasteboard, PasteboardError, WriteIdentity};
+    use crate::native::NativeHelper;
 
-    use super::{Pasteboard, PasteboardError};
-
-    pub(super) struct SystemPasteboard(arboard::Clipboard);
+    pub(super) struct SystemPasteboard(NativeHelper);
 
     impl SystemPasteboard {
         pub(super) fn open() -> Result<Self, PasteboardError> {
-            arboard::Clipboard::new()
+            NativeHelper::locate()
                 .map(Self)
-                .map_err(|_| PasteboardError)
+                .map_err(PasteboardError::from)
         }
     }
 
     impl Pasteboard for SystemPasteboard {
-        fn write_concealed(&mut self, text: &str) -> Result<(), PasteboardError> {
-            #[cfg(target_os = "macos")]
-            let result = {
-                use arboard::SetExtApple;
-                self.0.set().exclude_from_history().text(text)
-            };
-            #[cfg(not(target_os = "macos"))]
-            let result = self.0.set_text(text);
-            result.map_err(|_| PasteboardError)
+        fn write_concealed(&mut self, text: &str) -> Result<WriteIdentity, PasteboardError> {
+            let (change_count, owner) = self
+                .0
+                .clipboard_write(text)
+                .map_err(PasteboardError::from)?;
+            Ok(WriteIdentity {
+                change_count,
+                owner,
+            })
         }
 
-        fn holds(&mut self, text: &str) -> bool {
-            // The content may be a secret of another app: erase the copy.
+        fn clear_if_unchanged(&mut self, identity: &WriteIdentity) -> Result<(), PasteboardError> {
             self.0
-                .get_text()
-                .map(Zeroizing::new)
-                .is_ok_and(|current| current.as_str() == text)
-        }
-
-        fn clear(&mut self) -> Result<(), PasteboardError> {
-            self.0.clear().map_err(|_| PasteboardError)
+                .clipboard_clear_if_unchanged(identity.change_count, &identity.owner)
+                .map_err(PasteboardError::from)
         }
     }
 }
@@ -198,16 +222,22 @@ mod native {
 pub(crate) mod memory {
     use std::sync::{Arc, Mutex, PoisonError};
 
-    use super::{Pasteboard, PasteboardError};
+    use super::{Pasteboard, PasteboardError, WriteIdentity};
 
     #[derive(Debug, Default)]
     pub(crate) struct Board {
         pub(crate) text: Option<String>,
         pub(crate) concealed: bool,
+        pub(crate) transient: bool,
+        pub(crate) local_only: bool,
+        change_count: u64,
+        owner: Option<String>,
         pub(crate) writes: usize,
         pub(crate) clears: usize,
         /// The next write fails.
         pub(crate) fail_write: bool,
+        /// The next clear fails before touching the board.
+        pub(crate) fail_clear: bool,
     }
 
     #[derive(Debug, Default, Clone)]
@@ -223,6 +253,8 @@ pub(crate) mod memory {
             self.with(|board| {
                 board.text = Some(text.to_owned());
                 board.concealed = false;
+                board.change_count += 1;
+                board.owner = None;
             });
         }
 
@@ -232,27 +264,40 @@ pub(crate) mod memory {
     }
 
     impl Pasteboard for MemoryBoard {
-        fn write_concealed(&mut self, text: &str) -> Result<(), PasteboardError> {
+        fn write_concealed(&mut self, text: &str) -> Result<WriteIdentity, PasteboardError> {
             self.with(|board| {
                 if std::mem::take(&mut board.fail_write) {
                     return Err(PasteboardError);
                 }
                 board.text = Some(text.to_owned());
                 board.concealed = true;
+                board.transient = true;
+                board.local_only = true;
                 board.writes += 1;
-                Ok(())
+                board.change_count += 1;
+                let owner = format!("memory-write-{}", board.change_count);
+                board.owner = Some(owner.clone());
+                Ok(WriteIdentity {
+                    change_count: board.change_count,
+                    owner,
+                })
             })
         }
 
-        fn holds(&mut self, text: &str) -> bool {
-            self.with(|board| board.text.as_deref() == Some(text))
-        }
-
-        fn clear(&mut self) -> Result<(), PasteboardError> {
+        fn clear_if_unchanged(&mut self, identity: &WriteIdentity) -> Result<(), PasteboardError> {
             self.with(|board| {
-                board.text = None;
-                board.concealed = false;
-                board.clears += 1;
+                if std::mem::take(&mut board.fail_clear) {
+                    return Err(PasteboardError);
+                }
+                if board.change_count == identity.change_count
+                    && board.owner.as_ref() == Some(&identity.owner)
+                {
+                    board.text = None;
+                    board.concealed = false;
+                    board.owner = None;
+                    board.clears += 1;
+                    board.change_count += 1;
+                }
                 Ok(())
             })
         }
@@ -379,8 +424,133 @@ mod tests {
         let err = clip
             .copy(code("287082"), 30, EPOCH, Instant::now())
             .unwrap_err();
-        assert!(err.message().contains("Nothing was copied"));
+        assert!(err.message().contains("clipboard may contain the value"));
         assert!(!clip.is_pending());
         assert_eq!(board.text(), None);
+    }
+    #[test]
+    fn ordinary_secret_expires_after_thirty_seconds_and_preserves_a_later_identical_copy() {
+        let (mut clip, board) = clipboard();
+        let start = Instant::now();
+        assert_eq!(
+            clip.copy_secret(code("synthetic-secret"), EPOCH, start)
+                .expect("copy"),
+            MAX_CLEAR
+        );
+        assert_eq!(
+            clip.tick(start + Duration::from_secs(29), Some(EPOCH)),
+            Some(Duration::from_secs(1))
+        );
+        board.other_app_writes("synthetic-secret");
+        assert_eq!(clip.tick(start + MAX_CLEAR, Some(EPOCH)), None);
+        assert_eq!(board.text().as_deref(), Some("synthetic-secret"));
+        assert_eq!(board.with(|b| b.clears), 0);
+    }
+
+    #[test]
+    fn ordinary_secret_clears_on_expiry_switch_lock_and_quit_but_keeps_later_copies() {
+        let (mut clip, board) = clipboard();
+        let start = Instant::now();
+        clip.copy_secret(code("synthetic-secret"), EPOCH, start)
+            .expect("copy");
+        clip.tick(start + MAX_CLEAR, Some(EPOCH));
+        assert_eq!(board.text(), None);
+        for epoch in [None, Some(OTHER_EPOCH)] {
+            clip.copy_secret(code("synthetic-secret"), EPOCH, start)
+                .expect("copy");
+            clip.tick(start, epoch);
+            assert_eq!(board.text(), None);
+        }
+        clip.copy_secret(code("synthetic-secret"), EPOCH, start)
+            .expect("copy");
+        clip.end_session();
+        assert_eq!(board.text(), None);
+        clip.copy_secret(code("synthetic-secret"), EPOCH, start)
+            .expect("copy");
+        board.other_app_writes("synthetic-secret");
+        clip.end_session();
+        assert_eq!(board.text().as_deref(), Some("synthetic-secret"));
+    }
+
+    #[test]
+    fn failed_replacement_keeps_the_previous_copys_expiry() {
+        let (mut clip, board) = clipboard();
+        let start = Instant::now();
+        clip.copy_secret(code("first-synthetic-secret"), EPOCH, start)
+            .expect("copy");
+        board.with(|b| b.fail_write = true);
+        assert!(
+            clip.copy_secret(code("second-synthetic-secret"), EPOCH, start)
+                .is_err()
+        );
+        assert!(clip.is_pending());
+        clip.tick(start + MAX_CLEAR, Some(EPOCH));
+        assert_eq!(board.text(), None);
+    }
+
+    #[test]
+    fn a_later_identical_totp_copy_is_also_preserved() {
+        let (mut clip, board) = clipboard();
+        let start = Instant::now();
+        clip.copy(code("287082"), 17, EPOCH, start).expect("copy");
+        board.other_app_writes("287082");
+        clip.tick(start + Duration::from_secs(17), Some(EPOCH));
+        assert_eq!(board.text().as_deref(), Some("287082"));
+        assert_eq!(board.with(|b| b.clears), 0);
+    }
+    #[test]
+    fn a_failed_clear_erases_the_local_value_and_retries_only_its_identity() {
+        let (mut clip, board) = clipboard();
+        let start = Instant::now();
+        clip.copy_secret(code("synthetic-secret"), EPOCH, start)
+            .expect("copy");
+        board.with(|b| b.fail_clear = true);
+        assert_eq!(
+            clip.tick(start + MAX_CLEAR, Some(EPOCH)),
+            Some(Duration::from_secs(1))
+        );
+        assert!(clip.pending.as_ref().expect("retry")._text.is_none());
+        assert_eq!(
+            clip.tick(start + MAX_CLEAR + Duration::from_secs(1), Some(EPOCH)),
+            None
+        );
+        assert_eq!(board.text(), None);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn failed_write_acknowledgement_and_failed_cleanup_report_uncertain_clipboard_state() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary fixture");
+        let path = dir.path().join("fake-failed-cleanup-helper");
+        // This fixture records command names only; it has no real pasteboard API.
+        std::fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+req = json.loads(sys.stdin.readline())
+with (pathlib.Path(__file__).parent / 'commands').open('a') as log:
+    log.write(req['cmd'] + '\n')
+if req['cmd'] == 'clipboard_write':
+    print(json.dumps({'ok': True}))
+else:
+    print(json.dumps({'ok': False, 'error': 'failed', 'message': 'Synthetic cleanup failure.'}))
+"#,
+        )
+        .expect("write fake helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("fixture permissions");
+        let client = crate::native::NativeHelper::with_paths(&path, &path);
+        let error = PasteboardError::from(
+            client
+                .clipboard_write("synthetic-copy-canary")
+                .expect_err("lost acknowledgement"),
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("commands")).expect("commands"),
+            "clipboard_write\nclipboard_clear\n"
+        );
+        assert!(error.message().contains("clipboard may contain the value"));
+        assert!(!error.message().contains("Nothing was copied"));
+        assert!(!error.message().contains("synthetic-copy-canary"));
     }
 }

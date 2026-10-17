@@ -473,13 +473,13 @@ struct EveryVaultQuestionsTests {
         #expect(model.deliveries[fixture.work.qid] == .sent(.allowProduction))
     }
 
-    @Test("a notification opens the newest question, also of a vault that is not selected")
+    @Test("a generic notification refreshes all open vaults without selecting a question")
     func notificationOpensOtherVault() async throws {
         let fixture = try await Fixture()
         fixture.push.open()
         let qid = await fixture.model.takeFocus(stillFree: { true })
-        #expect(qid == fixture.work.qid)
-        #expect(fixture.model.questions.first { $0.qid == qid }?.vaultID == Self.work.id)
+        #expect(qid == nil)
+        #expect(fixture.model.questions.contains { $0.qid == fixture.work.qid && $0.vaultID == Self.work.id })
     }
 
     @Test("the push token reaches every team at once, and turning notifications off clears every team")

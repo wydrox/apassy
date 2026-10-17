@@ -36,6 +36,10 @@ func handle(_ request: Request) throws -> Fields {
         return try handleKeychainDelete(request)
     case "keychain_exists":
         return try handleKeychainExists(request)
+    case "clipboard_write":
+        return try handleClipboardWrite(request)
+    case "clipboard_clear":
+        return try handleClipboardClear(request)
     case "ubiquity_status":
         return try handleUbiquityStatus(request)
     case "notify", "notify_status", "notify_authorize":

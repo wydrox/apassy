@@ -17,7 +17,7 @@ enum AgentsReach: Equatable {
     enum Action: Equatable {
         /// "Connect this iPhone": the questions through the relay, as in Decisions.
         case connect
-        /// "Open Decisions": where the questions of the agents arrive.
+        /// "Open Requests": where the questions of the agents arrive.
         case openDecisions
         /// "Pair with the Mac on Wi-Fi": the companion, which brings the requests of the agents.
         case pairOnWiFi
@@ -25,7 +25,7 @@ enum AgentsReach: Equatable {
         var title: String {
             switch self {
             case .connect: "Connect this iPhone"
-            case .openDecisions: "Open Decisions"
+            case .openDecisions: "Open Requests"
             case .pairOnWiFi: "Pair with the Mac on Wi-Fi"
             }
         }

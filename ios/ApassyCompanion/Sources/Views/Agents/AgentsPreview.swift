@@ -17,6 +17,12 @@ import SwiftUI
             modifier(AgentsPreviewSeed(model: model, path: path))
         }
 
+        /// Run the synthetic unverified removal on the detail's lifetime. A parent list task
+        /// is cancelled when its navigation destination appears.
+        func agentsUnverifiedSettleSeed(_ model: AgentsModel, entry: AgentEntry) -> some View {
+            modifier(AgentsUnverifiedSettleSeed(model: model, entry: entry))
+        }
+
         /// With `-ApassyPreviewAgents confirm`, the page of Codex asks to remove its exception.
         func agentsConfirmSeed(_ entry: AgentEntry, ask: @escaping (FeedException) -> Void) -> some View {
             task {
@@ -38,6 +44,25 @@ import SwiftUI
                 else { return }
                 try? await Task.sleep(for: .milliseconds(500))
                 scroll(target)
+            }
+        }
+    }
+
+    private struct AgentsUnverifiedSettleSeed: ViewModifier {
+        let model: AgentsModel
+        let entry: AgentEntry
+        @Environment(VaultModel.self) private var vault: VaultModel?
+
+        func body(content: Content) -> some View {
+            content.task(id: entry.id) {
+                guard UserDefaults.standard.string(forKey: "ApassyPreviewAgents") == "unverified",
+                    entry.vaultName == "Work", entry.agent.name == "Claude Code",
+                    model.results(of: entry).isEmpty,
+                    let service = vault?.service as? PreviewVaultService,
+                    let only = entry.agent.exceptions.first(where: { $0.kind == .only })
+                else { return }
+                await service.scriptFeedOutcomes([.init(.applied, verified: false)])
+                await model.remove(only, in: entry)
             }
         }
     }
@@ -77,13 +102,6 @@ import SwiftUI
                         .agents.first(where: { $0.agent.name == open.agent })
                 else { return }
                 path = [entry.id]
-                // `unverified`: the relay answers the removal of an "only" row with a settle that
-                // this iPhone cannot open.
-                if mode == "unverified", let only = entry.agent.exceptions.first(where: { $0.kind == .only }) {
-                    await service.scriptFeedOutcomes([.init(.applied, verified: false)])
-                    try? await Task.sleep(for: .milliseconds(800))
-                    await model.remove(only, in: entry)
-                }
             }
         }
     }
