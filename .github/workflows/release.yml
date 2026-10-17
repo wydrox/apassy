@@ -30,8 +30,8 @@ permissions:
 
 jobs:
   # A version that the changelog has not released is never signed or uploaded.
-  # The check reads only Cargo.toml and CHANGELOG.md of the commit. A skip is not a
-  # failure: the run ends green with a notice. See docs/operations/release.md.
+  # After source eligibility, public latest.json must prove a strictly lower
+  # version. Equal skips; lower proposals or failed public reads fail closed.
   ready:
     # The same events as the job macos.
     if: >-
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      production: ${{ steps.ready.outputs.production }}
+      production: ${{ steps.newer.outputs.production }}
       version: ${{ steps.ready.outputs.version }}
     steps:
       - name: Check out the version files of the commit that passed CI
@@ -54,6 +54,7 @@ jobs:
             Cargo.toml
             CHANGELOG.md
             scripts/ci-release-ready.py
+            scripts/ci-release-newer.py
           sparse-checkout-cone-mode: false
 
       - name: Check that the version is released
@@ -61,6 +62,13 @@ jobs:
         run: >-
           python3 scripts/ci-release-ready.py --cargo Cargo.toml
           --changelog CHANGELOG.md --github-output "$GITHUB_OUTPUT"
+
+      - name: Require a version newer than the public Mac release
+        if: steps.ready.outputs.production == 'true'
+        id: newer
+        env:
+          VERSION: ${{ steps.ready.outputs.version }}
+        run: python3 scripts/ci-release-newer.py --version "$VERSION" --github-output "$GITHUB_OUTPUT"
 
   macos:
     needs: ready
@@ -149,15 +157,25 @@ jobs:
           fi
           echo "configured=true" >>"$GITHUB_OUTPUT"
 
+      # ready can finish before another run publishes. Recheck inside the serialized
+      # macos job before any signing, downloads, or expensive toolchain work.
+      - name: Recheck the public version after acquiring release concurrency
+        if: steps.secrets.outputs.configured == 'true'
+        id: newer
+        env:
+          VERSION: ${{ needs.ready.outputs.version }}
+        run: python3 scripts/ci-release-newer.py --version "$VERSION" --github-output "$GITHUB_OUTPUT"
+
       # CI runs finish in any order. An older commit must not replace the image
       # of a newer one.
       - name: Check that the commit is the head of main
         id: head
         env:
           CONFIGURED: ${{ steps.secrets.outputs.configured }}
+          NEWER: ${{ steps.newer.outputs.production }}
         run: |
           head="$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/main | cut -f1)"
-          if [ "$CONFIGURED" != "true" ]; then
+          if [ "$CONFIGURED" != "true" ] || [ "$NEWER" != "true" ]; then
             echo "publish=false" >>"$GITHUB_OUTPUT"
           elif [ "$head" = "$COMMIT" ]; then
             echo "publish=true" >>"$GITHUB_OUTPUT"

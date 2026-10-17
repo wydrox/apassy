@@ -27,7 +27,7 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     # The app has no App Intents. This stops the note "Metadata extraction skipped".
     LM_SKIP_METADATA_EXTRACTION: YES
-    MARKETING_VERSION: 0.5.4
+    MARKETING_VERSION: 0.5.5
     CURRENT_PROJECT_VERSION: 1
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"
@@ -78,6 +78,7 @@ targets:
         CFBundleDisplayName: Apassy
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ApassyBuildCommit: $(APASSY_BUILD_COMMIT)
         LSRequiresIPhoneOS: true
         LSSupportsOpeningDocumentsInPlace: true
         UTExportedTypeDeclarations:
@@ -155,6 +156,7 @@ targets:
         CFBundleDisplayName: Apassy
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ApassyBuildCommit: $(APASSY_BUILD_COMMIT)
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         NSFaceIDUsageDescription: Apassy uses Face ID before it fills a password or a code, signs in with a passkey, or saves a passkey.
         NSExtension:
