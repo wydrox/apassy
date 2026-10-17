@@ -4,6 +4,8 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-17
+
 ### Added
 
 - **Sync log:** each failed folder or relay sync writes one line to `~/Library/Logs/Apassy/sync.log`: the time, the list ID of the vault, the kind of sync, the error, the status of the synced file, and the first digits of its hashes. The same error writes at most one line every 10 minutes, with a count; the first sync that works after failures writes one line too. No vault name, credential, value, or passphrase goes into the log. The file has mode `0600` and stays under 256 KiB (one older file, `sync.log.1`) ([sync](docs/operations/sync.md) §7.2).
