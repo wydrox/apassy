@@ -2,8 +2,56 @@
 
 Date: 2026-10-09.
 
-Each push to `main` that passes CI and names a released version (see [Release eligibility](#release-eligibility)) publishes a signed and notarized `Apassy-<version>.dmg`. <https://apassy.wyderka.cc/download> redirects to it, for example `/download/Apassy-0.5.0.dmg`. The same image stays at `/download/Apassy.dmg` for apps before 0.5.0 ([Image names](#image-names)). A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
+Each push to `main` that passes CI, names a released version (see [Release eligibility](#release-eligibility)), and has a version strictly newer than public `latest.json` publishes a signed and notarized `Apassy-<version>.dmg`. <https://apassy.wyderka.cc/download> redirects to it, for example `/download/Apassy-0.5.0.dmg`. The same image stays at `/download/Apassy.dmg` for apps before 0.5.0 ([Image names](#image-names)). A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
 The site is a static Astro page in `site/`, served by a Cloudflare Worker on the same domain.
+
+## Coordinated six-component release policy
+
+From 0.5.5, every release uses one new version for all six components: iOS app,
+macOS app, Linux CLI (`apassy-team`), browser extension, relay, and website. Bump
+every component even if its code did not change. A same-version rebuild is not a
+new release: installed clients compare versions and do not receive it as an update.
+The production Mac workflow checks the public `latest.json` before entering the
+signing job, and again inside the serialized release job. An equal version skips
+signing/publication. A lower proposed version, an unreachable manifest (including
+404), malformed JSON/version, or missing exact public source commit fails closed.
+Only a strictly higher SemVer precedence proceeds; build metadata alone is equal.
+Prereleases sort below the corresponding stable version. Existing exact-CI,
+artifact/source, and current-`main` checks still apply.
+
+`release-versions.json` records the shared version and the six required components.
+Update it together with both app/core Cargo manifests and their lockfile, iOS
+`MARKETING_VERSION`, extension manifest, and the dated changelog. The website keeps
+deriving `VERSION` from the first dated changelog section; its npm package has no
+separate product version. In the separate relay checkout, update the relay Cargo
+package and lockfile: both `apassy-relay` and the Linux `apassy-team` binary inherit
+that package version.
+
+Before publication, use Python 3.12 to check both exact release checkouts:
+
+```sh
+python3 scripts/check-release-versions.py --relay-checkout ../apassy-relay-release-055 --require-relay
+```
+
+CI checks the source files in this repository. Without `--relay-checkout`, the
+checker explicitly reports that the relay and Linux CLI were not checked. The
+existing eligibility helper remains separate: populated `Unreleased` entries still
+skip production signing and deployment without failing that helper. Neither source
+consistency nor eligibility proves that any component was published.
+
+iOS `CURRENT_PROJECT_VERSION` / `APASSY_IOS_BUILD` is an upload build number, not
+the shared marketing version. Before upload, read App Store Connect and choose a
+valid higher build number; a build-number increment alone does not replace the
+marketing-version bump. Keep the iOS 26 deployment target and required toolchain.
+
+Read back all six destinations after delivery: the signed macOS download and
+`latest.json` (including hashes/source), processed TestFlight marketing version and
+build in the intended group, public extension listing/package, public Linux binary
+with checksum and `--version`, running relay version/source, and live website and
+changelog. A submitted extension awaiting store review is pending, not published.
+Do not report the release complete until all six are live at the shared version.
+If a destination is blocked, report its actual version and the exact unfinished
+step; retain the shared target version for the remaining deliveries.
 
 ## How it works
 
@@ -296,4 +344,4 @@ For `npm run preview`, put test files in the local bucket with `npx wrangler r2 
 - Without `MACOS_KEYCHAIN_PROFILE`, the published app cannot unlock with Touch ID. See [Touch ID unlock](#touch-id-unlock).
 - The app runs on Apple silicon with macOS 15 or later only. The Linux button of the site opens a note with the team CLI `apassy-team` for Linux (x86-64), which the relay serves at `/dl/` with `SHA256SUMS` (relay OPERATIONS section 18); the note says that the app needs macOS, because the isolation of agents uses macOS Seatbelt.
 - From 0.3.0, the app reads `latest.json`, downloads a newer build, and installs it at "Restart now" or at the next quit ([updates](updates.md), [ADR 0015](../adr/0015-automatic-updates.md)). An app before 0.3.0 does not update itself: install 0.3.0 from the site once. A copy without a Developer ID signature (an ad hoc build, or a build from source signed with Apple Development), or one outside an app bundle, only shows the new version and the download page. A build from source updates when its owner runs `scripts/install.sh` again.
-- The updater trusts the Developer ID team and Apple notarization, not the site. Each green CI run on `main` that names a released version publishes a new image on the site, but installed apps install only a higher version: raise the version in `Cargo.toml`, `Cargo.lock`, and `extension/manifest.json`, and update `CHANGELOG.md`, to release. Each installed app with automatic install on then gets it within about 6 hours.
+- The updater trusts the Developer ID team and Apple notarization, not the site. Each green CI run on `main` that names a released version strictly newer than public `latest.json` can publish a new image on the site. Installed apps install only a higher version: bump all six components and the files named in the coordinated release policy above to release. Each installed app with automatic install on then gets it within about 6 hours.

@@ -46,6 +46,14 @@ for arg in "$@"; do
   esac
 done
 
+commit="$(git rev-parse --verify HEAD)" || fail "cannot identify the source commit"
+if [ "$upload" = 1 ] && [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  fail "commit the release changes before uploading to TestFlight"
+fi
+if [ -n "${APASSY_BUILD_COMMIT:-}" ] && [ "$APASSY_BUILD_COMMIT" != "$commit" ]; then
+  fail "APASSY_BUILD_COMMIT does not match the checked-out source"
+fi
+
 [ -n "${APASSY_TEAM:-}" ] || fail "set APASSY_TEAM to the team ID that signs the app"
 [ -n "${APASSY_NOTARY_KEY:-}" ] && [ -f "$APASSY_NOTARY_KEY" ] \
   || fail "set APASSY_NOTARY_KEY to the .p8 file of an App Store Connect API key"
@@ -78,6 +86,7 @@ xcodebuild -project ios/ApassyCompanion/ApassyCompanion.xcodeproj \
   -destination 'generic/platform=iOS' \
   -archivePath "$archive" -derivedDataPath "$derived" \
   DEVELOPMENT_TEAM="$APASSY_TEAM" CURRENT_PROJECT_VERSION="$build" \
+  APASSY_BUILD_COMMIT="$commit" \
   "${auth[@]}" archive -quiet
 
 destination=export

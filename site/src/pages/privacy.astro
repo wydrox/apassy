@@ -5,7 +5,7 @@ import { REPO } from "../lib/site";
 // Chrome Web Store listing of the extension links here. Keep it true to the code:
 // docs/operations/browser.md, docs/adr/0015-automatic-updates.md, and
 // docs/adr/0022-relay-sync.md.
-const UPDATED = "2026-10-08";
+const UPDATED = "2026-10-17";
 ---
 <Page title="Privacy · apassy" description="What Apassy, its browser extension, and this site do with your data.">
   <main class="container">
@@ -38,31 +38,43 @@ const UPDATED = "2026-10-08";
       <h2>The browser extension</h2>
       <p>
         The Apassy extension for Chromium browsers fills, saves, and creates website logins from the Apassy app on the same
-        Mac. It has no servers and makes no network requests.
+        Mac. It also fills one-time codes and can answer passkey requests. It has no servers and makes no network requests.
       </p>
       <ul>
         <li>
-          <strong>What it reads.</strong> The address of the active tab, when you open the extension. The username and the
-          password fields of the page, only when you click "Save this login". The extension does nothing on a page until you
-          click its button.
+          <strong>What it reads.</strong> The address and selected login form of the active tab when you use the toolbar.
+          Saving or updating a login explicitly reads the username and password from that form. If you enable login
+          suggestions for a site, focusing a login field reads its site and username prefix to retrieve matching account
+          titles and usernames from Apassy. Focus does not release or fill a password. Optional passkey support reads the
+          site's passkey request.
         </li>
         <li>
           <strong>Where the data goes.</strong> Only to the Apassy app on the same Mac, through the browser's native
-          messaging. Apassy asks for Touch ID or your passphrase before it fills a login, saves one, or creates one. It
-          never sends the data to us or to anyone else.
+          messaging, and into the selected website form or back to the site that requested a passkey. Apassy asks for
+          fresh Touch ID or passphrase approval before each fill, save, update, new login, one-time code, or passkey
+          operation. Listing account metadata does not require this approval. The extension never sends the data to us.
         </li>
         <li>
-          <strong>What it keeps.</strong> Nothing. It stores no data in the browser and never uses the clipboard. A
-          password goes from the app into the page and is then dropped.
+          <strong>What it keeps.</strong> Nonsecret feature preferences are retained through browser site permissions and
+          registered scripts. Extension-only browser session storage holds action results and recovery metadata: site
+          origin, tab, document and form identifiers, time, and result status. Results are usable for up to five minutes
+          and are removed when a later check finds them expired or their page/document target changed. This storage
+          contains no passwords, passkeys, one-time codes, account labels, or page query strings. Passwords and codes are
+          handled only for the requested operation, and the extension never uses the clipboard.
         </li>
         <li>
-          <strong>How the data is used.</strong> Only to fill, save, and create logins in your Apassy vault. It is not
+          <strong>How the data is used.</strong> Only to suggest, fill, save, create, or update logins and to use one-time
+          codes and passkeys from your Apassy vault. It is not
           sold, not given to third parties, not used for ads, and not used to decide credit or loans.
         </li>
         <li>
           <strong>Permissions.</strong> <code>nativeMessaging</code> to talk to the Apassy app, <code>activeTab</code>
-          to read the address of the page that you are on after you click the button, and <code>scripting</code> to put
-          the username and the password into the fields of that page.
+          to access the active page after you click the button, <code>scripting</code> to run the packaged scripts for
+          these operations, and <code>storage</code> for the nonsecret session results described above. Site access to HTTPS
+          sites and local test pages on <code>localhost</code> is optional and requires your choice and the browser's
+          permission prompt. Login suggestions run only on enabled sites and support frames with the same origin as the
+          top page. Toolbar actions, one-time codes, and passkeys target the top frame. Turning a feature off stops its
+          scripts; revoke its site access in the browser's extension settings to remove the grant.
         </li>
       </ul>
 

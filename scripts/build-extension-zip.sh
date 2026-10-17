@@ -30,6 +30,7 @@ EXT_VERSION="$(plutil -extract version raw -o - extension/manifest.json)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 STAGE="$TMP/apassy-extension"
+[ -z "$(find extension -type l)" ] || fail "the extension has a symbolic link"
 cp -R extension "$STAGE"
 find "$STAGE" -name .DS_Store -delete
 [ -z "$(find "$STAGE" -name '_*')" ] || fail "the extension has a file whose name starts with _"
@@ -51,26 +52,46 @@ PY
 find "$STAGE" -exec touch -h -t 202001010000 {} +
 OUT_DIR="target/dist"
 mkdir -p "$OUT_DIR"
-OUT="$OUT_DIR/apassy-extension-$VERSION.zip"
-rm -f "$OUT"
-(cd "$STAGE" && find . -type f | LC_ALL=C sort | sed 's|^\./||' | zip -X -q -@ "$OLDPWD/$OUT")
+OUT="$TMP/apassy-extension-$VERSION.zip"
+(cd "$STAGE" && find . -type f | LC_ALL=C sort | sed 's|^\./||' | zip -X -q -@ "$OUT")
 
-# Check the archive: the manifest at the root, no key, the version.
-unzip -p "$OUT" manifest.json >"$TMP/check.json" || fail "the archive has no manifest.json at its root"
-python3 -I - "$TMP/check.json" "$VERSION" <<'PY'
-import json, sys
-manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+# Check the actual archive, including every runtime helper. New files or
+# permissions need an explicit packaging-policy change rather than silently
+# adding site access or private build files to a store upload.
+python3 -I - "$OUT" "$VERSION" <<'PY'
+import json, sys, zipfile
+required = {
+    "README.md", "manifest.json", "background.js", "fill.js",
+    "login-worker.js", "login-target.js", "login-suggestions.js",
+    "passkey-page.js", "passkey-bridge.js", "popup.html", "popup.js", "popup.css",
+    "icons/16.png", "icons/32.png", "icons/48.png", "icons/128.png",
+}
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    names = archive.namelist()
+    if set(names) != required or len(names) != len(required):
+        sys.exit("error: unexpected archive files (missing=%r, extra=%r)" %
+                 (sorted(required - set(names)), sorted(set(names) - required)))
+    if archive.testzip() is not None:
+        sys.exit("error: corrupt extension archive")
+    manifest = json.loads(archive.read("manifest.json"))
 if "key" in manifest:
     sys.exit("error: the store manifest still has a key")
 if manifest.get("version") != sys.argv[2]:
     sys.exit("error: the store manifest has another version")
-if sorted(manifest.get("permissions", [])) != ["activeTab", "nativeMessaging", "scripting"]:
+if sorted(manifest.get("permissions", [])) != ["activeTab", "nativeMessaging", "scripting", "storage"]:
     sys.exit("error: unexpected permissions: %r" % manifest.get("permissions"))
-for field in ("host_permissions", "content_scripts", "externally_connectable"):
+if sorted(manifest.get("optional_host_permissions", [])) != ["http://localhost/*", "https://*/*"]:
+    sys.exit("error: unexpected optional host permissions: %r" % manifest.get("optional_host_permissions"))
+for field in ("host_permissions", "optional_permissions", "content_scripts", "externally_connectable"):
     if field in manifest:
         sys.exit("error: the store manifest has %s" % field)
+if manifest.get("manifest_version") != 3 or manifest.get("background") != {"service_worker": "background.js"}:
+    sys.exit("error: unexpected background worker configuration")
 PY
 
+PACKAGE="$OUT_DIR/apassy-extension-$VERSION.zip"
+mv "$OUT" "$PACKAGE"
+OUT="$PACKAGE"
 echo "Package: $OUT ($(wc -c <"$OUT" | tr -d ' ') bytes)"
 echo "SHA-256: $(shasum -a 256 "$OUT" | cut -d' ' -f1)"
 unzip -Z1 "$OUT" | sed 's/^/  /'

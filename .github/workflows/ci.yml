@@ -90,7 +90,15 @@ jobs:
           python-version: '3.12'
 
       - name: Test CI helpers
-        run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_extension_package.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_dmg_notary_retry.py'
+
+      - name: Check coordinated release versions
+        run: |
+          python3 scripts/check-release-versions.py
+          python3 -m unittest discover -s scripts/tests -p 'test_release_versions.py'
 
       - name: Check git diff whitespace
         run: git diff --check

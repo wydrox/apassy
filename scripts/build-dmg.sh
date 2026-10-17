@@ -235,21 +235,25 @@ notarize() {
   fi
 }
 
-# Staple the ticket of $1. The stapler asks Apple's CloudKit for the ticket, which
-# can drop the connection for a while right after the notary accepts. Try again,
-# with longer waits, before the build fails.
-staple() {
-  local file="$1" attempt wait=15
+# Retry stapler operations. Both staple and validate contact Apple's CloudKit,
+# which can drop the connection just after notary acceptance. Every operation
+# must succeed, including validation of the copy mounted from the disk image.
+stapler_retry() {
+  local operation="$1" file="$2" attempt wait=15
   for attempt in 1 2 3 4 5 6; do
-    if xcrun stapler staple "$file"; then
-      xcrun stapler validate "$file"
-      return
+    if xcrun stapler "$operation" "$file"; then
+      return 0
     fi
-    [ "$attempt" != "6" ] || fail "could not staple the ticket to $file"
-    echo "Staple: attempt $attempt failed; trying again in ${wait}s" >&2
+    [ "$attempt" != "6" ] || fail "stapler $operation failed for $file after $attempt attempts"
+    echo "Stapler $operation: attempt $attempt failed; trying again in ${wait}s" >&2
     sleep "$wait"
     wait=$((wait * 2))
   done
+}
+
+staple() {
+  stapler_retry staple "$1"
+  stapler_retry validate "$1"
 }
 
 # ---------------------------------------------------------------- app
@@ -294,7 +298,7 @@ codesign --verify --deep --strict "$MOUNT/Apassy.app" \
   || fail "the packaged app signature is not valid"
 check_provider "$MOUNT/Apassy.app" "the mounted image"
 if [ "$NOTARIZE" = "1" ]; then
-  xcrun stapler validate "$MOUNT/Apassy.app"
+  stapler_retry validate "$MOUNT/Apassy.app"
   spctl --assess --type exec --verbose=2 "$MOUNT/Apassy.app"
 fi
 sync
