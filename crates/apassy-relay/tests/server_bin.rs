@@ -20,6 +20,28 @@ fn relay(dir: &std::path::Path, listen: &str) -> Command {
 }
 
 #[test]
+fn version_needs_no_configuration_and_creates_no_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("must-not-exist");
+    for flag in ["--version", "-V", "version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy-relay"))
+            .env_clear()
+            .env("APASSY_RELAY_DATA", &data)
+            .env("APASSY_RELAY_LISTEN", "invalid-address")
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("apassy-relay {}\n", env!("CARGO_PKG_VERSION")),
+        );
+        assert!(output.stderr.is_empty(), "{flag}");
+        assert!(!data.exists());
+    }
+}
+
+#[test]
 fn init_prints_the_owner_token_once_and_only_on_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let output = relay(dir.path(), "127.0.0.1:0")
@@ -50,6 +72,9 @@ fn usage_errors_exit_with_2() {
     let dir = tempfile::tempdir().unwrap();
     for args in [
         vec!["bogus"],
+        vec!["--version", "extra"],
+        vec!["-V", "extra"],
+        vec!["version", "extra"],
         vec!["init", "--team", "T"],
         vec!["init", "--owner", "o"],
         vec!["init", "--team", "T", "--owner", "o", "--extra", "x"],

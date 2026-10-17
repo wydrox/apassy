@@ -20,6 +20,7 @@ use apassy_relay::server::hub::MAX_SWEEP_DAYS;
 use apassy_relay::server::operator::{self, Command as Operator};
 
 const USAGE: &str = "Usage:
+  apassy-relay --version
   apassy-relay [serve]
   apassy-relay init [--team <name> --owner <name>]
   apassy-relay migrate
@@ -65,6 +66,7 @@ enum Command {
     RollbackCheck,
     Admin(Operator),
     Help,
+    Version,
 }
 
 fn parse_flags(args: &[String], names: &[&str]) -> Result<Vec<Option<String>>, String> {
@@ -232,6 +234,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         return Ok(Command::Serve);
     };
     match first.as_str() {
+        "--version" | "-V" | "version" if args.len() == 1 => Ok(Command::Version),
         "serve" if args.len() == 1 => Ok(Command::Serve),
         "migrate" if args.len() == 1 => Ok(Command::Migrate),
         "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
@@ -290,6 +293,10 @@ fn main() -> ExitCode {
         }
     };
     match &command {
+        Command::Version => {
+            println!("apassy-relay {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
         Command::Help => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -377,7 +384,7 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(&error.message),
         },
-        Command::Help | Command::Admin(_) => ExitCode::SUCCESS,
+        Command::Help | Command::Version | Command::Admin(_) => ExitCode::SUCCESS,
     }
 }
 

@@ -266,8 +266,17 @@ fn a_new_vault_is_version_6_with_no_value_column() {
 #[test]
 fn health_needs_no_edge_header() {
     let relay = start(UpstreamOptions::default());
-    let response = ureq::get(&format!("{}/healthz", relay.url))
+    let mut response = ureq::get(&format!("{}/healthz", relay.url))
         .call()
         .expect("healthz");
     assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers()["x-apassy-relay-version"],
+        env!("CARGO_PKG_VERSION"),
+    );
+    assert_eq!(
+        response.headers()["x-apassy-relay-commit"],
+        option_env!("APASSY_RELEASE_COMMIT").unwrap_or("unknown"),
+    );
+    assert_eq!(response.body_mut().read_to_string().unwrap(), "ok\n");
 }
