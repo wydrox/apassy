@@ -760,7 +760,18 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         None => (url.clone(), String::new()),
     };
     if method == "GET" && path == paths::HEALTH {
-        let _ = request.respond(Response::from_string("ok\n"));
+        let version = Header::from_bytes("x-apassy-relay-version", env!("CARGO_PKG_VERSION"))
+            .expect("the Cargo version is a valid header");
+        let commit = Header::from_bytes(
+            "x-apassy-relay-commit",
+            option_env!("APASSY_RELEASE_COMMIT").unwrap_or("unknown"),
+        )
+        .expect("the build commit is a valid header");
+        let _ = request.respond(
+            Response::from_string("ok\n")
+                .with_header(version)
+                .with_header(commit),
+        );
         return;
     }
     let edge = header_value(&request, EDGE_HEADER);

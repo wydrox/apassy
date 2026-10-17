@@ -1,5 +1,27 @@
 # Running apassy-relay
 
+## Coordinated 0.5.5 release (2026-10-17)
+
+This section supersedes the historical build/deploy examples below. Keep one public version across the macOS app, iOS companion, Linux CLI, Chromium extension, relay (server and edge Worker), and website (root `AGENTS.md`). The pinned `apassy` core dependency is intentionally unchanged; do not renumber dependencies, schemas, or protocols for a product release.
+
+1. Commit the prepared release in this repository and the coordinated application release in `wydrox/apassy`. Run the normal CI on the exact relay commit and wait for green. Push an `image-*` tag on that commit to run `.github/workflows/image.yml`. Its three independent GitHub jobs return `relay-image`, `apassy-team-linux-x86_64`, and `apassy-team-darwin-arm64`; they do not deploy. No local VM or production build/test container is needed.
+2. Download all three artifacts from the same successful run. Check the CLI metadata (`release-linux.json`, `release-darwin.json`): both must name version `0.5.5` and the exact relay source SHA. Check each platform checksum. CI executes each CLI's `--version`; Linux is built in pinned Bullseye and rejects required GLIBC symbol versions above 2.31. Darwin must be arm64. The relay image remains Trixie and is not the portable Linux download.
+3. Verify `relay-image.tar.gz.sha256`, `relay-image.id`, `relay-image.inspect.json`, and `relay-image.release.json`. The image has both `apassy-relay:release-0.5.5` and `apassy-relay:sha-<full SHA>` tags; its OCI version/revision labels must match the release metadata. The stable version tag permits a reviewed compose change without embedding a commit hash inside its own commit. Never identify an artifact by its tag alone.
+4. Stage both verified CLI binaries in `deploy/worker/public/dl/`. This ignored directory is absent from a fresh checkout: deploying without it removes the downloads. Generate one `SHA256SUMS` containing both filenames and a `release.json` recording the coordinated version, source SHA, and each platform's SHA-256. Check the Worker package/root lock metadata is `0.5.5`, run Worker tests/typecheck, then deploy only with release authorization. Preserve bindings, secrets, limits, and routing. Read back the Worker deployment ID and fetch/check both public downloads, combined checksums, installer, guide, and metadata.
+5. Follow the existing operational backup/load/restart procedure with the verified CI image, preserving service settings and data. Use `apassy-relay --version` for the package version without opening configuration or data. After authorized deployment, `GET /healthz` must still return `ok\n` and HTTP 200; `x-apassy-relay-version` must be `0.5.5` and `x-apassy-relay-commit` the exact source SHA. The Worker forwards these headers unchanged. Unknown commit metadata means it was built outside the release workflow and is not release proof.
+6. Verify the other application publication surfaces independently, including TestFlight and Chrome Web Store. A relay/Worker release does not publish those packages. Report any pending review/processing or old public version separately.
+
+To stage downloads from the extracted CLI artifacts (paths below are examples):
+
+```sh
+mkdir -p deploy/worker/public/dl
+cp /tmp/relay-release/linux/apassy-team-linux-x86_64 deploy/worker/public/dl/
+cp /tmp/relay-release/darwin/apassy-team-darwin-arm64 deploy/worker/public/dl/
+(cd deploy/worker/public/dl && shasum -a 256 apassy-team-darwin-arm64 apassy-team-linux-x86_64 > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+```
+
+For release image builds, CI supplies `APASSY_RELEASE_VERSION` and the full `APASSY_RELEASE_COMMIT` as Docker build arguments. The latter is compiled into health metadata; local builds without it report `unknown`. Keep the production image's recorded ID/OCI revision and the CI artifact checksum together with the deployment evidence.
+
 Plain steps to run the alpha. The design is in [SPEC.md](SPEC.md). Names such as `apassy-relay.wyderka.cc` are the ones of the first deployment. Change them for yours.
 
 ## 1. What runs where
