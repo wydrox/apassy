@@ -528,5 +528,6 @@ struct CategoryListView: View {
             }
         }
         .navigationTitle(category.label)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -42,11 +42,15 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::answer::{AnswerError, OpenedQuestion, answer_from_mac, open_question};
-use super::client::{AnswerReceipt, AnswerRecord, MAX_WAIT, QuestionsClient, QuestionsError};
+use super::answer::{AnswerError, OpenedQuestion, Unreadable, answer_from_mac, open_question};
+use super::client::{
+    AnswerReceipt, AnswerRecord, MAX_WAIT, QuestionList, QuestionRecord, QuestionsClient,
+    QuestionsError,
+};
 use super::envelope::{
-    AnswerBody, Card, CardError, Choice, RemoteEnvironment, Sealed, SettleBody, SettleOutcome,
-    TO_APPROVERS, TO_MEMBER, VERSION, answer_aad, card_aad, new_qid, settle_aad,
+    AnswerBody, Card, CardError, Choice, MAX_CARD_BYTES, RemoteEnvironment, Sealed, SettleBody,
+    SettleOutcome, TO_APPROVERS, TO_MEMBER, VERSION, answer_aad, card_aad, new_qid, settle_aad,
+    valid_key_id, valid_qid,
 };
 use super::feed::FeedState;
 use crate::broker::SharedVault;
@@ -79,6 +83,13 @@ const MAX_VIEW_LINES: usize = 20;
 pub const ACTIVITY_OPERATION: &str = "answer through the relay";
 /// The relay lists at most this many questions in one answer (section 10.4).
 const LIST_PAGE: usize = 100;
+/// Bound encrypted cards retained while their key or trusted-device row catches up.
+const MAX_PENDING: usize = LIST_PAGE;
+const RECEIVE_NETWORK: &str =
+    "Requests from other Macs could not be refreshed. Apassy will try again.";
+const RECEIVE_SYNC: &str = "Sync this vault to read a request from another Mac.";
+const RECEIVE_UNREADABLE: &str =
+    "A request from another Mac could not be read. Sync this vault or update Apassy.";
 /// The owner removed this Mac from the questions (its key is in a removed row).
 pub const REMOVED: &str = "This device was removed from questions. To answer and ask through the relay again, turn “Send questions through the relay” on again: it needs your confirmation and a new key.";
 /// The vault has a questions membership on this Mac but no row of this Mac.
@@ -95,9 +106,6 @@ pub const SENT: &str = "Sent. The Mac checks it; if the run does not continue wi
 /// decision 1).
 pub const TEAM_PRODUCTION: &str =
     "Remote answers for team production come with shared vaults; answer on this Mac.";
-/// The shortest time between two list calls that brought nothing: a relay that does not
-/// hold the long poll is not asked in a loop.
-const LIST_AT_LEAST: Duration = Duration::from_secs(1);
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -184,6 +192,8 @@ pub struct QuestionsView {
     pub refused: Vec<RemoteRefused>,
     /// A problem of the relay for the window, in words.
     pub problem: Option<String>,
+    /// A receiving problem, independent of posting the questions of this Mac.
+    pub receive_problem: Option<String>,
     /// The open questions of the other devices of the vault, opened and checked, the
     /// soonest end first.
     pub remote: Vec<RemoteQuestion>,
@@ -224,14 +234,161 @@ impl RemoteQuestion {
 /// The questions of the other devices, as the lister keeps them.
 #[derive(Default)]
 struct Remote {
-    /// The team of the list. Another team starts the list again.
-    team_id: Option<String>,
+    /// A list and its retained envelopes belong to one unlocked vault session.
+    session: Option<RemoteSession>,
+    /// Invalidates an in-flight list even if the same session is enabled again.
+    generation: u64,
     /// The last question sequence seen (section 10.4).
     since: u64,
     /// The number of the next new question.
     next_id: u64,
     /// The open questions, by `qid`.
     open: BTreeMap<String, RemoteQuestion>,
+    /// Only sealed cards are retained until the vault data needed to verify them arrives.
+    pending: BTreeMap<String, PendingRemote>,
+    receive_problem: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RemoteSession {
+    path: PathBuf,
+    epoch: [u8; 32],
+    team_id: String,
+}
+
+impl RemoteSession {
+    fn of(active: &Active) -> Self {
+        Self {
+            path: active.path.clone(),
+            epoch: active.epoch,
+            team_id: active.team_id.clone(),
+        }
+    }
+}
+
+struct PendingRemote {
+    record: QuestionRecord,
+    reason: Unreadable,
+}
+
+impl Remote {
+    fn retry_pending(
+        &mut self,
+        team_id: &str,
+        keys: &[QuestionKey],
+        devices: &[TrustedDevice],
+        now: u64,
+    ) {
+        self.pending
+            .retain(|_, pending| pending.record.expires_at > now);
+        self.open.retain(|_, question| question.expires_at() > now);
+        let retry: Vec<_> = self.pending.keys().cloned().collect();
+        for qid in retry {
+            let Some(mut pending) = self.pending.remove(&qid) else {
+                continue;
+            };
+            match open_question(&pending.record, team_id, keys, devices, now) {
+                Ok(question) => {
+                    if let Some(known) = self.open.get_mut(&qid) {
+                        known.question = question;
+                    } else {
+                        self.next_id += 1;
+                        let id = self.next_id;
+                        self.open.insert(
+                            qid,
+                            RemoteQuestion {
+                                id,
+                                question,
+                                sent: None,
+                            },
+                        );
+                    }
+                }
+                Err(Unreadable::Expired) => {
+                    self.open.remove(&qid);
+                }
+                Err(reason) => {
+                    // No card or answer becomes visible before all original checks pass.
+                    self.open.remove(&qid);
+                    pending.reason = reason;
+                    self.pending.insert(qid, pending);
+                }
+            }
+        }
+    }
+
+    /// Process terminal records before retrying; leave deferred envelopes behind the
+    /// cursor so a full bounded cache cannot permanently discard later questions.
+    fn receive_list(
+        &mut self,
+        list: &QuestionList,
+        since: u64,
+        team_id: &str,
+        keys: &[QuestionKey],
+        devices: &[TrustedDevice],
+        now: u64,
+    ) -> bool {
+        if list.seq < since {
+            self.since = 0;
+            self.retry_pending(team_id, keys, devices, now);
+            return false;
+        }
+        for record in &list.questions {
+            if record.state != "open" || record.expires_at <= now {
+                self.pending.remove(&record.qid);
+                self.open.remove(&record.qid);
+            }
+        }
+        // Key/trust sync or terminal updates can release slots before admitting a page.
+        self.retry_pending(team_id, keys, devices, now);
+        let mut invalid = false;
+        let mut deferred: Option<u64> = None;
+        for record in &list.questions {
+            if record.state != "open" || record.expires_at <= now {
+                continue;
+            }
+            if !bounded_remote(record, now) {
+                invalid = true;
+                self.pending.remove(&record.qid);
+                self.open.remove(&record.qid);
+                continue;
+            }
+            if self.pending.contains_key(&record.qid) || self.pending.len() < MAX_PENDING {
+                self.pending.insert(
+                    record.qid.clone(),
+                    PendingRemote {
+                        record: record.clone(),
+                        reason: Unreadable::CouldNotRead,
+                    },
+                );
+            } else {
+                deferred = Some(deferred.map_or(record.seq, |seq| seq.min(record.seq)));
+            }
+        }
+        let last = list.questions.iter().map(|record| record.seq).max();
+        let next = match last {
+            Some(last) if list.questions.len() >= LIST_PAGE => last,
+            Some(last) => last.max(list.seq),
+            None => list.seq.max(since),
+        };
+        self.since = deferred.map_or(next, |seq| next.min(seq.saturating_sub(1)).max(since));
+        self.retry_pending(team_id, keys, devices, now);
+        invalid || deferred.is_some()
+    }
+}
+
+/// The relay is untrusted: bound every variable-size field before retaining a record.
+fn bounded_remote(record: &QuestionRecord, now: u64) -> bool {
+    valid_qid(&record.qid)
+        && valid_key_id(&record.key_id)
+        && matches!(record.to.as_str(), TO_MEMBER | TO_APPROVERS)
+        && record.nonce.len() == 16
+        && record.ciphertext.len() <= (MAX_CARD_BYTES + 16).div_ceil(3) * 4
+        && record.from_device_name.len() <= 256
+        && record.state == "open"
+        && record.settle.is_none()
+        && record.expires_at > now
+        && record.expires_at <= now.saturating_add(600)
 }
 
 /// An answer of this Mac to a question of another device, ready to send on a thread of
@@ -1709,8 +1866,10 @@ impl Shared {
         {
             let mut remote = lock(&self.remote);
             let next_id = remote.next_id;
+            let generation = remote.generation.wrapping_add(1);
             *remote = Remote {
                 next_id,
+                generation,
                 ..Remote::default()
             };
         }
@@ -1719,12 +1878,18 @@ impl Shared {
 
     /// Copy the open questions of the other devices to the view.
     fn publish_remote(&self) {
-        let mut list: Vec<RemoteQuestion> = lock(&self.remote).open.values().cloned().collect();
+        // Keep the remote lock until the view is updated: a concurrent forget must not
+        // clear the list and then have an older snapshot published over it.
+        let remote = lock(&self.remote);
+        let mut list: Vec<RemoteQuestion> = remote.open.values().cloned().collect();
         list.sort_by_key(|question| (question.expires_at(), question.id));
         let mut view = lock(&self.view);
-        if view.remote != list {
-            view.remote = list;
-            drop(view);
+        let changed = view.remote != list || view.receive_problem != remote.receive_problem;
+        view.remote = list;
+        view.receive_problem = remote.receive_problem.clone();
+        drop(view);
+        drop(remote);
+        if changed {
             self.changed();
         }
     }
@@ -1739,7 +1904,11 @@ impl Shared {
 
     /// The relay says that `qid` takes no more answers.
     fn remote_gone(&self, qid: &str) {
-        lock(&self.remote).open.remove(qid);
+        {
+            let mut remote = lock(&self.remote);
+            remote.open.remove(qid);
+            remote.pending.remove(qid);
+        }
         self.publish_remote();
     }
 
@@ -1774,110 +1943,90 @@ impl Shared {
     fn list_step(&self) {
         let active = lock(&self.state).active.clone();
         let Some(active) = active else {
-            if lock(&self.remote).team_id.is_some() {
+            if lock(&self.remote).session.is_some() {
                 self.forget_remote();
             }
             self.sleep(Duration::from_secs(1));
             return;
         };
-        let since = {
+        let session = RemoteSession::of(&active);
+        let (since, generation, wait) = {
+            // Validate before starting a new receiving session, including after a lock.
+            let mut guard = lock(&self.vault);
+            if Self::vault_of(&mut guard, &active).is_none() {
+                return;
+            }
             let mut remote = lock(&self.remote);
-            if remote.team_id.as_deref() != Some(active.team_id.as_str()) {
+            if remote.session.as_ref() != Some(&session) {
                 let next_id = remote.next_id;
+                let generation = remote.generation.wrapping_add(1);
                 *remote = Remote {
-                    team_id: Some(active.team_id.clone()),
+                    session: Some(session.clone()),
                     next_id,
+                    generation,
                     ..Remote::default()
                 };
             }
-            remote.since
+            let wait = if remote.pending.is_empty() {
+                MAX_WAIT
+            } else {
+                SHORT_POLL_EVERY
+            };
+            (remote.since, remote.generation, wait)
         };
         if self.unsupported_now() {
-            // A relay without the questions routes: no list until the wait ends.
             self.sleep(Duration::from_secs(5));
             return;
         }
         let started = Instant::now();
-        let list = match active.client.list(since, MAX_WAIT) {
-            Ok(list) => list,
-            Err(error) if error.status() == Some(404) => {
-                self.mark_unsupported(&active, "Apassy");
-                return;
-            }
-            Err(error) => {
-                if !matches!(error, QuestionsError::Closed) && !self.stop.load(Ordering::SeqCst) {
-                    self.sleep(Duration::from_secs(2));
-                }
-                return;
-            }
-        };
-        if list.seq < since {
-            // A relay restored from a backup: read again from the start.
-            lock(&self.remote).since = 0;
+        let fetched = active.client.list(since, wait);
+        if matches!(&fetched, Err(error) if error.status() == Some(404)) {
+            self.mark_unsupported(&active, "Apassy");
             return;
         }
-        let (keys, devices) = {
+        if matches!(&fetched, Err(QuestionsError::Closed)) || self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        // Retry with current vault data even if the relay returned an empty delta or
+        // failed. Hold the vault through the commit so a lock cannot publish stale cards.
+        {
             let mut guard = lock(&self.vault);
             let Some(vault) = Self::vault_of(&mut guard, &active) else {
                 return;
             };
-            (
-                vault
-                    .question_key()
-                    .ok()
-                    .flatten()
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                vault.trusted_devices().unwrap_or_default(),
-            )
-        };
-        let now = unix_now();
-        {
+            let keys: Vec<_> = vault.question_key().ok().flatten().into_iter().collect();
+            let devices = vault.trusted_devices().unwrap_or_default();
+            let now = unix_now();
             let mut remote = lock(&self.remote);
-            if remote.team_id.as_deref() != Some(active.team_id.as_str()) {
+            if remote.session.as_ref() != Some(&session) || remote.generation != generation {
                 return;
             }
-            for record in &list.questions {
-                let opened = (record.state == "open")
-                    .then(|| open_question(record, &active.team_id, &keys, &devices, now).ok())
-                    .flatten();
-                match opened {
-                    Some(question) => {
-                        if let Some(known) = remote.open.get_mut(&record.qid) {
-                            known.question = question;
-                        } else {
-                            remote.next_id += 1;
-                            let id = remote.next_id;
-                            remote.open.insert(
-                                record.qid.clone(),
-                                RemoteQuestion {
-                                    id,
-                                    question,
-                                    sent: None,
-                                },
-                            );
-                        }
-                    }
-                    // Settled, expired, or a card that this Mac cannot read: it offers
-                    // no answer here.
-                    None => {
-                        remote.open.remove(&record.qid);
-                    }
+            let invalid = match &fetched {
+                Ok(list) => remote.receive_list(list, since, &active.team_id, &keys, &devices, now),
+                Err(_) => {
+                    remote.retry_pending(&active.team_id, &keys, &devices, now);
+                    false
                 }
-            }
-            remote
-                .open
-                .retain(|_, question| question.expires_at() > now);
-            let last = list.questions.iter().map(|record| record.seq).max();
-            remote.since = match last {
-                Some(last) if list.questions.len() >= LIST_PAGE => last,
-                Some(last) => last.max(list.seq),
-                None => list.seq.max(since),
             };
+            remote.receive_problem = if fetched.is_err() {
+                Some(RECEIVE_NETWORK.to_owned())
+            } else if remote
+                .pending
+                .values()
+                .any(|pending| pending.reason == Unreadable::NoKey)
+            {
+                Some(RECEIVE_SYNC.to_owned())
+            } else if invalid || !remote.pending.is_empty() {
+                Some(RECEIVE_UNREADABLE.to_owned())
+            } else {
+                None
+            };
+            drop(remote);
+            self.publish_remote();
         }
-        self.publish_remote();
-        if list.questions.is_empty() && started.elapsed() < LIST_AT_LEAST {
-            self.sleep(LIST_AT_LEAST.saturating_sub(started.elapsed()));
+        // A relay may return immediately even for a long poll. Bound retry frequency.
+        if started.elapsed() < SHORT_POLL_EVERY {
+            self.sleep(SHORT_POLL_EVERY.saturating_sub(started.elapsed()));
         }
     }
 }
@@ -1942,5 +2091,60 @@ fn feed_publisher(shared: &Shared) {
 fn feed_actions(shared: &Shared) {
     while !shared.stop.load(Ordering::SeqCst) {
         shared.actions_step();
+    }
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use super::*;
+
+    fn sealed_record(seq: u64, now: u64) -> QuestionRecord {
+        QuestionRecord {
+            qid: crate::sync::encode_b64u(&seq.to_le_bytes().repeat(2)),
+            seq,
+            to: TO_MEMBER.to_owned(),
+            from_device_id: 1,
+            from_device_name: "Synthetic Mac".to_owned(),
+            key_id: "0123456789abcdef".to_owned(),
+            nonce: "AAAAAAAAAAAAAAAA".to_owned(),
+            ciphertext: "AAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+            created_at: now,
+            expires_at: now + 60,
+            state: "open".to_owned(),
+            settled_at: None,
+            settle: None,
+        }
+    }
+
+    #[test]
+    fn a_full_receive_cache_defers_the_cursor_and_admits_the_next_page_after_expiry() {
+        let now = 1_790_000_000;
+        let mut remote = Remote::default();
+        let first = QuestionList {
+            seq: 200,
+            questions: (1..=100).map(|seq| sealed_record(seq, now)).collect(),
+        };
+        assert!(!remote.receive_list(&first, 0, "t_synthetic1", &[], &[], now));
+        assert_eq!(remote.since, 100);
+        assert_eq!(remote.pending.len(), MAX_PENDING);
+        let next = QuestionList {
+            seq: 200,
+            questions: (101..=200).map(|seq| sealed_record(seq, now + 1)).collect(),
+        };
+        assert!(remote.receive_list(&next, 100, "t_synthetic1", &[], &[], now + 1));
+        assert_eq!(
+            remote.since, 100,
+            "no deferred envelope is behind the cursor"
+        );
+        assert_eq!(remote.pending.len(), MAX_PENDING);
+        // The first page expires; the deferred page is still live and can be admitted.
+        assert!(!remote.receive_list(&next, 100, "t_synthetic1", &[], &[], now + 60));
+        assert_eq!(remote.since, 200);
+        assert_eq!(remote.pending.len(), MAX_PENDING);
+        assert!(
+            next.questions
+                .iter()
+                .all(|record| remote.pending.contains_key(&record.qid))
+        );
     }
 }

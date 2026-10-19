@@ -168,6 +168,8 @@ public protocol VaultService: Sendable {
     func credentialExport() async throws -> CredentialExport
 
     // 5.10 Questions through the relay (contract relay-questions-v1). The app only.
+    func requestHistory() async throws -> RequestHistorySnapshot
+    func clearRequestHistory(vaultID: String) async throws
     func questionsList() async throws -> QuestionsList
     /// Make the questions context of `vaultID` without selecting it (a vault that is not open
     /// after `resume`, or after the app started): the core opens the vault, reads what its
@@ -246,6 +248,14 @@ public protocol VaultService: Sendable {
 }
 
 public extension VaultService {
+    func requestHistory() async throws -> RequestHistorySnapshot {
+        throw VaultError(.notAllowed, "Update Apassy to view saved request history.")
+    }
+
+    func clearRequestHistory(vaultID: String) async throws {
+        throw VaultError(.notAllowed, "Update Apassy to clear saved request history.")
+    }
+
     func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
         throw VaultError(.notAllowed, "This service cannot open an iCloud vault.")
     }

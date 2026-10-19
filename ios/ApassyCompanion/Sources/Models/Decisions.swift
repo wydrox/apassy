@@ -18,11 +18,14 @@ struct WaitingDecision: Identifiable, Equatable {
     /// The vault and the asking Mac of a question ("Personal · Mac mini"), when the questions of
     /// two vaults or more show; else nil.
     var vault: String? = nil
+    /// A paired device identifier, never a Mac display name. Nil in legacy callers.
+    var pairedDeviceID: String? = nil
 
     var id: String {
         switch source {
-        case .question(let question): "question-\(question.qid)"
-        case .run(let run): "run-\(run.id)"
+        case .question(let question): question.requestIdentity
+        case .run(let run):
+            "run:\((pairedDeviceID ?? "unqualified").utf8.count):\(pairedDeviceID ?? "unqualified"):\(run.id):\(run.digest)"
         }
     }
 
@@ -90,7 +93,7 @@ enum Decisions {
     /// With `namesVaults` (the questions of two vaults or more), each question names its vault.
     static func waiting(
         questions: [RemoteQuestion], runs: [PendingRun], runTimeout: Int, fetchedAt: Date?, pairedMac: String?,
-        namesVaults: Bool = false, now: Date
+        namesVaults: Bool = false, pairedDeviceID: String? = nil, now: Date
     ) -> [WaitingDecision] {
         let at = Int64(now.timeIntervalSince1970)
         let open = questions.filter {
@@ -111,7 +114,7 @@ enum Decisions {
                 created = fetchedAt.addingTimeInterval(-TimeInterval(max(0, waited)))
                 deadline = fetchedAt.addingTimeInterval(TimeInterval(max(0, runTimeout - max(0, waited))))
             }
-            rows.append(WaitingDecision(source: .run(run), createdAt: created, deadline: deadline))
+            rows.append(WaitingDecision(source: .run(run), createdAt: created, deadline: deadline, pairedDeviceID: pairedDeviceID))
         }
         // A stable sort: equal times keep the order above (questions first).
         return rows.enumerated().sorted { lhs, rhs in
@@ -140,7 +143,8 @@ enum Decisions {
         waiting(
             questions: questions, runs: session?.runs ?? [],
             runTimeout: session?.approvalTimeout ?? SessionModel.defaultApprovalTimeout,
-            fetchedAt: session?.fetchedAt, pairedMac: session?.macName, namesVaults: namesVaults, now: now)
+            fetchedAt: session?.fetchedAt, pairedMac: session?.macName, namesVaults: namesVaults,
+            pairedDeviceID: session?.requestSourceID, now: now)
     }
 
     /// The number on the Decisions tab: the rows of Waiting (a run that a question shows counts

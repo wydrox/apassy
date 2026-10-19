@@ -152,25 +152,24 @@ struct ItemDetailView: View {
     }
 
     private func header(_ row: ItemRow) -> some View {
-        VStack(spacing: 8) {
-            ProviderTile(row, scale: 1.9)
-            Text(row.title)
-                .font(.title2.bold())
-                .multilineTextAlignment(.center)
-                .padding(.top, 4)
-            Text(CredentialLooks.headerLine(row))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            let caps = caps(row)
-            if !caps.isEmpty {
-                FlowLayout {
-                    ForEach(caps) { cap in
-                        CapView(label: cap.label, red: cap.red)
+        HStack(alignment: .top, spacing: 12) {
+            ProviderTile(row)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(CredentialLooks.headerLine(row))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                let caps = caps(row)
+                if !caps.isEmpty {
+                    FlowLayout {
+                        ForEach(caps) { cap in
+                            CapView(label: cap.label, red: cap.red)
+                        }
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
     }
 

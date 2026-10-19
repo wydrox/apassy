@@ -27,6 +27,13 @@ typedef struct ApassyCore ApassyCore;
 // Start a core. `config` is JSON (section 3). NULL on a bad config.
 ApassyCore *apassy_core_new(const char *config);
 
+// Native app: retrieve a device-local 32-byte request-history key, outside JSON.
+// Return 0 for success, 1 for missing, another value for unavailable.
+typedef int32_t (*apassy_history_key_provider)(void *context,
+    const char *vault_id, bool may_create, uint8_t *out_key_32);
+ApassyCore *apassy_core_new_with_history_key_provider(const char *config,
+    apassy_history_key_provider provider, void *context);
+
 // One call. `request` is JSON (section 4). The answer is JSON, UTF-8, NUL-terminated,
 // never NULL. Free it with apassy_core_free_string.
 char *apassy_core_call(ApassyCore *core, const char *request);
@@ -39,6 +46,7 @@ void apassy_core_free(ApassyCore *core);
 ```
 
 - `apassy_core_call` is safe from several threads at once. A slow call (a sync, a long poll, a join) does not hold the vault: item calls answer while it runs.
+- The history callback and its context must be thread-safe and remain valid until `apassy_core_free` returns. The callback writes exactly 32 bytes on success; it must not retain either pointer. `may_create=false` forbids creating or replacing a key. Missing, inaccessible or malformed keys never cause a reset. The core calls the provider only while it holds an authorized vault context and zeroizes its returned key buffer after use.
 - A panic inside a call is caught and answered as the error `internal`. The core never aborts the process on a bad request.
 - The core counts each answer first and writes it into one buffer with room for the final NUL byte. A serializer that changes size between the two passes gives the error `internal`, so a secret never moves to a grown copy. The core erases the buffer when it is freed.
 - The core erases each answer when it is freed, and each passphrase and secret it parsed. A Swift `String` cannot be erased; the app keeps a revealed value only while it is on the screen. This is best effort, as on the Mac.
@@ -51,6 +59,8 @@ void apassy_core_free(ApassyCore *core);
 
 - `data_dir`: absolute; the App Group container, so the app and the AutoFill extension see the same vault. The core makes it with mode 0700.
 - `device_name`: the name that the relay and the Macs show for this iPhone, and the name in a conflict copy. At most 64 bytes after trimming.
+- `request_history_enabled`: defaults to `false`. The native app enables it only after verifying that its local history directory is excluded from backup. Enabled history requires the key-provider constructor.
+- `request_history_required`: defaults to `false` for existing callers. The native app always sets it to `true`, including when storage initialization fails. An unavailable journal then blocks answer preparation/delivery instead of bypassing the durable duplicate-answer guard. AutoFill does not enable or require history.
 - `role`: `app` or `autofill`. The `autofill` role answers only the calls marked **R** in section 5. Every other call gets `not_allowed`. The extension never syncs and never edits an item. It records a reveal, and it can add a passkey with `passkey_register`. It cannot import, remove, or export (section 5.8).
 
 Files in `data_dir`:
@@ -61,8 +71,19 @@ Files in `data_dir`:
 | `vaults/<vault_id>.apassy` | The live vault (SQLCipher), as on the Mac. |
 | `sync/<vault_id>.json` and `sync/.*` | The relay sync state and work files, as on the Mac. |
 | `feed-seq.json` | The highest feed `seq` accepted of each Mac (section 5.12). No secret. |
+| `request-history/<vault_id>.json` | Encrypted, device-local request metadata and durable answer intents; excluded from backup and sync. |
 | `icloud-transfer/<transaction>/…` | Private encrypted input/output snapshots for one coordinated file transaction. |
 | iCloud bookmarks | Private Swift-managed file access records, keyed by vault ID. They contain no passphrase. |
+
+### Local Requests journal (internal 0.5.5 build)
+
+Journal version 2 uses a random per-vault key stored by the native app in non-synchronizing `WhenUnlockedThisDeviceOnly` Keychain storage. It is independent of rotating relay question keys. AEAD binds the journal version, vault ID and local key identifier. The JSON configuration, relay payloads, vault schema and component marketing versions do not change.
+
+Version 1 is migrated atomically when its matching question key remains available. A live old context is migrated before a newly synchronized question key replaces it. If that key was lost before upgrade, `history_migration_blocked` preserves the ciphertext and blocks new answers; it does not discard history. Missing version-2 keys report `history_key_missing`; inaccessible provider/storage reports `history_storage_unavailable`. Other unreadable journals report `history_unavailable`. Clearing unreadable history is refused because it could erase a pending answer guard.
+
+An answer intent is persisted before its POST. An ambiguous network failure retains the intent across restart. Only a fresh attempt rejected with HTTP 429 can release its own intent; a rejected retry cannot erase an earlier ambiguous delivery. Answer POSTs do not automatically retry HTTP 503. Sends for the same vault/request are serialized and revalidate the authorized context after waiting. Existing generic relay retries are unchanged.
+
+The earlier Requests beta cannot read version-2 history, so downgrading to that beta does not preserve usable history. This is a local journal-format change, not a vault or wire-format change. Removing a vault removes its journal; the get/create-only provider intentionally retains its unreferenced device-local key. Removal is not a claim of cryptographic erasure. Face ID, production APNs and real device upgrade/Keychain behavior require physical-device acceptance separately from synthetic tests.
 
 ## 4. Requests and answers
 

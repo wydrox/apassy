@@ -114,6 +114,50 @@ impl RelayMember {
         self.call_until(method, path, body, wait, None)
     }
 
+    /// Send one answer POST without automatic 503 retries. This lets the caller
+    /// distinguish a fresh definitive rejection from an ambiguous prior delivery.
+    /// Authentication may retry after 401 (an unauthenticated POST is not accepted).
+    /// Existing generic call/retry behavior is unchanged for every other caller.
+    pub fn call_answer_once(&self, path: &str, body: &Value) -> Result<Value, RelayCallError> {
+        if !path.starts_with("/v1/questions/") || !path.ends_with("/answers") {
+            return Err(RelayCallError::Sync(SyncError::Damaged));
+        }
+        let session = &self.session;
+        let result = session.authed(|bearer| {
+            if let Some(left) = super::rate_limited(&session.url) {
+                return Err(super::rate_limit_error(left));
+            }
+            let mut request = json_request("POST", path, Some(bearer), body);
+            session.bind(&mut request, None);
+            let answer = crate::sync::relay_http::exchange(&session.url, &request)
+                .map_err(super::http_error)?;
+            let result = super::decode(&answer);
+            if let Err(ApiError::Relay {
+                status: 429,
+                retry_after,
+                ..
+            }) = &result
+            {
+                let wait = Duration::from_secs(
+                    retry_after
+                        .unwrap_or(super::RATE_WAIT)
+                        .clamp(1, super::MAX_RATE_WAIT),
+                );
+                super::lock(super::rate_limits()).insert(
+                    session.url.as_str().to_owned(),
+                    std::time::Instant::now() + wait,
+                );
+            }
+            result
+        });
+        match result {
+            Err(_) if session.cancel.is_closed() => Err(RelayCallError::Sync(SyncError::Vault(
+                VaultErrorKind::Locked,
+            ))),
+            other => other.map_err(RelayCallError::from),
+        }
+    }
+
     /// [`Self::call`] that `cancel` ends: a long poll that the caller ends when it has
     /// another question to wait for. A request has one cancel, so a call in flight
     /// with `cancel` ends by `cancel` only: the caller closes it at a lock too. A later

@@ -1,0 +1,129 @@
+{
+  "checked_at": "2026-10-19T07:00:59.248565+00:00",
+  "delivery_scope": "User-authorized internal TestFlight build; no new coordinated six-component release",
+  "source_commit": "bc08deadcef6fbf7ee427ee3f9533028fc8ac5c0",
+  "source_branch": "product/ios-requests",
+  "marketing_version": "0.5.5",
+  "build_number": "29873206",
+  "ipa": {
+    "file": "ApassyCompanion.ipa",
+    "bytes": 16116418,
+    "sha256": "6b4b41d09b2491f2fd79e27c86e62c9c4eae1c363ea96a7888dd583ed5581091"
+  },
+  "bundles": [
+    {
+      "bundle": "com.wydrox.apassy.companion",
+      "marketing_version": "0.5.5",
+      "build": "29873206",
+      "source_commit": "bc08deadcef6fbf7ee427ee3f9533028fc8ac5c0",
+      "minimum_ios": "26.0",
+      "codesign_verified": true,
+      "entitlements": {
+        "application-identifier": "7S3F9767BM.com.wydrox.apassy.companion",
+        "aps-environment": "production",
+        "beta-reports-active": true,
+        "com.apple.developer.authentication-services.autofill-credential-provider": true,
+        "com.apple.developer.team-identifier": "7S3F9767BM",
+        "com.apple.developer.usernotifications.time-sensitive": true,
+        "com.apple.security.application-groups": [
+          "group.com.wydrox.apassy.companion"
+        ],
+        "get-task-allow": false,
+        "keychain-access-groups": [
+          "7S3F9767BM.com.wydrox.apassy.companion",
+          "7S3F9767BM.com.wydrox.apassy.shared"
+        ]
+      },
+      "profile_name": "Apassy iOS App Store",
+      "profile_uuid": "e13dd1a1-59c5-4c69-83cc-fc20eef9d09f",
+      "profile_expiry": "2027-08-28T12:29:41"
+    },
+    {
+      "bundle": "com.wydrox.apassy.companion.autofill",
+      "marketing_version": "0.5.5",
+      "build": "29873206",
+      "source_commit": "bc08deadcef6fbf7ee427ee3f9533028fc8ac5c0",
+      "minimum_ios": "26.0",
+      "codesign_verified": true,
+      "entitlements": {
+        "application-identifier": "7S3F9767BM.com.wydrox.apassy.companion.autofill",
+        "beta-reports-active": true,
+        "com.apple.developer.authentication-services.autofill-credential-provider": true,
+        "com.apple.developer.team-identifier": "7S3F9767BM",
+        "com.apple.security.application-groups": [
+          "group.com.wydrox.apassy.companion"
+        ],
+        "get-task-allow": false,
+        "keychain-access-groups": [
+          "7S3F9767BM.com.wydrox.apassy.shared"
+        ]
+      },
+      "profile_name": "Apassy iOS AutoFill App Store",
+      "profile_uuid": "62a20b5d-45ac-4664-8750-df7c4836e33b",
+      "profile_expiry": "2027-08-28T12:29:41"
+    }
+  ],
+  "apple_validation": "No errors validating archive at 'target/ios/export/ApassyCompanion.ipa'.",
+  "upload": {
+    "message": "No errors uploading archive at 'target/ios/export/ApassyCompanion.ipa'.",
+    "delivery_uuid": "f74a714f-3e79-4adb-9b51-8ebe426583db"
+  },
+  "testflight": {
+    "app_id": "6820438429",
+    "build_id": "f74a714f-3e79-4adb-9b51-8ebe426583db",
+    "processing_state": "VALID",
+    "uploaded_date": "2026-10-18T23:58:34-07:00",
+    "expired": false,
+    "autoNotifyEnabled": true,
+    "internalBuildState": "IN_BETA_TESTING",
+    "externalBuildState": "READY_FOR_BETA_SUBMISSION",
+    "group": {
+      "id": "6b2b208b-6786-4736-857d-93a769afa99f",
+      "name": "Apassy",
+      "is_internal": true,
+      "has_access_to_all_builds": true,
+      "build_relationship_verified": true
+    },
+    "tester": {
+      "name": "Rafał",
+      "expected_publisher_account_verified": true,
+      "group_membership_verified": true,
+      "existing_tester_state": "INSTALLED",
+      "invitation_needed": false,
+      "new_build_installed_on_device_verified": false
+    },
+    "localization": {
+      "locale": "en-GB",
+      "whatsNew": "Requests A — internal test build 0.5.5 (29873206).\n\nWaiting and History now use native system navigation. Routine requests offer Deny / Allow Once directly from the list; elevated or unclear requests retain Review. History supports search and filters and stores encrypted metadata for relay vault requests observed on this iPhone.\n\nPlease use synthetic credentials in a test vault. On a physical iPhone, test Face ID approval and cancellation, lock/background during approval, and APNs foreground/background/cold launch. Opening a notification should return to Waiting without automatically unlocking or selecting an unrelated request. Verify uncertain delivery never appears as confirmed approval. Check history lock/unlock, clear, VoiceOver, and largest text.\n\nFace ID and APNs device behavior have not yet been accepted on a physical device. This is an internal Requests test build, not a new coordinated six-component release.\n",
+      "saved_and_read_back": true
+    }
+  },
+  "checks_current_turn": {
+    "swift_model_tests": 414,
+    "swift_request_history_tests": 5,
+    "rust_request_history_tests": 5,
+    "rust_questions_flow_tests": 12,
+    "release_checker_tests": 8,
+    "rust_clippy": "passed",
+    "rust_fmt": "passed",
+    "six_source_versions": "0.5.5; relay included",
+    "signed_device_release_archive": "passed",
+    "apple_validation": "passed",
+    "ipa_codesign_and_entitlements": "passed"
+  },
+  "earlier_evidence": "Seven native Simulator scenarios and screenshots remain the implementation-stage evidence; unchanged source hashes verified, not rerun as device tests.",
+  "device_acceptance_pending": [
+    "Face ID approval/cancellation and interrupted authentication",
+    "APNs foreground/background/cold launch and privacy",
+    "Live relay uncertainty/reconnect",
+    "Physical VoiceOver and largest-text flow"
+  ],
+  "invitation_sent": false,
+  "subsequent_compatibility_review": {
+    "acceptance": "blocked",
+    "reason": "Synthetic test confirms history_unavailable after question-key rotation; valid new relay answer is not sent",
+    "report": "compatibility-review-2026-10-19.md",
+    "build_withdrawn": false,
+    "production_source_changed": false
+  }
+}

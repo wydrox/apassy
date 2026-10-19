@@ -26,7 +26,9 @@ import Testing
         let passphrase = try #require(ready["passphrase"] as? String)
         let links = try #require(ready["links"] as? [String: String])
 
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let historyKeys = CoreTestHistoryKeys()
+        var core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: historyKeys.store)
         let key = P256.Signing.PrivateKey()
         for name in ["Personal", "Work"] {
             let link = try #require(links[name])
@@ -128,6 +130,53 @@ import Testing
         let cleared = try await core.pushTokenClear()
         #expect(cleared.cleared == [work])
         #expect(cleared.pending == [personal])
+
+        // k. The native C callback gave each vault a durable key. Fetch verified
+        // settles before restarting so history must preserve both metadata and delivery.
+        _ = try await core.questionsUnlock(vaultID: personal, passphrase: passphrase)
+        try await Self.eventually("both verified outcomes reached local history", timeout: 20) {
+            _ = try await core.questionsList()
+            let history = try await core.requestHistory()
+            return history.vaults.first { $0.vaultID == personal }?.entries.first?.outcome == "approved"
+                && history.vaults.first { $0.vaultID == work }?.entries.first?.outcome == "denied"
+        }
+        let savedHistory = try await core.requestHistory()
+        #expect(savedHistory.retentionDays == 30)
+        #expect(savedHistory.maxEntriesPerVault == 1000)
+        #expect(savedHistory.vaults.allSatisfy { $0.availability == .available && $0.entries.count == 1 })
+        #expect(savedHistory.vaults.flatMap(\.entries).allSatisfy { $0.sentAt != nil })
+        #expect(Set(historyKeys.snapshot.createdVaultIDs) == [personal, work])
+        #expect(historyKeys.snapshot.generationCount == 2)
+        for id in [personal, work] {
+            let ciphertext = try Data(contentsOf: dir.appending(path: "request-history/\(id).json"))
+            let envelope = try #require(JSONSerialization.jsonObject(with: ciphertext) as? [String: Any])
+            #expect(envelope["version"] as? Int == 2)
+            let text = String(decoding: ciphertext, as: UTF8.self)
+            #expect(!text.contains("Shop database"))
+            #expect(!text.contains("API token"))
+            #expect(!text.contains("claude-code"))
+        }
+
+        // l. A new core starts locked and cannot consult the provider. The same
+        // synthetic device backend then decrypts retained journals without new keys.
+        try await core.lock()
+        weak let previousCore = core
+        core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: historyKeys.store)
+        #expect(previousCore == nil)
+        let readCount = historyKeys.snapshot.readVaultIDs.count
+        let lockedHistory = try await core.requestHistory()
+        #expect(lockedHistory.vaults.count == 2)
+        #expect(lockedHistory.vaults.allSatisfy { $0.availability == .locked && $0.entries.isEmpty })
+        #expect(historyKeys.snapshot.readVaultIDs.count == readCount)
+        try await core.unlock(passphrase: passphrase, keep: false)
+        let selectedHistory = try await core.requestHistory()
+        #expect(selectedHistory.vaults.first { $0.vaultID == personal }?.availability == .locked)
+        #expect(selectedHistory.vaults.first { $0.vaultID == work }?.availability == .available)
+        _ = try await core.questionsUnlock(vaultID: personal, passphrase: passphrase)
+        #expect(try await core.requestHistory() == savedHistory)
+        #expect(historyKeys.snapshot.readVaultIDs.count > readCount)
+        #expect(historyKeys.snapshot.generationCount == 2)
     }
 
     // MARK: helpers

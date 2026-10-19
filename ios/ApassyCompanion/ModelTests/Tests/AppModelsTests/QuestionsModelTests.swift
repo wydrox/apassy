@@ -12,6 +12,7 @@ final class ScriptedSigner: AnswerSigner {
         var key = Data([4] + [UInt8](repeating: 1, count: 64))
         var reasons: [String] = []
         var failure: CompanionKeyError?
+        var beforeSignature: (@Sendable () async -> Void)?
         var renewals = 0
         let renewedKey = Data([4] + [UInt8](repeating: 2, count: 64))
     }
@@ -24,14 +25,21 @@ final class ScriptedSigner: AnswerSigner {
 
     func fail(with error: CompanionKeyError?) { state.withLock { $0.failure = error } }
 
+    func beforeSigning(_ action: @escaping @Sendable () async -> Void) {
+        state.withLock { $0.beforeSignature = action }
+    }
+
     func publicKey() throws -> Data { state.withLock { $0.key } }
 
     func sign(_ message: Data, reason: String) async throws -> Data {
-        try state.withLock { state in
+        let result = try state.withLock { state in
             state.reasons.append(reason)
             if let failure = state.failure { throw failure }
             return Data("signature".utf8)
         }
+        let action = state.withLock { $0.beforeSignature }
+        await action?()
+        return result
     }
 
     func renew() throws -> Data {
@@ -338,7 +346,7 @@ struct QuestionsModelTests {
         let sent = await fixture.service.sentAnswers()
         #expect(sent.map(\.answer.kind) == [.allowProduction])
         #expect(sent[0].signature == Data("signature".utf8))
-        #expect(fixture.model.deliveries[question.qid] == .sent(.allowProduction))
+        #expect(fixture.model.delivery(for: question) == .sent(.allowProduction))
         #expect(fixture.model.deliveryText(for: fixture.model.questions[0])
             == QuestionsModel.sentText)
     }
@@ -367,7 +375,7 @@ struct QuestionsModelTests {
         fixture.signer.fail(with: .cancelled)
         await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: fixture.model.questions[0])
         #expect(await fixture.service.sentAnswers().isEmpty)
-        #expect(fixture.model.deliveries[question.qid] == nil)
+        #expect(fixture.model.delivery(for: question) == nil)
     }
 
     @Test("a new Face ID enrollment makes a new answer key but does not register it")
@@ -380,7 +388,7 @@ struct QuestionsModelTests {
         #expect(fixture.signer.renewals == 1)
         #expect(await fixture.service.answerKeyRegistrations() == 1)
         #expect(await fixture.service.registeredAnswerKey() != fixture.signer.key)
-        guard case .failed(let message) = fixture.model.deliveries[question.qid] else {
+        guard case .failed(let message) = fixture.model.delivery(for: question) else {
             Issue.record("no failure shown")
             return
         }
@@ -395,12 +403,12 @@ struct QuestionsModelTests {
         await fixture.service.failNextAnswer(VaultError(.relayUnreachable, "The relay is not reachable."))
         await fixture.model.send(AnswerBar.make(for: question.card!).deny, for: fixture.model.questions[0])
         #expect(await fixture.service.sentAnswers().count == 1)
-        #expect(fixture.model.deliveries[question.qid] == .sent(.deny))
+        #expect(fixture.model.delivery(for: question) == .sent(.deny))
 
         // A known accepted answer cannot be submitted a second time while its Mac is offline.
         await fixture.model.send(AnswerBar.make(for: question.card!).deny, for: fixture.model.questions[0])
         #expect(await fixture.service.sentAnswers().count == 1)
-        #expect(fixture.model.deliveries[question.qid] == .sent(.deny))
+        #expect(fixture.model.delivery(for: question) == .sent(.deny))
         let late = Fixture()
         let lateQuestion = await late.withQuestion()
         await late.service.failNextAnswer(VaultError(.alreadyAnswered, "Already answered on another device."))
@@ -539,7 +547,7 @@ struct QuestionsModelTests {
         #expect(fixture.model.outcome(for: question)?.text == QuestionsModel.unconfirmedText)
         await fixture.model.refresh()
         #expect(fixture.model.outcome(for: fixture.model.questions[0])?.text == QuestionsModel.unconfirmedText)
-        #expect(fixture.model.deliveries[question.qid] == .sent(.deny))
+        #expect(fixture.model.delivery(for: question) == .sent(.deny))
     }
 
     @Test("foreground quieting is limited to an unlocked visible list")
@@ -668,11 +676,134 @@ struct QuestionsModelTests {
         #expect(fixture.signer.reasons.isEmpty, "no Face ID")
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(
-            fixture.model.deliveries[question.qid]
+            fixture.model.delivery(for: question)
                 == .failed("Family is locked on this iPhone. Unlock it in Requests, then answer."))
         // Deny needs no Face ID, and it is refused too: never the key of the selected vault.
         await fixture.model.send(bar.deny, for: question)
         #expect(await fixture.service.sentAnswers().isEmpty)
+    }
+
+    @Test("a journal attempt during retry preserves exactly one original signed payload")
+    func ownAttemptDuringRetry() async throws {
+        let service = AttemptedAnswerService()
+        let question = PreviewVaultService.sampleQuestion()
+        await service.install(question)
+        let signer = ScriptedSigner()
+        let model = QuestionsModel(service: service, signer: signer, push: nil,
+            deviceName: "Synthetic iPhone", retryInterval: .milliseconds(1))
+        await model.refresh()
+        let sending = Task { await model.send(AnswerBar.make(for: question.card!).allowOnce!, for: question) }
+        await service.waitForPost()
+        await model.refresh()
+        let attempted = try #require(model.questions.first)
+        #expect(attempted.answered == .approveOnce)
+        await model.send(AnswerBar.make(for: question.card!).deny, for: attempted)
+        #expect(await service.payloads.count == 1)
+        await service.failFirstPost()
+        await sending.value
+        let payloads = await service.payloads
+        #expect(payloads.count == 2)
+        #expect(payloads.first == payloads.last)
+        #expect(await service.preparations == 1)
+        #expect(signer.reasons.count == 1)
+        #expect(model.delivery(for: question) == .sent(.approveOnce))
+    }
+
+    @Test("a restored attempt without known acceptance never claims Answer sent")
+    func restoredAttemptIsUnconfirmed() async {
+        let fixture = Fixture()
+        var attempted = PreviewVaultService.sampleQuestion()
+        attempted.answered = .approveOnce
+        await fixture.service.setQuestions(enabled: true, questions: [attempted])
+        await fixture.model.refresh()
+        #expect(fixture.model.deliveryText(for: attempted) == QuestionsModel.unconfirmedText)
+        #expect(fixture.model.outcome(for: attempted) == QuestionOutcome(text: QuestionsModel.unconfirmedText, tone: .neutral))
+    }
+
+    @Test("history is only available metadata, clears locally, and disappears on leave")
+    func historyPrivacyAndClear() async throws {
+        let fixture = Fixture()
+        _ = await fixture.withQuestion()
+        let info = try await fixture.service.info()
+        let vaultID = try #require(info.selected)
+        let entry = RequestHistoryEntry(id: "relay:\(vaultID):synthetic", vaultID: vaultID,
+            qid: "synthetic", title: "SYNTHETIC_TOKEN", agent: "codex", project: "Synthetic",
+            action: "Read", production: false, deviceName: "Synthetic Mac",
+            firstSeenAt: 100, lastSeenAt: 120, expiresAt: 300, selectedKind: "approve_once", sentAt: 125)
+        await fixture.service.setRequestHistory([
+            RequestHistoryVault(vaultID: vaultID, vaultName: "Synthetic", availability: .available, entries: [entry])
+        ])
+        await fixture.model.refreshHistory()
+        #expect(fixture.model.history == [entry])
+        #expect(fixture.model.history.first?.outcome == nil)
+        await fixture.model.clearLocalHistory(vaultID: vaultID)
+        #expect(fixture.model.history.isEmpty)
+        #expect(await fixture.service.sentAnswers().isEmpty)
+        await fixture.service.setRequestHistory([
+            RequestHistoryVault(vaultID: vaultID, vaultName: "Synthetic", availability: .available, entries: [entry])
+        ])
+        await fixture.model.refreshHistory()
+        #expect(fixture.model.history.count == 1)
+        fixture.model.vaultWillLeave()
+        #expect(fixture.model.historyVaults.isEmpty)
+        #expect(fixture.model.history.isEmpty)
+        #expect(fixture.model.receiptQuestions.isEmpty)
+        #expect(fixture.model.questions.isEmpty)
+    }
+
+    @Test("a request changed while Face ID is pending never posts the old choice")
+    func changedDuringAuthentication() async {
+        let fixture = Fixture()
+        let question = await fixture.withQuestion()
+        fixture.signer.beforeSigning {
+            var changed = question
+            changed.card?.digest = "changed-digest"
+            changed.card?.run.command = ["rm", "-rf", "important"]
+            await fixture.service.setQuestions(enabled: true, questions: [changed])
+            await fixture.model.refresh()
+        }
+        await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: question)
+        #expect(await fixture.service.sentAnswers().isEmpty)
+        #expect(fixture.model.receiptQuestions.count == 1)
+        #expect(fixture.model.outcome(for: fixture.model.receiptQuestions[0])?.tone != .allowed)
+    }
+
+    @Test("a lock while Face ID is pending drops request and receipt metadata")
+    func lockedDuringAuthentication() async {
+        let fixture = Fixture()
+        let question = await fixture.withQuestion()
+        fixture.signer.beforeSigning { await fixture.model.vaultDidLock() }
+        await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: question)
+        #expect(await fixture.service.sentAnswers().isEmpty)
+        #expect(fixture.model.questions.isEmpty)
+        #expect(fixture.model.receiptQuestions.isEmpty)
+        #expect(fixture.model.history.isEmpty)
+        #expect(fixture.model.phase == .locked)
+    }
+
+    @Test("duplicate taps during Face ID cannot prepare another answer")
+    func duplicateDuringAuthentication() async {
+        let fixture = Fixture()
+        let question = await fixture.withQuestion()
+        let bar = AnswerBar.make(for: question.card!)
+        fixture.signer.beforeSigning { await fixture.model.send(bar.deny, for: question) }
+        await fixture.model.send(bar.allowOnce!, for: question)
+        #expect(await fixture.service.sentAnswers().map(\.answer.kind) == [.approveOnce])
+        #expect(fixture.model.receiptQuestions.count == 1)
+        #expect(fixture.model.outcome(for: fixture.model.receiptQuestions[0])?.tone == .neutral)
+    }
+
+    @Test("an unoffered answer cannot be prepared or authenticated")
+    func unofferedChoice() async {
+        let fixture = Fixture()
+        var question = await fixture.withQuestion()
+        question.card?.question.validAnswers = ["once"]
+        await fixture.service.setQuestions(enabled: true, questions: [question])
+        await fixture.model.refresh()
+        let choice = AnswerBar.Choice(answer: RemoteAnswer(kind: .allowProduction), label: "Allow production")
+        await fixture.model.send(choice, for: question)
+        #expect(await fixture.service.sentAnswers().isEmpty)
+        #expect(fixture.signer.reasons.isEmpty)
     }
 
     // MARK: Connecting a vault from iCloud Drive
@@ -928,4 +1059,96 @@ struct QuestionsModelTests {
         // The request is used up: a later look opens nothing either.
         #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
     }
+}
+
+/// Models a durable attempted marker becoming visible while an exact signed POST is retried.
+private actor AttemptedAnswerService: VaultService {
+    struct Payload: Equatable, Sendable {
+        let qid: String
+        let answer: RemoteAnswer
+        let time: Int64
+        let signature: Data?
+        let vaultID: String?
+    }
+    private let inner = PreviewVaultService()
+    private var question: RemoteQuestion?
+    private var post: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+    private(set) var payloads: [Payload] = []
+    private(set) var preparations = 0
+
+    func install(_ question: RemoteQuestion) async {
+        self.question = question
+        await inner.setQuestions(enabled: true, questions: [question])
+    }
+    func questionsList() async throws -> QuestionsList { try await inner.questionsList() }
+    func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration {
+        try await inner.answerKeyRegister(publicKey: publicKey)
+    }
+    func questionAnswerString(qid: String, answer: RemoteAnswer, vaultID: String?) async throws -> PreparedAnswer {
+        preparations += 1
+        return try await inner.questionAnswerString(qid: qid, answer: answer, vaultID: vaultID)
+    }
+    func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?, vaultID: String?) async throws -> SentAnswer {
+        payloads.append(Payload(qid: qid, answer: answer, time: time, signature: signature, vaultID: vaultID))
+        if payloads.count == 1 {
+            var pending = question!
+            pending.answered = answer.kind
+            let key = await inner.registeredAnswerKey()
+            await inner.setQuestions(enabled: true, questions: [pending], answerKey: key)
+            await withCheckedContinuation { continuation in
+                post = continuation
+                started?.resume()
+                started = nil
+            }
+            throw VaultError(.relayUnreachable, "Synthetic lost response")
+        }
+        return SentAnswer(id: 2, at: time, kind: answer.kind)
+    }
+    func waitForPost() async {
+        if post != nil { return }
+        await withCheckedContinuation { started = $0 }
+    }
+    func failFirstPost() { post?.resume(); post = nil }
+    func info() async throws -> CoreInfo { try await inner.info() }
+    func select(vaultID: String) async throws { try await inner.select(vaultID: vaultID) }
+    func unlock(passphrase: String, keep: Bool) async throws { try await inner.unlock(passphrase: passphrase, keep: keep) }
+    func lock() async throws { try await inner.lock() }
+    func suspend() async throws { try await inner.suspend() }
+    func resume() async throws -> Bool { try await inner.resume() }
+    func checkPassphrase(_ passphrase: String) async throws -> Bool { try await inner.checkPassphrase(passphrase) }
+    func createLocalVault(name: String, passphrase: String) async throws -> VaultEntry {
+        try await inner.createLocalVault(name: name, passphrase: passphrase)
+    }
+    func removeVault(id: String, force: Bool) async throws -> Bool { try await inner.removeVault(id: id, force: force) }
+    func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo {
+        try await inner.joinStart(link: link, deviceName: deviceName, answerKey: answerKey)
+    }
+    func joinPoll() async throws -> JoinInfo { try await inner.joinPoll() }
+    func joinCancel() async throws { try await inner.joinCancel() }
+    func joinFinish(passphrase: String) async throws -> VaultEntry { try await inner.joinFinish(passphrase: passphrase) }
+    func items(archived: ArchiveFilter) async throws -> [ItemRow] { try await inner.items(archived: archived) }
+    func item(id: UInt64) async throws -> ItemDetail { try await inner.item(id: id) }
+    func reveal(id: UInt64, field: String) async throws -> String { try await inner.reveal(id: id, field: field) }
+    func totp(id: UInt64, field: String) async throws -> TotpCode { try await inner.totp(id: id, field: field) }
+    func history(id: UInt64) async throws -> [ItemEvent] { try await inner.history(id: id) }
+    func save(id: UInt64?, revision: UInt64?, draft: ItemDraft) async throws -> SavedItem {
+        try await inner.save(id: id, revision: revision, draft: draft)
+    }
+    func archive(id: UInt64, archived: Bool) async throws { try await inner.archive(id: id, archived: archived) }
+    func delete(id: UInt64, revision: UInt64) async throws { try await inner.delete(id: id, revision: revision) }
+    func generate(_ options: GeneratorOptions) async throws -> GeneratedPassword { try await inner.generate(options) }
+    func strength(_ value: String) async throws -> Strength { try await inner.strength(value) }
+    func watchtower() async throws -> WatchtowerReport { try await inner.watchtower() }
+    func sync() async throws -> SyncStatus { try await inner.sync() }
+    func syncStatus() async throws -> SyncStatus { try await inner.syncStatus() }
+    func syncWait(timeout: Int) async throws -> Bool { try await inner.syncWait(timeout: timeout) }
+    func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
+        try await inner.takeNewPassphrase(passphrase)
+    }
+    func useRelayCopy() async throws -> SyncStatus { try await inner.useRelayCopy() }
+    func devices() async throws -> [RelayDevice] { try await inner.devices() }
+    func autofillList(domains: [String]) async throws -> AutofillList { try await inner.autofillList(domains: domains) }
+    func autofillCredential(id: UInt64) async throws -> FillCredential { try await inner.autofillCredential(id: id) }
+    func credentialIdentities() async throws -> [CredentialIdentity] { try await inner.credentialIdentities() }
 }

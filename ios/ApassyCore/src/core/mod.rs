@@ -30,13 +30,15 @@ mod organize;
 mod otp;
 mod passkey;
 mod questions;
+mod request_history;
 mod sync;
 mod watchtower;
 mod wire;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -47,10 +49,13 @@ use apassy::vault::Vault;
 
 use config::{Paths, PhoneList, VaultEntry};
 pub use errors::{CoreError, CoreResult};
+pub use request_history::{HistoryKeyError, HistoryKeyProvider};
 use wire::{Empty, Secret, ok, params};
 
 /// The vault schema of this core. A copy of another schema is refused.
 pub const SCHEMA: i64 = apassy::vault::SCHEMA_VERSION;
+
+type AnswerLocks = BTreeMap<(String, String), Weak<Mutex<()>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +67,12 @@ pub enum Role {
 #[derive(Deserialize)]
 struct ConfigWire {
     data_dir: String,
+    /// Native host has guaranteed local-only, no-backup storage.
+    #[serde(default)]
+    request_history_enabled: bool,
+    /// The native app must enforce durable guards even when storage setup failed.
+    #[serde(default)]
+    request_history_required: bool,
     #[serde(default)]
     device_name: Option<String>,
     #[serde(default)]
@@ -71,6 +82,11 @@ struct ConfigWire {
 /// The vault core of one process.
 pub struct Core {
     paths: Paths,
+    request_history_enabled: bool,
+    request_history_required: bool,
+    history_key_provider: Option<Arc<dyn HistoryKeyProvider>>,
+    /// Serialize answer delivery and rejection rollback; never held by lock/removal.
+    question_sending: Mutex<AnswerLocks>,
     device_name: String,
     role: Role,
     list: Mutex<PhoneList>,
@@ -212,6 +228,18 @@ struct Credential<'a> {
 impl Core {
     /// Start a core from its JSON config (contract section 3).
     pub fn new(config: &str) -> CoreResult<Self> {
+        Self::new_inner(config, None)
+    }
+
+    /// Native or synthetic provider. Key material never crosses JSON configuration.
+    pub fn new_with_history_key_provider(
+        config: &str,
+        provider: Arc<dyn HistoryKeyProvider>,
+    ) -> CoreResult<Self> {
+        Self::new_inner(config, Some(provider))
+    }
+
+    fn new_inner(config: &str, provider: Option<Arc<dyn HistoryKeyProvider>>) -> CoreResult<Self> {
         let config: ConfigWire = params(config)?;
         let paths = Paths::new(PathBuf::from(config.data_dir))?;
         let device_name = config
@@ -230,6 +258,10 @@ impl Core {
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
+            request_history_enabled: config.request_history_enabled,
+            request_history_required: config.request_history_required,
+            history_key_provider: provider,
+            question_sending: Mutex::new(BTreeMap::new()),
             paths,
             device_name,
             role: config.role.unwrap_or(Role::App),
@@ -543,6 +575,8 @@ impl Core {
             }
             // 5.10 Questions through the relay: the app only.
             "questions_list"
+            | "request_history"
+            | "clear_request_history"
             | "questions_wait"
             | "questions_unlock"
             | "question_open"

@@ -10,7 +10,8 @@ import Testing
     @Test func aVaultWithoutATeamHasNoQuestions() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         let vault = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
 
         // A core that keeps the questions of every vault lists none: no vault has a context.
@@ -70,12 +71,22 @@ import Testing
     @Test func theAutoFillExtensionCannotAnswer() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .autofill)
+        let historyKeys = CoreTestHistoryKeys()
+        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .autofill,
+            historyKeyStore: historyKeys.store)
         do {
             _ = try await core.questionsList()
             Issue.record("AutoFill listed questions")
         } catch let error as VaultError {
             #expect(error.code == .notAllowed)
         }
+        do {
+            _ = try await core.requestHistory()
+            Issue.record("AutoFill read request history")
+        } catch let error as VaultError {
+            #expect(error.code == .notAllowed)
+        }
+        #expect(historyKeys.snapshot.readVaultIDs.isEmpty)
+        #expect(historyKeys.snapshot.generationCount == 0)
     }
 }

@@ -42,7 +42,7 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(discard.waitForExistence(timeout: 5))
         discard.tap()
         XCTAssertTrue(name.waitForNonExistence(timeout: 5))
-        XCTAssertTrue(app.navigationBars["Vault"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Personal"].waitForExistence(timeout: 5))
 
         add.tap()
         XCTAssertTrue(login.waitForExistence(timeout: 5))
@@ -119,7 +119,7 @@ final class VaultTabsUITests: XCTestCase {
         app.swipeDown()
         XCTAssertEqual(app.searchFields.count, 0, "Vault")
         app.tabBars.buttons["Requests"].tap()
-        XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.segmentedControls["requests.destination"].waitForExistence(timeout: 5))
         app.swipeDown()
         XCTAssertEqual(app.searchFields.count, 0, "Requests")
         XCTAssertFalse(app.tabBars.buttons["Agents"].exists)
@@ -135,18 +135,13 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Stripe live key"].waitForExistence(timeout: 5))
     }
 
-    /// Decisions says where requests and suggestions are, never "when the Mac is connected", and
-    /// offers the pairing on Wi-Fi that brings the requests.
-    func testDecisionsSaysWhereRequestsAndSuggestionsAre() {
+    /// Requests offers the next useful action without empty Suggestions sections.
+    func testRequestsWithoutConnectionOffersConnect() {
         let app = launch(["-ApassyOpen", "decisions"])
-        XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 15))
-        let suggestions = app.staticTexts["Suggestions come from your Mac. They show in Apassy on the Mac."]
-        for _ in 0..<3 where !suggestions.exists { app.swipeUp() }
-        XCTAssertTrue(suggestions.waitForExistence(timeout: 5))
-        XCTAssertTrue(
-            app.staticTexts.matching(Self.starts("Requests from agents show in Apassy on your Mac.")).firstMatch.exists)
-        XCTAssertTrue(app.buttons["Pair with the Mac on Wi-Fi"].exists)
-        XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
+        XCTAssertTrue(app.segmentedControls["requests.destination"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["Connect Mac"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Suggestions"].exists)
+        XCTAssertTrue(app.segmentedControls.buttons["History"].exists)
     }
 
     /// Fields remain useful without two unavailable Mac-only sections.
@@ -164,7 +159,7 @@ final class VaultTabsUITests: XCTestCase {
 
     func testVaultRootShowsCredentialsAndOrganization() {
         let app = launch(["-ApassyOpen", "vault"])
-        XCTAssertTrue(app.navigationBars["Vault"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["Personal"].waitForExistence(timeout: 15))
         let firstCredential = app.staticTexts["OpenAI"]
         XCTAssertTrue(firstCredential.waitForExistence(timeout: 5))
         XCTAssertTrue(firstCredential.isHittable, "The root must show a credential before scrolling")
@@ -176,6 +171,100 @@ final class VaultTabsUITests: XCTestCase {
         app.buttons["Folders and tools"].tap()
         XCTAssertTrue(app.navigationBars["Folders and tools"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Watchtower"].exists)
+    }
+
+    func testVaultTitleSelectorUsesTheNormalLockFlow() {
+        let app = launch(["-ApassyOpen", "vault", "-ApassyPreviewDecisions", "locked"])
+        let bar = app.navigationBars["Personal"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 15))
+        let selector = bar.buttons["vault.selector"]
+        XCTAssertTrue(selector.waitForExistence(timeout: 5))
+        XCTAssertTrue(selector.isHittable)
+        XCTAssertGreaterThanOrEqual(selector.frame.width, 28)
+        XCTAssertGreaterThanOrEqual(selector.frame.height, 28)
+        captureHeader(app, "compact-vault")
+        // Check the actual native control edge. iOS constrains title menus to
+        // 36 points here, within Apple's 28-point minimum (44 recommended).
+        tapTitleEdge(selector, in: app, top: true)
+        let family = app.buttons["vault.select.0a1b2c3d4e5f60718293a4b5c6d7e8f9"]
+        XCTAssertTrue(family.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["vault.select.4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c"].isEnabled)
+        captureHeader(app, "compact-vault-selector")
+        family.tap()
+        let passphrase = app.secureTextFields["Passphrase"]
+        XCTAssertTrue(passphrase.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Family"].exists)
+        XCTAssertFalse(app.tabBars.firstMatch.exists, "Credentials must stay behind the normal unlock screen")
+        passphrase.tap()
+        passphrase.typeText("preview passphrase\n")
+        let selected = app.navigationBars["Family"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 10))
+        XCTAssertLessThanOrEqual(selected.frame.height, 64)
+        XCTAssertFalse(app.navigationBars["Personal"].exists)
+    }
+
+    func testCompactFolderFormAndSearchNavigation() {
+        let app = launch(["-ApassyOpen", "folder:Billing"])
+        let folderBar = app.navigationBars["Billing"]
+        XCTAssertTrue(folderBar.waitForExistence(timeout: 15))
+        XCTAssertLessThanOrEqual(folderBar.frame.height, 64)
+        captureHeader(app, "compact-folder")
+        app.buttons["New Credential"].tap()
+        let formBar = app.navigationBars["New Credential"]
+        XCTAssertTrue(formBar.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(formBar.frame.height, 64)
+        captureHeader(app, "compact-form")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(folderBar.waitForExistence(timeout: 5))
+        app.tabBars.buttons["Search"].tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars.staticTexts["Search"].exists)
+        XCTAssertFalse(app.staticTexts["Search the vault"].exists)
+        captureHeader(app, "compact-search-empty")
+        field.tap()
+        field.typeText("stripe")
+        let item = app.staticTexts["Stripe live key"]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        captureHeader(app, "compact-search-results")
+        item.tap()
+        let detailBar = app.navigationBars["Stripe live key"]
+        XCTAssertTrue(detailBar.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(detailBar.frame.height, 64)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Stripe live key").count, 1,
+                       "The credential title belongs in the navigation bar without a duplicate hero")
+        captureHeader(app, "compact-credential-detail")
+        detailBar.buttons.firstMatch.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "stripe")
+    }
+
+    func testVaultSelectorRemainsReachableAtAccessibilityTextSize() {
+        let app = launch(["-ApassyOpen", "vault", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
+        let bar = app.navigationBars["Personal"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 15))
+        let selector = bar.buttons["vault.selector"]
+        XCTAssertTrue(selector.waitForExistence(timeout: 5))
+        XCTAssertTrue(selector.isHittable)
+        XCTAssertGreaterThanOrEqual(selector.frame.width, 28)
+        XCTAssertGreaterThanOrEqual(selector.frame.height, 28)
+        captureHeader(app, "compact-vault-accessibility")
+        tapTitleEdge(selector, in: app, top: false)
+        XCTAssertTrue(app.buttons["vault.select.4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["vault.addAnother"].exists)
+    }
+
+    private func tapTitleEdge(_ selector: XCUIElement, in app: XCUIApplication, top: Bool) {
+        let frame = selector.frame
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.midX, dy: top ? frame.minY + 1 : frame.maxY - 1)).tap()
+    }
+
+    private func captureHeader(_ app: XCUIApplication, _ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testSettingsReachesAgentAccessAndRevocation() {
@@ -201,8 +290,10 @@ final class VaultTabsUITests: XCTestCase {
     /// questions, and the vault on screen stays.
     func testLockedVaultOpensItsQuestions() {
         let app = launch(["-ApassyOpen", "decisions", "-ApassyPreviewDecisions", "locked"])
+        XCTAssertTrue(app.segmentedControls["requests.destination"].waitForExistence(timeout: 15))
         let unlock = app.buttons["Unlock Family"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 15))
+        for _ in 0..<6 where !unlock.isHittable { app.swipeUp() }
+        XCTAssertTrue(unlock.exists)
         XCTAssertTrue(app.staticTexts["Family is locked. Unlock to see its questions."].exists)
         let family = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Home router"))
         XCTAssertFalse(family.firstMatch.exists)
@@ -211,7 +302,9 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeText("preview passphrase\n")
-        XCTAssertTrue(family.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10))
+        for _ in 0..<6 where !family.firstMatch.isHittable { app.swipeDown() }
+        XCTAssertTrue(family.firstMatch.exists)
         XCTAssertFalse(app.buttons["Unlock Family"].exists)
     }
 

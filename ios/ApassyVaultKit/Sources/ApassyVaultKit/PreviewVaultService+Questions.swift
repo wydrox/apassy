@@ -39,7 +39,9 @@ public struct PreviewQuestions: Sendable {
         }
     }
 
+    var history: [RequestHistoryVault] = []
     var enabled = false
+    var reportVaultScope = false
     var questions: [RemoteQuestion] = []
     var answerKey: Data?
     var sent: [Sent] = []
@@ -95,6 +97,12 @@ extension PreviewVaultService {
 
     // MARK: Test and preview hooks
 
+    /// Opt into the modern vault-scoped list for a single-vault preview.
+    /// Default false retains the older-core fixture behavior used by existing tests.
+    public func setQuestionsReportVaultScope(_ enabled: Bool) {
+        questionsState.reportVaultScope = enabled
+    }
+
     /// Turn the questions team on or off, with these questions.
     public func setQuestions(
         enabled: Bool, questions: [RemoteQuestion] = [], answerKey: Data? = nil, registered: Bool = true,
@@ -105,6 +113,9 @@ extension PreviewVaultService {
         questionsState.answerKey = answerKey
         questionsState.registered = registered
         questionsState.removed = removed
+        if enabled, !removed, ownContext, let selected {
+            observeHistory(questions, vaultID: selected)
+        }
     }
 
     /// Another unlocked vault with its own questions team and questions. From then on the service
@@ -182,6 +193,62 @@ extension PreviewVaultService {
             at: Int64(Date().timeIntervalSince1970))
     }
 
+    /// Mirror the core's metadata selection with synthetic in-memory observations only.
+    private func observeHistory(_ questions: [RemoteQuestion], vaultID: String) {
+        guard let vault = vaults.first(where: { $0.id == vaultID }) else { return }
+        var saved = questionsState.history.first { $0.vaultID == vaultID }
+            ?? RequestHistoryVault(vaultID: vaultID, vaultName: vault.name, availability: .available)
+        guard saved.availability == .available else { return }
+        let now = Int64(Date.now.timeIntervalSince1970)
+        for question in questions {
+            guard let card = question.card else { continue }
+            let id = "relay:\(vaultID):\(question.qid)"
+            var entry = saved.entries.first { $0.id == id } ?? RequestHistoryEntry(
+                id: id, vaultID: vaultID, qid: question.qid,
+                title: card.question.items.prefix(4).map(\.name).joined(separator: ", "),
+                agent: card.run.agent, project: card.question.project?.label, action: card.question.action.rawValue,
+                production: card.question.production, deviceName: question.askerName,
+                firstSeenAt: now, lastSeenAt: now, expiresAt: question.expiresAt)
+            entry.lastSeenAt = now
+            if let settle = question.settle {
+                entry.outcome = settle.outcome
+                entry.confirmedKind = settle.kind
+                entry.confirmedAt = settle.at
+                entry.confirmedBy = settle.deviceName
+                entry.replacedBy = settle.replacedBy
+            }
+            saved.entries.removeAll { $0.id == id }
+            saved.entries.append(entry)
+        }
+        questionsState.history.removeAll { $0.vaultID == vaultID }
+        questionsState.history.append(saved)
+    }
+
+    /// Synthetic history fixtures only; the preview never writes a journal to disk.
+    public func setRequestHistory(_ vaults: [RequestHistoryVault]) {
+        questionsState.history = vaults
+    }
+
+    public func requestHistory() async throws -> RequestHistorySnapshot {
+        if unlocked { questionsState.ownOpen = true }
+        return RequestHistorySnapshot(vaults: vaults.map { vault in
+            let accessible = vault.id == selected ? ownContext : questionsState.others.contains { $0.id == vault.id && $0.open && !$0.removed }
+            guard accessible else {
+                return RequestHistoryVault(vaultID: vault.id, vaultName: vault.name, availability: .locked)
+            }
+            return questionsState.history.first { $0.vaultID == vault.id }
+                ?? RequestHistoryVault(vaultID: vault.id, vaultName: vault.name, availability: .available)
+        })
+    }
+
+    public func clearRequestHistory(vaultID: String) async throws {
+        let snapshot = try await requestHistory()
+        guard snapshot.vaults.contains(where: { $0.vaultID == vaultID && $0.availability != .locked }) else {
+            throw VaultError(.locked, "Unlock this vault to clear its history.")
+        }
+        questionsState.history.removeAll { $0.vaultID == vaultID }
+    }
+
     // MARK: VaultService
 
     private var questionsStatus: QuestionsStatus {
@@ -244,7 +311,11 @@ extension PreviewVaultService {
         let openOthers = questionsState.others.filter(\.open)
         guard ownContext || !openOthers.isEmpty else { throw VaultError(.locked, "The vault is locked.") }
         let own = ownContext && questionsState.enabled && !questionsState.removed ? questionsState.questions : []
-        guard !questionsState.others.isEmpty else { return QuestionsList(status: questionsStatus, questions: own) }
+        if let selected { observeHistory(own, vaultID: selected) }
+        for other in openOthers where !other.removed { observeHistory(other.questions, vaultID: other.id) }
+        if !questionsState.reportVaultScope && questionsState.others.isEmpty {
+            return QuestionsList(status: questionsStatus, questions: own)
+        }
         let selected = try await info().selectedVault
         let (id, name) = (selected?.id ?? "", selected?.name ?? "This vault")
         var vaults: [QuestionsVault] = []
@@ -347,6 +418,18 @@ extension PreviewVaultService {
             }
         } else if let at = questionsState.questions.firstIndex(where: { $0.qid == qid }) {
             questionsState.questions[at].answered = answer.kind
+        }
+        if let id = other.map({ questionsState.others[$0].id }) ?? selected {
+            let requests = other.map { questionsState.others[$0].questions } ?? questionsState.questions
+            observeHistory(requests, vaultID: id)
+            if let vaultIndex = questionsState.history.firstIndex(where: { $0.vaultID == id }),
+               let entryIndex = questionsState.history[vaultIndex].entries.firstIndex(where: { $0.qid == qid }) {
+                questionsState.history[vaultIndex].entries[entryIndex].selectedKind = answer.kind.rawValue
+                questionsState.history[vaultIndex].entries[entryIndex].selectedEnvironment = answer.environment?.rawValue
+                questionsState.history[vaultIndex].entries[entryIndex].selectedItemID = answer.itemID
+                questionsState.history[vaultIndex].entries[entryIndex].attemptedAt = time
+                questionsState.history[vaultIndex].entries[entryIndex].sentAt = time
+            }
         }
         return SentAnswer(id: UInt64(questionsState.sent.count), at: time, kind: answer.kind)
     }

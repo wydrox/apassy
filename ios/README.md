@@ -59,6 +59,24 @@ xcodebuild -scheme ApassyCompanionKit -destination 'generic/platform=iOS' -deriv
 
 The Secure Enclave keys are compiled out of a simulator build (`#if !targetEnvironment(simulator)`). A simulator build uses `SoftwareKeys`, and `CompanionKeyStore.usesSecureEnclave` is false so the screen can say so. The Secure Enclave code cannot run in `swift test`; a device is the only place that shows Face ID.
 
+## Navigation titles
+
+Use compact native navigation chrome. The root tabs do not repeat their tab names
+as large headings:
+
+- Requests starts with its actions toolbar, Waiting / History picker and list.
+- Vault uses the active vault's name as a compact native menu with native toolbar sizing.
+  Selecting another vault uses `VaultModel.select`: lock first, then the existing
+  unlock screen. Never bypass owner authentication when switching from the toolbar.
+- Search uses the native search field without an extra Search heading or introductory
+  empty-state title. Keep search scoped to its own navigation stack.
+- Folders, details, settings and forms use inline contextual titles and the native
+  Back, Cancel or Done controls. Do not hide an entire navigation bar to remove a title.
+
+Use system Liquid Glass navigation and controls; keep content on readable native
+surfaces. Check Dynamic Type and native back navigation when changing these titles.
+See [compact-header verification](../docs/product/ios-requests/compact-headers-2026-10-19.md).
+
 ## The app
 
 `ApassyCompanion` is a SwiftUI app for iOS 26 (iPhone only) with the Liquid Glass design, and an AutoFill extension. It has no third-party code besides the vault core. Its bundle IDs are `com.wydrox.apassy.companion` and `com.wydrox.apassy.companion.autofill`, and its name on the home screen is Apassy.
@@ -101,19 +119,18 @@ What the app does with the vault:
 
 ### Requests (ADR 0026, ADR 0020)
 
-The Requests tab separates waiting decisions, access requests, and outcomes. Its badge counts waiting work, not suggestions or unconfirmed outcomes.
+The Requests tab has native **Waiting / History** destinations. Its badge counts waiting work, not unconfirmed outcomes. System navigation, segmented pickers, lists and menus inherit Liquid Glass; request content remains on readable native list surfaces.
 
 | Part | What it does |
 | --- | --- |
-| Waiting | The questions through the relay and the runs of the paired Mac on Wi-Fi, in one list, newest first. Each row has the agent, the credential, the project, a red dot for production, and a timer. A run that a question already shows counts once. |
+| Waiting | Relay questions and paired Mac Wi-Fi runs share a queue. Current routine non-production Read requests offer Deny / Allow Once after full visible context; production, unknown or elevated requests offer Deny / Review. Approval keeps the existing fresh owner signature. Wi-Fi runs require Review to grant. Access requests can only be denied on the phone. Submitted rows stay in place until Done. |
 | Locked vaults | A lock or a suspend drops the questions of every vault, and a resume opens the selected vault only. Face ID never asks by itself. After an unlock and a resume, the other vaults whose passphrase is stored behind Face ID ("Unlock with Face ID" on for it) share one row: "Work, Family are locked. Unlock with Face ID to see their questions." One tap reads them all with one Face ID (`questions_unlock`). A Face ID unlock of the selected vault reads them in the same prompt: "Unlock Personal, and the questions of Work and Family". Any other vault with questions shows one row: "<vault> is locked. Unlock to see its questions." Its Unlock shows a passphrase sheet. The selected vault never gets a row. The sheet opens the questions only; the vault on screen does not change. Its field is cleared when the app leaves the screen. |
-| Requests | When a Mac is paired on Wi-Fi: its open access requests, or "No requests". Else they are on the Mac, with "Pair with the Mac on Wi-Fi". |
-| Suggestions | "Suggestions come from your Mac. They show in Apassy on the Mac." |
-| Recent | Confirmed, replaced, or expired questions show the actual result. Posting an answer first says “Sent. Waiting for the Mac to confirm.” After a minute or expiry without a settle it says “Not confirmed. The Mac may be offline. Check again for the result.” Neither a sent allow nor a sent deny becomes a confirmed outcome without the settle. Unconfirmed rows remain recoverable after refresh. |
+| History | Search and All / Allowed / Denied filters, date groups, read-only details and explicit per-vault clearing. Only relay requests observed on this iPhone are saved: 30 days from first observation, up to 1,000 entries per vault. Metadata is encrypted using a domain-separated vault question key and excluded from backups. Lock hides it; removal deletes it; corruption/key rotation requires explicit clearing. Unresolved live attempts cannot be cleared. Wi-Fi Activity stays separate. |
+| Outcomes | A signed attempt, relay acceptance and verified Mac confirmation are separate facts. Attempt-only/restored unknown state is Not confirmed. Only a matching verified settle can report Allowed or Denied. Execution is never inferred. Live answer intent is saved before POST so a lock/restart cannot enable a different answer accidentally. |
 | A question | The sentence, the facts, the command, and why the owner is asked. A fixed bar at the bottom has "Allow ACTION in PROJECT", "Deny", and "Allow Once". A production question shows a red "Allow production: ACTION in PROJECT". Its "⋯" menu holds the stricter answers and the environment of a credential. When the question has ended, the outcome takes the place of the bar. |
 | Face ID | An answer that gives authority asks for Face ID, as the core decides. The stricter answers go without it. A changed Face ID enrollment makes a new answer key; the Mac removes the old device, and the owner connects this iPhone again. |
 | Notification | The fixed text is only “A question is waiting”. Opening it selects Requests and refreshes the list. The payload has no vault or question identifier, so it never opens the newest question as if it were the announced one and never starts an unlock. Locked vault rows require an explicit owner action. A creation/edit draft remains intact if already open. |
-| "⋯" menu | "Notifications" (with relay connected) reports current iOS authorization and APNs/relay registration, with Retry Registration or Open Settings as applicable (registration does not guarantee delivery); "Connect this iPhone" (without relay connection), and "Mac on Wi-Fi" (pairing, Activity, Mac). |
+| "⋯" menu | Connect this iPhone when available, and Mac on Wi-Fi (pairing, Activity, Mac). History has its own clear-history menu. |
 
 While a refreshed, unlocked Requests list covers every vault, foreground pushes update it quietly. A detail, editor, Settings sheet, locked vault, or incomplete list does not suppress the alert. After a successful complete refresh with no waiting or unconfirmed question and no hidden locked vault, Apassy removes only the delivered request alerts captured before that refresh; a newly arrived alert is preserved. Generic APNs payloads remain unchanged.
 
@@ -147,7 +164,7 @@ A Simulator build (never a device build) takes these development aids:
 | `-ApassyUnlockPassphrase <passphrase>` | Unlock once at launch. |
 | `-ApassyOpen <route>` | Open a screen. The routes are below. |
 | `-ApassyPasteDemo stripe\|env` | Fill New Credential with synthetic values that the preview vault detects: one Stripe key, or a `.env` with three lines. Use it with `-ApassyOpen newcredential`. |
-| `-ApassyPreviewDecisions list\|detail\|vaults\|locked` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` explicitly opens the newest fixture question; real generic notification taps open the refreshed list. `vaults` adds the questions of a second vault, "Work". `locked` also adds a third vault, "Family", whose questions are locked; the preview passphrase opens them. |
+| `-ApassyPreviewDecisions list\|detail\|vaults\|locked` | With `-ApassyPreviewVault`, give the preview vault synthetic questions and confirmed/unconfirmed history fixtures. Preview answer keys are ephemeral and never written to Keychain. `detail` explicitly opens the newest fixture question; real generic notification taps open the refreshed list. `vaults` adds the questions of a second vault, "Work". `locked` also adds a third vault, "Family", whose questions are locked; the preview passphrase opens them. |
 | `-ApassyPreviewAgents list\|detail\|confirm\|stale\|restricted\|unverified\|othervault` | With `-ApassyPreviewVault`, give the preview vault the synthetic feeds of two Macs and two vaults. `detail` opens Claude Code on the Mac mini, `confirm` opens Codex and asks to remove its exception, `stale` opens the agent of a Mac that has not reported for three days, `restricted` opens the "only these items" agent of Work, `unverified` removes one of its rows and gets a settle that this iPhone cannot open, and `othervault` opens that agent of Work, a vault that is not selected, whose feed came after its keys were read: "Remove" reads them again first (the preview passphrase stands in for the one stored behind Face ID). Add `-ApassyPreviewAgentsScroll exceptions` (or `sees`) to scroll an agent's page to its exceptions (or to what it sees). |
 | `-ApassyPairingLink <link>` | The companion pairing, as below. |
 

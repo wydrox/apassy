@@ -967,6 +967,11 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
 
 pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
     let open = open(app, pending);
+    let receive_problem = app
+        .owner
+        .questions
+        .as_ref()
+        .and_then(|questions| questions.view().receive_problem);
     sync_selection(&mut app.ui.decisions, &open);
     let subtitle = app
         .owner_ui
@@ -992,6 +997,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
             ui,
             "This request is no longer waiting. Review current requests or Activity.",
         );
+    }
+    if let Some(problem) = receive_problem.as_deref() {
+        columns::list_note(ui, problem);
     }
     // The rows come first in the layout, so ⌘2 and Tab reach them before the footer.
     let notice = notifications_off(app);
@@ -1031,7 +1039,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         // With nothing open, the list says so, and the detail says "All clear", as in
         // the mockup.
         |ui| {
-            if empty {
+            if empty && receive_problem.is_none() {
                 ui.add_space(40.0);
                 columns::list_note(ui, "Nothing needs you");
             }
@@ -1210,6 +1218,15 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
             .unwrap_or_default();
         for line in &answered {
             kit::tone_note(ui, line, Tone::Accent);
+        }
+        // The list carries the receiving error; do not claim that all requests are clear.
+        if app
+            .owner
+            .questions
+            .as_ref()
+            .is_some_and(|questions| questions.view().receive_problem.is_some())
+        {
+            return;
         }
         columns::nothing_selected(
             ui,

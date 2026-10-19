@@ -1,0 +1,131 @@
+{
+  "date": "2026-10-17",
+  "branch": "product/ios-requests",
+  "base_commit": "46e088dc69cc0d0d77dfad4849984867bd136d44",
+  "scope": "Native source implementation; synthetic tests; no publication or real vault/Keychain writes",
+  "models": {
+    "tests_passed": 414,
+    "suites": 36,
+    "log": "/tmp/apassy-requests-model-tests-final.log"
+  },
+  "vaultkit_history": {
+    "tests_passed": 5,
+    "log": "/tmp/apassy-requests-vaultkit-tests-final.log"
+  },
+  "rust_history_unit": {
+    "tests_passed": 5,
+    "log": "/tmp/apassy-requests-rust-final-unit.log"
+  },
+  "rust_questions_flow": {
+    "tests_passed": 12,
+    "log": "/tmp/apassy-requests-rust-final-flow.log"
+  },
+  "clippy_core_lib": {
+    "result": "passed",
+    "log": "/tmp/apassy-requests-clippy.log"
+  },
+  "rust_format": {
+    "result": "passed",
+    "log": "/tmp/apassy-requests-format.log"
+  },
+  "native_build": {
+    "result": "passed",
+    "configuration": "unsigned Debug, arm64 iOS 27 Simulator, iOS 26 deployment",
+    "log": "/tmp/apassy-requests-native-closed-build.log"
+  },
+  "native_ui": {
+    "unique_scenarios_passed": 7,
+    "cases": {
+      "ApassyCompanionUITests.RequestsUITests testHistoryRetainsSearchWhenSwitchingDestinations": {
+        "result": "passed",
+        "seconds": 32.846,
+        "log": "/tmp/apassy-requests-ui-tests.log"
+      },
+      "ApassyCompanionUITests.RequestsUITests testRoutineReadOffersOneTimeActionAndProductionRequiresReview": {
+        "result": "passed",
+        "seconds": 26.566,
+        "log": "/tmp/apassy-requests-ui-reviewed.log"
+      },
+      "ApassyCompanionUITests.VaultTabsUITests testOnlyTheSearchTabHasTheSearchField": {
+        "result": "passed",
+        "seconds": 29.596,
+        "log": "/tmp/apassy-requests-ui-tests.log"
+      },
+      "ApassyCompanionUITests.VaultTabsUITests testRequestsWithoutConnectionOffersConnect": {
+        "result": "passed",
+        "seconds": 21.021,
+        "log": "/tmp/apassy-requests-ui-tests.log"
+      },
+      "ApassyCompanionUITests.VaultTabsUITests testLockedVaultOpensItsQuestions": {
+        "result": "passed",
+        "seconds": 28.476,
+        "log": "/tmp/apassy-requests-ui-rerun.log"
+      },
+      "ApassyCompanionUITests.RequestsUITests testAccessibilityTextKeepsActionsReachable": {
+        "result": "passed",
+        "seconds": 28.269,
+        "log": "/tmp/apassy-requests-ui-accessibility.log"
+      },
+      "ApassyCompanionUITests.RequestsUITests testHistorySearchReadOnlyDetailAndClear": {
+        "result": "passed",
+        "seconds": 37.559,
+        "log": "/tmp/apassy-requests-ui-reviewed.log"
+      }
+    },
+    "last_result_bundle": "/tmp/apassy-requests-ui-accessibility.xcresult",
+    "prior_failure": "Largest-text full-screen swipes overshot actions; recording inspected, replaced with short drags, rerun passed."
+  },
+  "not_verified": [
+    "Physical iPhone owner authentication/Secure Enclave",
+    "APNs cold launch and delivery",
+    "VoiceOver customer tasks",
+    "Complete cross-device history"
+  ],
+  "source_sha256": {
+    "ios/ApassyCompanion/ApassyCompanion.xcodeproj/project.pbxproj": "82c68f419b105ac79c2b7643501f0298934446f298382848e8b49eaf6ab45a1c",
+    "ios/ApassyCompanion/ModelTests/Sources/AppModels/RequestActionsModel.swift": "2bc30967fddd5bd7fa9cf31893f588b59810121afa99a3ee24c9e9fe12a309e6",
+    "ios/ApassyCompanion/ModelTests/Tests/AppModelsTests/DecisionsTests.swift": "749a55070101e12bc3cdf6b6e3c80ab85140aec988b284b1804798d6fac6abde",
+    "ios/ApassyCompanion/ModelTests/Tests/AppModelsTests/QuestionsModelTests.swift": "cb8ea826d9d491c72f82c3e7c2a17d391c2d89495095ba98635f6584fc8a5991",
+    "ios/ApassyCompanion/ModelTests/Tests/AppModelsTests/RequestActionsModelTests.swift": "540d6d89ecd4300c32d150c02b4a89cea5ee5ac5177d5a663ab9a3ec617bae02",
+    "ios/ApassyCompanion/ModelTests/Tests/AppModelsTests/SessionModelTests.swift": "cf3e8dd421d2acaf492fd81de610bb50dd9ad314b0537e6293a87f373640d4ae",
+    "ios/ApassyCompanion/Sources/Models/Decisions.swift": "80ed10d81528cb43860c9c19ceeba347bdd1ab1552414d791777ff70560dbfc1",
+    "ios/ApassyCompanion/Sources/Models/QuestionsModel.swift": "6d5f73f4c82a487ce34a410de399eff2887b019988631fdc176e9eb7b20985dd",
+    "ios/ApassyCompanion/Sources/Models/RequestActionsModel.swift": "2bc30967fddd5bd7fa9cf31893f588b59810121afa99a3ee24c9e9fe12a309e6",
+    "ios/ApassyCompanion/Sources/Models/RootModel.swift": "84b9d285a33bd3b0461e3fadd683a32cf3c9c2662cf5fd0c8aef1ffa3598ef96",
+    "ios/ApassyCompanion/Sources/Models/SessionModel.swift": "90d20a943286c8b587c18ea3688c4db29d0b6339bf648d88cd16a0b960d69e66",
+    "ios/ApassyCompanion/Sources/Views/Decisions/DecisionsPreview.swift": "eeaa3d3d43397abd553505381843813e8796455326f6a58849a9a336e6634446",
+    "ios/ApassyCompanion/Sources/Views/Decisions/DecisionsView.swift": "e9463471841b403370679fb9538a2a52c1b2488cdf33a366ea4d4b3404ef73d4",
+    "ios/ApassyCompanion/Sources/Views/Decisions/QuestionDetailView.swift": "fe3e593a858c65beb3b812af690e6996f6ea1b1054a3fdf5882ff40b960855e5",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestHistoryDetailView.swift": "c78609581b5be5994db134d6cb1ae845a7d6b4647733388b972e844d06d88ffb",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestHistoryPresentation.swift": "d12aa20df25bb93ad902d7f4b4b8abba9240c388dacd34317bc8abdbe7e8e401",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsAccessRow.swift": "4901dc70ae6fee01429a15a510eaa730c95c3949bf088802f3ee2df83de1c6d4",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryView.swift": "2467d150466346a9bf325fb11c7c9bfe19a650bb894d8244c0931ba49fb1e5e8",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsLocalReceipt.swift": "70cc8d3df066277b285105eb6450af1f25ef094b9734c6cc7908d0bbe5016b7d",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRunRow.swift": "f9b154c0b2a24854f907eefd7539260eae3c94ff6d2230dfc3269283d488a0cd",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsWaitingRow.swift": "bfeac68d08c314aba6f21e0250928215c0d00b882f947508b6bbeeabc60e66f3",
+    "ios/ApassyCompanion/UITests/RequestsUITests.swift": "324361958243c0882b1b3a3b338c5fc67a7d9ad79dbddff16cd500920cf1fcb6",
+    "ios/ApassyCompanion/UITests/VaultTabsUITests.swift": "ed6bbcf8e2d4c4da1c0bb1ccf905a639954022b31985559b482cf1a03f3fc0c0",
+    "ios/ApassyCore/src/core/mod.rs": "268b9bd5ceb18f1a586715ac037f5c312264ca90453d6d657d5114b636d8e174",
+    "ios/ApassyCore/src/core/questions.rs": "96a7aaa27e8e55e83c2f6a357fb02f561dab0f1941700f36ef787ccae887796e",
+    "ios/ApassyCore/src/core/request_history.rs": "1a86cffcc8a5acdfdcfe1097bacf6ce34da6960a745fbe0cff50264ce5e06935",
+    "ios/ApassyCore/src/core/sync.rs": "a2ac910b13bb1aa1d9286fb80647c8c98ee5bb99eb74f2634c48490d0eb2bae0",
+    "ios/ApassyCore/tests/common/questions_relay.rs": "87bad5d047621452feebaed167dbb2293e13d2652fa1b2a4484fe214a8c316a7",
+    "ios/ApassyCore/tests/questions_flow.rs": "b413f0456cbd354707a6dd5dc037a2378ae1d7d1e6b12a066f82db8bf4cde6da",
+    "ios/ApassyVaultKit/Sources/ApassyVaultCore/CoreVaultService+Questions.swift": "437fd69c7d4fbdb029602ce94e8deb76ddc9cead76929b3f42f1aa008b2b383a",
+    "ios/ApassyVaultKit/Sources/ApassyVaultCore/CoreVaultService.swift": "bfdfaaad5373ee07813ba8fa267fca06dece89c09c841235aa428635bd7cc45b",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/PreviewVaultService+Questions.swift": "6159b8d10898546ed9007bc80654a1a1d8bb2e62371e90c79078dff94364ecf1",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/Questions.swift": "9c1bea32c6330278abeb56662055bb3556710ea098da7c79ed252fea60af0108",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/RequestHistory.swift": "ee2879f9d7d66d950ef470d39a42489410955d44d3bd75a905241b23b2396cc7",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/VaultService.swift": "eab058b7359a241771f5751b75b41542369b535db284c5b9e638425c1cfbfad7",
+    "ios/ApassyVaultKit/Tests/ApassyVaultKitTests/RequestHistoryTests.swift": "09ba5efc81df563ece421059b9d5ba8feef9edc3011d8e210dfc283ed3acde20",
+    "ios/README.md": "4da51fe6402f41459e358dd3770f2fee952a588c3f9e616a8b0a1c43d59b23a9"
+  },
+  "visual_checks": [
+    "Waiting light and dark",
+    "Dark fresh launch",
+    "History single options menu",
+    "Read-only confirmed and unconfirmed details",
+    "Largest accessibility text actions",
+    "Gallery 728 px and 360 px, no console errors"
+  ]
+}

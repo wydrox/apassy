@@ -1426,6 +1426,275 @@ fn no_request_body_holds_a_command_an_item_name_or_a_secret() {
 
 // ---- The questions of the other Macs on this Mac (section 13). ----
 
+/// Post as B without starting another lister: every questions GET belongs to A.
+fn post_question_from_b(world: &World) -> apassy::questions::client::Posted {
+    let b = world.mac_b();
+    let key = &b.keys[0];
+    let created_at = now();
+    let expires_at = created_at + 300;
+    let card = Card::from_run(
+        QID,
+        &b.uuid,
+        "Synthetic Mac mini",
+        created_at,
+        &world.run(contract_answers()),
+    );
+    let sealed = Sealed::new(
+        key,
+        &card_aad(&world.team, QID, &key.key_id(), "member", expires_at),
+        &card.to_plaintext().expect("card"),
+    )
+    .expect("seal");
+    b.client
+        .post_question(QID, "member", expires_at, &sealed)
+        .expect("B posts its question")
+}
+
+/// Two new polls prove a response after the preceding relay operation was consumed.
+/// The fake relay logs paths without their query strings; only A runs a lister.
+fn wait_for_receiver_polls(world: &World) {
+    let polls = world.relay.count("GET /v1/questions");
+    let started = Instant::now();
+    while world.relay.count("GET /v1/questions") < polls + 2 {
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "A did not consume the relay response: {:?}",
+            world.worker.view()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_receiver_view(
+    world: &World,
+    ready: impl Fn(&apassy::questions::QuestionsView) -> bool,
+) -> apassy::questions::QuestionsView {
+    let started = Instant::now();
+    loop {
+        let view = world.worker.view();
+        if ready(&view) {
+            return view;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "A did not reach the expected receiver state: {view:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn sync_b_to_a(world: &World) {
+    world
+        .b
+        .sync
+        .sync_shared(&world.shared_b, |_| true)
+        .expect("push B's changes");
+    world
+        .a
+        .sync
+        .sync_shared(&world.shared_a, |_| true)
+        .expect("pull B's changes on A");
+}
+
+fn assert_original_remote_question(world: &World, posted: &apassy::questions::client::Posted) {
+    let view = wait_for_receiver_view(world, |view| {
+        view.receive_problem.is_none()
+            && view
+                .remote
+                .iter()
+                .any(|question| question.question.record.qid == QID)
+    });
+    let remote = view
+        .remote
+        .iter()
+        .find(|question| question.question.record.qid == QID)
+        .unwrap();
+    assert_eq!(remote.question.record.seq, posted.seq, "the original card");
+    assert_eq!(remote.asker(), "Synthetic Mac mini");
+    assert_eq!(
+        world
+            .worker
+            .answering(remote.id)
+            .expect("readable question")
+            .send(Choice::ApproveOnce, None)
+            .unwrap_err(),
+        AnswerError::NeedsOwnerCheck,
+        "retrying a card never authorizes an approval"
+    );
+    assert_eq!(world.relay.answer_count(QID), 0);
+    assert_eq!(world.relay.questions_posted(), 1, "B never reposted");
+    assert_eq!(world.relay.question_state(QID).as_deref(), Some("open"));
+}
+
+/// A question received before its rotated key has synced must become readable after
+/// the key arrives, without another relay event, vault lock, or worker restart.
+#[test]
+fn an_unreadable_remote_question_reappears_after_its_key_syncs() {
+    let world = world(true);
+    world.relay.answer_polls_at_once(true);
+    let epoch = world.with_a(|vault| vault.epoch());
+    let old_key = world.with_a(|vault| vault.question_key().unwrap().unwrap().key_id());
+    let new_key = world.with_b(|vault| vault.rotate_question_key().expect("rotate on B"));
+    assert_ne!(new_key.key_id(), old_key);
+    let posted = post_question_from_b(&world);
+    wait_for_receiver_polls(&world);
+    assert_eq!(
+        world.with_a(|vault| vault.question_key().unwrap().unwrap().key_id()),
+        old_key,
+        "A still has the old key when it consumes the card"
+    );
+    assert!(world.worker.view().remote.is_empty());
+    assert!(world.worker.view().receive_problem.is_some());
+
+    sync_b_to_a(&world);
+    world.with_a(|vault| {
+        assert!(!vault.is_locked());
+        assert_eq!(vault.epoch(), epoch, "sync preserves A's unlocked session");
+        assert_eq!(
+            vault.question_key().unwrap().unwrap().key_id(),
+            new_key.key_id()
+        );
+    });
+    assert_original_remote_question(&world, &posted);
+}
+
+/// The question key alone is insufficient: an unseen asking device is retried after
+/// its trusted row arrives through ordinary vault sync in the same unlocked session.
+#[test]
+fn an_unreadable_remote_question_reappears_after_its_asker_syncs() {
+    let world = world(false);
+    world.relay.answer_polls_at_once(true);
+    world.with_a(|vault| enable_questions(vault, "Synthetic MacBook").expect("on for A"));
+    world
+        .a
+        .sync
+        .sync_shared(&world.shared_a, |_| true)
+        .expect("push A");
+    world
+        .b
+        .sync
+        .sync_shared(&world.shared_b, |_| true)
+        .expect("pull A on B");
+    world.with_b(|vault| enable_questions(vault, "Synthetic Mac mini").expect("on for B"));
+    let b = world.mac_b();
+    let epoch = world.with_a(|vault| {
+        assert_eq!(
+            vault.question_key().unwrap().unwrap().key_id(),
+            b.keys[0].key_id()
+        );
+        assert!(
+            !vault
+                .trusted_devices()
+                .unwrap()
+                .iter()
+                .any(|device| device.uuid == b.uuid)
+        );
+        vault.epoch()
+    });
+    let posted = post_question_from_b(&world);
+    wait_for_receiver_polls(&world);
+    assert!(world.worker.view().remote.is_empty());
+    assert!(world.worker.view().receive_problem.is_some());
+
+    sync_b_to_a(&world);
+    world.with_a(|vault| {
+        assert!(!vault.is_locked());
+        assert_eq!(vault.epoch(), epoch);
+        assert!(
+            vault
+                .trusted_devices()
+                .unwrap()
+                .iter()
+                .any(|device| device.uuid == b.uuid)
+        );
+    });
+    assert_original_remote_question(&world, &posted);
+}
+
+fn settle_question_from_b(world: &World) {
+    let b = world.mac_b();
+    let key = &b.keys[0];
+    let body = SettleBody {
+        v: 1,
+        qid: QID.to_owned(),
+        outcome: "denied".to_owned(),
+        answered_by: None,
+        device_name: None,
+        device_kind: None,
+        kind: None,
+        at: now(),
+        replaced_by: None,
+    };
+    let sealed = Sealed::new(
+        key,
+        &settle_aad(&world.team, QID, &key.key_id()),
+        &body.to_plaintext().expect("settle body"),
+    )
+    .expect("sealed settle");
+    b.client
+        .settle(QID, &sealed)
+        .expect("B settles its question");
+}
+
+/// A terminal relay record discards the unreadable cache entry before its key arrives.
+#[test]
+fn a_settled_unreadable_remote_question_never_reappears_after_key_sync() {
+    let world = world(true);
+    world.relay.answer_polls_at_once(true);
+    world.with_b(|vault| vault.rotate_question_key().expect("rotate on B"));
+    post_question_from_b(&world);
+    wait_for_receiver_polls(&world);
+    assert!(world.worker.view().receive_problem.is_some());
+    settle_question_from_b(&world);
+    wait_for_receiver_polls(&world);
+    let view = world.worker.view();
+    assert!(
+        view.receive_problem.is_none(),
+        "terminal records clear the warning"
+    );
+    assert!(view.remote.is_empty());
+
+    sync_b_to_a(&world);
+    wait_for_receiver_polls(&world);
+    let view = world.worker.view();
+    assert!(
+        view.remote.is_empty(),
+        "settled pending card must not resurrect"
+    );
+    assert!(view.receive_problem.is_none());
+    assert_eq!(world.relay.question_state(QID).as_deref(), Some("settled"));
+    assert_eq!(world.relay.questions_posted(), 1);
+    assert_eq!(world.relay.answer_count(QID), 0);
+}
+
+/// Lock removes pending receiver state and its message. A terminal change while the
+/// vault is locked must not leave an old card to reappear after unlocking and syncing.
+#[test]
+fn locking_clears_an_unreadable_remote_question_and_its_problem() {
+    let world = world(true);
+    world.relay.answer_polls_at_once(true);
+    world.with_b(|vault| vault.rotate_question_key().expect("rotate on B"));
+    post_question_from_b(&world);
+    wait_for_receiver_polls(&world);
+    assert!(world.worker.view().receive_problem.is_some());
+    world.with_a(|vault| vault.lock().expect("lock A"));
+    world.worker.forget();
+    let view = wait_for_receiver_view(&world, |view| !view.on && view.receive_problem.is_none());
+    assert!(view.remote.is_empty());
+    settle_question_from_b(&world);
+    world.with_a(|vault| vault.unlock(PASS).expect("unlock A"));
+    sync_b_to_a(&world);
+    wait_for_receiver_polls(&world);
+    let view = world.worker.view();
+    assert!(
+        view.remote.is_empty(),
+        "locked pending card must not resurrect"
+    );
+    assert!(view.receive_problem.is_none());
+    assert_eq!(world.relay.question_state(QID).as_deref(), Some("settled"));
+    assert_eq!(world.relay.answer_count(QID), 0);
+}
+
 /// Mac B asks with its own waiter; Mac A lists the question of B, "from" B, and answers
 /// it from its Decisions with its relay key: "Allow once" only with a fresh owner check
 /// of Mac A (`OwnerAction::AnswerRemoteQuestion`), and the run on B goes on with a

@@ -192,6 +192,181 @@ struct SessionModelTests {
         #expect(!session.isEnding)
     }
 
+    // MARK: Visible list Deny
+
+    private func copyRun(_ run: PendingRun, digest: String? = nil, command: [String]? = nil,
+                         waitingSeconds: Int? = nil) -> PendingRun {
+        PendingRun(id: run.id, agent: run.agent, command: command ?? run.command, cwd: run.cwd,
+            envNames: run.envNames, purpose: run.purpose, risk: run.risk, userRequest: run.userRequest,
+            requestSource: run.requestSource, agentRequest: run.agentRequest, remember: run.remember,
+            digest: digest ?? run.digest, waitingSeconds: waitingSeconds ?? run.waitingSeconds)
+    }
+
+    @Test("list denials require a fresh connected inbox and a real remaining deadline")
+    func listDenyFreshness() async throws {
+        let f = Fixture()
+        await f.session.refresh()
+        let run = try #require(f.session.runs.first)
+        let request = try #require(f.session.accessRequests.first)
+        let fetched = try #require(f.session.fetchedAt)
+        #expect(f.session.canDenyFromList(run: run, now: fetched))
+        #expect(f.session.canDenyAccessFromList(request, now: fetched))
+        #expect(!f.session.canDenyFromList(run: run, now: fetched.addingTimeInterval(10.001)))
+        #expect(!f.session.canDenyAccessFromList(request, now: fetched.addingTimeInterval(10.001)))
+        #expect(!f.session.canDenyFromList(run: run, now: fetched.addingTimeInterval(-0.001)))
+        let expired = copyRun(run, waitingSeconds: f.session.approvalTimeout)
+        await f.mac.setInbox(Inbox(runs: [expired], accessRequests: [], activity: []))
+        await f.session.refresh()
+        #expect(!f.session.canDenyFromList(run: expired))
+        do {
+            try await f.session.denyFromList(expired)
+            Issue.record("an expired row must not send")
+        } catch { #expect(error.localizedDescription == "Refresh requests before answering.") }
+        #expect(await f.mac.calls.isEmpty)
+    }
+
+    @Test("changed or missing local snapshots cannot deny another version with the same ID")
+    func listDenyChangedOrMissing() async throws {
+        let f = Fixture()
+        await f.session.refresh()
+        let oldRun = try #require(f.session.runs.first)
+        let oldAccess = try #require(f.session.accessRequests.first)
+        let changedRun = copyRun(oldRun, command: ["synthetic-tool", "changed"])
+        let changedAccess = AccessRequest(id: oldAccess.id, agent: oldAccess.agent,
+            itemName: oldAccess.itemName, reason: "Changed synthetic request", cwd: oldAccess.cwd,
+            requestedAt: oldAccess.requestedAt)
+        await f.mac.setInbox(Inbox(runs: [changedRun], accessRequests: [changedAccess], activity: []))
+        await f.session.refresh()
+        #expect(!f.session.canDenyFromList(run: oldRun))
+        #expect(!f.session.canDenyAccessFromList(oldAccess))
+        do {
+            try await f.session.denyFromList(oldRun)
+            Issue.record("a changed snapshot must not send")
+        } catch { #expect(error.localizedDescription == "Refresh requests before answering.") }
+        do {
+            try await f.session.denyAccessFromList(oldAccess)
+            Issue.record("changed access scope must not send")
+        } catch { #expect(error.localizedDescription == "Refresh requests before answering.") }
+        await f.mac.setInbox(Inbox(runs: [], accessRequests: [], activity: []))
+        await f.session.refresh()
+        #expect(!f.session.canDenyFromList(run: oldRun))
+        #expect(!f.session.canDenyAccessFromList(oldAccess))
+        #expect(await f.mac.calls.isEmpty)
+    }
+
+    @Test("an offline cached row requires refresh instead of sending Deny")
+    func listDenyOffline() async throws {
+        let f = Fixture()
+        await f.session.refresh()
+        let run = try #require(f.session.runs.first)
+        let request = try #require(f.session.accessRequests.first)
+        await f.mac.fail(with: .unreachable)
+        await f.session.refresh()
+        #expect(!f.session.canDenyFromList(run: run))
+        #expect(!f.session.canDenyAccessFromList(request))
+        do {
+            try await f.session.denyFromList(run)
+            Issue.record("a cached offline row must not send")
+        } catch { #expect(error.localizedDescription == "Refresh requests before answering.") }
+        #expect(await f.mac.calls.isEmpty)
+    }
+
+    @Test("a refused list Deny preserves the row and returns the real Mac error")
+    func listDenyRefused() async throws {
+        let f = Fixture()
+        await f.session.refresh()
+        let run = try #require(f.session.runs.first)
+        let request = try #require(f.session.accessRequests.first)
+        await f.mac.fail(with: .server(status: 409, code: "changed", message: "Synthetic request changed."))
+        do {
+            try await f.session.denyFromList(run)
+            Issue.record("the Mac refusal must reach the row")
+        } catch { #expect(error.localizedDescription == "Synthetic request changed.") }
+        do {
+            try await f.session.denyAccessFromList(request)
+            Issue.record("the Mac refusal must reach the access row")
+        } catch { #expect(error.localizedDescription == "Synthetic request changed.") }
+        #expect(f.session.run(id: run.id) == run)
+        #expect(f.session.accessRequests.contains(request))
+        #expect(f.session.denying.isEmpty)
+        #expect(f.session.actionError == nil)
+    }
+
+    @Test("concurrent list Deny taps send once and hold the original row", arguments: [false, true])
+    func duplicateListDeny(access: Bool) async throws {
+        let mac = SuspendedListConnection()
+        let session = SessionModel(record: PreviewData.record, mac: mac, keysInSecureEnclave: false,
+            store: InMemoryPairingStore(), onEnded: { _ in })
+        await session.refresh()
+        let run = try #require(session.runs.first)
+        let request = try #require(session.accessRequests.first)
+        let sending = Task {
+            if access { try await session.denyAccessFromList(request) }
+            else { try await session.denyFromList(run) }
+        }
+        await mac.waitForDenial()
+        #expect(access ? !session.canDenyAccessFromList(request) : !session.canDenyFromList(run: run))
+        do {
+            if access { try await session.denyAccessFromList(request) }
+            else { try await session.denyFromList(run) }
+            Issue.record("the second tap must not send")
+        } catch { #expect(error.localizedDescription == "Refresh requests before answering.") }
+        #expect(await mac.denialCalls == 1)
+        #expect(access ? session.accessRequests.contains(request) : session.run(id: run.id) != nil)
+        await mac.completeDenial()
+        try await sending.value
+        #expect(access ? !session.accessRequests.contains(request) : session.run(id: run.id) == nil)
+        #expect(await mac.denialCalls == 1)
+    }
+
+    @Test("an inbox response already in flight cannot restore rows after Forget")
+    func forgetDuringRefresh() async {
+        let mac = SuspendedListConnection(suspendInbox: true)
+        let session = SessionModel(record: PreviewData.record, mac: mac, keysInSecureEnclave: false,
+            store: InMemoryPairingStore(), onEnded: { _ in })
+        let refreshing = Task { await session.refresh() }
+        await mac.waitForInbox()
+        session.forgetMac()
+        await mac.completeInbox()
+        await refreshing.value
+        #expect(session.inbox == nil)
+        #expect(session.fetchedAt == nil)
+        #expect(session.waitingCount == 0)
+        #expect(session.isEnding)
+    }
+
+    @Test("equal device IDs and Mac names remain distinct when their verified pins differ")
+    func requestSourceCollision() {
+        var other = PreviewData.record
+        other.pin = Data(repeating: 0x7e, count: 32)
+        let first = SessionModel(record: PreviewData.record, mac: ScriptedConnection(),
+            keysInSecureEnclave: false, store: InMemoryPairingStore(), onEnded: { _ in })
+        let second = SessionModel(record: other, mac: ScriptedConnection(),
+            keysInSecureEnclave: false, store: InMemoryPairingStore(), onEnded: { _ in })
+        #expect(first.record.deviceID == second.record.deviceID)
+        #expect(first.macName == second.macName)
+        #expect(first.requestSourceID != second.requestSourceID)
+    }
+
+    @Test("forget clears cached private rows and disables every list Deny")
+    func forgetClearsWaiting() async throws {
+        let f = Fixture()
+        await f.session.refresh()
+        let run = try #require(f.session.runs.first)
+        let request = try #require(f.session.accessRequests.first)
+        f.session.forgetMac()
+        #expect(f.session.inbox == nil)
+        #expect(f.session.fetchedAt == nil)
+        #expect(f.session.runs.isEmpty)
+        #expect(f.session.accessRequests.isEmpty)
+        #expect(f.session.activity.isEmpty)
+        #expect(!f.session.canDenyFromList(run: run))
+        #expect(!f.session.canDenyAccessFromList(request))
+        await f.session.refresh()
+        #expect(f.session.inbox == nil)
+        #expect(await f.mac.calls.isEmpty)
+    }
+
     // MARK: Keys that cannot be used
 
     @Test("a key that cannot be used ends the pairing: the Mac is asked, the record goes, the flow shows the message",
@@ -280,4 +455,50 @@ struct SessionModelTests {
         await f.session.refresh()
         #expect(!f.session.showsConnectionScreen(rows: 0))
     }
+}
+
+/// Deterministic transport suspension tests overlapping taps and a response after Forget.
+private actor SuspendedListConnection: MacConnection {
+    let suspendInbox: Bool
+    private var denial: CheckedContinuation<Void, Never>?
+    private var denialStarted: CheckedContinuation<Void, Never>?
+    private var inboxResponse: CheckedContinuation<Void, Never>?
+    private var inboxStarted: CheckedContinuation<Void, Never>?
+    private(set) var denialCalls = 0
+    var lastGoodHost: String? { nil }
+
+    init(suspendInbox: Bool = false) { self.suspendInbox = suspendInbox }
+    func status() async throws -> StatusInfo { PreviewData.status }
+    func inbox() async throws -> Inbox {
+        if suspendInbox {
+            await withCheckedContinuation { continuation in
+                inboxResponse = continuation
+                inboxStarted?.resume()
+                inboxStarted = nil
+            }
+        }
+        return PreviewData.inbox
+    }
+    func waitForInbox() async {
+        if inboxResponse != nil { return }
+        await withCheckedContinuation { inboxStarted = $0 }
+    }
+    func completeInbox() { inboxResponse?.resume(); inboxResponse = nil }
+    func approve(run: PendingRun, remember: Bool) async throws -> ApproveOutcome { .approved }
+    func deny(run: PendingRun) async throws { await suspendDenial() }
+    func denyAccessRequest(id: String) async throws { await suspendDenial() }
+    private func suspendDenial() async {
+        denialCalls += 1
+        await withCheckedContinuation { continuation in
+            denial = continuation
+            denialStarted?.resume()
+            denialStarted = nil
+        }
+    }
+    func waitForDenial() async {
+        if denialCalls > 0 { return }
+        await withCheckedContinuation { denialStarted = $0 }
+    }
+    func completeDenial() { denial?.resume(); denial = nil }
+    func unpair() async throws {}
 }

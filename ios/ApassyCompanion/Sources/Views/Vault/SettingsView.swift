@@ -67,6 +67,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
@@ -181,6 +182,7 @@ struct DevicesView: View {
             }
         }
         .navigationTitle("Team devices")
+        .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .refreshable { await load() }
     }

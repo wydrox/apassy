@@ -9,10 +9,11 @@ import SwiftUI
 /// (expired, answered on another device, or sent from here) the outcome takes the place of the bar.
 struct QuestionDetailView: View {
     let model: QuestionsModel
-    let qid: String
+    let requestIdentity: String
     @State private var tapGuard = AnswerGuard()
 
-    private var question: RemoteQuestion? { model.questions.first { $0.qid == qid } }
+    private var question: RemoteQuestion? { model.questions.first { $0.requestIdentity == requestIdentity }
+        ?? model.receiptQuestions.first { $0.requestIdentity == requestIdentity } }
 
     var body: some View {
         Group {
@@ -33,7 +34,7 @@ struct QuestionDetailView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         // The bar takes the place of the tab bar, as in the mockup.
-        .toolbar(.hidden, for: .tabBar)
+        .toolbarVisibility(.hidden, for: .tabBar)
     }
 
     private func content(_ question: RemoteQuestion, _ card: QuestionCard, outcome: QuestionOutcome?) -> some View {
@@ -72,6 +73,7 @@ struct QuestionDetailView: View {
         .contentMargins(.bottom, 24, for: .scrollContent)
         // A tap meant for the list or a notification must not answer this question.
         .onAppear { tapGuard.arm(now: Date()) }
+        .onChange(of: question.card) { _, _ in tapGuard.arm(now: Date()) }
         .toolbar {
             if outcome == nil, !bar.menu.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -142,9 +144,9 @@ struct QuestionDetailView: View {
 
     /// The fixed bottom glass bar of the mockup.
     private func actions(_ question: RemoteQuestion, _ card: QuestionCard, _ bar: AnswerBar) -> some View {
-        let busy = model.deliveries[question.qid] == .sending
+        let busy = model.delivery(for: question) == .sending
         return DecisionBar {
-            if case .failed(let message) = model.deliveries[question.qid] {
+            if case .failed(let message) = model.delivery(for: question) {
                 Text(message)
                     .font(.footnote)
                     .foregroundStyle(.red)
@@ -189,7 +191,7 @@ struct QuestionDetailView: View {
         let model = QuestionsModel(
             service: service, signers: TeamAnswerSigners(), push: nil, deviceName: "Test iPhone")
         NavigationStack {
-            QuestionDetailView(model: model, qid: "oKGio6SlpqeoqaqrrK2urw")
+            QuestionDetailView(model: model, requestIdentity: PreviewVaultService.sampleQuestion().requestIdentity)
         }
         .task {
             await service.setQuestions(enabled: true, questions: [PreviewVaultService.sampleQuestion()])

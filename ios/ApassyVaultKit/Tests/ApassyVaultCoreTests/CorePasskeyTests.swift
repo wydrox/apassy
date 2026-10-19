@@ -12,7 +12,8 @@ import Testing
 
     private func vault() async throws -> (CoreVaultService, URL) {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-pk-\(UUID().uuidString)")
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         return (core, dir)
     }

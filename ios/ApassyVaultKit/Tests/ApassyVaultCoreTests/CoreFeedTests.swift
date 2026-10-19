@@ -11,7 +11,8 @@ import Testing
     @Test func aVaultWithoutATeamHasNoFeedAndALockDropsIt() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         try await core.lock()
         try await core.unlock(passphrase: "synthetic-swift-pass", keep: false)
@@ -49,7 +50,8 @@ import Testing
     @Test func autoFillHasNoFeed() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let app = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let app = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await app.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         let autofill = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .autofill)
         do {

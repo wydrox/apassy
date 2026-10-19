@@ -1,0 +1,206 @@
+{
+  "baseline": "46e088dc69cc0d0d77dfad4849984867bd136d44",
+  "date": "2026-10-17",
+  "scope": "Synthetic HTML prototype only",
+  "functional": [
+    {
+      "name": "Earlier confirmation cannot replace another request authentication",
+      "pass": true
+    },
+    {
+      "name": "Original request journal still confirmed",
+      "pass": true
+    },
+    {
+      "name": "Broader scope belongs to selected request",
+      "pass": true
+    },
+    {
+      "name": "a locked Work history hidden",
+      "pass": true
+    },
+    {
+      "name": "b locked Work history hidden",
+      "pass": true
+    },
+    {
+      "name": "c locked Work history hidden",
+      "pass": true
+    },
+    {
+      "name": "Locked vault is not empty",
+      "pass": true
+    },
+    {
+      "name": "Global badge retains other known request",
+      "pass": true
+    },
+    {
+      "name": "Empty history search works",
+      "pass": true
+    },
+    {
+      "name": "Combined history shows both vaults",
+      "pass": true
+    },
+    {
+      "name": "Access request stays deny-only",
+      "pass": true
+    },
+    {
+      "name": "Access denial keeps ordinary requests",
+      "pass": true
+    },
+    {
+      "name": "Unconfirmed answer remains available",
+      "pass": true
+    },
+    {
+      "name": "Offline grant disabled",
+      "pass": true
+    },
+    {
+      "name": "Expired request leaves waiting and has record",
+      "pass": true
+    },
+    {
+      "name": "Changed request requires updated snapshot",
+      "pass": true
+    },
+    {
+      "name": "Reset cancels all outstanding answers",
+      "pass": true
+    },
+    {
+      "name": "No uncaught JavaScript errors",
+      "pass": true
+    }
+  ],
+  "layout": [
+    {
+      "width": 320,
+      "states": 90,
+      "failures": []
+    },
+    {
+      "width": 390,
+      "states": 90,
+      "failures": []
+    },
+    {
+      "width": 728,
+      "states": 90,
+      "failures": []
+    },
+    {
+      "width": 1440,
+      "states": 90,
+      "failures": []
+    }
+  ],
+  "darkPreview": "Forced the existing dark CSS media block and matched the screenshot background to injected thread background for diagnostic preview; actual artifacts retain transparent outer background and OS media selection.",
+  "screenshots": [
+    "a-waiting.png",
+    "a-history.png",
+    "a-unconfirmed.png",
+    "b-journal.png",
+    "c-vault-inboxes.png",
+    "a-empty.png",
+    "a-offline.png"
+  ],
+  "contrast": [
+    {
+      "pair": "light secondary on paper",
+      "ratio": 5.65,
+      "pass_4_5": true
+    },
+    {
+      "pair": "light secondary on sheet",
+      "ratio": 6.21,
+      "pass_4_5": true
+    },
+    {
+      "pair": "light blue on pale",
+      "ratio": 5.43,
+      "pass_4_5": true
+    },
+    {
+      "pair": "light white on primary",
+      "ratio": 6.18,
+      "pass_4_5": true
+    },
+    {
+      "pair": "light production",
+      "ratio": 5.9,
+      "pass_4_5": true
+    },
+    {
+      "pair": "light allowed",
+      "ratio": 6.5,
+      "pass_4_5": true
+    },
+    {
+      "pair": "light denied",
+      "ratio": 6.84,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark secondary on sheet",
+      "ratio": 7.41,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark secondary on segment",
+      "ratio": 4.76,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark blue on pale",
+      "ratio": 5.63,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark primary text",
+      "ratio": 7.39,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark production",
+      "ratio": 7.57,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark allowed",
+      "ratio": 9.78,
+      "pass_4_5": true
+    },
+    {
+      "pair": "dark denied",
+      "ratio": 7.27,
+      "pass_4_5": true
+    }
+  ],
+  "standalone": [
+    {
+      "file": "a-waiting-history.html",
+      "pass": true,
+      "concept": "a",
+      "title": "Apassy \u00b7 Waiting and History",
+      "active": "a"
+    },
+    {
+      "file": "b-journal.html",
+      "pass": true,
+      "concept": "b",
+      "title": "Apassy \u00b7 One journal",
+      "active": "b"
+    },
+    {
+      "file": "c-vault-inboxes.html",
+      "pass": true,
+      "concept": "c",
+      "title": "Apassy \u00b7 Vault inboxes",
+      "active": "c"
+    }
+  ]
+}

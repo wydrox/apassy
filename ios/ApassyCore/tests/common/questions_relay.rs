@@ -79,6 +79,10 @@ struct Relay {
     nonces: BTreeMap<String, Vec<u8>>,
     questions: Vec<StoredQuestion>,
     answers: Vec<StoredAnswer>,
+    hold_answer_replies: bool,
+    answer_rate_next: usize,
+    answer_lost_reply_next: usize,
+    answer_post_attempts: usize,
     seq: u64,
     next_secret: u64,
     push: Option<(u64, Value)>,
@@ -182,6 +186,40 @@ fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
 }
 
 impl QuestionsRelay {
+    /// Reject the next answer POSTs before acceptance, as an explicit relay 429.
+    pub fn rate_answer_posts(&self, count: usize) {
+        lock(&self.shared.0).answer_rate_next = count;
+    }
+
+    /// Accept these POSTs, then close the connection before writing a response.
+    pub fn lose_answer_replies(&self, count: usize) {
+        lock(&self.shared.0).answer_lost_reply_next = count;
+    }
+
+    pub fn answer_post_attempts(&self) -> usize {
+        lock(&self.shared.0).answer_post_attempts
+    }
+
+    pub fn hold_answer_replies(&self, hold: bool) {
+        let (mutex, changed) = &*self.shared;
+        lock(mutex).hold_answer_replies = hold;
+        changed.notify_all();
+    }
+
+    pub fn wait_for_accepted_answer(&self) {
+        let (mutex, changed) = &*self.shared;
+        let relay = lock(mutex);
+        let (relay, _) = changed
+            .wait_timeout_while(relay, Duration::from_secs(10), |relay| {
+                relay.answers.is_empty()
+            })
+            .unwrap();
+        assert!(
+            !relay.answers.is_empty(),
+            "answer did not reach synthetic relay"
+        );
+    }
+
     /// Start the fake with the team `team_id` and the asking Mac as device 1.
     pub fn start(team_id: &str, mac_public_key: &[u8]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -779,9 +817,19 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
         .log
         .push(format!("{} {}", request.method, request.path));
     let (status, body) = route(shared, &request);
+    // Test-only sentinel: acceptance happened, but the client gets no HTTP reply.
+    if status == 0 {
+        return;
+    }
     let body = serde_json::to_vec(&body).unwrap_or_default();
+    // Keep the real client backoff intact with a short explicit scripted delay.
+    let retry_after = if status == 429 {
+        "Retry-After: 1\r\n"
+    } else {
+        ""
+    };
     let head = format!(
-        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} X\r\n{retry_after}Content-Length: {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -974,6 +1022,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
                     }
                 }
                 ("POST", ["questions", qid, "answers"]) => {
+                    relay.answer_post_attempts += 1;
                     let body = request.json();
                     let Some(at) = relay.questions.iter().position(|q| q.qid == *qid) else {
                         return fail(404, "not_found");
@@ -990,6 +1039,10 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
                     }
                     if body["v"] != json!(1) || body["key_id"] != json!(question.key_id) {
                         return fail(400, "invalid_request");
+                    }
+                    if relay.answer_rate_next > 0 {
+                        relay.answer_rate_next -= 1;
+                        return fail(429, "answer_rate");
                     }
                     let count = relay
                         .answers
@@ -1008,6 +1061,21 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
                         nonce: body["nonce"].as_str().unwrap_or_default().to_owned(),
                         ciphertext: body["ciphertext"].as_str().unwrap_or_default().to_owned(),
                     });
+                    changed.notify_all();
+                    if relay.answer_lost_reply_next > 0 {
+                        relay.answer_lost_reply_next -= 1;
+                        return (0, Value::Null);
+                    }
+                    let (next, timed) = changed
+                        .wait_timeout_while(relay, Duration::from_secs(10), |relay| {
+                            relay.hold_answer_replies
+                        })
+                        .unwrap();
+                    relay = next;
+                    assert!(
+                        !timed.timed_out() || !relay.hold_answer_replies,
+                        "test did not release answer response"
+                    );
                     ok(json!({"id": id, "at": now()}))
                 }
                 ("PUT", ["push", "token"]) => {

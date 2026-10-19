@@ -1,0 +1,267 @@
+{
+  "date": "2026-10-19",
+  "branch": "product/ios-requests",
+  "parent_commit": "f5b9efca833465d8d60c3bd57c1f9696756e9071",
+  "scope": "UI-only compact headers and native vault selector; synthetic Simulator only; no publication",
+  "native_build": {
+    "result": "passed",
+    "log": "/tmp/apassy-compact-headers-20261019/native-36-build.log",
+    "configuration": "Unsigned Debug arm64 iOS Simulator; iOS 26 deployment / Xcode 27 unchanged",
+    "command": "xcodebuild -project ios/ApassyCompanion/ApassyCompanion.xcodeproj -scheme ApassyCompanion -destination 'platform=iOS Simulator,id=36F1DEE4-9ED8-4769-AD00-41CD44F657D5' -derivedDataPath /tmp/apassy-requests-uniform-ui-20261019/DerivedData -jobs 1 ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build-for-testing"
+  },
+  "native_tests": {
+    "unique_scenarios_passed_across_scoped_runs": 11,
+    "cases": [
+      "ApassyCompanionUITests.RequestsUITests testAccessibilityTextKeepsActionsReachable",
+      "ApassyCompanionUITests.RequestsUITests testHistoryRetainsSearchWhenSwitchingDestinations",
+      "ApassyCompanionUITests.RequestsUITests testHistorySearchReadOnlyDetailAndClear",
+      "ApassyCompanionUITests.RequestsUITests testRoutineReadOffersOneTimeActionAndProductionRequiresReview",
+      "ApassyCompanionUITests.RequestsUITests testWaitingAndHistoryKeepTheSameNavigationLayout",
+      "ApassyCompanionUITests.VaultTabsUITests testCompactFolderFormAndSearchNavigation",
+      "ApassyCompanionUITests.VaultTabsUITests testOnlyTheSearchTabHasTheSearchField",
+      "ApassyCompanionUITests.VaultTabsUITests testRequestsWithoutConnectionOffersConnect",
+      "ApassyCompanionUITests.VaultTabsUITests testVaultRootShowsCredentialsAndOrganization",
+      "ApassyCompanionUITests.VaultTabsUITests testVaultSelectorRemainsReachableAtAccessibilityTextSize",
+      "ApassyCompanionUITests.VaultTabsUITests testVaultTitleSelectorUsesTheNormalLockFlow"
+    ],
+    "runs": [
+      {
+        "name": "ui-final",
+        "log": "/tmp/apassy-compact-headers-20261019/ui-final.log",
+        "result_bundle": "/tmp/apassy-compact-headers-20261019/ui-final.xcresult",
+        "passed": 9,
+        "failed": 2,
+        "cases": [
+          {
+            "case": "ApassyCompanionUITests.RequestsUITests testAccessibilityTextKeepsActionsReachable",
+            "result": "passed",
+            "seconds": 12.483
+          },
+          {
+            "case": "ApassyCompanionUITests.RequestsUITests testHistoryRetainsSearchWhenSwitchingDestinations",
+            "result": "passed",
+            "seconds": 29.337
+          },
+          {
+            "case": "ApassyCompanionUITests.RequestsUITests testHistorySearchReadOnlyDetailAndClear",
+            "result": "passed",
+            "seconds": 39.577
+          },
+          {
+            "case": "ApassyCompanionUITests.RequestsUITests testRoutineReadOffersOneTimeActionAndProductionRequiresReview",
+            "result": "passed",
+            "seconds": 9.023
+          },
+          {
+            "case": "ApassyCompanionUITests.RequestsUITests testWaitingAndHistoryKeepTheSameNavigationLayout",
+            "result": "passed",
+            "seconds": 12.7
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testCompactFolderFormAndSearchNavigation",
+            "result": "passed",
+            "seconds": 20.876
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testOnlyTheSearchTabHasTheSearchField",
+            "result": "passed",
+            "seconds": 12.881
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testRequestsWithoutConnectionOffersConnect",
+            "result": "passed",
+            "seconds": 7.81
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultRootShowsCredentialsAndOrganization",
+            "result": "passed",
+            "seconds": 10.418
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultSelectorRemainsReachableAtAccessibilityTextSize",
+            "result": "failed",
+            "seconds": 15.323
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultTitleSelectorUsesTheNormalLockFlow",
+            "result": "failed",
+            "seconds": 14.271
+          }
+        ]
+      },
+      {
+        "name": "ui-selector-final",
+        "log": "/tmp/apassy-compact-headers-20261019/ui-selector-final.log",
+        "result_bundle": "/tmp/apassy-compact-headers-20261019/ui-selector-final.xcresult",
+        "passed": 1,
+        "failed": 2,
+        "cases": [
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testCompactFolderFormAndSearchNavigation",
+            "result": "passed",
+            "seconds": 22.972
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultSelectorRemainsReachableAtAccessibilityTextSize",
+            "result": "failed",
+            "seconds": 7.468
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultTitleSelectorUsesTheNormalLockFlow",
+            "result": "failed",
+            "seconds": 7.681
+          }
+        ]
+      },
+      {
+        "name": "ui-native-36",
+        "log": "/tmp/apassy-compact-headers-20261019/ui-native-36.log",
+        "result_bundle": "/tmp/apassy-compact-headers-20261019/ui-native-36.xcresult",
+        "passed": 2,
+        "failed": 0,
+        "cases": [
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultSelectorRemainsReachableAtAccessibilityTextSize",
+            "result": "passed",
+            "seconds": 12.762
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testVaultTitleSelectorUsesTheNormalLockFlow",
+            "result": "passed",
+            "seconds": 16.584
+          }
+        ]
+      },
+      {
+        "name": "ui-dark-final",
+        "log": "/tmp/apassy-compact-headers-20261019/ui-dark-final.log",
+        "result_bundle": "/tmp/apassy-compact-headers-20261019/ui-dark-final.xcresult",
+        "passed": 2,
+        "failed": 0,
+        "cases": [
+          {
+            "case": "ApassyCompanionUITests.RequestsUITests testWaitingAndHistoryKeepTheSameNavigationLayout",
+            "result": "passed",
+            "seconds": 14.383
+          },
+          {
+            "case": "ApassyCompanionUITests.VaultTabsUITests testCompactFolderFormAndSearchNavigation",
+            "result": "passed",
+            "seconds": 21.836
+          }
+        ]
+      }
+    ],
+    "test_command_template": "xcodebuild -project ios/ApassyCompanion/ApassyCompanion.xcodeproj -scheme ApassyCompanion -destination 'platform=iOS Simulator,id=36F1DEE4-9ED8-4769-AD00-41CD44F657D5' -derivedDataPath /tmp/apassy-requests-uniform-ui-20261019/DerivedData -resultBundlePath RESULT -jobs 1 -parallel-testing-enabled NO -collect-test-diagnostics never -only-testing:ApassyCompanionUITests/CLASS/METHOD ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test-without-building"
+  },
+  "selector_acceptance": {
+    "native_height_points": 36,
+    "minimum_checked_points": 28,
+    "recommended_points": 44,
+    "actual_inside_edges": "passed at normal and AccessibilityXXXL text sizes",
+    "outside_44_point_probes": "failed; not claimed fixed",
+    "decision": "Native principal Menu with a 36-point label fills the native host. Larger-label/style/layout overrides removed. Apple minimum28/default44. Physical touch comfort unverified.",
+    "reference": "https://developer.apple.com/design/human-interface-guidelines/accessibility#Mobility"
+  },
+  "earlier_failures": [
+    "Disk exhaustion; only verified superseded failed test staging/diagnostics removed.",
+    "Ancestor accessibility identifier overrode picker identifier; removed, Requests suite passed.",
+    "44-point probes failed for title-menu and native Menu hosts. Plain/fixedSize/layout wrapper attempts did not fix reachability.",
+    "Removing label minimum made target smaller than28; final label36, actual-edge and lock-flow tests pass."
+  ],
+  "source_sha256": {
+    "ios/ApassyCompanion/ApassyCompanion.xcodeproj/project.pbxproj": "2109b87263e94717678273f1386fb07f57b85910910bddd00105960ab36581ad",
+    "ios/ApassyCompanion/Sources/Models/RootModel.swift": "84b9d285a33bd3b0461e3fadd683a32cf3c9c2662cf5fd0c8aef1ffa3598ef96",
+    "ios/ApassyCompanion/Sources/Vault/VaultModel.swift": "2c2c09f790578d39a39daff55ff0032385e13c1b0633cab9b2e4a8a62f9e118b",
+    "ios/ApassyCompanion/Sources/Views/Agents/AgentsView.swift": "22f31012974e3c90da768e0911bbef046ed3b319b3054b6bb203c6524c303770",
+    "ios/ApassyCompanion/Sources/Views/Decisions/DecisionComponents.swift": "822b6354e0775c397e3c6fccfc24e49abf64f141dfab0fed108b3e133e6160af",
+    "ios/ApassyCompanion/Sources/Views/Decisions/DecisionsPreview.swift": "eeaa3d3d43397abd553505381843813e8796455326f6a58849a9a336e6634446",
+    "ios/ApassyCompanion/Sources/Views/Decisions/DecisionsView.swift": "c7367a36bc71f903d0db3286c03a78eb6f1248fee040a3c3206c5e2fbe7ed6c9",
+    "ios/ApassyCompanion/Sources/Views/Decisions/QuestionDetailView.swift": "fe3e593a858c65beb3b812af690e6996f6ea1b1054a3fdf5882ff40b960855e5",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestHistoryDetailView.swift": "107a17b37b41bfc70240a6d6e691fdb8446a5cb86d3c5492c3b1fc3b553c25f7",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestHistoryPresentation.swift": "d12aa20df25bb93ad902d7f4b4b8abba9240c388dacd34317bc8abdbe7e8e401",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsAccessRow.swift": "e1dbaea3aaf63962dc629ecb61a6244fbb54197e29ff0414b20c974cf11bbfad",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryList.swift": "4063155ff5d31e55c175642186879e563f6015401f7507a24d1256184c0c3f3b",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryRow.swift": "b501812d190ad443de357cbcc4fe4fce8b879a1d0426f82a24f85a8840f0b8b8",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistorySearchSheet.swift": "24bc0f7217d6a43d674adf40157d22b53e9eaba6ba54ad8c806e54c166c00a62",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryView.swift": "1bb62d946db394dcdb8c55be6f79d8a53bc0e07f83f819d42092389f07d4a5ca",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsList.swift": "bfd88fae4370d641b5a3b8aa8bf934524ecafab86aadd2c64efd36fc9e956fa1",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsLocalReceipt.swift": "70cc8d3df066277b285105eb6450af1f25ef094b9734c6cc7908d0bbe5016b7d",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRowLink.swift": "8cf7c536c45624603a290f2792629d4ad8d06d3a91795057c94583afe5f3e937",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRowSummary.swift": "c6d601364b06946069befa1ca816a5ed3710f39abf6085e3999a49972c638ac2",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRunRow.swift": "510a35ebb29de9c9fac39031d61e01d2ba2b0a033435ed6cd7b7dfe023011477",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsWaitingRow.swift": "404024991990763077beed19c24cbec33c799495020f6b23c5c7f729dc0a50da",
+    "ios/ApassyCompanion/Sources/Views/Vault/FolderView.swift": "5af0d2d307753bbc69e4d983791d59d4c8bd38f6f3007401f5d887f7bd88486e",
+    "ios/ApassyCompanion/Sources/Views/Vault/ItemDetailView.swift": "69fc0d9c1dca66ddfe2e05d2f72dc42a2e0c6119db5289d641d37dfeb552ef87",
+    "ios/ApassyCompanion/Sources/Views/Vault/LicensesView.swift": "0fe2061224f9b57763f1e7bba4381374fe3c7af4c58dc532b90e777a0295aa33",
+    "ios/ApassyCompanion/Sources/Views/Vault/SettingsView.swift": "0b3571e87adac0937fa050975bbf7f3e9639caf4f746aaa140849809e0cea8e7",
+    "ios/ApassyCompanion/Sources/Views/Vault/VaultComponents.swift": "03a2c89f22cc436004859bbeefb9bf979383130cf50a8dd273e40281dfba63b5",
+    "ios/ApassyCompanion/Sources/Views/Vault/VaultRootView.swift": "bad42ef02b46436ff2f76f7ce597188e4023fcc0d70bde5506f6ca7d1673e639",
+    "ios/ApassyCompanion/Sources/Views/Vault/VaultTabView.swift": "eefeca3c50303931454ae6a488c50361156733b8eecb56900b125e86ec17975c",
+    "ios/ApassyCompanion/Sources/Views/Vault/WatchtowerView.swift": "14332ef0b87e6272608d41e89cae63214393a8b614ca29af7c1a94e39fc9eb22",
+    "ios/ApassyCompanion/UITests/RequestsUITests.swift": "a9dafeb90683f2c000a3eb62a00d306fa565321d6610af42469b33852b3f52af",
+    "ios/ApassyCompanion/UITests/VaultTabsUITests.swift": "bfc40fb15929245ca9706a38c233baffec031e587ec1c5fa86c37b6fdc9cccf8"
+  },
+  "reused_core_vaultkit_source_sha256": {
+    "ios/ApassyCore/src/core/mod.rs": "268b9bd5ceb18f1a586715ac037f5c312264ca90453d6d657d5114b636d8e174",
+    "ios/ApassyCore/src/core/questions.rs": "96a7aaa27e8e55e83c2f6a357fb02f561dab0f1941700f36ef787ccae887796e",
+    "ios/ApassyCore/src/core/request_history.rs": "1a86cffcc8a5acdfdcfe1097bacf6ce34da6960a745fbe0cff50264ce5e06935",
+    "ios/ApassyCore/src/core/sync.rs": "a2ac910b13bb1aa1d9286fb80647c8c98ee5bb99eb74f2634c48490d0eb2bae0",
+    "ios/ApassyCore/tests/common/questions_relay.rs": "87bad5d047621452feebaed167dbb2293e13d2652fa1b2a4484fe214a8c316a7",
+    "ios/ApassyCore/tests/questions_flow.rs": "b413f0456cbd354707a6dd5dc037a2378ae1d7d1e6b12a066f82db8bf4cde6da",
+    "ios/ApassyVaultKit/Sources/ApassyVaultCore/CoreVaultService+Questions.swift": "437fd69c7d4fbdb029602ce94e8deb76ddc9cead76929b3f42f1aa008b2b383a",
+    "ios/ApassyVaultKit/Sources/ApassyVaultCore/CoreVaultService.swift": "bfdfaaad5373ee07813ba8fa267fca06dece89c09c841235aa428635bd7cc45b",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/PreviewVaultService+Questions.swift": "6159b8d10898546ed9007bc80654a1a1d8bb2e62371e90c79078dff94364ecf1",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/Questions.swift": "9c1bea32c6330278abeb56662055bb3556710ea098da7c79ed252fea60af0108",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/RequestHistory.swift": "ee2879f9d7d66d950ef470d39a42489410955d44d3bd75a905241b23b2396cc7",
+    "ios/ApassyVaultKit/Sources/ApassyVaultKit/VaultService.swift": "eab058b7359a241771f5751b75b41542369b535db284c5b9e638425c1cfbfad7",
+    "ios/ApassyVaultKit/Tests/ApassyVaultKitTests/RequestHistoryTests.swift": "09ba5efc81df563ece421059b9d5ba8feef9edc3011d8e210dfc283ed3acde20"
+  },
+  "core_vaultkit_hash_matches": 13,
+  "rust_tests_rerun": false,
+  "screenshot_sha256": {
+    "docs/product/ios-requests/screenshots/compact-credential-detail-2026-10-19.png": "dcf21919304942542457960a7ccb4edc0ef6f1e9735e6c22ade193ab6e921f50",
+    "docs/product/ios-requests/screenshots/compact-credential-detail-dark-2026-10-19.png": "7daaeea707c8f2904d8f1d3d21f443ebe984f6d42fba36466059b15c7d4fec46",
+    "docs/product/ios-requests/screenshots/compact-folder-2026-10-19.png": "4b17dc40a5edec2fb8732cdd62926047e19a09737c3e8ae81f9f5c3ffeb104fa",
+    "docs/product/ios-requests/screenshots/compact-folder-dark-2026-10-19.png": "6452a2d65605e13e10d5d8e4c2e4df6988b44ac51c376ccaaafd3fe23f6a460a",
+    "docs/product/ios-requests/screenshots/compact-form-2026-10-19.png": "f369b4199ff94a8d821df140a2d229920a5b92f9c9e3ce23953527ac80d51416",
+    "docs/product/ios-requests/screenshots/compact-form-dark-2026-10-19.png": "6294b2c568977bda277d544b8d565c138c1020999fa0c927441863ea381ad9a7",
+    "docs/product/ios-requests/screenshots/compact-history-dark-2026-10-19.png": "b081fadd403d4fd89fcc2f806eeff368a83d4abaa2127d3499a046c5fa07212b",
+    "docs/product/ios-requests/screenshots/compact-history-light-2026-10-19.png": "3a0d319695dcd17e40dd27c5764c0e30e77ac73001f410fe86d3695f3adda046",
+    "docs/product/ios-requests/screenshots/compact-requests-accessibility-2026-10-19.png": "2ceff14defe54b677c1ef4d237b186f90af6c29aafdfda0a9cba1ca4de867b8c",
+    "docs/product/ios-requests/screenshots/compact-search-empty-2026-10-19.png": "d41c890a8f3562d84a25ccf8d487af49962b0255a6eab2fc68bb1eb76ec5afa6",
+    "docs/product/ios-requests/screenshots/compact-search-empty-dark-2026-10-19.png": "df63ff782251af30774f6aefc393c07b2c50b6b723bbe2fb9f007a13b8956f8a",
+    "docs/product/ios-requests/screenshots/compact-search-results-2026-10-19.png": "ca549273efeabc63ed54fdaa48ea7a1844ed855b1a6a2b2dd1474b9f196ee43c",
+    "docs/product/ios-requests/screenshots/compact-search-results-dark-2026-10-19.png": "bbf5ac632d65f4f35d947e46341156f0dcc5398be6b6145684d033debe63b348",
+    "docs/product/ios-requests/screenshots/compact-vault-2026-10-19.png": "592cb3812199d70ec5760195a7f46edc191198efdad001323215491a341f7a90",
+    "docs/product/ios-requests/screenshots/compact-vault-accessibility-2026-10-19.png": "e41b718559d5aa392468a06f534f2d9fd658da43a8b7119441ab86fa66e02e08",
+    "docs/product/ios-requests/screenshots/compact-vault-selector-2026-10-19.png": "ba146292e890cd5ee667809d85fba6583f64162503984da3e3bf9f8f6a53b723",
+    "docs/product/ios-requests/screenshots/compact-waiting-dark-2026-10-19.png": "2f48c0479f1466d0fa02b3bb402f192af890102eb2c98336411ba9c827e41b10",
+    "docs/product/ios-requests/screenshots/compact-waiting-light-2026-10-19.png": "69302d20187fc2194672d1ce344f67cc66b90b91692b294b5183482d8d522706"
+  },
+  "visual_checks": {
+    "independent_agent": "No P0/P1/P2 findings in final Vault, menu, AccessibilityXXXL selector, credential detail originals",
+    "waiting_history_top_300_pixels_identical": {
+      "light": true,
+      "dark": true
+    },
+    "gallery": "compact-headers-preview.html",
+    "gallery_widths_checked": [
+      728,
+      360
+    ],
+    "gallery_console_errors": 0,
+    "gallery_horizontal_overflow": false
+  },
+  "cleanup": {
+    "dedicated_simulator": "36F1DEE4-9ED8-4769-AD00-41CD44F657D5 shut down/deleted",
+    "core_framework": "Preserved device framework restored; only task-created Simulator XCFramework removed"
+  },
+  "not_verified": [
+    "Physical Face ID",
+    "APNs delivery",
+    "Physical VoiceOver and touch comfort",
+    "Actual vault upgrade or production behavior"
+  ],
+  "distribution": "No upload. Versions stay0.5.5. Existing history-key-rotation compatibility gate remains unresolved."
+}

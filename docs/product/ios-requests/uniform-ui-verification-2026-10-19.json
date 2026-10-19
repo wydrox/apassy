@@ -1,0 +1,101 @@
+{
+  "date": "2026-10-19",
+  "branch": "product/ios-requests",
+  "parent_commit": "badf2cf2ae8642a09ea4b1de5600a062997e9b24",
+  "scope": "UI-only correction; synthetic Simulator verification; no publication",
+  "build": {
+    "result": "passed",
+    "log": "/tmp/apassy-requests-uniform-ui-20261019/native-search-build.log",
+    "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project ios/ApassyCompanion/ApassyCompanion.xcodeproj -scheme ApassyCompanion -destination \"platform=iOS Simulator,id=4D7017ED-4D00-4AD5-ACCE-976DEED298DC\" -derivedDataPath /tmp/apassy-requests-uniform-ui-20261019/DerivedData -jobs 1 ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build-for-testing",
+    "configuration": "Unsigned Debug arm64 Simulator; iOS 26 deployment and Xcode 27 unchanged"
+  },
+  "native_tests": {
+    "light": {
+      "passed": 7,
+      "failed": 0,
+      "cases": [
+        [
+          "ApassyCompanionUITests.RequestsUITests testAccessibilityTextKeepsActionsReachable",
+          "13.051"
+        ],
+        [
+          "ApassyCompanionUITests.RequestsUITests testHistoryRetainsSearchWhenSwitchingDestinations",
+          "24.546"
+        ],
+        [
+          "ApassyCompanionUITests.RequestsUITests testHistorySearchReadOnlyDetailAndClear",
+          "36.786"
+        ],
+        [
+          "ApassyCompanionUITests.RequestsUITests testRoutineReadOffersOneTimeActionAndProductionRequiresReview",
+          "9.333"
+        ],
+        [
+          "ApassyCompanionUITests.RequestsUITests testWaitingAndHistoryKeepTheSameNavigationLayout",
+          "12.897"
+        ],
+        [
+          "ApassyCompanionUITests.VaultTabsUITests testLockedVaultOpensItsQuestions",
+          "18.547"
+        ],
+        [
+          "ApassyCompanionUITests.VaultTabsUITests testRequestsWithoutConnectionOffersConnect",
+          "7.490"
+        ]
+      ],
+      "result_bundle": "/tmp/apassy-requests-uniform-ui-20261019/ui-final.xcresult",
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project ios/ApassyCompanion/ApassyCompanion.xcodeproj -scheme ApassyCompanion -destination \"platform=iOS Simulator,id=4D7017ED-4D00-4AD5-ACCE-976DEED298DC\" -derivedDataPath /tmp/apassy-requests-uniform-ui-20261019/DerivedData -resultBundlePath /tmp/apassy-requests-uniform-ui-20261019/ui-final.xcresult -jobs 1 -parallel-testing-enabled NO -collect-test-diagnostics never \"-only-testing:ApassyCompanionUITests/RequestsUITests\" \"-only-testing:ApassyCompanionUITests/VaultTabsUITests/testRequestsWithoutConnectionOffersConnect\" \"-only-testing:ApassyCompanionUITests/VaultTabsUITests/testLockedVaultOpensItsQuestions\" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test-without-building"
+    },
+    "dark": {
+      "passed": 1,
+      "failed": 0,
+      "cases": [
+        [
+          "ApassyCompanionUITests.RequestsUITests testWaitingAndHistoryKeepTheSameNavigationLayout",
+          "13.753"
+        ]
+      ],
+      "result_bundle": "/tmp/apassy-requests-uniform-ui-20261019/ui-dark.xcresult",
+      "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project ios/ApassyCompanion/ApassyCompanion.xcodeproj -scheme ApassyCompanion -destination \"platform=iOS Simulator,id=4D7017ED-4D00-4AD5-ACCE-976DEED298DC\" -derivedDataPath /tmp/apassy-requests-uniform-ui-20261019/DerivedData -resultBundlePath /tmp/apassy-requests-uniform-ui-20261019/ui-dark.xcresult -jobs 1 -parallel-testing-enabled NO -collect-test-diagnostics never \"-only-testing:ApassyCompanionUITests/RequestsUITests/testWaitingAndHistoryKeepTheSameNavigationLayout\" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test-without-building"
+    },
+    "device": "Dedicated iPhone 17e, iOS 27, synthetic preview only"
+  },
+  "source_sha256": {
+    "ios/ApassyCompanion/ApassyCompanion.xcodeproj/project.pbxproj": "2109b87263e94717678273f1386fb07f57b85910910bddd00105960ab36581ad",
+    "ios/ApassyCompanion/Sources/Views/Decisions/DecisionsView.swift": "50e69748da69e5adc6f4d7be0c7ec572cc167262a439ffe51195f6b4ba9a70ee",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestHistoryDetailView.swift": "107a17b37b41bfc70240a6d6e691fdb8446a5cb86d3c5492c3b1fc3b553c25f7",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsAccessRow.swift": "e1dbaea3aaf63962dc629ecb61a6244fbb54197e29ff0414b20c974cf11bbfad",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryList.swift": "4063155ff5d31e55c175642186879e563f6015401f7507a24d1256184c0c3f3b",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryRow.swift": "b501812d190ad443de357cbcc4fe4fce8b879a1d0426f82a24f85a8840f0b8b8",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistorySearchSheet.swift": "24bc0f7217d6a43d674adf40157d22b53e9eaba6ba54ad8c806e54c166c00a62",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsHistoryView.swift": "1bb62d946db394dcdb8c55be6f79d8a53bc0e07f83f819d42092389f07d4a5ca",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsList.swift": "bfd88fae4370d641b5a3b8aa8bf934524ecafab86aadd2c64efd36fc9e956fa1",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRowLink.swift": "8cf7c536c45624603a290f2792629d4ad8d06d3a91795057c94583afe5f3e937",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRowSummary.swift": "c6d601364b06946069befa1ca816a5ed3710f39abf6085e3999a49972c638ac2",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsRunRow.swift": "510a35ebb29de9c9fac39031d61e01d2ba2b0a033435ed6cd7b7dfe023011477",
+    "ios/ApassyCompanion/Sources/Views/Decisions/RequestsWaitingRow.swift": "404024991990763077beed19c24cbec33c799495020f6b23c5c7f729dc0a50da",
+    "ios/ApassyCompanion/UITests/RequestsUITests.swift": "36ba7527bbfba565d440f9a464ff39224a94eff79beb024b23c9b239681c124b"
+  },
+  "screenshot_sha256": {
+    "docs/product/ios-requests/screenshots/uniform-accessibility-2026-10-19.png": "32a8f6621abf2e23af4ea35f2f9e3a5ee86b5a089373f4d90b172bb552f3978d",
+    "docs/product/ios-requests/screenshots/uniform-history-dark-2026-10-19.png": "1b3fdbfc993acb2351d62989c4ca61dfb8725b9b8475b492aa4f0273bbb5f4b6",
+    "docs/product/ios-requests/screenshots/uniform-history-detail-2026-10-19.png": "6ffcd3ad193a9635a4d0c8f3aa3d57940e21c0610eb714ecb6c01d8ca2607f75",
+    "docs/product/ios-requests/screenshots/uniform-history-light-2026-10-19.png": "1ea13e2d00f5e75a11885ea4bffe007fa0e8b5b9d7af5ffd24f1151d34bf7f60",
+    "docs/product/ios-requests/screenshots/uniform-waiting-dark-2026-10-19.png": "36d844f866909305b43b814628455568127c874bdfba9d12a73bf1059d93e3a5",
+    "docs/product/ios-requests/screenshots/uniform-waiting-light-2026-10-19.png": "b161b3bc67d2fb8d7ecfb27cde58550bee19ca39f6313ddd4724bb81eeca58c5"
+  },
+  "visual_checks": {
+    "light": "Parent and independent agent reviewed native originals; shared geometry and styling",
+    "dark": "Parent reviewed native originals; geometry test passed",
+    "headers": "Waiting/History top 480 pixels identical in both themes",
+    "gallery": "728px and 360px, images loaded, no horizontal overflow or console errors"
+  },
+  "not_verified": [
+    "Physical Face ID",
+    "APNs",
+    "Physical-device VoiceOver tasks",
+    "Actual upgrade/rollback path",
+    "Backend history key-rotation gate remains unresolved"
+  ],
+  "distribution": "No new TestFlight upload. Previous 29873206 does not include these changes."
+}
