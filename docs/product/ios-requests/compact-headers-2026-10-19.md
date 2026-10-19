@@ -80,8 +80,9 @@ passing result for the earlier stricter probes.
 
 ## Distribution
 
-This correction is committed source only, not a new TestFlight build. Versions
-remain 0.5.5. The previously published build 29873206 does not contain this change.
-The [history key-rotation compatibility gate](compatibility-review-2026-10-19.md)
-remains unresolved and still blocks further distribution. Face ID, APNs, physical
-VoiceOver use and the actual upgrade path require separate device acceptance.
+These headers are included in internal TestFlight **0.5.5 (29873951)**, from commit
+`0c917d1`, confirmed `VALID` / `IN_BETA_TESTING` for Rafał's Apassy group. The earlier
+build 29873206 does not contain this change. The history key-rotation gate was
+addressed and tested in the [forward-update report](history-compatibility-fix-2026-10-19.md).
+Face ID, APNs, physical VoiceOver use and the actual upgrade path require separate
+device acceptance; TestFlight availability is not an on-device result.

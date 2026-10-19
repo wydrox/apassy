@@ -1,0 +1,117 @@
+{
+  "recorded_at": "2026-10-19T19:25:19.383669+00:00",
+  "artifact": {
+    "commit": "0c917d1852136643c084208b5c4d7e1fd325ac77",
+    "marketing": "0.5.5",
+    "build": "29873951",
+    "ipa_sha256": "2e2d05f91438e5f79d4b1cec7bd2afce3cfe316633adac3795cff001c53715be",
+    "ipa_bytes": 16218140,
+    "bundles": [
+      {
+        "bundle": "com.wydrox.apassy.companion",
+        "version": "0.5.5",
+        "build": "29873951",
+        "commit": "0c917d1852136643c084208b5c4d7e1fd325ac77",
+        "minimum_ios": "26.0",
+        "codesign_strict": true,
+        "entitlements": {
+          "application-identifier": "7S3F9767BM.com.wydrox.apassy.companion",
+          "aps-environment": "production",
+          "beta-reports-active": true,
+          "com.apple.developer.authentication-services.autofill-credential-provider": true,
+          "com.apple.developer.team-identifier": "7S3F9767BM",
+          "com.apple.developer.usernotifications.time-sensitive": true,
+          "com.apple.security.application-groups": [
+            "group.com.wydrox.apassy.companion"
+          ],
+          "get-task-allow": false,
+          "keychain-access-groups": [
+            "7S3F9767BM.com.wydrox.apassy.companion",
+            "7S3F9767BM.com.wydrox.apassy.shared"
+          ]
+        },
+        "profile_name": "Apassy iOS App Store",
+        "profile_expiration": "2027-08-28T12:29:41"
+      },
+      {
+        "bundle": "com.wydrox.apassy.companion.autofill",
+        "version": "0.5.5",
+        "build": "29873951",
+        "commit": "0c917d1852136643c084208b5c4d7e1fd325ac77",
+        "minimum_ios": "26.0",
+        "codesign_strict": true,
+        "entitlements": {
+          "application-identifier": "7S3F9767BM.com.wydrox.apassy.companion.autofill",
+          "beta-reports-active": true,
+          "com.apple.developer.authentication-services.autofill-credential-provider": true,
+          "com.apple.developer.team-identifier": "7S3F9767BM",
+          "com.apple.security.application-groups": [
+            "group.com.wydrox.apassy.companion"
+          ],
+          "get-task-allow": false,
+          "keychain-access-groups": [
+            "7S3F9767BM.com.wydrox.apassy.shared"
+          ]
+        },
+        "profile_name": "Apassy iOS AutoFill App Store",
+        "profile_expiration": "2027-08-28T12:29:41"
+      }
+    ]
+  },
+  "tests": {
+    "swift_models": 414,
+    "swift_vaultkit": 84,
+    "swift_core_integration": 46,
+    "rust_core_unit": 57,
+    "rust_questions_flow": 12,
+    "rust_compatibility": 5,
+    "unique_total": 618,
+    "final_restart_rerun": 1
+  },
+  "checks": {
+    "rustfmt": "passed",
+    "clippy_lib_tests_warnings_denied": "passed",
+    "diff_check": "passed",
+    "six_source_versions": "0.5.5",
+    "relay_manifest_commit": "d7fe756320cd97d88e5cbc9419fe8b111cd3c719",
+    "apple_validation": "passed"
+  },
+  "log_sha256": {
+    "rust-core-regressions-final.log": "7eac1f294f2cf2801f0d0c3909114c6cc10eeeeea3fa280af572b09724699fdb",
+    "rust-clippy.log": "5e13360e6db6deb042678613e233d1214b7a11240bd51470a0d1d2f401e1836a",
+    "swift-model-tests.log": "63ef86872f286ea806a32b8e0e4eac53aeaf6da15764f8cd5f68674c74f4e8d2",
+    "swift-vault-tests.log": "954d3397ecf4e0cd550841759787fcaf9646af08927848b92754d39516d18ccf",
+    "swift-restart-final.log": "e9fe645a11a8e7ea5820fdb874d7b284812f37bb24a959bc5f38d625afba8882",
+    "ios-archive.log": "f9249616b0b8124842a7ee9d4b020303b17a8d20b8fea9d4ee71775408c2adb2",
+    "ipa-validation.log": "12c37e12c0558060ff621af04841a87e73f32e163074d78ebedd24a5529dff31",
+    "ipa-upload.log": "543c7b44bb1ecc449dfc4fcadf29ec17217ddb5f9acc0e817113c3e475fc2c88"
+  },
+  "distribution": {
+    "upload": "accepted",
+    "delivery_uuid": "fa49eaaa-bb52-4c5e-8518-ee705c96f274",
+    "processing": "VALID",
+    "verified_at": "2026-10-19T19:28:26.691888+00:00",
+    "build_id": "fa49eaaa-bb52-4c5e-8518-ee705c96f274",
+    "marketing": "0.5.5",
+    "build": "29873951",
+    "uploaded_date": "2026-10-19T12:25:32-07:00",
+    "expired": false,
+    "internal_state": "IN_BETA_TESTING",
+    "external_state": "READY_FOR_BETA_SUBMISSION",
+    "group_id": "6b2b208b-6786-4736-857d-93a769afa99f",
+    "group_name": "Apassy",
+    "internal_group": true,
+    "group_contains_build": true,
+    "rafal_membership_confirmed": true,
+    "invitation_required": false,
+    "notes_locale": "en-GB",
+    "notes_readback_matches": true,
+    "new_build_installed_on_device": "not_verified"
+  },
+  "boundaries": [
+    "synthetic vaults and loopback relay only",
+    "fake Keychain backend only in executable tests",
+    "physical Face ID, APNs and real upgrade not tested",
+    "older Requests beta cannot read v2 history; user accepted forward-only update"
+  ]
+}

@@ -33,7 +33,7 @@ All executable fixtures use synthetic vaults, fake relay services on loopback, a
 | New rotation, rejection and initialization regressions | 5 passed; the fake 429 response now declares Retry-After: 1 instead of invoking the real 60-second default |
 | Native Swift–C–Rust integration and fake key store | 84 VaultKit and 46 Core integration tests passed; final two-vault restart check passed again after compiler-warning cleanup |
 | Final formatting, lint and version consistency | `cargo fmt --all -- --check`, Clippy (`apassy-core --lib --tests`, warnings denied), `git diff --check`, and Python 3.12 six-source-version check passed |
-| Signed archive and TestFlight processing/group readback | Pending |
+| Signed archive and TestFlight processing/group readback | Passed: 0.5.5 (29873951), `VALID`, `IN_BETA_TESTING`, present in the internal Apassy group |
 
 Independent review found a transient migration-key loss issue; the implementation now retains history-only migration material for retry in the live authorized context. Follow-up review found no remaining P0/P1 or new security issue. Review alone is not runtime or physical-device acceptance.
 
@@ -41,4 +41,14 @@ Independent review found a transient migration-key loss issue; the implementatio
 
 After the verified build is available to Rafał, test Face ID approval/cancellation, lock and background transitions, production APNs delivery/opening, and updating the existing app with its history intact. Also check key persistence through restart and question-key rotation on a synthetic test vault. Simulator, fake Keychain and code-signing evidence do not establish those device behaviors.
 
-The App Store Connect preflight confirmed Rafał already belongs to the internal Apassy group (`6b2b208b-6786-4736-857d-93a769afa99f`) with access to all builds. No new invitation is required. This preflight is not evidence that the replacement build was uploaded or processed.
+## Delivered build
+
+Authenticated readback at **2026-10-19 19:28:26 UTC** confirmed **0.5.5 (29873951)** is `VALID`, unexpired and `IN_BETA_TESTING`. The build is listed in the internal **Apassy** group (`6b2b208b-6786-4736-857d-93a769afa99f`), whose membership includes Rafał. No new invitation is required. Test notes were saved in `en-GB` and read back exactly. External beta submission was not requested or performed.
+
+- Build / delivery ID: `fa49eaaa-bb52-4c5e-8518-ee705c96f274`.
+- Embedded source commit in both app and AutoFill: `0c917d1852136643c084208b5c4d7e1fd325ac77`, pushed on `product/ios-requests`.
+- IPA: 16,218,140 bytes; SHA-256 `2e2d05f91438e5f79d4b1cec7bd2afce3cfe316633adac3795cff001c53715be`.
+- Both exported bundles passed strict code-signature verification, have build 29873951 / marketing version 0.5.5 / minimum iOS 26.0, and disable debugging. The main app has production APNs; app groups, Keychain groups and distribution profiles were verified.
+- Apple validation and the single upload both succeeded with no errors. The uploaded bytes were hash-checked against the verified IPA before transfer.
+
+[Machine-readable verification](history-compatibility-verification-2026-10-19.json) records test counts, log hashes, artifact metadata and provider readback. Availability to the tester does not prove installation or the physical-device checks above. No previous TestFlight build was expired. No other component was republished, and all six source marketing versions remain 0.5.5.
