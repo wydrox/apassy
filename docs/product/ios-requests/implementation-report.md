@@ -6,6 +6,8 @@ User authorized implementation after accepting A as a wireframe. Versions remain
 On 2026-10-19 the user additionally authorized committing this branch and delivering a new TestFlight build for Rafał. The earlier verification below remains the implementation-stage record. See the [physical-device test plan](device-test-plan.md); upload, processing and tester availability require separate delivery evidence.
 The user explicitly selected an internal TestFlight **0.5.5** build with a new build number, without starting a new coordinated six-component release. This does not change the shared marketing versions or the release policy.
 
+Delivery is complete: **0.5.5 (29873206)** is `VALID` / `IN_BETA_TESTING` and available to Rafał's internal group. See the separate [TestFlight delivery evidence](testflight-delivery-2026-10-19.md). Physical-device acceptance remains pending.
+
 ## Delivered behavior
 
 - Native Waiting / History navigation, system lists, segmented controls, menus, search and sheets. Liquid Glass is used through system navigation and controls; content rows are readable system surfaces.
@@ -40,7 +42,7 @@ Independent review found and resolved: lock during authentication restoring rows
 
 All tests use synthetic data. The Simulator uses ephemeral in-memory answer keys for explicit preview launches, without creating Keychain items. Original dirty checkouts and unrelated concurrent work remain untouched.
 
-The HTML/browser evidence in verify-report.md is historical proposal evidence. It is not native acceptance. Real-device Face ID/Secure Enclave, APNs cold launches/delivery, VoiceOver task testing and customer comprehension tasks remain separate acceptance checks. No TestFlight upload, signing, publication, commit or push was performed for this implementation.
+The HTML/browser evidence in verify-report.md is historical proposal evidence. It is not native acceptance. Real-device Face ID/Secure Enclave, APNs cold launches/delivery, VoiceOver task testing and customer comprehension tasks remain separate acceptance checks. No TestFlight upload, signing, publication, commit or push was performed during the original implementation stage; the later authorized commit and delivery are documented separately above.
 
 Build-resource note: the first native attempt was superseded to constrain architectures; a later attempt hit disk exhaustion. Final build passed after removing only this task’s generated incremental/test caches and using one build job. Unrelated caches/source/processes were preserved.
 
