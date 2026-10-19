@@ -26,7 +26,28 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
                 iCloudFiles: any ICloudFileAccess = CoordinatedICloudFileAccess()) throws {
         self.role = role
         self.cloud = ICloudVaultTransfer(directory: dataDirectory, files: iCloudFiles, session: cloudSession)
+        // Persistence is opt-in only after Foundation confirms backup exclusion. Failure
+        // disables history storage, without preventing access to the vault or live requests.
+        var historyEnabled = false
+        if role == .app {
+            do {
+                var directory = dataDirectory.appending(path: "request-history", directoryHint: .isDirectory)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+                let resource = try directory.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+                guard resource.isSymbolicLink != true, resource.isDirectory == true else {
+                    throw VaultError(.notAllowed, "History needs a private local folder.")
+                }
+                var values = URLResourceValues()
+                values.isExcludedFromBackup = true
+                try directory.setResourceValues(values)
+                historyEnabled = try directory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true
+            } catch {
+                historyEnabled = false
+            }
+        }
         let config: [String: Any] = [
+            "request_history_enabled": historyEnabled,
             "data_dir": dataDirectory.path(percentEncoded: false),
             "device_name": deviceName,
             "role": role.rawValue,

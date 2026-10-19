@@ -17,7 +17,7 @@ import SwiftUI
                     waited: 8, now: now),
                 question(
                     qid: "b3BlbmFpLWFwaS1xdWVzdGlvbi0", agent: "codex", item: "OpenAI API", production: false,
-                    project: "newsletter", command: ["node", "scripts/summarize.js"], env: ["OPENAI_API_KEY"],
+                    project: "newsletter", command: ["git", "status", "--short"], env: ["OPENAI_API_KEY"],
                     why: "Codex has not used OpenAI API in newsletter before.",
                     answers: ["once", "in_project:read", "never_for_agent", "always_ask_for_agent", "disconnect"],
                     waited: 61, now: now),
@@ -101,6 +101,7 @@ import SwiftUI
                     // The rows of this iPhone hold the answer key of each team (software keys in
                     // the Simulator), as after a confirmed connection.
                     let signers = root?.answerSigners
+                    await service.setQuestionsReportVaultScope(true)
                     await service.setQuestions(
                         enabled: true, questions: DecisionsPreview.questions(),
                         answerKey: try? signers?.joinKey(team: "t_7k2m5q4x3c"))
@@ -117,6 +118,25 @@ import SwiftUI
                             questions: DecisionsPreview.familyQuestions(),
                             answerKey: try? signers?.joinKey(team: family.team), onPhone: true, open: false)
                         await vault?.refreshInfo()
+                    }
+                    if let info = try? await service.info(), let id = info.selected {
+                        let now = Int64(Date().timeIntervalSince1970)
+                        let fixtures = [
+                            RequestHistoryEntry(id: "relay:\(id):history-approved", vaultID: id,
+                                qid: "history-approved", title: "GitHub read token", agent: "codex",
+                                project: "website", action: "read", production: false, deviceName: "Mac mini",
+                                firstSeenAt: now - 3600, lastSeenAt: now - 3540, expiresAt: now - 3480,
+                                selectedKind: "approve_once", attemptedAt: now - 3590, sentAt: now - 3589,
+                                outcome: "approved", confirmedKind: "approve_once", confirmedAt: now - 3588,
+                                confirmedBy: "Mac mini"),
+                            RequestHistoryEntry(id: "relay:\(id):history-unconfirmed", vaultID: id,
+                                qid: "history-unconfirmed", title: "Deploy token", agent: "claude-code",
+                                project: "website", action: "deploy", production: true, deviceName: "MacBook Pro",
+                                firstSeenAt: now - 7200, lastSeenAt: now - 7140, expiresAt: now - 7080,
+                                selectedKind: "deny", attemptedAt: now - 7190),
+                        ]
+                        await service.setRequestHistory([RequestHistoryVault(
+                            vaultID: id, vaultName: "Personal", availability: .available, entries: fixtures)])
                     }
                     await model.refresh()
                     if mode == "detail" { model.notificationOpened() }

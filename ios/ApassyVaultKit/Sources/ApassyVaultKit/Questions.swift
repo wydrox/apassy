@@ -43,17 +43,19 @@ public struct QuestionsVault: Codable, Sendable, Equatable, Identifiable {
     public var vaultID: String
     public var vaultName: String
     public var status: QuestionsStatus
+    public var error: String?
 
     public var id: String { vaultID }
 
-    public init(vaultID: String, vaultName: String, status: QuestionsStatus) {
+    public init(vaultID: String, vaultName: String, status: QuestionsStatus, error: String? = nil) {
         self.vaultID = vaultID
         self.vaultName = vaultName
         self.status = status
+        self.error = error
     }
 
     enum CodingKeys: String, CodingKey {
-        case status
+        case status, error
         case vaultID = "vault_id"
         case vaultName = "vault_name"
     }

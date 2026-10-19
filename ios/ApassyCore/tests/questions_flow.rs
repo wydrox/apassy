@@ -130,10 +130,24 @@ struct Setup {
 }
 
 fn setup() -> Setup {
+    setup_with_history(false)
+}
+
+fn core_with_history(dir: &Path) -> Core {
+    std::fs::create_dir_all(dir.join("request-history")).unwrap();
+    // Synthetic host only: the shipping Swift host verifies Foundation backup exclusion.
+    Core::new(&json!({"data_dir": dir, "device_name": "Test iPhone", "role": "app", "request_history_enabled": true}).to_string()).unwrap()
+}
+
+fn setup_with_history(history: bool) -> Setup {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("Apassy");
     std::fs::create_dir_all(&data).unwrap();
-    let phone = core(&data, "app");
+    let phone = if history {
+        core_with_history(&data)
+    } else {
+        core(&data, "app")
+    };
     let vault = call(
         &phone,
         json!({"op": "create_local_vault", "name": "Personal", "passphrase": PASS}),
@@ -858,4 +872,250 @@ fn removing_a_vault_takes_its_push_token_and_its_device_off_the_team() {
         "the token, then the device: {log:?}"
     );
     assert!(!setup.file.exists());
+}
+
+#[test]
+fn request_history_survives_restart_hides_on_lock_and_never_invents_a_settle() {
+    let mut setup = setup_with_history(true);
+    attach(&setup);
+    post(&setup.relay, &QUESTION_KEY, QID, CARD, now() + 300);
+    call(&setup.core, json!({"op":"questions_list"}));
+    let history = call(&setup.core, json!({"op":"request_history"}));
+    let vault_id = history["vaults"][0]["vault_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let journal_path = setup
+        .data
+        .join("request-history")
+        .join(format!("{vault_id}.json"));
+    assert_eq!(history["vaults"][0]["availability"], "available");
+    assert_eq!(history["vaults"][0]["entries"].as_array().unwrap().len(), 1);
+    let row = &history["vaults"][0]["entries"][0];
+    assert_eq!(row["title"], "Shop database, API token");
+    for forbidden in [
+        "command",
+        "cwd",
+        "purpose",
+        "risk",
+        "user_request",
+        "agent_request",
+        "why",
+        "env_names",
+    ] {
+        assert!(row.get(forbidden).is_none(), "{forbidden} was saved");
+    }
+    let on_disk = std::fs::read_to_string(&journal_path).unwrap();
+    assert!(!on_disk.contains("Shop database"));
+    assert!(!on_disk.contains("Apply the new migration"));
+    let answer_time = now();
+    call(
+        &setup.core,
+        json!({"op":"question_answer", "qid":QID, "kind":"deny", "time":answer_time}),
+    );
+    let sent = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(sent["vaults"][0]["entries"][0]["selected_kind"], "deny");
+    assert!(sent["vaults"][0]["entries"][0]["sent_at"].is_number());
+    assert!(sent["vaults"][0]["entries"][0]["outcome"].is_null());
+    call(&setup.core, json!({"op":"lock"}));
+    let locked = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(locked["vaults"][0]["availability"], "locked");
+    assert_eq!(locked["vaults"][0]["entries"], json!([]));
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op":"clear_request_history", "vault_id":vault_id})
+        ),
+        "locked"
+    );
+    setup.core = core_with_history(&setup.data);
+    call(&setup.core, json!({"op":"unlock", "passphrase":PASS}));
+    let restarted = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(
+        restarted["vaults"][0]["entries"][0]["selected_kind"],
+        "deny"
+    );
+    let questions = call(&setup.core, json!({"op":"questions_list"}));
+    assert_eq!(questions["questions"][0]["answered"], "deny");
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op":"question_answer_string", "qid":QID, "kind":"allow_production"})
+        ),
+        "already_answered"
+    );
+    // The exact signed-payload retry remains valid while its 55-second window is open.
+    call(
+        &setup.core,
+        json!({"op":"question_answer", "qid":QID, "kind":"deny", "time":answer_time}),
+    );
+    let settle = json!({"v":1,"qid":QID,"outcome":"denied","device_name":"Test Mac","kind":"deny","at":now()}).to_string();
+    let (nonce, ciphertext) = seal(
+        &QUESTION_KEY,
+        &aad(&["apassy-question-v1", "settle", TEAM, QID, KEY_ID]),
+        settle.as_bytes(),
+    );
+    setup.relay.settle(QID, KEY_ID, &nonce, &ciphertext);
+    call(&setup.core, json!({"op":"questions_list"}));
+    let settled = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(settled["vaults"][0]["entries"][0]["outcome"], "denied");
+    assert_eq!(
+        settled["vaults"][0]["entries"][0]["confirmed_by"],
+        "Test Mac"
+    );
+    let extension = core(&setup.data, "autofill");
+    assert_eq!(
+        fails(&extension, json!({"op":"request_history"})),
+        "not_allowed"
+    );
+    assert_eq!(
+        fails(
+            &extension,
+            json!({"op":"clear_request_history", "vault_id":vault_id})
+        ),
+        "not_allowed"
+    );
+    drop(extension);
+    call(
+        &setup.core,
+        json!({"op":"remove_vault", "vault_id":vault_id, "force":true}),
+    );
+    assert!(!journal_path.exists());
+}
+
+#[test]
+fn history_intent_survives_lock_during_post_and_removal_never_resurrects_it() {
+    for remove in [false, true] {
+        let setup = setup_with_history(true);
+        attach(&setup);
+        post(&setup.relay, &QUESTION_KEY, QID, CARD, now() + 300);
+        call(&setup.core, json!({"op":"questions_list"}));
+        let history = call(&setup.core, json!({"op":"request_history"}));
+        let vault_id = history["vaults"][0]["vault_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let journal = setup
+            .data
+            .join("request-history")
+            .join(format!("{vault_id}.json"));
+        setup.relay.hold_answer_replies(true);
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| {
+                setup.core.call(
+                    &json!({"op":"question_answer", "qid":QID,"kind":"deny","time":now()})
+                        .to_string(),
+                )
+            });
+            setup.relay.wait_for_accepted_answer();
+            let intent = call(&setup.core, json!({"op":"request_history"}));
+            assert!(intent["vaults"][0]["entries"][0]["attempted_at"].is_number());
+            assert!(intent["vaults"][0]["entries"][0]["sent_at"].is_null());
+            if remove {
+                call(
+                    &setup.core,
+                    json!({"op":"remove_vault", "vault_id":vault_id,"force":true}),
+                );
+            } else {
+                call(&setup.core, json!({"op":"lock"}));
+            }
+            setup.relay.hold_answer_replies(false);
+            // Closing transport can cancel the local result even after relay acceptance.
+            let _: Value = serde_json::from_str(&pending.join().unwrap()).unwrap();
+        });
+        if remove {
+            assert!(
+                !journal.exists(),
+                "late reply recreated a removed vault journal"
+            );
+        } else {
+            call(&setup.core, json!({"op":"unlock", "passphrase":PASS}));
+            let restored = call(&setup.core, json!({"op":"request_history"}));
+            let row = &restored["vaults"][0]["entries"][0];
+            assert!(row["attempted_at"].is_number());
+            assert!(row["sent_at"].is_null());
+            assert!(row["outcome"].is_null());
+            let questions = call(&setup.core, json!({"op":"questions_list"}));
+            assert_eq!(questions["questions"][0]["answered"], "deny");
+            assert_eq!(
+                fails(
+                    &setup.core,
+                    json!({"op":"question_answer_string","qid":QID,"kind":"allow_production"})
+                ),
+                "already_answered"
+            );
+        }
+    }
+}
+
+#[test]
+fn full_pending_history_refuses_post_without_evicting_an_authority_guard() {
+    let setup = setup_with_history(true);
+    attach(&setup);
+    post(&setup.relay, &QUESTION_KEY, QID, CARD, now() + 300);
+    call(&setup.core, json!({"op":"questions_list"}));
+    let history = call(&setup.core, json!({"op":"request_history"}));
+    let vault_id = history["vaults"][0]["vault_id"].as_str().unwrap();
+    let file = setup
+        .data
+        .join("request-history")
+        .join(format!("{vault_id}.json"));
+    let sealed: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let journal_aad = aad(&["apassy-local-request-history-v1", vault_id, KEY_ID]);
+    let bytes = open(
+        &QUESTION_KEY,
+        &journal_aad,
+        sealed["nonce"].as_str().unwrap(),
+        sealed["ciphertext"].as_str().unwrap(),
+    )
+    .unwrap();
+    let journal: Value = serde_json::from_slice(&bytes).unwrap();
+    let template = journal["entries"][0].clone();
+    let at = now();
+    let entries: Vec<Value> = (0..1000u128)
+        .map(|index| {
+            let mut entry = template.clone();
+            let qid = encode_b64u(&index.to_be_bytes());
+            entry["id"] = json!(format!("relay:{vault_id}:{qid}"));
+            entry["qid"] = json!(qid);
+            entry["selected_kind"] = json!("deny");
+            entry["attempted_at"] = json!(at);
+            entry["answer_time"] = json!(at);
+            entry["expires_at"] = json!(at + 300);
+            entry
+        })
+        .collect();
+    let plaintext = serde_json::to_vec(&json!({"entries": entries})).unwrap();
+    let (nonce, ciphertext) = seal(&QUESTION_KEY, &journal_aad, &plaintext);
+    std::fs::write(
+        &file,
+        serde_json::to_vec(
+            &json!({"version":1,"key_id":KEY_ID,"nonce":nonce,"ciphertext":ciphertext}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op":"question_answer","qid":QID,"kind":"deny","time":at})
+        ),
+        "history_full"
+    );
+    assert!(
+        setup.relay.answers().is_empty(),
+        "POST reached relay without space for its durable guard"
+    );
+    let restored = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(
+        restored["vaults"][0]["entries"].as_array().unwrap().len(),
+        1000
+    );
+    assert!(
+        restored["vaults"][0]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["attempted_at"].is_number())
+    );
 }

@@ -2,27 +2,24 @@ import ApassyCompanionKit
 import ApassyVaultKit
 import SwiftUI
 
-/// A screen pushed in Decisions. A request from an agent (mockup screen 8) gets its own case once
-/// the Mac sends requests to the iPhone.
+/// Source-qualified navigation in Requests.
 enum DecisionRoute: Hashable {
-    /// A question through the relay, by its qid.
+    /// A question through the relay, by its vault-qualified request identity.
     case question(String)
+    case history(String)
     /// A run of the Mac on this Wi-Fi, as the owner opened it: the detail keeps that version.
-    case run(PendingRun)
+    case run(sourceID: String, run: PendingRun)
 
     func hash(into hasher: inout Hasher) {
         switch self {
         case .question(let qid): hasher.combine("question-\(qid)")
-        case .run(let run): hasher.combine("run-\(run.id)-\(run.digest)")
+        case .history(let id): hasher.combine("history-\(id)")
+        case .run(let sourceID, let run): hasher.combine("run-\(sourceID)-\(run.id)-\(run.digest)")
         }
     }
 }
 
-/// Decisions (ADR 0026 §8, mockup screen 5): what blocks an agent now, with a timer, then the
-/// requests and the suggestions. Questions through the relay and the runs of the Mac on this Wi-Fi
-/// are one list. Suggestions live in the Mac's vault and do not reach the iPhone yet, and requests
-/// come only from a Mac paired on Wi-Fi, so their sections say where they are (`AgentsReach`). A
-/// vault whose questions are not open shows one row with Unlock.
+/// Native Waiting / History destinations share the existing Requests navigation and pairing flows.
 struct DecisionsView: View {
     @Environment(RootModel.self) private var root: RootModel?
     @Environment(\.scenePhase) private var scenePhase
@@ -35,6 +32,19 @@ struct DecisionsView: View {
     @State private var showsConnect = false
     @State private var showsMac = false
     @State private var localSheetPresented = false
+    @State private var destination = Destination.waiting
+    @State private var historyQuery = ""
+    @State private var historyFilter = RequestHistoryPresentation.Filter.all
+    @State private var heldRuns: [String: PendingRun] = [:]
+    @State private var heldAccess: [String: AccessRequest] = [:]
+    @State private var heldRunDates: [String: Date] = [:]
+    @State private var runReceipts: [String: RequestsLocalReceipt] = [:]
+    @State private var accessReceipts: [String: RequestsLocalReceipt] = [:]
+
+    private enum Destination: String, CaseIterable, Identifiable {
+        case waiting = "Waiting", history = "History"
+        var id: Self { self }
+    }
 
     private var session: SessionModel? {
         if case .paired(let session) = companion.phase { return session }
@@ -42,25 +52,39 @@ struct DecisionsView: View {
     }
 
     private var requestsListVisible: Bool {
-        scenePhase == .active && path.isEmpty && !showsConnect && !showsMac && !localSheetPresented
+        scenePhase == .active && destination == .waiting && path.isEmpty && !showsConnect && !showsMac && !localSheetPresented
             && questions?.unlockPrompt == nil && session?.actionError == nil
     }
 
     var body: some View {
         NavigationStack(path: $path) {
-            // Each second: the timers, and the rows that expire leave Waiting.
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                list(now: context.date)
+            VStack(spacing: 0) {
+                Picker("Requests view", selection: $destination) {
+                    ForEach(Destination.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                if destination == .waiting {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        list(now: context.date)
+                    }
+                } else if let questions {
+                    RequestsHistoryView(model: questions, query: $historyQuery, filter: $historyFilter)
+                } else {
+                    ContentUnavailableView("History unavailable", systemImage: "lock")
+                }
             }
             .navigationTitle("Requests")
             .toolbar { toolbar }
             .navigationDestination(for: DecisionRoute.self) { route in
                 switch route {
-                case .question(let qid):
-                    // A new view for each question, so that its tap guard starts again.
-                    if let questions { QuestionDetailView(model: questions, qid: qid).id(qid) }
-                case .run(let run):
-                    if let session {
+                case .question(let identity):
+                    if let questions { QuestionDetailView(model: questions, requestIdentity: identity).id(identity) }
+                case .history(let id):
+                    if let questions { RequestHistoryDetailView(model: questions, entryID: id) }
+                case .run(let sourceID, let run):
+                    if let session, session.requestSourceID == sourceID {
                         RunDetailView(session: session, run: run, presentation: .pushed)
                     } else {
                         ContentUnavailableView("This run no longer waits", systemImage: "clock")
@@ -111,7 +135,19 @@ struct DecisionsView: View {
         .onChange(of: questions?.focusRequests ?? 0, initial: true) { _, requests in
             guard requests > 0, let questions else { return }
             path = []
+            destination = .waiting
             Task { _ = await questions.takeFocus(stillFree: { true }) }
+        }
+        .onChange(of: questions?.phase) { _, phase in
+            if phase == .locked { historyQuery = "" }
+        }
+        .onChange(of: session?.requestSourceID) { _, _ in
+            path = []
+            heldRuns.removeAll()
+            heldAccess.removeAll()
+            heldRunDates.removeAll()
+            runReceipts.removeAll()
+            accessReceipts.removeAll()
         }
         .alert(
             "Apassy could not finish",
@@ -128,26 +164,65 @@ struct DecisionsView: View {
     // MARK: The list
 
     private func list(now: Date) -> some View {
-        let waiting = Decisions.waiting(
-            questions: questions?.questions ?? [], session: session, namesVaults: questions?.namesVaults ?? false,
-            now: now)
-        let ended = (questions?.questions ?? []).filter { question in
-            !waiting.contains { $0.id == "question-\(question.qid)" }
-        }
+        let waiting = waitingRows(now: now)
+        let access = accessRows
+        let hasUnavailableVaults = questions?.contexts.contains { $0.error != nil } ?? false
         return List {
-            Section("Waiting") {
+            if waiting.isEmpty && access.isEmpty && (questions?.lockedVaults.isEmpty ?? true) && !hasUnavailableVaults {
+                emptyWaiting
+                    .listRowBackground(Color.clear)
+            }
+            Section {
                 ForEach(waiting) { decision in
-                    NavigationLink(value: route(decision)) {
-                        WaitingRow(decision: decision, now: now)
+                    switch decision.source {
+                    case .question(let question):
+                        if let questions {
+                            RequestsWaitingRow(model: questions, question: question, now: now)
+                        }
+                    case .run(let run):
+                        if let session {
+                            let receiptKey = "\(session.requestSourceID):run:\(run.id):\(run.digest)"
+                            RequestsRunRow(session: session, run: run, now: now,
+                                hold: {
+                                    heldRuns[run.id] = run
+                                    heldRunDates[run.id] = decision.createdAt
+                                },
+                                dismissReceipt: {
+                                    heldRuns[run.id] = nil
+                                    heldRunDates[run.id] = nil
+                                    runReceipts[receiptKey] = nil
+                                },
+                                receipt: Binding(get: { runReceipts[receiptKey] ?? .idle },
+                                    set: { value in
+                                        guard self.session?.requestSourceID == session.requestSourceID else { return }
+                                        runReceipts[receiptKey] = value
+                                    }))
+                                .id("\(session.requestSourceID):\(run.id):\(run.digest)")
+                        }
                     }
                 }
-                if waiting.isEmpty { emptyWaiting }
+                if let session {
+                    ForEach(access) { request in
+                        let receiptKey = "\(session.requestSourceID):access:\(request.id)"
+                        RequestsAccessRow(session: session, request: request,
+                            hold: { heldAccess[request.id] = request },
+                            dismissReceipt: {
+                                heldAccess[request.id] = nil
+                                accessReceipts[receiptKey] = nil
+                            },
+                            receipt: Binding(get: { accessReceipts[receiptKey] ?? .idle },
+                                set: { value in
+                                    guard self.session?.requestSourceID == session.requestSourceID else { return }
+                                    accessReceipts[receiptKey] = value
+                                }))
+                            .id("\(session.requestSourceID):access:\(request.id)")
+                    }
+                }
                 if let questions, questions.phase != .locked {
                     let stored = questions.faceIDLocked
                     if !stored.isEmpty {
-                        FaceIDLockedRow(
-                            vaults: stored, opening: stored.contains { questions.opening.contains($0.id) }
-                        ) {
+                        FaceIDLockedRow(vaults: stored,
+                            opening: stored.contains { questions.opening.contains($0.id) }) {
                             Task { await questions.unlockFaceIDTapped() }
                         }
                     }
@@ -157,33 +232,26 @@ struct DecisionsView: View {
                         }
                     }
                 }
-                if let session, session.state != .connected, !session.runs.isEmpty {
-                    Text("\(session.macName) does not answer. Its runs are the last known.")
-                        .font(.footnote).foregroundStyle(.secondary)
+            }
+            if let session, session.state != .connected {
+                Section {
+                    Label("\(session.macName) is unavailable", systemImage: "wifi.exclamationmark")
+                    if let fetchedAt = session.fetchedAt {
+                        Text("Last updated \(fetchedAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Button("Retry") { Task { await session.refresh() } }.frame(minHeight: 44)
                 }
             }
-            Section("Requests") {
-                ForEach(session?.accessRequests ?? []) { request in
-                    AccessRequestRow(request: request, isDenying: session?.denying.contains(request.id) == true) {
-                        Task { await session?.deny(request) }
+            if let questions, let error = questions.refreshError, !waiting.isEmpty {
+                Section {
+                    Label("Couldn’t refresh", systemImage: "exclamationmark.triangle")
+                    Text(error).font(.subheadline).foregroundStyle(.secondary)
+                    if let updated = questions.lastUpdated {
+                        Text("Last updated \(updated.formatted(date: .omitted, time: .shortened))")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
-                }
-                if let session {
-                    if session.accessRequests.isEmpty {
-                        Text("No requests").font(.subheadline).foregroundStyle(.secondary)
-                    }
-                } else {
-                    macPlace(.requests)
-                }
-            }
-            Section("Suggestions") { macPlace(.suggestions) }
-            if !ended.isEmpty, let questions {
-                Section("Recent") {
-                    ForEach(ended) { question in
-                        NavigationLink(value: DecisionRoute.question(question.qid)) {
-                            EndedRow(model: questions, question: question)
-                        }
-                    }
+                    Button("Retry") { Task { await questions.refresh() } }.frame(minHeight: 44)
                 }
             }
             notices
@@ -194,71 +262,64 @@ struct DecisionsView: View {
         }
     }
 
-    private func route(_ decision: WaitingDecision) -> DecisionRoute {
-        switch decision.source {
-        case .question(let question): .question(question.qid)
-        case .run(let run): .run(run)
+    /// Keep a submitted row in its chronological slot until its explicit Done action.
+    private func waitingRows(now: Date) -> [WaitingDecision] {
+        let receipts = questions?.receiptQuestions ?? []
+        let receiptIDs = Set(receipts.map(\.requestIdentity))
+        var rows = Decisions.waiting(
+            questions: (questions?.questions ?? []).filter { !receiptIDs.contains($0.requestIdentity) },
+            session: session, namesVaults: questions?.namesVaults ?? false, now: now)
+        rows.removeAll { decision in
+            if case .run(let run) = decision.source { return heldRuns[run.id] != nil }
+            return false
+        }
+        rows += receipts.map { question in
+            WaitingDecision(source: .question(question),
+                createdAt: Date(timeIntervalSince1970: TimeInterval(question.createdAt)),
+                deadline: Date(timeIntervalSince1970: TimeInterval(question.expiresAt)), vault: question.vaultLine)
+        }
+        rows += heldRuns.values.map { run in
+            WaitingDecision(source: .run(run), createdAt: heldRunDates[run.id], deadline: nil)
+        }
+        return rows.sorted {
+            let lhs = $0.createdAt ?? .distantPast
+            let rhs = $1.createdAt ?? .distantPast
+            return lhs == rhs ? $0.id < $1.id : lhs > rhs
         }
     }
 
-    /// A part of the Mac's vault that does not reach this iPhone: where it is, and the one action.
-    private func macPlace(_ place: AgentsReach.Place) -> some View {
-        let reach = AgentsReach(questions: questions, companion: companion)
-        return MacPlaceRow(note: reach.note(place), action: reach.action(place)) { action in
-            switch action {
-            case .pairOnWiFi: showsMac = true
-            case .connect: showsConnect = true
-            case .openDecisions: break
-            }
-        }
+    private var accessRows: [AccessRequest] {
+        let live = (session?.accessRequests ?? []).filter { heldAccess[$0.id] == nil }
+        return (live + Array(heldAccess.values)).sorted { $0.id < $1.id }
     }
 
-    /// Nothing waits: why, and the way to connect this iPhone when the questions are not set up.
     @ViewBuilder
     private var emptyWaiting: some View {
         switch questions?.phase {
         case .loading where session?.runs.isEmpty ?? true:
-            ProgressView().frame(maxWidth: .infinity)
+            ProgressView("Loading requests…").frame(maxWidth: .infinity)
         case .locked:
-            VStack(alignment: .leading, spacing: 4) {
-                Label("The vault is locked", systemImage: "lock")
-                    .font(.headline)
-                Text("Unlock it to read and answer the questions of your agents.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 4)
+            ContentUnavailableView("The vault is locked", systemImage: "lock",
+                description: Text("Unlock to view its requests."))
         case .failed(let message):
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Apassy cannot read the questions", systemImage: "exclamationmark.triangle")
-                    .font(.headline)
-                Text(message).font(.subheadline).foregroundStyle(.secondary)
-                Button("Try again") { Task { await questions?.refresh() } }
-                    .buttonStyle(.bordered)
+            ContentUnavailableView {
+                Label("Couldn’t refresh", systemImage: "exclamationmark.triangle")
+            } description: { Text(message) } actions: {
+                Button("Retry") { Task { await questions?.refresh() } }
+                    .buttonStyle(.bordered).frame(minHeight: 44)
             }
-            .padding(.vertical, 4)
-        case .off where questions?.lockedVaults.isEmpty ?? true:
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Nothing waits", systemImage: "checkmark.circle")
-                    .font(.headline)
-                Text(
-                    "To answer agents on this iPhone, open Apassy on your Mac, choose Settings > Devices > Notifications through the relay, add an iPhone, and scan the code here."
-                )
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                Button("Connect this iPhone") { showsConnect = true }
-                    .buttonStyle(.borderedProminent)
+        case .off where session == nil && (questions?.lockedVaults.isEmpty ?? true):
+            ContentUnavailableView {
+                Label("Connect a Mac", systemImage: "desktopcomputer")
+            } description: { Text("Approve requests on this iPhone.") } actions: {
+                Button("Connect Mac") { showsConnect = true }.buttonStyle(.bordered).frame(minHeight: 44)
             }
-            .padding(.vertical, 4)
         default:
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Nothing waits", systemImage: "checkmark.circle")
-                    .font(.headline)
-                Text("When an agent asks, the question shows here with the time left.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            ContentUnavailableView {
+                Label("No requests waiting", systemImage: "checkmark.circle")
+            } actions: {
+                Button("View History") { destination = .history }.buttonStyle(.bordered).frame(minHeight: 44)
             }
-            .padding(.vertical, 4)
         }
     }
 
@@ -271,8 +332,19 @@ struct DecisionsView: View {
             if let pending = questions.notificationsPendingText {
                 Section { Text(pending).font(.footnote).foregroundStyle(.secondary) }
             }
+            ForEach(questions.contexts.filter { $0.error != nil }) { vault in
+                Section {
+                    Label("\(vault.vaultName) is unavailable", systemImage: "exclamationmark.triangle")
+                    if let error = vault.error {
+                        Text(error).font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Button("Retry") { Task { await questions.refresh() } }
+                        .frame(minHeight: 44)
+                        .accessibilityLabel("Retry \(vault.vaultName) requests")
+                }
+            }
             if questions.phase == .ready {
-                ForEach(questions.contexts.filter { $0.status.enabled && !$0.status.hasKey }) { vault in
+                ForEach(questions.contexts.filter { $0.error == nil && $0.status.enabled && !$0.status.hasKey }) { vault in
                     Section {
                         Text(
                             questions.namesVaults
@@ -297,58 +369,22 @@ struct DecisionsView: View {
                 }
             }
         }
-        ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                if let questions {
-                    if questions.canConnect {
-                        Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
+        if destination == .waiting {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if let questions {
+                        if questions.canConnect {
+                            Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
+                        }
                     }
+                    Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Mac on Wi-Fi", systemImage: "wifi") {
+                        showsMac = true
+                    }
+                } label: {
+                    Label("Devices", systemImage: "ellipsis")
                 }
-                Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Mac on Wi-Fi", systemImage: "wifi") {
-                    showsMac = true
-                }
-            } label: {
-                Label("Devices", systemImage: "ellipsis")
             }
         }
-    }
-}
-
-/// One row of Waiting (mockup screen 5): the agent, the credential, the project, a red dot for
-/// production, and the time left.
-private struct WaitingRow: View {
-    let decision: WaitingDecision
-    let now: Date
-
-    var body: some View {
-        HStack(spacing: 12) {
-            AgentAvatar(agent: decision.agent)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(decision.title).lineLimit(1)
-                Text(decision.subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if let vault = decision.vault {
-                    Text(vault)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            if decision.production {
-                Circle().fill(.red).frame(width: 8, height: 8)
-                    .accessibilityLabel("Production")
-            }
-            if let left = decision.secondsLeft(now: now) {
-                Text(Decisions.clock(left))
-                    .font(.subheadline.weight(.medium).monospacedDigit())
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel("\(left) seconds left")
-            }
-        }
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -478,28 +514,6 @@ struct QuestionsUnlockSheet: View {
         passphrase = ""
         message = nil
         Task { message = await model.unlockQuestions(locked, passphrase: typed) }
-    }
-}
-
-/// A question that ended: who answered, or that it expired.
-private struct EndedRow: View {
-    let model: QuestionsModel
-    let question: RemoteQuestion
-
-    var body: some View {
-        let agent = AgentName.display(question.card?.run.agent ?? question.askerName)
-        HStack(spacing: 12) {
-            AgentAvatar(agent: agent)
-                .opacity(0.5)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(question.credentialTitle).lineLimit(1)
-                Text(model.deliveryText(for: question) ?? agent)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-        }
-        .accessibilityElement(children: .combine)
     }
 }
 

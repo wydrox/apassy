@@ -214,7 +214,28 @@ final class QuestionsModel {
     private(set) var questions: [RemoteQuestion] = []
     /// The vaults whose questions the core keeps; empty with an older core (the selected vault).
     private(set) var vaults: [QuestionsVault] = []
-    private(set) var deliveries: [String: Delivery] = [:]
+    private var scopedDeliveries: [String: Delivery] = [:]
+    /// Compatibility for detail callers. Ambiguous qids have no unqualified alias.
+    var deliveries: [String: Delivery] {
+        var result = scopedDeliveries
+        for question in questions where questions.filter({ $0.qid == question.qid }).count == 1 {
+            result[question.qid] = scopedDeliveries[question.requestIdentity]
+        }
+        return result
+    }
+    private(set) var receiptQuestions: [RemoteQuestion] = []
+    private(set) var isRefreshing = false
+    private(set) var refreshError: String?
+    private(set) var lastUpdated: Date?
+    private(set) var historyVaults: [RequestHistoryVault] = []
+    private(set) var historyLoading = false
+    private(set) var historyError: String?
+    var history: [RequestHistoryEntry] {
+        historyVaults.filter { $0.availability == .available }.flatMap(\.entries)
+            .sorted { $0.lastSeenAt == $1.lastSeenAt ? $0.id < $1.id : $0.lastSeenAt > $1.lastSeenAt }
+    }
+    @ObservationIgnored private var historyGeneration = 0
+    @ObservationIgnored private var listGeneration = 0
     private(set) var attach: AttachStep?
     /// A problem with the answer key or the notifications, for a line under the list.
     private(set) var notice: String?
@@ -365,36 +386,54 @@ final class QuestionsModel {
     /// Read the list. For each vault with a questions team, check the answer key of this iPhone in
     /// its row, then bring the push token to the teams that do not have it, or take it away.
     func refresh() async {
+        listGeneration += 1
+        let request = listGeneration
+        isRefreshing = true
+        defer { if request == listGeneration { isRefreshing = false } }
+        let generation = openGeneration
         do {
-            let generation = openGeneration
             let list = try await service.questionsList()
             // A lock while the list was read: its questions must not show again.
-            guard generation == openGeneration else { return }
+            guard generation == openGeneration, request == listGeneration else { return }
             status = list.status
             vaults = list.vaults ?? []
             listsEveryVault = list.vaults != nil
             for question in list.questions where question.settle != nil {
-                deliveries[question.qid] = nil
-                sentAt[question.qid] = nil
+                scopedDeliveries[question.requestIdentity] = nil
+                sentAt[question.requestIdentity] = nil
             }
             questions = list.questions.map { question in
                 var current = question
-                if current.settle == nil, case .sent(let answer) = deliveries[current.qid] {
+                if current.settle == nil, case .sent(let answer) = scopedDeliveries[current.requestIdentity] {
                     current.answered = answer
                 }
                 return current
             }
+            // Retain only readable scopes. A disappeared core cache entry is not confirmation.
+            let opened = Set(vaults.map(\.vaultID))
+            receiptQuestions = receiptQuestions.compactMap { held in
+                if let id = held.vaultID, !opened.contains(id) { return nil }
+                return questions.first { $0.requestIdentity == held.requestIdentity } ?? held
+            }
+            lastUpdated = now()
+            refreshError = nil
             updateLockedVaults()
             let enabled = contexts.contains { $0.status.enabled }
             phase = enabled ? .ready : .off
             setRequestsVisible(requestsVisible)
             if enabled { await checkAnswerKeys() }
+            guard generation == openGeneration, request == listGeneration else { return }
             await updatePushToken()
+            guard generation == openGeneration, request == listGeneration else { return }
             scheduleAlertReconciliation()
+            await refreshHistory()
         } catch let error as VaultError where error.code == .locked {
+            guard generation == openGeneration, request == listGeneration else { return }
             // Nothing can be answered while the vault is locked: say so, never an empty list.
             showLocked()
         } catch {
+            guard generation == openGeneration, request == listGeneration else { return }
+            refreshError = error.localizedDescription
             if case .ready = phase {
                 notice = error.localizedDescription
             } else {
@@ -407,8 +446,8 @@ final class QuestionsModel {
         guard phase == .ready, listsEveryVault, lockedVaults.isEmpty, waiting.isEmpty,
             !questions.contains(where: needsConfirmation)
         else { return false }
-        return !deliveries.contains { qid, delivery in
-            if case .sent = delivery { return !questions.contains { $0.qid == qid && $0.settle != nil } }
+        return !scopedDeliveries.contains { identity, delivery in
+            if case .sent = delivery { return !questions.contains { $0.requestIdentity == identity && $0.settle != nil } }
             return false
         }
     }
@@ -567,21 +606,34 @@ final class QuestionsModel {
     /// Send `choice` for `question`. An answer that gives authority asks for Face ID first; the
     /// others go at once. A network failure sends the same signed answer again while it is young.
     func send(_ choice: AnswerBar.Choice, for question: RemoteQuestion) async {
-        guard deliveries[question.qid] != .sending, question.answered == nil, question.settle == nil,
-            question.state == .open, question.expiresAt > Int64(now().timeIntervalSince1970),
-            let card = question.card else { return }
-        if case .sent = deliveries[question.qid] { return }
         // The row of this iPhone in the team of the question's vault: its key signs. A question
         // of a vault whose questions are not open now never goes out with another vault's key.
         if question.vaultID != nil, vault(of: question) == nil {
-            deliveries[question.qid] = .failed(Self.notOpenText(question.vaultName))
+            scopedDeliveries[question.requestIdentity] = .failed(Self.notOpenText(question.vaultName))
             return
         }
-        deliveries[question.qid] = .sending
+        guard isCurrentUnanswered(question), scopedDeliveries[question.requestIdentity] != .sending,
+            let card = question.card, let offered = Self.offeredChoice(choice.answer, card: card) else { return }
+        let generation = openGeneration
+        if case .sent = scopedDeliveries[question.requestIdentity] { return }
+        scopedDeliveries[question.requestIdentity] = .sending
+        holdReceipt(question)
+        // Validate the exact displayed snapshot against the service before preparing any answer.
+        await refresh()
+        guard generation == openGeneration else { return }
+        guard !isRefreshing, isCurrentUnanswered(question) else {
+            scopedDeliveries[question.requestIdentity] = .failed(
+                refreshError ?? "Request changed. Review the updated request before answering.")
+            return
+        }
         let row = vault(of: question)?.status ?? status
         do {
             let prepared = try await service.questionAnswerString(
                 qid: question.qid, answer: choice.answer, vaultID: question.vaultID)
+            guard generation == openGeneration, isCurrentUnanswered(question),
+                prepared.needsFaceID == choice.answer.needsFaceID else {
+                throw VaultError(.invalidInput, "Request changed. Review the updated request before answering.")
+            }
             var signature: Data?
             if prepared.needsFaceID {
                 guard let signer = signers.signer(team: row.teamID, registered: row.answerKey) else {
@@ -589,23 +641,36 @@ final class QuestionsModel {
                 }
                 signature = try await signer.sign(
                     Data(prepared.answerString.utf8),
-                    reason: Self.faceIDReason(agent: card.run.agent, answer: choice.label))
+                    reason: Self.faceIDReason(agent: card.run.agent, answer: offered.label))
             }
-            let sent = try await post(question, choice.answer, prepared, signature)
-            deliveries[question.qid] = .sent(sent.kind)
-            sentAt[question.qid] = now()
-            if let at = questions.firstIndex(where: { $0.qid == question.qid }) { questions[at].answered = sent.kind }
+            guard generation == openGeneration else { return }
+            if prepared.needsFaceID { await refresh() }
+            guard generation == openGeneration, !isRefreshing, isCurrentUnanswered(question),
+                vault(of: question)?.status == row else {
+                throw VaultError(.invalidInput, "Request changed. Review the updated request before answering.")
+            }
+            let sent = try await post(question, choice.answer, prepared, signature, generation: generation)
+            // A lock can complete while transport is in flight. Never restore decrypted state.
+            guard generation == openGeneration else { return }
+            scopedDeliveries[question.requestIdentity] = .sent(sent.kind)
+            sentAt[question.requestIdentity] = now()
+            if let at = questions.firstIndex(where: { $0.requestIdentity == question.requestIdentity }) { questions[at].answered = sent.kind }
         } catch CompanionKeyError.cancelled {
-            deliveries[question.qid] = nil
+            guard generation == openGeneration else { return }
+            scopedDeliveries[question.requestIdentity] = nil
+            dismissReceipt(for: question)
         } catch CompanionKeyError.biometryChanged {
-            deliveries[question.qid] = .failed(
+            guard generation == openGeneration else { return }
+            scopedDeliveries[question.requestIdentity] = .failed(
                 "Face ID changed on this iPhone, so Apassy made a new answer key. On a Mac, remove this iPhone in Settings › Devices, then connect it again. Answer on the Mac for now.")
             // A new key for this team only: the rows of the other vaults keep theirs.
             _ = try? signers.renew(team: row.teamID)
         } catch let error as VaultError {
-            deliveries[question.qid] = .failed(Self.message(for: error, asker: question.askerName))
+            guard generation == openGeneration else { return }
+            scopedDeliveries[question.requestIdentity] = .failed(Self.message(for: error, asker: question.askerName))
         } catch {
-            deliveries[question.qid] = .failed(error.localizedDescription)
+            guard generation == openGeneration else { return }
+            scopedDeliveries[question.requestIdentity] = .failed(error.localizedDescription)
         }
         await refresh()
     }
@@ -613,10 +678,18 @@ final class QuestionsModel {
     /// Post, and post again after a network failure while the time of the answer is younger than
     /// 55 s (contract section 13, step 4).
     private func post(
-        _ question: RemoteQuestion, _ answer: RemoteAnswer, _ prepared: PreparedAnswer, _ signature: Data?
+        _ question: RemoteQuestion, _ answer: RemoteAnswer, _ prepared: PreparedAnswer, _ signature: Data?, generation: Int
     ) async throws -> SentAnswer {
+        var attempted = false
+        let originalVault = vault(of: question)
         while true {
+            guard generation == openGeneration, !Task.isCancelled,
+                vault(of: question) == originalVault,
+                isCurrentRetry(question, answer: answer, allowOwnAttempt: attempted) else {
+                throw VaultError(.invalidInput, "Request changed. Review the updated request before answering.")
+            }
             do {
+                attempted = true
                 return try await service.questionAnswer(
                     qid: question.qid, answer: answer, time: prepared.time, signature: signature,
                     vaultID: question.vaultID)
@@ -627,6 +700,60 @@ final class QuestionsModel {
                 try await Task.sleep(for: retryInterval)
             }
         }
+    }
+
+    func delivery(for question: RemoteQuestion) -> Delivery? {
+        scopedDeliveries[question.requestIdentity]
+    }
+
+    private func holdReceipt(_ question: RemoteQuestion) {
+        guard !receiptQuestions.contains(where: { $0.requestIdentity == question.requestIdentity }) else { return }
+        receiptQuestions.append(question)
+    }
+
+    func dismissReceipt(for question: RemoteQuestion) {
+        guard delivery(for: question) != .sending else { return }
+        receiptQuestions.removeAll { $0.requestIdentity == question.requestIdentity }
+    }
+
+    /// Only an immutable snapshot from the latest successful list may be answered.
+    private func isCurrentUnanswered(_ question: RemoteQuestion) -> Bool {
+        guard phase == .ready, refreshError == nil, question.problem == nil,
+            vault(of: question)?.error == nil,
+            question.state == .open, question.answered == nil, question.settle == nil,
+            question.expiresAt > Int64(now().timeIntervalSince1970),
+            let live = questions.first(where: { $0.requestIdentity == question.requestIdentity }) else { return false }
+        return live == question
+    }
+
+    /// Only this invocation may retry its already prepared payload after a failed POST.
+    /// A journal-restored attempt can set `answered` during an otherwise unchanged refresh.
+    private func isCurrentRetry(_ question: RemoteQuestion, answer: RemoteAnswer, allowOwnAttempt: Bool) -> Bool {
+        if isCurrentUnanswered(question) { return true }
+        guard allowOwnAttempt, scopedDeliveries[question.requestIdentity] == .sending,
+            phase == .ready, refreshError == nil, vault(of: question)?.error == nil,
+            question.expiresAt > Int64(now().timeIntervalSince1970),
+            var current = questions.first(where: { $0.requestIdentity == question.requestIdentity }),
+            current.answered == answer.kind else { return false }
+        current.answered = nil
+        return current == question
+    }
+
+    private static func offeredChoice(_ answer: RemoteAnswer, card: QuestionCard) -> AnswerBar.Choice? {
+        let bar = AnswerBar.make(for: card)
+        return ([bar.deny] + [bar.allowOnce, bar.primary].compactMap { $0 } + bar.menu)
+            .first { $0.answer == answer }
+    }
+
+    func listActions(for question: RemoteQuestion, now: Date) -> RequestListActions {
+        let blocked: Bool
+        switch delivery(for: question) {
+        case .sending, .sent: blocked = true
+        case .failed, nil: blocked = false
+        }
+        let current = isCurrentUnanswered(question) && !blocked
+            && question.expiresAt > Int64(now.timeIntervalSince1970)
+        return RequestListActions.make(for: question, current: current)
     }
 
     static func notOpenText(_ vaultName: String?) -> String {
@@ -653,12 +780,12 @@ final class QuestionsModel {
             if let name = settle.deviceName { return "Confirmed on \(name)" }
             return "Ended on \(question.askerName)"
         }
-        switch deliveries[question.qid] {
+        switch scopedDeliveries[question.requestIdentity] {
         case .sending: return "Sending…"
         case .sent: return unconfirmedText(for: question)
         case .failed(let message): return message
         case nil:
-            if question.answered != nil { return unconfirmedText(for: question) }
+            if question.answered != nil { return Self.unconfirmedText }
             if question.state == .expired { return "Expired" }
             return question.problem
         }
@@ -678,9 +805,9 @@ final class QuestionsModel {
             default: return QuestionOutcome(text: "Ended on \(question.askerName)", tone: .neutral)
             }
         }
-        if case .sent = deliveries[question.qid] { return QuestionOutcome(text: unconfirmedText(for: question), tone: .neutral) }
-        if question.answered != nil, deliveries[question.qid] == nil {
-            return QuestionOutcome(text: unconfirmedText(for: question), tone: .neutral)
+        if case .sent = scopedDeliveries[question.requestIdentity] { return QuestionOutcome(text: unconfirmedText(for: question), tone: .neutral) }
+        if question.answered != nil {
+            return QuestionOutcome(text: Self.unconfirmedText, tone: .neutral)
         }
         if question.state != .open || question.expiresAt <= Int64(now().timeIntervalSince1970) {
             return QuestionOutcome(text: "Expired", tone: .neutral)
@@ -693,7 +820,7 @@ final class QuestionsModel {
 
     private func unconfirmedText(for question: RemoteQuestion) -> String {
         if question.expiresAt <= Int64(now().timeIntervalSince1970)
-            || sentAt[question.qid].map({ now().timeIntervalSince($0) >= 60 }) == true
+            || sentAt[question.requestIdentity].map({ now().timeIntervalSince($0) >= 60 }) == true
         {
             return Self.unconfirmedText
         }
@@ -702,8 +829,46 @@ final class QuestionsModel {
 
     func needsConfirmation(for question: RemoteQuestion) -> Bool {
         guard question.settle == nil else { return false }
-        if case .sent = deliveries[question.qid] { return true }
+        if case .sent = scopedDeliveries[question.requestIdentity] { return true }
         return question.answered != nil
+    }
+
+    // MARK: Phone-observed encrypted history
+
+    /// The core owns encryption, retention and vault authorization. No plaintext cache is kept.
+    func refreshHistory() async {
+        guard phase == .ready || phase == .off else { return }
+        historyGeneration += 1
+        let request = historyGeneration
+        let generation = openGeneration
+        historyLoading = true
+        defer { if request == historyGeneration { historyLoading = false } }
+        do {
+            let snapshot = try await service.requestHistory()
+            guard request == historyGeneration, generation == openGeneration,
+                phase != .locked else { return }
+            historyVaults = snapshot.vaults
+            historyError = nil
+        } catch {
+            guard request == historyGeneration, generation == openGeneration else { return }
+            historyError = error.localizedDescription
+        }
+    }
+
+    /// Deletes only this vault's phone-observed metadata; it never sends a request answer.
+    func clearLocalHistory(vaultID: String) async {
+        guard historyVaults.contains(where: { $0.vaultID == vaultID && $0.availability != .locked }) else { return }
+        let generation = openGeneration
+        historyGeneration += 1
+        historyLoading = false
+        do {
+            try await service.clearRequestHistory(vaultID: vaultID)
+            guard generation == openGeneration else { return }
+            await refreshHistory()
+        } catch {
+            guard generation == openGeneration else { return }
+            historyError = error.localizedDescription
+        }
     }
 
     // MARK: Opening a notification
@@ -804,7 +969,17 @@ final class QuestionsModel {
     /// The vault locked (or the core answered `locked`): no question shows, and every other vault
     /// with questions is locked.
     private func showLocked() {
+        openGeneration += 1
+        historyGeneration += 1
+        historyVaults = []
+        historyLoading = false
+        historyError = nil
         questions = []
+        receiptQuestions = []
+        scopedDeliveries = [:]
+        sentAt = [:]
+        lastUpdated = nil
+        refreshError = nil
         vaults = []
         phase = .locked
         push?.setRequestsVisible(false)
@@ -875,6 +1050,17 @@ final class QuestionsModel {
     /// (its field is cleared).
     func vaultWillLeave() {
         openGeneration += 1
+        historyGeneration += 1
+        historyVaults = []
+        historyLoading = false
+        historyError = nil
+        receiptQuestions = []
+        questions = []
+        scopedDeliveries = [:]
+        sentAt = [:]
+        lastUpdated = nil
+        refreshError = nil
+        phase = .loading
         reopenTask?.cancel()
         reopenTask = nil
         opening = []

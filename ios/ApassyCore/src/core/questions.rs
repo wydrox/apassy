@@ -141,6 +141,7 @@ pub(super) struct Context {
     error: Option<&'static str>,
     /// The agent feeds of the Macs of this team (relay-feed-v1, `feed.rs`).
     pub(super) feed: super::feed::Mirror,
+    history_error: bool,
 }
 
 #[derive(Clone)]
@@ -234,6 +235,7 @@ impl State {
             push_due,
             error: None,
             feed: super::feed::Mirror::default(),
+            history_error: false,
         };
         if let Some(old) = self.contexts.insert(vault_id.to_owned(), context) {
             old.member.close();
@@ -997,6 +999,43 @@ impl Core {
     pub(super) fn questions_call(&self, op: &str, request: &str) -> CoreResult<String> {
         match op {
             "questions_list" => Ok(ok(&self.questions_list()?)),
+            "request_history" => self.request_history(),
+            "clear_request_history" => {
+                #[derive(Deserialize)]
+                struct Clear {
+                    vault_id: String,
+                }
+                let Clear { vault_id } = params(request)?;
+                self.questions_refresh()?;
+                let mut state = guard(&self.questions);
+                let context = state
+                    .contexts
+                    .get_mut(&vault_id)
+                    .filter(|context| !context.keys.is_removed())
+                    .ok_or_else(CoreError::locked)?;
+                if let Some((key_id, key)) = &context.keys.key
+                    && let Ok(journal) = super::request_history::load(
+                        &self.paths.data_dir,
+                        &vault_id,
+                        key_id,
+                        key,
+                        now(),
+                    )
+                    && journal.entries.iter().any(|entry| {
+                        entry.attempted_at.is_some()
+                            && entry.outcome.is_none()
+                            && entry.expires_at > now()
+                    })
+                {
+                    return Err(CoreError::new(
+                        "history_pending",
+                        "Wait for the pending request to finish before clearing this vault's history.",
+                    ));
+                }
+                super::request_history::remove(&self.paths.data_dir, &vault_id)?;
+                context.history_error = false;
+                Ok(ok(&Empty {}))
+            }
             "questions_wait" => {
                 #[derive(Deserialize)]
                 struct Wait {
@@ -1631,6 +1670,7 @@ impl Core {
                 continue;
             }
             let mut last = since;
+            let mut observed = Vec::new();
             for mut record in answer.questions {
                 if !envelope::valid_qid(&record.qid) || !envelope::valid_key_id(&record.key_id) {
                     continue;
@@ -1643,8 +1683,54 @@ impl Core {
                     }
                     record.answered = old.answered;
                 }
+                // Verify and journal before the 10-minute live-cache pruning below.
+                if !context.keys.is_removed()
+                    && let Ok(card) = context.keys.open(&record)
+                {
+                    observed.push((
+                        super::request_history::Entry::observed(
+                            vault_id,
+                            &card,
+                            record.expires_at,
+                            now(),
+                        ),
+                        context.keys.settle(&record),
+                    ));
+                }
                 context.records.insert(record.qid.clone(), record);
                 changed = true;
+            }
+            if self.request_history_enabled && !observed.is_empty() {
+                let saved = (|| -> CoreResult<()> {
+                    let (key_id, key) = context.keys.key.as_ref().ok_or_else(CoreError::locked)?;
+                    let mut journal = super::request_history::load(
+                        &self.paths.data_dir,
+                        vault_id,
+                        key_id,
+                        key,
+                        now(),
+                    )?;
+                    for (entry, settle) in observed {
+                        journal.observe(entry, settle);
+                    }
+                    journal.prune(now());
+                    // Delivery survives a lock/restart, but only for the same verified digest.
+                    for record in context.records.values_mut() {
+                        if let Ok(card) = context.keys.open(record)
+                            && let Some(kind) = journal.answered(&record.qid, &card.digest)
+                        {
+                            record.answered = Some(kind);
+                        }
+                    }
+                    super::request_history::save(
+                        &self.paths.data_dir,
+                        vault_id,
+                        key_id,
+                        key,
+                        &journal,
+                    )
+                })();
+                context.history_error = saved.is_err();
             }
             let next = if more { last } else { answer.seq.max(last) };
             context.since = context.since.max(next);
@@ -1729,6 +1815,62 @@ impl Core {
         })
     }
 
+    /// No relay call: only vault scopes already authorized in this session are decrypted.
+    fn request_history(&self) -> CoreResult<String> {
+        self.questions_refresh()?;
+        let vaults = guard(&self.list).vaults.clone();
+        let state = guard(&self.questions);
+        let mut output = Vec::new();
+        for vault in vaults {
+            let mut availability = "locked";
+            let mut entries = Vec::new();
+            let mut error: Option<&str> = None;
+            if let Some(context) = state.contexts.get(&vault.id) {
+                availability = "unavailable";
+                if !self.request_history_enabled {
+                    error = Some("history_storage_unavailable");
+                } else if !context.keys.is_removed() {
+                    if let Some((key_id, key)) = &context.keys.key {
+                        match super::request_history::load(
+                            &self.paths.data_dir,
+                            &vault.id,
+                            key_id,
+                            key,
+                            now(),
+                        ) {
+                            Ok(journal) if !context.history_error => {
+                                // Persist pruning so expired ciphertext is removed as well.
+                                if super::request_history::save(
+                                    &self.paths.data_dir,
+                                    &vault.id,
+                                    key_id,
+                                    key,
+                                    &journal,
+                                )
+                                .is_ok()
+                                {
+                                    availability = "available";
+                                    entries = journal.entries;
+                                } else {
+                                    error = Some("history_unavailable");
+                                }
+                            }
+                            _ => error = Some("history_unavailable"),
+                        }
+                    } else {
+                        error = Some("sync_first");
+                    }
+                } else {
+                    error = Some("removed");
+                }
+            }
+            output.push(json!({ "vault_id": vault.id, "vault_name": vault.name, "availability": availability, "entries": entries, "error": error }));
+        }
+        Ok(ok(
+            &json!({ "vaults": output, "retention_days": super::request_history::RETENTION_DAYS, "max_entries_per_vault": super::request_history::MAX_ENTRIES }),
+        ))
+    }
+
     /// An open question of the context `using` that passed every check of section 7.3,
     /// from its records, or from the relay when it is not there yet.
     fn opened(&self, qid: &str, using: &Using) -> CoreResult<Opened> {
@@ -1800,6 +1942,24 @@ impl Core {
             &card,
         )
         .map_err(CoreError::invalid)?;
+        if self.request_history_enabled {
+            let mut state = guard(&self.questions);
+            let context = state.context_mut(&using.vault_id, &using.member)?;
+            let (key_id, key) = context.keys.key.as_ref().ok_or_else(CoreError::locked)?;
+            let journal = super::request_history::load(
+                &self.paths.data_dir,
+                &using.vault_id,
+                key_id,
+                key,
+                now(),
+            )?;
+            if !journal.permits_answer(&record.qid, &card.digest, &choice, time) {
+                return Err(CoreError::new(
+                    "already_answered",
+                    "An answer was already sent. Wait for confirmation from the Mac.",
+                ));
+            }
+        }
         let text = envelope::answer_string(
             &own.uuid,
             &using.keys.team_id,
@@ -1896,6 +2056,59 @@ impl Core {
             "ciphertext": encode_b64u(&sealed),
         });
         let path = format!("/v1/questions/{}/answers", ready.record.qid);
+        if self.request_history_enabled {
+            // Persist intent before POST. A lock during the network call cannot erase the
+            // duplicate-answer guard, and a late success never recreates a removed journal.
+            let mut state = guard(&self.questions);
+            let context = state.context_mut(&ready.using.vault_id, member)?;
+            let mut journal = super::request_history::load(
+                &self.paths.data_dir,
+                &ready.using.vault_id,
+                key_id,
+                key,
+                now(),
+            )?;
+            // Another concurrent answer may have persisted its intent after preparation.
+            if !journal.permits_answer(&ready.record.qid, &ready.digest, &ready.choice, time) {
+                return Err(CoreError::new(
+                    "already_answered",
+                    "An answer was already sent. Wait for confirmation from the Mac.",
+                ));
+            }
+            let card = keys.open(&ready.record).map_err(unreadable)?;
+            journal.observe(
+                super::request_history::Entry::observed(
+                    &ready.using.vault_id,
+                    &card,
+                    ready.record.expires_at,
+                    now(),
+                ),
+                None,
+            );
+            if !journal.attempt(&ready.record.qid, &ready.digest, &ready.choice, now(), time) {
+                return Err(CoreError::new(
+                    "history_full",
+                    "Wait for pending requests to finish before answering another request.",
+                ));
+            }
+            journal.prune(now());
+            if journal.answered(&ready.record.qid, &ready.digest).is_none() {
+                return Err(CoreError::new(
+                    "history_full",
+                    "This answer could not be saved safely. Refresh the request.",
+                ));
+            }
+            super::request_history::save(
+                &self.paths.data_dir,
+                &ready.using.vault_id,
+                key_id,
+                key,
+                &journal,
+            )?;
+            if let Some(record) = context.records.get_mut(&ready.record.qid) {
+                record.answered = Some(ready.choice.kind());
+            }
+        }
         let result = member
             .call("POST", &path, Some(&body), Duration::ZERO)
             .map_err(call_error)?;
@@ -1907,10 +2120,43 @@ impl Core {
         let posted: Posted = serde_json::from_value(result)
             .map_err(|_| CoreError::from(SyncError::RelayUnreachable))?;
         let kind = ready.choice.kind();
-        if let Ok(context) = guard(&self.questions).context_mut(&ready.using.vault_id, member)
-            && let Some(record) = context.records.get_mut(&ready.record.qid)
-        {
-            record.answered = Some(kind);
+        if let Ok(context) = guard(&self.questions).context_mut(&ready.using.vault_id, member) {
+            if let Some(record) = context.records.get_mut(&ready.record.qid) {
+                record.answered = Some(kind);
+            }
+            // POST acceptance only records delivery. It never creates an outcome.
+            if self.request_history_enabled {
+                let saved = (|| -> CoreResult<()> {
+                    let mut journal = super::request_history::load(
+                        &self.paths.data_dir,
+                        &ready.using.vault_id,
+                        key_id,
+                        key,
+                        now(),
+                    )?;
+                    if let Ok(card) = keys.open(&ready.record) {
+                        journal.observe(
+                            super::request_history::Entry::observed(
+                                &ready.using.vault_id,
+                                &card,
+                                ready.record.expires_at,
+                                now(),
+                            ),
+                            None,
+                        );
+                    }
+                    journal.sent(&ready.record.qid, &ready.digest, posted.at);
+                    journal.prune(now());
+                    super::request_history::save(
+                        &self.paths.data_dir,
+                        &ready.using.vault_id,
+                        key_id,
+                        key,
+                        &journal,
+                    )
+                })();
+                context.history_error = saved.is_err();
+            }
         }
         Ok(Sent {
             id: posted.id,

@@ -30,6 +30,7 @@ mod organize;
 mod otp;
 mod passkey;
 mod questions;
+mod request_history;
 mod sync;
 mod watchtower;
 mod wire;
@@ -62,6 +63,9 @@ pub enum Role {
 #[derive(Deserialize)]
 struct ConfigWire {
     data_dir: String,
+    /// Native host has guaranteed local-only, no-backup storage.
+    #[serde(default)]
+    request_history_enabled: bool,
     #[serde(default)]
     device_name: Option<String>,
     #[serde(default)]
@@ -71,6 +75,7 @@ struct ConfigWire {
 /// The vault core of one process.
 pub struct Core {
     paths: Paths,
+    request_history_enabled: bool,
     device_name: String,
     role: Role,
     list: Mutex<PhoneList>,
@@ -230,6 +235,7 @@ impl Core {
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
+            request_history_enabled: config.request_history_enabled,
             paths,
             device_name,
             role: config.role.unwrap_or(Role::App),
@@ -543,6 +549,8 @@ impl Core {
             }
             // 5.10 Questions through the relay: the app only.
             "questions_list"
+            | "request_history"
+            | "clear_request_history"
             | "questions_wait"
             | "questions_unlock"
             | "question_open"

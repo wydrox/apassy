@@ -1,3 +1,5 @@
+import ApassyCompanionKit
+import Synchronization
 import ApassyVaultCore
 import ApassyVaultKit
 import AuthenticationServices
@@ -244,7 +246,12 @@ final class RootModel {
     /// One answer key per questions team in the keychain; a team whose row holds the shared key of
     /// an earlier version keeps it (`TeamAnswerSigners`).
     private nonisolated static func makeAnswerSigners() -> any AnswerSigners {
-        TeamAnswerSigners(store: KeychainAnswerKeyStore())
+        #if DEBUG && targetEnvironment(simulator)
+            if ProcessInfo.processInfo.arguments.contains("-ApassyPreviewVault") {
+                return TeamAnswerSigners(store: PreviewAnswerKeyStore())
+            }
+        #endif
+        return TeamAnswerSigners(store: KeychainAnswerKeyStore())
     }
 
     private func makeQuestions(vault: VaultModel) {
@@ -416,3 +423,22 @@ private final class ExportSession {
         return windows.first(where: \.isKeyWindow) ?? windows.first
     }
 }
+
+#if DEBUG && targetEnvironment(simulator)
+    /// Explicit synthetic previews use ephemeral keys and never create a Keychain item.
+    private final class PreviewAnswerKeyStore: AnswerKeyStore {
+        private let keys = Mutex<[String: SoftwareKeys]>([:])
+
+        func load(service: String) throws -> (any CompanionKeys)? {
+            keys.withLock { $0[service] }
+        }
+
+        func create(service: String) throws -> any CompanionKeys {
+            keys.withLock { stored in
+                let made = SoftwareKeys()
+                stored[service] = made
+                return made
+            }
+        }
+    }
+#endif

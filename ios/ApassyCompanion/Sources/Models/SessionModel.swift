@@ -41,6 +41,7 @@ final class SessionModel {
     private let onEnded: @MainActor (String?) -> Void
     private let pollInterval: Duration
     private var isRefreshing = false
+    private var denyingRuns: Set<String> = []
 
     init(
         record: PairingRecord,
@@ -57,6 +58,11 @@ final class SessionModel {
         self.onEnded = onEnded
         self.pollInterval = pollInterval
         self.lastGoodHost = record.lastGoodHost
+    }
+
+    /// The verified pairing, not a display name or a run ID from another Mac.
+    var requestSourceID: String {
+        "\(record.deviceID.utf8.count):\(record.deviceID):\(record.pin.map { String(format: "%02x", $0) }.joined())"
     }
 
     var macName: String { status?.macName ?? record.macName }
@@ -101,6 +107,7 @@ final class SessionModel {
         defer { isRefreshing = false }
         do {
             let fresh = try await mac.inbox()
+            guard !isEnding, !Task.isCancelled else { return }
             inbox = fresh
             fetchedAt = Date()
             state = .connected
@@ -126,7 +133,7 @@ final class SessionModel {
     }
 
     private func handle(_ error: Error) async {
-        if error is CancellationError { return }
+        if error is CancellationError || isEnding { return }
         switch error as? CompanionError {
         case .unpaired?:
             end(notice: CompanionError.unpaired.errorDescription)
@@ -163,6 +170,11 @@ final class SessionModel {
     }
 
     func deny(_ run: PendingRun) async throws {
+        guard !denyingRuns.contains(run.id) else {
+            throw CompanionError.invalidInput("A denial is already being sent.")
+        }
+        denyingRuns.insert(run.id)
+        defer { denyingRuns.remove(run.id) }
         do {
             try await mac.deny(run: run)
             removeRun(id: run.id)
@@ -172,9 +184,50 @@ final class SessionModel {
         }
     }
 
-    /// Deny an access request. An error goes to `actionError`.
-    func deny(_ request: AccessRequest) async {
-        guard !denying.contains(request.id) else { return }
+    /// Quick actions use the last successful two-second poll for at most ten seconds.
+    /// A stale or changed snapshot always requires a refresh; a denial never grants access.
+    private func hasFreshInbox(now: Date) -> Bool {
+        guard state == .connected, !isEnding, let fetchedAt else { return false }
+        return (0...10).contains(now.timeIntervalSince(fetchedAt))
+    }
+
+    func canDenyFromList(run: PendingRun, now: Date = .now) -> Bool {
+        guard hasFreshInbox(now: now), !denyingRuns.contains(run.id),
+            let current = self.run(id: run.id), current.digest == run.digest,
+            current.command == run.command, current.envNames == run.envNames,
+            current.agent == run.agent, current.cwd == run.cwd,
+            current.purpose == run.purpose, current.risk == run.risk,
+            current.userRequest == run.userRequest, current.requestSource == run.requestSource,
+            current.agentRequest == run.agentRequest, current.remember == run.remember
+        else { return false }
+        if let waited = current.waitingSeconds, let fetchedAt {
+            return waited >= 0 && Double(waited) + now.timeIntervalSince(fetchedAt) < Double(approvalTimeout)
+        }
+        return true
+    }
+
+    func canDenyAccessFromList(_ request: AccessRequest, now: Date = .now) -> Bool {
+        hasFreshInbox(now: now) && !denying.contains(request.id) && accessRequests.contains(request)
+    }
+
+    func denyFromList(_ run: PendingRun) async throws {
+        guard canDenyFromList(run: run) else {
+            throw CompanionError.invalidInput("Refresh requests before answering.")
+        }
+        try await deny(run)
+    }
+
+    func denyAccessFromList(_ request: AccessRequest) async throws {
+        guard canDenyAccessFromList(request) else {
+            throw CompanionError.invalidInput("Refresh requests before answering.")
+        }
+        try await sendAccessDenial(request)
+    }
+
+    private func sendAccessDenial(_ request: AccessRequest) async throws {
+        guard !denying.contains(request.id) else {
+            throw CompanionError.invalidInput("A denial is already being sent.")
+        }
         denying.insert(request.id)
         defer { denying.remove(request.id) }
         do {
@@ -186,6 +239,16 @@ final class SessionModel {
             }
         } catch CompanionError.unpaired {
             end(notice: CompanionError.unpaired.errorDescription)
+            throw CompanionError.unpaired
+        }
+    }
+
+    /// Deny an access request. An error goes to `actionError`.
+    func deny(_ request: AccessRequest) async {
+        guard !denying.contains(request.id) else { return }
+        do {
+            try await sendAccessDenial(request)
+        } catch CompanionError.unpaired {
         } catch is CancellationError {
         } catch {
             actionError = error.localizedDescription
@@ -240,7 +303,14 @@ final class SessionModel {
         dropPairing(notice: error.localizedDescription)
     }
 
+    private func clearInbox() {
+        inbox = nil
+        fetchedAt = nil
+        status = nil
+    }
+
     private func dropPairing(notice: String?) {
+        clearInbox()
         // A failed delete leaves a record that the next start finds unpaired or without keys, so
         // the flow goes on either way.
         try? store.delete()
@@ -255,6 +325,7 @@ final class SessionModel {
             actionError = "Apassy could not delete the pairing from this iPhone. \(error.localizedDescription)"
             return
         }
+        clearInbox()
         onEnded(notice)
     }
 }

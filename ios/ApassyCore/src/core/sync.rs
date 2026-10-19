@@ -350,6 +350,7 @@ impl Core {
         // No `questions_unlock` has the file open while it goes (lock order: the opening,
         // then the list, then the questions).
         let opening = guard(&self.opening);
+        super::request_history::remove(&self.paths.data_dir, id)?;
         let file = self.paths.vault_file(id);
         let _ = fs::remove_file(&file);
         let _ = fs::remove_file(super::sidecar(&file));

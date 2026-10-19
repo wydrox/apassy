@@ -135,18 +135,13 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Stripe live key"].waitForExistence(timeout: 5))
     }
 
-    /// Decisions says where requests and suggestions are, never "when the Mac is connected", and
-    /// offers the pairing on Wi-Fi that brings the requests.
-    func testDecisionsSaysWhereRequestsAndSuggestionsAre() {
+    /// Requests offers the next useful action without empty Suggestions sections.
+    func testRequestsWithoutConnectionOffersConnect() {
         let app = launch(["-ApassyOpen", "decisions"])
         XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 15))
-        let suggestions = app.staticTexts["Suggestions come from your Mac. They show in Apassy on the Mac."]
-        for _ in 0..<3 where !suggestions.exists { app.swipeUp() }
-        XCTAssertTrue(suggestions.waitForExistence(timeout: 5))
-        XCTAssertTrue(
-            app.staticTexts.matching(Self.starts("Requests from agents show in Apassy on your Mac.")).firstMatch.exists)
-        XCTAssertTrue(app.buttons["Pair with the Mac on Wi-Fi"].exists)
-        XCTAssertFalse(app.staticTexts["Available when the Mac is connected"].exists)
+        XCTAssertTrue(app.buttons["Connect Mac"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Suggestions"].exists)
+        XCTAssertTrue(app.segmentedControls.buttons["History"].exists)
     }
 
     /// Fields remain useful without two unavailable Mac-only sections.
@@ -201,8 +196,10 @@ final class VaultTabsUITests: XCTestCase {
     /// questions, and the vault on screen stays.
     func testLockedVaultOpensItsQuestions() {
         let app = launch(["-ApassyOpen", "decisions", "-ApassyPreviewDecisions", "locked"])
+        XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 15))
         let unlock = app.buttons["Unlock Family"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 15))
+        for _ in 0..<6 where !unlock.isHittable { app.swipeUp() }
+        XCTAssertTrue(unlock.exists)
         XCTAssertTrue(app.staticTexts["Family is locked. Unlock to see its questions."].exists)
         let family = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Home router"))
         XCTAssertFalse(family.firstMatch.exists)
@@ -211,7 +208,9 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeText("preview passphrase\n")
-        XCTAssertTrue(family.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10))
+        for _ in 0..<6 where !family.firstMatch.isHittable { app.swipeDown() }
+        XCTAssertTrue(family.firstMatch.exists)
         XCTAssertFalse(app.buttons["Unlock Family"].exists)
     }
 

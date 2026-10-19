@@ -26,13 +26,45 @@ struct DecisionsTests {
             digest: String(repeating: "ab", count: 32), waitingSeconds: waited)
     }
 
+    private static func questionID(_ qid: String) -> String {
+        question(qid, waited: 0).requestIdentity
+    }
+
+    private static func runID(_ id: String) -> String {
+        "run:11:unqualified:\(id):\(String(repeating: "ab", count: 32))"
+    }
+
+    @Test("relay row identity includes the vault even when qids collide")
+    func sourceQualifiedQuestions() {
+        var personal = Self.question("same", waited: 0)
+        personal.vaultID = "personal"
+        var work = personal
+        work.vaultID = "work"
+        let rows = Decisions.waiting(questions: [personal, work], runs: [], runTimeout: 120,
+            fetchedAt: nil, pairedMac: nil, now: Self.now)
+        #expect(Set(rows.map(\.id)).count == 2)
+    }
+
+    @Test("local identity includes trusted pairing and immutable digest")
+    func sourceQualifiedRuns() {
+        let run = Self.run("same", waited: 0)
+        let changed = PendingRun(id: run.id, agent: run.agent, command: run.command, cwd: run.cwd,
+            envNames: run.envNames, purpose: run.purpose, risk: run.risk, userRequest: run.userRequest,
+            requestSource: run.requestSource, agentRequest: run.agentRequest, remember: run.remember,
+            digest: String(repeating: "cd", count: 32), waitingSeconds: run.waitingSeconds)
+        let first = WaitingDecision(source: .run(run), createdAt: nil, deadline: nil, pairedDeviceID: "pair-a")
+        let anotherMac = WaitingDecision(source: .run(run), createdAt: nil, deadline: nil, pairedDeviceID: "pair-b")
+        let replacement = WaitingDecision(source: .run(changed), createdAt: nil, deadline: nil, pairedDeviceID: "pair-a")
+        #expect(Set([first.id, anotherMac.id, replacement.id]).count == 3)
+    }
+
     @Test("questions and runs are one list, newest first; a run of unknown age goes last")
     func mergedOrder() {
         let rows = Decisions.waiting(
             questions: [Self.question("q-old", waited: 200), Self.question("q-new", waited: 8)],
             runs: [Self.run("r-unknown", waited: nil), Self.run("r-mid", waited: 30)],
             runTimeout: 120, fetchedAt: Self.now, pairedMac: Self.mac, now: Self.now)
-        #expect(rows.map(\.id) == ["question-q-new", "run-r-mid", "question-q-old", "run-r-unknown"])
+        #expect(rows.map(\.id) == [Self.questionID("q-new"), Self.runID("r-mid"), Self.questionID("q-old"), Self.runID("r-unknown")])
     }
 
     @Test("an expired or settled question is not waiting")
@@ -42,7 +74,7 @@ struct DecisionsTests {
         let rows = Decisions.waiting(
             questions: [Self.question("expired", waited: 300), settled, Self.question("open", waited: 299)], runs: [],
             runTimeout: 120, fetchedAt: nil, pairedMac: Self.mac, now: Self.now)
-        #expect(rows.map(\.id) == ["question-open"])
+        #expect(rows.map(\.id) == [Self.questionID("open")])
     }
 
     @Test("a run that a question already shows is listed once, as the question")
@@ -54,7 +86,7 @@ struct DecisionsTests {
         let rows = Decisions.waiting(
             questions: [question], runs: [same], runTimeout: 120, fetchedAt: Self.now, pairedMac: Self.mac,
             now: Self.now)
-        #expect(rows.map(\.id) == ["question-q"])
+        #expect(rows.map(\.id) == [Self.questionID("q")])
         let both = Decisions.waiting(
             questions: [question], runs: [otherAgent], runTimeout: 120, fetchedAt: Self.now, pairedMac: Self.mac,
             now: Self.now)
@@ -81,7 +113,7 @@ struct DecisionsTests {
         let otherMac = Decisions.waiting(
             questions: [question], runs: [same], runTimeout: 120, fetchedAt: Self.now, pairedMac: "Mac Studio",
             now: Self.now)
-        #expect(otherMac.map(\.id) == ["question-q", "run-77"])
+        #expect(otherMac.map(\.id) == [Self.questionID("q"), Self.runID("77")])
         let unpaired = Decisions.waiting(
             questions: [question], runs: [same], runTimeout: 120, fetchedAt: Self.now, pairedMac: nil, now: Self.now)
         #expect(unpaired.count == 2)
@@ -92,7 +124,7 @@ struct DecisionsTests {
         let cut = Decisions.waiting(
             questions: [longQuestion], runs: [same], runTimeout: 120, fetchedAt: Self.now,
             pairedMac: String(long.prefix(40)), now: Self.now)
-        #expect(cut.map(\.id) == ["question-q"])
+        #expect(cut.map(\.id) == [Self.questionID("q")])
         #expect(Decisions.sameMac("Mac mini\n", "Mac mini"))
         #expect(!Decisions.sameMac("Mac mini", "Mac mini 2"))
         #expect(!Decisions.sameMac("", ""))

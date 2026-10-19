@@ -1,0 +1,28 @@
+{
+  "scope": "List-action revision, synthetic browser only",
+  "interaction_checks": 19,
+  "interaction_passed": 19,
+  "layout": [
+    {
+      "width": 320,
+      "count": 90,
+      "failures": []
+    },
+    {
+      "width": 390,
+      "count": 90,
+      "failures": []
+    },
+    {
+      "width": 728,
+      "count": 90,
+      "failures": []
+    },
+    {
+      "width": 1440,
+      "count": 90,
+      "failures": []
+    }
+  ],
+  "native_checks": "not run"
+}

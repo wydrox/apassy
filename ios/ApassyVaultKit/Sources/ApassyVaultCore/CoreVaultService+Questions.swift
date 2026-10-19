@@ -4,6 +4,14 @@ import Foundation
 // Questions through the relay over the core (contract ios-core-v1 section 5.10). The core refuses
 // these calls in the AutoFill extension.
 extension CoreVaultService {
+    public func requestHistory() async throws -> RequestHistorySnapshot {
+        try await call("request_history")
+    }
+
+    public func clearRequestHistory(vaultID: String) async throws {
+        try await call("clear_request_history", ["vault_id": vaultID])
+    }
+
     /// The questions of every vault that the core keeps (`vaults`), or of the selected vault with
     /// an older core.
     public func questionsList() async throws -> QuestionsList { try await call("questions_list") }
