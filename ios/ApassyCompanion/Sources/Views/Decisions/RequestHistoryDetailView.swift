@@ -21,7 +21,6 @@ struct RequestHistoryDetailView: View {
                         LabeledContent("Vault", value: model.historyVaults.first { $0.vaultID == entry.vaultID }?.vaultName ?? "Not available")
                         LabeledContent("Device", value: entry.deviceName)
                         LabeledContent("Action", value: entry.action.capitalized)
-                        LabeledContent("Environment", value: entry.production ? "Production or unconfirmed" : "Development")
                     }
                     Section("Answer and confirmation") {
                         if let selectedKind = entry.selectedKind {

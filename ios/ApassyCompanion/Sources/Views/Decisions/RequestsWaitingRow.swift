@@ -26,14 +26,15 @@ struct RequestsWaitingRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            NavigationLink(value: DecisionRoute.question(question.requestIdentity)) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(question.credentialTitle).font(.headline).fixedSize(horizontal: false, vertical: true)
+            RequestsRowLink(route: .question(question.requestIdentity)) {
+                RequestsRowSummary(
+                    title: question.credentialTitle,
+                    requester: question.card.map { AgentName.display($0.run.agent) },
+                    project: question.card?.question.project?.label,
+                    vault: question.vaultName ?? "Not reported",
+                    device: question.askerName
+                ) {
                     if let card = question.card {
-                        Text("\(AgentName.display(card.run.agent)) · \(card.question.project?.label ?? "Project not reported")")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        Text("Vault: \(question.vaultName ?? "Not reported") · \(question.askerName)")
-                            .font(.subheadline).foregroundStyle(.secondary)
                         Text("\(card.question.action.label) · \(Decisions.environment(card.question.items))")
                             .font(.subheadline.weight(.medium))
                         if card.question.items.count > 1 {
@@ -53,11 +54,7 @@ struct RequestsWaitingRow: View {
                             .accessibilityLabel("Expires at \(Date(timeIntervalSince1970: TimeInterval(question.expiresAt)).formatted(date: .omitted, time: .shortened))")
                     }
                 }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .accessibilityElement(children: .combine)
             }
-            .buttonStyle(.plain)
             if hasReceipt {
                 VStack(alignment: .leading, spacing: 6) {
                     if isSending {

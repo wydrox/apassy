@@ -43,7 +43,13 @@ final class RequestsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Allow Once"].exists)
         attach(app, "native-history-detail")
         app.navigationBars.buttons.firstMatch.tap()
-        app.swipeDown()
+        app.buttons["History options"].tap()
+        app.buttons["Allowed"].tap()
+        XCTAssertTrue(approved.exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Deploy token")).firstMatch.exists)
+        app.buttons["History options"].tap()
+        app.buttons["All"].tap()
+        openHistorySearch(app)
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap()
@@ -56,7 +62,7 @@ final class RequestsUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Denied"].exists)
         attach(app, "native-history-unconfirmed")
         app.navigationBars.buttons.firstMatch.tap()
-        if app.buttons["Close"].exists { app.buttons["Close"].tap() }
+        app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["History options"].waitForExistence(timeout: 5))
         app.buttons["History options"].tap()
         app.buttons["Clear Personal History"].tap()
@@ -70,15 +76,43 @@ final class RequestsUITests: XCTestCase {
     func testHistoryRetainsSearchWhenSwitchingDestinations() {
         let app = launch()
         app.segmentedControls.buttons["History"].tap()
-        app.swipeDown()
+        openHistorySearch(app)
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.tap()
         search.typeText("GitHub")
+        app.buttons["Done"].tap()
         app.segmentedControls.buttons["Waiting"].tap()
         XCTAssertFalse(app.searchFields.firstMatch.exists)
         app.segmentedControls.buttons["History"].tap()
+        openHistorySearch(app)
         XCTAssertEqual(app.searchFields.firstMatch.value as? String, "GitHub")
+    }
+
+    func testWaitingAndHistoryKeepTheSameNavigationLayout() {
+        let app = launch()
+        let picker = app.segmentedControls["requests.destination"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        let initialPicker = picker.frame
+        let title = app.navigationBars["Requests"].staticTexts["Requests"]
+        XCTAssertTrue(title.exists)
+        let initialTitle = title.frame
+        attach(app, "uniform-waiting-light")
+
+        picker.buttons["History"].tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "GitHub read token")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.searchFields.firstMatch.exists)
+        XCTAssertEqual(picker.frame.minY, initialPicker.minY, accuracy: 1)
+        XCTAssertEqual(picker.frame.minX, initialPicker.minX, accuracy: 1)
+        XCTAssertEqual(picker.frame.width, initialPicker.width, accuracy: 1)
+        XCTAssertEqual(title.frame.minY, initialTitle.minY, accuracy: 1)
+        XCTAssertEqual(title.frame.height, initialTitle.height, accuracy: 1)
+        attach(app, "uniform-history-light")
+
+        picker.buttons["Waiting"].tap()
+        XCTAssertEqual(picker.frame.minY, initialPicker.minY, accuracy: 1)
+        XCTAssertEqual(title.frame.minY, initialTitle.minY, accuracy: 1)
+        XCTAssertTrue(app.buttons["Review Stripe live"].exists)
     }
 
     func testAccessibilityTextKeepsActionsReachable() {
@@ -104,5 +138,11 @@ final class RequestsUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func openHistorySearch(_ app: XCUIApplication) {
+        app.buttons["History options"].tap()
+        app.buttons["Search History"].tap()
+        XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5))
     }
 }

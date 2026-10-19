@@ -17,16 +17,19 @@ struct RequestsAccessRow: View {
     @State private var tapGuard = AnswerGuard()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(request.itemName).font(.headline)
-            Text("\(AgentName.display(request.agent)) asks for access").font(.subheadline)
-            if let folder = CommandDisplay.folderTail(request.cwd) {
-                Text(folder).font(.subheadline).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            RequestsRowSummary(
+                title: request.itemName,
+                requester: AgentName.display(request.agent),
+                project: CommandDisplay.folderTail(request.cwd),
+                vault: nil,
+                device: session.macName
+            ) {
+                if !request.reason.isEmpty {
+                    Text("The agent says: \(request.reason)").font(.callout).foregroundStyle(.secondary)
+                }
+                Label("Review access on Mac", systemImage: "desktopcomputer").font(.subheadline)
             }
-            if !request.reason.isEmpty {
-                Text("The agent says: \(request.reason)").font(.callout).foregroundStyle(.secondary)
-            }
-            Label("Review access on Mac", systemImage: "desktopcomputer").font(.subheadline)
             if sending {
                 ProgressView("Sending denial…")
             } else if denied {

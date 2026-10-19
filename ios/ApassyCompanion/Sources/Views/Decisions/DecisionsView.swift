@@ -63,6 +63,7 @@ struct DecisionsView: View {
                     ForEach(Destination.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                .accessibilityIdentifier("requests.destination")
                 .padding(.horizontal)
                 .padding(.vertical, 8)
                 if destination == .waiting {
@@ -72,10 +73,14 @@ struct DecisionsView: View {
                 } else if let questions {
                     RequestsHistoryView(model: questions, query: $historyQuery, filter: $historyFilter)
                 } else {
-                    ContentUnavailableView("History unavailable", systemImage: "lock")
+                    RequestsList {
+                        ContentUnavailableView("History unavailable", systemImage: "lock")
+                            .listRowBackground(Color.clear)
+                    }
                 }
             }
             .navigationTitle("Requests")
+            .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbar }
             .navigationDestination(for: DecisionRoute.self) { route in
                 switch route {
@@ -167,7 +172,7 @@ struct DecisionsView: View {
         let waiting = waitingRows(now: now)
         let access = accessRows
         let hasUnavailableVaults = questions?.contexts.contains { $0.error != nil } ?? false
-        return List {
+        return RequestsList {
             if waiting.isEmpty && access.isEmpty && (questions?.lockedVaults.isEmpty ?? true) && !hasUnavailableVaults {
                 emptyWaiting
                     .listRowBackground(Color.clear)

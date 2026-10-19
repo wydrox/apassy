@@ -21,21 +21,18 @@ struct RequestsRunRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            NavigationLink(value: DecisionRoute.run(sourceID: session.requestSourceID, run: run)) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(run.envNames.isEmpty ? "Command request" : run.envNames.joined(separator: ", "))
-                        .font(.headline)
-                    Text("\(AgentName.display(run.agent)) · \(CommandDisplay.folderTail(run.cwd) ?? "Project not reported")")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                    Text(session.macName).font(.subheadline).foregroundStyle(.secondary)
+            RequestsRowLink(route: .run(sourceID: session.requestSourceID, run: run)) {
+                RequestsRowSummary(
+                    title: run.envNames.isEmpty ? "Command request" : run.envNames.joined(separator: ", "),
+                    requester: AgentName.display(run.agent),
+                    project: CommandDisplay.folderTail(run.cwd),
+                    vault: nil,
+                    device: session.macName
+                ) {
                     Text(CommandDisplay.line(run.command)).font(.callout.monospaced())
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .accessibilityElement(children: .combine)
             }
-            .buttonStyle(.plain)
             if sending {
                 ProgressView("Sending denial…")
             } else if denied {
