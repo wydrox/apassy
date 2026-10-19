@@ -4,6 +4,26 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-19
+
+The coordinated 0.5.6 release updates the iPhone app, Mac app, Linux CLI, browser extension, relay, and website together.
+
+### Changed
+
+- **iPhone, Requests:** Waiting and History share the same native list presentation. Review, Allow Once and Deny stay close to the waiting request; completed and unconfirmed attempts remain available in encrypted local history, with search and filters.
+- **iPhone, navigation:** Requests uses compact actions and the Waiting / History picker. Vault shows the active vault name and selector. Search uses its search field; folders, details and forms use compact contextual navigation titles.
+
+### Fixed
+
+- **Mac, receiving Requests:** a question that arrives before its key or trusted-device record now becomes visible after vault sync without reopening the vault. Receiving failures show a contextual message instead of an all-clear state. Expired and settled questions stay removed, and approvals still require a fresh owner check.
+- **iPhone, durable request history:** device-local history keys keep history readable across question-key rotation. Atomic migration preserves older history when its key is available; storage failures preserve encrypted data and block unsafe retries. Unconfirmed answers remain guarded against accidental duplicate sends.
+
+### Upgrade notes
+
+- Macs must be explicitly joined under Settings → Devices to receive each other's requests; opening the same synced vault alone does not enroll a device.
+- Updating from an earlier Requests test build migrates readable history forward. Older Requests test builds cannot read the new history format. If a required legacy key was already lost, encrypted history is preserved and reported as unavailable.
+- Extension, relay and Linux CLI receive the coordinated version bump without changing the request wire protocol.
+
 ## [0.5.5] - 2026-10-17
 
 The coordinated 0.5.5 release updates the iPhone app, Mac app, Linux CLI, browser extension, relay, and website together. The UX changes below require this version bump so installed 0.5.4 apps can receive them; rebuilding 0.5.4 is not an upgrade.
