@@ -12,7 +12,8 @@ import Testing
     }
     private func makeDonor(in root: URL) async throws -> (URL, VaultEntry) {
         let directory = root.appendingPathComponent("mac")
-        let mac = try CoreVaultService(dataDirectory: directory, deviceName: "Synthetic Mac", role: .app)
+        let mac = try CoreVaultService(dataDirectory: directory, deviceName: "Synthetic Mac", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         let vault = try await mac.createLocalVault(name: "Personal", passphrase: passphrase)
         _ = try await mac.save(id: nil, revision: nil, draft: ItemDraft(title: "Mac item", kind: .login,
             notes: "", tags: [], fields: [.named("username", "mac", secret: false),
@@ -29,7 +30,8 @@ import Testing
         let (provider, donor) = try await makeDonor(in: root)
         let files = LocalICloudFiles()
         let phoneDirectory = root.appendingPathComponent("phone")
-        let phone = try CoreVaultService(dataDirectory: phoneDirectory, deviceName: "Synthetic iPhone", role: .app, iCloudFiles: files)
+        let phone = try CoreVaultService(dataDirectory: phoneDirectory, deviceName: "Synthetic iPhone", role: .app, iCloudFiles: files,
+            historyKeyStore: CoreTestHistoryKeys().store)
         let imported = try await phone.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
         #expect(imported.id == donor.id)
         #expect(imported.isICloud)
@@ -45,7 +47,8 @@ import Testing
         #expect(status.message == "Saved to the iCloud file.")
         #expect(files.publications == 1)
         let reader = try CoreVaultService(dataDirectory: root.appendingPathComponent("reader"),
-            deviceName: "Synthetic Reader", role: .app, iCloudFiles: LocalICloudFiles())
+            deviceName: "Synthetic Reader", role: .app, iCloudFiles: LocalICloudFiles(),
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await reader.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
         #expect(Set(try await reader.items(archived: .no).map(\.title)) == ["Mac item", "Phone item"])
         // A restore cannot publish until the correct encrypted identity is unlocked.
@@ -69,7 +72,8 @@ import Testing
         let (provider, donor) = try await makeDonor(in: root)
         let directory = root.appendingPathComponent("phone")
         let phone = try CoreVaultService(dataDirectory: directory, deviceName: "Synthetic iPhone", role: .app,
-                                        iCloudFiles: LocalICloudFiles())
+            iCloudFiles: LocalICloudFiles(),
+            historyKeyStore: CoreTestHistoryKeys().store)
         let previous = try await phone.createLocalVault(name: "Previous", passphrase: passphrase)
         try Data("blocks directory creation".utf8).write(to: directory.appendingPathComponent("icloud-bookmarks"))
         await #expect(throws: (any Error).self) {
@@ -107,10 +111,12 @@ import Testing
         try FileManager.default.copyItem(at: provider, to: branchFile)
         let files = LocalICloudFiles()
         let phone = try CoreVaultService(dataDirectory: root.appendingPathComponent("phone"),
-            deviceName: "Phone", role: .app, iCloudFiles: files)
+            deviceName: "Phone", role: .app, iCloudFiles: files,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await phone.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
         let other = try CoreVaultService(dataDirectory: root.appendingPathComponent("other"),
-            deviceName: "Other", role: .app, iCloudFiles: LocalICloudFiles())
+            deviceName: "Other", role: .app, iCloudFiles: LocalICloudFiles(),
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await other.openICloudVault(url: branchFile, name: "Personal", passphrase: passphrase)
         for (service, label) in [(phone, "Phone"), (other, "Other")] {
             let original = try #require(try await service.items(archived: .no).first)
@@ -131,7 +137,8 @@ import Testing
         #expect(try CoordinatedICloudFileAccess.hash(branchFile) == originals[1])
 
         let reader = try CoreVaultService(dataDirectory: root.appendingPathComponent("reader"),
-            deviceName: "Reader", role: .app, iCloudFiles: LocalICloudFiles())
+            deviceName: "Reader", role: .app, iCloudFiles: LocalICloudFiles(),
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await reader.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
         let active = try await reader.items(archived: .no)
         #expect(Set(active.map(\.title)) == ["Mac item", "Phone addition", "Other addition"])
@@ -155,7 +162,8 @@ import Testing
         let (provider, _) = try await makeDonor(in: root)
         let files = LocalICloudFiles()
         let phone = try CoreVaultService(dataDirectory: root.appendingPathComponent("phone"),
-            deviceName: "Phone", role: .app, iCloudFiles: files)
+            deviceName: "Phone", role: .app, iCloudFiles: files,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await phone.openICloudVault(url: provider, name: "Personal", passphrase: passphrase)
         let conflict: URL
         if malformed {

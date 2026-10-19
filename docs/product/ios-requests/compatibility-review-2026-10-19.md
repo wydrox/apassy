@@ -1,5 +1,9 @@
 # Requests 0.5.5 internal build: compatibility gate
 
+This is the historical review of build 29873206. The replacement implementation
+and its current verification/distribution status are tracked in
+[the forward-update report](history-compatibility-fix-2026-10-19.md).
+
 **Decision: the user's no-regression condition is not met by build 29873206.**
 The build remains available in internal TestFlight; this review did not expire,
 remove, replace or redistribute it. Further publication is paused. Its earlier

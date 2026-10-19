@@ -10,8 +10,13 @@ struct RequestsHistoryView: View {
     @State private var showsSearch = false
 
     private var clearableVaults: [RequestHistoryVault] {
-        model.historyVaults.filter {
-            $0.availability == .unavailable || ($0.availability == .available && !$0.entries.isEmpty)
+        guard !model.historyLoading, model.historyError == nil else { return [] }
+        let now = Int64(Date().timeIntervalSince1970)
+        return model.historyVaults.filter { vault in
+            vault.availability == .available && !vault.entries.isEmpty
+                && !vault.entries.contains { entry in
+                    entry.attemptedAt != nil && entry.outcome == nil && entry.expiresAt > now
+                }
         }
     }
 
@@ -61,7 +66,11 @@ struct RequestsHistoryView: View {
     }
 
     private func clearHistory() {
-        guard let clearVaultID else { return }
+        guard let clearVaultID,
+            clearableVaults.contains(where: { $0.vaultID == clearVaultID }) else {
+            self.clearVaultID = nil
+            return
+        }
         Task { await model.clearLocalHistory(vaultID: clearVaultID) }
         self.clearVaultID = nil
     }

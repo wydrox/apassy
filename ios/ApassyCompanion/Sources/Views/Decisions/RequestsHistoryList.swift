@@ -43,7 +43,7 @@ struct RequestsHistoryList: View {
             if let error = model.historyError {
                 Section {
                     Label("Couldn’t refresh", systemImage: "exclamationmark.triangle")
-                    Text(error).font(.subheadline).foregroundStyle(.secondary)
+                    Text(historyMessage(for: error)).font(.subheadline).foregroundStyle(.secondary)
                     Button("Retry", action: refresh).frame(minHeight: 44)
                 }
             }
@@ -51,7 +51,9 @@ struct RequestsHistoryList: View {
                 Section {
                     Label("\(vault.vaultName) \(vault.availability == .locked ? "is locked" : "is unavailable")",
                         systemImage: vault.availability == .locked ? "lock" : "exclamationmark.triangle")
-                    if let error = vault.error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+                    if let error = vault.error {
+                        Text(historyMessage(for: error)).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
             }
             ForEach(grouped.keys.sorted(by: >), id: \.self) { day in
@@ -71,4 +73,17 @@ struct RequestsHistoryList: View {
     }
 
     private func refresh() { Task { await model.refreshHistory() } }
+
+    private func historyMessage(for error: String) -> LocalizedStringResource {
+        if error.contains("history_migration_blocked") {
+            return "History needs its previous key. Encrypted history is preserved."
+        }
+        if error.contains("history_key_missing") {
+            return "The history key is unavailable. Encrypted history is preserved."
+        }
+        if error.contains("history_storage_unavailable") {
+            return "History storage is unavailable. Encrypted history is preserved."
+        }
+        return "History couldn’t be read. Encrypted history is preserved."
+    }
 }

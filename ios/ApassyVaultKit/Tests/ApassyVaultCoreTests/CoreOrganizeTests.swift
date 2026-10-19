@@ -15,7 +15,8 @@ import Testing
     @Test func foldersPasteAndOptionsRoundTripThroughTheService() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         #expect(try await core.folders().isEmpty)
 
@@ -112,7 +113,8 @@ import Testing
     @Test func theAutoFillExtensionReadsFoldersOnly() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let app = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let app = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         _ = try await app.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         _ = try await app.createFolder(parent: nil, name: "Acme")
         try await app.suspend()

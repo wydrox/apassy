@@ -9,7 +9,8 @@ import Testing
     @Test func aLocalVaultRoundTripsThroughTheService() async throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "apassy-core-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
+        let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app,
+            historyKeyStore: CoreTestHistoryKeys().store)
         let empty = try await core.info()
         #expect(empty.vaults.isEmpty)
         #expect(empty.schema == 19)

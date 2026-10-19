@@ -142,6 +142,9 @@ pub(super) struct Context {
     /// The agent feeds of the Macs of this team (relay-feed-v1, `feed.rs`).
     pub(super) feed: super::feed::Mirror,
     history_error: bool,
+    // At most one old key, solely for retrying a v1 journal migration. NEVER used
+    // by Keys::open, signing, registration, or authority checks. Dropped on lock.
+    history_migration_key: Option<(String, Zeroizing<Vec<u8>>)>,
 }
 
 #[derive(Clone)]
@@ -204,6 +207,7 @@ impl State {
         vault_id: &str,
         keys: Keys,
         public_key: &[u8],
+        history_migration_key: Option<(String, Zeroizing<Vec<u8>>)>,
         member: impl FnOnce() -> CoreResult<RelayMember>,
     ) -> CoreResult<()> {
         if let Some(context) = self.contexts.get_mut(vault_id)
@@ -212,9 +216,13 @@ impl State {
             && context.member.public_key() == public_key
         {
             context.keys = Arc::new(keys);
+            context.history_migration_key = history_migration_key;
             return Ok(());
         }
         self.put(vault_id, Arc::new(member()?), keys);
+        if let Some(context) = self.contexts.get_mut(vault_id) {
+            context.history_migration_key = history_migration_key;
+        }
         Ok(())
     }
 
@@ -236,6 +244,7 @@ impl State {
             error: None,
             feed: super::feed::Mirror::default(),
             history_error: false,
+            history_migration_key: None,
         };
         if let Some(old) = self.contexts.insert(vault_id.to_owned(), context) {
             old.member.close();
@@ -996,6 +1005,121 @@ fn question_out(
 }
 
 impl Core {
+    fn history_provider(&self) -> CoreResult<&dyn super::request_history::HistoryKeyProvider> {
+        if !self.request_history_enabled {
+            return Err(CoreError::new(
+                "history_storage_unavailable",
+                "Local history storage is unavailable. Retry when storage is ready.",
+            ));
+        }
+        self.history_key_provider.as_deref().ok_or_else(|| {
+            CoreError::new(
+                "history_storage_unavailable",
+                "The device's history key provider is unavailable.",
+            )
+        })
+    }
+
+    // All callers hold the questions mutex and a live, authorized context. Provider
+    // output lives only for this operation; no local key survives lock or suspension.
+    fn history_load(
+        &self,
+        vault_id: &str,
+        key_id: &str,
+        key: &[u8],
+        at: u64,
+    ) -> CoreResult<super::request_history::Journal> {
+        super::request_history::load_local(
+            &self.paths.data_dir,
+            vault_id,
+            Some((key_id, key)),
+            self.history_provider()?,
+            at,
+        )
+    }
+
+    fn history_save(
+        &self,
+        vault_id: &str,
+        _key_id: &str,
+        _key: &[u8],
+        journal: &super::request_history::Journal,
+    ) -> CoreResult<()> {
+        super::request_history::save_local(
+            &self.paths.data_dir,
+            vault_id,
+            self.history_provider()?,
+            journal,
+        )
+    }
+
+    fn history_load_context(
+        &self,
+        vault_id: &str,
+        context: &Context,
+        at: u64,
+    ) -> CoreResult<super::request_history::Journal> {
+        let key = context
+            .history_migration_key
+            .as_ref()
+            .or(context.keys.key.as_ref())
+            .ok_or_else(CoreError::locked)?;
+        let result = self.history_load(vault_id, &key.0, &key.1, at);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == "history_migration_blocked")
+            && let Some(current) = &context.keys.key
+            && current.0 != key.0
+        {
+            return self.history_load(vault_id, &current.0, &current.1, at);
+        }
+        result
+    }
+
+    fn migrate_history_before_capture(
+        &self,
+        state: &mut State,
+        vault_id: &str,
+        new: &Keys,
+    ) -> Option<(String, Zeroizing<Vec<u8>>)> {
+        if !(self.request_history_enabled || self.request_history_required) || new.is_removed() {
+            return None;
+        }
+        // Retain only the journal migration key through transient errors. The new
+        // Keys always replaces relay authority, even while this migration is pending.
+        let context = state.contexts.get(vault_id);
+        let mut candidate = context
+            .and_then(|context| context.history_migration_key.as_ref())
+            .or_else(|| {
+                context
+                    .filter(|context| !context.keys.is_removed())
+                    .and_then(|context| context.keys.key.as_ref())
+            })
+            .or(new.key.as_ref())?
+            .clone();
+        let mut result = self.history_load(vault_id, &candidate.0, &candidate.1, now());
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == "history_migration_blocked")
+            && let Some(current) = &new.key
+            && current.0 != candidate.0
+        {
+            candidate = current.clone();
+            result = self.history_load(vault_id, &candidate.0, &candidate.1, now());
+        }
+        let may_need_legacy =
+            match super::request_history::legacy_key_id(&self.paths.data_dir, vault_id) {
+                Ok(Some(key_id)) => key_id == candidate.0,
+                Ok(None) => false,
+                Err(_) => true, // Do not discard the only candidate during transient I/O.
+            };
+        let retained = (result.is_err() && may_need_legacy).then_some(candidate);
+        if let Some(context) = state.contexts.get_mut(vault_id) {
+            context.history_error = result.is_err();
+        }
+        retained
+    }
+
     pub(super) fn questions_call(&self, op: &str, request: &str) -> CoreResult<String> {
         match op {
             "questions_list" => Ok(ok(&self.questions_list()?)),
@@ -1013,20 +1137,12 @@ impl Core {
                     .get_mut(&vault_id)
                     .filter(|context| !context.keys.is_removed())
                     .ok_or_else(CoreError::locked)?;
-                if let Some((key_id, key)) = &context.keys.key
-                    && let Ok(journal) = super::request_history::load(
-                        &self.paths.data_dir,
-                        &vault_id,
-                        key_id,
-                        key,
-                        now(),
-                    )
-                    && journal.entries.iter().any(|entry| {
-                        entry.attempted_at.is_some()
-                            && entry.outcome.is_none()
-                            && entry.expires_at > now()
-                    })
-                {
+                let journal = self.history_load_context(&vault_id, context, now())?;
+                if journal.entries.iter().any(|entry| {
+                    entry.attempted_at.is_some()
+                        && entry.outcome.is_none()
+                        && entry.expires_at > now()
+                }) {
                     return Err(CoreError::new(
                         "history_pending",
                         "Wait for the pending request to finish before clearing this vault's history.",
@@ -1195,9 +1311,12 @@ impl Core {
         let read = read_keys(vault)?;
         let mut state = guard(&self.questions);
         match read {
-            Some((membership, keys)) => state.keep(&vault_id, keys, &membership.public_key, || {
-                member_of(&membership)
-            }),
+            Some((membership, keys)) => {
+                let migration = self.migrate_history_before_capture(&mut state, &vault_id, &keys);
+                state.keep(&vault_id, keys, &membership.public_key, migration, || {
+                    member_of(&membership)
+                })
+            }
             None => {
                 if state.forget(&vault_id) {
                     self.save_push(&state);
@@ -1377,8 +1496,9 @@ impl Core {
         }
         match (read, member) {
             (Some((membership, keys)), Some(member)) => {
+                let migration = self.migrate_history_before_capture(&mut state, vault_id, &keys);
                 let mut member = Some(member);
-                state.keep(vault_id, keys, &membership.public_key, || {
+                state.keep(vault_id, keys, &membership.public_key, migration, || {
                     member
                         .take()
                         .ok_or_else(|| CoreError::internal("The device is missing."))
@@ -1700,16 +1820,12 @@ impl Core {
                 context.records.insert(record.qid.clone(), record);
                 changed = true;
             }
-            if self.request_history_enabled && !observed.is_empty() {
+            if (self.request_history_enabled || self.request_history_required)
+                && !observed.is_empty()
+            {
                 let saved = (|| -> CoreResult<()> {
                     let (key_id, key) = context.keys.key.as_ref().ok_or_else(CoreError::locked)?;
-                    let mut journal = super::request_history::load(
-                        &self.paths.data_dir,
-                        vault_id,
-                        key_id,
-                        key,
-                        now(),
-                    )?;
+                    let mut journal = self.history_load_context(vault_id, context, now())?;
                     for (entry, settle) in observed {
                         journal.observe(entry, settle);
                     }
@@ -1722,13 +1838,7 @@ impl Core {
                             record.answered = Some(kind);
                         }
                     }
-                    super::request_history::save(
-                        &self.paths.data_dir,
-                        vault_id,
-                        key_id,
-                        key,
-                        &journal,
-                    )
+                    self.history_save(vault_id, key_id, key, &journal)
                 })();
                 context.history_error = saved.is_err();
             }
@@ -1831,31 +1941,18 @@ impl Core {
                     error = Some("history_storage_unavailable");
                 } else if !context.keys.is_removed() {
                     if let Some((key_id, key)) = &context.keys.key {
-                        match super::request_history::load(
-                            &self.paths.data_dir,
-                            &vault.id,
-                            key_id,
-                            key,
-                            now(),
-                        ) {
+                        match self.history_load_context(&vault.id, context, now()) {
                             Ok(journal) if !context.history_error => {
                                 // Persist pruning so expired ciphertext is removed as well.
-                                if super::request_history::save(
-                                    &self.paths.data_dir,
-                                    &vault.id,
-                                    key_id,
-                                    key,
-                                    &journal,
-                                )
-                                .is_ok()
-                                {
+                                if self.history_save(&vault.id, key_id, key, &journal).is_ok() {
                                     availability = "available";
                                     entries = journal.entries;
                                 } else {
                                     error = Some("history_unavailable");
                                 }
                             }
-                            _ => error = Some("history_unavailable"),
+                            Err(failure) => error = Some(failure.code),
+                            Ok(_) => error = Some("history_unavailable"),
                         }
                     } else {
                         error = Some("sync_first");
@@ -1942,17 +2039,13 @@ impl Core {
             &card,
         )
         .map_err(CoreError::invalid)?;
-        if self.request_history_enabled {
+        if self.request_history_enabled || self.request_history_required {
             let mut state = guard(&self.questions);
             let context = state.context_mut(&using.vault_id, &using.member)?;
-            let (key_id, key) = context.keys.key.as_ref().ok_or_else(CoreError::locked)?;
-            let journal = super::request_history::load(
-                &self.paths.data_dir,
-                &using.vault_id,
-                key_id,
-                key,
-                now(),
-            )?;
+            if context.keys.is_removed() {
+                return Err(removed());
+            }
+            let journal = self.history_load_context(&using.vault_id, context, now())?;
             if !journal.permits_answer(&record.qid, &card.digest, &choice, time) {
                 return Err(CoreError::new(
                     "already_answered",
@@ -1987,6 +2080,26 @@ impl Core {
     }
 
     fn question_answer(&self, answer: &AnswerIn) -> CoreResult<Sent> {
+        let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
+        let bound_vault_id = using.vault_id;
+        let sending = {
+            let mut active = guard(&self.question_sending);
+            active.retain(|_, value| value.strong_count() > 0);
+            let slot = active
+                .entry((bound_vault_id.clone(), answer.qid.clone()))
+                .or_default();
+            match slot.upgrade() {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(std::sync::Mutex::new(()));
+                    *slot = Arc::downgrade(&lock);
+                    lock
+                }
+            }
+        };
+        // Preparation below revalidates the live context after waiting. Lock/removal
+        // never acquire this mutex and can still cancel a POST immediately.
+        let _sending = guard(&sending);
         let at = now();
         let time = answer
             .time
@@ -2001,6 +2114,9 @@ impl Core {
             return Err(CoreError::invalid("The answer has a time in the future."));
         }
         let (prepared, ready) = self.prepare_answer(answer, time)?;
+        if ready.using.vault_id != bound_vault_id {
+            return Err(wrong_vault());
+        }
         let member = &ready.using.member;
         let keys = &ready.using.keys;
         let signature = if prepared.needs_face_id {
@@ -2056,18 +2172,16 @@ impl Core {
             "ciphertext": encode_b64u(&sealed),
         });
         let path = format!("/v1/questions/{}/answers", ready.record.qid);
-        if self.request_history_enabled {
+        let mut fresh_intent = false;
+        if self.request_history_enabled || self.request_history_required {
             // Persist intent before POST. A lock during the network call cannot erase the
             // duplicate-answer guard, and a late success never recreates a removed journal.
             let mut state = guard(&self.questions);
             let context = state.context_mut(&ready.using.vault_id, member)?;
-            let mut journal = super::request_history::load(
-                &self.paths.data_dir,
-                &ready.using.vault_id,
-                key_id,
-                key,
-                now(),
-            )?;
+            if context.keys.is_removed() {
+                return Err(removed());
+            }
+            let mut journal = self.history_load_context(&ready.using.vault_id, context, now())?;
             // Another concurrent answer may have persisted its intent after preparation.
             if !journal.permits_answer(&ready.record.qid, &ready.digest, &ready.choice, time) {
                 return Err(CoreError::new(
@@ -2075,6 +2189,7 @@ impl Core {
                     "An answer was already sent. Wait for confirmation from the Mac.",
                 ));
             }
+            fresh_intent = journal.answered(&ready.record.qid, &ready.digest).is_none();
             let card = keys.open(&ready.record).map_err(unreadable)?;
             journal.observe(
                 super::request_history::Entry::observed(
@@ -2098,20 +2213,39 @@ impl Core {
                     "This answer could not be saved safely. Refresh the request.",
                 ));
             }
-            super::request_history::save(
-                &self.paths.data_dir,
-                &ready.using.vault_id,
-                key_id,
-                key,
-                &journal,
-            )?;
+            self.history_save(&ready.using.vault_id, key_id, key, &journal)?;
             if let Some(record) = context.records.get_mut(&ready.record.qid) {
                 record.answered = Some(ready.choice.kind());
             }
         }
-        let result = member
-            .call("POST", &path, Some(&body), Duration::ZERO)
-            .map_err(call_error)?;
+        let result = match member.call_answer_once(&path, &body) {
+            Ok(result) => result,
+            Err(error) => {
+                // A fresh 429 means this single POST was not accepted. A rejected
+                // retry must never erase an earlier accepted/lost-response intent.
+                if fresh_intent && matches!(&error, RelayCallError::Relay { status: 429, .. }) {
+                    let mut state = guard(&self.questions);
+                    if let Ok(context) = state.context_mut(&ready.using.vault_id, member)
+                        && !context.keys.is_removed()
+                    {
+                        let mut journal =
+                            self.history_load_context(&ready.using.vault_id, context, now())?;
+                        if journal.reject_fresh_attempt(
+                            &ready.record.qid,
+                            &ready.digest,
+                            &ready.choice,
+                            time,
+                        ) {
+                            self.history_save(&ready.using.vault_id, key_id, key, &journal)?;
+                            if let Some(record) = context.records.get_mut(&ready.record.qid) {
+                                record.answered = None;
+                            }
+                        }
+                    }
+                }
+                return Err(call_error(error));
+            }
+        };
         #[derive(Deserialize)]
         struct Posted {
             id: u64,
@@ -2125,15 +2259,12 @@ impl Core {
                 record.answered = Some(kind);
             }
             // POST acceptance only records delivery. It never creates an outcome.
-            if self.request_history_enabled {
+            if (self.request_history_enabled || self.request_history_required)
+                && !context.keys.is_removed()
+            {
                 let saved = (|| -> CoreResult<()> {
-                    let mut journal = super::request_history::load(
-                        &self.paths.data_dir,
-                        &ready.using.vault_id,
-                        key_id,
-                        key,
-                        now(),
-                    )?;
+                    let mut journal =
+                        self.history_load_context(&ready.using.vault_id, context, now())?;
                     if let Ok(card) = keys.open(&ready.record) {
                         journal.observe(
                             super::request_history::Entry::observed(
@@ -2147,13 +2278,7 @@ impl Core {
                     }
                     journal.sent(&ready.record.qid, &ready.digest, posted.at);
                     journal.prune(now());
-                    super::request_history::save(
-                        &self.paths.data_dir,
-                        &ready.using.vault_id,
-                        key_id,
-                        key,
-                        &journal,
-                    )
+                    self.history_save(&ready.using.vault_id, key_id, key, &journal)
                 })();
                 context.history_error = saved.is_err();
             }
@@ -2530,6 +2655,52 @@ struct Ready {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_migration_material_never_restores_old_authority_and_drops_with_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let core =
+            Core::new(&json!({"data_dir": directory.path(), "role": "app"}).to_string()).unwrap();
+        let device = apassy::sync::DeviceKey::generate().unwrap();
+        let member = RelayMember::new(
+            "https://relay.example",
+            "t_7k2m5q4x3c",
+            1,
+            device.pkcs8().unwrap().clone(),
+        )
+        .unwrap();
+        let vault_id = "11111111111111111111111111111111";
+        let keys = |byte| Keys {
+            team_id: "t_7k2m5q4x3c".into(),
+            device_id: 1,
+            key: Some((format!("key-{byte}"), Zeroizing::new(vec![byte; 32]))),
+            devices: Vec::new(),
+            own: None,
+            removed: false,
+            questions_only: true,
+        };
+        {
+            let mut state = guard(&core.questions);
+            state.put(vault_id, Arc::new(member), keys(7));
+            state
+                .keep(
+                    vault_id,
+                    keys(8),
+                    device.public_key(),
+                    Some(("key-7".into(), Zeroizing::new(vec![7; 32]))),
+                    || Err(CoreError::internal("Unexpected new membership.")),
+                )
+                .unwrap();
+            let context = state.contexts.get(vault_id).unwrap();
+            assert_eq!(context.keys.key.as_ref().unwrap().0, "key-8");
+            assert_eq!(context.keys.key.as_ref().unwrap().1.as_slice(), &[8; 32]);
+            assert_eq!(context.history_migration_key.as_ref().unwrap().0, "key-7");
+            assert_eq!(context.keys.own_row().unwrap_err().code, "not_registered");
+        }
+        // The lock/suspend path drops Context, including its Zeroizing migration key.
+        core.questions_drop_all().finish();
+        assert!(guard(&core.questions).contexts.is_empty());
+    }
 
     #[test]
     fn relay_refusals_have_their_codes() {

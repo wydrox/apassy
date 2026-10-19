@@ -1,6 +1,6 @@
 //! Local, metadata-only relay observations. No keys or plaintext journal leave the core.
 //! The caller holds the questions mutex for disk work, so lock/removal cannot race writes.
-//! A changed question key deliberately makes the old journal unavailable until cleared.
+//! Version 2 uses a device-local key independent of rotating relay question keys.
 use super::{
     config::valid_id,
     errors::{CoreError, CoreResult},
@@ -15,6 +15,20 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+
+/// Failure to retrieve a durable, device-local history key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryKeyError {
+    Missing,
+    Unavailable,
+}
+
+/// Called only while an authorized vault context is held. Implementations must never
+/// replace an existing key, and must not create one when `may_create` is false.
+pub trait HistoryKeyProvider: Send + Sync {
+    fn key(&self, vault_id: &str, may_create: bool)
+    -> Result<Zeroizing<[u8; 32]>, HistoryKeyError>;
+}
 
 pub(super) const RETENTION_DAYS: u64 = 30;
 pub(super) const MAX_ENTRIES: usize = 1000;
@@ -178,6 +192,32 @@ impl Journal {
         false
     }
 
+    pub fn reject_fresh_attempt(
+        &mut self,
+        qid: &str,
+        digest: &str,
+        choice: &envelope::Choice,
+        time: u64,
+    ) -> bool {
+        if !self.permits_answer(qid, digest, choice, time) {
+            return false;
+        }
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.qid == qid
+                && entry.digest == digest
+                && entry.sent_at.is_none()
+                && entry.outcome.is_none()
+        }) else {
+            return false;
+        };
+        entry.selected_kind = None;
+        entry.selected_environment = None;
+        entry.selected_item_id = None;
+        entry.attempted_at = None;
+        entry.answer_time = None;
+        true
+    }
+
     pub fn sent(&mut self, qid: &str, digest: &str, at: u64) {
         if let Some(entry) = self
             .entries
@@ -265,7 +305,7 @@ struct Sealed {
 fn unavailable() -> CoreError {
     CoreError::new(
         "history_unavailable",
-        "History could not be read or saved. Clear this vault's history to start again.",
+        "History could not be read or saved. Retry when local storage is available.",
     )
 }
 
@@ -288,17 +328,11 @@ fn aad(vault_id: &str, key_id: &str) -> Vec<u8> {
     format!("apassy-local-request-history-v1\0{vault_id}\0{key_id}").into_bytes()
 }
 
-pub(super) fn load(
-    data: &Path,
-    vault_id: &str,
-    key_id: &str,
-    key: &[u8],
-    at: u64,
-) -> CoreResult<Journal> {
+fn read_sealed(data: &Path, vault_id: &str) -> CoreResult<Option<Sealed>> {
     let path = path(data, vault_id)?;
     let metadata = match fs::symlink_metadata(&path) {
         Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Journal::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(unavailable()),
     };
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_FILE_BYTES {
@@ -313,15 +347,35 @@ pub(super) fn load(
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(unavailable());
     }
-    let sealed: Sealed = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-    if sealed.version != 1 || sealed.key_id != key_id {
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| unavailable())
+}
+
+/// Used only to limit in-memory migration material; no untrusted header grants
+/// authorization or permits discarding an unreadable journal.
+pub(super) fn legacy_key_id(data: &Path, vault_id: &str) -> CoreResult<Option<String>> {
+    Ok(read_sealed(data, vault_id)?
+        .filter(|sealed| sealed.version == 1)
+        .map(|sealed| sealed.key_id))
+}
+
+fn open_sealed(
+    sealed: Sealed,
+    vault_id: &str,
+    version: u32,
+    key_id: &str,
+    key: &[u8],
+    at: u64,
+) -> CoreResult<Journal> {
+    if sealed.version != version || sealed.key_id != key_id {
         return Err(unavailable());
     }
     let nonce = decode_b64u(&sealed.nonce).ok_or_else(unavailable)?;
     let ciphertext = decode_b64u(&sealed.ciphertext).ok_or_else(unavailable)?;
-    let plain = Zeroizing::new(
-        envelope::open(key, &nonce, &aad(vault_id, key_id), &ciphertext).ok_or_else(unavailable)?,
-    );
+    let aad = version_aad(version, vault_id, key_id);
+    let plain =
+        Zeroizing::new(envelope::open(key, &nonce, &aad, &ciphertext).ok_or_else(unavailable)?);
     let mut journal: Journal = serde_json::from_slice(&plain).map_err(|_| unavailable())?;
     if journal.entries.len() > MAX_ENTRIES
         || journal.entries.iter().any(|e| {
@@ -337,9 +391,123 @@ pub(super) fn load(
     Ok(journal)
 }
 
-pub(super) fn save(
+fn version_aad(version: u32, vault_id: &str, key_id: &str) -> Vec<u8> {
+    if version == 1 {
+        aad(vault_id, key_id)
+    } else {
+        format!("apassy-local-request-history-v2\0{vault_id}\0{key_id}").into_bytes()
+    }
+}
+
+fn local_key(
+    provider: &dyn HistoryKeyProvider,
+    vault_id: &str,
+    may_create: bool,
+) -> CoreResult<Zeroizing<[u8; 32]>> {
+    provider
+        .key(vault_id, may_create)
+        .map_err(|error| match error {
+            HistoryKeyError::Missing => CoreError::new(
+                "history_key_missing",
+                "This device's history key is missing. Existing history was preserved.",
+            ),
+            HistoryKeyError::Unavailable => CoreError::new(
+                "history_storage_unavailable",
+                "The device's history key is unavailable. Unlock the device and retry.",
+            ),
+        })
+}
+
+fn local_key_id(key: &[u8]) -> String {
+    format!("local-{}", apassy::vault::question_key_id(key))
+}
+
+pub(super) fn load_local(
     data: &Path,
     vault_id: &str,
+    legacy: Option<(&str, &[u8])>,
+    provider: &dyn HistoryKeyProvider,
+    at: u64,
+) -> CoreResult<Journal> {
+    match read_sealed(data, vault_id)? {
+        None => {
+            let _key = local_key(provider, vault_id, true)?;
+            Ok(Journal::default())
+        }
+        Some(sealed) if sealed.version == 2 => {
+            // An existing v2 ciphertext must NEVER cause replacement-key generation.
+            let key = local_key(provider, vault_id, false)?;
+            open_sealed(
+                sealed,
+                vault_id,
+                2,
+                &local_key_id(key.as_slice()),
+                key.as_slice(),
+                at,
+            )
+        }
+        Some(sealed) if sealed.version == 1 => {
+            let (key_id, key) = legacy.filter(|(id, _)| *id == sealed.key_id).ok_or_else(|| {
+                CoreError::new("history_migration_blocked", "History needs its previous question key. The encrypted history was preserved.")
+            })?;
+            let journal = open_sealed(sealed, vault_id, 1, key_id, key, at)?;
+            let local = local_key(provider, vault_id, true)?;
+            // Before rename, a failure leaves v1 intact; after rename the complete
+            // v2 ciphertext remains readable with the already-persisted local key.
+            save_version(
+                data,
+                vault_id,
+                2,
+                &local_key_id(local.as_slice()),
+                local.as_slice(),
+                &journal,
+            )?;
+            Ok(journal)
+        }
+        Some(_) => Err(unavailable()),
+    }
+}
+
+pub(super) fn save_local(
+    data: &Path,
+    vault_id: &str,
+    provider: &dyn HistoryKeyProvider,
+    journal: &Journal,
+) -> CoreResult<()> {
+    let key = local_key(provider, vault_id, false)?;
+    save_version(
+        data,
+        vault_id,
+        2,
+        &local_key_id(key.as_slice()),
+        key.as_slice(),
+        journal,
+    )
+}
+
+#[cfg(test)]
+fn load(data: &Path, vault_id: &str, key_id: &str, key: &[u8], at: u64) -> CoreResult<Journal> {
+    match read_sealed(data, vault_id)? {
+        None => Ok(Journal::default()),
+        Some(sealed) => open_sealed(sealed, vault_id, 1, key_id, key, at),
+    }
+}
+
+#[cfg(test)]
+fn save(
+    data: &Path,
+    vault_id: &str,
+    key_id: &str,
+    key: &[u8],
+    journal: &Journal,
+) -> CoreResult<()> {
+    save_version(data, vault_id, 1, key_id, key, journal)
+}
+
+fn save_version(
+    data: &Path,
+    vault_id: &str,
+    version: u32,
     key_id: &str,
     key: &[u8],
     journal: &Journal,
@@ -352,10 +520,10 @@ pub(super) fn save(
     let plain = Zeroizing::new(serde_json::to_vec(journal).map_err(|_| unavailable())?);
     let mut nonce = [0; 12];
     getrandom::fill(&mut nonce).map_err(|_| unavailable())?;
-    let sealed =
-        envelope::seal(key, &nonce, &aad(vault_id, key_id), &plain).ok_or_else(unavailable)?;
+    let sealed = envelope::seal(key, &nonce, &version_aad(version, vault_id, key_id), &plain)
+        .ok_or_else(unavailable)?;
     let bytes = serde_json::to_vec(&Sealed {
-        version: 1,
+        version,
         key_id: key_id.into(),
         nonce: encode_b64u(&nonce),
         ciphertext: encode_b64u(&sealed),
@@ -418,6 +586,165 @@ mod tests {
     const OTHER: &str = "22222222222222222222222222222222";
     const QID: &str = "oKGio6SlpqeoqaqrrK2urw";
     const AT: u64 = 1800000000;
+    struct Provider {
+        value: Result<[u8; 32], HistoryKeyError>,
+        calls: std::sync::Mutex<Vec<bool>>,
+    }
+    impl Provider {
+        fn new(value: Result<[u8; 32], HistoryKeyError>) -> Self {
+            Self {
+                value,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl HistoryKeyProvider for Provider {
+        fn key(
+            &self,
+            _vault_id: &str,
+            may_create: bool,
+        ) -> Result<Zeroizing<[u8; 32]>, HistoryKeyError> {
+            self.calls.lock().unwrap().push(may_create);
+            self.value.map(Zeroizing::new)
+        }
+    }
+
+    #[test]
+    fn legacy_fixture_migrates_atomically_and_survives_question_key_changes() {
+        let dir = directory_for_test();
+        let mut journal = Journal {
+            entries: vec![entry()],
+        };
+        assert!(journal.attempt(QID, &"a".repeat(64), &envelope::Choice::Deny, AT, AT));
+        // Exact pre-v2 format: no new field or key provider is needed to create it.
+        save(dir.path(), VAULT, "old-question-key", &[7; 32], &journal).unwrap();
+        let provider = Provider::new(Ok([41; 32]));
+        let migrated = load_local(
+            dir.path(),
+            VAULT,
+            Some(("old-question-key", &[7; 32])),
+            &provider,
+            AT,
+        )
+        .unwrap();
+        assert_eq!(migrated.entries, journal.entries);
+        let sealed = read_sealed(dir.path(), VAULT).unwrap().unwrap();
+        assert_eq!(sealed.version, 2);
+        assert!(
+            !String::from_utf8_lossy(&fs::read(path(dir.path(), VAULT).unwrap()).unwrap())
+                .contains("SYNTHETIC_PRIVATE_METADATA")
+        );
+        let restored = load_local(
+            dir.path(),
+            VAULT,
+            Some(("rotated-key", &[99; 32])),
+            &provider,
+            AT,
+        )
+        .unwrap();
+        assert_eq!(restored.entries, journal.entries);
+        assert!(!restored.permits_answer(QID, &"a".repeat(64), &envelope::Choice::ApproveOnce, AT));
+        assert_eq!(*provider.calls.lock().unwrap(), vec![true, false]);
+        // Older Requests beta fails closed rather than reading v2 as empty history.
+        assert!(load(dir.path(), VAULT, "old-question-key", &[7; 32], AT).is_err());
+    }
+
+    #[test]
+    fn failed_or_impossible_migration_preserves_v1_bytes_without_reset() {
+        let dir = directory_for_test();
+        save(
+            dir.path(),
+            VAULT,
+            "old-key",
+            &[7; 32],
+            &Journal {
+                entries: vec![entry()],
+            },
+        )
+        .unwrap();
+        let original = fs::read(path(dir.path(), VAULT).unwrap()).unwrap();
+        let unavailable = Provider::new(Err(HistoryKeyError::Unavailable));
+        assert_eq!(
+            load_local(
+                dir.path(),
+                VAULT,
+                Some(("old-key", &[7; 32])),
+                &unavailable,
+                AT
+            )
+            .err()
+            .unwrap()
+            .code,
+            "history_storage_unavailable"
+        );
+        assert_eq!(
+            fs::read(path(dir.path(), VAULT).unwrap()).unwrap(),
+            original
+        );
+        let provider = Provider::new(Ok([41; 32]));
+        assert_eq!(
+            load_local(
+                dir.path(),
+                VAULT,
+                Some(("new-key", &[8; 32])),
+                &provider,
+                AT
+            )
+            .err()
+            .unwrap()
+            .code,
+            "history_migration_blocked"
+        );
+        assert!(provider.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            fs::read(path(dir.path(), VAULT).unwrap()).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn existing_v2_never_recreates_missing_key_and_rejects_wrong_key_or_vault() {
+        let dir = directory_for_test();
+        let provider = Provider::new(Ok([41; 32]));
+        let journal = Journal {
+            entries: vec![entry()],
+        };
+        save_local(dir.path(), VAULT, &provider, &journal).unwrap();
+        let original = fs::read(path(dir.path(), VAULT).unwrap()).unwrap();
+        let missing = Provider::new(Err(HistoryKeyError::Missing));
+        assert_eq!(
+            load_local(dir.path(), VAULT, None, &missing, AT)
+                .err()
+                .unwrap()
+                .code,
+            "history_key_missing"
+        );
+        assert_eq!(*missing.calls.lock().unwrap(), vec![false]);
+        assert!(load_local(dir.path(), VAULT, None, &Provider::new(Ok([42; 32])), AT).is_err());
+        fs::write(path(dir.path(), OTHER).unwrap(), &original).unwrap();
+        assert!(load_local(dir.path(), OTHER, None, &provider, AT).is_err());
+        assert_eq!(
+            fs::read(path(dir.path(), VAULT).unwrap()).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn unreadable_journal_never_calls_provider_or_replaces_ciphertext() {
+        let dir = directory_for_test();
+        let provider = Provider::new(Ok([41; 32]));
+        fs::write(path(dir.path(), VAULT).unwrap(), b"damaged ciphertext").unwrap();
+        assert!(load_local(dir.path(), VAULT, None, &provider, AT).is_err());
+        assert!(provider.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            fs::read(path(dir.path(), VAULT).unwrap()).unwrap(),
+            b"damaged ciphertext"
+        );
+        fs::remove_file(path(dir.path(), VAULT).unwrap()).unwrap();
+        fs::create_dir(path(dir.path(), VAULT).unwrap()).unwrap();
+        assert!(load_local(dir.path(), VAULT, None, &provider, AT).is_err());
+        assert!(provider.calls.lock().unwrap().is_empty());
+    }
     fn directory_for_test() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("request-history")).unwrap();

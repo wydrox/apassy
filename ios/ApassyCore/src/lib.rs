@@ -10,4 +10,4 @@
 pub mod core;
 mod ffi;
 
-pub use core::Core;
+pub use core::{Core, HistoryKeyError, HistoryKeyProvider};

@@ -17,17 +17,50 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
     private let cloudSession = ICloudSession()
     private let cloud: ICloudVaultTransfer
     private let core: Pointer
+    // Owns the callback's unretained context until core_free has returned.
+    private let historyKeyStore: KeychainHistoryKeyStore?
     private let queue = DispatchQueue(label: "com.wydrox.apassy.core", qos: .userInitiated, attributes: .concurrent)
+
+    private static let historyKeyProvider: apassy_history_key_provider = { context, vaultID, mayCreate, output in
+        guard let context else { return 2 }
+        // Bound the C-string read and validate before it can become a Keychain account.
+        var idBytes: [UInt8] = []
+        for index in 0...64 {
+            let byte = vaultID[index]
+            if byte == 0 { break }
+            guard index < 64, byte == 45 || (48...57).contains(byte) || (97...102).contains(byte) else {
+                return 2
+            }
+            idBytes.append(UInt8(byte))
+        }
+        let id = String(decoding: idBytes, as: UTF8.self)
+        guard KeychainHistoryKeyStore.isValidVaultID(id) else { return 2 }
+        let store = Unmanaged<KeychainHistoryKeyStore>.fromOpaque(context).takeUnretainedValue()
+        switch store.key(vaultID: id, mayCreate: mayCreate) {
+        case .key(let key):
+            guard key.count == 32 else { return 2 }
+            key.copyBytes(to: output, count: 32)
+            return 0
+        case .missing:
+            return 1
+        case .unavailable:
+            return 2
+        }
+    }
 
     /// - Parameters:
     ///   - dataDirectory: the App Group data folder (`SharedContainer.dataDirectory()`).
     ///   - deviceName: the name that the relay and the Macs show for this iPhone.
+    ///   - historyKeyStore: an optional fake-backed store for synthetic tests.
     public init(dataDirectory: URL, deviceName: String, role: Role,
-                iCloudFiles: any ICloudFileAccess = CoordinatedICloudFileAccess()) throws {
+                iCloudFiles: any ICloudFileAccess = CoordinatedICloudFileAccess(),
+                historyKeyStore: KeychainHistoryKeyStore? = nil) throws {
         self.role = role
         self.cloud = ICloudVaultTransfer(directory: dataDirectory, files: iCloudFiles, session: cloudSession)
-        // Persistence is opt-in only after Foundation confirms backup exclusion. Failure
-        // disables history storage, without preventing access to the vault or live requests.
+        let keyStore = role == .app ? (historyKeyStore ?? KeychainHistoryKeyStore()) : nil
+        self.historyKeyStore = keyStore
+        // The app always requires history guards. Storage becomes available only
+        // after backup exclusion is verified; failure must not disable enforcement.
         var historyEnabled = false
         if role == .app {
             do {
@@ -48,20 +81,30 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         }
         let config: [String: Any] = [
             "request_history_enabled": historyEnabled,
+            "request_history_required": role == .app,
             "data_dir": dataDirectory.path(percentEncoded: false),
             "device_name": deviceName,
             "role": role.rawValue,
         ]
         let data = try JSONSerialization.data(withJSONObject: config)
         let text = String(decoding: data, as: UTF8.self)
-        guard let core = text.withCString({ apassy_core_new($0) }) else {
+        let pointer = text.withCString { config in
+            if let keyStore {
+                return apassy_core_new_with_history_key_provider(
+                    config, Self.historyKeyProvider, Unmanaged.passUnretained(keyStore).toOpaque())
+            }
+            return apassy_core_new(config)
+        }
+        guard let core = pointer else {
             throw VaultError(.internal, "The vault core did not start.")
         }
         self.core = Pointer(raw: core)
     }
 
     deinit {
-        apassy_core_free(core.raw)
+        withExtendedLifetime(historyKeyStore) {
+            apassy_core_free(core.raw)
+        }
     }
 
     // MARK: - The wire
