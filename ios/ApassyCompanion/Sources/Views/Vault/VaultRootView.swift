@@ -77,6 +77,7 @@ struct VaultFoldersView: View {
             }
         }
         .navigationTitle("Folders and tools")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -121,6 +122,7 @@ struct FavoritesView: View {
             }
         }
         .navigationTitle("Favorites")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

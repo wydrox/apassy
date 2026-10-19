@@ -59,6 +59,24 @@ xcodebuild -scheme ApassyCompanionKit -destination 'generic/platform=iOS' -deriv
 
 The Secure Enclave keys are compiled out of a simulator build (`#if !targetEnvironment(simulator)`). A simulator build uses `SoftwareKeys`, and `CompanionKeyStore.usesSecureEnclave` is false so the screen can say so. The Secure Enclave code cannot run in `swift test`; a device is the only place that shows Face ID.
 
+## Navigation titles
+
+Use compact native navigation chrome. The root tabs do not repeat their tab names
+as large headings:
+
+- Requests starts with its actions toolbar, Waiting / History picker and list.
+- Vault uses the active vault's name as a compact native menu with native toolbar sizing.
+  Selecting another vault uses `VaultModel.select`: lock first, then the existing
+  unlock screen. Never bypass owner authentication when switching from the toolbar.
+- Search uses the native search field without an extra Search heading or introductory
+  empty-state title. Keep search scoped to its own navigation stack.
+- Folders, details, settings and forms use inline contextual titles and the native
+  Back, Cancel or Done controls. Do not hide an entire navigation bar to remove a title.
+
+Use system Liquid Glass navigation and controls; keep content on readable native
+surfaces. Check Dynamic Type and native back navigation when changing these titles.
+See [compact-header verification](../docs/product/ios-requests/compact-headers-2026-10-19.md).
+
 ## The app
 
 `ApassyCompanion` is a SwiftUI app for iOS 26 (iPhone only) with the Liquid Glass design, and an AutoFill extension. It has no third-party code besides the vault core. Its bundle IDs are `com.wydrox.apassy.companion` and `com.wydrox.apassy.companion.autofill`, and its name on the home screen is Apassy.

@@ -20,6 +20,7 @@ struct FolderView: View {
             }
         }
         .navigationTitle(tree.folder(uuid)?.name ?? "Folder")
+        .navigationBarTitleDisplayMode(.inline)
         .navigationSubtitle(subtitle(tree))
         .toolbar {
             if let folder = tree.folder(uuid) {

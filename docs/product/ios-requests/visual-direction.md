@@ -53,3 +53,12 @@ This is a user requirement for implementation, not optional polish. Use master-p
 - Native screenshots and interaction checks must cover populated/empty lists, list actions, review, history, authentication return and confirmation, both at rest and while scrolling. HTML blur or screenshot resemblance cannot prove native compliance.
 
 Basis: apple-design `liquid-glass.md › The two layers`, `Where the material belongs`, `Color on glass` and `Review checklist`; swiftui-pro `design.md › Standard system styling` and accessibility guidance. Primary references: [Apple Materials](https://developer.apple.com/design/human-interface-guidelines/materials) and [Adopting Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass). Native verification has not yet been performed.
+
+## Accepted compact title policy — 2026-10-19
+
+The user removed repeated large root titles from the accepted direction. Requests
+uses a compact native action bar above Waiting / History. Vault shows the active
+vault name with a native selector. Search needs only its search field. Contextual
+child screens retain inline titles and standard navigation controls. This supersedes
+the large root headings in earlier screenshots and HTML proposals. See
+[implementation and native verification](compact-headers-2026-10-19.md).

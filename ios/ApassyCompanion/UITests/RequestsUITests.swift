@@ -8,7 +8,7 @@ final class RequestsUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-ApassyPreviewVault", "-ApassyPreviewUnlocked", "-ApassyOpen", "decisions", "-ApassyPreviewDecisions", "list"] + arguments
         app.launch()
-        XCTAssertTrue(app.navigationBars["Requests"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.segmentedControls["requests.destination"].waitForExistence(timeout: 15))
         return app
     }
 
@@ -94,10 +94,11 @@ final class RequestsUITests: XCTestCase {
         let picker = app.segmentedControls["requests.destination"]
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
         let initialPicker = picker.frame
-        let title = app.navigationBars["Requests"].staticTexts["Requests"]
-        XCTAssertTrue(title.exists)
-        let initialTitle = title.frame
-        attach(app, "uniform-waiting-light")
+        let bar = app.navigationBars.firstMatch
+        XCTAssertFalse(bar.staticTexts["Requests"].exists)
+        XCTAssertLessThanOrEqual(bar.frame.height, 64, "The root navigation bar must stay compact")
+        let initialBar = bar.frame
+        attach(app, "compact-waiting")
 
         picker.buttons["History"].tap()
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "GitHub read token")).firstMatch.waitForExistence(timeout: 5))
@@ -105,13 +106,14 @@ final class RequestsUITests: XCTestCase {
         XCTAssertEqual(picker.frame.minY, initialPicker.minY, accuracy: 1)
         XCTAssertEqual(picker.frame.minX, initialPicker.minX, accuracy: 1)
         XCTAssertEqual(picker.frame.width, initialPicker.width, accuracy: 1)
-        XCTAssertEqual(title.frame.minY, initialTitle.minY, accuracy: 1)
-        XCTAssertEqual(title.frame.height, initialTitle.height, accuracy: 1)
-        attach(app, "uniform-history-light")
+        XCTAssertFalse(bar.staticTexts["Requests"].exists)
+        XCTAssertEqual(bar.frame.minY, initialBar.minY, accuracy: 1)
+        XCTAssertEqual(bar.frame.height, initialBar.height, accuracy: 1)
+        attach(app, "compact-history")
 
         picker.buttons["Waiting"].tap()
         XCTAssertEqual(picker.frame.minY, initialPicker.minY, accuracy: 1)
-        XCTAssertEqual(title.frame.minY, initialTitle.minY, accuracy: 1)
+        XCTAssertEqual(bar.frame.height, initialBar.height, accuracy: 1)
         XCTAssertTrue(app.buttons["Review Stripe live"].exists)
     }
 

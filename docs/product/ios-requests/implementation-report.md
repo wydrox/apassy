@@ -1,7 +1,8 @@
 # Native Requests implementation
 
-Latest UI correction: [consistent Waiting and History](uniform-ui-2026-10-19.md)
+Latest UI correction: [compact headers and the active-vault selector](compact-headers-2026-10-19.md)
 (2026-10-19; native verification, not a new TestFlight build).
+The earlier [Waiting / History consistency correction](uniform-ui-2026-10-19.md) remains documented separately.
 
 Branch: `product/ios-requests`, based on `46e088dc69cc0d0d77dfad4849984867bd136d44`.
 User authorized implementation after accepting A as a wireframe. Versions remain 0.5.5; this work is not a release.

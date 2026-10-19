@@ -10,6 +10,7 @@ struct WatchtowerView: View {
     var body: some View {
         content
             .navigationTitle("Watchtower")
+            .navigationBarTitleDisplayMode(.inline)
             .refreshable { await vault.refreshWatchtower() }
             .task { await vault.refreshWatchtower() }
     }

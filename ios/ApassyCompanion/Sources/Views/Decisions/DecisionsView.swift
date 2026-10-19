@@ -79,8 +79,8 @@ struct DecisionsView: View {
                     }
                 }
             }
-            .navigationTitle("Requests")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbar }
             .navigationDestination(for: DecisionRoute.self) { route in
                 switch route {

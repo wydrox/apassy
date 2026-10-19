@@ -224,6 +224,7 @@ struct VaultTabView: View {
 /// Vault root renders this list directly; Folders also offers its unfiltered destination.
 struct ItemsView: View {
     @Environment(VaultModel.self) private var vault
+    @Environment(RootModel.self) private var root
     var isRoot = false
     @Environment(VaultUI.self) private var ui
     @State private var kind: ItemKind?
@@ -235,11 +236,13 @@ struct ItemsView: View {
     }
 
     var body: some View {
-        content
-            .navigationTitle(isRoot ? "Vault" : (kind?.pluralLabel ?? "All credentials"))
-            .navigationSubtitle(isRoot ? (vault.vault?.name ?? "") : subtitle)
+        navigationContent
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if isRoot {
+                    ToolbarItem(placement: .principal) {
+                        vaultSelector
+                    }
                     ToolbarItem(placement: .topBarLeading) {
                         Button {
                             ui.sheet = .settings
@@ -257,6 +260,59 @@ struct ItemsView: View {
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 ToolbarItem(placement: .topBarTrailing) { NewCredentialButton(folder: nil) }
             }
+    }
+
+    @ContentBuilder
+    private var navigationContent: some View {
+        if isRoot {
+            content
+                .navigationTitle(vault.vault?.name ?? "")
+        } else {
+            content
+                .navigationTitle(kind?.pluralLabel ?? "All credentials")
+                .navigationSubtitle(subtitle)
+        }
+    }
+
+    private var vaultSelector: some View {
+        Menu {
+            ForEach(vault.vaults) { entry in
+                Button {
+                    // Use the same transition as Settings: lock before switching,
+                    // then let the normal unlock screen authenticate the owner.
+                    Task { await vault.select(vaultID: entry.id) }
+                } label: {
+                    if entry.id == vault.vault?.id {
+                        Label(entry.name, systemImage: "checkmark")
+                    } else {
+                        Text(entry.name)
+                    }
+                }
+                .disabled(entry.id == vault.vault?.id)
+                .accessibilityIdentifier("vault.select.\(entry.id)")
+            }
+            Divider()
+            Button("Add another vault", systemImage: "plus") {
+                root.addVault()
+            }
+            .accessibilityIdentifier("vault.addAnother")
+        } label: {
+            HStack(spacing: 4) {
+                Text(vault.vault?.name ?? "")
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHidden(true)
+            }
+            // Fill the native inline title host without extending beyond its hit region.
+            .frame(minWidth: 36, minHeight: 36)
+            .contentShape(.rect)
+        }
+        .accessibilityLabel(vault.vault?.name ?? "")
+        .accessibilityHint("Choose a vault")
+        .accessibilityIdentifier("vault.selector")
     }
 
     private var content: some View {
@@ -361,7 +417,8 @@ struct SearchView: View {
         @Bindable var ui = ui
         NavigationStack {
             results
-                .navigationTitle("Search")
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
                 .vaultDestinations()
         }
         // Here, not on the TabView: there the field reached the stack of every tab, and on Vault,
@@ -373,9 +430,7 @@ struct SearchView: View {
     private var results: some View {
         let found = VaultQuery.search(vault.items, text: ui.searchText)
         if ui.searchText.trimmingCharacters(in: .whitespaces).isEmpty {
-            ContentUnavailableView(
-                "Search the vault", systemImage: "magnifyingglass",
-                description: Text("Find an item by its title, username, tag, or website."))
+            Color.clear
         } else if found.active.isEmpty, found.archived.isEmpty {
             ContentUnavailableView.search(text: ui.searchText)
         } else {

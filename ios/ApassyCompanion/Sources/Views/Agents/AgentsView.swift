@@ -58,6 +58,7 @@ struct AgentsView: View {
     private var page: some View {
         content
             .navigationTitle("Agent Access")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationSubtitle(subtitle)
     }
 
