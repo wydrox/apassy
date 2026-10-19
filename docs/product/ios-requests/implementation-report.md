@@ -8,6 +8,8 @@ The user explicitly selected an internal TestFlight **0.5.5** build with a new b
 
 Delivery is complete: **0.5.5 (29873206)** is `VALID` / `IN_BETA_TESTING` and available to Rafał's internal group. See the separate [TestFlight delivery evidence](testflight-delivery-2026-10-19.md). Physical-device acceptance remains pending.
 
+The later [compatibility review](compatibility-review-2026-10-19.md) found and reproduced a regression after question-key rotation. Build 29873206 does not meet the user's conditional no-regression acceptance; further publication is paused. The earlier test results below remain historical, incomplete coverage.
+
 ## Delivered behavior
 
 - Native Waiting / History navigation, system lists, segmented controls, menus, search and sheets. Liquid Glass is used through system navigation and controls; content rows are readable system surfaces.

@@ -118,5 +118,12 @@
     "Live relay uncertainty/reconnect",
     "Physical VoiceOver and largest-text flow"
   ],
-  "invitation_sent": false
+  "invitation_sent": false,
+  "subsequent_compatibility_review": {
+    "acceptance": "blocked",
+    "reason": "Synthetic test confirms history_unavailable after question-key rotation; valid new relay answer is not sent",
+    "report": "compatibility-review-2026-10-19.md",
+    "build_withdrawn": false,
+    "production_source_changed": false
+  }
 }

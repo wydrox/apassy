@@ -1,5 +1,12 @@
 # Requests A: internal TestFlight delivery
 
+**Subsequent compatibility gate failed:** a focused synthetic test confirmed that
+existing history blocks new relay answers after question-key rotation. Delivery
+below is historical fact, not safety acceptance. See the
+[compatibility review](compatibility-review-2026-10-19.md). Build 29873206 remains
+available; it has not been withdrawn, and installation is not recommended as
+satisfying the user's no-regression condition.
+
 **Available to Rafał: Apassy 0.5.5 (29873206).** App Store Connect readback on
 2026-10-19 at 07:00:59 UTC (09:00:59 CEST) confirmed `VALID`,
 `IN_BETA_TESTING`, the build's membership in the internal **Apassy** group,
