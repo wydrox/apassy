@@ -488,6 +488,17 @@ struct QuestionsModelTests {
         #expect(await fixture.service.currentPushToken() == nil)
     }
 
+    @Test("without a vault that sends requests through the relay, the status says so, not Apple")
+    func noRelayVaultStatus() async {
+        let fixture = Fixture()
+        await fixture.model.refresh()
+        await fixture.model.setNotifications(true)
+        #expect(fixture.model.notificationStatus == .noRelayVault)
+        #expect(!fixture.model.notificationCanRetry)
+        _ = await fixture.withQuestion()
+        #expect(fixture.model.notificationStatus == .registering)
+    }
+
     @Test("OS revocation and APNs failure are visible, and registration can recover")
     func effectiveNotificationStatus() async {
         let fixture = Fixture()

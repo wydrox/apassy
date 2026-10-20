@@ -1927,12 +1927,17 @@ impl Core {
 
     /// No relay call: only vault scopes already authorized in this session are decrypted.
     fn request_history(&self) -> CoreResult<String> {
-        self.questions_refresh()?;
+        let selected = self.questions_refresh()?;
         let vaults = guard(&self.list).vaults.clone();
         let state = guard(&self.questions);
         let mut output = Vec::new();
         for vault in vaults {
-            let mut availability = "locked";
+            // No context: the vault is locked, or it is open and has no questions team on
+            // this iPhone (requests are off). Never call an open vault locked.
+            let mut availability = match &selected {
+                Selected::Unlocked(id) if *id == vault.id => "off",
+                _ => "locked",
+            };
             let mut entries = Vec::new();
             let mut error: Option<&str> = None;
             if let Some(context) = state.contexts.get(&vault.id) {

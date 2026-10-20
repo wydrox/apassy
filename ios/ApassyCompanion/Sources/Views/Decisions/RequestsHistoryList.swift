@@ -49,8 +49,16 @@ struct RequestsHistoryList: View {
             }
             ForEach(model.historyVaults.filter { $0.availability != .available }, id: \.vaultID) { vault in
                 Section {
-                    Label("\(vault.vaultName) \(vault.availability == .locked ? "is locked" : "is unavailable")",
-                        systemImage: vault.availability == .locked ? "lock" : "exclamationmark.triangle")
+                    switch model.historyAvailability(vault) {
+                    case .off:
+                        Label("Requests are off for \(vault.vaultName)", systemImage: "bell.slash")
+                        Text("This iPhone doesn’t approve this vault’s requests, so it has no history. Connect a Mac in Waiting.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    case .locked:
+                        lockedRow(vault)
+                    default:
+                        Label("\(vault.vaultName) is unavailable", systemImage: "exclamationmark.triangle")
+                    }
                     if let error = vault.error {
                         Text(historyMessage(for: error)).font(.footnote).foregroundStyle(.secondary)
                     }
@@ -73,6 +81,30 @@ struct RequestsHistoryList: View {
     }
 
     private func refresh() { Task { await model.refreshHistory() } }
+
+    /// A vault whose questions are not open: Unlock opens them as in Waiting (Face ID, else the
+    /// passphrase sheet), then History reads again.
+    @ViewBuilder
+    private func lockedRow(_ vault: RequestHistoryVault) -> some View {
+        HStack(spacing: 12) {
+            Label("\(vault.vaultName) is locked", systemImage: "lock")
+            Spacer(minLength: 8)
+            if let locked = model.lockedVaults.first(where: { $0.id == vault.vaultID }) {
+                if model.opening.contains(locked.id) {
+                    ProgressView().accessibilityLabel("Opening \(locked.name)")
+                } else {
+                    Button("Unlock") {
+                        Task {
+                            await model.unlockTapped(locked)
+                            await model.refreshHistory()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Unlock \(locked.name)")
+                }
+            }
+        }
+    }
 
     private func historyMessage(for error: String) -> LocalizedStringResource {
         if error.contains("history_migration_blocked") {

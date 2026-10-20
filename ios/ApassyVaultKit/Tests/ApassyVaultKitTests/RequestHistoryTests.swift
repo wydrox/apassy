@@ -30,6 +30,23 @@ import Testing
         #expect(vault.availability == .locked)
     }
 
+    @Test func offScopeDecodesWithoutRows() throws {
+        let data = Data("""
+            {"vault_id":"vault","vault_name":"Synthetic","availability":"off","entries":[],"error":null}
+            """.utf8)
+        let vault = try JSONDecoder().decode(RequestHistoryVault.self, from: data)
+        #expect(vault.availability == .off)
+        #expect(vault.entries.isEmpty)
+    }
+
+    @Test func previewOpenVaultWithoutQuestionsIsOffAndLockedWhenLocked() async throws {
+        let service = PreviewVaultService()
+        _ = try await service.questionsList()
+        #expect(try await service.requestHistory().vaults[0].availability == .off)
+        try await service.lock()
+        #expect(try await service.requestHistory().vaults[0].availability == .locked)
+    }
+
     @Test func previewLockHidesSavedFixtureAndUnlockRestoresItThenClearDeletes() async throws {
         let service = PreviewVaultService()
         let entry = RequestHistoryEntry(id: "relay:\(vaultID):qid", vaultID: vaultID, qid: "qid",

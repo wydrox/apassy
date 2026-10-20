@@ -195,7 +195,8 @@ extension PreviewVaultService {
 
     /// Mirror the core's metadata selection with synthetic in-memory observations only.
     private func observeHistory(_ questions: [RemoteQuestion], vaultID: String) {
-        guard let vault = vaults.first(where: { $0.id == vaultID }) else { return }
+        // Nothing seen, nothing saved: an empty record would make a vault without questions available.
+        guard !questions.isEmpty, let vault = vaults.first(where: { $0.id == vaultID }) else { return }
         var saved = questionsState.history.first { $0.vaultID == vaultID }
             ?? RequestHistoryVault(vaultID: vaultID, vaultName: vault.name, availability: .available)
         guard saved.availability == .available else { return }
@@ -233,6 +234,12 @@ extension PreviewVaultService {
         if unlocked { questionsState.ownOpen = true }
         return RequestHistorySnapshot(vaults: vaults.map { vault in
             let accessible = vault.id == selected ? ownContext : questionsState.others.contains { $0.id == vault.id && $0.open && !$0.removed }
+            // As the core: an open selected vault without a questions team is off, not locked.
+            // A synthetic history fixture keeps the vault available for previews.
+            if vault.id == selected, unlocked, !questionsState.enabled,
+                !questionsState.history.contains(where: { $0.vaultID == vault.id }) {
+                return RequestHistoryVault(vaultID: vault.id, vaultName: vault.name, availability: .off)
+            }
             guard accessible else {
                 return RequestHistoryVault(vaultID: vault.id, vaultName: vault.name, availability: .locked)
             }
