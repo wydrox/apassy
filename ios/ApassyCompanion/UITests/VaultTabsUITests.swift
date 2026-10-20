@@ -144,6 +144,20 @@ final class VaultTabsUITests: XCTestCase {
         XCTAssertTrue(app.segmentedControls.buttons["History"].exists)
     }
 
+    /// TestFlight feedback 0.5.6: an unlocked vault without relay requests is off in History, not locked.
+    func testHistoryOfAnOpenVaultWithoutRelaySaysOffNotLocked() {
+        let app = launch(["-ApassyOpen", "decisions"])
+        XCTAssertTrue(app.segmentedControls["requests.destination"].waitForExistence(timeout: 15))
+        app.segmentedControls.buttons["History"].tap()
+        let off = app.staticTexts["Requests are off for Personal"].waitForExistence(timeout: 5)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "history-off"
+        shot.lifetime = .keepAlways
+        add(shot)
+        XCTAssertTrue(off)
+        XCTAssertFalse(app.staticTexts["Personal is locked"].exists)
+    }
+
     /// Fields remain useful without two unavailable Mac-only sections.
     func testCredentialLinksToAgentAccessWithoutMacOnlyPlaceholders() {
         let app = launch(["-ApassyOpen", "item:100"])

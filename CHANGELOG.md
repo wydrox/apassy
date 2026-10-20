@@ -13,6 +13,10 @@ The coordinated 0.5.7 release updates the iPhone app, Mac app, Linux CLI, browse
 - **iPhone, Requests History:** an unlocked vault that does not send its requests through the relay is no longer shown as locked. History says that requests are off for it. A vault whose requests are really locked has an Unlock button, as in Waiting.
 - **iPhone, notifications:** when no vault on the iPhone sends its requests through the relay, the notification status says so, instead of "Waiting for Apple to register this iPhone". Requests over Wi-Fi never notify.
 
+### Security
+
+- **All apps:** rustls-webpki 0.103.16 and webpki-root-certs 1.0.10, for RUSTSEC-2026-0382 and RUSTSEC-2026-0383 (distrusted emSign intermediates could be accepted).
+
 ### Upgrade notes
 
 - Push notifications need a vault that sends its questions through the relay: on the Mac, turn on Send questions through the relay in Settings > Devices, then connect the iPhone.

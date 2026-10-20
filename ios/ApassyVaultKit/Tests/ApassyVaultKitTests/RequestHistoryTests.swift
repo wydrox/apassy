@@ -41,6 +41,7 @@ import Testing
 
     @Test func previewOpenVaultWithoutQuestionsIsOffAndLockedWhenLocked() async throws {
         let service = PreviewVaultService()
+        _ = try await service.questionsList()
         #expect(try await service.requestHistory().vaults[0].availability == .off)
         try await service.lock()
         #expect(try await service.requestHistory().vaults[0].availability == .locked)
