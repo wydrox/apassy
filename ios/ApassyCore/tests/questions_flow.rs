@@ -607,6 +607,18 @@ fn removing_a_vault_takes_its_push_token_and_its_device_off_the_team() {
 }
 
 #[test]
+fn request_history_says_off_for_an_open_vault_without_a_questions_team() {
+    // The vault is unlocked but this iPhone is not attached: History must not call it locked.
+    let setup = setup_with_history(true);
+    let open = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(open["vaults"][0]["availability"], "off");
+    assert_eq!(open["vaults"][0]["entries"], json!([]));
+    call(&setup.core, json!({"op":"lock"}));
+    let locked = call(&setup.core, json!({"op":"request_history"}));
+    assert_eq!(locked["vaults"][0]["availability"], "locked");
+}
+
+#[test]
 fn request_history_survives_restart_hides_on_lock_and_never_invents_a_settle() {
     let mut setup = setup_with_history(true);
     attach(&setup);

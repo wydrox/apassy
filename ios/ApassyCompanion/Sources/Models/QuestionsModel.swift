@@ -855,6 +855,12 @@ final class QuestionsModel {
         }
     }
 
+    /// What History shows for `vault`. A vault that opened without a questions team has no context,
+    /// so the core calls it locked; it is off, as an open selected vault without a team is.
+    func historyAvailability(_ vault: RequestHistoryVault) -> RequestHistoryAvailability {
+        vault.availability == .locked && withoutQuestions.contains(vault.vaultID) ? .off : vault.availability
+    }
+
     /// Deletes only this vault's phone-observed metadata; it never sends a request answer.
     func clearLocalHistory(vaultID: String) async {
         guard historyVaults.contains(where: { $0.vaultID == vaultID && $0.availability != .locked }) else { return }

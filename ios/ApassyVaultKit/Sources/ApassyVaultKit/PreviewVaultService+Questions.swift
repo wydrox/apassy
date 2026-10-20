@@ -233,6 +233,12 @@ extension PreviewVaultService {
         if unlocked { questionsState.ownOpen = true }
         return RequestHistorySnapshot(vaults: vaults.map { vault in
             let accessible = vault.id == selected ? ownContext : questionsState.others.contains { $0.id == vault.id && $0.open && !$0.removed }
+            // As the core: an open selected vault without a questions team is off, not locked.
+            // A synthetic history fixture keeps the vault available for previews.
+            if vault.id == selected, unlocked, !questionsState.enabled,
+                !questionsState.history.contains(where: { $0.vaultID == vault.id }) {
+                return RequestHistoryVault(vaultID: vault.id, vaultName: vault.name, availability: .off)
+            }
             guard accessible else {
                 return RequestHistoryVault(vaultID: vault.id, vaultName: vault.name, availability: .locked)
             }

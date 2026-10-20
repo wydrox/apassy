@@ -19,8 +19,9 @@ public struct RequestHistorySnapshot: Decodable, Sendable, Equatable {
     }
 }
 
+/// `off`: the vault is open, but this iPhone does not answer its requests (no questions team).
 public enum RequestHistoryAvailability: String, Decodable, Sendable {
-    case available, locked, unavailable
+    case available, locked, off, unavailable
 }
 
 /// Locked/unavailable scopes carry no entries or counts. Unlock never happens implicitly.
