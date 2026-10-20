@@ -186,7 +186,8 @@ final class QuestionsModel {
     }
 
     enum NotificationStatus: Equatable {
-        case off, checking, permissionRequired, denied, registering, waitingForVault, ready, quiet
+        /// No vault on this iPhone sends its requests through the relay: nothing can notify.
+        case off, checking, permissionRequired, denied, noRelayVault, registering, waitingForVault, ready, quiet
         case failed(String)
     }
 
@@ -1256,6 +1257,9 @@ final class QuestionsModel {
         case .denied: notificationStatus = .denied
         case .allowed, .quiet:
             if let registrationFailure { notificationStatus = .failed(registrationFailure) }
+            // Checked before the token: without a relay vault iOS is never asked for one, and
+            // "Waiting for Apple" would blame the wrong side.
+            else if phase == .off && lockedVaults.isEmpty { notificationStatus = .noRelayVault }
             else if pushToken == nil { notificationStatus = .registering }
             else if pushTeams.isEmpty || !pushTeams.isSubset(of: tokenTeams) { notificationStatus = .waitingForVault }
             else { notificationStatus = notificationAuthorization == .quiet ? .quiet : .ready }
@@ -1268,6 +1272,8 @@ final class QuestionsModel {
         case .checking: "Checking notification settings…"
         case .permissionRequired: "Notification permission has not been granted. Retry to allow notifications."
         case .denied: "Notifications are off for Apassy in iOS Settings. Open Settings to allow them."
+        case .noRelayVault:
+            "No vault on this iPhone sends its requests through the relay, so nothing can notify you. On the Mac, turn on Send questions through the relay in Settings > Devices, then connect this iPhone. Requests over Wi-Fi never notify."
         case .registering: "Waiting for Apple to register this iPhone. Requests still appear in Apassy."
         case .waitingForVault: "Not connected to notifications yet. Unlock a connected vault to finish registration."
         case .ready: "Registered for notifications. Focus and scheduled delivery may delay alerts."
