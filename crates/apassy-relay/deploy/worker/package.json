@@ -1,6 +1,6 @@
 {
   "name": "apassy-relay-edge",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "private": true,
   "type": "module",
   "description": "The edge Worker of apassy-relay: forwards to the relay and adds the edge secret.",
