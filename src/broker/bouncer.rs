@@ -1340,8 +1340,10 @@ mod tests {
     }
 
     /// Synthetic inference responses, with no vault, provider, or command execution.
+    /// `None` holds a request open without replying, while accepting the next one.
+    /// This forces a real client timeout without delaying the retry's response.
     fn scripted_inference_server(
-        responses: Vec<(u16, &'static str, Duration)>,
+        responses: Vec<(u16, &'static str, Option<Duration>)>,
     ) -> (
         String,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1361,6 +1363,7 @@ mod tests {
         let seen = Arc::clone(&calls);
         let stopped = Arc::clone(&stop);
         let server = std::thread::spawn(move || {
+            let mut held_requests = Vec::new();
             for (status, body, delay) in responses {
                 let mut stream = loop {
                     if stopped.load(Ordering::SeqCst) {
@@ -1389,6 +1392,10 @@ mod tests {
                 let mut request = vec![0; length];
                 reader.read_exact(&mut request).expect("request body");
                 seen.fetch_add(1, Ordering::SeqCst);
+                let Some(delay) = delay else {
+                    held_requests.push(stream);
+                    continue;
+                };
                 std::thread::sleep(delay);
                 let _ = write!(
                     stream,
@@ -1405,8 +1412,11 @@ mod tests {
     #[test]
     fn the_default_inference_budget_accepts_a_slow_first_real_decision() {
         use std::sync::atomic::Ordering;
-        let (url, calls, stop, server) =
-            scripted_inference_server(vec![(200, VALID_INFERENCE, Duration::from_millis(5200))]);
+        let (url, calls, stop, server) = scripted_inference_server(vec![(
+            200,
+            VALID_INFERENCE,
+            Some(Duration::from_millis(5200)),
+        )]);
         let client = BouncerClient::new(&url).expect("client");
         assert!(matches!(
             client.evaluate(&request("")),
@@ -1425,27 +1435,23 @@ mod tests {
     fn a_transient_inference_timeout_retries_once_with_the_configured_budget() {
         use std::sync::atomic::Ordering;
         let (url, calls, stop, server) = scripted_inference_server(vec![
-            (200, VALID_INFERENCE, Duration::from_millis(300)),
-            (200, VALID_INFERENCE, Duration::ZERO),
+            (200, VALID_INFERENCE, None),
+            (200, VALID_INFERENCE, Some(Duration::ZERO)),
         ]);
         let client = BouncerClient::new(&url)
             .expect("client")
-            .with_timeout(Duration::from_millis(200));
+            .with_timeout(Duration::from_secs(1));
         let began = std::time::Instant::now();
-        assert!(matches!(
-            client.evaluate(&request("")),
-            BouncerVerdict::Scored { .. }
-        ));
-        assert!(
-            began.elapsed() >= Duration::from_millis(200),
-            "first attempt timed out"
-        );
-        assert!(
-            began.elapsed() < Duration::from_secs(2),
-            "retry stayed bounded"
-        );
+        let verdict = client.evaluate(&request(""));
+        let elapsed = began.elapsed();
         stop.store(true, Ordering::SeqCst);
         server.join().expect("server");
+        assert!(
+            matches!(verdict, BouncerVerdict::Scored { .. }),
+            "{verdict:?}"
+        );
+        assert!(elapsed >= Duration::from_secs(1), "first attempt timed out");
+        assert!(elapsed < Duration::from_secs(5), "retry stayed bounded");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -1453,9 +1459,9 @@ mod tests {
     fn inference_timeouts_stop_after_two_attempts() {
         use std::sync::atomic::Ordering;
         let (url, calls, stop, server) = scripted_inference_server(vec![
-            (200, VALID_INFERENCE, Duration::from_millis(300)),
-            (200, VALID_INFERENCE, Duration::from_millis(300)),
-            (200, VALID_INFERENCE, Duration::ZERO),
+            (200, VALID_INFERENCE, None),
+            (200, VALID_INFERENCE, None),
+            (200, VALID_INFERENCE, Some(Duration::ZERO)),
         ]);
         let client = BouncerClient::new(&url)
             .expect("client")
@@ -1491,8 +1497,8 @@ mod tests {
             (200, VALID_INFERENCE, "another-model"),
         ] {
             let (url, calls, stop, server) = scripted_inference_server(vec![
-                (status, body, Duration::ZERO),
-                (200, VALID_INFERENCE, Duration::ZERO),
+                (status, body, Some(Duration::ZERO)),
+                (200, VALID_INFERENCE, Some(Duration::ZERO)),
             ]);
             let client = BouncerClient::new(&url).expect("client").expect_model(pin);
             assert!(matches!(
