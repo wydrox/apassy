@@ -380,29 +380,10 @@ fn certain_command(argv: &[String]) -> bool {
 /// `--config-env`, or an unknown global option, and not for an unknown subcommand (an
 /// alias can run a program).
 fn git_certain(args: &[String]) -> bool {
-    let mut i = 0;
-    while let Some(arg) = args.get(i) {
-        match arg.as_str() {
-            "-C" => i += 2,
-            "--no-pager"
-            | "-P"
-            | "--no-optional-locks"
-            | "--bare"
-            | "--literal-pathspecs"
-            | "--no-replace-objects" => i += 1,
-            a if a.starts_with("--git-dir=")
-                || a.starts_with("--work-tree=")
-                || a.starts_with("--namespace=") =>
-            {
-                i += 1
-            }
-            a if a.starts_with('-') => return false,
-            _ => break,
-        }
-    }
-    let Some(sub) = args.get(i) else {
+    let Some(i) = git_subcommand(args) else {
         return false;
     };
+    let sub = &args[i];
     let rest = &args[i + 1..];
     let first = rest.first().map(String::as_str);
     if git(args) != Change {
@@ -432,6 +413,36 @@ fn git_certain(args: &[String]) -> bool {
         "config" => !rest.iter().any(|a| a == "-e" || a == "--edit"),
         _ => false,
     }
+}
+
+/// The subcommand after the fixed list of Git global options. Path values are
+/// operands, never subcommands; config overrides and unknown options cannot make
+/// either classification or production certainty skip ahead to a read.
+fn git_subcommand(args: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "-C" | "--git-dir" | "--work-tree" => {
+                args.get(i + 1)?;
+                i += 2;
+            }
+            "--no-pager"
+            | "-P"
+            | "--no-optional-locks"
+            | "--bare"
+            | "--literal-pathspecs"
+            | "--no-replace-objects" => i += 1,
+            a if a.starts_with("--git-dir=")
+                || a.starts_with("--work-tree=")
+                || a.starts_with("--namespace=") =>
+            {
+                i += 1
+            }
+            a if a.starts_with('-') => return None,
+            _ => break,
+        }
+    }
+    args.get(i).map(|_| i)
 }
 
 /// `gh` and `glab`: the read list, `api` with `DELETE`, and the explicit changes of a
@@ -1623,32 +1634,10 @@ fn script_commands(script: &str) -> Vec<Vec<String>> {
 
 /// `git`: a fixed list of read subcommands; `push` is a deploy or a delete.
 fn git(args: &[String]) -> ActionKind {
-    // Global options before the subcommand.
-    let mut i = 0;
-    while let Some(arg) = args.get(i) {
-        match arg.as_str() {
-            // `-c` and `--config-env` set any setting, also a program to run.
-            "-c" | "--config-env" => return Change,
-            "-C" => i += 2,
-            "--no-pager"
-            | "-P"
-            | "--no-optional-locks"
-            | "--bare"
-            | "--literal-pathspecs"
-            | "--no-replace-objects" => i += 1,
-            a if a.starts_with("--git-dir=")
-                || a.starts_with("--work-tree=")
-                || a.starts_with("--namespace=") =>
-            {
-                i += 1
-            }
-            a if a.starts_with('-') => return Change,
-            _ => break,
-        }
-    }
-    let Some(sub) = args.get(i) else {
+    let Some(i) = git_subcommand(args) else {
         return Change;
     };
+    let sub = &args[i];
     let rest = &args[i + 1..];
     let has = |words: &[&str]| rest.iter().any(|a| words.contains(&a.as_str()));
     let first = rest.first().map(String::as_str);
@@ -1706,7 +1695,7 @@ fn git(args: &[String]) -> ActionKind {
         }
         _ => false,
     };
-    if read && plain_args("git", rest) {
+    if read && plain_args("git", args) {
         Read
     } else {
         Change

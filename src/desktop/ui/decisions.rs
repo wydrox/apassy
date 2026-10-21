@@ -59,7 +59,8 @@ use super::folders::FolderTree;
 use super::kit::{self, Font, Icon, Style, Tone};
 use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
-    AnswerKind, ApprovalQueue, PendingRun, QuestionInfo, QuestionItem, StricterAnswer, shown_path,
+    AnswerKind, ApprovalQueue, EvaluationOffer, PendingRun, QuestionInfo, QuestionItem,
+    StricterAnswer, shown_path,
 };
 use crate::broker::server::QUESTION_WAIT;
 use crate::contracts::CredentialKind;
@@ -69,11 +70,12 @@ use crate::desktop::{BrokerState, DesktopApp};
 use crate::questions::{
     AnswerError, AnswerReceipt, Choice, RemoteEnvironment, RemoteQuestion, remote_owner_action,
 };
-use crate::vault::Environment;
 use crate::vault::agent_items::{
     Correction, CorrectionAnswer, CorrectionKind, CredentialRequest, RAISED_FROM_FACT,
 };
+use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::detect::{self, Detected};
+use crate::vault::{Environment, RiskLevel};
 
 /// The color of the time left, as in the mockup (#c86a00).
 const TIMER: egui::Color32 = egui::Color32::from_rgb(200, 106, 0);
@@ -162,6 +164,39 @@ pub(crate) struct State {
     paste: Paste,
     /// The answers to questions of other Macs that go to the relay now.
     sending: Sending,
+    /// An immutable offer snapshot with only the owner's classification edits.
+    evaluation: Option<EvaluationDraft>,
+}
+
+impl State {
+    pub(crate) fn forget_evaluation(&mut self) {
+        self.evaluation = None;
+    }
+}
+
+#[derive(Debug)]
+struct EvaluationDraft {
+    run_id: u64,
+    offer: EvaluationOffer,
+    confirmations: Vec<EvaluationConfirmation>,
+    expanded: bool,
+    stale: bool,
+}
+
+impl EvaluationDraft {
+    fn new(run_id: u64, offer: EvaluationOffer) -> Self {
+        Self {
+            run_id,
+            confirmations: offer
+                .items
+                .iter()
+                .map(|item| item.confirmation.clone())
+                .collect(),
+            offer,
+            expanded: false,
+            stale: false,
+        }
+    }
 }
 
 /// What waits for the owner, in the order of the list.
@@ -249,6 +284,11 @@ pub(super) enum Primary {
 pub(super) enum Answer {
     Deny,
     Once,
+    /// Allow this run once and separately authorize later model evaluation.
+    Evaluate {
+        offer: EvaluationOffer,
+        confirmations: Vec<EvaluationConfirmation>,
+    },
     InProject(ActionKind),
     Production(ActionKind),
     /// Mark the credential as development: the owner check first.
@@ -765,6 +805,7 @@ pub(super) fn selected_key(app: &DesktopApp) -> Option<Key> {
 /// Select a decision, as a click on its row does.
 #[cfg(test)]
 pub(super) fn select_key(app: &mut DesktopApp, key: Key) {
+    app.ui.decisions.forget_evaluation();
     app.ui.decisions.routed = false;
     app.ui.decisions.show_activity = false;
     app.ui.decisions.activity_id = None;
@@ -792,8 +833,18 @@ pub(super) fn disconnecting(app: &DesktopApp) -> bool {
     app.ui.decisions.disconnect.is_some()
 }
 
+#[cfg(test)]
+pub(super) fn evaluation_confirmations(app: &DesktopApp) -> Option<Vec<EvaluationConfirmation>> {
+    app.ui
+        .decisions
+        .evaluation
+        .as_ref()
+        .map(|draft| draft.confirmations.clone())
+}
+
 /// Select a question, for example from the banner of another view.
 pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
+    app.ui.decisions.forget_evaluation();
     app.ui.decisions.routed = false;
     app.ui.decisions.show_activity = false;
     app.ui.decisions.activity_id = None;
@@ -809,6 +860,7 @@ pub(super) fn route_notification(
     use crate::desktop::inbox::EventKey;
     use crate::desktop::notify::NotificationDestination;
     app.ui.decisions.paste.erase();
+    app.ui.decisions.forget_evaluation();
     app.ui.decisions.disconnect = None;
     app.ui.decisions.form = None;
     app.ui.decisions.routed = true;
@@ -851,6 +903,13 @@ fn sync_selection(state: &mut State, open: &Open) {
     } else {
         next_selection(&keys, state.selected, state.index)
     };
+    if state
+        .evaluation
+        .as_ref()
+        .is_some_and(|draft| state.selected != Some(Key::Run(draft.run_id)))
+    {
+        state.forget_evaluation();
+    }
     if let Some(selected) = state.selected {
         state.index = keys.iter().position(|key| *key == selected).unwrap_or(0);
     }
@@ -984,6 +1043,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         history = kit::small_button(ui, "Activity", Style::Bordered).clicked();
     });
     if history {
+        app.ui.decisions.forget_evaluation();
         app.ui.decisions.selected = None;
         app.ui.decisions.routed = true;
         app.ui.decisions.activity_id = None;
@@ -1051,6 +1111,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     }
     ui.allocate_rect(area, Sense::hover());
     if let Some(key) = chosen {
+        app.ui.decisions.forget_evaluation();
         app.ui.decisions.routed = false;
         app.ui.decisions.show_activity = false;
         app.ui.decisions.activity_id = None;
@@ -1284,6 +1345,7 @@ fn question_detail(
     pending: &[PendingRun],
     current: Waiting,
 ) {
+    prepare_evaluation(app, current.run.id);
     let mut answer = None;
     columns::detail_toolbar(ui, |ui| more_menu(ui, &current.run, &mut answer));
     bottom_bar(ui, ("decision-bar", current.run.id), |ui| {
@@ -1318,6 +1380,7 @@ fn remote_detail(
     pending: &[PendingRun],
     remote: RemoteWaiting,
 ) {
+    app.ui.decisions.forget_evaluation();
     let run = remote.run().clone();
     let mut answer = None;
     columns::detail_toolbar(ui, |ui| more_menu(ui, &run, &mut answer));
@@ -1620,6 +1683,144 @@ fn unconfirmed(run: &PendingRun) -> Option<&QuestionItem> {
     run.question.items.iter().find(|item| item.unconfirmed)
 }
 
+/// A queued offer is a snapshot. Changed scope details require an explicit review;
+/// they never replace classification edits while the owner is reading the question.
+fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
+    let offer = (!app.owner_ui.session.is_locked())
+        .then(|| queue(app).and_then(|(queue, _)| queue.evaluation_offer(run_id)))
+        .flatten();
+    let Some(offer) = offer else {
+        app.ui.decisions.forget_evaluation();
+        return;
+    };
+    match app.ui.decisions.evaluation.as_mut() {
+        Some(draft) if draft.run_id == run_id => {
+            if draft.offer != offer {
+                draft.stale = true;
+            }
+        }
+        _ => app.ui.decisions.evaluation = Some(EvaluationDraft::new(run_id, offer)),
+    }
+}
+
+fn evaluation_panel(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    run: &PendingRun,
+    answer: &mut Option<Answer>,
+) {
+    let Some(draft) = app.ui.decisions.evaluation.as_mut() else {
+        return;
+    };
+    ui.add_space(12.0);
+    kit::disclosure(ui, &mut draft.expanded, "Let the bouncer decide next time");
+    if !draft.expanded {
+        return;
+    }
+    if draft.stale {
+        kit::tone_note(
+            ui,
+            "The permission details changed. Review them again before enabling the bouncer.",
+            Tone::Warning,
+        );
+        let run_id = draft.run_id;
+        if kit::small_button(ui, "Review updated details", Style::Bordered).clicked() {
+            app.ui.decisions.forget_evaluation();
+            prepare_evaluation(app, run_id);
+            if let Some(draft) = app.ui.decisions.evaluation.as_mut() {
+                draft.expanded = true;
+            }
+        }
+        return;
+    }
+    kit::section(
+        ui,
+        None,
+        Some(
+            "Confirm each credential's environment and risk. This run is allowed once; matching later requests are evaluated by the model. Production, always-ask, and hard checks still apply.",
+        ),
+        |s| {
+            s.labeled(
+                "Agent",
+                kit::text(
+                    format!("{} (ID {})", run.agent, draft.offer.agent_id),
+                    Font::Body,
+                ),
+            );
+            s.labeled("Project", kit::text(&draft.offer.project.label, Font::Body));
+            s.labeled(
+                "Project folder",
+                kit::text(&draft.offer.project.key, Font::Mono),
+            );
+            s.labeled(
+                "Action",
+                kit::text(action_label(draft.offer.action), Font::Body),
+            );
+            for (item, confirmation) in draft.offer.items.iter().zip(&mut draft.confirmations) {
+                s.row(|ui| {
+                    ui.label(kit::medium(&item.name, Font::Body));
+                });
+                s.field("Environment", |ui| {
+                    egui::ComboBox::from_id_salt((
+                        "evaluation-environment",
+                        draft.run_id,
+                        confirmation.item_id,
+                    ))
+                    .selected_text(environment_label(confirmation.environment))
+                    .show_ui(ui, |ui| {
+                        for value in Environment::ALL {
+                            ui.selectable_value(
+                                &mut confirmation.environment,
+                                *value,
+                                environment_label(*value),
+                            );
+                        }
+                    })
+                    .response
+                });
+                s.field("Risk", |ui| {
+                    egui::ComboBox::from_id_salt((
+                        "evaluation-risk",
+                        draft.run_id,
+                        confirmation.item_id,
+                    ))
+                    .selected_text(confirmation.risk.as_str())
+                    .show_ui(ui, |ui| {
+                        for value in RiskLevel::ALL {
+                            ui.selectable_value(&mut confirmation.risk, *value, value.as_str());
+                        }
+                    })
+                    .response
+                });
+                s.labeled(
+                    "Hosts",
+                    kit::text(
+                        if confirmation.hosts.is_empty() {
+                            "No destination host".to_owned()
+                        } else {
+                            confirmation.hosts.join(", ")
+                        },
+                        Font::Mono,
+                    ),
+                );
+            }
+            if draft.offer.command_binding.is_some() {
+                s.labeled("Applies to", kit::text("Only this exact command, execution context and directly selected script version.", Font::Body));
+            }
+            s.row(|ui| {
+                if kit::small_button(ui, "Allow once and enable bouncer", Style::Prominent)
+                    .clicked()
+                {
+                    *answer = Some(Answer::Evaluate {
+                        offer: draft.offer.clone(),
+                        confirmations: draft.confirmations.clone(),
+                    });
+                }
+            });
+        },
+    );
+}
+
 /// The bar at the bottom: Deny on the left; a caption; Allow Once; the main answer.
 fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) {
     let question = &run.question;
@@ -1627,12 +1828,12 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
     let main_label = primary_label(question);
     let caption = match (main, &question.project) {
         (Some(Primary::InProject(_)), Some(project)) => format!(
-            "Allow is remembered for all agents in {}.",
+            "All agents in {} · from the next matching use.",
             short(&project.label)
         ),
         // The button names the action; the caption stays on two lines next to it.
         (Some(Primary::Production(_)), Some(project)) => format!(
-            "Production stays allowed for all agents in {}.",
+            "Production allowance in {} · all agents · next matching use.",
             short(&project.label)
         ),
         (Some(Primary::Correct), _) => unconfirmed(run).map_or_else(String::new, |item| {
@@ -1872,6 +2073,9 @@ fn draw_question(
     kit::section(ui, None, None, |s| {
         s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::LABEL));
     });
+    if remote.is_none() {
+        evaluation_panel(app, ui, run, answer);
+    }
     // The correction stays at hand when the bar offers a remembered answer.
     if question
         .valid_answers
@@ -1954,6 +2158,36 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
             }
         }
         Answer::Once => app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(ctx)),
+        Answer::Evaluate {
+            offer,
+            confirmations,
+        } => {
+            let same_offer = queue.evaluation_offer(run.id).as_ref() == Some(&offer);
+            let same_bindings = offer.items.len() == confirmations.len()
+                && offer
+                    .items
+                    .iter()
+                    .zip(&confirmations)
+                    .all(|(item, chosen)| {
+                        item.confirmation.item_id == chosen.item_id
+                            && item.confirmation.revision == chosen.revision
+                            && item.confirmation.hosts == chosen.hosts
+                    });
+            if !same_offer || !same_bindings {
+                app.set_err(
+                    "The bouncer permission is no longer offered. Review the question again.",
+                );
+                return;
+            }
+            app.ask_owner(
+                OwnerRequest::ApproveAndEvaluate {
+                    run: run.clone(),
+                    offer,
+                    confirmations,
+                },
+                Some(ctx),
+            );
+        }
         Answer::InProject(action) | Answer::Production(action) => {
             let Some(project) = run.question.project.clone() else {
                 app.set_err("This question has no project. Use Allow Once.");
@@ -2026,6 +2260,7 @@ pub(super) fn remote_choice(run: &PendingRun, answer: &Answer) -> Option<Choice>
     Some(match answer {
         Answer::Deny => Choice::Deny,
         Answer::Once => Choice::ApproveOnce,
+        Answer::Evaluate { .. } => return None,
         Answer::InProject(action) => Choice::ApproveInProject {
             action: *action,
             project_key: project_key()?,

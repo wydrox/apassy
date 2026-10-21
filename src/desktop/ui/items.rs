@@ -1156,6 +1156,9 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .is_empty();
     if agents_use_it {
         agent_use_group(app, ui, id);
+    }
+    evaluation_scopes_group(app, ui, id);
+    if agents_use_it {
         if !rules_of(app, id).is_empty() {
             rules_group(app, ui, &details);
         }
@@ -1657,6 +1660,65 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
         }
     });
     ui.add_space(rows::GROUP_GAP);
+}
+
+/// Model-evaluation permission is separate from a remembered execution allowance.
+fn evaluation_scopes_group(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+    let scopes = match app.owner_ui.session.evaluation_scopes(item_id) {
+        Ok(scopes) if !scopes.is_empty() => scopes,
+        _ => return,
+    };
+    let agents = app.owner_ui.session.agents().unwrap_or_default();
+    let mut remove = None;
+    rows::group_label(ui, "Bouncer decisions", None);
+    rows::group(ui, |s| {
+        for scope in &scopes {
+            let agent = agents
+                .iter()
+                .find(|agent| agent.id == scope.agent_id)
+                .map_or_else(
+                    || format!("Agent {}", scope.agent_id),
+                    |agent| agent.name.clone(),
+                );
+            let title = format!(
+                "{agent} · {} in {}",
+                action_words(scope.action),
+                scope.project.label
+            );
+            let hosts = if scope.hosts.is_empty() {
+                "No destination host".to_owned()
+            } else {
+                scope.hosts.join(", ")
+            };
+            s.line(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - 80.0).max(80.0));
+                    ui.add(Label::new(kit::text(&title, Font::Body).color(kit::LABEL)).wrap());
+                    ui.add(Label::new(rows::small(format!("{} · {hosts}", scope.project.key))).wrap());
+                    if scope.command_binding.is_some() {
+                        ui.add(Label::new(rows::small("Only this exact command, execution context and directly selected script version.")).wrap());
+                    }
+                    ui.add(Label::new(rows::small("Model evaluation only; production, always-ask, and hard checks still apply.")).wrap());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if rows::pill_button(ui, "Remove", &format!("Remove bouncer permission: {title}")).clicked() {
+                        remove = Some(scope.id);
+                    }
+                });
+            });
+        }
+    });
+    ui.add_space(rows::GROUP_GAP);
+    if let Some(id) = remove {
+        let result = app.owner_ui.session.remove_evaluation_scope(id);
+        match result {
+            Ok(true) => {
+                app.set_ok("Bouncer permission removed. Matching uses require your decision again.")
+            }
+            Ok(false) => app.set_note("This bouncer permission was already removed."),
+            Err(error) => app.set_err(error.message),
+        }
+    }
 }
 
 /// One rule of the "Rules from your answers" group.

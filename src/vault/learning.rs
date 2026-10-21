@@ -350,11 +350,21 @@ pub struct DayRate {
     pub day: u64,
     pub decisions: u32,
     pub asked: u32,
+    /// Allowed requests that used the model without asking the owner.
     pub by_model: u32,
+    /// Allowed requests that used a pattern without asking the owner.
     pub by_pattern: u32,
+    /// Allowed requests that used a remembered owner answer without asking again.
+    pub by_answer: u32,
 }
 
 impl DayRate {
+    /// Allowed requests that ran without an owner question. Denials and unanswered
+    /// requests remain in `decisions`, but never count as successful automation.
+    pub fn automatic(&self) -> u32 {
+        self.by_model + self.by_pattern + self.by_answer
+    }
+
     pub fn ask_rate(&self) -> f64 {
         if self.decisions == 0 {
             0.0
@@ -582,8 +592,10 @@ impl Vault {
         let conn = self.conn_ref()?;
         let mut stmt = conn
             .prepare(
-                "SELECT at / 86400, COUNT(*), SUM(asked), SUM(decided_by = 'model'),
-                     SUM(decided_by = 'pattern')
+                "SELECT at / 86400, COUNT(*), SUM(asked),
+                     SUM(decision = 'allow' AND asked = 0 AND decided_by = 'model'),
+                     SUM(decision = 'allow' AND asked = 0 AND decided_by = 'pattern'),
+                     SUM(decision = 'allow' AND asked = 0 AND decided_by IN ('owner', 'answer'))
                  FROM decision_log WHERE decided_by != 'rule' AND at >= ?1
                  GROUP BY at / 86400 ORDER BY at / 86400 ASC",
             )
@@ -596,13 +608,14 @@ impl Vault {
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let count = |n: i64| u32::try_from(n).map_err(|_| err(VaultErrorKind::Storage));
         let mut days = Vec::new();
         for row in rows {
-            let (day, decisions, asked, by_model, by_pattern) =
+            let (day, decisions, asked, by_model, by_pattern, by_answer) =
                 row.map_err(|_| err(VaultErrorKind::Storage))?;
             days.push(DayRate {
                 day: from_sql_time(day)? * DAY_SECONDS,
@@ -610,6 +623,7 @@ impl Vault {
                 asked: count(asked)?,
                 by_model: count(by_model)?,
                 by_pattern: count(by_pattern)?,
+                by_answer: count(by_answer)?,
             });
         }
         Ok(days)

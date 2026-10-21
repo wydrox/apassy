@@ -496,6 +496,92 @@ fn certain(argv: &[String]) -> (Option<ActionKind>, Option<ActionKind>) {
     )
 }
 
+#[test]
+fn git_path_global_options_keep_read_classification_precise() {
+    for line in [
+        "git --git-dir .git log --oneline -5",
+        "git --work-tree . status --porcelain",
+        "git --git-dir .git --work-tree . --no-pager diff --stat",
+        "git -C sub --git-dir ../.git --work-tree .. log -1",
+        // Existing equals and separate -C forms stay equivalent.
+        "git --git-dir=.git --work-tree=. log -1",
+        "git -C sub log -1",
+    ] {
+        let argv = command_line_to_argv(line);
+        assert_eq!(check(&argv, Read), None, "{line}");
+        assert_eq!(certain(&argv), (Some(Read), Some(Read)), "{line}");
+    }
+}
+
+#[test]
+fn git_path_global_options_do_not_hide_writes_or_code_execution() {
+    for (line, expected) in [
+        ("git --git-dir .git commit -m x", Change),
+        ("git --work-tree . add README.md", Change),
+        ("git --git-dir .git push origin main", Deploy),
+        ("git --work-tree . clean -fdx", Delete),
+    ] {
+        let argv = command_line_to_argv(line);
+        assert_eq!(classify(&argv, &Analysis::default()), expected, "{line}");
+        assert_eq!(
+            classify_certain(&argv, &Analysis::default()),
+            Some(expected),
+            "{line}"
+        );
+    }
+    for line in [
+        "git --git-dir .git my-alias",
+        "git --work-tree . credential fill",
+        "git --git-dir .git -c core.fsmonitor=./x status",
+        "git --work-tree . --config-env=core.pager=PAGER log",
+        "git --git-dir .git --exec-path=./bin log",
+        "git --work-tree . --unknown log",
+        "git --git-dir .git rebase --exec ./x main",
+        "git --work-tree . clone --upload-pack=./x repo",
+        // Missing values/subcommands and unsupported attached -C are uncertain.
+        "git --git-dir",
+        "git --work-tree",
+        "git --git-dir log",
+        "git --work-tree status",
+        "git -Csub log",
+    ] {
+        let argv = command_line_to_argv(line);
+        assert_ne!(classify(&argv, &Analysis::default()), Read, "{line}");
+        assert_eq!(certain(&argv), (None, None), "{line}");
+    }
+}
+
+#[test]
+fn git_path_global_options_do_not_hide_shell_marks_or_output_files() {
+    for command in [
+        &["git", "--git-dir", "$(./x)", "log"][..],
+        &["git", "--work-tree", "`./x`", "status"],
+        &["git", "--git-dir=.git;./x", "log"],
+        &["git", "-C", "sub|./x", "status"],
+        &["git", "--git-dir", ".git", "diff", "--output=patch.diff"],
+        &["git", "--work-tree", ".", "log", "--output", "log.txt"],
+        &["git", "--git-dir", ".git", "log", ">", "log.txt"],
+        &["git", "--work-tree", ".", "diff", "--ext-diff"],
+        &["git", "--git-dir", ".git", "grep", "-O./x", "TODO"],
+    ] {
+        let argv = words(command);
+        assert_ne!(classify(&argv, &Analysis::default()), Read, "{command:?}");
+        assert_ne!(
+            classify_certain(&argv, &Analysis::default()),
+            Some(Read),
+            "{command:?}"
+        );
+    }
+    // A read rule cannot override analysis that identifies secret output.
+    let argv = words(&["git", "--git-dir", ".git", "log"]);
+    let secret = Analysis {
+        flags: vec!["secret_output".to_owned()],
+        ..Analysis::default()
+    };
+    assert_eq!(classify(&argv, &secret), Change);
+    assert_eq!(classify_certain(&argv, &secret), None);
+}
+
 /// Gate 1 review: a production allowance must not cover a command whose kind comes
 /// only from the fallback ("everything else is a change").
 #[test]

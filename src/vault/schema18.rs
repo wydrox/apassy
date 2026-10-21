@@ -377,7 +377,8 @@ mod tests {
         vault.lock().unwrap();
         let conn = Connection::open_with_flags(&path, OPEN_EXISTING).unwrap();
         apply_key(&conn, PASS).unwrap();
-        let mut sql = String::from(crate::vault::schema19::DOWNGRADE_TO_18_SQL);
+        let mut sql = crate::vault::schema20::downgrade_sql();
+        sql.push_str(crate::vault::schema19::DOWNGRADE_TO_18_SQL);
         for table in [
             "folder",
             "item_folder",

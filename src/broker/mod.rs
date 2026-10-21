@@ -12,6 +12,7 @@ pub mod bouncer;
 pub mod calibration;
 pub mod corrections;
 pub mod decide;
+mod evaluation_binding;
 pub mod exec;
 pub mod finetune;
 pub mod http;

@@ -20,8 +20,8 @@ use super::owner_tests::{PASS, WRONG, collect, socket_dir, unlocked_app_with_ite
 use super::{agents, draw};
 use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
-    AnswerKind, ApprovalOutcome, ApprovalQueue, OwnerCheck, PendingRun, QuestionInfo, QuestionItem,
-    QuestionRefusal, Settled,
+    AnswerKind, ApprovalOutcome, ApprovalQueue, EvaluationItem, EvaluationOffer, OwnerCheck,
+    PendingRun, QuestionInfo, QuestionItem, QuestionRefusal, Settled,
 };
 use crate::broker::project::Project;
 use crate::desktop::{BrokerState, DesktopApp, Place};
@@ -115,16 +115,27 @@ fn ask(
     agent_id: u64,
     pending: PendingRun,
 ) -> (Waiter, PendingRun) {
+    ask_with_evaluation(app, queue, agent_id, pending, None)
+}
+
+fn ask_with_evaluation(
+    app: &DesktopApp,
+    queue: &Arc<ApprovalQueue>,
+    agent_id: u64,
+    pending: PendingRun,
+    offer: Option<EvaluationOffer>,
+) -> (Waiter, PendingRun) {
     let before: Vec<u64> = queue.pending().iter().map(|run| run.id).collect();
     let epoch = app.owner_ui.session.epoch().expect("unlocked");
     let waiter = {
         let queue = Arc::clone(queue);
         std::thread::spawn(move || {
-            queue.wait_for_question(
+            queue.wait_for_evaluation_question(
                 pending,
                 agent_id,
                 epoch,
                 [0; 32],
+                offer,
                 Duration::from_secs(30),
                 || true,
             )
@@ -141,6 +152,275 @@ fn ask(
         std::thread::sleep(Duration::from_millis(5));
     };
     (waiter, run)
+}
+
+/// Keep the same egui context while opening a picker and choosing its value.
+struct DecisionClicks(egui::Context);
+
+impl DecisionClicks {
+    fn new() -> Self {
+        Self(egui::Context::default())
+    }
+
+    fn frame(&self, app: &mut DesktopApp, events: Vec<egui::Event>) -> Vec<(String, Pos2)> {
+        let output = self.0.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, WIDE)),
+                events,
+                ..Default::default()
+            },
+            |ui| draw(app, ui),
+        );
+        fn placed(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((text.galley.text().to_owned(), text.pos)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        placed(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            placed(&clipped.shape, &mut texts);
+        }
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    fn click(&self, app: &mut DesktopApp, needle: &str) {
+        self.frame(app, Vec::new());
+        let texts = self.frame(app, Vec::new());
+        let at = texts
+            .iter()
+            .rev()
+            .find(|(text, _)| text == needle)
+            .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+            .unwrap_or_else(|| panic!("{needle:?} missing: {texts:?}"));
+        self.frame(app, vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false] {
+            self.frame(
+                app,
+                vec![egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        self.frame(app, Vec::new());
+    }
+}
+
+fn evaluation_offer(item_id: u64) -> EvaluationOffer {
+    EvaluationOffer {
+        agent_id: 1,
+        project: project("acme-billing"),
+        action: ActionKind::Read,
+        items: vec![EvaluationItem {
+            name: "Unclassified key".to_owned(),
+            confirmation: crate::vault::bouncer_scopes::EvaluationConfirmation {
+                item_id,
+                revision: 1,
+                environment: crate::vault::Environment::Production,
+                risk: crate::vault::RiskLevel::High,
+                hosts: vec!["api.stripe.com".to_owned()],
+            },
+        }],
+        command_binding: Some("synthetic-command-and-script-digest".to_owned()),
+    }
+}
+
+#[test]
+fn local_evaluation_controls_preserve_defaults_and_authenticate_exact_classification() {
+    use crate::broker::approvals::OwnerAction;
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::{Environment, RiskLevel};
+
+    let dir = TempDir::new().expect("dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let offer = evaluation_offer(item_id);
+    let mut unknown = item(item_id, "Unclassified key");
+    unknown.unconfirmed = true;
+    unknown.production = true;
+    let (waiter, pending) = ask_with_evaluation(
+        &app,
+        &queue,
+        1,
+        run("Claude Code", question(vec![unknown], &[])),
+        Some(offer.clone()),
+    );
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains("Let the bouncer decide next time"), "{text}");
+    let initial = decisions::evaluation_confirmations(&app).expect("draft");
+    assert_eq!(initial, vec![offer.items[0].confirmation.clone()]);
+    assert_eq!(initial[0].environment, Environment::Production);
+    assert_eq!(initial[0].risk, RiskLevel::High);
+    let clicks = DecisionClicks::new();
+    clicks.click(&mut app, "Let the bouncer decide next time");
+    let (text, past) = frames(&mut app, WIDE, 2);
+    for expected in [
+        "Environment",
+        "Risk",
+        "high",
+        "Production",
+        "Allow once and enable bouncer",
+        "api.stripe.com",
+        "Only this exact command, execution context and directly selected script version.",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(past.is_empty(), "{past:?}");
+    assert!(
+        !text.contains("synthetic-command-and-script-digest"),
+        "{text}"
+    );
+    clicks.click(&mut app, "Production");
+    clicks.click(&mut app, "Development");
+    clicks.click(&mut app, "high");
+    clicks.click(&mut app, "low");
+    clicks.click(&mut app, "Allow once and enable bouncer");
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("owner check")
+        .request
+        .clone();
+    let OwnerRequest::ApproveAndEvaluate {
+        run,
+        offer: signed_offer,
+        confirmations,
+    } = &request
+    else {
+        panic!("unexpected request: {request:?}");
+    };
+    assert_eq!(run, &pending);
+    assert_eq!(
+        signed_offer, &offer,
+        "the actual offer is never rewritten by the pickers"
+    );
+    let mut chosen = initial;
+    chosen[0].environment = Environment::Development;
+    chosen[0].risk = RiskLevel::Low;
+    assert_eq!(confirmations, &chosen);
+    assert_eq!(
+        request.action(),
+        OwnerAction::ApproveAndEvaluate {
+            run: pending.clone(),
+            offer: offer.clone(),
+            confirmations: chosen.clone(),
+        }
+    );
+    let description = request.describe();
+    for expected in [
+        "Claude Code",
+        "development",
+        "low",
+        "api.stripe.com",
+        "acme-billing",
+        "reading",
+        "Only this exact command, execution context and directly selected script version.",
+        "next matching use",
+        "model evaluation",
+    ] {
+        assert!(description.contains(expected), "{expected}: {description}");
+    }
+    assert!(
+        !description.contains("synthetic-command-and-script-digest"),
+        "{description}"
+    );
+    assert!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG))
+            .is_err()
+    );
+    assert_eq!(
+        queue.pending().len(),
+        1,
+        "nothing is approved before authentication"
+    );
+    decisions::apply(
+        &mut app,
+        &egui::Context::default(),
+        &pending,
+        Answer::Evaluate {
+            offer: offer.clone(),
+            confirmations: chosen.clone(),
+        },
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("authenticate");
+    let settled = waiter.join().expect("waiter").expect("settled");
+    assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+    let evaluation = settled.evaluation.expect("separate evaluation permission");
+    assert_eq!(evaluation.offer, offer);
+    assert_eq!(evaluation.confirmations, chosen);
+    assert!(settled.answer.is_none(), "no standing execution allowance");
+    assert!(settled.grant.is_none(), "no new credential grant");
+}
+
+#[test]
+fn evaluation_requires_a_local_offer_and_drafts_clear_on_selection_and_lock() {
+    let dir = TempDir::new().expect("dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let pending_run = run(
+        "Claude Code",
+        question(vec![item(item_id, "Unclassified key")], &[]),
+    );
+    let (waiter, pending) = ask(&app, &queue, 1, pending_run.clone());
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 2);
+    assert!(!text.contains("Let the bouncer decide next time"), "{text}");
+    let offer = evaluation_offer(item_id);
+    let evaluate = Answer::Evaluate {
+        offer: offer.clone(),
+        confirmations: vec![offer.items[0].confirmation.clone()],
+    };
+    decisions::apply(
+        &mut app,
+        &egui::Context::default(),
+        &pending,
+        evaluate.clone(),
+    );
+    assert!(
+        app.owner.check.is_none(),
+        "an unoffered permission never starts authentication"
+    );
+    assert!(
+        decisions::remote_choice(&pending, &evaluate).is_none(),
+        "remote questions cannot encode this permission"
+    );
+    queue.deny(pending.id);
+    waiter.join().expect("waiter").expect("denied");
+
+    let (waiter, pending) = ask_with_evaluation(&app, &queue, 1, pending_run, Some(offer.clone()));
+    frames(&mut app, WIDE, 2);
+    assert!(decisions::evaluation_confirmations(&app).is_some());
+    decisions::select_key(&mut app, Key::Run(pending.id));
+    assert!(
+        decisions::evaluation_confirmations(&app).is_none(),
+        "selection clears edits"
+    );
+    frames(&mut app, WIDE, 2);
+    assert_eq!(
+        decisions::evaluation_confirmations(&app),
+        Some(vec![offer.items[0].confirmation.clone()])
+    );
+    app.lock_vault(None);
+    assert!(
+        decisions::evaluation_confirmations(&app).is_none(),
+        "locking clears edits"
+    );
+    waiter
+        .join()
+        .expect("waiter")
+        .expect("lock settles the question");
 }
 
 /// `frames` frames of the whole app at `size`. Returns the painted text of the last one,
@@ -377,9 +657,18 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "Deny",
         "Allow Once",
         "Allow production: Read in acme-billing",
-        "Production stays allowed for all agents in acme-billing.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
+    }
+    let production_caption = text
+        .lines()
+        .find(|line| line.to_lowercase().contains("production allowance"))
+        .expect("the production answer explains its remembered allowance");
+    for expected in ["acme-billing", "all agents", "next matching use"] {
+        assert!(
+            production_caption.contains(expected),
+            "{expected}: {production_caption}"
+        );
     }
     // As in the mockup, the request of the user has no group of its own.
     assert!(!text.contains("Show the last payouts."), "{text}");
@@ -462,7 +751,7 @@ fn allow_in_project_needs_the_owner_check_and_selects_the_next_question() {
     let (text, _) = frames(&mut app, DEFAULT, 3);
     assert!(text.contains("Allow Read in acme-billing"), "{text}");
     assert!(
-        text.contains("Allow is remembered for all agents in acme-billing."),
+        text.contains("All agents in acme-billing · from the next matching use."),
         "{text}"
     );
     assert_eq!(decisions::selected(&app), Some(first.id));
@@ -1712,6 +2001,10 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
 
     let (text, past) = frames(&mut app, DEFAULT, 3);
     assert!(text.contains("Waiting"), "{text}");
+    assert!(
+        !text.contains("Let the bouncer decide next time"),
+        "remote cards have no evaluation permission: {text}"
+    );
     assert!(
         text.contains("claude-code · acme-billing · from Synthetic Mac mini"),
         "{text}"

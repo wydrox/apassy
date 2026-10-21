@@ -45,6 +45,12 @@
 //! edit, or a merge of a sync) the new call does not join: the old question ends, and
 //! the new call asks again. An answer never covers a version of a credential that came
 //! after its question showed.
+//!
+//! Local evaluation offers stay outside the relay card. An authenticated
+//! [`OwnerAction::ApproveAndEvaluate`] approves this run once and returns an exact
+//! [`EvaluationChoice`] for the broker's second check. It permits future model
+//! evaluation, and never preapproves future execution. A changed offer replaces the
+//! waiting question even when its credential baseline has not changed.
 
 mod owner_auth;
 
@@ -56,6 +62,7 @@ use std::time::{Duration, Instant};
 
 use super::action_kind::ActionKind;
 use super::project::Project;
+use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::exceptions::ExceptionKind;
 use crate::vault::{
     Declaration, SuggestedDeclaration, Vault, VaultError, VaultErrorKind, VaultResult,
@@ -179,6 +186,32 @@ pub struct AnswerChoice {
     pub action: ActionKind,
     /// "Allow production": the production items get a production allowance.
     pub production: bool,
+}
+
+/// One credential whose confirmed metadata can authorize future model evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationItem {
+    pub name: String,
+    pub confirmation: EvaluationConfirmation,
+}
+
+/// An exact offer for this agent, project, action and credential revisions. Kept out
+/// of the relay card: an old remote answer can only approve the current run once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationOffer {
+    pub agent_id: u64,
+    pub project: Project,
+    pub action: ActionKind,
+    pub items: Vec<EvaluationItem>,
+    pub command_binding: Option<String>,
+}
+
+/// Approves the current run once and permits future model evaluation. Each later
+/// request must still pass its own evaluation and all credential checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationChoice {
+    pub offer: EvaluationOffer,
+    pub confirmations: Vec<EvaluationConfirmation>,
 }
 
 /// A pattern that the owner can teach with "Approve and remember".
@@ -328,6 +361,8 @@ pub struct Settled {
     pub grant: Option<GrantChoice>,
     /// The answer to remember (ADR 0025).
     pub answer: Option<AnswerChoice>,
+    /// A local owner authorization for future evaluation, never automatic execution.
+    pub evaluation: Option<EvaluationChoice>,
     /// The call joined a question that already waited.
     pub attached: bool,
 }
@@ -339,6 +374,7 @@ impl Settled {
             method: None,
             grant: None,
             answer: None,
+            evaluation: None,
             attached: false,
         }
     }
@@ -427,6 +463,8 @@ pub enum ApprovalRefusal {
     Changed,
     /// "Approve and remember" for a run that cannot teach a pattern.
     NothingToRemember,
+    /// No matching evaluation offer was available for this run.
+    NothingToEvaluate,
     /// "Allow in this folder" for a run without a first use, or for a folder that is too
     /// wide for a lasting grant (the root, the home folder, or a parent of it).
     NothingToGrant,
@@ -458,6 +496,9 @@ impl ApprovalRefusal {
             Self::NothingToRemember => {
                 "This run cannot teach a pattern. Nothing was approved. Use \"Approve once\"."
             }
+            Self::NothingToEvaluate => {
+                "This run cannot authorize future evaluation. Nothing was approved. Use \"Allow once\"."
+            }
             Self::NothingToGrant => {
                 "This run cannot get access in a folder. Nothing was approved. Use \"Allow once\"."
             }
@@ -484,6 +525,7 @@ struct Decision {
     method: Option<CheckMethod>,
     grant: Option<GrantChoice>,
     remember: Option<AnswerChoice>,
+    evaluation: Option<EvaluationChoice>,
 }
 
 /// The question of one waiting run (ADR 0025).
@@ -549,6 +591,8 @@ struct QueueState {
     pending: Vec<PendingRun>,
     /// The first-use offer of a waiting run (ADR 0024).
     offers: BTreeMap<u64, FirstUseOffer>,
+    /// Local evaluation offers; excluded from PendingRun and remote signed digests.
+    evaluation_offers: BTreeMap<u64, EvaluationOffer>,
     /// The question of each waiting run of a known agent (ADR 0025).
     questions: BTreeMap<u64, Question>,
     /// Questions that a call with another baseline replaced. The call that waits on one
@@ -700,6 +744,29 @@ impl ApprovalQueue {
                     )?),
                     _ => None,
                 };
+                let evaluation = match proof.action() {
+                    OwnerAction::ApproveAndEvaluate {
+                        offer,
+                        confirmations,
+                        ..
+                    } => {
+                        let question = state
+                            .questions
+                            .get(&confirmed.id)
+                            .ok_or(ApprovalRefusal::NothingToEvaluate)?;
+                        proof
+                            .check(proof.action(), &question.session)
+                            .map_err(|_| ApprovalRefusal::Changed)?;
+                        Some(Self::evaluation_choice(
+                            waiting,
+                            question.agent_id,
+                            state.evaluation_offers.get(&confirmed.id),
+                            offer,
+                            confirmations,
+                        )?)
+                    }
+                    _ => None,
+                };
                 Self::settle(
                     &mut state,
                     confirmed.id,
@@ -707,11 +774,60 @@ impl ApprovalQueue {
                     Some(method),
                     grant,
                     remember,
+                    evaluation,
                 );
                 self.changed.notify_all();
                 Ok(())
             }
         }
+    }
+
+    fn evaluation_choice(
+        run: &PendingRun,
+        agent_id: u64,
+        waiting: Option<&EvaluationOffer>,
+        confirmed: &EvaluationOffer,
+        confirmations: &[EvaluationConfirmation],
+    ) -> Result<EvaluationChoice, ApprovalRefusal> {
+        let waiting = waiting.ok_or(ApprovalRefusal::NothingToEvaluate)?;
+        if waiting != confirmed
+            || waiting.agent_id != agent_id
+            || run.question.project.as_ref() != Some(&waiting.project)
+            || run.question.action != waiting.action
+            || waiting.items.is_empty()
+        {
+            return Err(ApprovalRefusal::Changed);
+        }
+        let expected: BTreeMap<_, _> = waiting
+            .items
+            .iter()
+            .map(|item| (item.confirmation.item_id, &item.confirmation))
+            .collect();
+        let requested: BTreeSet<_> = run.question.item_ids.iter().copied().collect();
+        if expected.len() != waiting.items.len()
+            || requested.len() != run.question.item_ids.len()
+            || expected.keys().copied().collect::<BTreeSet<_>>() != requested
+            || confirmations.len() != expected.len()
+        {
+            return Err(ApprovalRefusal::Changed);
+        }
+        let mut seen = BTreeSet::new();
+        for confirmation in confirmations {
+            let Some(offered) = expected.get(&confirmation.item_id) else {
+                return Err(ApprovalRefusal::Changed);
+            };
+            // Only the environment and risk fields can be corrected by the owner.
+            if !seen.insert(confirmation.item_id)
+                || confirmation.revision != offered.revision
+                || confirmation.hosts != offered.hosts
+            {
+                return Err(ApprovalRefusal::Changed);
+            }
+        }
+        Ok(EvaluationChoice {
+            offer: waiting.clone(),
+            confirmations: confirmations.to_vec(),
+        })
     }
 
     /// The answer of "Allow ACTION in PROJECT" or "Allow production": the project and
@@ -788,6 +904,11 @@ impl ApprovalQueue {
         self.state().offers.get(&id).cloned()
     }
 
+    /// The exact evaluation offer currently shown for a waiting run.
+    pub fn evaluation_offer(&self, id: u64) -> Option<EvaluationOffer> {
+        self.state().evaluation_offers.get(&id).cloned()
+    }
+
     /// Deny a waiting run. A denial needs no owner check. Returns false when the run
     /// no longer waits.
     pub fn deny(&self, id: u64) -> bool {
@@ -795,7 +916,7 @@ impl ApprovalQueue {
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        Self::settle(&mut state, id, Answer::Deny, None, None, None);
+        Self::settle(&mut state, id, Answer::Deny, None, None, None, None);
         self.changed.notify_all();
         true
     }
@@ -835,7 +956,7 @@ impl ApprovalQueue {
             }
             StricterAnswer::Disconnect => vault.revoke_agent(agent),
         };
-        Self::settle(&mut state, id, Answer::Deny, None, None, None);
+        Self::settle(&mut state, id, Answer::Deny, None, None, None, None);
         self.changed.notify_all();
         changed.map(|()| true)
     }
@@ -887,11 +1008,13 @@ impl ApprovalQueue {
         method: Option<CheckMethod>,
         grant: Option<GrantChoice>,
         remember: Option<AnswerChoice>,
+        evaluation: Option<EvaluationChoice>,
     ) {
         Self::note_end(state, id, Self::outcome_of(answer), method);
         state.pending.retain(|run| run.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
+        state.evaluation_offers.remove(&id);
         state.questions.remove(&id);
         state.decisions.insert(
             id,
@@ -900,6 +1023,7 @@ impl ApprovalQueue {
                 method,
                 grant,
                 remember,
+                evaluation,
             },
         );
     }
@@ -921,6 +1045,7 @@ impl ApprovalQueue {
         state.pending.retain(|pending| pending.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
+        state.evaluation_offers.remove(&id);
         state.questions.remove(&id);
     }
 
@@ -937,6 +1062,7 @@ impl ApprovalQueue {
         state.pending.clear();
         state.waiting_since.clear();
         state.offers.clear();
+        state.evaluation_offers.clear();
         state.questions.clear();
         state.decisions.clear();
         self.changed.notify_all();
@@ -971,7 +1097,7 @@ impl ApprovalQueue {
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> (ApprovalOutcome, Option<CheckMethod>) {
-        let settled = match self.wait(run, None, None, timeout, still_valid) {
+        let settled = match self.wait(run, None, None, None, timeout, still_valid) {
             Ok(settled) => settled,
             Err(_) => Settled::ended(ApprovalOutcome::Invalidated),
         };
@@ -1003,12 +1129,37 @@ impl ApprovalQueue {
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> Result<Settled, QuestionRefusal> {
+        self.wait_for_evaluation_question(
+            run,
+            agent_id,
+            session,
+            baseline,
+            None,
+            timeout,
+            still_valid,
+        )
+    }
+
+    /// Like [`Self::wait_for_question`], with a local authenticated offer for future
+    /// model evaluation. A changed offer replaces the waiting question, even when the
+    /// credential baseline is unchanged. Remote answers never authorize evaluation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wait_for_evaluation_question(
+        &self,
+        run: PendingRun,
+        agent_id: u64,
+        session: [u8; 32],
+        baseline: Baseline,
+        offer: Option<EvaluationOffer>,
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> Result<Settled, QuestionRefusal> {
         let asker = Asker {
             agent_id,
             session,
             baseline,
         };
-        self.wait(run, None, Some(asker), timeout, still_valid)
+        self.wait(run, None, offer, Some(asker), timeout, still_valid)
     }
 
     /// Like [`Self::wait_for_decision`], for a run with a first use (ADR 0024). The
@@ -1027,7 +1178,7 @@ impl ApprovalQueue {
             session: [0; 32],
             baseline: [0; 32],
         };
-        self.wait(run, Some(offer), Some(asker), timeout, still_valid)
+        self.wait(run, Some(offer), None, Some(asker), timeout, still_valid)
             .map_err(|_| FirstUseBusy)
     }
 
@@ -1035,6 +1186,7 @@ impl ApprovalQueue {
         &self,
         mut run: PendingRun,
         offer: Option<FirstUseOffer>,
+        evaluation: Option<EvaluationOffer>,
         agent: Option<Asker>,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
@@ -1050,7 +1202,7 @@ impl ApprovalQueue {
             Some(asker) => {
                 match state
                     .questions
-                    .iter_mut()
+                    .iter()
                     .find(|(_, question)| question.agent_id == asker.agent_id)
                 {
                     Some((id, question))
@@ -1058,9 +1210,13 @@ impl ApprovalQueue {
                             && question.session == asker.session
                             && question.template == template =>
                     {
-                        if question.baseline == asker.baseline {
+                        if question.baseline == asker.baseline
+                            && state.evaluation_offers.get(id) == evaluation.as_ref()
+                        {
+                            let id = *id;
+                            let question = state.questions.get_mut(&id).expect("waiting question");
                             question.turn = question.turn.wrapping_add(1);
-                            Some((*id, question.turn, question.deadline))
+                            Some((id, question.turn, question.deadline))
                         } else {
                             replaced = Some(*id);
                             None
@@ -1073,8 +1229,8 @@ impl ApprovalQueue {
             None => None,
         };
         if let Some(old) = replaced {
-            // A credential changed after the old question showed. The old question ends,
-            // and this call asks again, so the owner answers for the credential as it is.
+            // A credential or evaluation offer changed after the old question showed.
+            // Ask again so the owner authorizes only the current credential and scope.
             Self::forget(&mut state, old, ApprovalOutcome::Invalidated);
             state.replaced.insert(old);
         }
@@ -1091,6 +1247,9 @@ impl ApprovalQueue {
                 state.waiting_since.insert(id, Instant::now());
                 if let Some(offer) = offer {
                     state.offers.insert(id, offer);
+                }
+                if let Some(offer) = evaluation {
+                    state.evaluation_offers.insert(id, offer);
                 }
                 if let Some(asker) = agent {
                     state.questions.insert(
@@ -1141,6 +1300,7 @@ impl ApprovalQueue {
                     method: decision.method,
                     grant: decision.grant,
                     answer: decision.remember,
+                    evaluation: decision.evaluation,
                     attached,
                 });
             }
@@ -1226,6 +1386,333 @@ mod tests {
     fn start_waiter(queue: &Arc<ApprovalQueue>) -> std::thread::JoinHandle<ApprovalOutcome> {
         let queue = Arc::clone(queue);
         std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
+    }
+
+    fn evaluation_case() -> (PendingRun, EvaluationOffer) {
+        let project = Project {
+            key: "/tmp/apassy-evaluation-test".to_owned(),
+            label: "evaluation-test".to_owned(),
+            root: "/tmp/apassy-evaluation-test".into(),
+        };
+        let mut run = run();
+        run.question.project = Some(project.clone());
+        run.question.action = ActionKind::Read;
+        run.question.item_ids = vec![11, 12];
+        let offer = EvaluationOffer {
+            agent_id: 7,
+            project,
+            action: ActionKind::Read,
+            items: [11, 12]
+                .map(|item_id| EvaluationItem {
+                    name: format!("Item {item_id}"),
+                    confirmation: EvaluationConfirmation {
+                        item_id,
+                        revision: 3,
+                        environment: crate::vault::Environment::Production,
+                        risk: crate::vault::RiskLevel::High,
+                        hosts: vec!["example.invalid".to_owned()],
+                    },
+                })
+                .to_vec(),
+            command_binding: Some("synthetic-command-binding".to_owned()),
+        };
+        (run, offer)
+    }
+
+    fn start_evaluation_waiter(
+        queue: &Arc<ApprovalQueue>,
+        run: PendingRun,
+        offer: Option<EvaluationOffer>,
+    ) -> std::thread::JoinHandle<Result<Settled, QuestionRefusal>> {
+        let queue = Arc::clone(queue);
+        std::thread::spawn(move || {
+            queue.wait_for_evaluation_question(
+                run,
+                7,
+                [1; 32],
+                [2; 32],
+                offer,
+                Duration::from_secs(5),
+                || true,
+            )
+        })
+    }
+
+    fn evaluation_action(run: PendingRun, offer: &EvaluationOffer) -> OwnerAction {
+        OwnerAction::ApproveAndEvaluate {
+            run,
+            offer: offer.clone(),
+            confirmations: offer
+                .items
+                .iter()
+                .map(|item| item.confirmation.clone())
+                .collect(),
+        }
+    }
+
+    fn evaluation_proof(action: OwnerAction) -> OwnerProof {
+        OwnerProof::issue_for_test(action, [1; 32], Instant::now())
+    }
+
+    #[test]
+    fn evaluation_approval_binds_the_offer_and_allows_only_metadata_corrections() {
+        for evaluate in [true, false] {
+            let queue = Arc::new(ApprovalQueue::new());
+            let (run, offer) = evaluation_case();
+            let waiter = start_evaluation_waiter(&queue, run, Some(offer.clone()));
+            let id = wait_until_pending(&queue);
+            assert_eq!(queue.evaluation_offer(id), Some(offer.clone()));
+            let waiting = queue.pending()[0].clone();
+            let action = if evaluate {
+                let mut action = evaluation_action(waiting, &offer);
+                let OwnerAction::ApproveAndEvaluate { confirmations, .. } = &mut action else {
+                    unreachable!()
+                };
+                confirmations[0].environment = crate::vault::Environment::Development;
+                confirmations[0].risk = crate::vault::RiskLevel::Low;
+                action
+            } else {
+                OwnerAction::ApproveRun(waiting)
+            };
+            queue.approve(evaluation_proof(action)).expect("approve");
+            let settled = waiter.join().expect("join").expect("answer");
+            assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+            assert!(settled.answer.is_none());
+            assert!(settled.grant.is_none());
+            assert_eq!(settled.evaluation.is_some(), evaluate);
+            if let Some(choice) = settled.evaluation {
+                assert_eq!(choice.offer, offer);
+                assert_eq!(choice.confirmations.len(), 2);
+                assert_eq!(
+                    choice.confirmations[0].environment,
+                    crate::vault::Environment::Development
+                );
+                assert_eq!(choice.confirmations[0].risk, crate::vault::RiskLevel::Low);
+            }
+            assert!(queue.evaluation_offer(id).is_none());
+        }
+    }
+
+    #[test]
+    fn evaluation_approval_refuses_altered_incomplete_or_stale_proofs() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let (run, offer) = evaluation_case();
+        let waiter = start_evaluation_waiter(&queue, run, Some(offer.clone()));
+        let id = wait_until_pending(&queue);
+        let waiting = queue.pending()[0].clone();
+        let action = evaluation_action(waiting.clone(), &offer);
+        let original_offer = offer.clone();
+        let old = Instant::now() - PROOF_LIFETIME - Duration::from_millis(1);
+        assert_eq!(
+            queue.approve(OwnerProof::issue_for_test(action.clone(), [1; 32], old)),
+            Err(ApprovalRefusal::Stale)
+        );
+        assert_eq!(
+            queue.approve(OwnerProof::issue_for_test(
+                action.clone(),
+                [9; 32],
+                Instant::now()
+            )),
+            Err(ApprovalRefusal::Changed)
+        );
+        let mut wrong_run = waiting.clone();
+        wrong_run.command.push("another-argument".to_owned());
+        assert_eq!(
+            queue.approve(evaluation_proof(evaluation_action(wrong_run, &offer))),
+            Err(ApprovalRefusal::Changed)
+        );
+        let mut wrong_id = waiting.clone();
+        wrong_id.id = id.wrapping_add(1);
+        assert_eq!(
+            queue.approve(evaluation_proof(evaluation_action(wrong_id, &offer))),
+            Err(ApprovalRefusal::NotWaiting)
+        );
+        for alteration in 0..15 {
+            let mut altered = action.clone();
+            let OwnerAction::ApproveAndEvaluate {
+                offer,
+                confirmations,
+                ..
+            } = &mut altered
+            else {
+                unreachable!()
+            };
+            match alteration {
+                0 => offer.agent_id += 1,
+                1 => offer.project.key.push_str("-other"),
+                2 => offer.action = ActionKind::Change,
+                3 => offer.command_binding = None,
+                4 => offer.items[0].confirmation.hosts.clear(),
+                5 => offer.items[0].confirmation.revision += 1,
+                6 => offer.items[0].name.push_str("-other"),
+                7 => confirmations[0].hosts.push("other.invalid".to_owned()),
+                8 => confirmations[0].revision += 1,
+                9 => {
+                    confirmations.pop();
+                }
+                10 => confirmations.push(confirmations[0].clone()),
+                11 => confirmations[1] = confirmations[0].clone(),
+                12 => confirmations[0].item_id = 99,
+                13 => {
+                    offer.items[0].confirmation.environment = crate::vault::Environment::Development
+                }
+                14 => offer.items[0].confirmation.risk = crate::vault::RiskLevel::Low,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                queue.approve(evaluation_proof(altered)),
+                Err(ApprovalRefusal::Changed),
+                "alteration {alteration}"
+            );
+            assert_eq!(queue.evaluation_offer(id), Some(original_offer.clone()));
+        }
+        queue.deny(id);
+        assert_eq!(
+            waiter.join().expect("join").expect("answer").outcome,
+            ApprovalOutcome::Denied
+        );
+        assert!(queue.evaluation_offer(id).is_none());
+    }
+
+    #[test]
+    fn evaluation_requires_an_offer_for_the_current_question_and_agent() {
+        let (run, offer) = evaluation_case();
+        let confirmations: Vec<_> = offer
+            .items
+            .iter()
+            .map(|item| item.confirmation.clone())
+            .collect();
+        assert_eq!(
+            ApprovalQueue::evaluation_choice(&run, 7, None, &offer, &confirmations),
+            Err(ApprovalRefusal::NothingToEvaluate)
+        );
+        assert_eq!(
+            ApprovalQueue::evaluation_choice(&run, 8, Some(&offer), &offer, &confirmations),
+            Err(ApprovalRefusal::Changed)
+        );
+        let mut duplicate = offer.clone();
+        duplicate.items[1] = duplicate.items[0].clone();
+        assert_eq!(
+            ApprovalQueue::evaluation_choice(&run, 7, Some(&duplicate), &duplicate, &confirmations),
+            Err(ApprovalRefusal::Changed)
+        );
+        for mismatched_run in [
+            {
+                let mut run = run.clone();
+                run.question.project = None;
+                run
+            },
+            {
+                let mut run = run.clone();
+                run.question.action = ActionKind::Change;
+                run
+            },
+            {
+                let mut run = run.clone();
+                run.question.item_ids.pop();
+                run
+            },
+            {
+                let mut run = run.clone();
+                run.question.item_ids = vec![11, 11];
+                run
+            },
+        ] {
+            assert_eq!(
+                ApprovalQueue::evaluation_choice(
+                    &mismatched_run,
+                    7,
+                    Some(&offer),
+                    &offer,
+                    &confirmations
+                ),
+                Err(ApprovalRefusal::Changed)
+            );
+        }
+        let queue = Arc::new(ApprovalQueue::new());
+        let waiter = start_evaluation_waiter(&queue, run, None);
+        let id = wait_until_pending(&queue);
+        assert_eq!(
+            queue.approve(evaluation_proof(evaluation_action(
+                queue.pending()[0].clone(),
+                &offer
+            ))),
+            Err(ApprovalRefusal::NothingToEvaluate)
+        );
+        queue.deny(id);
+        waiter.join().expect("join").expect("answer");
+    }
+
+    #[test]
+    fn changed_evaluation_offer_replaces_instead_of_reusing_the_question() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let (run, offer) = evaluation_case();
+        let first = start_evaluation_waiter(&queue, run.clone(), Some(offer.clone()));
+        let old = wait_until_pending(&queue);
+        let old_proof = evaluation_proof(evaluation_action(queue.pending()[0].clone(), &offer));
+        let second = start_evaluation_waiter(&queue, run.clone(), Some(offer.clone()));
+        assert_eq!(
+            first.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        assert_eq!(queue.pending()[0].id, old, "identical offer joins");
+        let mut changed = offer;
+        changed.command_binding = Some("different-command-binding".to_owned());
+        let third = start_evaluation_waiter(&queue, run, Some(changed.clone()));
+        assert_eq!(
+            second.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        let new = wait_until_pending(&queue);
+        assert_ne!(new, old);
+        assert!(queue.evaluation_offer(old).is_none());
+        assert_eq!(queue.evaluation_offer(new), Some(changed));
+        assert_eq!(queue.approve(old_proof), Err(ApprovalRefusal::NotWaiting));
+        queue.invalidate_all();
+        assert_eq!(
+            third.join().expect("join").expect("answer").outcome,
+            ApprovalOutcome::Invalidated
+        );
+        assert!(queue.evaluation_offer(new).is_none());
+    }
+
+    #[test]
+    fn evaluation_offers_are_removed_on_timeout_invalid_session_and_close() {
+        for end in ["timeout", "invalid-session", "close"] {
+            let queue = Arc::new(ApprovalQueue::new());
+            let (run, offer) = evaluation_case();
+            let q = Arc::clone(&queue);
+            let waiter = std::thread::spawn(move || {
+                q.wait_for_evaluation_question(
+                    run,
+                    7,
+                    [1; 32],
+                    [2; 32],
+                    Some(offer),
+                    if end == "timeout" {
+                        Duration::from_millis(150)
+                    } else {
+                        Duration::from_secs(5)
+                    },
+                    || end != "invalid-session",
+                )
+            });
+            let id = wait_until_pending(&queue);
+            if end == "close" {
+                queue.close();
+            }
+            let settled = waiter.join().expect("join").expect("answer");
+            assert_eq!(
+                settled.outcome,
+                if end == "timeout" {
+                    ApprovalOutcome::TimedOut
+                } else {
+                    ApprovalOutcome::Invalidated
+                }
+            );
+            assert!(settled.evaluation.is_none());
+            assert!(queue.evaluation_offer(id).is_none());
+        }
     }
 
     /// ADR 0024: the root, the home folder, and its parents are broad. A project below

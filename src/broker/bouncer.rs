@@ -36,7 +36,10 @@ pub const DEFAULT_TASK_MATCH: f64 = 0.75;
 /// A "destroy" answer at or above this vetoes a command that is not known safe.
 const DESTROY_VETO: f64 = 0.9;
 const PATH: &str = "/v1/systemone";
-const TIMEOUT: Duration = Duration::from_secs(3);
+/// A warmed inference normally finishes in under a second, but the first real
+/// decision can take over five seconds. One timeout retry gives at most 20 seconds
+/// by default. `with_timeout` overrides each attempt's whole-exchange budget.
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Facts that the model answers. A decision model classifies facts well. A direct
 /// "allow or ask" question gave probabilities near 0.5 in a probe on 2026-09-26.
@@ -295,11 +298,11 @@ impl BouncerClient {
             self.api_key.as_deref(),
             timeout,
         )
-        .map_err(|_| format!("no answer from {}", self.url))?;
+        .map_err(|failure| format!("readiness request to {} failed ({failure:?})", self.url))?;
         if !(200..300).contains(&response.status) {
             return Err(format!("status {}", response.status));
         }
-        match parse_answers(&response.body, &[READY]) {
+        match self.check_model(parse_answers(&response.body, &[READY])) {
             BouncerVerdict::Scored { model, .. } => Ok(model),
             BouncerVerdict::Unavailable(reason) => Err(reason),
         }
@@ -315,14 +318,32 @@ impl BouncerClient {
         let Ok(bytes) = serde_json::to_vec(&body) else {
             return BouncerVerdict::Unavailable("the request did not encode".to_owned());
         };
-        let response = match http::post_json_loopback(
-            &self.destination,
-            PATH,
-            &bytes,
-            self.api_key.as_deref(),
-            self.timeout,
-        ) {
+        // Inference is read-only: retry at most once, and only when its transport
+        // timed out. This never retries a command, HTTP error, or invalid answer.
+        let send = || {
+            http::post_json_loopback(
+                &self.destination,
+                PATH,
+                &bytes,
+                self.api_key.as_deref(),
+                self.timeout,
+            )
+        };
+        let response = match send().or_else(|failure| {
+            if failure == http::HttpFailure::Timeout {
+                send()
+            } else {
+                Err(failure)
+            }
+        }) {
             Ok(response) => response,
+            Err(http::HttpFailure::Timeout) => {
+                return BouncerVerdict::Unavailable(format!(
+                    "the model at {} timed out after two inference attempts (up to {} ms total)",
+                    self.url,
+                    self.timeout.saturating_mul(2).as_millis()
+                ));
+            }
             Err(_) => {
                 return BouncerVerdict::Unavailable(format!("no answer from {}", self.url));
             }
@@ -330,7 +351,10 @@ impl BouncerClient {
         if !(200..300).contains(&response.status) {
             return BouncerVerdict::Unavailable(format!("status {}", response.status));
         }
-        let verdict = parse_answers(&response.body, &facts_for(request));
+        self.check_model(parse_answers(&response.body, &facts_for(request)))
+    }
+
+    fn check_model(&self, verdict: BouncerVerdict) -> BouncerVerdict {
         match (&self.expected_model, &verdict) {
             (Some(expected), BouncerVerdict::Scored { model, .. })
                 if model.as_deref() != Some(expected.as_str()) =>
@@ -1313,5 +1337,192 @@ mod tests {
             client.evaluate(&request("")),
             BouncerVerdict::Unavailable(_)
         ));
+    }
+
+    /// Synthetic inference responses, with no vault, provider, or command execution.
+    fn scripted_inference_server(
+        responses: Vec<(u16, &'static str, Duration)>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&calls);
+        let stopped = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            for (status, body, delay) in responses {
+                let mut stream = loop {
+                    if stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                };
+                stream.set_nonblocking(false).expect("blocking stream");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("timeout");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().expect("length");
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).expect("request body");
+                seen.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(delay);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Synthetic\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, calls, stop, server)
+    }
+
+    const VALID_INFERENCE: &str = r#"{"model":"synthetic-v1","answers":{"task_match":{"noul":0.9},"writes":{"noul":0.1},"remote":{"noul":0.1},"leak":{"noul":0.1},"destroy":{"noul":0.1}}}"#;
+
+    #[test]
+    fn the_default_inference_budget_accepts_a_slow_first_real_decision() {
+        use std::sync::atomic::Ordering;
+        let (url, calls, stop, server) =
+            scripted_inference_server(vec![(200, VALID_INFERENCE, Duration::from_millis(5200))]);
+        let client = BouncerClient::new(&url).expect("client");
+        assert!(matches!(
+            client.evaluate(&request("")),
+            BouncerVerdict::Scored { .. }
+        ));
+        stop.store(true, Ordering::SeqCst);
+        server.join().expect("server");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a slow first decision needs no retry"
+        );
+    }
+
+    #[test]
+    fn a_transient_inference_timeout_retries_once_with_the_configured_budget() {
+        use std::sync::atomic::Ordering;
+        let (url, calls, stop, server) = scripted_inference_server(vec![
+            (200, VALID_INFERENCE, Duration::from_millis(300)),
+            (200, VALID_INFERENCE, Duration::ZERO),
+        ]);
+        let client = BouncerClient::new(&url)
+            .expect("client")
+            .with_timeout(Duration::from_millis(200));
+        let began = std::time::Instant::now();
+        assert!(matches!(
+            client.evaluate(&request("")),
+            BouncerVerdict::Scored { .. }
+        ));
+        assert!(
+            began.elapsed() >= Duration::from_millis(200),
+            "first attempt timed out"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "retry stayed bounded"
+        );
+        stop.store(true, Ordering::SeqCst);
+        server.join().expect("server");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn inference_timeouts_stop_after_two_attempts() {
+        use std::sync::atomic::Ordering;
+        let (url, calls, stop, server) = scripted_inference_server(vec![
+            (200, VALID_INFERENCE, Duration::from_millis(300)),
+            (200, VALID_INFERENCE, Duration::from_millis(300)),
+            (200, VALID_INFERENCE, Duration::ZERO),
+        ]);
+        let client = BouncerClient::new(&url)
+            .expect("client")
+            .with_timeout(Duration::from_millis(200));
+        let began = std::time::Instant::now();
+        match client.evaluate(&request("")) {
+            BouncerVerdict::Unavailable(reason) => assert!(
+                reason.contains("two inference attempts (up to 400 ms total)"),
+                "{reason}"
+            ),
+            verdict => panic!("timeouts gave a verdict: {verdict:?}"),
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "total budget stayed bounded"
+        );
+        stop.store(true, Ordering::SeqCst);
+        server.join().expect("server");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalid_or_wrong_version_inference_is_never_retried() {
+        use std::sync::atomic::Ordering;
+        for (status, body, pin) in [
+            (500, "{}", "synthetic-v1"),
+            (200, "not-json", "synthetic-v1"),
+            (
+                200,
+                r#"{"answers":{"task_match":{"noul":0.9}}}"#,
+                "synthetic-v1",
+            ),
+            (200, VALID_INFERENCE, "another-model"),
+        ] {
+            let (url, calls, stop, server) = scripted_inference_server(vec![
+                (status, body, Duration::ZERO),
+                (200, VALID_INFERENCE, Duration::ZERO),
+            ]);
+            let client = BouncerClient::new(&url).expect("client").expect_model(pin);
+            assert!(matches!(
+                client.evaluate(&request("")),
+                BouncerVerdict::Unavailable(_)
+            ));
+            stop.store(true, Ordering::SeqCst);
+            server.join().expect("server");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "invalid response was not retried"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_also_checks_the_expected_model_version() {
+        let url = answer_server(
+            r#"{"model":"wrong-model","answers":{"ready":{"noul":0.5}}}"#,
+            1,
+        );
+        let client = BouncerClient::new(&url)
+            .expect("client")
+            .expect_model("active-model");
+        assert!(
+            client
+                .warm_up(Duration::from_secs(1))
+                .expect_err("wrong version")
+                .contains("not the active version active-model")
+        );
     }
 }

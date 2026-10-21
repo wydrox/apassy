@@ -19,7 +19,7 @@
 //! `relay_device`, in the same transaction as the new tables. A failure of any step
 //! leaves the file at schema 18 with its row.
 
-use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
+use super::types::{VaultErrorKind, VaultResult, err};
 use super::{merge, verify_expected_columns_in};
 
 /// Tables of schema 19, and the move of the relay row. The triggers of the new child
@@ -112,7 +112,7 @@ fn add_schema_v19_with(
         .map_err(storage)?;
     tx.execute_batch(SCHEMA_V19_MARKS_SQL).map_err(storage)?;
     before_check(tx)?;
-    verify_expected_columns_in(tx, "main", SCHEMA_VERSION)
+    verify_expected_columns_in(tx, "main", super::TRUSTED_DEVICE_SCHEMA_VERSION)
 }
 
 /// Remove the schema 19 rows of a deleted item: its home, when it is a mirror.
@@ -141,6 +141,8 @@ mod tests {
         vault.lock().unwrap();
         let conn = Connection::open_with_flags(&path, OPEN_EXISTING).unwrap();
         apply_key(&conn, PASS).unwrap();
+        conn.execute_batch(&super::super::schema20::downgrade_sql())
+            .unwrap();
         conn.execute_batch(DOWNGRADE_TO_18_SQL).unwrap();
         conn.execute(
             "INSERT INTO relay_device

@@ -57,7 +57,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
-use super::{FirstUseDeclaration, FirstUseOffer, PendingRun};
+use super::{EvaluationOffer, FirstUseDeclaration, FirstUseOffer, PendingRun};
 use crate::broker::SharedVault;
 use crate::broker::action_kind::ActionKind;
 use crate::broker::project::Project;
@@ -68,6 +68,7 @@ use crate::native::{
     AuthCancel, HelperErrorCode, MAX_AGENT_NAME_CHARS, MAX_REASON_CHARS, NativeError, NativeHelper,
 };
 use crate::questions::envelope::{Choice, RemoteEnvironment, answer_string};
+use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::exceptions::ExceptionKind;
 use crate::vault::usage::InteractionKind;
 use crate::vault::{Declaration, Vault, VaultErrorKind};
@@ -190,6 +191,13 @@ pub enum OwnerAction {
     ApproveRun(PendingRun),
     /// Approve one waiting run and remember a narrow pattern for later runs (ADR 0010).
     ApproveAndRemember(PendingRun),
+    /// Approve this run once and authorize future model evaluation in this exact
+    /// scope. Future requests still require their own evaluation. Local owner check only.
+    ApproveAndEvaluate {
+        run: PendingRun,
+        offer: EvaluationOffer,
+        confirmations: Vec<EvaluationConfirmation>,
+    },
     /// Approve one waiting run with a first use and give the agent process access to its
     /// new items in the folder of the offer (ADR 0024). The proof names the run, the
     /// offer, and each declaration exactly as the owner saw them. A phone cannot make it.
@@ -369,6 +377,12 @@ impl OwnerAction {
                     short_name(run)
                 )
             }
+            Self::ApproveAndEvaluate { run, offer, .. } => format!(
+                "approve this run of agent \"{}\" once and allow future model evaluation of {} in \"{}\"",
+                short_name(run),
+                action_words(offer.action),
+                short_device_name(&offer.project.label)
+            ),
             Self::ApproveAndGrant {
                 run,
                 offer,
@@ -456,6 +470,7 @@ impl OwnerAction {
         match self {
             Self::ApproveRun(run)
             | Self::ApproveAndRemember(run)
+            | Self::ApproveAndEvaluate { run, .. }
             | Self::ApproveAndGrant { run, .. }
             | Self::ApproveInProject { run, .. }
             | Self::AllowProduction { run, .. } => Some(run),
@@ -1286,6 +1301,7 @@ fn remote_choice<'a>(
 ) -> Result<(Choice, &'a PendingRun), OwnerAuthError> {
     match action {
         OwnerAction::ApproveRun(run) => Ok((Choice::ApproveOnce, run)),
+        OwnerAction::ApproveAndEvaluate { .. } => Err(OwnerAuthError::RemoteUnsupported),
         OwnerAction::ApproveInProject {
             run,
             project,
@@ -1398,5 +1414,74 @@ pub fn verify_remote_action(
         Ok(())
     } else {
         Err(OwnerAuthError::RemoteRejected)
+    }
+}
+
+#[cfg(test)]
+mod evaluation_tests {
+    use super::*;
+
+    #[test]
+    fn remote_and_companion_choices_cannot_authorize_evaluation() {
+        let run = PendingRun {
+            id: 123,
+            agent: "Synthetic agent".to_owned(),
+            command: vec!["true".to_owned()],
+            cwd: "/tmp/synthetic-evaluation".to_owned(),
+            env_names: vec!["SYNTHETIC_KEY".to_owned()],
+            purpose: "Synthetic test".to_owned(),
+            risk: String::new(),
+            user_request: String::new(),
+            request_source: String::new(),
+            agent_request: String::new(),
+            remember: None,
+            question: super::super::QuestionInfo::default(),
+        };
+        let action = OwnerAction::ApproveAndEvaluate {
+            run: run.clone(),
+            offer: EvaluationOffer {
+                agent_id: 7,
+                project: Project {
+                    key: "/tmp/synthetic-evaluation".to_owned(),
+                    label: "Synthetic".to_owned(),
+                    root: "/tmp/synthetic-evaluation".into(),
+                },
+                action: ActionKind::Read,
+                items: Vec::new(),
+                command_binding: None,
+            },
+            confirmations: Vec::new(),
+        };
+        assert_eq!(action.run(), Some(&run));
+        assert!(
+            action
+                .reason()
+                .contains("once and allow future model evaluation")
+        );
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        let gate = OwnerGate::new(std::sync::Arc::new(std::sync::Mutex::new(None)), None);
+        assert_eq!(
+            gate.check_companion(&action, "synthetic-device", 0, &[], [0; 32]),
+            Err(OwnerAuthError::CompanionUnsupported)
+        );
+        let once = OwnerAction::ApproveRun(run);
+        assert!(matches!(
+            remote_choice(&once, None),
+            Ok((Choice::ApproveOnce, _))
+        ));
+        let proof = OwnerProof::issue_for_test(action.clone(), [1; 32], Instant::now());
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        let mut other = action;
+        let OwnerAction::ApproveAndEvaluate { offer, .. } = &mut other else {
+            unreachable!()
+        };
+        offer.command_binding = Some("changed-binding".to_owned());
+        assert_eq!(
+            proof.check(&other, &[1; 32]),
+            Err(ProofRefusal::WrongAction)
+        );
     }
 }

@@ -9,13 +9,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{
-    ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
+    ApprovalQueue, ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
 use apassy::broker::bouncer::{BouncerClient, Thresholds};
 use apassy::broker::http::TlsClient;
@@ -23,11 +22,10 @@ use apassy::broker::learning::{self, RunScope};
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault, calibration};
 use apassy::contracts::CredentialKind;
 use apassy::vault::exceptions::ExceptionKind;
-use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, Field, ItemDraft, LoggedDecision,
-    PATTERN_APPROVALS_NEEDED, PatternState, RequestSource, Reversibility, RiskLevel, Scope,
-    SecretValue, Vault,
+    DecidedBy, DecisionEntry, Declaration, DeclarationSources, Environment, ExecMode, Field,
+    ItemDraft, LoggedDecision, PATTERN_APPROVALS_NEEDED, PatternState, RequestSource,
+    Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -49,11 +47,13 @@ struct Fixture {
     model_calls: Arc<Mutex<Vec<String>>>,
 }
 
-fn staging() -> Declaration {
+/// Owner-confirmed development/low metadata makes these model-learning fixtures
+/// eligible without granting authority from past use-log entries.
+fn development() -> Declaration {
     Declaration {
         project: "project".to_owned(),
-        environment: Environment::Staging,
-        risk: RiskLevel::Medium,
+        environment: Environment::Development,
+        risk: RiskLevel::Low,
         scope: Scope::ReadWrite,
         reversibility: Reversibility::Reversible,
     }
@@ -100,9 +100,11 @@ fn fixture_with(model: &'static [(&'static str, f64)], approval_timeout: Duratio
         )
         .expect("grant");
     vault
-        .set_declaration(item.id, &staging())
+        .set_declaration(item.id, &development())
         .expect("declaration");
-    seed_history(&mut vault, item.id, agent.id, &project);
+    vault
+        .set_declaration_sources(item.id, &DeclarationSources::default())
+        .expect("owner-confirmed classification");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = approval_timeout;
@@ -124,35 +126,6 @@ fn fixture_with(model: &'static [(&'static str, f64)], approval_timeout: Duratio
         token: token.expose().to_owned(),
         broker,
         model_calls: bouncer.bodies,
-    }
-}
-
-/// ADR 0025 §3: the model decides only for an item that this agent used in the project
-/// before. Each kind of action of this agent gets one earlier use that the bouncer
-/// allowed.
-fn seed_history(vault: &mut Vault, item: u64, agent: u64, project: &std::path::Path) {
-    for action in [
-        ActionKind::Read,
-        ActionKind::Change,
-        ActionKind::Deploy,
-        ActionKind::Delete,
-    ] {
-        vault
-            .record_item_use(&NewItemUse {
-                item_id: item,
-                agent_id: Some(agent),
-                agent_name: "Learning agent".to_owned(),
-                project_key: project.display().to_string(),
-                project_label: "project".to_owned(),
-                action,
-                command_summary: "run earlier".to_owned(),
-                hosts: Vec::new(),
-                outcome: UseOutcome::Allowed,
-                decided_by: UseDecidedBy::Bouncer,
-                answered_on: String::new(),
-                decision_log_id: None,
-            })
-            .expect("history");
     }
 }
 
@@ -211,30 +184,41 @@ fn owner_check(vault: &SharedVault, action: OwnerAction) -> OwnerProof {
         .expect("owner check")
 }
 
+/// Fail a broken synthetic interaction instead of leaving its owner thread waiting
+/// forever when the broker unexpectedly allows, refuses, or times out the run.
+fn wait_for_owner_question(approvals: &ApprovalQueue) -> PendingRun {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(pending) = approvals.pending().into_iter().next() {
+            return pending;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no owner question appeared within 15 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The next waiting run gets `answer`. An approval passes the owner check, the same
 /// path as the approval card. The thread returns the run as the card saw it.
 fn owner(fx: &Fixture, answer: OwnerAnswer) -> JoinHandle<PendingRun> {
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     std::thread::spawn(move || {
-        loop {
-            if let Some(pending) = approvals.pending().into_iter().next() {
-                match answer {
-                    OwnerAnswer::Approve => {
-                        let proof = owner_check(&vault, OwnerAction::ApproveRun(pending.clone()));
-                        assert_eq!(approvals.approve(proof), Ok(()));
-                    }
-                    OwnerAnswer::ApproveAndRemember => {
-                        let proof =
-                            owner_check(&vault, OwnerAction::ApproveAndRemember(pending.clone()));
-                        assert_eq!(approvals.approve(proof), Ok(()));
-                    }
-                    OwnerAnswer::Deny => assert!(approvals.deny(pending.id)),
-                }
-                return pending;
+        let pending = wait_for_owner_question(&approvals);
+        match answer {
+            OwnerAnswer::Approve => {
+                let proof = owner_check(&vault, OwnerAction::ApproveRun(pending.clone()));
+                assert_eq!(approvals.approve(proof), Ok(()));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            OwnerAnswer::ApproveAndRemember => {
+                let proof = owner_check(&vault, OwnerAction::ApproveAndRemember(pending.clone()));
+                assert_eq!(approvals.approve(proof), Ok(()));
+            }
+            OwnerAnswer::Deny => assert!(approvals.deny(pending.id)),
         }
+        pending
     })
 }
 
@@ -431,21 +415,15 @@ fn one_denial_blocks_the_pattern() {
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     let refused = std::thread::spawn(move || {
-        loop {
-            if let Some(pending) = approvals.pending().into_iter().next() {
-                assert!(pending.remember.is_none());
-                let remember =
-                    owner_check(&vault, OwnerAction::ApproveAndRemember(pending.clone()));
-                assert_eq!(
-                    approvals.approve(remember),
-                    Err(ApprovalRefusal::NothingToRemember)
-                );
-                let once = owner_check(&vault, OwnerAction::ApproveRun(pending));
-                assert_eq!(approvals.approve(once), Ok(()));
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let pending = wait_for_owner_question(&approvals);
+        assert!(pending.remember.is_none());
+        let remember = owner_check(&vault, OwnerAction::ApproveAndRemember(pending.clone()));
+        assert_eq!(
+            approvals.approve(remember),
+            Err(ApprovalRefusal::NothingToRemember)
+        );
+        let once = owner_check(&vault, OwnerAction::ApproveRun(pending));
+        assert_eq!(approvals.approve(once), Ok(()));
     });
     assert_eq!(decided_by(&run(&fx, &report("8"))), "Owner approved");
     refused.join().expect("owner");
@@ -473,11 +451,11 @@ fn one_denial_blocks_the_pattern() {
 #[test]
 fn an_active_pattern_never_overrides_the_earlier_steps() {
     let fx = fixture(UNSURE);
-    let staged = [Some(staging())];
+    let declared = [Some(development())];
     let items = [fx.item_id];
 
     // Clean request: the pattern allows it without the model.
-    teach(&fx, &items, &staged, "", &report("1"));
+    teach(&fx, &items, &declared, "", &report("1"));
     assert_eq!(decided_by(&run(&fx, &report("2"))), "Remembered pattern");
     let calls = fx.model_calls.lock().expect("calls").len();
 
@@ -498,7 +476,7 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
         "-c".to_owned(),
         format!("echo ${ENV_NAME} | base64"),
     ];
-    teach(&fx, &items, &staged, "", &leak);
+    teach(&fx, &items, &declared, "", &leak);
     let card = expect_prompt(&fx, || run(&fx, &leak));
     assert!(
         card.risk.contains("Rule flags: secret_output"),
@@ -525,7 +503,7 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
 
     // Production rule (ADR 0010, goal item P2). The pattern is taught under the
     // production declaration, so its key matches.
-    let mut production = staging();
+    let mut production = development();
     production.environment = Environment::Production;
     with_vault(&fx, |vault| {
         vault
@@ -668,7 +646,7 @@ fn decision_log_and_export_have_no_secret_values() {
     assert_eq!(first.user_request_source, RequestSource::Agent);
     assert_eq!(first.cwd_rel, ".");
     assert_eq!(first.env_names, vec![ENV_NAME.to_owned()]);
-    assert_eq!(first.declarations, vec![Some(staging())]);
+    assert_eq!(first.declarations, vec![Some(development())]);
     assert_eq!(first.fact("task_match"), Some(0.95));
     assert_eq!(first.pattern, "sh -c './report.sh --limit <number>'");
     let masked = &log[1].entry;
@@ -719,7 +697,7 @@ fn decision_log_and_export_have_no_secret_values() {
         lines[0]["command"],
         serde_json::json!(["sh", "-c", "./report.sh --limit 1"])
     );
-    assert_eq!(lines[0]["declaration"][0]["environment"], "staging");
+    assert_eq!(lines[0]["declaration"][0]["environment"], "development");
     assert_eq!(lines[0]["user_request_source"], "agent");
     assert_eq!(lines[0]["model_facts"]["task_match"], 0.95);
     assert_eq!(lines[3]["decided_by"], "owner");
@@ -754,8 +732,8 @@ fn decision_log_and_export_have_no_secret_values() {
 #[test]
 fn revoke_delete_and_restore_remove_patterns() {
     let fx = fixture(UNSURE);
-    let staged = [Some(staging())];
-    teach(&fx, &[fx.item_id], &staged, "", &report("1"));
+    let declared = [Some(development())];
+    teach(&fx, &[fx.item_id], &declared, "", &report("1"));
     let backup = fx.dir.path().join("learning.backup");
     let restored = fx.dir.path().join("restored.db");
     with_vault(&fx, |vault| {
@@ -786,7 +764,7 @@ fn revoke_delete_and_restore_remove_patterns() {
             cwd: &fx.project,
             cwd_rel: ".",
             items: &[item],
-            declarations: &staged,
+            declarations: &declared,
             instruction: "",
         },
         &report("1"),
@@ -813,7 +791,7 @@ fn owner_entry(at: u64, task_match: f64, approve: bool) -> DecisionEntry {
         command: vec!["./report.sh".to_owned()],
         purpose: "Report.".to_owned(),
         env_names: vec![ENV_NAME.to_owned()],
-        declarations: vec![Some(staging())],
+        declarations: vec![Some(development())],
         rule_flags: Vec::new(),
         known_safe: false,
         model_facts: vec![
@@ -835,6 +813,75 @@ fn owner_entry(at: u64, task_match: f64, approve: bool) -> DecisionEntry {
         note: String::new(),
         instruction: String::new(),
     }
+}
+
+/// Both overview readers count allowed model, pattern, and remembered-answer runs
+/// once. Owner decisions and unsuccessful requests still contribute to the ask rate.
+#[test]
+fn automatic_counts_include_remembered_answers_without_counting_denials() {
+    let dir = TempDir::new().expect("dir");
+    let mut vault = Vault::create(&dir.path().join("metrics.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    let now = learning::now();
+    let day = now / 86_400 * 86_400;
+    let since = day - 6 * 86_400;
+    let record = |vault: &mut Vault, at, decided_by, asked, allow| {
+        let mut entry = owner_entry(at, 0.95, allow);
+        entry.decided_by = decided_by;
+        entry.asked = asked;
+        vault.record_decision(&entry).expect("record");
+    };
+    record(&mut vault, since - 1, DecidedBy::Answer, false, true);
+    for decided_by in [DecidedBy::Model, DecidedBy::Pattern, DecidedBy::Answer] {
+        record(&mut vault, now, decided_by, false, true);
+    }
+    assert_eq!(vault.week_counts(now).expect("week").automatic, 3);
+
+    for allow in [true, false] {
+        record(&mut vault, now, DecidedBy::Owner, true, allow);
+    }
+    assert_eq!(vault.week_counts(now).expect("week").automatic, 3);
+
+    record(&mut vault, now, DecidedBy::NoAnswer, true, false);
+    record(&mut vault, now, DecidedBy::Rule, false, false);
+    // Defensive accounting: an inconsistent historic row cannot become a
+    // successful automatic run merely because it names an automatic route.
+    for decided_by in [DecidedBy::Model, DecidedBy::Pattern, DecidedBy::Answer] {
+        record(&mut vault, now, decided_by, false, false);
+    }
+    record(&mut vault, now, DecidedBy::Model, true, true);
+
+    let days = vault.ask_rate_by_day(since).expect("days");
+    assert_eq!(days.len(), 1, "the previous week is excluded");
+    let totals = days[0];
+    assert_eq!(
+        (totals.by_model, totals.by_pattern, totals.by_answer),
+        (1, 1, 1)
+    );
+    assert_eq!(totals.automatic(), 3);
+    assert_eq!(totals.decisions, 10, "only the rule denial is excluded");
+    assert_eq!(
+        totals.asked, 4,
+        "approval, denial, timeout, and asked model row"
+    );
+    assert_eq!(totals.ask_rate(), 0.4);
+    assert_eq!(
+        vault.week_counts(now).expect("week").automatic,
+        u64::from(totals.automatic()),
+        "the Decisions total uses the same definition as Bouncer"
+    );
+    assert_eq!(
+        vault
+            .decision_log()
+            .expect("log")
+            .iter()
+            .filter(|row| row.entry.decided_by == DecidedBy::Answer
+                && row.entry.decision == LoggedDecision::Allow
+                && row.entry.at >= since)
+            .count(),
+        1,
+        "the stored owner/asked=0 remembered answer round trips once"
+    );
 }
 
 /// Goal item B5: a proposal is valid only if a replay on all past decisions allows no
@@ -898,7 +945,7 @@ fn calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it() {
     });
 
     // The production rule is not calibrated.
-    let mut production = staging();
+    let mut production = development();
     production.environment = Environment::Production;
     with_vault(&fx, |vault| {
         vault

@@ -26,7 +26,7 @@ pub struct WeekCounts {
     /// Owner interactions in the last 7 days: questions, approvals, owner checks, and
     /// corrections.
     pub by_you: u64,
-    /// Decisions of the last 7 days that did not wait for the owner.
+    /// Allowed decisions of the last 7 days that did not wait for the owner.
     pub automatic: u64,
 }
 
@@ -172,7 +172,7 @@ impl Vault {
         let automatic = self
             .ask_rate_by_day(since)?
             .iter()
-            .map(|day| u64::from(day.decisions.saturating_sub(day.asked)))
+            .map(|day| u64::from(day.automatic()))
             .sum();
         Ok(WeekCounts { by_you, automatic })
     }

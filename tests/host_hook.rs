@@ -23,17 +23,15 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client::{self, SendOptions};
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{ApprovalQueue, OwnerAction, OwnerCheck, OwnerGate, PendingRun};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::exceptions::ExceptionKind;
-use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Declaration, Environment, ExecMode, Field, ItemDraft, Reversibility, RiskLevel, Scope,
-    SecretValue, Vault,
+    Declaration, DeclarationSources, Environment, ExecMode, Field, ItemDraft, Reversibility,
+    RiskLevel, Scope, SecretValue, Vault,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -84,7 +82,7 @@ fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
     vault.unlock(PASS).expect("unlock");
     let item = vault
         .add(ItemDraft {
-            title: "Billing staging key".to_owned(),
+            title: "Billing development key".to_owned(),
             kind: CredentialKind::ApiKey,
             notes: String::new(),
             tags: Vec::new(),
@@ -103,8 +101,8 @@ fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
             item.id,
             &Declaration {
                 project: "project".to_owned(),
-                environment: Environment::Staging,
-                risk: RiskLevel::Medium,
+                environment: Environment::Development,
+                risk: RiskLevel::Low,
                 scope: Scope::ReadWrite,
                 reversibility: Reversibility::Reversible,
             },
@@ -119,32 +117,11 @@ fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
             .add_agent_exception(agent.id, item.id, ExceptionKind::AlwaysAsk)
             .expect("always ask");
     }
-    // ADR 0025 §3: a staging item asks the owner at its first use in the project. These
-    // tests are about the user request at the model step, so the agent used the item in
-    // the project before, for each kind of action, and the bouncer allowed it.
-    for action in [
-        ActionKind::Read,
-        ActionKind::Change,
-        ActionKind::Deploy,
-        ActionKind::Delete,
-    ] {
-        vault
-            .record_item_use(&NewItemUse {
-                item_id: item.id,
-                agent_id: Some(agent.id),
-                agent_name: "Hook agent".to_owned(),
-                project_key: project.join(".git").display().to_string(),
-                project_label: "project".to_owned(),
-                action,
-                command_summary: "run echo".to_owned(),
-                hosts: Vec::new(),
-                outcome: UseOutcome::Allowed,
-                decided_by: UseDecidedBy::Bouncer,
-                answered_on: String::new(),
-                decision_log_id: None,
-            })
-            .expect("history");
-    }
+    // These tests exercise host request attribution at the model step. Use an
+    // owner-confirmed development/low item; history never authorizes evaluation.
+    vault
+        .set_declaration_sources(item.id, &DeclarationSources::default())
+        .expect("owner-confirmed classification");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let bouncer = common::fake_bouncer(&[]);
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
@@ -368,11 +345,16 @@ fn approval_card_shows_the_source_and_the_difference() {
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     let approver = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(pending) = approvals.pending().into_iter().next() {
                 owner_approves(&vault, &approvals, &pending);
                 return pending;
             }
+            assert!(
+                Instant::now() < deadline,
+                "no hook approval question appeared"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     });

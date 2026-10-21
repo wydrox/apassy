@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{
     ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
@@ -23,10 +22,10 @@ use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::sync::{FolderSync, SyncConfig};
 use apassy::vault::exceptions::ExceptionKind;
-use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, ItemDraft,
-    Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultErrorKind,
+    ActivityDecision, Declaration, DeclarationSources, EnvDelivery, Environment, ExecMode,
+    ExecRule, Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue, Vault,
+    VaultErrorKind,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -177,12 +176,7 @@ fn decide_later_with_name(
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     std::thread::spawn(move || {
-        let pending = loop {
-            if let Some(run) = approvals.pending().into_iter().next() {
-                break run;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        let pending = first_pending(&approvals);
         assert_eq!(pending.env_names, vec![env_name]);
         assert!(!format!("{pending:?}").contains(SECRET));
         let proof = approve.then(|| owner_check(&vault, pending.clone()));
@@ -1116,10 +1110,15 @@ fn a_changed_binding_invalidates_a_model_decision_without_an_owner_prompt() {
 }
 
 fn first_pending(approvals: &broker::approvals::ApprovalQueue) -> PendingRun {
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(run) = approvals.pending().into_iter().next() {
             return run;
         }
+        assert!(
+            Instant::now() < deadline,
+            "no run waits for approval within 15 seconds"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -1401,8 +1400,8 @@ fn restore_needs_owner_review_before_runs() {
             fx.item_id,
             &Declaration {
                 project: "project".to_owned(),
-                environment: Environment::Staging,
-                risk: RiskLevel::Medium,
+                environment: Environment::Development,
+                risk: RiskLevel::Low,
                 scope: Scope::ReadWrite,
                 reversibility: Reversibility::Reversible,
             },
@@ -1469,26 +1468,11 @@ fn restore_needs_owner_review_before_runs() {
             ExecMode::Bouncer,
         )
         .expect("grant");
-    // ADR 0025 §3: the model decides for a staging item that this agent used in the
-    // project before.
-    for action in [ActionKind::Read, ActionKind::Change] {
-        restored
-            .record_item_use(&NewItemUse {
-                item_id: fx.item_id,
-                agent_id: Some(agent.id),
-                agent_name: "Run agent".to_owned(),
-                project_key: fx.project.display().to_string(),
-                project_label: "project".to_owned(),
-                action,
-                command_summary: "run echo".to_owned(),
-                hosts: Vec::new(),
-                outcome: UseOutcome::Allowed,
-                decided_by: UseDecidedBy::Bouncer,
-                answered_on: String::new(),
-                decision_log_id: None,
-            })
-            .expect("history");
-    }
+    // Owner review is the gate under test. Confirm development/low metadata
+    // independently; past Bouncer uses must not provide evaluation authority.
+    restored
+        .set_declaration_sources(fx.item_id, &DeclarationSources::default())
+        .expect("owner-confirmed classification");
     let token = token.expose().to_owned();
     let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
     let bouncer = common::fake_bouncer(&[]);
@@ -1637,12 +1621,7 @@ fn archived_items_do_not_run_and_a_run_shows_for_each_item() {
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     let approver = std::thread::spawn(move || {
-        let pending = loop {
-            if let Some(run) = approvals.pending().into_iter().next() {
-                break run;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        let pending = first_pending(&approvals);
         let proof = owner_check(&vault, pending);
         approvals.approve(proof).expect("approve");
     });

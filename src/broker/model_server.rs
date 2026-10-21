@@ -472,6 +472,8 @@ pub enum Problem {
     Exited(String),
     /// The server did not answer in time.
     NoAnswer(Duration),
+    /// The endpoint answered, but a valid readiness inference did not.
+    Readiness(String),
 }
 
 impl Problem {
@@ -499,6 +501,7 @@ impl Problem {
                 "The model server did not answer within {} seconds. See the log.",
                 limit.as_secs()
             ),
+            Self::Readiness(reason) => format!("The model is not ready: {reason}."),
         }
     }
 }
@@ -980,20 +983,39 @@ impl ModelServer {
         }
     }
 
-    /// In [`StartMode::WhenNeeded`], start the server if it does not run, and wait up to
-    /// `timeout` for it. No lock is held while the server starts.
+    /// Wait for a successful readiness inference. Managed modes can start a server;
+    /// external mode only waits for the monitor's check. No lock is held during I/O.
     pub fn ensure_running(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         let mut inner = self.lock();
         inner.last_use = Instant::now();
+        if inner.quit {
+            return Err("the model server stopped".to_owned());
+        }
+        if let Err(reason) = &self.client {
+            return Err(Problem::BadUrl(reason).text());
+        }
         match &inner.state {
             ServerState::Running { .. } => return Ok(()),
             ServerState::Off => return Err(OFF_REASON.to_owned()),
-            ServerState::External { .. } => return Ok(()),
+            ServerState::External { up: Some(true), .. } => return Ok(()),
+            ServerState::External { .. } => {
+                inner.last_probe = None;
+                self.wake.notify_all();
+            }
             ServerState::Starting { .. } => {}
             ServerState::Stopped | ServerState::Failed { .. } => {
+                if let ServerState::Failed {
+                    problem: Problem::Readiness(reason),
+                    ..
+                } = &inner.state
+                {
+                    // The monitor retries inference on the existing process. Do not
+                    // spawn another process or hide the last readiness failure.
+                    return Err(Problem::Readiness(reason.clone()).text());
+                }
                 if !inner.settings.start.managed() {
-                    return Ok(());
+                    return Err("the external model server is not ready".to_owned());
                 }
                 if let ServerState::Failed { problem, .. } = &inner.state
                     && !problem.is_setup()
@@ -1008,10 +1030,14 @@ impl ModelServer {
             }
         }
         loop {
+            if inner.quit {
+                return Err("the model server stopped".to_owned());
+            }
             match &inner.state {
                 ServerState::Running { .. } => return Ok(()),
+                ServerState::External { up: Some(true), .. } => return Ok(()),
                 ServerState::Failed { problem, .. } => return Err(problem.text()),
-                ServerState::Starting { .. } => {}
+                ServerState::Starting { .. } | ServerState::External { .. } => {}
                 _ => return Err("the model server stopped".to_owned()),
             }
             let now = Instant::now();
@@ -1103,7 +1129,14 @@ impl ModelServer {
             self.fail(inner, Problem::Exited(status.to_string()));
             return None;
         }
-        let running = matches!(inner.state, ServerState::Running { outside: false, .. });
+        let running = matches!(
+            inner.state,
+            ServerState::Running { outside: false, .. }
+                | ServerState::Failed {
+                    problem: Problem::Readiness(_),
+                    ..
+                }
+        );
         if idle_stop_due(
             inner.settings.start,
             inner.child.is_some(),
@@ -1118,7 +1151,12 @@ impl ModelServer {
         }
         let probe = matches!(
             inner.state,
-            ServerState::External { .. } | ServerState::Running { outside: true, .. }
+            ServerState::External { .. }
+                | ServerState::Running { outside: true, .. }
+                | ServerState::Failed {
+                    problem: Problem::Readiness(_),
+                    ..
+                }
         );
         if probe
             && inner
@@ -1136,43 +1174,50 @@ impl ModelServer {
         let Ok(client) = &self.client else {
             return;
         };
-        let up = client.probe_health(PROBE_TIMEOUT) == Health::Healthy;
-        let needs_model = {
-            let inner = self.lock();
-            matches!(inner.state, ServerState::External { model: None, .. })
-        };
-        // The version needs one answer. It also loads the model, so the first run is fast.
-        let model = if up && needs_model {
-            client.warm_up(WARM_UP_LIMIT).ok().flatten()
+        let health = client.probe_health(PROBE_TIMEOUT);
+        let up = health == Health::Healthy;
+        // A health response alone never establishes readiness. Failed warm-ups are
+        // retried on the same process, including one managed outside Apassy.
+        let ready = if up {
+            client.warm_up(WARM_UP_LIMIT)
         } else {
-            None
+            Err(format!("no healthy model server at {}", client.url()))
         };
         let mut inner = self.lock();
-        if inner.generation != generation {
+        if inner.generation != generation || inner.quit {
             return;
         }
-        match &mut inner.state {
-            ServerState::External {
-                up: known,
-                model: version,
-            } => {
-                *known = Some(up);
-                if !up {
-                    *version = None;
-                } else if model.is_some() {
-                    *version = model;
-                }
+        inner.last_probe = Some(Instant::now());
+        match ready {
+            Ok(model) => {
+                inner.last_failure = None;
+                inner.state = if inner.settings.start == StartMode::External {
+                    ServerState::External {
+                        up: Some(true),
+                        model,
+                    }
+                } else {
+                    ServerState::Running {
+                        model,
+                        outside: inner.child.is_none(),
+                    }
+                };
             }
-            ServerState::Running { outside: true, .. } if !up => {
-                // ADR 0024: Apassy is the program that starts the bouncer. In "With
-                // Apassy", it replaces a server of another program that stopped.
+            Err(_)
+                if health == Health::NoServer
+                    && inner.child.is_none()
+                    && inner.settings.start.managed() =>
+            {
+                // A failed warm-up must not hide that the outside process later
+                // exited. Only an empty port permits managed recovery; an occupied
+                // unhealthy endpoint still fails closed without a second process.
                 if inner.settings.start == StartMode::WithApassy {
                     Self::request_launch(&mut inner);
                 } else {
                     inner.state = ServerState::Stopped;
                 }
             }
-            _ => {}
+            Err(reason) => self.fail(&mut inner, Problem::Readiness(reason)),
         }
     }
 
@@ -1190,27 +1235,22 @@ impl ModelServer {
                 return;
             }
         };
-        let ready = match preflight(&self.layout) {
-            Ok(ready) => ready,
-            Err(problem) => {
-                let mut inner = self.lock();
-                if current(&inner) {
-                    self.fail(&mut inner, problem);
-                }
-                return;
-            }
-        };
         let port = client.port().unwrap_or(8770);
         match client.probe_health(PROBE_TIMEOUT) {
             Health::Healthy => {
-                let model = client.warm_up(WARM_UP_LIMIT).ok().flatten();
+                let ready = client.warm_up(WARM_UP_LIMIT);
                 let mut inner = self.lock();
                 if current(&inner) {
-                    inner.state = ServerState::Running {
-                        model,
-                        outside: true,
-                    };
                     inner.last_probe = Some(Instant::now());
+                    match ready {
+                        Ok(model) => {
+                            inner.state = ServerState::Running {
+                                model,
+                                outside: inner.child.is_none(),
+                            }
+                        }
+                        Err(reason) => self.fail(&mut inner, Problem::Readiness(reason)),
+                    }
                 }
                 return;
             }
@@ -1223,6 +1263,16 @@ impl ModelServer {
             }
             Health::NoServer => {}
         }
+        let ready = match preflight(&self.layout) {
+            Ok(ready) => ready,
+            Err(problem) => {
+                let mut inner = self.lock();
+                if current(&inner) {
+                    self.fail(&mut inner, problem);
+                }
+                return;
+            }
+        };
         // A first start downloads the base weights before it answers.
         let limit = if self.weights_ready() {
             START_LIMIT
@@ -1288,13 +1338,19 @@ impl ModelServer {
                 break;
             }
         }
-        let model = client.warm_up(WARM_UP_LIMIT).ok().flatten();
+        let ready = client.warm_up(WARM_UP_LIMIT);
         let mut inner = self.lock();
         if current(&inner) && inner.child.is_some() {
-            inner.state = ServerState::Running {
-                model,
-                outside: false,
-            };
+            inner.last_probe = Some(Instant::now());
+            match ready {
+                Ok(model) => {
+                    inner.state = ServerState::Running {
+                        model,
+                        outside: false,
+                    }
+                }
+                Err(reason) => self.fail(&mut inner, Problem::Readiness(reason)),
+            }
         }
     }
 }
@@ -1308,9 +1364,11 @@ impl ModelGate for ModelServer {
         };
         match mode {
             StartMode::Off => Err(OFF_REASON.to_owned()),
-            StartMode::WhenNeeded if self.weights_ready() => self.ensure_running(NEEDED_WAIT),
-            StartMode::WhenNeeded => self.ensure_first_start(),
-            StartMode::WithApassy | StartMode::External => Ok(()),
+            StartMode::WhenNeeded | StartMode::WithApassy if self.weights_ready() => {
+                self.ensure_running(NEEDED_WAIT)
+            }
+            StartMode::WhenNeeded | StartMode::WithApassy => self.ensure_first_start(),
+            StartMode::External => self.ensure_running(NEEDED_WAIT),
         }
     }
 }
@@ -2299,10 +2357,15 @@ mod tests {
         let path = dir.path().join(SETTINGS_FILE);
         let mut layout = layout(dir.path());
         layout.script = None;
+        // A healthy server on the real default port can be adopted without a local
+        // installation. This test specifically exercises a missing managed start,
+        // so isolate it from any model already running on this computer.
+        let url = format!("http://127.0.0.1:{}", free_port());
         let server = ModelServer::start_with(
             Some(path.clone()),
             BouncerSettings {
                 start: StartMode::Off,
+                url: Some(url.clone()),
                 ..BouncerSettings::default()
             },
             layout,
@@ -2315,6 +2378,7 @@ mod tests {
         server
             .set_settings(BouncerSettings {
                 start: StartMode::WhenNeeded,
+                url: Some(url),
                 ..BouncerSettings::default()
             })
             .expect("save");
@@ -3092,6 +3156,20 @@ mod tests {
         listener: std::net::TcpListener,
         stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> thread::JoinHandle<()> {
+        serve_fake_model_replies(listener, stop, || {
+            (
+                200,
+                r#"{"model":"fake-base-v1","answers":{"ready":{"type":"noul","noul":0.5}}}"#,
+                Duration::ZERO,
+            )
+        })
+    }
+
+    fn serve_fake_model_replies(
+        listener: std::net::TcpListener,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        mut reply: impl FnMut() -> (u16, &'static str, Duration) + Send + 'static,
+    ) -> thread::JoinHandle<()> {
         listener.set_nonblocking(true).expect("nonblocking");
         thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -3125,14 +3203,15 @@ mod tests {
                         Ok(n) => raw.extend_from_slice(&buf[..n]),
                     }
                 }
-                let body = if head.starts_with("get /health") {
-                    r#"{"status":"ok"}"#
+                let (status, body, delay) = if head.starts_with("get /health") {
+                    (200, r#"{"status":"ok"}"#, Duration::ZERO)
                 } else {
-                    r#"{"model":"fake-base-v1","answers":{"ready":{"type":"noul","noul":0.5}}}"#
+                    reply()
                 };
+                thread::sleep(delay);
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Synthetic\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }
@@ -3150,6 +3229,356 @@ mod tests {
         executable(&layout.python(), "#!/bin/sh\n");
         executable(&layout.laya_serve(), "#!/bin/sh\n");
         layout
+    }
+
+    #[test]
+    fn healthy_endpoint_with_failed_inference_is_not_ready_and_recovers_without_restart() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for mode in [
+            StartMode::External,
+            StartMode::WithApassy,
+            StartMode::WhenNeeded,
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            let pids = dir.path().join("pids");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let url = format!("http://{}", listener.local_addr().expect("addr"));
+            let stop = Arc::new(AtomicBool::new(false));
+            let valid = Arc::new(AtomicBool::new(false));
+            let answers_valid = Arc::clone(&valid);
+            let fake = serve_fake_model_replies(listener, Arc::clone(&stop), move || {
+                if answers_valid.load(Ordering::SeqCst) {
+                    (
+                        200,
+                        r#"{"model":"recovered-v1","answers":{"ready":{"noul":0.5}}}"#,
+                        Duration::ZERO,
+                    )
+                } else {
+                    (500, r#"{"error":"model not loaded"}"#, Duration::ZERO)
+                }
+            });
+            let server = ModelServer::start_for_test(
+                BouncerSettings {
+                    start: mode,
+                    idle_minutes: 10,
+                    url: Some(url),
+                },
+                fake_server_layout(dir.path(), &pids),
+                Host::none(),
+                None,
+                FIRST_START_WAIT,
+            );
+            let reason = server
+                .before_model()
+                .expect_err("failed inference is not ready");
+            assert!(reason.contains("status 500"), "{mode:?}: {reason}");
+            assert!(matches!(
+                server.state(),
+                ServerState::Failed {
+                    problem: Problem::Readiness(_),
+                    ..
+                }
+            ));
+            assert!(
+                !pids.is_file(),
+                "never start a second process on an occupied endpoint"
+            );
+            valid.store(true, Ordering::SeqCst);
+            // Make the ordinary periodic retry due now, instead of sleeping 10 seconds.
+            server.lock().last_probe = None;
+            server.wake.notify_all();
+            wait_until(Duration::from_secs(5), "readiness recovers", || {
+                matches!(
+                    server.state(),
+                    ServerState::Running { .. } | ServerState::External { up: Some(true), .. }
+                )
+            });
+            assert_eq!(server.before_model(), Ok(()));
+            assert!(!server.status().owned);
+            assert!(!pids.is_file());
+            server.shutdown();
+            // An external process still answers after the supervisor stops.
+            assert_eq!(
+                BouncerClient::new(server.status().url.as_str())
+                    .expect("client")
+                    .probe_health(PROBE_TIMEOUT),
+                Health::Healthy
+            );
+            stop.store(true, Ordering::SeqCst);
+            fake.join().expect("fake server");
+        }
+    }
+
+    #[test]
+    fn failed_outside_warmup_then_an_empty_port_allows_only_managed_recovery() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for mode in [
+            StartMode::WithApassy,
+            StartMode::WhenNeeded,
+            StartMode::External,
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            let pids = dir.path().join("pids");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let outside_stop = Arc::new(AtomicBool::new(false));
+            let outside = serve_fake_model_replies(listener, Arc::clone(&outside_stop), || {
+                (500, r#"{"error":"warmup failed"}"#, Duration::ZERO)
+            });
+            let server = ModelServer::start_for_test(
+                BouncerSettings {
+                    start: mode,
+                    idle_minutes: 10,
+                    url: Some(format!("http://{addr}")),
+                },
+                fake_server_layout(dir.path(), &pids),
+                Host::none(),
+                None,
+                FIRST_START_WAIT,
+            );
+            assert!(
+                server
+                    .before_model()
+                    .expect_err("warmup fails")
+                    .contains("status 500")
+            );
+            assert!(
+                !pids.is_file(),
+                "an occupied endpoint must not cause a second spawn"
+            );
+            outside_stop.store(true, Ordering::SeqCst);
+            outside.join().expect("outside endpoint exits");
+            server.lock().last_probe = None;
+            server.wake.notify_all();
+
+            if mode == StartMode::External {
+                wait_until(
+                    Duration::from_secs(5),
+                    "external failure is refreshed",
+                    || matches!(server.state(), ServerState::Failed { problem: Problem::Readiness(ref reason), .. } if reason.contains("no healthy model server")),
+                );
+                assert!(server.before_model().is_err());
+                assert!(!pids.is_file(), "external mode must never start a process");
+                server.shutdown();
+                continue;
+            }
+            if mode == StartMode::WhenNeeded {
+                wait_until(
+                    Duration::from_secs(5),
+                    "when-needed returns to stopped",
+                    || server.state() == ServerState::Stopped,
+                );
+                assert!(!pids.is_file(), "when-needed waits for another request");
+            } else {
+                wait_until(
+                    Duration::from_secs(5),
+                    "with-apassy starts its own process",
+                    || pids.is_file(),
+                );
+            }
+            let waiting = Arc::clone(&server);
+            let gate = thread::spawn(move || waiting.before_model());
+            wait_until(Duration::from_secs(5), "managed script starts", || {
+                pids.is_file()
+            });
+            let stop = Arc::new(AtomicBool::new(false));
+            let owned = serve_fake_model(
+                std::net::TcpListener::bind(addr).expect("owned endpoint"),
+                Arc::clone(&stop),
+            );
+            assert_eq!(gate.join().expect("waiting gate"), Ok(()));
+            assert!(matches!(
+                server.state(),
+                ServerState::Running { outside: false, .. }
+            ));
+            assert!(server.status().owned);
+            server.shutdown();
+            stop.store(true, Ordering::SeqCst);
+            owned.join().expect("owned endpoint");
+        }
+    }
+
+    #[test]
+    fn with_apassy_waits_for_successful_startup_inference() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let fake = serve_fake_model_replies(listener, Arc::clone(&stop), move || {
+            entered.send(()).expect("entered");
+            released
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release readiness");
+            (
+                200,
+                r#"{"model":"delayed-v1","answers":{"ready":{"noul":0.5}}}"#,
+                Duration::ZERO,
+            )
+        });
+        let server = ModelServer::start_for_test(
+            BouncerSettings {
+                start: StartMode::WithApassy,
+                idle_minutes: 10,
+                url: Some(url),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            None,
+            FIRST_START_WAIT,
+        );
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("warmup started");
+        let (completed, result) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&server);
+        let gate = thread::spawn(move || completed.send(waiting.before_model()).expect("result"));
+        assert!(
+            result.recv_timeout(Duration::from_millis(150)).is_err(),
+            "gate must wait for actual inference"
+        );
+        assert!(matches!(server.state(), ServerState::Starting { .. }));
+        release.send(()).expect("release");
+        assert_eq!(
+            result
+                .recv_timeout(Duration::from_secs(5))
+                .expect("gate result"),
+            Ok(())
+        );
+        gate.join().expect("gate thread");
+        assert!(
+            matches!(server.state(), ServerState::Running { model: Some(ref model), outside: true } if model == "delayed-v1")
+        );
+        assert!(!pids.is_file());
+        server.shutdown();
+        stop.store(true, Ordering::SeqCst);
+        fake.join().expect("fake server");
+    }
+
+    #[test]
+    fn an_owned_server_recovers_after_warmup_failure_without_a_second_spawn() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let port = free_port();
+        let server = ModelServer::start_for_test(
+            BouncerSettings {
+                start: StartMode::WithApassy,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{port}")),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            None,
+            FIRST_START_WAIT,
+        );
+        wait_until(Duration::from_secs(5), "owned script starts", || {
+            pids.is_file()
+        });
+        let original_pid = first_pid(&pids);
+        let stop = Arc::new(AtomicBool::new(false));
+        let valid = Arc::new(AtomicBool::new(false));
+        let answers_valid = Arc::clone(&valid);
+        let fake = serve_fake_model_replies(
+            std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind"),
+            Arc::clone(&stop),
+            move || {
+                if answers_valid.load(Ordering::SeqCst) {
+                    (
+                        200,
+                        r#"{"model":"owned-v1","answers":{"ready":{"noul":0.5}}}"#,
+                        Duration::ZERO,
+                    )
+                } else {
+                    (200, "malformed", Duration::ZERO)
+                }
+            },
+        );
+        wait_until(Duration::from_secs(5), "warmup fails", || {
+            matches!(
+                server.state(),
+                ServerState::Failed {
+                    problem: Problem::Readiness(_),
+                    ..
+                }
+            )
+        });
+        assert!(server.before_model().is_err());
+        assert!(server.status().owned);
+        valid.store(true, Ordering::SeqCst);
+        server.lock().last_probe = None;
+        server.wake.notify_all();
+        wait_until(
+            Duration::from_secs(5),
+            "same owned process becomes ready",
+            || matches!(server.state(), ServerState::Running { outside: false, .. }),
+        );
+        assert_eq!(first_pid(&pids), original_pid);
+        assert_eq!(server.before_model(), Ok(()));
+        server.shutdown();
+        stop.store(true, Ordering::SeqCst);
+        fake.join().expect("fake server");
+    }
+
+    #[test]
+    fn shutdown_cancels_a_waiting_gate_and_a_late_warmup_cannot_publish_readiness() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let fake = serve_fake_model_replies(listener, Arc::clone(&stop), move || {
+            entered.send(()).expect("entered");
+            released
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release readiness");
+            (
+                200,
+                r#"{"model":"late-v1","answers":{"ready":{"noul":0.5}}}"#,
+                Duration::ZERO,
+            )
+        });
+        let server = ModelServer::start_for_test(
+            BouncerSettings {
+                start: StartMode::WithApassy,
+                idle_minutes: 10,
+                url: Some(url),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            None,
+            FIRST_START_WAIT,
+        );
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("warmup started");
+        let (completed, result) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&server);
+        let gate = thread::spawn(move || completed.send(waiting.before_model()).expect("result"));
+        assert!(result.recv_timeout(Duration::from_millis(100)).is_err());
+        server.shutdown();
+        assert_eq!(
+            result
+                .recv_timeout(Duration::from_secs(1))
+                .expect("gate cancelled"),
+            Err("the model server stopped".to_owned())
+        );
+        release.send(()).expect("release");
+        gate.join().expect("gate thread");
+        stop.store(true, Ordering::SeqCst);
+        fake.join().expect("fake server");
+        wait_until(
+            Duration::from_secs(2),
+            "the cancelled monitor exits",
+            || Arc::strong_count(&server) == 1,
+        );
+        assert!(!matches!(server.state(), ServerState::Running { .. }));
     }
 
     /// "When a run needs it" stops a server that Apassy started after "Stop after"
@@ -3200,6 +3629,61 @@ mod tests {
             !group_alive(pgid)
         });
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        fake.join().expect("fake server");
+        server.shutdown();
+    }
+
+    #[test]
+    fn the_idle_stop_also_ends_an_owned_server_whose_warmup_failed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let port = free_port();
+        let server = ModelServer::start_for_test(
+            BouncerSettings {
+                start: StartMode::WhenNeeded,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{port}")),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            Some(Duration::from_secs(1)),
+            FIRST_START_WAIT,
+        );
+        server.start_now();
+        wait_until(Duration::from_secs(5), "the script starts", || {
+            pids.is_file()
+        });
+        let pgid = first_pid(&pids);
+        let stop = Arc::new(AtomicBool::new(false));
+        let fake = serve_fake_model_replies(
+            std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind"),
+            Arc::clone(&stop),
+            || (200, "malformed readiness answer", Duration::ZERO),
+        );
+        wait_until(
+            Duration::from_secs(5),
+            "warmup failure stays visible",
+            || {
+                matches!(
+                    server.state(),
+                    ServerState::Failed {
+                        problem: Problem::Readiness(_),
+                        ..
+                    }
+                )
+            },
+        );
+        assert!(server.status().owned);
+        wait_until(
+            Duration::from_secs(15),
+            "idle failure stops its owned process",
+            || server.state() == ServerState::Stopped && !server.status().owned,
+        );
+        wait_until(Duration::from_secs(5), "idle process group ends", || {
+            !group_alive(pgid)
+        });
+        stop.store(true, Ordering::SeqCst);
         fake.join().expect("fake server");
         server.shutdown();
     }

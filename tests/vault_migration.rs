@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 19;
+const CURRENT_VERSION: i64 = 20;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -2358,6 +2358,19 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     drop(vault);
     let conn = rusqlite::Connection::open(&path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
+    let names: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'bouncer_scope_%'",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for name in names {
+        conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+    }
+    conn.execute_batch("DROP TABLE bouncer_scope").unwrap();
     conn.execute_batch(SCHEMA19_ONLY).expect("drop schema 19");
     conn.execute_batch(V16_SQL).expect("frozen relay_device");
     conn.execute(

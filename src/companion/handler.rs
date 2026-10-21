@@ -515,6 +515,7 @@ fn approve(shared: &Shared, device_id: &str, id: &str, request: &Request) -> Res
         // remember an answer (ADR 0025, until the iPhone stage).
         Err(
             ApprovalRefusal::NotAnApproval
+            | ApprovalRefusal::NothingToEvaluate
             | ApprovalRefusal::NothingToGrant
             | ApprovalRefusal::DeclarationsDoNotMatch
             | ApprovalRefusal::NoProject

@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, PendingRun};
 use apassy::broker::bouncer::{BouncerClient, BouncerRequest};
 use apassy::broker::http::TlsClient;
@@ -21,7 +20,6 @@ use apassy::broker::model_server::{
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::exceptions::ExceptionKind;
-use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
     Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, ItemDraft, Reversibility,
     RiskLevel, Scope, SecretValue, Vault,
@@ -42,8 +40,8 @@ struct Fixture {
     broker: BrokerHandle,
 }
 
-/// A staging item of the project of the runs (ADR 0025 §3: the item of another project
-/// asks the owner, so the declared project is the folder `project`).
+/// Explicit staging classification for sensitive and production gate cases. The
+/// declared project remains the fixture folder, so foreign-project checks stay real.
 fn staging_declaration() -> Declaration {
     Declaration {
         project: "project".to_owned(),
@@ -54,28 +52,35 @@ fn staging_declaration() -> Declaration {
     }
 }
 
+/// Model-only cases use confirmed development/low eligibility (ADR 0029), without
+/// fabricating historical uses or granting a remembered execution answer.
+fn model_declaration() -> Declaration {
+    Declaration {
+        environment: Environment::Development,
+        risk: RiskLevel::Low,
+        ..staging_declaration()
+    }
+}
+
 /// The owner waits this long in most tests: each question ends at once.
 const SHORT: Duration = Duration::from_millis(400);
 
 fn fixture(bouncer: Option<&str>) -> Fixture {
-    build(bouncer, staging_declaration(), None, SHORT)
+    build(bouncer, model_declaration(), None, SHORT)
 }
 
 fn fixture_declared(bouncer: Option<&str>, declaration: Declaration) -> Fixture {
-    build(bouncer, declaration, None, SHORT)
+    // Sensitive model cases first authorize evaluation with a real passphrase KDF.
+    build(bouncer, declaration, None, Duration::from_secs(15))
 }
 
 fn fixture_with_gate(bouncer: Option<&str>, gate: Option<Arc<dyn ModelGate>>) -> Fixture {
-    build(bouncer, staging_declaration(), gate, SHORT)
+    build(bouncer, model_declaration(), gate, SHORT)
 }
 
-/// One item with `declaration` and an agent with history for it in the project.
-///
-/// ADR 0025 §3: a staging item that the agent did not use in the project asks the owner
-/// before the model. These tests are about the model step, so the agent has history
-/// for each kind of action: an earlier use that the bouncer allowed. History never runs
-/// a command by itself; it only lets the model decide. A stricter declaration later in
-/// a test clears it.
+/// One item with an owner-confirmed declaration. Development/low model fixtures
+/// reach inference through their classification; sensitive fixtures must explicitly
+/// authorize evaluation through the authenticated question flow before inference.
 fn build(
     bouncer: Option<&str>,
     declaration: Declaration,
@@ -118,29 +123,6 @@ fn build(
     vault
         .set_declaration(item.id, &declaration)
         .expect("declaration");
-    for action in [
-        ActionKind::Read,
-        ActionKind::Change,
-        ActionKind::Deploy,
-        ActionKind::Delete,
-    ] {
-        vault
-            .record_item_use(&NewItemUse {
-                item_id: item.id,
-                agent_id: Some(agent.id),
-                agent_name: "Rule agent".to_owned(),
-                project_key: project.display().to_string(),
-                project_label: "project".to_owned(),
-                action,
-                command_summary: "run echo".to_owned(),
-                hosts: Vec::new(),
-                outcome: UseOutcome::Allowed,
-                decided_by: UseDecidedBy::Bouncer,
-                answered_on: String::new(),
-                decision_log_id: None,
-            })
-            .expect("history");
-    }
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = approval_timeout;
@@ -248,6 +230,39 @@ fn run_later(fx: &Fixture, command: &[&str]) -> std::thread::JoinHandle<WireResp
     })
 }
 
+/// Authenticate the exact queued offer. The first command runs only by this owner
+/// approval; the scope permits later evaluation and teaches no execution answer.
+fn enable_evaluation(fx: &Fixture, command: &[&str]) {
+    let runner = run_later(fx, command);
+    let pending = waiting(fx);
+    let offer = fx
+        .broker
+        .approvals()
+        .evaluation_offer(pending.id)
+        .expect("evaluation offer");
+    let confirmations = offer
+        .items
+        .iter()
+        .map(|item| item.confirmation.clone())
+        .collect();
+    let proof = OwnerGate::new(Arc::clone(&fx.vault), None)
+        .authorize(
+            OwnerAction::ApproveAndEvaluate {
+                run: pending,
+                offer,
+                confirmations,
+            },
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check");
+    fx.broker
+        .approvals()
+        .approve(proof)
+        .expect("enable evaluation");
+    let response = runner.join().expect("runner");
+    assert!(response.ok, "{response:?}");
+}
+
 fn add_exception(fx: &Fixture, kind: ExceptionKind) {
     let mut guard = fx.vault.lock().expect("vault");
     guard
@@ -259,8 +274,8 @@ fn add_exception(fx: &Fixture, kind: ExceptionKind) {
 
 /// ADR 0025 §3 replaces the folder of a grant (ADR 0012): a grant no longer limits the
 /// folder, and the item of another project asks the owner instead. A placeholder does not
-/// make the item fit another project. In its own project, with history, the bouncer
-/// decides.
+/// make the item fit another project. Confirmed development/low eligibility lets the
+/// bouncer decide only in the item's own project.
 #[test]
 fn an_item_of_another_project_asks_also_with_a_placeholder() {
     let bouncer = common::fake_bouncer(&[]);
@@ -344,7 +359,7 @@ fn clean_request_runs_without_a_prompt() {
 
 #[test]
 fn low_confidence_and_missing_context_wait_for_the_owner() {
-    // A task match below 80% certainty asks the owner.
+    // A task match below the default 75% certainty asks the owner.
     let unsure = common::fake_bouncer(&[("task_match", 0.7), ("writes", 0.5)]);
     let fx = fixture(Some(&unsure.url));
     assert_eq!(
@@ -354,17 +369,53 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
     assert!(last_reason(&fx).contains("Below the needed certainty: task_match 70% (needs 75%)"));
 
     // A high-risk declaration needs a certain read-only command.
-    // The declaration is high risk from the start: a stricter declaration later would
-    // clear the history, and the run would ask before the model.
+    // Preserve the staging/high classification. An exact authenticated evaluation
+    // scope, not historical uses, lets this sensitive case reach the model.
     let writes = common::fake_bouncer(&[("writes", 0.9)]);
     let mut declaration = staging_declaration();
     declaration.risk = RiskLevel::High;
     let fx = fixture_declared(Some(&writes.url), declaration);
-    assert_eq!(
-        code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
-        "approval_timeout"
+    std::fs::create_dir_all(fx.project.join("scripts")).expect("scripts directory");
+    std::fs::write(
+        fx.project.join("scripts/report.js"),
+        "console.log('report');\n",
+    )
+    .expect("synthetic report");
+    let command = ["sh", "-c", "node scripts/report.js"];
+    enable_evaluation(&fx, &command);
+    {
+        let guard = fx.vault.lock().expect("vault");
+        let vault = guard.as_ref().expect("open");
+        let declaration = vault
+            .declaration(fx.item_id)
+            .expect("declaration")
+            .expect("present");
+        assert_eq!(
+            (declaration.environment, declaration.risk),
+            (Environment::Staging, RiskLevel::High)
+        );
+        assert_eq!(
+            vault.evaluation_scopes(fx.item_id).expect("scopes").len(),
+            1
+        );
+        assert!(
+            vault
+                .answers_for_item(fx.item_id)
+                .expect("execution answers")
+                .is_empty()
+        );
+    }
+    assert!(writes.bodies.lock().expect("bodies").is_empty());
+    let runner = run_later(&fx, &command);
+    let pending = waiting(&fx);
+    assert!(
+        pending.question.why.contains("writes not"),
+        "{}",
+        pending.question.why
     );
-    assert!(last_reason(&fx).contains("writes not"));
+    assert_eq!(writes.bodies.lock().expect("bodies").len(), 1);
+    assert!(fx.broker.approvals().deny(pending.id));
+    assert_eq!(code(&runner.join().expect("runner")), "approval_denied");
 
     // No user request asks the owner.
     let clean = common::fake_bouncer(&[]);
@@ -610,9 +661,9 @@ fn production_declaration_always_waits_for_the_owner() {
         ("destroy", 0.0),
     ]);
     let fx = fixture(Some(&certain.url));
-    // The same fully certain model runs a known safe command on staging without a prompt.
-    let staging = run(&fx, &["echo", "hi"], "Print.");
-    assert!(staging.ok, "{staging:?}");
+    // Confirmed development/low permits the baseline model decision without a prompt.
+    let development = run(&fx, &["echo", "hi"], "Print.");
+    assert!(development.ok, "{development:?}");
     assert_eq!(certain.bodies.lock().expect("bodies").len(), 1);
 
     set_environment(&fx, fx.item_id, Environment::Production);

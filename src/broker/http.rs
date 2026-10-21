@@ -7,7 +7,7 @@
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -186,6 +186,7 @@ pub struct HttpResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpFailure {
     Connect,
+    Timeout,
     Tls,
     Protocol,
     TooLarge,
@@ -262,6 +263,7 @@ pub fn post_json_loopback(
     bearer: Option<&str>,
     timeout: std::time::Duration,
 ) -> Result<HttpResponse, HttpFailure> {
+    let deadline = Instant::now() + timeout;
     let DestinationUrl::Loopback { addr, host_header } = destination else {
         return Err(HttpFailure::Protocol);
     };
@@ -290,16 +292,49 @@ pub fn post_json_loopback(
         b"\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
         body,
     ]);
-    let stream = TcpStream::connect_timeout(addr, timeout.min(CONNECT_TIMEOUT))
-        .map_err(|_| HttpFailure::Connect)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|_| HttpFailure::Connect)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|_| HttpFailure::Connect)?;
-    let mut stream = stream;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or(HttpFailure::Timeout)?;
+    let stream = TcpStream::connect_timeout(addr, remaining.min(CONNECT_TIMEOUT))
+        .map_err(|err| classify(&err))?;
+    let mut stream = DeadlineStream { stream, deadline };
     exchange(&mut stream, &request)
+}
+
+/// Refresh the socket limit before every operation, so fragmented responses cannot
+/// extend a bouncer request beyond its total exchange budget.
+struct DeadlineStream {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.remaining()?;
+        self.stream.flush()
+    }
 }
 
 fn connect(addrs: &[SocketAddr]) -> Result<TcpStream, HttpFailure> {
@@ -322,7 +357,12 @@ fn classify(err: &io::Error) -> HttpFailure {
         .get_ref()
         .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some());
     // rustls reports its errors as InvalidData, sometimes without a rustls::Error inside.
-    if is_tls || err.kind() == io::ErrorKind::InvalidData {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        HttpFailure::Timeout
+    } else if is_tls || err.kind() == io::ErrorKind::InvalidData {
         HttpFailure::Tls
     } else {
         HttpFailure::Connect
@@ -628,5 +668,76 @@ mod tests {
         assert!(complete_response(bad).is_err());
         let until_close = b"HTTP/1.0 200 OK\r\n\r\n{}";
         assert_eq!(finish_at_eof(until_close).expect("eof body").body, b"{}");
+    }
+
+    #[test]
+    fn bouncer_timeout_covers_the_whole_fragmented_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination =
+            parse_destination(&format!("http://{}", listener.local_addr().expect("addr")))
+                .expect("destination");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 4096];
+            assert!(
+                stream.read(&mut request).expect("request") > 0,
+                "request bytes"
+            );
+            // Every individual fragment arrives before the timeout, but the whole
+            // response does not. The absolute deadline must still stop the client.
+            for chunk in [
+                b"HTTP/1.1 200 OK\r\n".as_slice(),
+                b"Content-Length: 2\r\n",
+                b"\r\n",
+                b"{",
+                b"}",
+            ] {
+                std::thread::sleep(Duration::from_millis(80));
+                if stream.write_all(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        let began = Instant::now();
+        let result = post_json_loopback(
+            &destination,
+            "/v1/systemone",
+            b"{}",
+            None,
+            Duration::from_millis(200),
+        );
+        assert_eq!(
+            result.expect_err("fragmented response must exceed total budget"),
+            HttpFailure::Timeout
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(350),
+            "deadline applies to all reads"
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn timeout_is_distinct_from_protocol_and_connection_failures() {
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::TimedOut)),
+            HttpFailure::Timeout
+        );
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::WouldBlock)),
+            HttpFailure::Timeout
+        );
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::ConnectionRefused)),
+            HttpFailure::Connect
+        );
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::ConnectionReset)),
+            HttpFailure::Connect
+        );
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::InvalidData)),
+            HttpFailure::Tls
+        );
     }
 }
