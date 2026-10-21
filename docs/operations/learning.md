@@ -1,10 +1,10 @@
 # Learning: decision log, remembered patterns, and calibration
 
-Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [ADR 0025](../adr/0025-low-friction-access.md) (answers, history, and the new order, section 3a). Goal items: B3, B5, B10, and the wait record of N3.
+Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [ADR 0025](../adr/0025-low-friction-access.md) (execution answers), and [ADR 0029](../adr/0029-bouncer-evaluation-permission.md) (explicit evaluation permission, section 3a). Goal items: B3, B5, B10, and the wait record of N3.
 
 Apassy learns from the owner decisions in two ways:
 
-- A remembered pattern lets a command that the owner approved 3 times run without a prompt (ADR 0009 step 1).
+- A remembered pattern lets a matching command run after 3 explicit "Approve and remember" approvals (ADR 0009 step 1). Ordinary "Allow once" and "Allow once and enable bouncer" do not add to this count.
 - A calibration lowers the `task_match` level of the model step when the decision log supports it (ADR 0009 step 3).
 
 Both act only at the model step. They never change a hard rule, the production rule (a production item without an owner allowance), a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
@@ -97,7 +97,7 @@ Tests: `approve_and_remember_three_times_then_the_pattern_runs_without_a_prompt`
 
 ## 3. Place in the decision order
 
-See [the bouncer](bouncer.md), section 3, step 4a, and section 3.0, step 6 (ADR 0025). A pattern replaces only the model step. Tests:
+See [the bouncer](bouncer.md), section 3.0, step 8 (ADR 0025, ADR 0029). A pattern replaces only the model step. Tests:
 
 | What must not change | Test |
 | --- | --- |
@@ -108,23 +108,28 @@ See [the bouncer](bouncer.md), section 3, step 4a, and section 3.0, step 6 (ADR 
 | Missing declaration | same two tests |
 | "Always ask for this agent" (a grant in "ask" mode before 0.5.0) | `an_active_pattern_never_overrides_the_earlier_steps`; `decision_log_and_export_have_no_secret_values` (no offer, the owner decides) |
 
-## 3a. Answers, history, and patterns (ADR 0025)
+## 3a. Execution answers, evaluation permission, and patterns
 
-ADR 0025 adds two more ways to run without a question. They are not patterns, and they do not use the pattern table. The full order is in [the bouncer](bouncer.md), section 3.0.
+These routes have different effects. The full order is in [the bouncer](bouncer.md), section 3.0.
 
-- **Remembered answer.** The owner answers a question with "Allow ACTION in PROJECT", or with "Allow production for PROJECT: ACTION". Apassy stores the answer for the item, the project, and the kind of action, for all agents (`src/vault/answers.rs`, table `owner_answer`). A later run with the same item, project, and kind of action starts without a question. This step comes before the check of the user request and the pattern. For a production item, only a production allowance counts. The decision log gets an entry with `decided_by` = `answer` (`DecidedBy::Answer`, `Outcome::Remembered`). The column of schema 7 has no `answer`, so the row stores `owner` with `asked` = no; no other entry has this pair, and a read gives `answer` again. The entry has no owner check of its own, and the owner did not see this run: it is no owner label, so a calibration and a fine-tune skip it. The answer fits a run only when each destination host of the run is a host of the answer or a known host of the item, and for a production item only when the rules are certain of the kind of action. A restore removes every answer, production allowances included. Removing an answer makes the bouncer stricter and needs no owner check.
-- **History.** Apassy counts a use of an item in a project with a kind of action as history when the bouncer allowed it (not a pattern, not the owner), the same agent made it, that agent is still connected, and the use came after the last change that made the declaration of the item stricter. A new agent has no history. A restore revokes every agent, so a restored log never counts. History is checked after the remembered pattern and after the check of a default declaration. History never starts a run: an item with history goes to the model, and an item without it asks the owner unless its declaration is development (or local) with low risk. The history never makes a production allowance, and it does not replace the hard rules.
-- **Pattern.** It still needs 3 approvals of the same generalized command (section 2). It is checked after the remembered answer and the check of the user request and the declaration, and before the check of a default declaration, the history, and the model.
+- **Allow once.** Approves the current run only. It confirms no classification, creates no evaluation permission, and teaches no pattern.
+- **Remembered execution answer.** "Allow ACTION in PROJECT" and "Allow production for PROJECT: ACTION" retain their existing immediate effect. Apassy remembers the item, project, action kind, and covered hosts for all agents. A later fitting run starts directly after readiness and the earlier security checks. Production still needs its separate allowance and a certain action kind. These answers do not use the pattern table or require three approvals.
+- **Explicit evaluation permission (ADR 0029).** On the asking Mac, "Allow once and enable bouncer" approves this run once and permits later model evaluation for this connected agent, item revision, project, action, and explicit hosts. The owner reviews environment and risk under a fresh owner check; both become owner-confirmed. The broker saves classification and scope atomically after rechecking the exact offer and credential/access state. The scope never starts a future run by itself. Confirmed development/local with low risk keeps its existing eligibility; otherwise prior use history is no longer an alternative to explicit permission.
+- **Pattern.** The CLI's `apassy runs approve ID --remember` still needs 3 explicit approvals of the same generalized command (section 2). It runs after remembered answers and the user-request/declaration checks, before the default-source and evaluation-eligibility gates. Its threshold has not changed.
 
-A pattern knows a command. An answer and history know an item, a project, and a kind of action. So an answer or history can start a new command of a known kind that no pattern knows. They cannot change a hard rule, a rule flag, a production item without an allowance, "Always ask me", or an exception of the agent.
+An evaluation scope differs from an execution answer: it names one agent and exact credential state, and uncertain commands additionally bind exact argv, working directory, `PATH`, executable resolution, and directly selected project script bytes. Script/context changes require review. This does not pin transitive imports, sourced files, dependencies, or all future executable behavior. The model still evaluates each later request. Hard vetoes, always-ask settings, and production allowances remain authoritative. See [the bouncer](bouncer.md), section 3.1.
 
-The use log (`item_use`) records every decided use of every item, whoever decided: `bouncer`, `pattern`, `answer`, `owner`, or `rule`. It is separate from the decision log. It has no secret value.
+Old model decisions, ordinary approvals, execution answers, and patterns do not create evaluation scopes. Schema 20 starts with an empty local scope table. Scopes are not synced and are removed from exported sync copies and restored backups; credential/access edits, revocation, stricter policy, and sync conflicts invalidate them. Removing a scope needs no owner check. The relay/iPhone question and answer wire formats are unchanged and cannot authorize this Mac-only choice.
+
+The decision log records a fitting execution answer as `DecidedBy::Answer` (`Outcome::Remembered`). For the schema-7 storage representation it uses `owner` with `asked` = no; reading the row restores `answer`. It is not an owner label for the current request, so calibration and fine-tuning skip it. A restore removes execution answers, including production allowances.
+
+The separate use log (`item_use`) still records decided credential uses by `bouncer`, `pattern`, `answer`, `owner`, or `rule`. It remains audit data; a historical model-allowed use grants no new evaluation permission.
 
 ## 4. Threshold calibration (goal item B5)
 
 Code: `src/broker/calibration.rs`.
 
-Only the `task_match` level changes. The range is 0.5 to 0.8. The default is 0.8. The production rule, the rule flags, the vetoes (`destroy`, `rule_break`), the read-only check for a sensitive declaration, and the hard rules are never calibrated (`calibration_changes_only_the_task_match_level`).
+Only the `task_match` level changes. The range is 0.5 to 0.8. The default is 0.75. The production rule, the rule flags, the vetoes (`destroy`, `rule_break`), the read-only check for a sensitive declaration, and the hard rules are never calibrated (`calibration_changes_only_the_task_match_level`).
 
 Proposal:
 
@@ -142,7 +147,7 @@ Test: `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it` (`t
 
 Since 0.5.0 the Learning view is not in the window ([ADR 0026](../adr/0026-simple-app.md) §2). The line under the Decisions title counts how often Apassy asked you this week. Settings > Bouncer > Calibration and learning (`settings_panel` in `src/desktop/learning_ui.rs`) shows:
 
-- "Ran without you": the runs of this week that the model or a pattern allowed.
+- "Ran without you": successful allowed requests this week that did not ask the owner, split into model, pattern, and remembered-answer decisions. Both automatic-use summaries use this same total. Denials, unanswered requests, and manual owner approvals do not count as successful automation; they remain in the applicable decision/question counts.
 - "Remembered patterns": the number of active patterns and of patterns that still learn. `apassy pattern list` lists each pattern with its state (learning with its approvals, active, blocked, or expired) and runs. `apassy pattern remove ID` removes one.
 - The disclosure "Calibration and models" has the calibration ("Threshold calibration"): the active level, "Compute a proposal", the replay numbers, "Apply N%", and "Back to the default (75%)".
 - The same disclosure has the candidate model card ("Candidate model", goal items B9 and B10). [The fine-tune](fine-tune.md), sections 6 to 10, describes the pipeline.

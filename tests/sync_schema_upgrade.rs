@@ -1,11 +1,12 @@
 #![cfg(feature = "vault")]
 
 //! Sync copies of schema 17 (before folders) and schema 18 (before trusted devices) on
-//! Macs of schema 19: adoption on a new Mac, a new passphrase, the folder, and the
+//! Macs of schema 20: adoption on a new Mac, a new passphrase, the folder, and the
 //! relay. Synthetic values only.
 //!
 //! Schema 19 adds three tables and drops `relay_device`; schema 18 adds tables and one
-//! column of the local `agent` table. A copy of schema 19 without the parts of the later
+//! column of the local `agent` table. Schema 20 adds a local evaluation-scope table.
+//! A current copy without the parts of the later
 //! schemas ([`SCHEMA19_ONLY`], [`SCHEMA18_ONLY`]) is the copy that the app of the earlier
 //! schema pushed, except the two version marks and the content digest. The fixture
 //! changes the tables and the marks, and stores a new digest. The digest is a copy of the app's algorithm
@@ -35,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 19;
+const CURRENT: i64 = 20;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
@@ -160,7 +161,7 @@ fn versions(path: &Path, passphrase: &str) -> (i64, i64) {
     (header, meta)
 }
 
-/// Give the closed sync copy at `path` (schema 19, written by the app) the version
+/// Give the closed sync copy at `path` (current schema, written by the app) the version
 /// marks of `version`; an earlier version also loses the parts of the later schemas.
 /// `digest`: store the content digest of the changed rows, as the push of that app does;
 /// else the old digest stays. The stored digest must be the one of this copy of the
@@ -192,7 +193,15 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
-    if version < CURRENT {
+    if version < 20 {
+        let names: Vec<String> = conn.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'bouncer_scope_%'").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        for name in names {
+            conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
+        }
+        conn.execute_batch("DROP TABLE bouncer_scope").unwrap();
+    }
+    if version < 19 {
         conn.execute_batch(SCHEMA19_ONLY).unwrap();
     }
     if version < MID {
@@ -586,7 +595,7 @@ fn a_schema17_relay_copy_is_replaced_also_with_the_same_content_and_after_a_fail
     assert!(!again.pushed);
     assert!(again.merge.is_none());
 
-    // Another Mac of schema 19 reads version 3 with the current schema.
+    // Another Mac of schema 20 reads version 3 with the current schema.
     let c = mac(&t.root, "c", &t.relay.url);
     let joined = join(&t.a, &t.vault_a, "Synthetic Mac mini");
     let download = joined.download(&c.data.join("sync")).unwrap();
@@ -744,7 +753,7 @@ fn point(fill: u8) -> Vec<u8> {
 /// schema 18 changes Alpha, adds Gamma, and makes a folder. Its copy merges: the edit,
 /// the new credential, and the folder come; the trusted device and the home of Mac A
 /// stay, also on the credential that the old copy replaced. Mac A then writes a copy of
-/// schema 19 that replaces the old one, and a new Mac gets the device and the home.
+/// schema 20 that replaces the old one, and a new Mac gets the device and the home.
 #[test]
 fn an_18_copy_merges_and_is_replaced_by_a_19_copy() {
     let root = TempDir::new().unwrap();
@@ -807,7 +816,7 @@ fn an_18_copy_merges_and_is_replaced_by_a_19_copy() {
     assert_eq!(a.folders().unwrap()[0].uuid, old_folder.uuid);
     assert_eq!(a.item_home(id_of(&a, "Gamma")).unwrap(), None);
 
-    // The copy of schema 19 replaces the old one.
+    // The current copy replaces the old one.
     let current = root.path().join("a-copy.apassy");
     a.write_sync_copy(&current, "Mac A").unwrap();
     assert_eq!(versions(&current, PASS), (CURRENT, CURRENT));

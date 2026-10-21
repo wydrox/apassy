@@ -29,13 +29,14 @@ use super::unlock::{
 use super::{BrokerState, DesktopApp};
 use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
-    ApprovalQueue, CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof,
-    PendingRun, action_words, touch_id_detail,
+    ApprovalQueue, CheckMethod, EvaluationOffer, OwnerAction, OwnerAuthError, OwnerCheck,
+    OwnerGate, OwnerProof, PendingRun, action_words, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::broker::project::Project;
 use crate::native::{AuthCancel, Biometry, CancelOnDrop, NativeHelper};
 use crate::questions::{Choice, RemoteEnvironment};
+use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::{EnvDelivery, ExecMode, ExecRule, GrantPlace};
 
 /// The result of a poll of a [`Task`].
@@ -333,6 +334,13 @@ pub enum OwnerRequest {
     /// Approve one run and add one approval to its pattern (ADR 0010). Only the command
     /// line asks for it.
     ApproveAndRemember(PendingRun),
+    /// Allow one run and authorize later matching model evaluation, with explicit
+    /// classification. This is never a standing execution allowance.
+    ApproveAndEvaluate {
+        run: PendingRun,
+        offer: EvaluationOffer,
+        confirmations: Vec<EvaluationConfirmation>,
+    },
     /// "Allow ACTION in PROJECT" (ADR 0025 §3): approve the question and remember the
     /// answer for its credentials, the project, and the kind of action, for every agent.
     ApproveInProject {
@@ -725,6 +733,15 @@ impl OwnerRequest {
             },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
+            Self::ApproveAndEvaluate {
+                run,
+                offer,
+                confirmations,
+            } => OwnerAction::ApproveAndEvaluate {
+                run: run.clone(),
+                offer: offer.clone(),
+                confirmations: confirmations.clone(),
+            },
             Self::ApproveInProject {
                 run,
                 project,
@@ -995,12 +1012,30 @@ impl OwnerRequest {
                 run.agent,
                 run.command.join(" ")
             ),
+            Self::ApproveAndEvaluate { run, offer, confirmations } => {
+                let items = offer.items.iter().zip(confirmations).map(|(item, confirmation)| {
+                    format!("\"{}\": environment {}, risk {}, hosts {} (revision {})",
+                        item.name,
+                        confirmation.environment.as_str(),
+                        confirmation.risk.as_str(),
+                        if confirmation.hosts.is_empty() { "none".to_owned() } else { confirmation.hosts.join(", ") },
+                        confirmation.revision)
+                }).collect::<Vec<_>>().join("; ");
+                let binding = if offer.command_binding.is_some() {
+                    " Only this exact command, execution context and directly selected script version."
+                } else {
+                    ""
+                };
+                format!("Allow this run of agent \"{}\" (ID {}) once: {}. Confirm {}. Enable the bouncer for {} in project \"{}\" ({}), for this agent and these credentials and hosts, from the next matching use. Later requests still require model evaluation; production, always-ask, and hard checks still apply.{}",
+                    run.agent, offer.agent_id, run.command.join(" "), items,
+                    action_words(offer.action), offer.project.label, offer.project.key, binding)
+            },
             Self::ApproveInProject {
                 run,
                 project,
                 action,
             } => format!(
-                "Allow {} in \"{}\" for every agent, and approve this run of agent \"{}\": {}. Apassy remembers the answer for {}. A later run of that kind there asks you no question.",
+                "Allow {} in \"{}\" for every agent, and approve this run of agent \"{}\": {}. Apassy remembers the answer for {} from the next matching use. This is an execution allowance, separate from bouncer evaluation permission and command-line pattern learning. Hard checks still apply.",
                 action_words(*action),
                 page_text(&project.label),
                 run.agent,
@@ -1020,7 +1055,7 @@ impl OwnerRequest {
                 question_items(run)
             ),
             Self::ApproveAndRemember(run) => format!(
-                "Approve one run of agent \"{}\" and remember its pattern{}: {}",
+                "Approve one run of agent \"{}\" and remember its pattern{}: {}. This adds one command-line teaching approval. Repeated approvals can activate this pattern at the model step; this is separate from a project allowance or evaluation permission. Hard checks still apply.",
                 run.agent,
                 run.remember
                     .as_ref()
@@ -1666,6 +1701,16 @@ impl DesktopApp {
                     Err(message) => self.set_err(message),
                 }
             }
+            OwnerRequest::ApproveAndEvaluate { run, .. } => {
+                let result = match self.approvals() {
+                    Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
+                    None => Err("The broker is not running. Nothing was approved."),
+                };
+                match result {
+                    Ok(()) => self.set_ok(format!("The run of {} is approved once. After the broker rechecks it, matching later uses can be evaluated by the bouncer.", run.agent)),
+                    Err(message) => self.set_err(message),
+                }
+            }
             OwnerRequest::ApproveInProject {
                 project, action, ..
             } => {
@@ -1677,7 +1722,7 @@ impl DesktopApp {
                 };
                 match result {
                     Ok(()) => self.set_ok(format!(
-                        "Allowed. Apassy remembers {} in {} for all agents.",
+                        "Allowed. Apassy remembers {} in {} for all agents from the next matching use, after the broker rechecks it. Hard checks still apply.",
                         action_words(action),
                         project.label
                     )),
@@ -2490,6 +2535,7 @@ impl DesktopApp {
 
     /// Erase every typed passphrase and secret, and the undo history of the fields.
     pub(crate) fn erase_typed_secrets(&mut self, ctx: Option<&egui::Context>) {
+        self.ui.decisions.forget_evaluation();
         let ui_state = &mut self.owner_ui;
         for field in [
             &mut ui_state.passphrase,

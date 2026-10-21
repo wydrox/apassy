@@ -1,6 +1,6 @@
 #![cfg(feature = "vault")]
 
-//! The bouncer decides from the first use (ADR 0025 §2, §3; it replaces ADR 0024 §1).
+//! First-use decisions and explicit owner permission for bouncer evaluation.
 //! Synthetic values only.
 
 use crate::common;
@@ -210,10 +210,10 @@ fn an_agent_that_does_not_see_all_credentials_gets_not_granted_and_an_empty_cata
     assert_eq!(data["sees_all_credentials"], false);
 }
 
-/// ADR 0025 §3: an item without history in the project whose declaration is not
-/// development with low risk asks the owner. The card says why. The model is not asked.
+/// A non-development/low-risk item needs explicit evaluation permission.
+/// History cannot supply it. The card explains the missing permission.
 #[test]
-fn a_first_use_without_history_asks_the_owner_and_says_why() {
+fn a_first_use_without_evaluation_permission_asks_the_owner_and_says_why() {
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     let handle = run_later(&fx, &fx.project.join("sub"), &sentry_call());
     let run = waiting(&fx);
@@ -232,7 +232,7 @@ fn a_first_use_without_history_asks_the_owner_and_says_why() {
     assert!(
         question
             .why
-            .contains("did not use \"Synthetic Sentry key\" in \"project\""),
+            .contains("needs your permission to evaluate \"Synthetic Sentry key\" in \"project\""),
         "{}",
         question.why
     );
@@ -250,17 +250,17 @@ fn a_first_use_without_history_asks_the_owner_and_says_why() {
 }
 
 /// ADR 0025 §3: a development key of a known provider that goes to its hosts goes to the
-/// model at first use. History never bypasses the model (Gate 1, A-3): the next use
-/// with the same kind of action in the project goes to the model again.
+/// model at first use under the development/low-risk baseline. Every subsequent
+/// use still requires a fresh model decision.
 #[test]
-fn a_development_item_with_a_provider_host_and_history_runs_without_a_question() {
+fn a_development_low_risk_item_uses_the_model_on_every_run() {
     let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
     let first = run_in(&fx, &fx.project.join("sub"), &sentry_call());
     assert_eq!(decided_by(&first), "Bouncer allowed");
     assert_eq!(model_calls(&fx), 1);
     let second = run_in(&fx, &fx.project, &sentry_call());
     assert_eq!(decided_by(&second), "Bouncer allowed");
-    assert_eq!(model_calls(&fx), 2, "history goes to the model");
+    assert_eq!(model_calls(&fx), 2, "each run is evaluated again");
     assert!(fx.broker.approvals().pending().is_empty());
     let uses = with_vault(&fx, |v| v.item_uses(fx.item_id, 10)).expect("uses");
     assert_eq!(uses.len(), 2);
@@ -272,11 +272,10 @@ fn a_development_item_with_a_provider_host_and_history_runs_without_a_question()
     assert!(!text.contains(SECRET));
 }
 
-/// History counts only for the agent that made it (Gate 1, A-3): a staging key that the
-/// bouncer allowed in the project for one agent goes to the model for that agent, and a
-/// new agent has no history, so it asks. History never runs without the model.
+/// A historical bouncer success is evidence only. Explicit owner authorization
+/// enables evaluation for this agent; removing it cannot be undone by that history.
 #[test]
-fn history_counts_only_for_the_same_agent_and_goes_to_the_model() {
+fn explicit_evaluation_permission_is_agent_scoped_and_history_cannot_restore_it() {
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     let project_key = std::fs::canonicalize(fx.project.join(".git"))
         .expect("git")
@@ -300,36 +299,128 @@ fn history_counts_only_for_the_same_agent_and_goes_to_the_model() {
             decision_log_id: None,
         })
         .expect("history");
+        assert!(v.evaluation_scopes(fx.item_id).expect("scopes").is_empty());
         token.expose().to_owned()
     });
-    // The agent of the history: the model decides.
+
+    // Even the exact agent, project and action of a recorded success still ask.
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    assert!(
+        run.question
+            .why
+            .contains("needs your permission to evaluate"),
+        "{}",
+        run.question.why
+    );
+    assert_eq!(
+        model_calls(&fx),
+        0,
+        "history grants no evaluation permission"
+    );
+    let offer = fx
+        .broker
+        .approvals()
+        .evaluation_offer(run.id)
+        .expect("evaluation offer");
+    assert_eq!(offer.agent_id, fx.agent_id);
+    assert_eq!(offer.project.key, project_key);
+    assert_eq!(offer.action, ActionKind::Change);
+    let confirmations = offer
+        .items
+        .iter()
+        .map(|item| item.confirmation.clone())
+        .collect();
+    owner(
+        &fx,
+        OwnerAction::ApproveAndEvaluate {
+            run,
+            offer,
+            confirmations,
+        },
+    )
+    .expect("owner authorized evaluation");
+    assert_eq!(
+        decided_by(&handle.join().expect("initial run")),
+        "Owner approved"
+    );
+    assert_eq!(
+        model_calls(&fx),
+        0,
+        "initial approval runs once without the model"
+    );
+    let scopes = with_vault(&fx, |v| v.evaluation_scopes(fx.item_id)).expect("scopes");
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0].agent_id, fx.agent_id);
+    assert_eq!(scopes[0].project.key, project_key);
+    assert_eq!(scopes[0].action, ActionKind::Change);
+
+    // The next matching request reaches the model, not an automatic execution answer.
     let response = run_in(&fx, &fx.project, &sentry_call());
     assert_eq!(decided_by(&response), "Bouncer allowed");
-    assert_eq!(model_calls(&fx), 1, "history goes to the model");
-    // A new agent has no history: it asks, and the model is not asked.
+    assert_eq!(model_calls(&fx), 1);
+    assert!(
+        with_vault(&fx, |v| v.answers_for_item(fx.item_id))
+            .expect("answers")
+            .is_empty()
+    );
+
+    // Another otherwise-authorized agent cannot borrow the evaluation permission.
     let handle = std::thread::spawn({
         let socket = fx.socket.clone();
         let item = fx.item_id;
         let cwd = fx.project.clone();
-        let token = other_token.clone();
-        move || send_run(&socket, &token, item, &cwd, &sentry_call())
+        move || send_run(&socket, &other_token, item, &cwd, &sentry_call())
     });
     let run = waiting(&fx);
     assert!(
-        run.question.why.contains("This agent did not use"),
+        run.question
+            .why
+            .contains("needs your permission to evaluate"),
         "{}",
         run.question.why
     );
     assert!(fx.broker.approvals().deny(run.id));
-    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    assert_eq!(
+        code(&handle.join().expect("other-agent thread")),
+        "approval_denied"
+    );
     assert_eq!(model_calls(&fx), 1);
-    // Another kind of action has no history: it asks.
+
+    // A different kind of action requires its own permission too.
     let fx_deploy = format!("true deploy || {}", sentry_call());
     let handle = run_later(&fx, &fx.project, &fx_deploy);
     let run = waiting(&fx);
     assert_eq!(run.question.action, ActionKind::Deploy);
     assert!(fx.broker.approvals().deny(run.id));
-    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    assert_eq!(
+        code(&handle.join().expect("different-action thread")),
+        "approval_denied"
+    );
+    assert_eq!(model_calls(&fx), 1);
+
+    // Both the seeded and the real bouncer success remain history after revocation.
+    assert!(with_vault(&fx, |v| v.remove_evaluation_scope(scopes[0].id)).expect("revoke scope"));
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    assert!(
+        run.question
+            .why
+            .contains("needs your permission to evaluate"),
+        "{}",
+        run.question.why
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(
+        code(&handle.join().expect("revoked-scope thread")),
+        "approval_denied"
+    );
+    assert_eq!(
+        model_calls(&fx),
+        1,
+        "history cannot recreate revoked authority"
+    );
+    assert!(!format!("{response:?} {scopes:?}").contains(SECRET));
 }
 
 #[test]
@@ -343,12 +434,67 @@ fn allow_once_runs_and_remembers_nothing() {
     assert!(response.result.as_ref().expect("result")["remembered"].is_null());
     with_vault(&fx, |v| {
         assert!(v.answers_for_item(fx.item_id).expect("answers").is_empty());
+        assert!(v.evaluation_scopes(fx.item_id).expect("scopes").is_empty());
     });
-    // "Allow once" is no history: the next use asks again.
+    assert_eq!(model_calls(&fx), 0);
+    // "Allow once" creates no evaluation permission: the next use asks again.
     let handle = run_later(&fx, &fx.project, &sentry_call());
     let run = waiting(&fx);
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+}
+
+/// A remembered execution answer retains its own semantics. Removing it must not
+/// leave evaluation permission behind through owner-answer usage history.
+#[test]
+fn a_remembered_execution_answer_does_not_create_evaluation_permission() {
+    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    let project = run.question.project.clone().expect("project");
+    let action = run.question.action;
+    owner(
+        &fx,
+        OwnerAction::ApproveInProject {
+            run,
+            project,
+            action,
+        },
+    )
+    .expect("remembered answer");
+    assert_eq!(
+        decided_by(&handle.join().expect("initial run")),
+        "Owner approved"
+    );
+    assert_eq!(
+        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        "Remembered answer"
+    );
+    with_vault(&fx, |v| {
+        assert!(v.evaluation_scopes(fx.item_id).expect("scopes").is_empty());
+        let answers = v.answers_for_item(fx.item_id).expect("answers");
+        assert_eq!(answers.len(), 1);
+        assert!(v.remove_answer(answers[0].id).expect("remove answer"));
+    });
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    assert!(
+        run.question
+            .why
+            .contains("needs your permission to evaluate"),
+        "{}",
+        run.question.why
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(
+        code(&handle.join().expect("after removal")),
+        "approval_denied"
+    );
+    assert_eq!(
+        model_calls(&fx),
+        0,
+        "remembered execution never authorized model evaluation"
+    );
 }
 
 /// ADR 0025 §3: an agent has at most one waiting question.

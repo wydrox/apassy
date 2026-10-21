@@ -17,6 +17,7 @@ mod add;
 pub mod agent_items;
 mod agents;
 pub mod answers;
+pub mod bouncer_scopes;
 mod candidate;
 mod companion;
 pub mod detect;
@@ -34,6 +35,7 @@ pub mod questions;
 mod relay_device;
 mod schema18;
 mod schema19;
+mod schema20;
 mod suggestions;
 mod sync;
 mod trusted_device;
@@ -177,6 +179,7 @@ const COMPANION_SCHEMA_VERSION: i64 = 15;
 const RELAY_DEVICE_SCHEMA_VERSION: i64 = 16;
 const PASSKEY_SCHEMA_VERSION: i64 = 17;
 const FOLDER_SCHEMA_VERSION: i64 = 18;
+const TRUSTED_DEVICE_SCHEMA_VERSION: i64 = 19;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -1000,6 +1003,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | RELAY_DEVICE_SCHEMA_VERSION
         | PASSKEY_SCHEMA_VERSION
         | FOLDER_SCHEMA_VERSION
+        | TRUSTED_DEVICE_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1133,19 +1137,25 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         &[]
     };
     // Schema 19 moves the row of `relay_device` to `relay_membership` and drops it.
-    let v16: &[&str] = if (RELAY_DEVICE_SCHEMA_VERSION..SCHEMA_VERSION).contains(&version) {
-        &relay_device::SCHEMA_V16_COLUMNS
-    } else {
-        &[]
-    };
+    let v16: &[&str] =
+        if (RELAY_DEVICE_SCHEMA_VERSION..TRUSTED_DEVICE_SCHEMA_VERSION).contains(&version) {
+            &relay_device::SCHEMA_V16_COLUMNS
+        } else {
+            &[]
+        };
     // Schema 17 adds no table and no column: a passkey is an item field.
     let v18: &[&str] = if version >= FOLDER_SCHEMA_VERSION {
         &schema18::SCHEMA_V18_COLUMNS
     } else {
         &[]
     };
-    let v19: &[&str] = if version >= SCHEMA_VERSION {
+    let v19: &[&str] = if version >= TRUSTED_DEVICE_SCHEMA_VERSION {
         &schema19::SCHEMA_V19_COLUMNS
+    } else {
+        &[]
+    };
+    let v20: &[&str] = if version >= 20 {
+        &schema20::SCHEMA_V20_COLUMNS
     } else {
         &[]
     };
@@ -1168,6 +1178,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v16)
         .chain(v18)
         .chain(v19)
+        .chain(v20)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1257,7 +1268,10 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < FOLDER_SCHEMA_VERSION {
         schema18::add_schema_v18(&tx)?;
     }
-    schema19::add_schema_v19(&tx)?;
+    if from < TRUSTED_DEVICE_SCHEMA_VERSION {
+        schema19::add_schema_v19(&tx)?;
+    }
+    schema20::add_schema_v20(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1312,6 +1326,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     passkey::add_schema_v17(&tx)?;
     schema18::add_schema_v18(&tx)?;
     schema19::add_schema_v19(&tx)?;
+    schema20::add_schema_v20(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

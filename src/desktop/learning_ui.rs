@@ -426,10 +426,11 @@ mod vault_view {
                 s.labeled(
                     "Ran without you",
                     super::super::ui::settings_rows::value(format!(
-                        "{} this week · model {} · pattern {}",
-                        week.by_model + week.by_pattern,
+                        "{} this week · model {} · pattern {} · remembered answers {}",
+                        week.automatic(),
                         week.by_model,
-                        week.by_pattern
+                        week.by_pattern,
+                        week.by_answer
                     )),
                 );
                 let (active, learning) = pattern_counts(&loaded.patterns, now);
@@ -682,28 +683,25 @@ mod vault_view {
         }
     }
 
-    /// Owner decisions and model runs of the last 7 days.
-    struct Week {
-        decisions: u32,
-        asked: u32,
-        by_model: u32,
-        by_pattern: u32,
-    }
-
-    fn week(days: &[DayRate], now: u64) -> Week {
+    /// The daily counters combined for the last 7 UTC days.
+    fn week(days: &[DayRate], now: u64) -> DayRate {
         let since = (now / DAY).saturating_sub(6) * DAY;
         days.iter().filter(|day| day.day >= since).fold(
-            Week {
+            DayRate {
+                day: since,
                 decisions: 0,
                 asked: 0,
                 by_model: 0,
                 by_pattern: 0,
+                by_answer: 0,
             },
-            |week, day| Week {
+            |week, day| DayRate {
+                day: since,
                 decisions: week.decisions + day.decisions,
                 asked: week.asked + day.asked,
                 by_model: week.by_model + day.by_model,
                 by_pattern: week.by_pattern + day.by_pattern,
+                by_answer: week.by_answer + day.by_answer,
             },
         )
     }
@@ -716,10 +714,7 @@ mod vault_view {
             ("–".to_owned(), "No decisions in 7 days".to_owned())
         } else {
             (
-                format!(
-                    "{:.0}%",
-                    f64::from(week.asked) / f64::from(week.decisions) * 100.0
-                ),
+                format!("{:.0}%", week.ask_rate() * 100.0),
                 format!(
                     "{} of {} runs · goal 10% or less",
                     week.asked, week.decisions
@@ -736,8 +731,11 @@ mod vault_view {
                 ui,
                 width,
                 "Ran without you",
-                &(week.by_model + week.by_pattern).to_string(),
-                &format!("model {} · pattern {}", week.by_model, week.by_pattern),
+                &week.automatic().to_string(),
+                &format!(
+                    "model {} · pattern {} · remembered answers {}",
+                    week.by_model, week.by_pattern, week.by_answer
+                ),
             );
             kit::stat_tile(
                 ui,
@@ -802,11 +800,18 @@ mod vault_view {
             kit::section(ui, None, None, |s| {
                 s.row(|ui| {
                     egui::Grid::new("learning-ask-rate")
-                        .num_columns(6)
+                        .num_columns(7)
                         .spacing([18.0, 6.0])
                         .show(ui, |ui| {
-                            for name in ["Day", "Requests", "Asked", "Model", "Pattern", "Ask rate"]
-                            {
+                            for name in [
+                                "Day",
+                                "Requests",
+                                "Asked",
+                                "Model",
+                                "Pattern",
+                                "Remembered answers",
+                                "Ask rate",
+                            ] {
                                 ui.label(kit::medium(name, Font::Callout).color(kit::SECONDARY));
                             }
                             ui.end_row();
@@ -817,6 +822,7 @@ mod vault_view {
                                 ui.label(day.asked.to_string());
                                 ui.label(day.by_model.to_string());
                                 ui.label(day.by_pattern.to_string());
+                                ui.label(day.by_answer.to_string());
                                 ui.label(format!("{:.0}%", day.ask_rate() * 100.0));
                                 ui.end_row();
                             }
@@ -893,13 +899,14 @@ mod vault_view {
                 };
                 ui.painter().rect_filled(column, radius, kit::ACCENT);
                 let tip = format!(
-                    "{}: {} of {} requests asked you ({:.0}%). Model {}, pattern {}.",
+                    "{}: {} of {} requests asked you ({:.0}%). Model {}, pattern {}, remembered answers {}.",
                     format_utc(day.day).split(' ').next().unwrap_or_default(),
                     day.asked,
                     day.decisions,
                     share * 100.0,
                     day.by_model,
-                    day.by_pattern
+                    day.by_pattern,
+                    day.by_answer
                 );
                 ui.interact(
                     slot_rect,
@@ -1597,9 +1604,11 @@ mod tests {
             let shared = app.owner_ui.session.shared_vault();
             let mut guard = shared.lock().expect("vault");
             let vault = guard.as_mut().expect("open");
-            vault
-                .record_decision(&entry(false, DecidedBy::Model))
-                .expect("model decision");
+            for decided_by in [DecidedBy::Model, DecidedBy::Pattern, DecidedBy::Answer] {
+                vault
+                    .record_decision(&entry(false, decided_by))
+                    .expect("automatic decision");
+            }
             for _ in 0..2 {
                 vault
                     .record_decision(&entry(true, DecidedBy::Owner))
@@ -1609,7 +1618,7 @@ mod tests {
         let text = draw_with(&mut app, settings_panel);
         for expected in [
             "Ran without you",
-            "1 this week · model 1 · pattern 0",
+            "3 this week · model 1 · pattern 1 · remembered answers 1",
             "Remembered patterns",
             "0 active · 0 still learning",
             "Calibration and models",
@@ -1617,6 +1626,13 @@ mod tests {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
         assert!(!text.contains("Threshold calibration"), "folded: {text}");
+        let text = draw_view(&mut app);
+        for expected in [
+            "2 of 5 runs · goal 10% or less",
+            "model 1 · pattern 1 · remembered answers 1",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
         app.ui.set_expanded("settings-learning-advanced", true);
         let text = draw_with(&mut app, settings_panel);
         for expected in [

@@ -5,7 +5,7 @@ Date: 2026-09-26. Decisions: [ADR 0008](../adr/0008-declarations-and-model-decis
 ## 1. Summary
 
 - When the owner adds or changes an item, Apassy suggests a declaration from the item: the provider, the environment, the risk, the scope, and the reversibility. Each value has a reason.
-- The owner confirms or changes each value. The save needs the owner check (goal item A4).
+- The owner confirms or changes each value. The save needs the owner check (goal item A4). The separate Mac-only evaluation choice can confirm just environment and risk together with a narrow local evaluation permission (section 3c).
 - The declaration stores the provider (vault schema 8). The broker gives the known API hosts of that provider to the command analysis.
 - A command that sends a bound secret of the item to another host gets the flag `foreign_host`. The run waits for the owner.
 - The vault records whether the owner saved each suggestion without a change. The app shows the share.
@@ -153,6 +153,20 @@ The development hint comes only from host names. The packs have no list of docum
 
 Cost: the broker remembers, for each item of the vault session, the item revision, the declaration, its sources, and the field of the variable. It reveals the value and runs the detection only after one of them changed. It reads the use log while the item has fewer than 5 allowed uses, after a change, and else every 10 allowed uses (`RECHECK_USES`). `corrections::checks` counts both for the tests.
 
+## 3c. Confirm classification and enable evaluation
+
+[ADR 0029](../adr/0029-bouncer-evaluation-permission.md) adds **"Allow once and enable bouncer"** on the asking Mac, under "Let the bouncer decide next time". It is separate from the Declaration sheet, ordinary "Allow once", existing project execution answers, and CLI pattern learning.
+
+The offer shows each credential's environment and risk, the connected agent, project, action, and explicit hosts. The owner can correct environment and risk only. A fresh Touch ID or vault-passphrase proof binds the exact run, offered item IDs/revisions, hosts, project/action/agent, and any command binding. The queue rejects changed, missing, extra, or duplicate items. The broker then rechecks the original credentials and access in the same vault session before writing anything.
+
+Classification and evaluation scopes are saved in one transaction. Environment and risk become source `owner`, even if the displayed values are accepted unchanged. Existing project, provider, scope, reversibility, and the sources of the other declaration fields are preserved. If the item has no declaration, scope and reversibility use their conservative defaults. A failed classification/scope save starts no command.
+
+The scope lets later matching requests reach model evaluation; it does not authorize their execution. It binds one agent, item revision, project, action, and explicit hosts. Uncertain commands also bind exact argv, canonical working directory, `PATH`, resolved executable, and directly selected project script bytes. Changes need review. This does not pin imports, sourced files, all dependencies, or future external executable behavior, and is not a sandbox.
+
+Ordinary "Allow once" changes no declaration and creates no scope. Existing "Allow ACTION in PROJECT" answers still allow fitting future execution immediately; CLI patterns still require 3 explicit "Approve and remember" actions. Old model/use history creates no evaluation permission. Confirmed development/local with low risk retains its existing eligibility. Production allowances, always-ask settings, and hard vetoes keep their previous precedence; selecting production here never creates an allowance.
+
+Scopes are local schema-20 data. Migration creates an empty table; scopes do not sync and are removed from sync exports and restored backups. Credential/access edits, revocation, stricter policy, and sync conflicts invalidate them. Removing one takes authority away and needs no owner check. The evaluation offer is outside relay/iPhone cards and signed answers, whose wire format and meanings are unchanged. See [the bouncer](bouncer.md), sections 3.0 and 3.1.
+
 ## 4. Synthetic evaluation
 
 ### Set
@@ -263,7 +277,7 @@ One atomic migration step from version 7 to version 8 (`src/vault/suggestions.rs
 
 - The signals are heuristics. A key format tells the provider and the mode. It does not tell the permissions of a restricted key or a fine-grained token, so the scope often stays at admin.
 - The general words suggest only the environment. A staging or development credential keeps a high risk and an irreversible default. Section 4 shows the cost: 13 of 32 changes.
-- A word in a name can make the environment lower than production for a token that acts on a whole account, for example "preview" or "dev" in the name of a Vercel token. The owner must check the environment of such a token. A production declaration is the only declaration that makes every run wait (ADR 0010).
+- A word in a name can make the environment lower than production for a token that acts on a whole account, for example "preview" or "dev" in the name of a Vercel token. The owner must check the environment of such a token. A confirmed production declaration triggers the production gate unless a fitting production allowance exists; evaluation permission alone never bypasses it (ADR 0010, ADR 0025, ADR 0029).
 - The same person wrote the labels and the provider files. The labels came first and follow a written policy, but the set is not independent. The real owner share (section 5) is the independent measure.
 - A secret that goes to a global known host of another provider, for example a Stripe key to `api.github.com`, gets no `foreign_host`. The goal item defines the flag for hosts outside the provider hosts and the global list.
 - The analysis sees a host only in a `scheme://` URL. A host in an option (`psql -h db.example.net`), a host from a variable (`$SUPABASE_URL`), or a secret that a program reads from its environment by itself is not seen. The model and the other rules still apply.

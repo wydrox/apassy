@@ -36,32 +36,34 @@
 //!       answer or a known host of the item. For a production item (also by default),
 //!       the rules must be certain of the kind of action. An answer that exists but
 //!       does not cover the run (another host, an unsure kind) asks the owner.
-//!    6. An item whose declaration names another project asks the owner (only an
-//!       answer of the owner for this project, step 5, covers it).
+//!    6. An item whose declaration names another project asks the owner unless an
+//!       execution answer or explicit evaluation permission covers this project.
 //!    7. A missing user request or a missing declaration asks the owner (ADR 0008).
 //!    8. An active remembered pattern starts the run (ADR 0009, ADR 0010). Patterns
 //!       belong to the project key.
 //!    9. A declaration value that is only a default (`declaration_source`) asks the
 //!       owner: a weak signal makes the bouncer stricter.
-//!    10. An item that this agent did not use in the project with this kind of action
-//!        (history: a use that the bouncer allowed, after the last stricter
-//!        declaration) asks the owner, unless its declaration is development (or local)
-//!        with low risk.
-//!    11. The model decides (contract v7, ADR 0008). History never starts a run by
-//!        itself. Unclear asks the owner. A candidate in shadow mode answers in parallel
+//!    10. An item needs an explicit owner permission for this agent, revision,
+//!        project, action, hosts and command binding (ADR 0029), unless its confirmed
+//!        declaration is development (or local) with low risk. History is not permission.
+//!    11. The model decides (contract v7, ADR 0008). Evaluation permission never starts
+//!        a run by itself. Unclear asks the owner. A candidate in shadow mode answers in parallel
 //!        and has no effect (goal item B9).
 //! 7. A question waits for the owner (at most one per agent; the same request again
 //!    joins it while the state that step 8 checks is the same, else it asks again). It
 //!    names the answers that can take effect. "Allow ACTION in PROJECT"
 //!    and "Allow production" remember an answer with the destination hosts of the run
 //!    after step 8; a production item that already has its allowance is skipped. An
-//!    owner denial blocks the pattern of the request.
+//!    owner denial blocks the pattern of the request. The separate Mac action
+//!    "Allow once and enable bouncer" confirms classification and permits later model
+//!    evaluation in the displayed scope. Ordinary "Allow once" does neither.
 //! 8. After a decision, the broker checks the vault, the agent, and the rules again.
 //!    The vault epoch must be the same as in step 1. A lock, an unlock, or a restore
 //!    in between makes the decision invalid (goal item V3).
 //!    The credential revision, process binding, declaration and its sources, provider,
 //!    exceptions, "Always ask me", the project, and canonical directories must also be
-//!    the same as in the original check.
+//!    the same as in the original check. Evaluation scope lifetime IDs and command
+//!    bindings must also match before secrets are read.
 //! 9. The broker reads the secrets, releases the vault lock, and starts the process.
 //!    A variable in placeholder mode (ADR 0011) gets a placeholder. The broker then
 //!    starts a run proxy that puts the real value into HTTPS requests to the hosts of
@@ -79,8 +81,9 @@ use serde_json::json;
 
 use super::action_kind::{ActionKind, classify, classify_certain};
 use super::approvals::{
-    AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, PendingRun, QuestionInfo, QuestionItem,
-    QuestionRefusal, Settled, action_words, baseline_of,
+    AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, EvaluationChoice, EvaluationItem,
+    EvaluationOffer, PendingRun, QuestionInfo, QuestionItem, QuestionRefusal, Settled,
+    action_words, baseline_of,
 };
 use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_learned};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
@@ -95,6 +98,7 @@ use super::shadow::{self, ShadowInput};
 use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::{WireResponse, codes};
 use crate::vault::answers::{AnswerScope, ProjectRef, normal_host};
+use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::exceptions::Standing;
 use crate::vault::providers;
 use crate::vault::usage::{
@@ -304,9 +308,11 @@ struct Known {
     /// An answer for the item, the project, and the kind of action exists, but it does
     /// not fit the run. The card says why.
     unfit: Vec<Option<&'static str>>,
-    /// This agent used the item in the project with this kind of action before, and the
-    /// bouncer allowed it, after the last stricter declaration.
-    history: Vec<bool>,
+    /// Explicit owner permission for this agent to ask the model in this exact scope.
+    evaluation: Vec<bool>,
+    /// Local permission identities, rechecked even when a scope does not fit this run.
+    evaluation_ids: Vec<Option<u64>>,
+    evaluation_unfit: Vec<Option<&'static str>>,
 }
 
 /// How a use is decided.
@@ -489,10 +495,11 @@ fn route<F: FnMut() -> Result<(), String>>(
         }
     }
     // The item of another project (ADR 0025 §3): only the owner decides, and an answer
-    // of the owner for this project counts.
+    // or explicit evaluation permission of the owner for this project counts.
     for (index, facts) in checked.facts.iter().enumerate() {
         if let Some(declared) = &facts.foreign_project
             && !known.answer.get(index).copied().unwrap_or(false)
+            && !known.evaluation.get(index).copied().unwrap_or(false)
         {
             return Route::Ask(format!(
                 "\"{}\" is declared for the project \"{declared}\", not for {place}.",
@@ -519,9 +526,15 @@ fn route<F: FnMut() -> Result<(), String>>(
         ));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
-        if !known.history.get(index).copied().unwrap_or(false) && !facts.dev_low {
+        if let Some(Some(why)) = known.evaluation_unfit.get(index) {
             return Route::Ask(format!(
-                "This agent did not use \"{}\" in {place} for {} before, and its declaration is not development with low risk.",
+                "The bouncer permission for \"{}\" in {place} does not cover this run: {why}. Review it on this Mac.",
+                facts.name
+            ));
+        }
+        if !known.evaluation.get(index).copied().unwrap_or(false) && !facts.dev_low {
+            return Route::Ask(format!(
+                "The bouncer needs your permission to evaluate \"{}\" in {place} for {}. Review its environment and risk on this Mac, then enable the bouncer for this scope.",
                 facts.name,
                 action_words(run.action)
             ));
@@ -571,15 +584,76 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
     valid
 }
 
-/// Read the answers and the history of each item (ADR 0025 §3). A read error counts as
-/// no answer and no history, so the owner decides.
-fn known(
+/// Desktop-only, explicit permission to evaluate later requests. It never changes
+/// a relay card or turns a hard veto into a remembered execution allowance.
+fn evaluation_offer<F: FnMut() -> Result<(), String>>(
+    checked: &Checked,
+    items: &[u64],
+    run: &RunFacts<'_>,
+    command_binding: &Result<Option<String>, String>,
+    ready: &mut Readiness<F>,
+) -> Option<EvaluationOffer> {
+    let project = checked.project.clone()?;
+    if !run.has_user_request
+        || !run.analysis.flags.is_empty()
+        || foreign_db_host(checked, run).is_some()
+        || checked
+            .facts
+            .iter()
+            .any(|facts| facts.asks_always() || facts.production)
+        || ready.get().is_err()
+    {
+        return None;
+    }
+    let command_binding = command_binding.as_ref().ok()?.clone();
+    let mut offered = Vec::new();
+    for (index, item_id) in items.iter().enumerate() {
+        let facts = &checked.facts[index];
+        let declaration = checked.declarations[index].as_ref();
+        // Wildcard provider knowledge does not silently widen an evaluation scope.
+        // Store only concrete hosts that the owner can see in this offer.
+        let mut hosts: Vec<_> = facts
+            .known_hosts
+            .iter()
+            .chain(run.hosts)
+            .filter(|host| !host.contains('*'))
+            .cloned()
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        if hosts.len() > crate::vault::answers::MAX_ANSWER_HOSTS {
+            return None;
+        }
+        offered.push(EvaluationItem {
+            name: facts.name.clone(),
+            confirmation: EvaluationConfirmation {
+                item_id: *item_id,
+                revision: checked.authorization[index].revision,
+                environment: declaration.map_or(providers::DEFAULT_ENVIRONMENT, |d| d.environment),
+                risk: declaration.map_or(providers::DEFAULT_RISK, |d| d.risk),
+                hosts,
+            },
+        });
+    }
+    Some(EvaluationOffer {
+        agent_id: checked.agent.id,
+        project,
+        action: run.action,
+        items: offered,
+        command_binding,
+    })
+}
+
+/// Read execution answers and explicit evaluation permissions. A read error gives
+/// no permission, so the owner decides.
+fn known_state(
     vault: &Vault,
     items: &[u64],
     checked: &Checked,
     action: ActionKind,
     certain: Option<ActionKind>,
     hosts: &[String],
+    command_binding: &Result<Option<String>, String>,
 ) -> Known {
     let Some(project) = &checked.project else {
         return known_nothing(items.len());
@@ -606,11 +680,29 @@ fn known(
         });
         known.answer.push(answer.is_some() && unfit.is_none());
         known.unfit.push(unfit);
-        known.history.push(
-            vault
-                .item_used_in_project(*item, &project.key, action, checked.agent.id)
-                .unwrap_or(false),
-        );
+        let evaluation = vault
+            .evaluation_scope(*item, checked.agent.id, &project.key, action)
+            .ok()
+            .flatten();
+        let unfit = evaluation.as_ref().and_then(|scope| {
+            if !hosts_within(hosts, scope.hosts.iter()) {
+                Some("the command goes to another host")
+            } else if !command_binding
+                .as_ref()
+                .is_ok_and(|binding| scope.command_binding == *binding)
+            {
+                Some("the command, its script, or its execution path changed")
+            } else {
+                None
+            }
+        });
+        known
+            .evaluation
+            .push(evaluation.is_some() && unfit.is_none());
+        known
+            .evaluation_ids
+            .push(evaluation.as_ref().map(|scope| scope.id));
+        known.evaluation_unfit.push(unfit);
     }
     known
 }
@@ -690,6 +782,13 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     let action = classify(request.command, &analysis);
     let certain = classify_certain(request.command, &analysis);
     let hosts = run_hosts(request.command);
+    let command_binding = super::evaluation_binding::command_binding(
+        request.command,
+        &checked.cwd,
+        &checked.project_dir,
+        certain.is_some(),
+        request.path,
+    );
     // `db_host_from_command` says only that the command names its database host. A
     // known host of each item settles it; a host that one item does not know keeps the
     // flag, so the owner decides (Gate 1, A-2, NEW-1).
@@ -721,8 +820,8 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         pattern
     });
     // Goal item B9: the active model (the default bouncer or a promoted model) and the
-    // candidate in shadow mode come from the vault. ADR 0025: the answers and the
-    // history of each item.
+    // candidate in shadow mode come from the vault, together with execution answers
+    // and explicit evaluation permissions (ADR 0029).
     let (learned, models, known) = lock(&ctx.vault)
         .as_ref()
         .filter(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
@@ -730,7 +829,15 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             (
                 learning::lookup(vault, pattern.as_ref(), now),
                 shadow::models(vault, ctx.bouncer.as_ref()),
-                known(vault, request.items, &checked, action, certain, &hosts),
+                known_state(
+                    vault,
+                    request.items,
+                    &checked,
+                    action,
+                    certain,
+                    &hosts,
+                    &command_binding,
+                ),
             )
         })
         .unwrap_or_else(|| {
@@ -901,6 +1008,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
     let mut remembered = false;
     let mut answer_choice: Option<AnswerChoice> = None;
+    let mut evaluation_choice: Option<EvaluationChoice> = None;
 
     if !needs_approval {
         let outcome = match route {
@@ -962,11 +1070,19 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             },
         };
         // A call joins the waiting question only when it saw the same credentials.
-        let settled = ctx.approvals.wait_for_question(
+        let evaluation_offer = evaluation_offer(
+            &checked,
+            request.items,
+            &run_facts,
+            &command_binding,
+            &mut ready,
+        );
+        let settled = ctx.approvals.wait_for_evaluation_question(
             pending,
             checked.agent.id,
             checked.epoch,
-            baseline_of(&checked.rechecked()),
+            baseline_of(&(checked.rechecked(), &known.evaluation_ids, &command_binding)),
+            evaluation_offer,
             ctx.approval_timeout,
             same_session,
         );
@@ -988,6 +1104,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             outcome,
             method: checked_with,
             answer: chosen,
+            evaluation: chosen_evaluation,
             attached,
             ..
         } = match settled {
@@ -1028,6 +1145,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             }
         };
         answer_choice = chosen;
+        evaluation_choice = chosen_evaluation;
         if checked_with == Some(CheckMethod::Companion) {
             logged_decided_by = OWNER_APPROVED_ON_IPHONE;
             ANSWERED_ON_IPHONE.clone_into(&mut answered_on);
@@ -1165,7 +1283,26 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 return WireResponse::failure(code, reason);
             }
         };
-        if rechecked.rechecked() != checked.rechecked() {
+        let current_binding = super::evaluation_binding::command_binding(
+            request.command,
+            &rechecked.cwd,
+            &rechecked.project_dir,
+            certain.is_some(),
+            request.path,
+        );
+        let current_known = known_state(
+            vault,
+            request.items,
+            &rechecked,
+            action,
+            certain,
+            &hosts,
+            &current_binding,
+        );
+        if rechecked.rechecked() != checked.rechecked()
+            || current_known.evaluation_ids != known.evaluation_ids
+            || current_binding != command_binding
+        {
             let reason = "The credential or its access changed while Apassy checked this run. Send the request again.";
             record(
                 vault,
@@ -1185,6 +1322,31 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 "",
             );
             return WireResponse::failure("authorization_changed", reason);
+        }
+        // The current run has an owner proof. Classification and future model eligibility
+        // are committed together only after the unchanged-state check above.
+        if let Some(choice) = &evaluation_choice {
+            let project = ProjectRef {
+                key: choice.offer.project.key.clone(),
+                label: choice.offer.project.label.clone(),
+            };
+            if vault
+                .authorize_evaluation(
+                    checked.agent.id,
+                    &project,
+                    action,
+                    &choice.confirmations,
+                    choice.offer.command_binding.as_deref(),
+                    &answered_on,
+                )
+                .is_err()
+            {
+                return WireResponse::failure(
+                    codes::ANSWER_FAILED,
+                    "Apassy could not save the classification and bouncer permission. Nothing ran.",
+                );
+            }
+            logged_decided_by = "Owner approved once and enabled bouncer evaluation";
         }
         // ADR 0025: "Allow ACTION in PROJECT" and "Allow production" are saved now, in
         // the session of the decision and after the second check.
@@ -1372,7 +1534,9 @@ fn known_nothing(items: usize) -> Known {
     Known {
         answer: vec![false; items],
         unfit: vec![None; items],
-        history: vec![false; items],
+        evaluation: vec![false; items],
+        evaluation_ids: vec![None; items],
+        evaluation_unfit: vec![None; items],
     }
 }
 

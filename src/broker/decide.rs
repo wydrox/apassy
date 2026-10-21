@@ -1123,7 +1123,7 @@ fn execute(prepared: &Prepared, tls: &TlsClient) -> Result<Value, WireResponse> 
                 "bad_output",
                 "The destination response is larger than 64 KiB.",
             ),
-            HttpFailure::Connect | HttpFailure::Protocol => WireResponse::failure(
+            HttpFailure::Connect | HttpFailure::Timeout | HttpFailure::Protocol => WireResponse::failure(
                 "destination_unreachable",
                 "The destination did not answer correctly.",
             ),

@@ -1414,6 +1414,88 @@ fn record_use(app: &mut DesktopApp, item_id: u64, agent_id: u64, command: &str) 
         .expect("record use");
 }
 
+#[test]
+fn a_credential_lists_and_revokes_bouncer_evaluation_permission_without_authentication() {
+    use crate::broker::action_kind::ActionKind;
+    use crate::vault::answers::ProjectRef;
+    use crate::vault::bouncer_scopes::EvaluationConfirmation;
+    use crate::vault::{Environment, RiskLevel};
+
+    let dir = TempDir::new().expect("dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let item_id = add_item(&mut app, "Deploy key");
+    let agent_id = register(&mut app, "Claude Code");
+    app.owner_ui
+        .session
+        .with_vault(|vault| -> crate::vault::VaultResult<()> {
+            let revision = vault.details(item_id)?.summary.revision;
+            vault.authorize_evaluation(
+                agent_id,
+                &ProjectRef {
+                    key: "/synthetic/apassy".to_owned(),
+                    label: "apassy".to_owned(),
+                },
+                ActionKind::Read,
+                &[EvaluationConfirmation {
+                    item_id,
+                    revision,
+                    environment: Environment::Development,
+                    risk: RiskLevel::Low,
+                    hosts: vec!["api.example.com".to_owned()],
+                }],
+                Some("synthetic-script-binding"),
+                "Synthetic Mac",
+            )
+        })
+        .expect("open")
+        .expect("authorize synthetic evaluation scope");
+    app.select_item(item_id.to_string());
+    let text = frames(&mut app);
+    for expected in [
+        "Bouncer decisions",
+        "Claude Code",
+        "reading in apassy",
+        "api.example.com",
+        "Only this exact command, execution context and directly selected script version.",
+        "Model evaluation only",
+        "Remove",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains(CANARY), "the secret stays masked");
+    assert!(!text.contains("synthetic-script-binding"), "{text}");
+    let scopes = app
+        .owner_ui
+        .session
+        .evaluation_scopes(item_id)
+        .expect("scopes");
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(
+        scopes[0].command_binding.as_deref(),
+        Some("synthetic-script-binding")
+    );
+    click_text(&mut app, "Remove");
+    assert!(
+        app.owner.check.is_none(),
+        "revocation is stricter and starts no owner check"
+    );
+    assert!(
+        app.owner_ui
+            .session
+            .evaluation_scopes(item_id)
+            .expect("scopes")
+            .is_empty()
+    );
+    assert!(!frames(&mut app).contains("Bouncer decisions"));
+    assert!(
+        !app.owner_ui
+            .session
+            .remove_evaluation_scope(scopes[0].id)
+            .expect("idempotent removal")
+    );
+}
+
 /// The rules of a credential: an answer of the owner and an exception of an agent. The
 /// page lists both and the agent use. Removing the exception gives authority back, so
 /// it asks for the owner check first; removing the answer makes the bouncer ask again,

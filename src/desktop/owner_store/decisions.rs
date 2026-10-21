@@ -26,6 +26,7 @@ use crate::vault::agent_items::{
     Correction, CorrectionAnswer, CorrectionKind, CorrectionState, CredentialRequest,
     CredentialRequestState, RAISED_FROM_FACT, RequestOutcome,
 };
+use crate::vault::bouncer_scopes::EvaluationScope;
 use crate::vault::detect::Detected;
 use crate::vault::exceptions::{AgentException, ExceptionKind, MAX_AGENT_NOTE_BYTES};
 use crate::vault::overview::WEEK;
@@ -81,6 +82,18 @@ pub struct AgentOverview {
 }
 
 impl OwnerSession {
+    /// Model-evaluation permissions for one credential. These expose no values.
+    pub fn evaluation_scopes(&self, item_id: u64) -> ModelResult<Vec<EvaluationScope>> {
+        self.unlocked()?.evaluation_scopes(item_id).map_err(map_err)
+    }
+
+    /// Revoking permission makes the broker stricter, so no owner check is needed.
+    pub fn remove_evaluation_scope(&mut self, id: u64) -> ModelResult<bool> {
+        self.unlocked()?
+            .remove_evaluation_scope(id)
+            .map_err(map_err)
+    }
+
     /// The owner interactions and the automatic decisions of the last 7 days.
     pub fn week_counts(&self) -> ModelResult<WeekCounts> {
         self.unlocked()?.week_counts(now()).map_err(map_err)

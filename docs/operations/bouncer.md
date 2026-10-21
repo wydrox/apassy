@@ -1,6 +1,6 @@
 # Bouncer with a local Laya model
 
-Date: 2026-09-25. Decision: [ADR 0007](../adr/0007-rules-and-local-bouncer.md).
+Initial guide: 2026-09-25. Current decision flow: 2026-10-21, [ADR 0029](../adr/0029-bouncer-evaluation-permission.md). Model policy: [ADR 0007](../adr/0007-rules-and-local-bouncer.md).
 
 ## 1. Install and start Laya
 
@@ -21,7 +21,7 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 LAYA_MODELS=english .venv/bin/laya-serve
 - The Apassy data directory must have mode `0700`. The broker does not start in a directory with a wider mode.
 - `APASSY_BOUNCER_URL` changes the address. The default is `http://127.0.0.1:8770`. `APASSY_BOUNCER_KEY` sends a bearer key if `LAYA_API_KEY` is set.
 
-If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run waits for the owner.
+Each real inference attempt has an absolute 10-second deadline for the whole HTTP exchange. A transport timeout gets one inference retry, for a default maximum of 20 seconds across both attempts. HTTP errors, malformed answers, missing facts, and a model-version mismatch do not retry. A failure asks the owner; the retry never starts a credential-bearing command. Model startup and readiness have separate waits below.
 
 ### Install from Apassy
 
@@ -43,7 +43,7 @@ You do not need Terminal for these commands. In Settings > Bouncer, choose "With
 Settings > Bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
-- **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
+- **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for successful readiness inference before its decision request. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
 - **Managed outside Apassy**: Apassy starts and stops nothing. It only uses the address.
 - **Off**: the broker asks no model. Every run that needs it waits for you. The log and the question say "The bouncer is off in Settings."
 
@@ -57,7 +57,9 @@ Without the base weights in the Hugging Face cache, the first start downloads th
 
 "Start now" shows only when the server can start. While the start script or the Laya environment is missing ("Cannot start"), the section has no "Start now", and the rows below the status name what is missing.
 
-If a healthy server already answers on the port, for example from a LaunchAgent, Apassy does not start a second one. The status says "Running (started outside Apassy)". In "With Apassy", when that server stops, Apassy starts its own (ADR 0024: Apassy is the program that starts the bouncer). If another program uses the port, the status says so.
+Readiness requires a valid inference response, including the active model version when pinned; a successful `/health` response alone is insufficient. A failed warm-up stays unavailable while the monitor retries inference on the existing process. Managed starts and waiting requests wait for this readiness result. External mode never starts a process, including during recovery.
+
+If an existing server passes readiness on the port, for example from a LaunchAgent, Apassy does not start a second one. The status says "Running (started outside Apassy)". In "With Apassy", when that server stops, Apassy starts its own (ADR 0024: Apassy is the program that starts the bouncer). If another program uses the port, the status says so.
 
 Apassy reads `~/Library/LaunchAgents` when it starts and then each minute. It reads each `.plist` with `plutil -convert json`. A LaunchAgent counts when its `ProgramArguments` name `tools/basemodel/start.sh`, for example `com.wydrox.apassy.bouncer.plist`. The section shows a note for it in two cases:
 
@@ -93,27 +95,35 @@ Since 0.5.0 there is no rule to set for an agent and a credential ([ADR 0025](..
 
 ## 3. Decision order
 
-### 3.0 Order of the broker (ADR 0025)
+### 3.0 Order of the broker (ADR 0025, ADR 0029)
 
-A process grant is no longer the authority for a run, and the broker does not read it: the upgrade to schema 18 turned each grant that asked, or that had a rule or an instruction, into "Always ask for this agent". A connected agent can use every item that is not archived, unless an exception hides it ("Not for this agent" gives `not_granted`; "Only these items" limits the agent to its list; "Always ask for this agent" asks at each use). After the checks of the request, the broker decides in this order (`src/broker/run.rs`, step 6). The first step that applies decides.
+A process grant is no longer the authority for a run. Schema 18 converted grants with a rule, instruction, or an ask mode into "Always ask for this agent". A connected agent can request any non-archived item that its standing exceptions permit. "Not for this agent" and "Only these items" remain access restrictions. The broker uses this order (`src/broker/run.rs`):
 
-1. Hard rules and security vetoes ask the owner, whatever was remembered: a rule flag of the command analysis (for example `secret_output`, `foreign_host`, a production word); a database host from the command (`db_host_from_command`) that is not a known host of the items (provider hosts, placeholder hosts, the `host` field); "Always ask me" of the item or "Always ask for this agent"; and a production item without a production allowance that fits the run. Production here means production from the owner, a value signal, or usage. An allowance fits when it is for the item, the project, and the kind of action, the rules are certain of that kind (`action_kind::classify_certain`: `./ship.sh` or `sh -c ...` is never certain), and each destination host of the run is a host of the allowance or a known host of the item.
-2. No running bouncer: the run asks the owner. Every remembered route below needs it.
-3. The working directory is no project (the root, the home folder, or a parent of them): the run asks the owner. Nothing can be remembered there.
-4. An item that is production only by default (source `default`, no signal) is unconfirmed: its first use in the project with a kind of action asks the owner. The question offers "Development" or "Production" to correct it. The answer is remembered as a normal project answer, not as a production allowance.
-5. A remembered answer of the owner fits each item: for the item, the project, and the kind of action (for a production item: a production allowance), with each destination host of the run among the hosts of the answer or the known hosts of the item, and for a production item (also an unconfirmed one) with a certain kind of action. The run starts. An answer that exists but does not cover the run (another host, a kind that the rules are not sure of) asks the owner.
-6. An item whose declaration names another project (a non-empty project that is not the label, the folder, or the path of this project) asks the owner. An answer of the owner for this project (step 5) covers it.
-7. A missing user request or a missing declaration asks the owner.
-8. An active remembered pattern starts the run (see [learning](learning.md)). A pattern belongs to the project key, so all worktrees of a repository share it.
-9. A declaration value for `environment` or `risk` that comes only from the source `default` asks the owner. A weak signal makes the bouncer stricter.
-10. An item that this agent did not use in this project with this kind of action asks the owner, unless its declaration is development (or local) with low risk. A use counts as history when the bouncer allowed it, the same agent made it while it is still connected, and it came after the last change that made the declaration of the item stricter (an environment nearer to production, a higher risk, a wider scope, or a less reversible action). A new agent has no history.
-11. The model decides (contract v7, the list below). History never starts a run by itself: it only lets the run reach the model. An unclear answer asks the owner.
+1. Hard rules and security vetoes ask the owner: command-analysis flags, an unknown database destination, always-ask settings, and production from the owner, a value signal, or usage without a fitting production allowance. Production allowances still require the item, project, certain action kind, and covered destination hosts. Evaluation permission cannot override these checks.
+2. A bouncer without successful readiness inference asks the owner. Remembered routes below also require readiness.
+3. A directory without a usable project (root, home, or a parent of home) asks the owner.
+4. Production only by default remains unconfirmed and asks unless a fitting execution answer already covers it. The owner can review its classification on the Mac, or use the existing environment correction/project answers.
+5. A fitting remembered execution answer for every item starts the run directly. It covers the item, project, action kind, and hosts; production requires a production allowance and a certain action kind. An existing answer that does not fit asks the owner.
+6. An item declared for another project asks unless a fitting execution answer or explicit evaluation scope covers this project.
+7. A missing user request or declaration asks the owner.
+8. An active remembered pattern starts the run. Its existing three explicit "Approve and remember" approvals are unchanged; see [learning](learning.md).
+9. Environment or risk with source `default` asks the owner.
+10. Each item needs either confirmed development/local with low risk, or an explicit local evaluation scope for this connected agent, item revision, project, action, and destination hosts. A scope that does not fit asks for review on this Mac. Prior model decisions, ordinary approvals, project answers, and use history never create evaluation permission.
+11. The model evaluates the current user request and command. Only a sufficiently certain answer without a veto starts the run.
 
-A question waits up to 300 seconds (5 minutes). It names the answers that can take effect (`QuestionInfo::valid_answers`): "Allow once", "Not for this agent", "Always ask for this agent", "Disconnect the agent", and, only when the answer can work later, "Allow ACTION in PROJECT" (remembered for all agents) or "Allow production: ACTION in PROJECT". Neither is offered without a project, without a running bouncer, with a rule flag, for an item with "Always ask me", or for a production item when the rules are not certain of the kind of action. "Development" or "Production" is offered for an unconfirmed item. The queue refuses a remembered answer that the question does not offer. A remembered answer keeps the destination hosts of its run and the known hosts of the items. "Allow ACTION in PROJECT" for a run with a production item that already has its allowance saves the other items and skips that one. See [the agent path](agent-path.md), section 8d. A model, a pattern, and the usage log never write an answer and never make a production allowance. A restore removes all answers. The history of agents that a restore revoked does not count.
+A question waits up to 300 seconds. "Allow once" approves only that run: it neither confirms classification nor creates an evaluation scope. Existing "Allow ACTION in PROJECT" and "Allow production: ACTION in PROJECT" remain immediate execution answers for all agents, with their original host/action and production checks. They are distinct from evaluation permission and from CLI pattern learning.
+
+On the asking Mac, "Let the bouncer decide next time" can offer **"Allow once and enable bouncer"**. The owner reviews each credential's environment and risk, the agent, project, action, and explicit hosts. A fresh Touch ID or passphrase proof binds the exact run and offer. Only environment and risk can be edited; item IDs, revisions, hosts, project, action, agent, and command binding must match. After the broker rechecks access and credential state, it commits classification and scope together. Environment and risk become owner-confirmed; other declaration fields and their sources are preserved. A failed save starts nothing.
+
+The offer requires a ready model, a project, a user request, no hard command flag or always-ask setting, no confirmed production item, and a command supported by the binding rules below. Selecting production during review still creates no production allowance: later production use continues to need one. A scope permits later evaluation, never execution by itself. Every later request is checked again, including the current user request, command, model result, and scope identity before secrets are read.
+
+Scopes are local schema-20 records. Migration starts with none; old approvals and history are not imported. Credential/access edits, agent revocation, stricter policy, and sync conflicts invalidate scopes. They do not sync, are removed from sync exports and restored backups, and can be removed without a new owner check. Editing a script, changing its execution context, or using another host requires review rather than silently extending the scope.
+
+The evaluation offer stays outside `PendingRun`, `QuestionInfo`, and `AnswerKind`. Relay/iPhone question cards and signed answers keep their existing wire format and meanings; they cannot create this permission. A changed offer replaces the waiting question instead of reusing a stale proof.
 
 A connector use (`apassy_use_credential`) keeps the standing rules: "Not for this agent" and "Only these items" refuse (`not_granted`), and "Always ask me", "Always ask for this agent", and a production declaration ask the owner as a question of the agent. A connector use has no project, so no production allowance covers it. The model does not decide a connector use: the operation is a fixed read of its profile that the owner set up with an owner check.
 
-The list below is the detail of the model step (step 11) and of the rules before it. Its step 2 now has the exception of an owner allowance, and its steps 4 and 4a come in the order above. Since 0.5.0 a run has no grant rule and no owner instruction, so step 1 and the `rule_break` check never apply to a run, and "Always ask me" or "Always ask for this agent" takes the place of a grant in "ask" mode.
+The dated policy detail below describes model certainty and vetoes. The current eligibility and approval order is section 3.0. Its step 2 now has the exception of an owner allowance, and its steps 4 and 4a come in the order above. Since 0.5.0 a run has no grant rule and no owner instruction, so step 1 and the `rule_break` check never apply to a run, and "Always ask me" or "Always ask for this agent" takes the place of a grant in "ask" mode.
 
 Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
 
@@ -154,6 +164,14 @@ Tests for steps 6 and 7 (version 7): `an_owner_instruction_needs_a_certain_no_ru
 Tests for steps 3 and 6 (dev round 4): `trace_settings_and_personal_data_reads_ask` in `tests/bouncer_rules.rs` (the broker path: `TF_LOG=TRACE terraform plan`, `GIT_TRACE=1 git fetch`, and `kubectl get secret api -o yaml` get `secret_output` without a model call; `select email, phone from users` and `stripe customers list | jq -r '.data[].email'` ask with `task_match` 0.3 and `writes` 0.05). The analysis tests are in `src/broker/shell_risk.rs`: `debug_and_trace_settings_print_secrets`, `shell_options_come_before_the_text`, `the_environment_of_a_program`, `secret_values_and_names`, and `personal_data_reads_need_the_task_match`.
 
 Tests for step 4a: `learning_replaces_only_the_model_step` and `calibration_changes_only_the_task_match_level` in `src/broker/bouncer.rs`. `an_active_pattern_never_overrides_the_earlier_steps` in `tests/learning.rs` runs the broker with an active pattern: a forbidden word, an expired rule, and the hourly limit deny (step 1); a production item, a rule flag, a missing user request, and a missing declaration wait for the owner (steps 2 to 4); the model is not called.
+
+### 3.1 Uncertain commands and project scripts
+
+Unknown commands and project scripts remain uncertain for production action allowances. Generic action scopes require a certain classification and a resolved system native executable. Other supported commands bind exact argument boundaries, canonical working and project directories, the effective `PATH`, resolved executable path, and directly selected project script bytes. A project script named `git` receives a script binding too. Direct script files must be readable regular files of at most 1 MiB inside the project; paths or symlinks that escape it are refused. Unknown native tools, project native binaries, unsupported project runners, module forms, external scripts, and ambiguous interpreters do not receive a durable evaluation offer. Commands resolved through `PATH` also refuse empty or relative search entries.
+
+A changed binding asks for another owner decision. Installed tool identity and semantics are trusted; external binaries are not attested. Inline interpreter code binds its argv, not files it later loads. This is not a sandbox or a transitive dependency guarantee: imports, sourced files, packages, hooks, plugins and external dependencies are not pinned. A matching binding permits another model evaluation only. The binding is checked before secret use, not atomically with execution or with filesystem isolation against concurrent changes.
+
+Common Git reads with split global path flags, such as `git --git-dir .git log` and `git --work-tree . status`, now share the same conservative classification as their existing equals forms. Config/exec overrides, aliases, output files, and shell syntax do not become certain reads.
 
 ## 4. Measurement
 

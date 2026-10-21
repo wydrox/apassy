@@ -48,8 +48,8 @@ use zeroize::Zeroizing;
 use super::sync::{SyncIdentity, content_digest, hash_value, read_sync_row, to_hex};
 use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
 use super::{
-    FOLDER_SCHEMA_VERSION, MAX_ITEM_EVENTS, Vault, agents, history, schema18, schema19,
-    verify_expected_columns_in,
+    FOLDER_SCHEMA_VERSION, MAX_ITEM_EVENTS, TRUSTED_DEVICE_SCHEMA_VERSION, Vault, agents, history,
+    schema18, schema19, verify_expected_columns_in,
 };
 
 /// Child tables of a credential in schema 14. Their triggers come with schema 14.
@@ -79,7 +79,7 @@ pub(super) const CHILD_TABLES: [&str; 11] = [
 
 /// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
 /// reads them from another copy.
-pub const LOCAL_TABLES: [&str; 29] = [
+pub const LOCAL_TABLES: [&str; 30] = [
     "agent",
     "grant_rule",
     "activity",
@@ -104,6 +104,7 @@ pub const LOCAL_TABLES: [&str; 29] = [
     "relay_membership",
     "agent_exception",
     "owner_answer",
+    "bouncer_scope",
     "item_use",
     "item_origin",
     "credential_request",
@@ -154,18 +155,18 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
     "moved",
 ];
 
-/// The schema before this one: a copy of schema 18 (before trusted devices) merges, and a
-/// copy of this schema is refused by the app of schema 18 (`UnsupportedSchema`).
-pub(super) const UPGRADABLE_SCHEMA: i64 = FOLDER_SCHEMA_VERSION;
+/// The previous schema. Schema 20 adds only local evaluation scopes, so schema 19
+/// copies preserve their existing synced semantics and migrate with no scopes.
+pub(super) const UPGRADABLE_SCHEMA: i64 = TRUSTED_DEVICE_SCHEMA_VERSION;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
 pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERSION;
 
-// Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19
-// only. A new schema needs its own step for a copy, or a refusal of the old copies.
+// Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
+// Schema 20 adds local state only; future synced schemas require another merge step.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 2);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 3);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades.
@@ -241,7 +242,7 @@ const LWW_TABLES: [LwwTable; 4] = [
             "updated_by",
             "deleted_at",
         ],
-        since: SCHEMA_VERSION,
+        since: TRUSTED_DEVICE_SCHEMA_VERSION,
         removal_wins: true,
     },
 ];
@@ -745,7 +746,7 @@ fn load_records(
 ) -> VaultResult<BTreeMap<String, Record>> {
     let filter = scope.item_filter();
     let v18 = version >= FOLDER_SCHEMA_VERSION;
-    let v19 = version >= SCHEMA_VERSION;
+    let v19 = version >= TRUSTED_DEVICE_SCHEMA_VERSION;
     let mut shares = if v18 {
         grouped(
             conn,
@@ -966,7 +967,10 @@ pub(super) fn sync_content_digest(
     drop(stmt);
     // The tables of each schema in their own pass, so the digest of a vault without rows
     // of a later table is the digest of the earlier schema.
-    for (since, tag) in [(FOLDER_SCHEMA_VERSION, b"\0w"), (SCHEMA_VERSION, b"\0d")] {
+    for (since, tag) in [
+        (FOLDER_SCHEMA_VERSION, b"\0w"),
+        (TRUSTED_DEVICE_SCHEMA_VERSION, b"\0d"),
+    ] {
         if version < since {
             continue;
         }
@@ -1867,7 +1871,7 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     if remote_schema < FOLDER_SCHEMA_VERSION {
         keep_local_v18(&mut remote, &local);
     }
-    if remote_schema < SCHEMA_VERSION {
+    if remote_schema < TRUSTED_DEVICE_SCHEMA_VERSION {
         keep_local_v19(&mut remote, &local);
     }
     // Folders, shared vaults, vault secrets, and trusted devices: the later row wins.
@@ -1921,6 +1925,12 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                     report.updated += 1;
                 }
                 Order::Concurrent => {
+                    // Divergent policy/credential edits invalidate local evaluation authority,
+                    // including when a stricter remote record loses the conflict.
+                    if ours.content_hash() != theirs.content_hash() {
+                        tx.execute("DELETE FROM bouncer_scope WHERE item_id = ?1", [ours.id])
+                            .map_err(storage)?;
+                    }
                     let clock = joined(&ours.clock, &theirs.clock);
                     let later = ours.version().max(theirs.version());
                     if ours.content_hash() == theirs.content_hash() {
@@ -2588,6 +2598,7 @@ mod schema17_tests {
 
     /// Make the closed sync copy at `path` a copy of schema 17 with the digest of a push.
     fn make_schema17(path: &Path) {
+        raw(path, &super::super::schema20::downgrade_sql(), false);
         raw(path, schema19::DOWNGRADE_TO_18_SQL, false);
         raw(path, DOWNGRADE_SQL, true);
     }
@@ -2815,6 +2826,7 @@ mod schema17_tests {
         // A copy of schema 18 with the header of schema 17.
         let header = w.dir.path().join("header.db");
         w.old.write_sync_copy(&header, "Old Mac").unwrap();
+        raw(&header, &super::super::schema20::downgrade_sql(), false);
         raw(&header, schema19::DOWNGRADE_TO_18_SQL, true);
         raw(&header, "PRAGMA user_version = 17;", false);
         refuse(&mut w.a, &header, VaultErrorKind::UnsupportedSchema);
@@ -3127,7 +3139,7 @@ mod schema16_tests {
             ),
             (
                 "future",
-                "PRAGMA user_version = 20; UPDATE vault_meta SET schema_version = 20;",
+                "PRAGMA user_version = 21; UPDATE vault_meta SET schema_version = 21;",
                 true,
                 VaultErrorKind::UnsupportedSchema,
             ),
