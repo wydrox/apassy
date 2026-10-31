@@ -184,6 +184,14 @@ pub fn connect_message(origin: &str, public_key_b64: &str) -> Vec<u8> {
     message
 }
 
+/// Fresh Connect recovery proof, distinct from creation and ordinary sign-in.
+pub fn connect_recovery_message(origin: &str, public_key_b64: &str, nonce: &str) -> Vec<u8> {
+    let mut message = connect_message(origin, public_key_b64);
+    message.extend_from_slice(b"\0recovery\0");
+    message.extend_from_slice(nonce.as_bytes());
+    message
+}
+
 /// A new random sign-in nonce, base64url.
 pub fn new_nonce() -> Result<String, DeviceKeyError> {
     use ring::rand::SecureRandom;

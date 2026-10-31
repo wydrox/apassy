@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use apassy::broker::packs::RuleSet;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
 
@@ -344,6 +344,7 @@ pub struct Hub {
     push: Arc<crate::server::push::Push>,
     /// The Connect teams of each client prefix today, in memory only (section 26).
     connect_prefixes: connect::PrefixLimiter,
+    connect_recovery: Mutex<HashMap<String, ([u8; 32], u64)>>,
     /// The long polls that Connect teams hold, all of them together.
     connect_polls: Arc<AtomicUsize>,
     /// The feed long polls that Connect teams hold, all of them together.
@@ -382,6 +383,7 @@ impl Hub {
             sync_transfers: Arc::new(AtomicUsize::new(0)),
             push,
             connect_prefixes: connect::PrefixLimiter::default(),
+            connect_recovery: Mutex::new(HashMap::new()),
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
         });
@@ -645,6 +647,28 @@ impl Hub {
         Ok((id, owner_id, device_id))
     }
 
+    /// An existence-independent, bounded recovery challenge for a device key.
+    pub fn connect_challenge(&self, public_key: &str, now: u64) -> RelayResult<serde_json::Value> {
+        let public = crate::device::decode_public_key(public_key)
+            .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
+        let mut challenges = self
+            .connect_recovery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        challenges.retain(|_, (_, expiry)| *expiry > now);
+        if challenges.len() >= 1000 {
+            return Err(directory::connect_busy());
+        }
+        let nonce = crate::device::new_nonce()
+            .map_err(|_| RelayError::internal("The system has no random source."))?;
+        let expires_at = now.saturating_add(60);
+        challenges.insert(
+            nonce.clone(),
+            (directory::connect_key_hash(&public), expires_at),
+        );
+        Ok(json!({"nonce": nonce, "expires_at": expires_at, "origin": self.config.public_url}))
+    }
+
     /// `POST /v1/connect` (docs/SPEC.md section 26): a Connect team without a code. An
     /// ordinary team (one file, the member `owner`, its device as the key holder) with
     /// the `connect` limits. The request proves its key with a signature. One public key
@@ -672,13 +696,51 @@ impl Hub {
         let signature =
             crate::hostkeys::decode_b64(&request.signature, crate::device::MAX_SIGNATURE_BYTES)
                 .map_err(|_| RelayError::invalid("The signature is not valid."))?;
-        let message = crate::device::connect_message(&self.config.public_url, &request.public_key);
+        let key_hash = directory::connect_key_hash(&public_key);
+        let message = if let Some(nonce) = &request.recovery_nonce {
+            // Consume before validation, including invalid signatures; restart forgets nonces.
+            let challenge = self
+                .connect_recovery
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(nonce);
+            if !challenge.is_some_and(|(key, expiry)| key == key_hash && expiry > now) {
+                return Err(RelayError::unauthenticated());
+            }
+            crate::device::connect_recovery_message(
+                &self.config.public_url,
+                &request.public_key,
+                nonce,
+            )
+        } else {
+            crate::device::connect_message(&self.config.public_url, &request.public_key)
+        };
         if !crate::device::verify(&public_key, &message, &signature) {
             return Err(RelayError::invalid(
                 "The signature is not one of the device key over the connect message.",
             ));
         }
-        let key_hash = directory::connect_key_hash(&public_key);
+        if request.recovery_nonce.is_some() {
+            // Hold the directory lock while checking state and the live device. Recovery
+            // never changes state, limits, names, or the key tombstone.
+            return self.directory.store.with(|conn| {
+                let id: Option<String> = conn.query_row(
+                    "SELECT t.id FROM connect_key k JOIN team t ON t.id = k.team_id \
+                     WHERE k.key_hash = ?1 AND t.state = 'active' AND t.kind = 'connect'",
+                    params![key_hash.as_slice()], |r| r.get(0),
+                ).optional().map_err(db)?;
+                let id = id.and_then(|id| TeamId::parse(&id)).ok_or_else(directory::connect_key_used)?;
+                let core = self.team(&id).ok_or_else(|| RelayError::internal("The team database is unavailable. Contact the relay operator."))?;
+                let (member, device) = core.store.with(|conn| {
+                    conn.query_row(
+                        "SELECT d.member_id, d.id FROM device d JOIN member m ON m.id = d.member_id \
+                         WHERE d.public_key = ?1 AND d.revoked_at IS NULL AND m.revoked_at IS NULL",
+                        params![public_key], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                    ).optional().map_err(db)?.ok_or_else(directory::connect_key_used)
+                })?;
+                Ok((id, MemberId(to_u(member)), DeviceId(to_u(device))))
+            });
+        }
         let per_day = self.config.connect_teams_per_day;
         let max = self.config.connect_teams_max;
         // In memory only: the count of this client prefix today.

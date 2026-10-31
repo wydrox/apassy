@@ -55,6 +55,7 @@ pub enum Endpoint {
     Me,
     TeamCreate,
     Connect,
+    ConnectChallenge,
     Join,
     Challenge,
     Token,
@@ -180,6 +181,7 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
         ["v1", "members", n, "role"] => pick(method, &[("PUT", Need::Owner, MemberRole(id(n)?))]),
         ["v1", "join"] => pick(method, &[("POST", Need::Edge, Join)]),
         ["v1", "teams"] => pick(method, &[("POST", Need::Edge, TeamCreate)]),
+        ["v1", "connect", "challenge"] => pick(method, &[("POST", Need::Edge, ConnectChallenge)]),
         ["v1", "connect"] => pick(method, &[("POST", Need::Edge, Connect)]),
         ["v1", "invites"] => pick(
             method,
@@ -868,6 +870,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         endpoint,
         Endpoint::TeamCreate
             | Endpoint::Connect
+            | Endpoint::ConnectChallenge
             | Endpoint::Join
             | Endpoint::Challenge
             | Endpoint::Token
@@ -1211,6 +1214,10 @@ fn dispatch_edge(
     match endpoint {
         Endpoint::TeamCreate => team_create(hub, body, now),
         Endpoint::Connect => connect_create(hub, body, prefix, now),
+        Endpoint::ConnectChallenge => {
+            let request: api::ConnectChallenge = parse_body(body)?;
+            hub.connect_challenge(&request.public_key, now)
+        }
         Endpoint::Join => {
             let request: JoinRequest = parse_body(body)?;
             let code = request.code.expose();
@@ -1491,7 +1498,7 @@ fn dispatch(
             &parse_body(body)?,
             now,
         ),
-        Join | TeamCreate | Connect | Challenge | Token | Link | LinkCancel => {
+        Join | TeamCreate | Connect | ConnectChallenge | Challenge | Token | Link | LinkCancel => {
             Err(RelayError::internal("This endpoint is served elsewhere."))
         }
         InviteCreate => admin::invite_create(core, member_of(principal)?, &parse_body(body)?, now),

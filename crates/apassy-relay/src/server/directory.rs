@@ -747,7 +747,7 @@ pub fn connect_key_hash(public_key: &[u8]) -> [u8; 32] {
 pub fn connect_key_used() -> RelayError {
     RelayError::new(
         codes::CONNECT_KEY_USED,
-        "This device key made a team before. Make a new device key.",
+        "This key cannot create another team. Recover an active team with a fresh Connect challenge, or use a new key.",
     )
 }
 

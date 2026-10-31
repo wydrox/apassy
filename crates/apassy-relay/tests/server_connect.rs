@@ -2065,3 +2065,68 @@ fn measure_connect_teams() {
     );
     drop(relay);
 }
+
+#[test]
+fn lost_connect_acknowledgement_recovers_same_active_team_after_restart() {
+    let relay = start(UpstreamOptions::default());
+    let key = DeviceKey::generate().unwrap();
+    let body = connect_body(&relay, "Lost acknowledgement", "Mac", &key);
+    let created = connect_ok(&relay, &body); // the server committed; pretend the response was lost
+    let relay = relay.restart();
+    let recovery = |key: &DeviceKey| {
+        let challenge = relay.ok(
+            "POST",
+            "/v1/connect/challenge",
+            "",
+            Some(&json!({
+                "public_key": key.public_key_b64()
+            })),
+        );
+        let nonce = challenge["nonce"].as_str().unwrap();
+        let mut message = device::connect_message(&relay.config.public_url, &key.public_key_b64());
+        message.extend_from_slice(b"\0recovery\0");
+        message.extend_from_slice(nonce.as_bytes());
+        let mut retry = body.clone();
+        retry["public_key"] = json!(key.public_key_b64());
+        retry["signature"] = json!(encode_b64(&key.sign(&message).unwrap()));
+        retry["recovery_nonce"] = json!(nonce);
+        retry
+    };
+    let retry = recovery(&key);
+    let recovered = connect_ok(&relay, &retry);
+    assert_eq!(recovered, created);
+    assert_eq!(
+        post_connect(&relay, &retry).status,
+        401,
+        "nonce is consumed"
+    );
+    assert_eq!(
+        post_connect(&relay, &body).status,
+        409,
+        "old proof cannot recover"
+    );
+    let other = DeviceKey::generate().unwrap();
+    assert_eq!(post_connect(&relay, &recovery(&other)).status, 409);
+    let team = TeamId::parse(created["team_id"].as_str().unwrap()).unwrap();
+    let valid = recovery(&key);
+    let mut forged = valid.clone();
+    forged["signature"] = json!(body["signature"]);
+    assert_eq!(post_connect(&relay, &forged).status, 400);
+    assert_eq!(
+        post_connect(&relay, &valid).status,
+        401,
+        "bad proof consumes nonce"
+    );
+    relay
+        .operator(Command::Suspend { team: team.clone() })
+        .unwrap();
+    assert_eq!(post_connect(&relay, &recovery(&key)).status, 409);
+    relay
+        .operator(Command::Delete {
+            team: team.clone(),
+            free_connect_key: false,
+        })
+        .unwrap();
+    assert_eq!(post_connect(&relay, &recovery(&key)).status, 409);
+    assert!(teams(&relay).iter().all(|info| info["id"] != team.as_str()));
+}
