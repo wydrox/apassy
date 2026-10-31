@@ -5,7 +5,7 @@
 //! of a stored credential. The owner can revoke it in the desktop app.
 
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -72,7 +72,7 @@ pub fn run_stdio(config: &AdapterConfig) -> io::Result<()> {
     let mut input = stdin.lock();
     loop {
         line.clear();
-        let read = input.read_line(&mut line)?;
+        let read = read_frame(&mut input, &mut line)?;
         if read == 0 {
             return Ok(());
         }
@@ -90,6 +90,17 @@ pub fn run_stdio(config: &AdapterConfig) -> io::Result<()> {
             stdout.flush()?;
         }
     }
+}
+
+fn read_frame(input: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
+    let read = input.take((MAX_LINE_BYTES + 1) as u64).read_line(line)?;
+    if line.len() > MAX_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "The MCP request is too large.",
+        ));
+    }
+    Ok(read)
 }
 
 /// Handle one JSON-RPC message. Notifications return `None`.
@@ -758,6 +769,15 @@ fn tool_error(code: &str, message: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_mcp_frame_is_bounded_without_a_newline() {
+        let mut input = std::io::Cursor::new(vec![b'x'; MAX_LINE_BYTES * 8]);
+        let mut line = String::new();
+        assert!(read_frame(&mut input, &mut line).is_err());
+        assert!(line.len() <= MAX_LINE_BYTES + 1);
+        assert!(input.position() <= (MAX_LINE_BYTES + 1) as u64);
+    }
+
     use super::*;
 
     fn config() -> AdapterConfig {
