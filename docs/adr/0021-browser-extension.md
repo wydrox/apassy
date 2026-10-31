@@ -55,7 +55,13 @@ the existing `save`/`update` app paths and their owner gate (including ADR 0030)
 Protocol negotiation contains metadata only and stays inside the capture deadline.
 An uncertain response offers no automatic retry.
 
-The closed-shadow top-right banner follows study 06 of the extension redesign.
+The closed-shadow top-right banner uses a private top-layer popover with
+visibility tracking and a stable trusted pointer/key activation before an action.
+Host opacity, occlusion and page focus cannot authorize a hidden action.
+Permission-removal messages stop existing scripts even after host injection
+authority is lost, and revocation also clears credentials awaiting browser API
+validation. Ungranted navigation URLs are treated as revocation.
+The banner follows study 06 of the extension redesign.
 **Never for this site** shares `loginSuggestionsExcluded` with **Not on this site**:
 one reversible hostname choice disables both passive features, avoiding two hidden
 and conflicting preference lists. Toolbar settings restores them together.

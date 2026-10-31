@@ -53,6 +53,26 @@ test("an untrusted click after trusted typing cannot stage an offer", async ({ h
   await expect(page.locator("[data-apassy-save-offer]")).toHaveCount(0);
   expect(h.requests("save")).toEqual([]);
 });
+test("hidden hosts and pointer-transparent top-layer overlays cannot clickjack Save", async ({ h }) => {
+  const { page, cdp } = await setup(h, "/offer/xhr");
+  await type(page, "#username", "new@example.test"); await type(page, "#password", "Synthetic-typed-42");
+  await page.locator("#submit").click();
+  await expect.poll(() => shadowText(cdp, banner)).toContain("Save this login");
+  await page.evaluate(() => {
+    document.querySelector("[data-apassy-save-offer]").style.opacity = "0";
+  });
+  await shadowButton(cdp, banner, "Save"); expect(h.requests("save")).toEqual([]);
+  await page.evaluate(() => {
+    document.querySelector("[data-apassy-save-offer]").style.opacity = "1";
+    const cover = document.createElement("div"); cover.id = "attack-cover"; cover.popover = "manual";
+    cover.style.cssText = "position:fixed;inset:0;margin:0;width:100vw;height:100vh;background:white;pointer-events:none";
+    document.body.append(cover); cover.showPopover();
+  });
+  await shadowButton(cdp, banner, "Save"); expect(h.requests("save")).toEqual([]);
+  await page.evaluate(() => document.getElementById("attack-cover").remove());
+  await shadowButton(cdp, banner, "Save");
+  await expect.poll(() => h.requests("save").length).toBe(1);
+});
 test("Never excludes the site after reload and can be undone in toolbar settings", async ({ h }) => {
   const { page, cdp } = await setup(h, "/offer/signin");
   await type(page, "#username", "new@example.test"); await type(page, "#password", "Synthetic-typed-42");

@@ -82,6 +82,9 @@ banner after a same-origin navigation or a form transition. A matching
 username instead shows **Update the password in Apassy?**. Username-first flows
 remember the previous step for up to three minutes in the same tab and origin.
 The banner detects submission; it does not prove that the website accepted it.
+Its closed-shadow action surface uses the browser top layer and requires a
+visibly stable, unobscured pointer or keyboard activation; hidden or covered
+offers cannot authorize a save.
 Choose **Save** or **Update** to send the typed password through the app's existing
 owner check. ADR 0030's local Touch ID window applies. Focus and submission alone
 send only site/username metadata to the app, never the password.
@@ -90,7 +93,8 @@ send only site/username metadata to the app, never the password.
 suggestions for that hostname, sharing **Not on this site** in toolbar Settings.
 Choose **Suggest on this site again** there to restore both features. Apassy-filled
 passwords without editing, search/OTP forms and cross-origin actions produce no
-offer. New-password confirmations must match.
+offer. Submitter action overrides and other-frame/new-tab form targets are also
+refused, including action changes during submission. New-password confirmations must match.
 
 Captured passwords exist only in content-script/worker memory, bound to tab and
 exact origin. Dismissal, save/update consumption, tab close, another origin,
@@ -168,7 +172,7 @@ node extension-tests/cdp/suggest-smoke.mjs /absolute/path/to/evidence
 
 This uses CDP port 9371, a profile-local mock host and synthetic metadata only. It checks broad access, autofocus, labels, exclusions, empty reasons, frames, refusals and public-page geometry. It never opens the owner's profile or vault. Render-state screenshots are UI fixtures, not proof of native Touch ID or successful sign-in.
 
-For typed submission offers and placement (Helium/CDP only, port 9401):
+For typed submission offers and placement (Helium/CDP only, port 9411):
 
 ```sh
 node --test extension-tests/fixtures/login-journey/*.unit.mjs
@@ -185,3 +189,15 @@ Playwright specifications; local smoke verification needs no Playwright.
 The Rust side has unit tests in `src/browser/`, the app tests in `src/desktop/ui/browser_tests.rs`, and the profile tests `profile_denies_the_browser_socket` and `profile_denies_native_messaging_host_manifests` in `tests/isolation/product_profile.rs`.
 
 `scripts/build-app.sh` copies `extension/` into `Contents/Resources/browser-extension`, checks that its version is the version in `Cargo.toml`, signs `apassy-browser-host`, and checks that the host refuses another extension and that the agent profile denies its start.
+
+The independent security regressions use the same isolated CDP port 9411:
+
+```sh
+node extension-tests/cdp/save-offer-security.mjs /absolute/path/to/evidence
+```
+
+Run the two CDP scripts sequentially. Security checks cover synthetic activation,
+page CSS/overlay clickjacking, page-channel/DOM disclosure, submit overrides,
+iframe isolation, storage boundaries, revocation and worker restart. Node models
+also check expiry and asynchronous validation races. These remain synthetic
+credentials with a profile-local mock; native owner verification is not claimed.

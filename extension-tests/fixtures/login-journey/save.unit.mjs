@@ -63,7 +63,7 @@ test("new login accept uses existing SaveLogin packet and no password in respons
   assert.equal(save.password, password); assert.equal(save.url, origin); assert.equal(save.trusted_gesture, true);
   assert(!JSON.stringify(result).includes(password));
 });
-for (const reason of ["dismiss", "timeout", "no transition", "tab close", "other origin", "disable", "permission removed"]) {
+for (const reason of ["dismiss", "timeout", "no transition", "tab close", "other origin", "ungranted origin", "disable", "permission removed"]) {
   test(`pending password erased on ${reason}`, async () => {
     const s = setup(); await s.capture(); const retained = s.api.pendingSaves.get(5);
     if (reason !== "no transition") await s.ready();
@@ -72,6 +72,7 @@ for (const reason of ["dismiss", "timeout", "no transition", "tab close", "other
     if (reason === "no transition") await s.bg.clock.advance(15000);
     if (reason === "tab close") s.bg.chrome.tabs.onRemoved.fire(5);
     if (reason === "other origin") s.bg.chrome.tabs.onUpdated.fire(5, { url: "https://other.example/" });
+    if (reason === "ungranted origin") s.bg.chrome.tabs.onUpdated.fire(5, { status: "loading" }, { id: 5 });
     if (reason === "disable") await s.bg.context.apassyLoginTest.loginAccessChange(origin, false);
     if (reason === "permission removed") s.bg.chrome.permissions.onRemoved.fire({});
     assert.equal(retained.password, ""); assert.equal(s.api.pendingSaves.size, 0);
@@ -147,4 +148,43 @@ test("case-insensitive duplicate metadata preserves the exact selected username 
   const { offer } = await s.ready(); assert.equal(offer.mode, "update"); assert.equal(offer.username, canonical);
   await s.send({ type: "login_save_action", id: offer.id, action: "accept", trustedGesture: true });
   assert.equal(s.bg.natives.flatMap((n) => n.sent).find((r) => r.cmd === "update").username, canonical);
+});
+
+
+test("revocation while capture awaits browser validation cannot repopulate memory", async () => {
+  for (const revoke of [(s) => s.bg.context.apassyClearSaveOffers(),
+    (s) => s.bg.chrome.tabs.onRemoved.fire(5),
+    (s) => s.bg.chrome.tabs.onUpdated.fire(5, { url: "https://other.example/" })]) {
+    const s = setup(); let release;
+    s.bg.chrome.tabs.get = () => new Promise((r) => { release = r; });
+    const captured = s.capture(); await flush();
+    revoke(s); release({ id: 5, url: origin + "/login" });
+    assert.equal((await captured).ok, false);
+    assert.equal(s.api.pendingSaves.size, 0);
+  }
+});
+
+test("a stalled capture validation erases its incoming secret and fails closed", async () => {
+  const s = setup(); let release;
+  s.bg.chrome.tabs.get = () => new Promise((r) => { release = r; });
+  const captured = s.capture(); await flush();
+  await s.bg.clock.advance(15000); release({ id: 5, url: origin + "/login" });
+  assert.equal((await captured).ok, false); assert.equal(s.api.pendingSaves.size, 0);
+});
+
+test("browser validation time cannot extend the absolute capture deadlines", async () => {
+  const s = setup(); let release;
+  s.bg.chrome.tabs.get = () => new Promise((r) => { release = r; });
+  const captured = s.capture(); await flush(); await s.bg.clock.advance(14000);
+  release({ id: 5, url: origin + "/login" }); assert.equal((await captured).ok, true);
+  assert.equal(s.api.pendingSaves.get(5).until, 1000000 + 180000);
+  await s.bg.clock.advance(1000); assert.equal(s.api.pendingSaves.size, 0);
+});
+
+test("permission revocation stops existing content scripts without executeScript permission", async () => {
+  const s = setup(), messages = [];
+  s.bg.chrome.tabs.sendMessage = async (id, message) => messages.push({ id, message });
+  s.bg.chrome.scripting.executeScript = async () => { throw new Error("grant revoked"); };
+  s.bg.granted.clear(); s.bg.chrome.permissions.onRemoved.fire({}); await flush();
+  assert(messages.some(({ id, message }) => id === 5 && message.type === "login_features_stop"));
 });

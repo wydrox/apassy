@@ -203,3 +203,21 @@ test("typing provenance expires, clears on fill/consumption, and rejects a progr
   time++; tracker.input(s.password, true); tracker.clear(s.password); assert.equal(tracker.has(s.password), false);
   tracker.input(s.password, true); tracker.clearAll(); assert.equal(tracker.has(s.password), false); assert.equal(timers.size, 0);
 });
+
+
+test("submitter overrides to another origin or frame are refused", () => {
+  for (const extra of [{ formAction: "https://other.example/login", formaction: "https://other.example/login" },
+    { formTarget: "signin-frame", formtarget: "signin-frame" }]) {
+    const s = setup(); s.password.value = "typed";
+    const submitter = new Node("BUTTON"); Object.assign(submitter, extra, { form: s.form });
+    assert.equal(s.api.submission(s.form, () => true, submitter), null);
+  }
+});
+
+test("password OTP signals and search inputs suppress submission offers", () => {
+  for (const change of [(s) => { s.password.name = s.password.id = "otp"; },
+    (s) => { const search = new Input("query", "search"); search.form = s.form; s.form.append(search); }]) {
+    const s = setup(); s.password.value = "typed"; change(s);
+    assert.equal(s.api.submission(s.form, () => true), null);
+  }
+});

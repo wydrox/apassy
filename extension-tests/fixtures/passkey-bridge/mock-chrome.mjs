@@ -174,6 +174,7 @@ export function loadBackground({ permissions = [] } = {}) {
       },
     },
     tabs: {
+      sendMessage: async () => {},
       onRemoved: event(),
       onUpdated: event(),
       get: async (id) => {

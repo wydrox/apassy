@@ -231,7 +231,11 @@ chrome.permissions.onAdded.addListener(() => { reconcileLoginScripts().catch(() 
 chrome.permissions.onRemoved.addListener(() => {
   loginFeatureGeneration++; loginOffers.clear();
   self.apassyClearSaveOffers?.();
-  reconcileLoginScripts().catch(() => {});
+  // No host grant is needed to stop content scripts already injected in a tab.
+  chrome.tabs.query({}).then(async (tabs) => {
+    await Promise.allSettled(tabs.map((tab) => chrome.tabs.sendMessage(tab.id, { type: "login_features_stop" })));
+    await reconcileLoginScripts();
+  }).catch(() => {});
 });
 // Runs when the worker starts, including the first start after an extension update.
 reconcileLoginScripts().catch(() => {});

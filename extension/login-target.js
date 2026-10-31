@@ -135,11 +135,20 @@
     result.reason = result.ok ? "" : "target";
     return result;
   }
-  function submission(scope, typed) {
+  function submissionAllowed(scope, submitter) {
     if (!scope || /search|one-time|\botp\b|verification|newsletter|subscribe/i.test([scope.id, scope.getAttribute("role"), scope.getAttribute("aria-label")].join(" "))) return null;
-    if (scope.tagName === "FORM" && new URL(scope.action, document.baseURI).origin !== self.origin) return null;
+    if (scope.tagName === "FORM") {
+      if (submitter?.form && submitter.form !== scope) return false;
+      const action = submitter?.hasAttribute("formaction") ? submitter.formAction : scope.action;
+      const target = submitter?.hasAttribute("formtarget") ? submitter.formTarget : scope.target || document.querySelector("base[target]")?.target;
+      if (new URL(action, document.baseURI).origin !== self.origin || (target && target.toLowerCase() !== "_self")) return false;
+    }
+    return true;
+  }
+  function submission(scope, typed, submitter) {
+    if (!submissionAllowed(scope, submitter)) return null;
     const all = members(scope);
-    if (all.some((el) => tokens(el).includes("one-time-code"))) return null;
+    if (all.some((el) => el.type === "search" || negative.test(signals(el)))) return null;
     const username = all.find((el) => user(el) && eligible(el) && tokens(el).includes("username")) || all.find((el) => user(el) && eligible(el));
     const passwords = all.filter((el) => el.type === "password" && eligible(el));
     if (!passwords.length) return username?.value.trim() ? { username: username.value.trim(), password: "" } : null;
@@ -187,5 +196,5 @@
       clearAll() { for (const field of records.keys()) clear(field); },
     });
   }
-  self.apassyLoginTarget = Object.freeze({ capture, read, fill, eligible, active, submission, group, placement, typedTracker });
+  self.apassyLoginTarget = Object.freeze({ capture, read, fill, eligible, active, submission, submissionAllowed, group, placement, typedTracker });
 })();

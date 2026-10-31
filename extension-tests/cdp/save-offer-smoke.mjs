@@ -9,12 +9,12 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../support/pages.mjs";
 import { shadowText, shadowButton } from "./closed-shadow.mjs";
-process.env.APASSY_CDP_PORT = "9401";
+process.env.APASSY_CDP_PORT = "9411";
 const { browser, worker, page, targets, delay } = await import("./cdp.mjs");
 await new Promise((resolve, reject) => {
   const probe = net.createServer();
-  probe.once("error", () => reject(new Error("Port 9401 occupied; refusing to attach.")));
-  probe.listen(9401, "127.0.0.1", () => probe.close(resolve));
+  probe.once("error", () => reject(new Error("Port 9411 occupied; refusing to attach.")));
+  probe.listen(9411, "127.0.0.1", () => probe.close(resolve));
 });
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const out = path.resolve(process.argv[2] || path.join(os.tmpdir(), "apassy-ext2-evidence"));
@@ -34,7 +34,7 @@ scenario();
 const server = await startServer(), base = `http://localhost:${server.port}`;
 const log = fs.openSync(path.join(scratch, "helium.log"), "w");
 const helium = spawn("/Applications/Helium.app/Contents/MacOS/Helium", [
-  `--user-data-dir=${profile}`, "--remote-debugging-port=9401", `--load-extension=${path.join(repo, "extension")}`,
+  `--user-data-dir=${profile}`, "--remote-debugging-port=9411", `--load-extension=${path.join(repo, "extension")}`,
   "--enable-unsafe-extension-debugging", "--headless=new", "--use-mock-keychain", "--password-store=basic",
   "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--window-size=1280,900",
 ], { stdio: ["ignore", log, log] });
@@ -87,7 +87,7 @@ async function submit(p, kind) {
   await click(p, "#submit");
 }
 try {
-  await wait(async () => (await fetch("http://127.0.0.1:9401/json/version")).ok, "Helium start");
+  await wait(async () => (await fetch("http://127.0.0.1:9411/json/version")).ok, "Helium start", 300);
   b = await browser(); w = await worker();
   const settings = await page("chrome://extensions/");
   for (const grant of ["https://*/*", "http://localhost/*"]) assert.equal(await settings.eval(`new Promise(r=>chrome.developerPrivate.addHostPermission('${id}',${JSON.stringify(grant)},()=>r(chrome.runtime.lastError?.message||'ok')))`), "ok");
@@ -156,7 +156,17 @@ try {
     assert(Math.abs(rects.menu.left - rects.field.left) < 1 || rects.menu.left === 8 || Math.abs(rects.menu.left + rects.menu.width - (rects.viewport.width - 8)) < 1);
     assert(rects.menu.top >= rects.field.bottom || rects.menu.bottom <= rects.field.top);
     assert(rects.menu.width >= Math.min(rects.field.width, rects.viewport.width - 16));
-    geometry.push({ name, url: await p.eval("location.href"), ...rects });
+    // Reading/positioning the menu must not move the site's field.
+    const layout = await p.eval(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {left:r.left,top:r.top,width:r.width}})()`);
+    await delay(250);
+    assert.deepEqual(await p.eval(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {left:r.left,top:r.top,width:r.width}})()`),layout);
+    await p.send("Emulation.setDeviceMetricsOverride",{width:1000,height:800,deviceScaleFactor:1,mobile:false});
+    await delay(250); await p.eval(`document.querySelector(${JSON.stringify(selector)})?.focus()`);
+    await wait(()=>p.eval(`(()=>{const f=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(),m=document.querySelector('[data-apassy-login-suggestions]')?.getBoundingClientRect();return m&&m.width>0&&(m.top>=f.bottom||m.bottom<=f.top)&&(Math.abs(m.left-f.left)<1||m.left===8||Math.abs(m.right-(innerWidth-8))<1)})()`),name+" resize placement");
+    await p.eval("window.scrollBy(0,30)"); await delay(250);
+    const moved = await p.eval(`(()=>{const f=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(),m=document.querySelector('[data-apassy-login-suggestions]').getBoundingClientRect();return {fieldTop:f.top,fieldBottom:f.bottom,menuTop:m.top,menuBottom:m.bottom,scrollY}})()`);
+    assert(moved.menuTop>=moved.fieldBottom||moved.menuBottom<=moved.fieldTop);
+    geometry.push({ name, url: await p.eval("location.href"), ...rects, afterResizeScroll:moved });
     await paired(p, name + "-placement"); check(name + " live empty-field placement", rects); await close(p);
   }
   assert(!JSON.stringify(requests()).includes(secret));
@@ -170,6 +180,7 @@ try {
   if (b) { await b.send("Browser.close").catch(() => {}); b.close(); }
   if (helium.exitCode === null) { helium.kill("SIGTERM"); await new Promise((r) => helium.once("exit", r)); }
   server.close(); fs.closeSync(log);
+  fs.copyFileSync(path.join(scratch,"helium.log"),path.join(out,"helium.log"));
   await fs.promises.rm(scratch, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
-  fs.writeFileSync(path.join(out, "cleanup.json"), JSON.stringify({ cdpPort: 9401, heliumPid: helium.pid, exitCode: helium.exitCode, signalCode: helium.signalCode, scratchProfileRemoved: !fs.existsSync(scratch) }, null, 2));
+  fs.writeFileSync(path.join(out, "cleanup.json"), JSON.stringify({ cdpPort: 9411, heliumPid: helium.pid, exitCode: helium.exitCode, signalCode: helium.signalCode, scratchProfileRemoved: !fs.existsSync(scratch) }, null, 2));
 }

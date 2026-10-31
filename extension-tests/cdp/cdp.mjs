@@ -73,12 +73,12 @@ export async function worker() {
     const wake = await b.send("Target.createTarget", {
       url: "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/popup.html",
     });
-    await delay(300);
-    t = (await targets()).find(
-      (t) =>
-        t.type === "service_worker" &&
-        t.url.includes("bbnpgnjnfjlbgggmpnhejpmfjhmmhiih"),
-    );
+    for (let i = 0; i < 100 && !t; i++) {
+      await delay(100);
+      t = (await targets()).find(
+        (t) => t.type === "service_worker" && t.url.includes("bbnpgnjnfjlbgggmpnhejpmfjhmmhiih"),
+      );
+    }
     await b.send("Target.closeTarget", { targetId: wake.targetId });
     b.close();
   }

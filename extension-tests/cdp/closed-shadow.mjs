@@ -14,6 +14,8 @@ export async function shadowText(cdp, attribute) {
   return (await shadowNodes(cdp, attribute)).filter((n) => n.nodeType === 3 && !n.nodeValue.startsWith(":host")).map((n) => n.nodeValue).join(" ");
 }
 export async function shadowButton(cdp, attribute, label) {
+  // Save offers require a visibly stable surface before pointer/key activation.
+  if (attribute === "data-apassy-save-offer") await new Promise((r) => setTimeout(r, 500));
   const nodes = await shadowNodes(cdp, attribute);
   const button = nodes.find((n) => n.nodeName === "BUTTON" && n.children?.some((c) => c.nodeType === 3 && c.nodeValue === label));
   if (!button) throw new Error(`Missing ${label} in ${attribute}`);
