@@ -20,6 +20,7 @@ pub mod answers;
 pub mod bouncer_scopes;
 mod candidate;
 mod companion;
+mod connect;
 pub mod detect;
 pub mod exceptions;
 mod folders;
@@ -36,6 +37,7 @@ mod relay_device;
 mod schema18;
 mod schema19;
 mod schema20;
+pub use connect::PendingConnect;
 mod suggestions;
 mod sync;
 mod trusted_device;
@@ -1085,6 +1087,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | PASSKEY_SCHEMA_VERSION
         | FOLDER_SCHEMA_VERSION
         | TRUSTED_DEVICE_SCHEMA_VERSION
+        | 20
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1240,6 +1243,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v21: &[&str] = if version >= 21 {
+        &connect::COLUMNS
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1260,6 +1268,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v18)
         .chain(v19)
         .chain(v20)
+        .chain(v21)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1352,7 +1361,10 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < TRUSTED_DEVICE_SCHEMA_VERSION {
         schema19::add_schema_v19(&tx)?;
     }
-    schema20::add_schema_v20(&tx)?;
+    if from < 20 {
+        schema20::add_schema_v20(&tx)?;
+    }
+    connect::add_schema(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1408,6 +1420,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema18::add_schema_v18(&tx)?;
     schema19::add_schema_v19(&tx)?;
     schema20::add_schema_v20(&tx)?;
+    connect::add_schema(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

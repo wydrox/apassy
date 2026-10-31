@@ -2439,6 +2439,9 @@ impl PendingJoin {
         text: &str,
         relay_url: &str,
     ) -> Result<(RelayUrl, Zeroizing<String>), SyncError> {
+        let parsed = crate::relay::pairing::PairingChannel::parse(text);
+        let text = parsed.as_ref().map_or(text, |(raw, _)| *raw);
+
         let text = text.trim();
         let (url, code) = match text.split_once("/link#") {
             Some((url, code)) => (RelayUrl::parse(url)?, code),

@@ -867,3 +867,81 @@ fn full_pending_history_refuses_post_without_evicting_an_authority_guard() {
             .all(|entry| entry["attempted_at"].is_number())
     );
 }
+
+#[test]
+fn connect_handoff_registers_the_confirmed_phone_without_waiting_for_icloud() {
+    use apassy::relay::{membership::register_linked_device, pairing::PairingChannel};
+    use apassy::vault::Vault;
+    let setup = setup();
+    let macdir = tempfile::tempdir().unwrap();
+    let macfile = macdir.path().join("synthetic-mac.apassy");
+    call(&setup.core, json!({"op":"lock"}));
+    std::fs::copy(&setup.file, &macfile).unwrap();
+    let mut mac = Vault::open(&macfile).unwrap();
+    mac.unlock(PASS).unwrap();
+    // The phone has the older iCloud vault, before Connect created its question key.
+    {
+        let conn = rusqlite::Connection::open(&setup.file).unwrap();
+        conn.pragma_update(None, "key", PASS).unwrap();
+        conn.execute(
+            "DELETE FROM vault_secret WHERE name = 'question-key-v1'",
+            [],
+        )
+        .unwrap();
+    }
+    call(&setup.core, json!({"op":"unlock","passphrase":PASS}));
+    let (raw, _) = setup.relay.link();
+    let channel = PairingChannel::generate().unwrap();
+    let link = channel.link(&raw);
+    let waiting = call(
+        &setup.core,
+        json!({"op":"join_attach", "link":link.as_str(), "answer_key":ANSWER_PUBLIC}),
+    );
+    assert_eq!(waiting["state"], "waiting");
+    assert_eq!(
+        call(&setup.core, json!({"op":"join_attach_poll"}))["state"],
+        "waiting"
+    );
+    let ids = setup.relay.confirm_links();
+    let (device_id, name, public) = setup.relay.confirmed().pop().unwrap();
+    assert_eq!(ids, vec![device_id]);
+    // Confirmation alone never imports keys or reports success.
+    assert_eq!(
+        call(&setup.core, json!({"op":"join_attach_poll"}))["state"],
+        "waiting"
+    );
+    let row = register_linked_device(&mut mac, TEAM, device_id, &name, &public)
+        .unwrap()
+        .unwrap();
+    let sealed = channel.seal(&mac, TEAM, &public).unwrap();
+    setup.relay.post_question(
+        channel.qid(),
+        &sealed.key_id,
+        &sealed.nonce,
+        &sealed.ciphertext,
+        now() + 600,
+    );
+    assert_eq!(
+        call(&setup.core, json!({"op":"join_attach_poll"}))["state"],
+        "attached"
+    );
+    let list = call(&setup.core, json!({"op":"questions_list"}));
+    assert_eq!(list["status"]["registered"], true);
+    assert_eq!(list["status"]["has_key"], true);
+    assert_eq!(list["status"]["device_uuid"], row.uuid);
+    assert_eq!(list["status"]["answer_key"], ANSWER_PUBLIC);
+    assert_eq!(
+        list["questions"].as_array().unwrap().len(),
+        0,
+        "key handoffs never become Requests cards"
+    );
+    // Existing APNs registration works on this questions-only membership.
+    call(
+        &setup.core,
+        json!({"op":"push_token_set", "token":"ab".repeat(32), "environment":"development"}),
+    );
+    post(&setup.relay, &QUESTION_KEY, QID, CARD, now() + 300);
+    let list = call(&setup.core, json!({"op":"questions_list"}));
+    assert_eq!(list["questions"].as_array().unwrap().len(), 1);
+    assert_eq!(list["questions"][0]["card"]["digest"], DIGEST);
+}

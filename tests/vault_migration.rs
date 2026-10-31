@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 20;
+const CURRENT_VERSION: i64 = 21;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 

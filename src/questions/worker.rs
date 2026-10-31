@@ -344,7 +344,10 @@ impl Remote {
         let mut invalid = false;
         let mut deferred: Option<u64> = None;
         for record in &list.questions {
-            if record.state != "open" || record.expires_at <= now {
+            if record.key_id == crate::relay::pairing::HANDOFF_KEY_ID
+                || record.state != "open"
+                || record.expires_at <= now
+            {
                 continue;
             }
             if !bounded_remote(record, now) {
