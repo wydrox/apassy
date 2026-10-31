@@ -195,7 +195,7 @@ async function pageOrigin(tabId) {
 
 // Asks the app for one login, then fills it into the top frame of the tab.
 // The reply has a code and a message, never a value.
-async function fill(tabId, url, item, suppliedTarget) {
+async function fill(tabId, url, item, suppliedTarget, trustedGesture = false) {
   const target = await resolveLoginTarget(tabId, url, suppliedTarget);
   return boundLoginAction(target, async () => {
     const startOrigin = await pageOrigin(tabId);
@@ -209,7 +209,7 @@ async function fill(tabId, url, item, suppliedTarget) {
       return { ok: false, code: "page_changed", message: MESSAGES.page_changed };
     }
 
-    const answer = await ask({ cmd: "fill", url: tab.url, item });
+    const answer = await ask({ cmd: "fill", url: tab.url, item, ...(trustedGesture ? { trusted_gesture: true } : {}) });
     if (!answer || !answer.ok) {
       return { ok: false, code: (answer && answer.code) || "host_failed", message: messageOf(answer) };
     }
@@ -310,7 +310,7 @@ async function peek(tabId, url, suppliedTarget, purpose = "login") {
 // Reads the login that the owner typed on the page and asks Apassy to save
 // it. The password goes from the page to the host only. The reply has a code
 // and a message, never a value.
-async function save(tabId, url, title, username, suppliedTarget) {
+async function save(tabId, url, title, username, suppliedTarget, trustedGesture = false) {
   const target = await resolveLoginTarget(tabId, url, suppliedTarget);
   return boundLoginAction(target, async () => {
     const changed = "The page changed. Nothing was saved.";
@@ -328,7 +328,7 @@ async function save(tabId, url, title, username, suppliedTarget) {
       // password must not be saved for another site.
       const fresh = await tabOn(tabId, tab.url);
       if (!fresh || !(await targetCall(target, "read"))?.ok) return failure("page_changed", changed);
-      request = { cmd: "save", url: fresh.url, title, username, password };
+      request = { cmd: "save", url: fresh.url, title, username, password, ...(trustedGesture ? { trusted_gesture: true } : {}) };
       const answer = await ask(request);
       if (!answer || !answer.ok) {
         return failure((answer && answer.code) || "host_failed", ["timeout", "host_failed"].includes(answer?.code)
@@ -348,14 +348,14 @@ async function save(tabId, url, title, username, suppliedTarget) {
 // Asks Apassy to make a new password and add the login, then fills it into
 // each new password field of the page, as fill() does. The reply has a code
 // and a message, never a value.
-async function create(tabId, url, fields, suppliedTarget) {
+async function create(tabId, url, fields, suppliedTarget, trustedGesture = false) {
   const target = await resolveLoginTarget(tabId, url, suppliedTarget);
   return boundLoginAction(target, async () => {
     const tab = await tabOn(tabId, url);
     if (!tab) return failure("page_changed");
     const startOrigin = originOf(tab.url);
 
-    const answer = await ask({ cmd: "create", url: tab.url, ...fields });
+    const answer = await ask({ cmd: "create", url: tab.url, ...fields, ...(trustedGesture ? { trusted_gesture: true } : {}) });
     if (!answer || !answer.ok) {
       const code = (answer && answer.code) || "host_failed";
       if (code === "host_failed" || code === "timeout") return failure(code, MAYBE_CREATED);
@@ -399,12 +399,12 @@ async function create(tabId, url, fields, suppliedTarget) {
 // Asks Apassy for the one-time code of a login, then fills it into the
 // one-time-code field of the top frame, as fill() does with a password. The
 // reply has a code and a message, never the one-time code.
-async function fillCode(tabId, url, item) {
+async function fillCode(tabId, url, item, trustedGesture = false) {
   const tab = await tabOn(tabId, url);
   if (!tab) return failure("page_changed", CODE_PAGE_CHANGED);
   const startOrigin = originOf(tab.url);
 
-  const answer = await ask({ cmd: "fill_code", url: tab.url, item });
+  const answer = await ask({ cmd: "fill_code", url: tab.url, item, ...(trustedGesture ? { trusted_gesture: true } : {}) });
   if (!answer || !answer.ok) {
     return failure((answer && answer.code) || "host_failed", messageOf(answer));
   }
@@ -573,7 +573,7 @@ async function handleMessage(message) {
       return state();
     case "fill": {
       if (!onPage || !Number.isInteger(message.item)) return bad();
-      return withBadge(() => fill(message.tabId, message.url, message.item, message.target));
+      return withBadge(() => fill(message.tabId, message.url, message.item, message.target, message.trustedGesture === true));
     }
     case "peek": {
       if (!onPage || (message.purpose !== undefined && !["login", "update"].includes(message.purpose))) return bad();
@@ -583,7 +583,7 @@ async function handleMessage(message) {
       const title = field(message && message.title, 128);
       const username = field(message && message.username, 1024);
       if (!onPage || !title || !username) return bad();
-      return withBadge(() => save(message.tabId, message.url, title, username, message.target));
+      return withBadge(() => save(message.tabId, message.url, title, username, message.target, message.trustedGesture === true));
     }
     case "create": {
       const title = field(message && message.title, 128);
@@ -593,16 +593,16 @@ async function handleMessage(message) {
           !Number.isInteger(length) || length < NEW_LENGTH.min || length > NEW_LENGTH.max) {
         return bad();
       }
-      return withBadge(() => create(message.tabId, message.url, { title, username, length, symbols }, message.target));
+      return withBadge(() => create(message.tabId, message.url, { title, username, length, symbols }, message.target, message.trustedGesture === true));
     }
     case "fill_code": {
       if (!onPage || !Number.isInteger(message.item)) return bad();
-      return withBadge(() => fillCode(message.tabId, message.url, message.item));
+      return withBadge(() => fillCode(message.tabId, message.url, message.item, message.trustedGesture === true));
     }
     case "update": {
       if (!onPage || !Number.isInteger(message.item) || typeof message.username !== "string" || bytes(message.username) > 1024) return bad();
       const target = await resolveLoginTarget(message.tabId, message.url, message.target);
-      return withBadge(() => updateLogin(message.tabId, message.url, message.item, message.username, target));
+      return withBadge(() => updateLogin(message.tabId, message.url, message.item, message.username, target, message.trustedGesture === true));
     }
     case "login_access_state": {
       const tab = await targetTab();
@@ -924,7 +924,7 @@ const USER_VERIFICATION = ["required", "preferred", "discouraged"];
 // base64url bytes (passkey-page.js). The parsed request, or null when Apassy
 // does not serve it (the browser then does).
 function parsePasskeyRequest(message, peer) {
-  if (!isRecord(message) || !onlyKeys(message, ["op", "options", "mediation"])) return null;
+  if (!isRecord(message) || !onlyKeys(message, ["op", "options", "mediation", "trustedGesture"])) return null;
   let size;
   try {
     size = JSON.stringify(message).length;
@@ -1210,6 +1210,9 @@ async function startPasskey(session, message) {
   const clientData = clientDataFor(request.op, request.challenge, peer.origin);
   const rid = crypto.randomUUID();
   const wire = wireRequest(request, peer.origin, clientData, rid);
+  // Only the isolated bridge can attest a browser user activation. Page data
+  // never carries a window, deadline, secret, or reusable approval.
+  if (message.trustedGesture === true && request.op === "get") wire.trusted_gesture = true;
   session.expect = {
     op: request.op,
     rid,

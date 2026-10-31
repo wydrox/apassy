@@ -356,7 +356,7 @@ test("forged answers for an unknown rid are ignored", async () => {
   assert.equal(p.page.calls.length, 0);
 });
 
-test("the bridge passes on nothing but op, options, and mediation", async () => {
+test("the bridge passes only options and its own browser gesture provenance", async () => {
   const p = pipeline({ scenario: () => undefined });
   const ports = [];
   const original = p.bg.chrome.runtime.onConnect.listeners[0];
@@ -369,7 +369,7 @@ test("the bridge passes on nothing but op, options, and mediation", async () => 
     options: { challenge: b64u(randomBytes(32)) },
   }) }));
   await flush();
-  assert.deepEqual(Object.keys(ports[0]).sort(), ["op", "options"]);
+  assert.deepEqual(Object.keys(ports[0]).sort(), ["op", "options", "trustedGesture"]);
 });
 
 test("an oversized or malformed request event is ignored by the bridge", async () => {
@@ -379,4 +379,16 @@ test("an oversized or malformed request event is ignored by the bridge", async (
   p.page.window.dispatchEvent(new CustomEvent("apassy-passkey-request", { detail: JSON.stringify({ rid: "short", op: "get", options: {} }) }));
   await flush();
   assert.equal(p.bg.natives.length, 0);
+});
+
+
+test("synthetic page event without browser user activation is refused", async () => {
+  const p = pipeline();
+  p.page.navigator.userActivation.isActive = false;
+  p.page.window.dispatchEvent(new CustomEvent("apassy-passkey-request", { detail: JSON.stringify({
+    rid: crypto.randomUUID(), op: "get", trustedGesture: true,
+    options: { challenge: b64u(randomBytes(32)) },
+  }) }));
+  await flush();
+  assert.equal(p.bg.natives.length, 0, "a page-supplied gesture cannot reach the native host");
 });

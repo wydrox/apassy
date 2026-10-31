@@ -103,7 +103,7 @@
     busy = true;
     const mine = generation;
     draw("Confirm with Touch ID or your passphrase in Apassy.");
-    const reply = await send({ type: "login_fill", token: target.token, item: login.item });
+    const reply = await send({ type: "login_fill", trustedGesture: true, token: target.token, item: login.item });
     busy = false;
     if (mine !== generation || !root) return;
     draw(reply.message, [], ["not_running", "none_open", "vault_locked"].includes(reply.code));

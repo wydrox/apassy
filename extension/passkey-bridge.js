@@ -51,8 +51,14 @@
   }
 
   function start(rid, message) {
-    // The page waits for this before it gives up on the bridge.
+    // The MAIN-world protocol necessarily uses CustomEvent. A page cannot
+    // attest its own gesture: use the browser's transient user activation in
+    // this isolated world. Synthetic page events without activation are refused.
     reply(rid, { kind: "ack" });
+    if (window.navigator.userActivation?.isActive !== true) {
+      reply(rid, { kind: "error", name: "NotAllowedError" });
+      return;
+    }
     if (ports.size >= MAX_OPEN) {
       reply(rid, { kind: "error", name: "NotAllowedError" });
       return;
@@ -81,7 +87,7 @@
       // request. Never a fallback here, the owner may have seen a dialog.
       reply(rid, { kind: "error", name: "NotAllowedError" });
     });
-    const request = { op: message.op, options: message.options };
+    const request = { op: message.op, options: message.options, trustedGesture: true };
     if (message.mediation !== undefined) request.mediation = message.mediation;
     port.postMessage(request);
   }

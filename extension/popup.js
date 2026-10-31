@@ -21,6 +21,7 @@ let onEscape = null;
 let view = 0;
 
 function send(message) {
+  if (["fill", "fill_code", "save", "create", "update"].includes(message.type)) message = { ...message, trustedGesture: true };
   return chrome.runtime.sendMessage(message).catch(() => ({
     ok: false, code: "host_failed", message: "Apassy did not answer. Try again.",
   }));
@@ -95,7 +96,7 @@ function renderList(message, isError) {
     button.dataset.item = String(login.item);
     button.append(element("span", "title", login.title || "Login"));
     if (login.username) button.append(element("span", "username", login.username));
-    button.addEventListener("click", () => fill(login));
+    button.addEventListener("click", (event) => { if (event.isTrusted) fill(login); });
     const row = element("li");
     row.append(button);
     if (login.hasTotp === true) {
@@ -103,14 +104,14 @@ function renderList(message, isError) {
       code.type = "button";
       code.dataset.item = String(login.item);
       code.setAttribute("aria-label", `Fill the one-time code of ${login.title || "Login"}`);
-      code.addEventListener("click", () => fillCode(login));
+      code.addEventListener("click", (event) => { if (event.isTrusted) fillCode(login); });
       row.classList.add("with-code");
       row.append(code);
     }
     const update = element("button", "secondary update-login", "Update login");
     update.type = "button";
     update.setAttribute("aria-label", `Update password for ${login.username} in ${login.title || "Login"}`);
-    update.addEventListener("click", () => openForm((page) => renderUpdate(page, login), "update"));
+    update.addEventListener("click", (event) => { if (event.isTrusted) openForm((page) => renderUpdate(page, login), "update"); });
     row.append(update);
     list.append(row);
   }
@@ -166,11 +167,11 @@ function actions() {
   const save = element("button", "secondary", "Save this login");
   save.type = "button";
   save.id = "save-open";
-  save.addEventListener("click", () => openForm(renderSave));
+  save.addEventListener("click", (event) => { if (event.isTrusted) openForm(renderSave); });
   const create = element("button", "secondary", "New password");
   create.type = "button";
   create.id = "new-open";
-  create.addEventListener("click", () => openForm(renderNew));
+  create.addEventListener("click", (event) => { if (event.isTrusted) openForm(renderNew); });
   row.append(save, create);
   return row;
 }
@@ -252,7 +253,7 @@ function drawForm({ id, fields, hint, submit, message, isError, onSubmit }) {
   form.append(...fields, element("p", "hint", hint), buttons);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!submit.disabled) onSubmit();
+    if (event.isTrusted && !submit.disabled) onSubmit();
   });
   onEscape = () => goBack();
   show(...(message ? [note(message, isError)] : []), form);
@@ -325,7 +326,8 @@ function renderUpdate(page, login) {
   const submit = element("button", "action", "Update this login");
   submit.type = "button";
   submit.disabled = !page.hasPassword;
-  submit.addEventListener("click", async () => {
+  submit.addEventListener("click", async (event) => {
+    if (!event.isTrusted) return;
     if (main.dataset.busy === "1") return;
     main.dataset.busy = "1";
     show(note("Confirm the password update in Apassy."));
@@ -438,12 +440,13 @@ function drawPasskeys(reply) {
   passkeysNote.textContent = reply && reply.ok === false
     ? reply.message
     : on
-      ? "Sites ask Apassy for passkeys. Each use asks for Touch ID or your passphrase."
+      ? "Sites ask Apassy for passkeys. Your Mac’s owner-check setting controls sign-in checks. Creating a passkey always asks again."
       : "Off: sites use the passkeys of the browser.";
   passkeysNote.classList.toggle("error", Boolean(reply && reply.ok === false));
 }
 
-passkeysBox.addEventListener("change", async () => {
+passkeysBox.addEventListener("change", async (event) => {
+  if (!event.isTrusted) return;
   passkeysBox.disabled = true;
   if (passkeysBox.checked) {
     // The browser shows its prompt only for a click of the owner, so ask
@@ -483,7 +486,8 @@ send({ type: "login_access_state" }).then((reply) => {
   suggestionsBox.disabled = !/^https:\/\//.test(suggestionsUrl) && !/^http:\/\/localhost(?::[0-9]+)?\//.test(suggestionsUrl);
   suggestionsRow.hidden = false;
 });
-suggestionsBox.addEventListener("change", async () => {
+suggestionsBox.addEventListener("change", async (event) => {
+  if (!event.isTrusted) return;
   const on = suggestionsBox.checked;
   suggestionsBox.disabled = true;
   let granted = !on;

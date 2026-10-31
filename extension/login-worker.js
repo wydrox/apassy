@@ -145,7 +145,7 @@ async function boundLoginAction(target, action) {
   } finally { loginBusy.delete(key); }
 }
 
-async function updateLogin(tabId, url, item, username, target) {
+async function updateLogin(tabId, url, item, username, target, trustedGesture = false) {
   return boundLoginAction(target, async () => {
     const page = await targetCall(target, "read", [true, "update"]);
     if (!page?.ok) return failure(["ambiguous_password", "password_confirmation"].includes(page?.reason) ? page.reason : "page_changed");
@@ -160,7 +160,7 @@ async function updateLogin(tabId, url, item, username, target) {
       if (metadata.data?.type !== "logins" || metadata.data.origin !== target.origin ||
           !metadata.data.logins?.some((login) => login.item === item && login.username === username)) return failure("no_match");
       if (!(await targetCall(target, "read"))?.ok) return failure("page_changed");
-      request = { cmd: "update", url, item, username, password };
+      request = { cmd: "update", url, item, username, password, ...(trustedGesture ? { trusted_gesture: true } : {}) };
       const answer = await ask(request);
       if (!answer?.ok) return failure(answer?.code || "host_failed", ["timeout", "host_failed"].includes(answer?.code)
         ? "Apassy did not confirm the update. Check this login in Apassy before trying again." : messageOf(answer));
@@ -180,7 +180,7 @@ async function handleLoginField(message, sender) {
   const active = await targetTab();
   if (!active || active.id !== sender.tab.id || originOf(active.url) !== sender.origin) return failure("page_changed");
   if (!message || !["login_suggestions", "login_fill", "login_show"].includes(message.type) ||
-      Object.keys(message).some((key) => !["type", "token", "username", "item"].includes(key))) return failure("bad_request");
+      Object.keys(message).some((key) => !["type", "token", "username", "item", "trustedGesture"].includes(key))) return failure("bad_request");
   const target = { tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId,
     origin: sender.origin, url: sender.url, token: message.token, inline: true, generation: loginFeatureGeneration };
   if (!validLoginTarget(target, sender.tab.id, sender.url) || !(await targetCall(target, "read"))?.ok) return failure("page_changed");
@@ -204,7 +204,7 @@ async function handleLoginField(message, sender) {
   const offer = loginOffers.get(key);
   if (!Number.isInteger(message.item) || !offer || Date.now() - offer.at > LOGIN_RESULT_TTL || !offer.items.includes(message.item)) return failure("bad_request");
   loginOffers.delete(key);
-  return withBadge(() => fill(target.tabId, target.url, message.item, target));
+  return withBadge(() => fill(target.tabId, target.url, message.item, target, message.trustedGesture === true));
 }
 
 chrome.permissions.onAdded.addListener(async () => {
