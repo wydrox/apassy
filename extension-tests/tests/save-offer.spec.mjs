@@ -1,4 +1,4 @@
-import { test, expect, LOGINS } from "../support/fixtures.mjs";
+import { test, expect, passwordSha256, OFFER_PASSWORD, LOGINS } from "../support/fixtures.mjs";
 import { shadowText, shadowButton } from "../cdp/closed-shadow.mjs";
 test.use({ loginSiteAccess: true });
 const banner = "data-apassy-save-offer";
@@ -23,8 +23,8 @@ for (const path of ["signin", "signup", "xhr", "click", "change", "step1"]) {
       await expect(page.locator("[data-apassy-save-offer]")).toHaveCount(0);
     }
     if (path === "change") await type(page, "#current", "synthetic-old");
-    await type(page, "#password", "Synthetic-typed-42");
-    if (["signup", "change"].includes(path)) await type(page, "#confirm", "Synthetic-typed-42");
+    await type(page, "#password", OFFER_PASSWORD);
+    if (["signup", "change"].includes(path)) await type(page, "#confirm", OFFER_PASSWORD);
     await page.locator("#submit").click();
     await expect.poll(() => shadowText(cdp, banner)).toContain(existing ? "Update the password in Apassy?" : "Save this login in Apassy?");
     expect(h.requests("save")).toEqual([]); expect(h.requests("update")).toEqual([]);
@@ -33,6 +33,7 @@ for (const path of ["signin", "signup", "xhr", "click", "change", "step1"]) {
     await expect.poll(() => shadowText(cdp, banner)).toContain(existing ? "Login updated" : "Login saved");
     const request = h.requests(existing ? "update" : "save")[0];
     expect(request.trusted_gesture).toBe(true); expect(request.password).toBe("[redacted]");
+    expect(request.password_sha256).toBe(passwordSha256(OFFER_PASSWORD));
     expect(request.username).toBe(existing ? LOGINS[0].username : "new@example.test");
   });
 }
@@ -47,7 +48,7 @@ test("Apassy fill without editing never offers", async ({ h }) => {
 });
 test("an untrusted click after trusted typing cannot stage an offer", async ({ h }) => {
   const { page } = await setup(h, "/offer/signin");
-  await type(page, "#username", "new@example.test"); await type(page, "#password", "Synthetic-typed-42");
+  await type(page, "#username", "new@example.test"); await type(page, "#password", OFFER_PASSWORD);
   await page.evaluate(() => document.querySelector("#submit").click());
   await expect(page).toHaveURL(/\/offer\/done/);
   await expect(page.locator("[data-apassy-save-offer]")).toHaveCount(0);
@@ -55,7 +56,7 @@ test("an untrusted click after trusted typing cannot stage an offer", async ({ h
 });
 test("hidden hosts and pointer-transparent top-layer overlays cannot clickjack Save", async ({ h }) => {
   const { page, cdp } = await setup(h, "/offer/xhr");
-  await type(page, "#username", "new@example.test"); await type(page, "#password", "Synthetic-typed-42");
+  await type(page, "#username", "new@example.test"); await type(page, "#password", OFFER_PASSWORD);
   await page.locator("#submit").click();
   await expect.poll(() => shadowText(cdp, banner)).toContain("Save this login");
   await page.evaluate(() => {
@@ -75,11 +76,11 @@ test("hidden hosts and pointer-transparent top-layer overlays cannot clickjack S
 });
 test("Never excludes the site after reload and can be undone in toolbar settings", async ({ h }) => {
   const { page, cdp } = await setup(h, "/offer/signin");
-  await type(page, "#username", "new@example.test"); await type(page, "#password", "Synthetic-typed-42");
+  await type(page, "#username", "new@example.test"); await type(page, "#password", OFFER_PASSWORD);
   await page.locator("#submit").click(); await expect.poll(() => shadowText(cdp, banner)).toContain("Save this login");
   await shadowButton(cdp, banner, "Never for this site");
   await page.goto(h.url("/offer/signin", "localhost"));
-  await type(page, "#username", "new@example.test"); await type(page, "#password", "Synthetic-typed-42");
+  await type(page, "#username", "new@example.test"); await type(page, "#password", OFFER_PASSWORD);
   await page.locator("#submit").click(); await expect(page).toHaveURL(/\/offer\/done/);
   await expect(page.locator("[data-apassy-save-offer]")).toHaveCount(0);
   expect((await h.handle({ type: "login_access_state" })).siteOff).toBe(true);

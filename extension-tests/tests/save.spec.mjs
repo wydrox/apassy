@@ -1,4 +1,4 @@
-import { test, expect, LOGINS, TYPED_PASSWORD } from "../support/fixtures.mjs";
+import { test, expect, passwordSha256, LOGINS, TYPED_PASSWORD } from "../support/fixtures.mjs";
 
 // "Save this login": peek and save in the service worker.
 
@@ -56,7 +56,7 @@ test("save sends one save request with the typed password and the fresh address 
   expect(reply).toEqual({ ok: true, code: "ok", message: "Saved.", item: 12 });
   expect(JSON.stringify(reply)).not.toContain(TYPED_PASSWORD);
   expect(h.requests()).toEqual([{
-    v: 1, cmd: "save", url: fresh, title: "Typed site", username: "typed-user", password: "[redacted]",
+    v: 1, cmd: "save", url: fresh, title: "Typed site", username: "typed-user", password: "[redacted]", password_sha256: passwordSha256(TYPED_PASSWORD),
   }]);
 });
 

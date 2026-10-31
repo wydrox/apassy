@@ -79,3 +79,46 @@ for (const legacy of [false, true]) for (const [vault, message] of Object.entrie
     }
   });
 }
+
+// Exercise native framing, preserving exact bytes and keeping failure output safe.
+for (const command of ["save", "update"]) {
+  test(`synthetic ${command} logs exact password proof without plaintext`, async () => {
+    const { createHash } = await import("node:crypto");
+    const digest = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+    const expected = "  Synthetic-é-🔐-42  ";
+    const wrong = expected.trim();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "apassy-password-proof-"));
+    fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify({
+      vault: "unlocked", logins: [{ item: 7, username: "synthetic", site: "example.test" }],
+    }));
+    const child = spawn(process.execPath, [host, extension], {
+      env: { ...process.env, APASSY_MOCK_DIR: dir }, stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.resume();
+    try {
+      const frames = [expected, wrong].map((password) => {
+        const request = { v: 1, cmd: command, url: "https://example.test/login", username: "synthetic", password,
+          ...(command === "save" ? { title: "Synthetic" } : { item: 7 }) };
+        const body = Buffer.from(JSON.stringify(request));
+        const header = Buffer.alloc(4); header.writeUInt32LE(body.length);
+        return Buffer.concat([header, body]);
+      });
+      const exited = new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
+      child.stdin.end(Buffer.concat(frames));
+      await exited;
+      assert.equal(child.exitCode, 0);
+      const log = fs.readFileSync(path.join(dir, "requests.jsonl"), "utf8");
+      // Compare booleans so failures cannot print the original password.
+      assert.equal([expected, wrong].some((value) => log.includes(value) || stderr.includes(value)), false);
+      const records = log.trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(records.map((record) => record.password), ["[redacted]", "[redacted]"]);
+      assert.deepEqual(records.map((record) => record.password_sha256), [digest(expected), digest(wrong)]);
+      assert.notEqual(records[0].password_sha256, records[1].password_sha256);
+    } finally {
+      child.kill();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

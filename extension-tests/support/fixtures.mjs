@@ -4,6 +4,7 @@
 
 import { test as base, expect, chromium } from "@playwright/test";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,11 +19,14 @@ const HELIUM = "/Applications/Helium.app/Contents/MacOS/Helium";
 const MOCK_HOST = path.resolve(HERE, "../mock-host/mock-host.mjs");
 const HEADLESS = process.env.HEADED !== "1";
 
+export const passwordSha256 = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+
 export const PASSWORD = "Tr0ub4dor&3-never-in-a-reply";
 export const USERNAME = "rafal@example.com";
 // The password that the mock app makes for "create" in the tests.
 export const NEW_PASSWORD = "N3w-from-Apassy_never-in-a-reply";
 // The password that a test types on a page for "save".
+export const OFFER_PASSWORD = "Synthetic-typed-42";
 export const TYPED_PASSWORD = "typed-by-hand_S3cret!";
 
 export const LOGINS = [
