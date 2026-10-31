@@ -494,12 +494,17 @@ pub(super) fn repair_host(app: &mut DesktopApp, ctx: &egui::Context, host: Host)
         })
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|v| v["agent_id"].as_str().and_then(|s| s.parse::<u64>().ok()));
-    let agent = app
-        .owner_ui
-        .session
-        .agents()
-        .ok()
-        .and_then(|agents| agents.into_iter().find(|a| Some(a.id) == id && !a.revoked));
+    let agent = app.owner_ui.session.agents().ok().and_then(|agents| {
+        let agent = agents.iter().find(|a| Some(a.id) == id && !a.revoked)?;
+        // connect currently resolves by name. Refuse ambiguous names rather
+        // than rotating a different identity with the same display name.
+        (agents
+            .iter()
+            .filter(|a| !a.revoked && a.name == agent.name)
+            .count()
+            == 1)
+            .then(|| agent.clone())
+    });
     match agent {
         Some(agent) => connect(app, Some(ctx), if host == Host::Claude { ConnectHost::Claude } else { ConnectHost::Codex }, &agent.name),
         None => app.set_err("This connection has no verified agent identity. Select the agent in Agents and reconnect it explicitly."),
