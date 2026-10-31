@@ -1591,7 +1591,11 @@ fn snapshot_validation_includes_suspended_teams_and_rejects_missing_or_corrupt_f
     let mut relay = start(UpstreamOptions::default());
     let mac = personal_team(&mut relay);
     let team = team_of(&mac.token);
-    Pusher::new(&team).push(&relay, &mac, b"recoverable");
+    let mut pusher = Pusher::new(&team);
+    pusher.push(&relay, &mac, b"old chain metadata");
+    pusher.push(&relay, &mac, b"previous snapshot");
+    pusher.push(&relay, &mac, b"recoverable");
+    assert!(!relay.config.sync_dir(&team).join("1.bin").exists());
     relay
         .operator(Command::Suspend { team: team.clone() })
         .unwrap();
@@ -1602,13 +1606,13 @@ fn snapshot_validation_includes_suspended_teams_and_rejects_missing_or_corrupt_f
         sync::verify_restored(&restored).unwrap(),
         manifest["teams"].as_u64().unwrap() as usize
     );
-    let file = restored.sync_dir(&team).join("1.bin");
+    let file = restored.sync_dir(&team).join("3.bin");
     std::fs::write(&file, b"unrecoverab").unwrap();
     assert!(sync::verify_restored(&restored).is_err());
     std::fs::remove_file(&file).unwrap();
     assert!(sync::verify_restored(&restored).is_err());
     // Even with no open core, a failed verification cannot publish a manifest.
     let failed_time = apassy_relay::now_unix() + 10;
-    std::fs::remove_file(relay.config.sync_dir(&team).join("1.bin")).unwrap();
+    std::fs::remove_file(relay.config.sync_dir(&team).join("3.bin")).unwrap();
     assert!(relay.hub().backup(failed_time).is_err());
 }

@@ -121,11 +121,14 @@ pub fn is_snapshot_name(name: &str) -> bool {
         .is_some_and(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Offline recovery check: every retained head must have a regular snapshot of
-/// exactly its declared length and SHA-256. Extra orphan files are not served.
+/// Offline recovery check: current and previous heads must have regular snapshots
+/// of their declared length and SHA-256. Older heads are chain metadata: their
+/// snapshots are intentionally pruned by push (SPEC 24), so they need no file.
 pub fn verify_snapshots(conn: &Connection, dir: &Path) -> RelayResult<()> {
     let mut statement = conn
-        .prepare("SELECT version, size, snapshot_sha256 FROM sync_head")
+        .prepare(
+            "SELECT version, size, snapshot_sha256 FROM sync_head ORDER BY version DESC LIMIT 2",
+        )
         .map_err(db)?;
     let rows = statement
         .query_map([], |row| {

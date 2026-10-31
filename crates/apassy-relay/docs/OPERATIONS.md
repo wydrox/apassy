@@ -38,7 +38,7 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
 5. On the approved target, record the running image ID and service settings, check
    free disk, run `apassy-relay admin backup`, and complete the isolated restore
    drill in `deploy/vps/backup/`. The updated drill runs `snapshot-check` before
-   startup: every retained head of every team, including suspended teams, must have
+   startup: current and previous snapshot heads of every team, including suspended teams, must have
    its file, size and digest. Keep the master-key backup separately. A failed
    backup or restore check stops the rollout. Hidden `.partial` folders are failed
    attempts, never recovery points; inspect and remove them only after diagnosing.
