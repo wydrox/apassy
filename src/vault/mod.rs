@@ -83,8 +83,8 @@ pub use history::{
     EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
 };
 pub use learning::{
-    CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement, DayRate,
-    DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,
+    BouncerCounts, CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement,
+    DayRate, DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,
     MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS, PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS,
     PatternKey, PatternRecord, PatternState, RequestSource,
 };

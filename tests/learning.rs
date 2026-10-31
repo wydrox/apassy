@@ -973,3 +973,38 @@ fn calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it() {
         assert!(refused.contains("allows 1 request"), "{refused}");
     });
 }
+
+#[test]
+fn bouncer_status_counts_success_asks_and_failures_without_double_counting() {
+    let dir = TempDir::new().unwrap();
+    let mut v = Vault::create(&dir.path().join("status.db"), PASS).unwrap();
+    v.unlock(PASS).unwrap();
+    let at = learning::now();
+    let mut entry = owner_entry(at - 1, 0.95, true);
+    entry.decided_by = DecidedBy::Model;
+    entry.asked = false;
+    v.record_decision(&entry).unwrap();
+    assert_eq!(v.bouncer_counts(at).unwrap(), Default::default());
+    entry.at = at;
+    v.record_decision(&entry).unwrap();
+    entry.decided_by = DecidedBy::Pattern;
+    v.record_decision(&entry).unwrap();
+    entry.decided_by = DecidedBy::Answer;
+    v.record_decision(&entry).unwrap();
+    entry.decided_by = DecidedBy::Owner;
+    entry.asked = true;
+    entry.decision = LoggedDecision::Deny;
+    v.record_decision(&entry).unwrap();
+    entry.decided_by = DecidedBy::NoAnswer;
+    v.record_decision(&entry).unwrap();
+    entry.decided_by = DecidedBy::Owner;
+    entry.note = "Bouncer unavailable: timeout".into();
+    v.record_decision(&entry).unwrap();
+    entry.note = "No bouncer runs, so each run waits for you: not ready".into();
+    v.record_decision(&entry).unwrap();
+    let counts = v.bouncer_counts(at).unwrap();
+    assert_eq!((counts.by_model, counts.asked, counts.failed), (1, 4, 3));
+    let daily = v.ask_rate_by_day(at).unwrap()[0];
+    assert_eq!(counts.by_model, u64::from(daily.by_model));
+    assert_eq!(counts.asked, u64::from(daily.asked));
+}

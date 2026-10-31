@@ -24,6 +24,8 @@ import argparse
 import json
 import os
 import sys
+import re
+import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -64,6 +66,24 @@ def verify(checkpoint, manifest, base):
     return digest
 
 
+def temperature_diagnostic(message):
+    """Clarify Laya's existing clamp warning, without changing calibration."""
+    text = str(message)
+    if not text.startswith("laya: this checkpoint ships invalid temperatures"):
+        return text
+    affected = text.partition("using ")[2].partition(". Treat confidence")[0]
+    buckets = re.findall(r"(?:^|, )([^=]+)=", affected)
+    # A qtype fallback can affect noul only when there is no option-specific value.
+    # Conservatively flag the noul fallback rather than claiming it cannot matter.
+    affects_noul = any(b in ("noul:2", "temperature[2]") for b in buckets)
+    impact = ("may affect the bouncer's yes/no questions (noul:2)"
+              if affects_noul or not buckets else
+              "does not affect the bouncer's yes/no questions (noul:2)")
+    return ("Apassy: temperature bucket(s) %s clamped by Laya: %s; %s. "
+            "Confidence in the affected buckets is uncalibrated."
+            % (", ".join(buckets) or "unknown", affected, impact))
+
+
 def build_router(checkpoint, manifest_path=None, device=None):
     import torch
     from laya.agent import Agent
@@ -76,7 +96,11 @@ def build_router(checkpoint, manifest_path=None, device=None):
     version = "%s+%s" % (manifest.get("name", common.MODEL_NAME), digest[:8])
     zero_shot = set(manifest.get("serve", {}).get("zero_shot_questions", []))
 
-    agent = Agent(base, device=device)
+    with warnings.catch_warnings(record=True) as diagnostics:
+        warnings.simplefilter("always", RuntimeWarning)
+        agent = Agent(base, device=device)
+    for diagnostic in diagnostics:
+        warnings.warn(temperature_diagnostic(diagnostic.message), diagnostic.category, stacklevel=2)
     tuned = agent.model
     stock = None
     if zero_shot:

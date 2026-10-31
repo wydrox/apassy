@@ -665,3 +665,37 @@ fn device_rows_say_how_each_device_answers() {
         "iPhone · its Face ID key has not synced yet"
     );
 }
+
+#[test]
+fn bouncer_status_requires_inference_readiness_including_external_mode() {
+    use crate::broker::model_server::{Problem, ServerState};
+    assert!(super::model_ready(&ServerState::Running {
+        model: None,
+        outside: false
+    }));
+    assert!(super::model_ready(&ServerState::External {
+        up: Some(true),
+        model: None
+    }));
+    for state in [
+        ServerState::Off,
+        ServerState::Stopped,
+        ServerState::External {
+            up: None,
+            model: None,
+        },
+        ServerState::External {
+            up: Some(false),
+            model: None,
+        },
+        ServerState::Starting {
+            since: std::time::Instant::now(),
+        },
+        ServerState::Failed {
+            problem: Problem::Readiness("failed inference".into()),
+            log_tail: vec![],
+        },
+    ] {
+        assert!(!super::model_ready(&state), "{state:?}");
+    }
+}

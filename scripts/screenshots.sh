@@ -19,6 +19,9 @@
 # chooses the target directory (default: target/ of this checkout).
 # APASSY_TOUR_BIN=PATH runs a binary that is already built instead.
 #
+# APASSY_TOUR=FILE runs only that custom tour, without unrelated seed/relay views.
+# APASSY_TOUR_SYSTEM_THEME=light|dark supplies system theme input in the example;
+# the product currently forces light appearance. It does not change macOS settings.
 # Usage: scripts/screenshots.sh [OUT_DIR]   (default: docs/images)
 #
 # Output in OUT_DIR:
@@ -98,8 +101,14 @@ let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
 func rgb(_ hex: UInt32) -> CGColor {
   CGColor(red: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
 }
-let cy = Int(CommandLine.arguments[2])!
-let xs = CommandLine.arguments[3].split(separator: ",").map { Int($0)! }
+// The capture can be 1x or 2x. The reference centers and radii below are 2x.
+let window = CGWindowID(CommandLine.arguments[4])!
+let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, window) as? [[String: Any]] ?? []
+let bounds = info.first?[kCGWindowBounds as String] as? [String: Double] ?? [:]
+let points = bounds["Width"] ?? Double(w) / 2.0
+let ratio = Double(w) / points / 2.0
+let cy = Int((Double(CommandLine.arguments[2])! * ratio).rounded())
+let xs = CommandLine.arguments[3].split(separator: ",").map { Int((Double($0)! * ratio).rounded()) }
 let colors: [(UInt32, UInt32)] = [(0xf97b75, 0xe95e56), (0xfec736, 0xe0a220), (0x81d55a, 0x5eb13b)]
 var painted = 0
 for (x, (fill, edge)) in zip(xs, colors) {
@@ -108,9 +117,9 @@ for (x, (fill, edge)) in zip(xs, colors) {
   if abs(r - g) > 24 || abs(g - b) > 24 { continue }
   let center = CGPoint(x: CGFloat(x) + 0.5, y: CGFloat(h) - CGFloat(cy) - 0.5)
   ctx.setFillColor(rgb(edge))
-  ctx.fillEllipse(in: CGRect(x: center.x - 14, y: center.y - 14, width: 28, height: 28))
+  ctx.fillEllipse(in: CGRect(x: center.x - 14 * ratio, y: center.y - 14 * ratio, width: 28 * ratio, height: 28 * ratio))
   ctx.setFillColor(rgb(fill))
-  ctx.fillEllipse(in: CGRect(x: center.x - 13, y: center.y - 13, width: 26, height: 26))
+  ctx.fillEllipse(in: CGRect(x: center.x - 13 * ratio, y: center.y - 13 * ratio, width: 26 * ratio, height: 26 * ratio))
   painted += 1
 }
 if painted > 0 {
@@ -161,7 +170,7 @@ tour() {
         file="$OUT/ui-$name.png"
         wid="$("$WORK/winid" "$APP_PID")" || fail "no window for the app"
         screencapture -x -o -l "$wid" "$file"
-        "$WORK/lights" "$file" "$LIGHTS_Y" "$LIGHTS_X" || fail "cannot paint the traffic lights"
+        "$WORK/lights" "$file" "$LIGHTS_Y" "$LIGHTS_X" "$wid" || fail "cannot paint the traffic lights"
 
         echo "captured $file"
         COUNT=$((COUNT + 1))
@@ -175,16 +184,20 @@ tour() {
 }
 
 tour seed
+if [ -z "${APASSY_TOUR:-}" ]; then
 tour seed-empty APASSY_TOUR_FIRST_STEPS=1
 # The relay group of Devices with the questions on and one iPhone, on the fake relay of
 # the tests in the app's process; then a relay without the feed routes.
 tour seed APASSY_TOUR_RELAY=on
 tour seed APASSY_TOUR_RELAY=old
+fi
 [ "$COUNT" -gt 0 ] || fail "no screenshot"
 
 # The names of the README and the site.
 for pair in vault:all-credentials credential:credential decisions:decisions-request \
   agent:agents settings:settings-vault; do
-  cp "$OUT/ui-${pair#*:}.png" "$OUT/app-${pair%%:*}.png"
+  if [ -f "$OUT/ui-${pair#*:}.png" ]; then
+    cp "$OUT/ui-${pair#*:}.png" "$OUT/app-${pair%%:*}.png"
+  fi
 done
 echo "Done: $COUNT screenshots in $OUT"

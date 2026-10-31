@@ -748,6 +748,14 @@ fn shortcuts_section(ui: &mut egui::Ui) {
     });
 }
 
+/// Only states established by a successful inference warm-up are ready.
+fn model_ready(state: &ServerState) -> bool {
+    matches!(
+        state,
+        ServerState::Running { .. } | ServerState::External { up: Some(true), .. }
+    )
+}
+
 /// Settings > Bouncer: the model server (ADR 0024) in one row with its state and its
 /// action, how it starts, a broker that does not take agent requests, and calibration
 /// and learning.
@@ -760,6 +768,48 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             action = model_server_rows(g, status);
         }
         broker_rows(app, g);
+        let ready = status
+            .as_ref()
+            .is_some_and(|status| model_ready(&status.state));
+        g.line(
+            "Bouncer",
+            Some(kit::text(
+                if ready {
+                    "Model ready"
+                } else {
+                    "Model not ready"
+                },
+                Font::Body,
+            )),
+            |_| {},
+        );
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vault) = guard.as_ref().filter(|vault| !vault.is_locked()) {
+            let day = crate::broker::learning::now() / 86_400 * 86_400;
+            match vault.bouncer_counts(day) {
+                Ok(counts) => {
+                    g.line(
+                        "Today (UTC)",
+                        Some(kit::text(
+                            format!(
+                                "{} decided by the bouncer · {} asked you · {} failed",
+                                counts.by_model, counts.asked, counts.failed
+                            ),
+                            Font::Body,
+                        )),
+                        |_| {},
+                    );
+                    g.note_row("Failed: model or readiness errors, or questions left unanswered. These can also count as asked.");
+                }
+                Err(_) => g.tone_row(
+                    "Today's bouncer counts are unavailable.",
+                    Tone::Warning.text(),
+                ),
+            }
+        }
     });
     crate::desktop::learning_ui::settings_panel(app, ui);
     let Some(server) = server else {
