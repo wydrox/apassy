@@ -20,6 +20,7 @@ problem has a fix. The exit code is 1 when a check fails.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Level {
+    Unverified,
     Ok,
     Note,
     Problem,
@@ -120,9 +121,11 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
             let socket = status.broker_socket.clone().unwrap_or_default();
             if UnixStream::connect(&socket).is_ok() {
                 report.add(
-                    Level::Ok,
+                    Level::Unverified,
                     "Broker",
-                    format!("accepts agents on {socket}"),
+                    format!(
+                        "socket accepts connections on {socket}; agent authentication unverified"
+                    ),
                     None,
                 );
             } else {
@@ -209,24 +212,12 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
             ),
         }
     }
-    if let Some(sandbox) = sibling("apassy-sandbox") {
-        let printed = std::process::Command::new(&sandbox)
-            .args(["--print", "--", "/usr/bin/true"])
-            .output();
-        match printed {
-            Ok(output) if output.status.success() => {
-                report.add(Level::Ok, "Sandbox profile", "found", None);
-            }
-            Ok(output) => report.add(
-                Level::Problem,
-                "Sandbox profile",
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                Some("Reinstall Apassy.app, or set APASSY_SANDBOX_PROFILE."),
-            ),
-            Err(err) => report.add(Level::Problem, "Sandbox profile", err.to_string(), None),
-        }
-    }
-
+    report.add(
+        Level::Unverified,
+        "Sandbox enforcement",
+        "unverified: static checks do not execute a sandbox",
+        None,
+    );
     // The data directory.
     let data = crate::paths::data_dir();
     match std::fs::metadata(&data) {
@@ -256,31 +247,108 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
         ),
     }
 
-    // The agent hosts.
-    let claude_config =
-        read(&home.join(".claude.json")) + &read(&std::path::PathBuf::from(".mcp.json"));
-    let claude_settings = read(&home.join(".claude").join("settings.json"))
-        + &read(&std::path::PathBuf::from(".claude/settings.json"))
-        + &read(&std::path::PathBuf::from(".claude/settings.local.json"));
+    // Inspect only configuration, never execute a referenced program.
+    let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from);
+    let config = claude_dir
+        .as_ref()
+        .map_or_else(|| home.join(".claude.json"), |dir| dir.join(".claude.json"));
+    let settings = claude_dir
+        .unwrap_or_else(|| home.join(".claude"))
+        .join("settings.json");
+    let mut effective = serde_json::json!({});
+    let mut local_server = None;
+    let mut locally_disabled = false;
+    for path in [config, std::path::PathBuf::from(".mcp.json")] {
+        if let Some(value) = json_config(&mut report, &path) {
+            if let Some(entry) = value.pointer("/mcpServers/apassy") {
+                effective = entry.clone();
+            }
+            if let Some(cwd) = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(str::to_owned))
+            {
+                if let Some(entry) = value
+                    .get("projects")
+                    .and_then(|p| p.get(&cwd))
+                    .and_then(|p| p.pointer("/mcpServers/apassy"))
+                {
+                    local_server = Some(entry.clone());
+                }
+                locally_disabled |= value
+                    .get("projects")
+                    .and_then(|p| p.get(&cwd))
+                    .and_then(|p| p.get("disabledMcpServers"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|entries| entries.iter().any(|entry| entry == "apassy"));
+            }
+        }
+    }
+    if let Some(local) = local_server {
+        effective = local;
+    }
+    if locally_disabled {
+        effective["disabled"] = serde_json::json!(true);
+    }
+    server_check(&mut report, "Claude Code", &effective);
+    let mut hooks_disabled = false;
+    let mut mcp_disabled = false;
+    for path in [
+        settings,
+        ".claude/settings.json".into(),
+        ".claude/settings.local.json".into(),
+    ] {
+        if let Some(value) = json_config(&mut report, &path) {
+            if let Some(disabled) = value
+                .get("disableAllHooks")
+                .and_then(serde_json::Value::as_bool)
+            {
+                hooks_disabled = disabled;
+            }
+            if let Some(disabled) = value
+                .get("disabledMcpServers")
+                .and_then(serde_json::Value::as_array)
+            {
+                mcp_disabled = disabled.iter().any(|x| x == "apassy");
+            }
+        }
+    }
+    if hooks_disabled || mcp_disabled {
+        report.add(
+            Level::Problem,
+            "Claude Code",
+            "Apassy MCP or hooks disabled in settings",
+            Some("Review the effective Claude settings."),
+        );
+    }
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
-    let codex_config = read(&codex_home.join("config.toml"));
-    let codex_hooks = read(&codex_home.join("hooks.json"));
-    host_checks(
-        &mut report,
-        "Claude Code",
-        claude_config.contains("apassy-mcp"),
-        claude_settings.contains("apassy-hook"),
-        "apassy setup claude --write",
-    );
-    host_checks(
-        &mut report,
-        "Codex",
-        codex_config.contains("[mcp_servers.apassy]") && codex_config.contains("apassy-mcp"),
-        codex_hooks.contains("apassy-hook"),
-        "apassy setup codex --write",
-    );
+    let path = codex_home.join("config.toml");
+    if path.exists() {
+        match read(&path).parse::<toml_edit::DocumentMut>() {
+            Ok(doc) => {
+                let server = doc.get("mcp_servers").and_then(|v| v.get("apassy"));
+                let value = serde_json::json!({"command": server.and_then(|v| v.get("command")).and_then(toml_edit::Item::as_str), "enabled": server.and_then(|v| v.get("enabled")).and_then(toml_edit::Item::as_bool).unwrap_or(true)});
+                server_check(&mut report, "Codex", &value);
+            }
+            Err(_) => report.add(
+                Level::Problem,
+                "Codex",
+                "invalid or unreadable config.toml",
+                Some("Repair the TOML configuration."),
+            ),
+        }
+    } else {
+        report.add(
+            Level::Note,
+            "Codex",
+            "MCP entry missing",
+            Some("apassy setup codex --write"),
+        );
+    }
+    report.add(Level::Unverified, "Host connection", "unverified: static config does not prove MCP reachability, hook execution, trust, or enforcement", Some("In the sandboxed host check /mcp, hook trust, and a synthetic first request."));
     if std::env::var_os(SESSION_ENV).is_some() && std::env::var_os("CLAUDECODE").is_some() {
         report.add(
             Level::Problem,
@@ -292,10 +360,13 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
 
     let failed = report.0.iter().any(|check| check.level == Level::Problem);
     if cli.json {
-        print_json(&serde_json::json!({ "ok": !failed, "checks": report.0 }));
+        print_json(
+            &serde_json::json!({ "ok": !failed, "code": if failed { "doctor" } else { "ok" }, "stage": "checks", "partial_state": {}, "checks": report.0 }),
+        );
     } else {
         for check in &report.0 {
             let mark = match check.level {
+                Level::Unverified => "unverified",
                 Level::Ok => "ok  ",
                 Level::Note => "note",
                 Level::Problem => "FAIL",
@@ -307,6 +378,9 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
         }
     }
     if failed {
+        if cli.json {
+            return Err(Failure::Printed);
+        }
         return Err(Failure::App {
             code: "doctor".to_owned(),
             message: "Some checks failed. See the fixes above.".to_owned(),
@@ -315,21 +389,121 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
     Ok(())
 }
 
-fn host_checks(report: &mut Report, host: &'static str, mcp: bool, hook: bool, fix: &str) {
-    match (mcp, hook) {
-        (true, true) => report.add(Level::Ok, host, "MCP server and prompt hook set", None),
-        (false, false) => report.add(Level::Note, host, "not connected", Some(fix)),
-        (true, false) => report.add(
-            Level::Note,
-            host,
-            "MCP server set, prompt hook missing",
-            Some(fix),
-        ),
-        (false, true) => report.add(
+fn json_config(report: &mut Report, path: &Path) -> Option<serde_json::Value> {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                report.add(
+                    Level::Problem,
+                    "Host config",
+                    format!("{}: invalid JSON", path.display()),
+                    Some("Repair the configuration."),
+                );
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            report.add(
+                Level::Problem,
+                "Host config",
+                format!("{}: unreadable", path.display()),
+                None,
+            );
+            None
+        }
+    }
+}
+
+fn executable(command: &str) -> bool {
+    let usable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if command.contains('/') {
+        usable(Path::new(command))
+    } else {
+        std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| usable(&dir.join(command))))
+    }
+}
+
+fn server_check(report: &mut Report, host: &'static str, value: &serde_json::Value) {
+    if value.get("disabled").and_then(serde_json::Value::as_bool) == Some(true)
+        || value.get("enabled").and_then(serde_json::Value::as_bool) == Some(false)
+    {
+        report.add(
             Level::Problem,
             host,
-            "prompt hook set, MCP server missing",
-            Some(fix),
-        ),
+            "MCP entry disabled",
+            Some("Enable the Apassy MCP entry."),
+        );
+    } else if let Some(command) = value.get("command").and_then(serde_json::Value::as_str) {
+        report.add(
+            if executable(command) {
+                Level::Unverified
+            } else {
+                Level::Problem
+            },
+            host,
+            if executable(command) {
+                "MCP executable exists; connection and prompt hook unverified"
+            } else {
+                "MCP executable missing or not executable"
+            },
+            Some("Check the configured command; verify the connection in the host."),
+        );
+    } else {
+        report.add(
+            Level::Note,
+            host,
+            "MCP entry missing",
+            Some("Run apassy setup HOST --write."),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn referenced_wrapper_requires_executable_bits_and_is_never_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("wrapper");
+        std::fs::write(&wrapper, "synthetic invalid executable contents").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let value = serde_json::json!({"command":wrapper});
+        let mut report = Report(vec![]);
+        server_check(&mut report, "Claude", &value);
+        assert!(report.0[0].level == Level::Problem);
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut report = Report(vec![]);
+        server_check(&mut report, "Claude", &value);
+        assert!(report.0[0].level == Level::Unverified);
+    }
+
+    #[test]
+    fn static_configs_are_parsed_without_executing_or_showing_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut report = Report(vec![]);
+        std::fs::write(&path, "not JSON synthetic-secret").unwrap();
+        assert!(json_config(&mut report, &path).is_none());
+        server_check(
+            &mut report,
+            "Claude",
+            &serde_json::json!({"command":"/missing/wrapper"}),
+        );
+        server_check(
+            &mut report,
+            "Claude",
+            &serde_json::json!({"command":"/bin/sh", "disabled":true}),
+        );
+        assert!(report.0.iter().all(|c| c.level == Level::Problem));
+        assert!(
+            !serde_json::to_string(&report.0)
+                .unwrap()
+                .contains("synthetic-secret")
+        );
     }
 }

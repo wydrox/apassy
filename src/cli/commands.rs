@@ -320,7 +320,11 @@ pub fn logout(cli: &Cli, mut args: Args) -> Outcome {
             });
         }
     }
-    if terminal::stdout_is_terminal() {
+    if cli.json {
+        print_json(
+            &serde_json::json!({"ok": true, "code": "ok", "stage": "logout", "partial_state": {"session_closed": true}, "data": {"shell_command": shell_line(&shell, None)}}),
+        );
+    } else if terminal::stdout_is_terminal() {
         println!(
             "The session is closed. Clear the variable too: {}",
             shell_line(&shell, None)
@@ -1744,6 +1748,9 @@ pub fn decisions(cli: &Cli, mut args: Args) -> Outcome {
         return Err(Failure::Other("Apassy sent no export.".to_owned()));
     };
     match output {
+        None if cli.json => print_json(
+            &serde_json::json!({"ok": true, "code": "ok", "stage": "export", "partial_state": {}, "data": {"jsonl": jsonl}}),
+        ),
         None => print!("{jsonl}"),
         Some(path) => {
             use std::os::unix::fs::OpenOptionsExt;
@@ -1753,8 +1760,22 @@ pub fn decisions(cli: &Cli, mut args: Args) -> Outcome {
                 .mode(0o600)
                 .open(&path)
                 .map_err(|err| Failure::Other(format!("Cannot create {path}: {err}")))?;
-            file.write_all(jsonl.as_bytes())?;
-            terminal::tell(&format!("{} written to {path}.", response.message));
+            if let Err(error) = file.write_all(jsonl.as_bytes()) {
+                if cli.json {
+                    print_json(
+                        &serde_json::json!({"ok": false, "code": "export_write", "stage": "export", "message": "Could not finish writing the export file.", "partial_state": {"file_created": true, "file_complete": false}, "data": {"output": path}}),
+                    );
+                    return Err(Failure::Printed);
+                }
+                return Err(error.into());
+            }
+            if cli.json {
+                print_json(
+                    &serde_json::json!({"ok": true, "code": "ok", "stage": "export", "partial_state": {"file_written": true}, "data": {"output": path, "bytes": jsonl.len()}}),
+                );
+            } else {
+                terminal::tell(&format!("{} written to {path}.", response.message));
+            }
         }
     }
     Ok(())
