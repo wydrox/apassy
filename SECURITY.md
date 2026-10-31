@@ -75,3 +75,10 @@ The site publishes `latest.json` with the SHA-256 of the image and whether it is
 - Every dependency is pinned to an exact version. CI runs `cargo audit`. The source and license review of the storage stack is in [storage dependencies](docs/reviews/storage-dependencies.md); the notices are in [licenses/THIRD-PARTY-NOTICES.md](licenses/THIRD-PARTY-NOTICES.md).
 - No custom cipher or TLS implementation (ADR 0001). TLS is `rustls` with the system trust store.
 - Each design decision is an ADR in [docs/adr](docs/adr). The security reviews are in [docs/reviews](docs/reviews). The blind evaluations of the bouncer are in [docs/evaluation](docs/evaluation).
+
+Output masking replaces nonempty secrets of at least four bytes wherever they occur.
+For one-, two-, and three-byte secrets, it masks complete tokens or field values
+(with no adjacent Unicode letter, number, or underscore). This keeps short values
+from destroying ordinary words in command output. A short secret embedded in a
+larger token can still appear. Encoding or splitting values also evades literal
+masking; masking is not a confidentiality boundary for arbitrary command output.

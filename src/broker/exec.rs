@@ -339,20 +339,45 @@ fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
     let mut ordered: Vec<&SecretEnv> = secrets
         .iter()
         .copied()
-        .filter(|secret| secret.value.len() >= MIN_MASK_BYTES)
+        .filter(|secret| !secret.value.is_empty())
         .collect();
     ordered.sort_by_key(|secret| std::cmp::Reverse(secret.value.len()));
-    let mut out = text.to_owned();
-    for secret in ordered {
-        let mut replaced = out.replace(secret.value.as_str(), &format!("[apassy:{}]", secret.name));
-        std::mem::swap(&mut out, &mut replaced);
-        replaced.zeroize();
+    let mut out = String::new();
+    let mut pos = 0;
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    while pos < text.len() {
+        let matched = ordered.iter().find(|secret| {
+            let value = secret.value.as_str();
+            text[pos..].starts_with(value)
+                && (value.len() >= MIN_MASK_BYTES
+                    || (!text[..pos].chars().next_back().is_some_and(word)
+                        && !text[pos + value.len()..].chars().next().is_some_and(word)))
+        });
+        if let Some(secret) = matched {
+            out.push_str(&format!("[apassy:{}]", secret.name));
+            pos += secret.value.len();
+        } else {
+            let c = text[pos..].chars().next().expect("character boundary");
+            out.push(c);
+            pos += c.len_utf8();
+        }
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_short_secrets_are_masked_at_token_boundaries() {
+        for value in ["x", "xy", "xyz"] {
+            let input = format!("value={value} \"{value}\" prefix{value}suffix");
+            assert_eq!(
+                mask(&input, &[secret("TOKEN", value)]),
+                format!("value=[apassy:TOKEN] \"[apassy:TOKEN]\" prefix{value}suffix")
+            );
+        }
+    }
+
     use super::*;
 
     fn secret(name: &str, value: &str) -> SecretEnv {
@@ -515,12 +540,15 @@ mod tests {
     }
 
     #[test]
-    fn mask_prefers_longer_values_and_skips_short_ones() {
+    fn mask_prefers_longer_values_and_masks_short_tokens() {
         let secrets = [
             secret("A", "abcd"),
             secret("B", "abcdef"),
             secret("C", "xy"),
         ];
-        assert_eq!(mask("abcdef abcd xy", &secrets), "[apassy:B] [apassy:A] xy");
+        assert_eq!(
+            mask("abcdef abcd xy", &secrets),
+            "[apassy:B] [apassy:A] [apassy:C]"
+        );
     }
 }
