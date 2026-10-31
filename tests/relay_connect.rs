@@ -211,3 +211,26 @@ fn confirmed_join_hands_keys_only_to_the_confirmed_device_and_preserves_revocati
             .is_err()
     );
 }
+
+#[test]
+fn a_short_edge_rate_limit_reports_retry_after_and_keeps_the_same_key() {
+    let relay = FakeRelay::start();
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let pending = prepare_connect(&mut vault, &relay.url, "Free", "Mac").unwrap();
+    relay.fail_next("POST /v1/connect", 1, 429);
+    assert_eq!(
+        create_connect(&pending).unwrap_err(),
+        ConnectError::TryLater(2)
+    );
+    assert_eq!(
+        vault.pending_connect().unwrap().unwrap().key_pkcs8,
+        pending.key_pkcs8
+    );
+    assert!(ConnectError::TryLater(2).to_string().contains("2 seconds"));
+    assert!(
+        ConnectError::TryLater(2)
+            .to_string()
+            .contains("will be reused")
+    );
+}

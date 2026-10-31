@@ -2370,7 +2370,8 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
-    conn.execute_batch("DROP TABLE bouncer_scope").unwrap();
+    conn.execute_batch("DROP TABLE relay_connect_pending; DROP TABLE bouncer_scope")
+        .unwrap();
     conn.execute_batch(SCHEMA19_ONLY).expect("drop schema 19");
     conn.execute_batch(V16_SQL).expect("frozen relay_device");
     conn.execute(

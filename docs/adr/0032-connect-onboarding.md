@@ -11,7 +11,7 @@ Schema 21 adds the local-only `relay_connect_pending` row to the SQLCipher vault
 
 The creation signature is DER ECDSA P-256/SHA-256 over `apassy-relay connect v1\0<origin>\0<public key b64u>`. The legacy body omits `recovery_nonce` entirely. A transport failure gets one bounded retry with the same key. On `409 connect_key_used`, the app probes `POST /v1/connect/challenge`. A supported challenge must match the origin and contain a valid fresh nonce; its proof appends `\0recovery\0<nonce>`, and the request includes `recovery_nonce`. This implements the relay's F06 recovery extension without a version gate. A relay without that route gives a clear recovery-unavailable error and retains the key; it never silently creates another team. Removed/suspended teams are not recreated by recovery.
 
-Daily capacity, total capacity, network creation limits, offline status and recovery failures have distinct messages. The displayed 50/day, 100 total and up to 5/network/day values are documented defaults, not observed production settings. Connect membership has only `questions`; the relay's Connect preset has `sync_bytes=0`. No snapshot or sync receipt is sent by this flow.
+Daily capacity, total capacity, network creation limits, offline status and recovery failures have distinct messages. A short edge limit uses the relay's Retry-After seconds rather than claiming the daily capacity is exhausted. The displayed 50/day, 100 total and up to 5/network/day values are documented defaults, not observed production settings. Connect membership has only `questions`; the relay's Connect preset has `sync_bytes=0`. No snapshot or sync receipt is sent by this flow.
 
 ## Confirmed iPhone join and key handoff
 

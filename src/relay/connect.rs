@@ -16,6 +16,7 @@ pub enum ConnectError {
     DailyCapacity,
     TotalCapacity,
     NetworkLimit,
+    TryLater(u64),
     Unsupported,
     Refused,
     OriginChanged,
@@ -37,6 +38,7 @@ impl fmt::Display for ConnectError {
             Self::KeyUsed => "The relay has already used this connection key, but could not recover the connection. This relay may not support recovery yet, or the connection was removed. Your key is saved. Try again after the relay is updated, or contact relay support. Apassy will not create another connection with a new key.",
             Self::DailyCapacity => "Connect has reached the relay's daily creation limit (normally 50 connections per 24 hours), or new connections are temporarily off. Try again in an hour. Your saved key will be reused.",
             Self::TotalCapacity => "Connect has no room for a new connection (normally 100 connections in total). Try again later or contact relay support. Your saved key will be reused.",
+            Self::TryLater(seconds) => return write!(f, "Connect asks you to wait {seconds} seconds before trying again. Your connection key is saved and will be reused."),
             Self::NetworkLimit => "This network has reached Connect's creation limit (up to 5 connections per day). Wait until tomorrow and try again. Your saved key will be reused.",
             Self::Unsupported => "This relay does not support Connect. Update the relay, then try again.",
             Self::OriginChanged => "A connection is already waiting at another relay address. Retry with that address so Apassy can reuse its saved key.",
@@ -120,6 +122,7 @@ struct Create<'a> {
 #[derive(Debug)]
 enum Failure {
     Offline,
+    Backoff(u64),
     Relay(u16, String, String),
 }
 
@@ -132,6 +135,13 @@ fn post<T: DeserializeOwned>(
     let mut request = json_request("POST", path, None, body);
     request.deadline = Some(Instant::now() + Duration::from_secs(30));
     let answer = relay_http::exchange(url, &request).map_err(|_| Failure::Offline)?;
+    if answer.status == 429
+        && let Some(seconds) = answer
+            .header("retry-after")
+            .and_then(|s| s.parse::<u64>().ok())
+    {
+        return Err(Failure::Backoff(seconds.clamp(1, 86_400)));
+    }
     if matches!(answer.status, 404 | 405) {
         return Err(Failure::Relay(
             answer.status,
@@ -163,6 +173,7 @@ fn post<T: DeserializeOwned>(
 fn failure(error: Failure) -> ConnectError {
     match error {
         Failure::Offline => ConnectError::Offline,
+        Failure::Backoff(seconds) => ConnectError::TryLater(seconds),
         Failure::Relay(409, code, _) if code == "connect_key_used" => ConnectError::KeyUsed,
         Failure::Relay(503, _, message) if message.contains("no room") => {
             ConnectError::TotalCapacity
