@@ -293,7 +293,10 @@ impl DesktopApp {
                         if due {
                             expired.store(true, Ordering::Release);
                         }
-                        due
+                        // A concurrent delivery may have latched expiry while
+                        // this caller waited for the sample mutex. Never clear it
+                        // just because a later sample reports fresh input.
+                        due || expired.load(Ordering::Acquire)
                     }) as Arc<dyn Fn() -> bool + Send + Sync>
                 });
             self.owner_ui
