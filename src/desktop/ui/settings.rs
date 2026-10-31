@@ -578,7 +578,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         &mut selected,
                         &options,
                         policy.label(),
-                        200.0,
+                        260.0,
                     )
                 },
             )
@@ -586,6 +586,9 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         });
         g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills, passkey sign-ins, and Allow once until this time is up. It always asks again when your Mac locks or sleeps.");
     });
+    if let Some(note) = &app.owner.frequency_note {
+        rows::footnote(ui, note);
+    }
     let lock_policy = app.auto_lock.policy;
     let mut lock_selected = lock_policy;
     rows::group(ui, Some("Vault locking"), |g| {
@@ -613,9 +616,6 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if lock_selected != lock_policy {
         app.save_auto_lock(lock_selected, &ctx);
-    }
-    if let Some(note) = &app.owner.frequency_note {
-        rows::footnote(ui, note);
     }
     if selected != policy {
         app.ask_owner(
