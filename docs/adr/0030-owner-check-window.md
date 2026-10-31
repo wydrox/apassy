@@ -16,7 +16,9 @@ the window, including when choosing a shorter period. The next covered action
 checks again.
 
 A successful fresh local Touch ID or vault-passphrase check, including vault
-unlock, starts an absolute window. Any fresh local check can restart that window,
+unlock and the passphrase check for Touch ID setup, starts an absolute window.
+Setup records verification on its worker before Keychain I/O or delayed UI polling;
+its cache deadline cannot slide while storage completes. Any fresh local check can restart that window,
 except changing this setting and answering a remote question. Use never extends
 it. Remote and iPhone answers neither use nor seed it.
 

@@ -1416,6 +1416,8 @@ pub(crate) struct UnlockState {
     pub(crate) unlocking: Option<Task<Result<Zeroizing<String>, TouchIdUnlockError>>>,
     pub(crate) check_generation: Option<u64>,
     pub(crate) changing: Option<Task<Result<String, String>>>,
+    /// Touch ID setup verifies the passphrase outside OwnerGate (audit M33).
+    pub(crate) fresh_setup: Option<(u64, [u8; 32])>,
     /// The passphrase for Touch ID setup (A2). The app erases it after each try.
     pub(crate) setup_passphrase: String,
 }
@@ -2489,13 +2491,39 @@ impl DesktopApp {
         let typed = Ephemeral::take(&mut self.owner.unlock.setup_passphrase).into_zeroizing();
         super::ui::forget_secret_field(ctx, super::ui::TOUCH_ID_SETUP_FIELD);
         let Some(helper) = self.owner.helper.clone() else {
+            self.owner_ui.session.owner_window.invalidate();
             self.set_err(unlock::HELPER_MISSING_NOTE);
             return;
         };
+        self.owner.unlock.fresh_setup = self
+            .owner_ui
+            .session
+            .epoch()
+            .map(|epoch| (self.owner_ui.session.owner_window.generation(), epoch));
         let vault = self.owner_ui.session.shared_vault();
+        let fresh = self.owner.unlock.fresh_setup;
+        let window = self.owner_ui.session.owner_window.clone();
         self.owner.unlock.changing = Some(Task::spawn(Some(ctx.clone()), move || {
-            unlock::turn_on(&helper, &vault, typed)
-                .map(|()| "Touch ID unlock is on. Touch ID can unlock this vault file now. The passphrase still works.".to_owned())
+            let result = unlock::turn_on_after_verification(&helper, &vault, typed, || {
+                let slot = vault
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some((generation, epoch)) = fresh
+                    && slot
+                        .as_ref()
+                        .is_some_and(|v| !v.is_locked() && v.epoch() == epoch)
+                {
+                    window.seed(
+                        epoch,
+                        crate::broker::approvals::CheckMethod::Passphrase,
+                        generation,
+                    );
+                }
+            });
+            if result.is_err() {
+                window.invalidate();
+            }
+            result.map(|()| "Touch ID unlock is on. Touch ID can unlock this vault file now. The passphrase still works.".to_owned())
                 .map_err(|err| err.message())
         }));
     }
@@ -2508,6 +2536,7 @@ impl DesktopApp {
         ) else {
             return;
         };
+        self.owner.unlock.fresh_setup = None;
         self.owner.unlock.changing = Some(Task::spawn(ctx.cloned(), move || {
             unlock::turn_off(&helper, &path)
                 .map(|_| note.to_owned())
@@ -2549,9 +2578,15 @@ impl DesktopApp {
             };
             if let Some(result) = result {
                 self.owner.unlock.changing = None;
+                let fresh = self.owner.unlock.fresh_setup.take();
                 match result {
                     Ok(message) => self.set_ok(message),
-                    Err(message) => self.set_err(message),
+                    Err(message) => {
+                        if fresh.is_some() {
+                            self.owner_ui.session.owner_window.invalidate();
+                        }
+                        self.set_err(message);
+                    }
                 }
                 self.refresh_unlock_setting(Some(ctx));
             }

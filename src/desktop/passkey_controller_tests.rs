@@ -2485,3 +2485,57 @@ fn owner_window_unavailable_observer_keeps_fresh_checks_available() {
         "unobserved sessions can never reuse verification"
     );
 }
+
+#[test]
+fn owner_window_touch_id_setup_seeds_only_after_fresh_passphrase() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let helper = dir.path().join("synthetic-setup-helper");
+    std::fs::write(&helper,"#!/usr/bin/python3\nimport sys,json,time,pathlib\nr=json.loads(sys.stdin.readline())\nassert r['cmd'] in ('keychain_store','keychain_exists')\nif r['cmd']=='keychain_store':\n pathlib.Path(__file__).with_suffix('.waiting').touch()\n while not pathlib.Path(__file__).with_suffix('.release').exists(): time.sleep(0.005)\nprint(json.dumps({'ok':True,'exists':True,'biometry_changed':False}))\n").unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    app.owner.helper = Some(crate::native::NativeHelper::with_paths(&helper, &helper));
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(crate::broker::approvals::OwnerFrequency::OneMinute);
+    window.observe(true);
+    for (passphrase, verified) in [(PASS, true), ("incorrect-synthetic-passphrase", false)] {
+        app.owner.unlock.setup_passphrase = passphrase.into();
+        app.start_touch_id_setup(&ctx);
+        if verified {
+            let waiting = Instant::now() + Duration::from_secs(5);
+            while !helper.with_extension("waiting").exists() && Instant::now() < waiting {
+                window.observe(true);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                helper.with_extension("waiting").exists(),
+                "mock store did not start"
+            );
+            assert!(
+                window
+                    .ticket(app.owner_ui.session.epoch().unwrap())
+                    .is_some(),
+                "verification must seed before delayed storage and UI polling"
+            );
+            std::fs::write(helper.with_extension("release"), b"continue").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.owner.unlock.changing.is_some() && Instant::now() < deadline {
+            window.observe(true);
+            app.poll_owner_flows(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            app.owner.unlock.changing.is_none(),
+            "setup worker timed out"
+        );
+        assert_eq!(
+            window
+                .ticket(app.owner_ui.session.epoch().unwrap())
+                .is_some(),
+            verified,
+            "only a freshly verified passphrase can seed"
+        );
+    }
+}
