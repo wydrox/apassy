@@ -128,6 +128,7 @@ pub(super) fn connect(
             .into_iter()
             .find(|agent| !agent.revoked && agent.name == name)
     });
+    let is_new = existing.is_none();
     let agent = match existing {
         Some(agent) => agent,
         // The token of the registration is dropped: the check gives the token that the
@@ -156,7 +157,7 @@ pub(super) fn connect(
     let request = OwnerRequest::ConnectAgent {
         agent_id: agent.id,
         agent_name: agent.name.clone(),
-        show_all: sees_nothing,
+        show_all: is_new && sees_nothing,
     };
     match ctx {
         Some(ctx) if app.ui.sheet.is_some() => ask_owner_from_sheet(app, request, ctx),
@@ -454,7 +455,10 @@ mod tests {
         assert_eq!(app.owner_ui.session.agents().unwrap().len(), 1);
         app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
         assert!(app.owner_ui.fresh_token.is_some());
-        assert!(app.owner_ui.session.agent_sees_all(agent.id).unwrap());
+        assert!(
+            !app.owner_ui.session.agent_sees_all(agent.id).unwrap(),
+            "retry preserves an existing empty catalog restriction"
+        );
         let (host, fresh) = token_shown(&mut app);
         assert_eq!(host, ConnectHost::Codex);
         assert!(fresh, "the token sheet saves the settings at once");
@@ -474,5 +478,124 @@ mod tests {
             .expect("registered");
         assert!(app.owner_ui.session.agent_sees_all(ci.id).unwrap());
         assert_eq!(token_shown(&mut app).0, ConnectHost::Other);
+    }
+}
+
+/// Static health inspection never launches programs or displays wrapper contents.
+pub(super) fn host_health(home: &std::path::Path, host: Host) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = home.join(".config/apassy");
+    let executable = |name: &str| {
+        std::fs::metadata(dir.join(format!("apassy-{name}-{}.sh", host.id())))
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    let (config, hooks) = if host == Host::Claude {
+        let custom = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        (
+            custom
+                .as_ref()
+                .map_or_else(|| home.join(".claude.json"), |p| p.join(".claude.json")),
+            custom
+                .unwrap_or_else(|| home.join(".claude"))
+                .join("settings.json"),
+        )
+    } else {
+        let base = std::env::var_os("CODEX_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        (base.join("config.toml"), base.join("hooks.json"))
+    };
+    let mcp = std::fs::read_to_string(config).ok().is_some_and(|s| {
+        if host == Host::Claude {
+            serde_json::from_str::<serde_json::Value>(&s)
+                .ok()
+                .is_some_and(|v| {
+                    v.pointer("/mcpServers/apassy/command")
+                        .and_then(|v| v.as_str())
+                        == dir.join(format!("apassy-mcp-{}.sh", host.id())).to_str()
+                })
+        } else {
+            s.parse::<toml_edit::DocumentMut>().ok().is_some_and(|v| {
+                v.get("mcp_servers")
+                    .and_then(|v| v.get("apassy"))
+                    .and_then(|v| v.get("command"))
+                    .and_then(|v| v.as_str())
+                    == dir.join("apassy-mcp-codex.sh").to_str()
+            })
+        }
+    });
+    let hook = std::fs::read(hooks)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| {
+            v["disableAllHooks"] != true
+                && v.pointer("/hooks/UserPromptSubmit")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| {
+                        a.iter().any(|entry| {
+                            entry["hooks"].as_array().is_some_and(|hooks| {
+                                hooks.iter().any(|h| {
+                                    h["command"].as_str().is_some_and(|s| {
+                                        s == format!(
+                                            "'{}'",
+                                            dir.join(format!("apassy-hook-{}.sh", host.id()))
+                                                .display()
+                                        )
+                                    })
+                                })
+                            })
+                        })
+                    })
+        });
+    let version = std::fs::read(dir.join(format!("connection-{}.json", host.id())))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["version"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".into());
+    let receipt = dir.join(format!(
+        "hook-health-{}.json",
+        if host == Host::Claude {
+            "claude-code"
+        } else {
+            "codex"
+        }
+    ));
+    let seen = std::fs::read(receipt)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["broker_ack_at"].as_u64())
+        .map(|seen| format!("hook acknowledged at Unix {seen}; MCP unknown"))
+        .unwrap_or_else(|| "no hook acknowledgement recorded; MCP unknown".into());
+    format!(
+        "MCP: {}; hook: {}; paths: MCP {}, hook {}; setup version: {version}; last request: {seen}",
+        if mcp { "installed" } else { "missing/invalid" },
+        if hook {
+            "installed"
+        } else {
+            "missing/disabled"
+        },
+        if executable("mcp") {
+            "exists"
+        } else {
+            "missing"
+        },
+        if executable("hook") {
+            "exists"
+        } else {
+            "missing"
+        }
+    )
+}
+
+#[cfg(all(test, feature = "vault"))]
+mod health_tests {
+    use super::*;
+    #[test]
+    fn missing_host_is_visible_and_never_claims_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let health = host_health(dir.path(), Host::Claude);
+        assert!(health.contains("missing"));
+        assert!(health.contains("no hook acknowledgement"));
+        assert!(health.contains("version: unknown"));
     }
 }

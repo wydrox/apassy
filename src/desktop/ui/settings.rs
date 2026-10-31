@@ -1449,6 +1449,43 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             g.tone_row(problem, Tone::Critical.text());
         }
     });
+    let mut repair = None;
+    rows::section(
+        ui,
+        Some("Agent host health"),
+        Some(
+            "Configuration is inspected locally. A first request and hook trust still need verification.",
+        ),
+        |g| {
+            for host in [
+                super::agent_setup::Host::Claude,
+                super::agent_setup::Host::Codex,
+            ] {
+                let home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default();
+                g.line_note(
+                    host.name(),
+                    None,
+                    Some(
+                        kit::text(
+                            super::agent_onboarding::host_health(&home, host),
+                            Font::Callout,
+                        )
+                        .color(kit::SECONDARY),
+                    ),
+                    |ui| {
+                        if kit::small_button(ui, "Repair…", Style::Bordered).clicked() {
+                            repair = Some(host);
+                        }
+                    },
+                );
+            }
+        },
+    );
+    if let Some(host) = repair {
+        super::agent_onboarding::reconnect(app, ui.ctx(), host.name());
+    }
     if install {
         match super::cli_tools::install() {
             Ok(()) => app.set_ok(

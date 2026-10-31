@@ -17,7 +17,7 @@ use super::{Cli, Failure, Outcome};
 use crate::owner::wire::{Command, Data, SecretText};
 
 pub const HELP: &str = "\
-apassy setup claude|codex [--name NAME] [--token-stdin] [--hook PATH] [--write]
+apassy setup claude|codex [--name NAME] [--token-stdin] [--hook PATH] [--write] [--repair] [--agent-id ID]
 
 Prepare an agent host for Apassy:
   Without --write, validate and preview only; no agent or files are changed.
@@ -37,6 +37,11 @@ Apassy.app includes the MCP server, prompt hook, and sandbox.
 Use --hook PATH only to select a different prompt hook.
 Agents, tokens, exceptions, and your answers stay on this Mac. A synced vault does not
 copy them.
+--repair --write restores missing managed files using the saved token; it never registers
+an agent or changes catalog access. --agent-id ID records an explicit agent identity.
+For an orphan with no wrappers, use --token-stdin --agent-id ID after an owner reconnect.
+File apply failures restore prior bytes and modes. Process crashes during commit still
+require a repair; this is not a crash-recovery journal.
 This command writes configuration. It does not check the host connection or a first request.
 
 Then there is nothing to give: the agent lists your credentials without values and uses
@@ -249,6 +254,8 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         .value(&["--name"])?
         .unwrap_or_else(|| host.default_name().to_owned());
     let token_stdin = args.flag(&["--token-stdin"]);
+    let repair = args.flag(&["--repair"]);
+    let agent_id = args.value(&["--agent-id"])?;
     let write = args.flag(&["--write"]);
     let hook_path = args.value(&["--hook"])?;
     args.finish()?;
@@ -325,10 +332,13 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
     for path in [&mcp_wrapper, &hook_wrapper_path, &config, &hooks] {
         writable_destination(path)?;
     }
-    let existing = managed_token(&mcp_wrapper, &mcp)?;
+    let mut existing = managed_token(&mcp_wrapper, &mcp)?;
     if let Some(hook) = &hook {
         let other = managed_token(&hook_wrapper_path, hook)?;
-        if !token_stdin
+        if repair && existing.is_none() {
+            existing = other;
+        } else if !repair
+            && !token_stdin
             && existing.as_ref().map(SecretText::expose) != other.as_ref().map(SecretText::expose)
         {
             return Err(Failure::Other("Managed wrappers are incomplete. Repair with the existing token using --token-stdin; do not register another agent.".into()));
@@ -353,6 +363,34 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
             ),
         };
     }
+    let identity_path = dir.join(format!("connection-{}.json", host.id()));
+    let saved_identity: Option<serde_json::Value> = if identity_path.exists() {
+        Some(
+            serde_json::from_str(&read_optional_config(&identity_path)?).map_err(|_| {
+                Failure::Other("Invalid connection identity. Review before reconnecting.".into())
+            })?,
+        )
+    } else {
+        None
+    };
+    let mut identity = agent_id.or_else(|| {
+        saved_identity
+            .as_ref()
+            .and_then(|v| v["agent_id"].as_str().map(str::to_owned))
+    });
+    if let Some(id) = &identity
+        && !token_stdin
+    {
+        let response = cli.call(Command::AgentShow { agent: id.clone() })?;
+        if !matches!(response.data, Data::Agent(ref view) if !view.agent.revoked && !view.agent.token_expired)
+        {
+            return Err(Failure::Other("Connection points to a missing, revoked, or expired agent. Reconnect explicitly in Agents; catalog access is preserved.".into()));
+        }
+    }
+    if repair && existing.is_none() && !token_stdin {
+        return Err(Failure::Other("Orphaned connection: supply the existing agent token with --token-stdin and --agent-id ID, or reconnect in Agents. Repair never creates an agent.".into()));
+    }
+    let mut created = None;
     let token = if token_stdin {
         let token =
             terminal::read_stdin_secret().map_err(|error| at_stage(error.into(), "token_read"))?;
@@ -373,6 +411,8 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         let response = cli.call(Command::AgentConnect { name: name.clone() })?;
         match response.data {
             Data::Token { token, agent } => {
+                identity = Some(agent.id.to_string());
+                created = Some(agent.id);
                 eprintln!("Connected {} (ID {}).", agent.name, agent.id);
                 stages.push("agent_connected");
                 token
@@ -381,34 +421,36 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         }
     };
 
-    write_wrapper(&mcp_wrapper, &mcp, &token)
-        .map_err(|failure| at_stage(failure, "wrapper_write"))?;
-    stages.push("mcp_wrapper_written");
-    eprintln!("Wrote {} (mode 0700).", mcp_wrapper.display());
-    let hook_wrapper = match &hook {
-        Some(hook) => {
-            let wrapper = dir.join(format!("apassy-hook-{}.sh", host.id()));
-            write_wrapper(&wrapper, hook, &token)
-                .map_err(|failure| at_stage(failure, "wrapper_write"))?;
-            stages.push("hook_wrapper_written");
-            eprintln!("Wrote {} (mode 0700).", wrapper.display());
-            Some(wrapper)
-        }
-        None => {
-            eprintln!(
-                "The prompt hook is missing. Reinstall the complete Apassy.app package, then run setup again. The MCP server alone does not provide prompt context."
-            );
-            None
-        }
-    };
+    let result = stage_connection(
+        host,
+        &mcp_wrapper,
+        &hook_wrapper_path,
+        &mcp,
+        hook.as_deref()
+            .ok_or_else(|| Failure::Other("Missing hook.".into()))?,
+        &token,
+        &config,
+        &hooks,
+        &identity_path,
+        identity.as_deref(),
+    );
     drop(token);
-    stages.push("host_config_started");
-
-    match host {
-        Host::Claude => claude(&mcp_wrapper, hook_wrapper.as_deref(), write, stages),
-        Host::Codex => codex(&mcp_wrapper, hook_wrapper.as_deref(), write, stages),
+    if let Err(failure) = result {
+        stages.push("files_rolled_back");
+        if let Some(id) = created {
+            if cli
+                .call(Command::AgentRevoke {
+                    agent: id.to_string(),
+                })
+                .is_ok()
+            {
+                stages.push("agent_revoked");
+            } else {
+                stages.push("orphan_requires_revocation");
+            }
+        }
+        return Err(failure);
     }
-    .map_err(|failure| at_stage(failure, "config_write"))?;
     stages.push("host_config_written");
     eprintln!(
         "{}. The host connection and first request are not checked.",
@@ -1476,5 +1518,242 @@ mod tests {
             quote(&wrapper.display().to_string())
         );
         assert!(dir.path().join("settings.json.before-apassy").is_file());
+    }
+}
+
+/// Every replacement is prepared on the destination filesystem before commit.
+/// On an apply error, restore original bytes and modes in reverse order.
+#[cfg(feature = "vault")]
+fn apply_files(files: &[(PathBuf, Vec<u8>, u32)]) -> Outcome {
+    apply_files_checked(files, |_| Ok(()))
+}
+
+#[cfg(feature = "vault")]
+fn apply_files_checked(
+    files: &[(PathBuf, Vec<u8>, u32)],
+    before_apply: impl Fn(usize) -> std::io::Result<()>,
+) -> Outcome {
+    let mut prepared = Vec::new();
+    let mut originals = Vec::new();
+    for (path, bytes, mode) in files {
+        writable_destination(path)?;
+        let old = match fs::read(path) {
+            Ok(bytes) => Some((
+                zeroize::Zeroizing::new(bytes),
+                fs::metadata(path)?.permissions(),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        fs::create_dir_all(
+            path.parent()
+                .ok_or_else(|| Failure::Other("Missing parent.".into()))?,
+        )?;
+        let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        temp.as_file()
+            .set_permissions(fs::Permissions::from_mode(*mode))?;
+        temp.write_all(bytes)?;
+        temp.as_file().sync_all()?;
+        prepared.push(temp);
+        originals.push(old);
+    }
+    for (index, temp) in prepared.iter().enumerate() {
+        if let Err(error) =
+            before_apply(index).and_then(|()| fs::rename(temp.path(), &files[index].0))
+        {
+            for n in (0..index).rev() {
+                let path = &files[n].0;
+                let restored = match &originals[n] {
+                    Some((bytes, permissions)) => (|| -> std::io::Result<()> {
+                        let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+                        temp.as_file().set_permissions(permissions.clone())?;
+                        temp.write_all(bytes)?;
+                        temp.as_file().sync_all()?;
+                        fs::rename(temp.path(), path)
+                    })(),
+                    None => fs::remove_file(path),
+                };
+                if restored.is_err() {
+                    return Err(Failure::Other("Setup failed and rollback is incomplete. Review host files before retrying.".into()));
+                }
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "vault")]
+#[allow(clippy::too_many_arguments)]
+fn stage_connection(
+    host: Host,
+    mcp_wrapper: &Path,
+    hook_wrapper: &Path,
+    mcp: &Path,
+    hook: &Path,
+    token: &SecretText,
+    config: &Path,
+    hooks: &Path,
+    identity_path: &Path,
+    identity: Option<&str>,
+) -> Outcome {
+    let wrapper_dir = mcp_wrapper
+        .parent()
+        .ok_or_else(|| Failure::Other("Missing wrapper directory.".into()))?;
+    fs::create_dir_all(wrapper_dir)?;
+    fs::set_permissions(wrapper_dir, fs::Permissions::from_mode(0o700))?;
+    let scratch = tempfile::tempdir()?;
+    let staged_mcp = scratch.path().join("mcp.sh");
+    let staged_hook = scratch.path().join("hook.sh");
+    write_wrapper(&staged_mcp, mcp, token)?;
+    write_wrapper(&staged_hook, hook, token)?;
+    let staged_hooks = scratch.path().join("hooks.json");
+    fs::write(&staged_hooks, read_optional_config(hooks)?)?;
+    merge_hook(&staged_hooks, hook_wrapper)?;
+    if host == Host::Claude {
+        claude_timeout(&staged_hooks, true)?;
+    }
+    let current = read_optional_config(config)?;
+    let config_bytes = if host == Host::Claude {
+        let mut root: serde_json::Value = if current.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&current)
+                .map_err(|_| Failure::Other("Invalid Claude config.".into()))?
+        };
+        if root.get("mcpServers").is_none() {
+            root["mcpServers"] = serde_json::json!({});
+        }
+        root["mcpServers"]["apassy"] =
+            serde_json::json!({"type":"stdio", "command":mcp_wrapper, "args":[], "env":{}});
+        serde_json::to_vec_pretty(&root).map_err(|e| Failure::Other(e.to_string()))?
+    } else {
+        let section = codex_section(mcp_wrapper);
+        if codex_section_present(&current, &section)? {
+            migrate_codex_timeout(&current).into_bytes()
+        } else {
+            format!("{current}\n{section}").into_bytes()
+        }
+    };
+    let mut files = vec![
+        (mcp_wrapper.to_owned(), fs::read(staged_mcp)?, 0o700),
+        (hook_wrapper.to_owned(), fs::read(staged_hook)?, 0o700),
+        (config.to_owned(), config_bytes, 0o600),
+        (hooks.to_owned(), fs::read(staged_hooks)?, 0o600),
+    ];
+    files.push((identity_path.to_owned(), serde_json::to_vec(&serde_json::json!({"agent_id":identity, "host":host.id(), "version":env!("CARGO_PKG_VERSION")})).unwrap(), 0o600));
+    files.push((
+        wrapper_dir.join(format!(
+            "hook-health-{}.json",
+            if host == Host::Claude {
+                "claude-code"
+            } else {
+                "codex"
+            }
+        )),
+        b"{}".to_vec(),
+        0o600,
+    ));
+    let result = apply_files(&files);
+    use zeroize::Zeroize;
+    for (_, bytes, _) in &mut files {
+        bytes.zeroize();
+    }
+    result
+}
+
+#[cfg(not(feature = "vault"))]
+#[allow(clippy::too_many_arguments)]
+fn stage_connection(
+    _: Host,
+    _: &Path,
+    _: &Path,
+    _: &Path,
+    _: &Path,
+    _: &SecretText,
+    _: &Path,
+    _: &Path,
+    _: &Path,
+    _: Option<&str>,
+) -> Outcome {
+    Err(Failure::Other(
+        "Connection setup requires a vault-enabled build.".into(),
+    ))
+}
+
+#[cfg(all(test, feature = "vault"))]
+mod transaction_tests {
+    use super::*;
+    #[test]
+    fn rollback_restores_bytes_modes_and_removes_partial_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("original");
+        let second = dir.path().join("new");
+        fs::write(&first, "original").unwrap();
+        fs::set_permissions(&first, fs::Permissions::from_mode(0o640)).unwrap();
+        let files = vec![
+            (first.clone(), b"replacement".to_vec(), 0o700),
+            (second.clone(), b"new".to_vec(), 0o600),
+            (dir.path().join("last"), vec![], 0o600),
+        ];
+        for failure in [1, 2] {
+            assert!(
+                apply_files_checked(&files, |n| if n == failure {
+                    Err(std::io::Error::other("synthetic apply failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(fs::read(&first).unwrap(), b"original");
+            assert_eq!(
+                fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+            assert!(!second.exists());
+        }
+    }
+    #[test]
+    fn repair_recreates_missing_hook_without_touching_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = dir.path().join("mcp.sh");
+        let hook = dir.path().join("hook.sh");
+        let config = dir.path().join("config.toml");
+        let hooks = dir.path().join("hooks.json");
+        stage_connection(
+            Host::Codex,
+            &mcp,
+            &hook,
+            Path::new("/bin/true"),
+            Path::new("/bin/true"),
+            &SecretText::new("apassy_agt_synthetic".into()),
+            &config,
+            &hooks,
+            &dir.path().join("identity.json"),
+            Some("42"),
+        )
+        .unwrap();
+        fs::remove_file(&hook).unwrap();
+        stage_connection(
+            Host::Codex,
+            &mcp,
+            &hook,
+            Path::new("/bin/true"),
+            Path::new("/bin/true"),
+            &SecretText::new("apassy_agt_synthetic".into()),
+            &config,
+            &hooks,
+            &dir.path().join("identity.json"),
+            Some("42"),
+        )
+        .unwrap();
+        assert!(hook.exists());
+        assert_eq!(
+            managed_token(&mcp, Path::new("/bin/true"))
+                .unwrap()
+                .unwrap()
+                .expose(),
+            "apassy_agt_synthetic"
+        );
     }
 }
