@@ -519,6 +519,59 @@ mod tests {
     }
 }
 
+/// A process lock protects the dedicated fixture namespace. A killed doctor releases
+/// the lock; its next run removes only fixture directories in this private root.
+#[cfg(feature = "vault")]
+fn live_fixture_root() -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata(
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or(())
+            .map_err(|_| std::io::Error::other("home unavailable"))?,
+    )?
+    .uid();
+    let root = std::path::PathBuf::from(format!("/tmp/apassy-live-doctor-{uid}"));
+    let lock = clean_live_fixture_root(&root, uid)?;
+    Ok((root, lock))
+}
+
+#[cfg(feature = "vault")]
+fn clean_live_fixture_root(root: &Path, uid: u32) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(root)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::other("unsafe fixture directory"));
+    }
+    let lock_path = root.join("lock");
+    if std::fs::symlink_metadata(&lock_path)
+        .is_ok_and(|m| !m.is_file() || m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::other("unsafe fixture lock"));
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)?;
+    lock.try_lock()
+        .map_err(|_| std::io::Error::other("another doctor is running"))?;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("fixture-")
+            && entry.file_type()?.is_dir()
+        {
+            std::fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(lock)
+}
+
 /// The diagnostic fixture is a separate vault and broker; it has no owner items,
 /// owner session, model endpoint, transcript roots or inherited agent token.
 #[cfg(feature = "vault")]
@@ -528,9 +581,10 @@ fn live_checks(report: &mut Report) {
     use crate::vault::{Field, ItemDraft, SecretValue, Vault};
     use std::sync::{Arc, Mutex};
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let (root, _lock) = live_fixture_root()?;
         let temp = tempfile::Builder::new()
-            .prefix("apassy-doctor-")
-            .tempdir_in("/tmp")?;
+            .prefix("fixture-")
+            .tempdir_in(root)?;
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let mut vault = Vault::create(&temp.path().join("fixture.db"), "synthetic-doctor-pass")?;
         vault.unlock("synthetic-doctor-pass")?;
@@ -658,6 +712,25 @@ fn live_checks(report: &mut Report) {
 #[cfg(all(test, feature = "vault"))]
 mod live_tests {
     use super::*;
+    #[test]
+    fn abandoned_fixture_cleanup_respects_lock_and_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private");
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(dir.path()).unwrap().uid();
+        let lock = clean_live_fixture_root(&root, uid).unwrap();
+        let abandoned = root.join("fixture-abandoned");
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join("fixture.db"), "synthetic").unwrap();
+        std::fs::write(root.join("unrelated"), "keep").unwrap();
+        assert!(clean_live_fixture_root(&root, uid).is_err());
+        assert!(abandoned.exists());
+        drop(lock); // Also released by the OS after a crash.
+        let _lock = clean_live_fixture_root(&root, uid).unwrap();
+        assert!(!abandoned.exists());
+        assert_eq!(std::fs::read(root.join("unrelated")).unwrap(), b"keep");
+    }
+
     #[test]
     fn isolated_live_fixture_reports_broker_mcp_hook_and_cleanup() {
         let mut report = Report(vec![]);

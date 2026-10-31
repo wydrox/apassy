@@ -338,6 +338,15 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
     let mut existing = managed_token(&mcp_wrapper, &mcp)?;
     if let Some(hook) = &hook {
         let other = managed_token(&hook_wrapper_path, hook)?;
+        if existing.is_some()
+            && other.is_some()
+            && existing.as_ref().map(SecretText::expose) != other.as_ref().map(SecretText::expose)
+        {
+            return Err(Failure::Other(
+                "Managed wrappers refer to different agents. Review the connection before repair."
+                    .into(),
+            ));
+        }
         if repair && existing.is_none() {
             existing = other;
         } else if !repair
@@ -376,6 +385,15 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
     } else {
         None
     };
+    if let (Some(explicit), Some(saved)) = (
+        &agent_id,
+        saved_identity.as_ref().and_then(|v| v["agent_id"].as_str()),
+    ) && explicit != saved
+    {
+        return Err(Failure::Other(
+            "Agent identity differs from the saved connection. No files changed.".into(),
+        ));
+    }
     let mut identity = agent_id.or_else(|| {
         saved_identity
             .as_ref()
@@ -1564,6 +1582,7 @@ fn apply_files_checked(
         if let Err(error) =
             before_apply(index).and_then(|()| fs::rename(temp.path(), &files[index].0))
         {
+            let mut rollback_failed = false;
             for n in (0..index).rev() {
                 let path = &files[n].0;
                 let restored = match &originals[n] {
@@ -1576,9 +1595,13 @@ fn apply_files_checked(
                     })(),
                     None => fs::remove_file(path),
                 };
-                if restored.is_err() {
-                    return Err(Failure::Other("Setup failed and rollback is incomplete. Review host files before retrying.".into()));
-                }
+                rollback_failed |= restored.is_err();
+            }
+            if rollback_failed {
+                return Err(Failure::Other(
+                    "Setup failed and rollback is incomplete. Review host files before retrying."
+                        .into(),
+                ));
             }
             return Err(error.into());
         }
@@ -1697,9 +1720,12 @@ mod transaction_tests {
         let files = vec![
             (first.clone(), b"replacement".to_vec(), 0o700),
             (second.clone(), b"new".to_vec(), 0o600),
-            (dir.path().join("last"), vec![], 0o600),
+            (dir.path().join("config"), vec![], 0o600),
+            (dir.path().join("hooks"), vec![], 0o600),
+            (dir.path().join("identity"), vec![], 0o600),
+            (dir.path().join("health"), vec![], 0o600),
         ];
-        for failure in [1, 2] {
+        for failure in 0..files.len() {
             assert!(
                 apply_files_checked(&files, |n| if n == failure {
                     Err(std::io::Error::other("synthetic apply failure"))
@@ -1713,9 +1739,41 @@ mod transaction_tests {
                 fs::metadata(&first).unwrap().permissions().mode() & 0o777,
                 0o640
             );
-            assert!(!second.exists());
+            for (path, _, _) in &files[1..] {
+                assert!(
+                    !path.exists(),
+                    "{} remained after failure {failure}",
+                    path.display()
+                );
+            }
         }
     }
+    #[test]
+    fn rollback_attempts_other_files_after_one_restore_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let second = sub.join("second");
+        fs::write(&first, "old-first").unwrap();
+        fs::write(&second, "old-second").unwrap();
+        let files = vec![
+            (first.clone(), b"new-first".to_vec(), 0o600),
+            (second, b"new-second".to_vec(), 0o600),
+            (dir.path().join("last"), vec![], 0o600),
+        ];
+        let result = apply_files_checked(&files, |index| {
+            if index == 2 {
+                fs::remove_dir_all(&sub)?;
+                Err(std::io::Error::other("synthetic failure"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&first).unwrap(), b"old-first");
+    }
+
     #[test]
     fn repair_recreates_missing_hook_without_touching_catalog() {
         let dir = tempfile::tempdir().unwrap();

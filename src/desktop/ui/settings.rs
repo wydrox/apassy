@@ -1464,27 +1464,35 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let home = std::env::var_os("HOME")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_default();
+                let health = super::agent_onboarding::host_health(&home, host);
                 g.line_note(
                     host.name(),
                     None,
-                    Some(
-                        kit::text(
-                            super::agent_onboarding::host_health(&home, host),
-                            Font::Callout,
-                        )
-                        .color(kit::SECONDARY),
-                    ),
+                    Some(kit::text(&health.status, Font::Callout).color(kit::SECONDARY)),
                     |ui| {
-                        if kit::small_button(ui, "Repair…", Style::Bordered).clicked() {
-                            repair = Some(host);
+                        if let Some(action) = health.action
+                            && kit::small_button(ui, action, Style::Bordered).clicked()
+                        {
+                            repair = Some((host, action == "Repair…"));
                         }
                     },
                 );
+                g.row(|ui| {
+                    ui.push_id(host.id(), |ui| {
+                        ui.collapsing("Details", |ui| {
+                            kit::note(ui, &health.details);
+                        });
+                    });
+                });
             }
         },
     );
-    if let Some(host) = repair {
-        super::agent_onboarding::reconnect(app, ui.ctx(), host.name());
+    if let Some((host, broken)) = repair {
+        if broken {
+            super::agent_onboarding::repair_host(app, ui.ctx(), host);
+        } else {
+            super::agent_onboarding::reconnect(app, ui.ctx(), host.name());
+        }
     }
     if install {
         match super::cli_tools::install() {

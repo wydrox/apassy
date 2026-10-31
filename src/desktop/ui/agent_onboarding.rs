@@ -481,8 +481,39 @@ mod tests {
     }
 }
 
+/// Repair must target the recorded identity, never an unrelated agent with the
+/// host's default name. Legacy unbound connections need an explicit selection.
+pub(super) fn repair_host(app: &mut DesktopApp, ctx: &egui::Context, host: Host) {
+    let id = std::env::var_os("HOME")
+        .and_then(|home| {
+            std::fs::read(
+                std::path::PathBuf::from(home)
+                    .join(format!(".config/apassy/connection-{}.json", host.id())),
+            )
+            .ok()
+        })
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| v["agent_id"].as_str().and_then(|s| s.parse::<u64>().ok()));
+    let agent = app
+        .owner_ui
+        .session
+        .agents()
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|a| Some(a.id) == id && !a.revoked));
+    match agent {
+        Some(agent) => connect(app, Some(ctx), if host == Host::Claude { ConnectHost::Claude } else { ConnectHost::Codex }, &agent.name),
+        None => app.set_err("This connection has no verified agent identity. Select the agent in Agents and reconnect it explicitly."),
+    }
+}
+
 /// Static health inspection never launches programs or displays wrapper contents.
-pub(super) fn host_health(home: &std::path::Path, host: Host) -> String {
+pub(super) struct HostHealth {
+    pub status: String,
+    pub details: String,
+    pub action: Option<&'static str>,
+}
+
+pub(super) fn host_health(home: &std::path::Path, host: Host) -> HostHealth {
     use std::os::unix::fs::PermissionsExt;
     let dir = home.join(".config/apassy");
     let executable = |name: &str| {
@@ -505,26 +536,34 @@ pub(super) fn host_health(home: &std::path::Path, host: Host) -> String {
             .unwrap_or_else(|| home.join(".codex"));
         (base.join("config.toml"), base.join("hooks.json"))
     };
-    let mcp = std::fs::read_to_string(config).ok().is_some_and(|s| {
+    let mcp = std::fs::read_to_string(&config).ok().is_some_and(|s| {
         if host == Host::Claude {
             serde_json::from_str::<serde_json::Value>(&s)
                 .ok()
                 .is_some_and(|v| {
-                    v.pointer("/mcpServers/apassy/command")
-                        .and_then(|v| v.as_str())
-                        == dir.join(format!("apassy-mcp-{}.sh", host.id())).to_str()
+                    v.pointer("/mcpServers/apassy/enabled") != Some(&serde_json::json!(false))
+                        && v.pointer("/mcpServers/apassy/disabled")
+                            != Some(&serde_json::json!(true))
+                        && v.pointer("/mcpServers/apassy/command")
+                            .and_then(|v| v.as_str())
+                            == dir.join(format!("apassy-mcp-{}.sh", host.id())).to_str()
                 })
         } else {
             s.parse::<toml_edit::DocumentMut>().ok().is_some_and(|v| {
                 v.get("mcp_servers")
                     .and_then(|v| v.get("apassy"))
-                    .and_then(|v| v.get("command"))
-                    .and_then(|v| v.as_str())
-                    == dir.join("apassy-mcp-codex.sh").to_str()
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+                    != Some(false)
+                    && v.get("mcp_servers")
+                        .and_then(|v| v.get("apassy"))
+                        .and_then(|v| v.get("command"))
+                        .and_then(|v| v.as_str())
+                        == dir.join("apassy-mcp-codex.sh").to_str()
             })
         }
     });
-    let hook = std::fs::read(hooks)
+    let hook = std::fs::read(&hooks)
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .is_some_and(|v| {
@@ -550,7 +589,12 @@ pub(super) fn host_health(home: &std::path::Path, host: Host) -> String {
     let version = std::fs::read(dir.join(format!("connection-{}.json", host.id())))
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v["version"].as_str().map(str::to_owned))
+        .and_then(|v| {
+            v["version"]
+                .as_str()
+                .filter(|s| s.len() <= 24 && s.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| "unknown".into());
     let receipt = dir.join(format!(
         "hook-health-{}.json",
@@ -566,25 +610,49 @@ pub(super) fn host_health(home: &std::path::Path, host: Host) -> String {
         .and_then(|v| v["broker_ack_at"].as_u64())
         .map(|seen| format!("hook acknowledged at Unix {seen}; MCP unknown"))
         .unwrap_or_else(|| "no hook acknowledgement recorded; MCP unknown".into());
-    format!(
-        "MCP: {}; hook: {}; paths: MCP {}, hook {}; setup version: {version}; last request: {seen}",
-        if mcp { "installed" } else { "missing/invalid" },
-        if hook {
-            "installed"
+    let configured = std::fs::read_to_string(&config).is_ok_and(|s| s.contains("apassy"))
+        || std::fs::read_to_string(&hooks).is_ok_and(|s| s.contains("apassy"))
+        || dir.join(format!("connection-{}.json", host.id())).exists()
+        || dir.join(format!("apassy-mcp-{}.sh", host.id())).exists();
+    let ready = mcp && hook && executable("mcp") && executable("hook");
+    let status = if !configured {
+        "Not connected"
+    } else if !mcp || !executable("mcp") {
+        "Needs repair: connection missing"
+    } else if !hook || !executable("hook") {
+        "Needs repair: hook missing"
+    } else {
+        "Set up · connection unverified"
+    };
+    HostHealth {
+        status: status.into(),
+        action: if !configured {
+            Some("Connect…")
+        } else if !ready {
+            Some("Repair…")
         } else {
-            "missing/disabled"
+            None
         },
-        if executable("mcp") {
-            "exists"
-        } else {
-            "missing"
-        },
-        if executable("hook") {
-            "exists"
-        } else {
-            "missing"
-        }
-    )
+        details: format!(
+            "MCP: {}; hook: {}; paths: MCP {}, hook {}; setup version: {version}; last request: {seen}",
+            if mcp { "installed" } else { "missing/invalid" },
+            if hook {
+                "installed"
+            } else {
+                "missing/disabled"
+            },
+            if executable("mcp") {
+                "exists"
+            } else {
+                "missing"
+            },
+            if executable("hook") {
+                "exists"
+            } else {
+                "missing"
+            }
+        ),
+    }
 }
 
 #[cfg(all(test, feature = "vault"))]
@@ -594,8 +662,10 @@ mod health_tests {
     fn missing_host_is_visible_and_never_claims_a_request() {
         let dir = tempfile::tempdir().unwrap();
         let health = host_health(dir.path(), Host::Claude);
-        assert!(health.contains("missing"));
-        assert!(health.contains("no hook acknowledgement"));
-        assert!(health.contains("version: unknown"));
+        assert_eq!(health.status, "Not connected");
+        assert_eq!(health.action, Some("Connect…"));
+        assert!(health.details.contains("missing"));
+        assert!(health.details.contains("no hook acknowledgement"));
+        assert!(health.details.contains("version: unknown"));
     }
 }
