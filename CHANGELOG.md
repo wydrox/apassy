@@ -2,6 +2,12 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## Unreleased
+
+### Added
+
+- Free and Personal vaults can connect an iPhone for approvals and push without an account or operator code. Connect saves its key before contacting the relay, reuses it after failures, and confirms each iPhone with safety words.
+
 ## [0.5.8] - 2026-10-31
 
 ### Added

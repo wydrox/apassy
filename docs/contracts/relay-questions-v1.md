@@ -698,3 +698,15 @@ Settle ciphertext (hex, 221 bytes):
 4. **Long polls.** The relay gets a separate pool of long-poll slots for questions (stream R4), so question waits do not take the shared member slots.
 5. **Push secret.** The relay calls the Worker's push route with its own `PUSH_SECRET`, not the edge secret.
 6. **Bundle id.** `com.wydrox.apassy.companion` (checked in `ios/ApassyCompanion/project.yml`). Device ids follow the schema 19 `trusted_device.uuid` format.
+
+## 21. Connect pairing key handoff (ADR 0032)
+
+A questions-only device link can append `&handoff=<qid>.<secret>` inside its URL fragment. `qid` is a new random 16-byte b64u identifier; `secret` is 32 random bytes, b64u. This capability never goes to the relay: the iPhone removes it before calling the existing device-link routes. A plain link remains compatible with the existing vault-sync delivery of keys.
+
+Only after the existing safety-word confirmation and trusted-device registration does the Mac post an opaque envelope to `POST /v1/questions`, `to=member`, expiring with the link. `key_id=c011ec7000000001` is reserved for this transfer; Mac and iPhone request readers skip it. No card/answer version or ordinary question AAD changes. The handoff plaintext has `v=1`, `vault_id`, `team_id`, `recipient` (X9.63 bytes), `question_key` (32 bytes), its original `key_updated_at` / `key_updated_by`, and the live public `trusted_device` rows of that team. It contains no credential value or private answer key.
+
+ChaCha20-Poly1305 uses the QR secret and a new random 12-byte nonce. AAD is UTF-8 `apassy-connect-handoff-v1\0<team id>\0<qid>\0<recipient public key b64u>`, with no final NUL. The envelope nonce/ciphertext use the existing b64u encodings. The recipient first completes its confirmed join, then finds the pinned qid, opens it and checks the version, team, vault UUID, its new relay public key, device number and local answer public key. Membership, question key and public trust rows commit together. Original sync versions are retained; local tombstones and removed keys always win. A newer local question key cannot be replaced by an older different key.
+
+A retry uses the same qid and exact sealed bytes. Relay 0.5.8 returns `409 conflict` for an existing qid; the Mac treats that as an already-sent transfer, while the iPhone still requires successful decryption and validation before showing success. Unsupported/malformed handoffs cannot enable approvals. The phone waits through transient network errors, and an expired link requires a new pairing. The Mac must stay open until it has sent the keys. Reinstalling the phone requires a new device key, code, and confirmation; remove the old device separately.
+
+This is an app extension over the existing opaque transport, not a production relay change. Connect creation and F06 recovery are specified in [ADR 0032](../adr/0032-connect-onboarding.md). Physical APNs receipt and cellular approval remain device acceptance checks.
