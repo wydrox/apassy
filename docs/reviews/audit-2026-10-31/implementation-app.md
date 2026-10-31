@@ -41,3 +41,11 @@ command has a string regression; native visual acceptance remains unverified.
 Final results are recorded in the draft PR. These checks use scratch HOME
 `/tmp/apassy-appfix-home`, the prescribed target directory and incremental setting.
 Disk availability was checked before each build and remained above 6 GiB.
+
+Validation:
+
+- Full `cargo test --offline --locked --all-features --all-targets --no-fail-fast -- --test-threads=1`: **1929 passed, 1 failed, 19 ignored**; exit 101. The sole failure is `isolation_profile::launcher_passes_the_installed_and_the_build_app`. Its unchanged launcher recognizes a literal `target` directory; the required `.target-appfix` path therefore has no default `APASSY_APP_BUILD`. The test expects that parameter. Launcher blob `5dc4615e1ece9255818418dcc7ea1c3eba7d4fe6` and test blob `5cad07d70d504360eb77618a058693ce2321ada7` exactly match base 6759f320. Not changed outside audit scope.
+- Library: **1,144 passed, 0 failed, 5 ignored**. All eight audit regression cases pass; the `audit_` filter also includes one existing case (9/9 pass, no ignored tests). Initial full-library run exposed two old import assertions; corrected assertions pass in the final run.
+- `cargo clippy --offline --locked --all-features --all-targets -- -D warnings`: **PASS**.
+- All-feature doc tests: **6 passed**. Node model: **33 passed**. Python isolation fixtures: **9 passed**. Format and whitespace checks: **PASS**.
+- No live/provider/native visual acceptance or remote CI acceptance claimed.
