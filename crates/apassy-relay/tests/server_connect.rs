@@ -2130,3 +2130,60 @@ fn lost_connect_acknowledgement_recovers_same_active_team_after_restart() {
     assert_eq!(post_connect(&relay, &recovery(&key)).status, 409);
     assert!(teams(&relay).iter().all(|info| info["id"] != team.as_str()));
 }
+
+#[test]
+fn reclamation_preserves_the_complete_encrypted_team_audit() {
+    let relay = start(UpstreamOptions::default());
+    let (team, _) = connect(&relay, "Abandoned");
+    let now = now_unix();
+    relay.hub().suspend(&team, now - 31 * 86400).unwrap();
+    // Only an idle-sweep suspension may be deleted automatically.
+    let directory = rusqlite::Connection::open(relay.config.directory_path()).unwrap();
+    directory
+        .pragma_update(None, "key", relay.config.master_key.expose())
+        .unwrap();
+    directory
+        .execute(
+            "UPDATE team SET suspend_reason = 'idle' WHERE id = ?1",
+            [team.as_str()],
+        )
+        .unwrap();
+    let source = open_team_file(&relay.config, &team);
+    let before: Vec<(i64, String)> = source
+        .prepare("SELECT id, detail FROM audit ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    drop(source);
+    let report = sweep(&relay, false);
+    assert_eq!(report["failed"], json!([]));
+    assert_eq!(report["deleted"], json!([team]));
+    assert!(!relay.config.team_path(&team).exists());
+    let archives: Vec<_> = std::fs::read_dir(relay.config.data_dir.join("audit-archive"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(archives.len(), 1);
+    let archive =
+        apassy_relay::server::store::Store::open_read_only(&archives[0], &relay.config.master_key)
+            .unwrap();
+    let after = archive
+        .with(|conn| {
+            Ok(conn
+                .prepare("SELECT id, detail FROM audit ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(sweep(&relay, false)["deleted"], json!([]));
+    assert!(
+        archives[0].exists(),
+        "later sweeps never prune archived audit"
+    );
+}

@@ -652,6 +652,25 @@ fn one_broken_team_does_not_stop_the_others() {
     let send = |command: Command| {
         apassy_relay::server::operator::send(&config.admin_socket_path(), &command)
     };
+    // Public liveness stays uniform; the filesystem-private view reports failure.
+    assert_eq!(
+        relay::call_url(&url, None, "GET", "/healthz", None, None).0,
+        200
+    );
+    use std::io::{BufRead, BufReader, Write};
+    let mut socket = std::os::unix::net::UnixStream::connect(config.admin_socket_path()).unwrap();
+    socket.write_all(b"{\"command\":\"readiness\"}\n").unwrap();
+    let mut line = String::new();
+    BufReader::new(socket).read_line(&mut line).unwrap();
+    let readiness: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(readiness["result"]["ready"], false, "{readiness}");
+    assert!(
+        readiness["result"]["teams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|team| team["id"] == id_b.as_str() && team["readable"] == false)
+    );
     let teams = send(Command::Teams).unwrap();
     let b = teams
         .as_array()

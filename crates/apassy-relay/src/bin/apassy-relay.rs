@@ -28,6 +28,7 @@ const USAGE: &str = "Usage:
   apassy-relay snapshot-check
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
+  apassy-relay admin readiness
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
     [--runs-per-hour <n>] [--pending-runs <n>] [--agent-requests <n>]
     [--sync-bytes <n>] [--sync-pushes-per-hour <n>] [--sync-transfers <n>]
@@ -38,7 +39,7 @@ const USAGE: &str = "Usage:
   apassy-relay admin suspend|resume <team id>
   apassy-relay admin delete <team id> [--free-connect-key]
   apassy-relay admin backup
-  apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run]
+  apassy-relay admin connect-sweep [--idle-days <n>] [--delete-days <n>] [--dry-run | --apply]
 
 The configuration is read from the environment:
   APASSY_RELAY_DATA, APASSY_RELAY_LISTEN, APASSY_RELAY_PUBLIC_URL,
@@ -113,6 +114,7 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
             Ok(Operator::TeamCode { hours })
         }
         "teams" if rest.is_empty() => Ok(Operator::Teams),
+        "readiness" if rest.is_empty() => Ok(Operator::Readiness),
         "limits" => {
             let Some(id) = rest.first() else {
                 return Err("Give one team id, such as t_7k2m5q4x3c.".to_string());
@@ -201,10 +203,15 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
         }
         "backup" if rest.is_empty() => Ok(Operator::Backup),
         "connect-sweep" => {
-            let dry_run = rest.iter().any(|arg| arg == "--dry-run");
+            let apply = rest.iter().filter(|arg| *arg == "--apply").count();
+            let dry = rest.iter().filter(|arg| *arg == "--dry-run").count();
+            if apply > 1 || dry > 1 || (apply > 0 && dry > 0) {
+                return Err("Give --apply or --dry-run once.".to_string());
+            }
+            let dry_run = apply == 0;
             let others: Vec<String> = rest
                 .iter()
-                .filter(|arg| *arg != "--dry-run")
+                .filter(|arg| *arg != "--dry-run" && *arg != "--apply")
                 .cloned()
                 .collect();
             if others.len() + 1 < rest.len() {
@@ -280,7 +287,16 @@ fn admin(command: &Operator) -> ExitCode {
                     serde_json::to_string_pretty(&result).unwrap_or_default()
                 );
             }
-            ExitCode::SUCCESS
+            if matches!(command, Operator::Readiness) && result["ready"] != true
+                || matches!(command, Operator::ConnectSweep { .. })
+                    && result["failed"]
+                        .as_array()
+                        .is_some_and(|failed| !failed.is_empty())
+            {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(error) => fail(&error.message),
     }
@@ -508,7 +524,7 @@ mod tests {
             Operator::ConnectSweep {
                 idle_days: 30,
                 delete_days: 30,
-                dry_run: false
+                dry_run: true
             }
         );
         assert_eq!(

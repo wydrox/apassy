@@ -973,6 +973,78 @@ impl Hub {
         Ok(freed)
     }
 
+    /// Private operator readiness. No corresponding public HTTP endpoint exists.
+    pub fn readiness(&self) -> RelayResult<serde_json::Value> {
+        let mut teams = Vec::new();
+        let mut ready = true;
+        let rows = self.directory.teams()?;
+        let held = rows
+            .iter()
+            .filter(|row| row.kind == TeamKind::Connect)
+            .count();
+        for row in &rows {
+            if row.state != TeamState::Active {
+                continue;
+            }
+            let readable = self.team(&row.id).is_some_and(|core| {
+                core.store
+                    .with(|conn| {
+                        let check: String = conn
+                            .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
+                            .map_err(db)?;
+                        conn.query_row("SELECT count(*) FROM team", [], |r| r.get::<_, i64>(0))
+                            .map_err(db)?;
+                        Ok(check == "ok")
+                    })
+                    .unwrap_or(false)
+            });
+            let full = self.team(&row.id).is_some_and(|core| {
+                crate::server::audit::file_use(&core)
+                    .is_ok_and(|(_, _, level)| level == Some(crate::server::audit::CapLevel::Full))
+            });
+            ready &= readable && !full;
+            teams.push(json!({"id": row.id, "readable": readable, "file_full": full}));
+        }
+        Ok(
+            json!({"ready": ready, "teams": teams, "push": self.push.status(),
+            "connect": {"held": held, "capacity": self.config.connect_teams_max,
+                "high_water": (held as u64).saturating_mul(10) >= self.config.connect_teams_max.saturating_mul(8)}}),
+        )
+    }
+
+    /// Preserve the complete append-only team audit before automatic reclamation.
+    /// The immutable encrypted snapshot uses the relay master key, so deleting the
+    /// directory's team key cannot make the history unreadable. Archives are never pruned.
+    fn archive_swept_team(&self, row: &TeamRow, now: u64) -> RelayResult<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        let directory = self.config.data_dir.join("audit-archive");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|_| RelayError::internal("The audit archive folder cannot be created."))?;
+        let archive = directory.join(format!("{}-{now}.db", row.id));
+        let store = Store::open_read_only(&self.config.team_path(&row.id), &row.file_key)?;
+        store.with(|conn| Store::snapshot_on(conn, &archive, &self.config.master_key))?;
+        // Verify readability and the audit count with the archive key before deletion.
+        let archived = Store::open_read_only(&archive, &self.config.master_key)?;
+        let count = |store: &Store| {
+            store.with(|conn| {
+                conn.query_row("SELECT count(*) FROM audit", [], |r| r.get::<_, i64>(0))
+                    .map_err(db)
+            })
+        };
+        if count(&store)? != count(&archived)? {
+            return Err(RelayError::internal("The archived audit is incomplete."));
+        }
+        File::open(&directory)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RelayError::internal("The audit archive folder cannot be synced."))?;
+        self.directory.audit.write(&self.directory.store, now, OPERATOR_ACTOR, "team_archived", None,
+            &json!({"team_id": row.id, "archive": archive.file_name().and_then(|name| name.to_str())}))?;
+        Ok(())
+    }
+
     /// The teams as the operator sees them.
     pub fn team_infos(&self) -> RelayResult<Vec<TeamInfo>> {
         let mut infos = Vec::new();
@@ -1092,7 +1164,8 @@ impl Hub {
                     (if dry_run {
                         Ok(())
                     } else {
-                        self.delete(&row.id, false, now).map(drop)
+                        self.archive_swept_team(&row, now)
+                            .and_then(|()| self.delete(&row.id, false, now).map(drop))
                     })
                     .map(|()| report.deleted.push(row.id.clone()))
                 }

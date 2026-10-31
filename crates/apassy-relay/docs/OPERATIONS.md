@@ -1025,7 +1025,7 @@ What changes at the first start of this version:
   - `APASSY_RELAY_CONNECT_LONG_POLLS` (default 96, 0 to 1024): the long polls of all Connect teams together (below).
 
   Either of the first two at `0` turns Connect off without a deploy; `deploy/vps/compose.yaml` ships with `APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "0"`, and step 5 of 20.2 turns it on. Each refusal writes a `connect_refused` row to the relay audit (at most one per reason and ten seconds).
-- One device key makes at most one Connect team, ever; the same key again gets 409 `connect_key_used`.
+- One device key creates at most one Connect team. An old creation proof still gets 409 `connect_key_used`; a fresh possession proof can recover the same active team (section 22). Suspended/deleted teams are never recovered.
 - One client network (an IPv6 /48 or an IPv4 /24) makes at most 5 Connect teams per UTC day, and never more than a tenth of the daily cap; over it 429 `rate_limited` until the next UTC day. The Worker sends the network in `X-Apassy-Client-Prefix` and, beside it, `X-Apassy-Client-Prefix-Mac`: an HMAC-SHA256 of the network under the edge secret. **The relay takes the network only when that HMAC verifies** (compared in constant time); without it, or with a wrong one, the call counts as the one network `unknown`. A Worker from before this one forwarded a client's own `X-Apassy-Client-Prefix`, so the header alone proves nothing. The relay counts **in memory only**: it keeps an HMAC of the prefix under a random salt that it makes at the first call of each UTC day and forgets with the counts at the next. No file, log line, or audit row of the relay holds an address or a prefix, and a restart forgets the counts.
 - A Connect team starts with these limits, and every other limit at its default (section 17):
 
@@ -1114,12 +1114,12 @@ A Connect team whose devices have not signed in for 30 days is most likely aband
 
 ```sh
 docker compose exec relay apassy-relay admin connect-sweep --dry-run       # names the teams, changes nothing
-docker compose exec relay apassy-relay admin connect-sweep                 # --idle-days 30 --delete-days 30
+docker compose exec relay apassy-relay admin connect-sweep --apply         # --idle-days 30 --delete-days 30
 ```
 
 The answer lists `suspended`, `deleted`, and `failed` team ids. A suspended team gets `"suspend_reason": "idle"` in `admin teams` and `team_suspended {"reason":"idle"}` in the team and relay audit. Its devices get 401 at the next sign-in, and the app connects again with a new key. During the suspension, `admin resume <id>` brings a team back (and clears the reason). A deleted team's key stays used, and no longer names the team. Suspended teams still count against `APASSY_RELAY_CONNECT_TEAMS_MAX` until they are deleted. Take a backup before the first real run.
 
-The relay does not schedule it. To run it once a day, the owner can add a cron line on the VPS after the first manual runs, for example `17 4 * * * cd /opt/apassy && docker compose exec -T relay apassy-relay admin connect-sweep >> /opt/apassy/logs/connect-sweep.log 2>&1`; that is not set up.
+The packaged systemd timer and its dry-run default are described in section 22. Installation and activation require a separate owner decision.
 
 ### 20.5 Start time, memory, and open files
 
@@ -1267,3 +1267,88 @@ So the first steps are a look, with the new image still up. Nothing is stopped y
    ```
 
    Then the copy of step 4 for every team with a copy (`ls /data/teams/*.db.pre-v6` in place of `copy-teams.txt`), the old image in `compose.yaml`, and `docker compose up -d --wait relay` (the relay only; the tunnel stays down, so only the operator socket reaches it). Suspend every Connect team (`admin teams` lists them, `admin suspend <id>` each), tell the owner of every operator team that changes of access since the migration are undone and must be re-applied (step 2), and only then start the tunnel: `docker compose up -d --wait cloudflared`. If the old image does not start because of a stored feed limit (step 4), there is no way to set it back without the new image: restore `relay.db` from the backup of step 3 as the last resort, knowing that the teams made since then are lost.
+
+
+## 22. Relay audit recovery, push, readiness and reclamation
+
+Prepared for review only: no deployment or timer installation is implied. Package
+versions and team/directory schemas remain 0.5.8 and 6/1003.
+
+**Connect recovery (F06, contract change requiring owner approval before deploy).**
+Creation is unchanged. Save the private device key before the first request. If its
+response is lost, POST `/v1/connect/challenge` with `{"public_key":"<base64url>"}`.
+The response uses the normal envelope and returns `nonce`, `expires_at` (60 seconds)
+and `origin`, independent of whether the key has a team. POST `/v1/connect` with the
+original v/team/device_name/public_key fields, `recovery_nonce`, and a new `signature`
+over `connect_message(origin, public_key) || 0x00 || "recovery" || 0x00 || nonce`.
+The server consumes the nonce before checking the signature. A valid proof returns
+the original team/member/device ids only while the team and device/member remain
+active. Names are not updated. Old creation signatures still get `connect_key_used`;
+that code now directs callers to fresh-challenge recovery. A deleted or suspended
+team gets the same 409 as an unavailable key, without a team id. Recovery never
+creates/resumes a team or clears a tombstone, and bypasses creation quotas. A team
+DB that failed to open needs operator repair/restart, then recovery works. Challenges
+are memory-only, capped at 1000, and must be requested again after restart. Clients
+0.5.7/0.5.8 retain their existing request/response shapes; fresh recovery is additive
+and needs a future app integration. The explicit operator rollback flag
+`--free-connect-key` retains its separately authorized destructive meaning.
+
+**Push (F07).** Four bounded senders use round-robin team queues, one in-flight
+question per team, 256 total held jobs including retries, 16 per operator team,
+2 per Connect team and 128 for Connect together. Pending qids coalesce. Worker
+network/timeouts, HTTP 429/5xx, missing/malformed 200 results, and APNs transient
+results retry only the remaining targets with exponential 1..60-second backoff
+plus 0..2-second team jitter. Backoff releases the sender. Attempts stop at the
+question TTL; each request is bounded by 10 seconds. Final bad-token results mark
+the token failed and do not retry. Each attempt rechecks the open question, current
+route, live asker/member/recipient, current token and team suspension. Restart
+replays up to the newest 256 open/unexpired questions per active team through the
+same admission bounds. This is best-effort replay, not an exactly-once outbox:
+queue overflow can drop intent and restart may repeat a previously successful
+notification (the constant APNs collapse id coalesces it). No schema change.
+APNs acceptance is not proof of device receipt. Existing push audit rows contain
+counts/status/reason/device ids, never token values.
+
+**Readiness (F08).** `apassy-relay admin readiness` uses the private operator socket.
+It returns `ready`, active team ids with database `readable`/`file_full` checks,
+push queue counts, and Connect held/capacity/80-percent high-water status. It exits
+1 for an unreadable/missing active team or a full file, 0 otherwise. Public
+`/healthz` remains process liveness (`ok`), with no team ids. Unknown tokens and
+failed-team tokens keep uniform refusal. Readiness does not prove backup freshness,
+restore success, APNs delivery, filesystem writeability or alert delivery; the owner
+must select monitoring/alerts separately. Use `admin teams` for detailed file use.
+
+**Reclamation (F09).** `admin connect-sweep` now defaults to dry-run. `--apply`
+is required to mutate; `--dry-run` remains explicit and cannot accompany `--apply`.
+Defaults: suspend after 30 days without a live device sign-in (creation time if
+never signed in), then delete only sweep-suspended teams after another 30 days.
+Limits must still equal the Connect preset; operator/upgraded/synced/operator-held
+teams are excluded. Failed actions are listed and make the CLI exit 1. Suspensions
+still hold a capacity seat; deletion frees it and preserves the key tombstone.
+
+Before automatic deletion, the full team DB, including every append-only audit
+row, is snapshotted to immutable `DATA/audit-archive/<team>-<time>.db`, encrypted
+with the relay master key (folder 0700, file 0600), synced and read-verified. Archive
+failure prevents deletion. Neither the directory audit nor archived team audits
+are pruned. Archives intentionally retain disk use: reclamation frees active-team
+capacity, not historical audit storage. Include `audit-archive/` in the owner's
+separate encrypted/off-host retention process; the current `admin backup` manifest
+covers directory/current team files, not this archive folder. Do not delete archives
+without a separate retention decision. Repeated failed deletions can leave multiple
+immutable archives; inspect them manually without overwriting history.
+
+Packaged units: `deploy/vps/reclamation/apassy-relay-connect-sweep.{service,timer}`.
+After an authorized backup/restore drill, inspect a manual dry-run first. The owner
+may install the units into `/etc/systemd/system/`, then enable the timer. It runs
+daily at 04:17 UTC with up to 15 minutes jitter and persistent catch-up, logging JSON
+and failures to the journal. Its default `SWEEP_MODE=--dry-run` changes nothing.
+Only after reviewing candidates/thresholds should the owner create
+`/etc/apassy-relay-connect-sweep` with `SWEEP_MODE=--apply`, then inspect the next
+service result and readiness high-water counts. No units are installed by this PR.
+
+**Rollout/rollback.** Review the Connect semantics and retention policy, then deploy
+only through a separately authorized release. No schema migration is needed.
+Rollback to the preceding schema-6/1003 binary restores one-shot pushes and old
+Connect retry refusal. Stop/disable the new sweep timer before rollback: the old
+CLI has different default sweep semantics and does not support `--apply`. Keep all
+immutable audit archives and the master key. No version bump is part of this patch.

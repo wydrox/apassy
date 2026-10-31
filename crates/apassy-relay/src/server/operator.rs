@@ -39,6 +39,8 @@ pub enum Command {
     },
     /// The teams: id, name, state, counts, last activity.
     Teams,
+    /// Private readiness: active team databases and capacity, separate from liveness.
+    Readiness,
     /// Reads or changes the limits of one team.
     Limits {
         team: TeamId,
@@ -75,6 +77,7 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
             let (code, expires_at) = hub.directory.new_team_code(*hours, now)?;
             Ok(json!({"code": code.expose(), "expires_at": expires_at}))
         }
+        Command::Readiness => hub.readiness(),
         Command::Teams => serde_json::to_value(hub.team_infos()?)
             .map_err(|_| RelayError::internal("A result cannot be written.")),
         Command::Limits { team, set } => serde_json::to_value(hub.limits(team, *set, now)?)

@@ -1688,3 +1688,27 @@ The way back to the schema 5 image (docs/OPERATIONS.md 21.3) copies each `teams/
 - **A team made after the migration** has no copy and is version 6: the old image cannot open it. A Connect team's `connect_key` stays in `relay.db` (26.2), so its device would get 409 `connect_key_used` at its next `POST /v1/connect`. `admin delete ID --free-connect-key` with the new image still up deletes such a team and frees its key (27.10).
 
 So the operator turns new Connect teams off and runs `apassy-relay rollback-check` before anything is stopped, and again as the gate with the relay stopped, right before the copy, which copies only the teams with a copy that the gate listed. A feed limit stored in `relay.db` (`feed_limits_stored`) is set back to the preset with the new image, never by restoring `relay.db` from a backup (that drops the teams made since, and the old image's start removes their files as orphans). When it names any revocation or change, the operator fixes forward (a new image from the schema 6 branch with the fix) rather than rolling back. When a rollback is the only way, the operator suspends each named Connect team with the new image still up (the suspension is in `relay.db`, which the rollback keeps), and the owner of each named operator team re-applies each named change right after the old image starts, before the team's devices are told the relay is back. The command reads the files without the relay, so it also runs when the new image cannot serve, as long as its binary starts.
+
+
+## 28. Audit reliability addendum (F06–F09)
+
+This supersedes the permanent-retry-refusal, shared FIFO/one-shot push and manual
+sweep behavior in sections 25–26. See OPERATIONS section 22 for exact wire messages,
+queue/TTL limits, private readiness, archive retention and rollout/rollback.
+
+- Connect creation stays compatible. A fresh, one-use 60-second challenge at
+  `POST /v1/connect/challenge` enables recovery of the same active team at
+  `POST /v1/connect` with optional `recovery_nonce` and a domain-separated signature.
+  Old creation proof replays remain 409; suspended/deleted/revoked identities cannot
+  recover or revive. No schema change (6/1003).
+- Push is bounded per question/team with round-robin fairness, four senders,
+  transient retries/backoff inside TTL, live identity/token checks and bounded
+  open-question replay after restart. Final bad tokens stop; overflow/restart
+  replay remains best effort, with possible collapse-id-coalesced duplicates.
+- Public health is liveness only. Private `admin readiness` checks active team
+  readability and caps, returns only to the filesystem-authorized operator and
+  exits nonzero on an unavailable active team.
+- `admin connect-sweep` defaults to dry-run; `--apply` enables the existing 30-day
+  idle suspension plus 30-day deletion policy. Packaged systemd units default to
+  dry-run and are not installed automatically. Automatic deletion first preserves
+  an immutable master-key-encrypted DB snapshot including all append-only audit.
