@@ -1244,11 +1244,6 @@ async function startPasskey(session, message) {
   // Only the isolated bridge can attest a browser user activation. Page data
   // never carries a window, deadline, secret, or reusable approval.
   if (message.trustedGesture === true && request.op === "get") wire.trusted_gesture = true;
-  const compatibleWire = await compatibleGestureRequest(wire);
-  if (session.done || !(await tabStillOn(peer))) {
-    endPasskey(session, null);
-    return;
-  }
   session.expect = {
     op: request.op,
     rid,
@@ -1269,9 +1264,23 @@ async function startPasskey(session, message) {
     return;
   }
   session.native = native;
+  // Negotiate on this session's port: cancellation and the request deadline
+  // cover status as well as the owner check. Never cache across app reconnects.
+  let awaitingStatus = Object.hasOwn(wire, "trusted_gesture");
   native.onMessage.addListener((answer) => {
     if (session.done || session.native !== native) return;
-    // One answer per request: the host is done.
+    if (awaitingStatus) {
+      awaitingStatus = false;
+      if (!supportsTrustedGesture(answer)) delete wire.trusted_gesture;
+      // Navigation may have happened while the app answered status.
+      tabStillOn(peer).then((current) => {
+        if (session.done || session.native !== native) return;
+        if (!current) endPasskey(session, null);
+        else native.postMessage(wire);
+      }).catch(() => endPasskey(session, NOT_ALLOWED));
+      return;
+    }
+    // One answer per passkey request: the host is done.
     closeNative(session);
     for (const timer of session.timers) clearTimeout(timer);
     session.timers = [];
@@ -1288,7 +1297,7 @@ async function startPasskey(session, message) {
   });
   // The deadline of the page (30 to 180 s). Ending closes the native port.
   session.timers.push(setTimeout(() => endPasskey(session, NOT_ALLOWED), request.timeout));
-  native.postMessage(compatibleWire);
+  native.postMessage(awaitingStatus ? { v: WIRE_VERSION, cmd: "status" } : wire);
 }
 
 async function deliverPasskey(session, answer) {

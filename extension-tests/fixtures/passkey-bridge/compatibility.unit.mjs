@@ -66,11 +66,51 @@ for (const version of ['0.5.7', '0.5.8']) {
       challenge: Buffer.alloc(32, 1).toString('base64url'), rpId: 'example.com', allowCredentials: [],
     } });
     await flush();
+    assert.equal(bg.natives.length, 1, 'status and assertion share the cancellable session port');
     assert.deepEqual(requests.map((r) => r.cmd), ['status', 'passkey_get']);
     const wire = requests[1];
     assert.equal(Object.hasOwn(wire, 'trusted_gesture'), version === '0.5.8');
     if (version === '0.5.8') assert.equal(wire.trusted_gesture, true);
     port.disconnect();
     await flush();
+  });
+}
+
+for (const ending of ['deadline', 'disconnect', 'replacement', 'navigation']) {
+  test(`a stalled passkey status probe is owned by the session: ${ending}`, async () => {
+    const bg = loadBackground();
+    const origin = 'https://login.example.com';
+    bg.tabs.set(5, `${origin}/login`);
+    bg.documents.set('DOC-1', origin);
+    let held;
+    bg.setHost((wire, record) => { held = record; });
+    const message = { op: 'get', trustedGesture: true, options: {
+      challenge: Buffer.alloc(32, 1).toString('base64url'), rpId: 'example.com',
+      allowCredentials: [], timeout: 30_000,
+    } };
+    const port = bg.connect(senderFor(origin));
+    const replies = [];
+    port.onMessage.addListener((reply) => replies.push(reply));
+    port.postMessage(message);
+    await flush();
+    const probe = bg.natives[0];
+    assert.deepEqual(probe.sent.map((wire) => wire.cmd), ['status']);
+    if (ending === 'deadline') await bg.clock.advance(30_000);
+    if (ending === 'disconnect') port.disconnect();
+    if (ending === 'replacement') {
+      const second = bg.connect(senderFor(origin));
+      second.postMessage(message);
+    }
+    if (ending === 'navigation') {
+      bg.documents.delete('DOC-1');
+      held.port.postMessage({ ok: true, data: { type: 'status', version: '0.5.8' } });
+    }
+    await flush();
+    assert.equal(probe.disconnected, true);
+    assert.deepEqual(probe.sent.map((wire) => wire.cmd), ['status'], 'no owner check after session ends');
+    if (ending === 'deadline' || ending === 'replacement') {
+      assert.equal(replies[0].kind, 'error');
+      assert.equal(replies[0].name, 'NotAllowedError');
+    }
   });
 }
