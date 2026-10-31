@@ -150,7 +150,9 @@ const PAGES = {
         document.querySelector("#status").textContent = (await response.json()).updated ? "Password changed on this site" : "Password change failed";
       });
     </script>`),
-  "/same-frame": page("Same origin frame", `<iframe id="frame" src="/typed"></iframe>`),
+  // Leave room for the chooser without covering the form. The browser's
+  // default 300x150 iframe correctly forces the extension to hide its menu.
+  "/same-frame": page("Same origin frame", `<iframe id="frame" src="/typed" style="width:640px;height:640px"></iframe>`),
   "/cross-frame": page("Cross origin frame", `<iframe id="frame" src="http://127.0.0.1:PORT/typed"></iframe>`),
   "/blank": page("Nothing here", `<p>No login form.</p>`),
 

@@ -7,6 +7,7 @@
 // fill uses the activeTab grant of the toolbar click, as a password fill does.
 
 import { test, expect } from "../fixtures/passkey-bridge/browser.mjs";
+import { goto } from "../support/helium.mjs";
 
 const CODE = "135790";
 const LOGINS = [
@@ -17,7 +18,7 @@ const LOGINS = [
 async function open(ph, pathname, scenario = {}) {
   ph.setScenario({ vault: "unlocked", logins: LOGINS, code: { value: CODE }, ...scenario });
   const page = await ph.context.newPage();
-  await page.goto(ph.pageUrl(pathname));
+  await goto(page, ph.pageUrl(pathname));
   await page.bringToFront();
   const state = await ph.handle({ type: "state" });
   expect(state.state).toBe("list");

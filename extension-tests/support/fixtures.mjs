@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "./pages.mjs";
+import { goto, warmUpHelium } from "./helium.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const EXTENSION_DIR = path.resolve(HERE, "../../extension");
@@ -31,19 +32,6 @@ export const LOGINS = [
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// In its first second, Helium sometimes sends a new tab to about:blank, which
-// aborts the navigation of the test (net::ERR_ABORTED). Try again then.
-async function goto(page, url) {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await page.goto(url);
-    } catch (error) {
-      if (attempt >= 3 || !String(error.message).includes("ERR_ABORTED")) throw error;
-      await sleep(250);
-    }
-  }
-}
 
 // Writes the host manifest into the profile: Chromium reads user-level host
 // manifests from <user-data-dir>/NativeMessagingHosts.
@@ -247,7 +235,6 @@ export const test = base.extend({
       fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     }
     const server = await startServer();
-    const started = Date.now();
     const context = await chromium.launchPersistentContext(profile, {
       executablePath: HELIUM,
       headless: HEADLESS,
@@ -263,12 +250,8 @@ export const test = base.extend({
     const harness = new Harness({ context, browserSession, server, ...host });
     harness.popupPages = new Set();
     await harness.worker();
-    // About one second after the start, Helium loads the page of the active
-    // tab once more, which clears what a test typed into it. Let that happen
-    // to a warm-up page.
     const warmUp = await context.newPage();
-    await goto(warmUp, harness.url("/blank"));
-    await sleep(Math.max(0, started + 2000 - Date.now()));
+    await warmUpHelium(warmUp, harness.url("/blank"));
     await warmUp.close();
     await use(harness);
     await context.close();
