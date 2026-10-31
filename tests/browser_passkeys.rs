@@ -324,6 +324,8 @@ fn fill_code_parses_and_checks_its_fields() {
 #[test]
 fn legacy_requests_and_literals_are_unchanged() {
     let request = Request {
+        trusted_gesture: false,
+        owner_window_host: 0,
         v: 1,
         cmd: "fill".to_owned(),
         url: Some("https://github.com/".to_owned()),

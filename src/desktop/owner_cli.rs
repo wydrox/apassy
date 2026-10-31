@@ -69,6 +69,8 @@ pub(crate) struct CliHost {
     issued: Option<SecretText>,
     /// The rows of the last batch binding, for its ticket.
     bound: Option<Vec<BindingRow>>,
+    fresh_export: Option<String>,
+    fresh_agent: Option<(AgentRow, SecretText)>,
 }
 
 impl CliHost {
@@ -85,6 +87,8 @@ impl CliHost {
         self.sessions.clear();
         self.issued = None;
         self.bound = None;
+        self.fresh_export = None;
+        self.fresh_agent = None;
     }
 
     #[cfg(test)]
@@ -112,6 +116,8 @@ pub(crate) struct CliTicket {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum After {
     Message,
+    Export,
+    RegisterAgent,
     Session,
     Token {
         agent_id: u64,
@@ -318,6 +324,8 @@ impl DesktopApp {
         }
         match &request {
             OwnerRequest::OpenCliSession => ticket.after = After::Session,
+            OwnerRequest::ExportDecisions => ticket.after = After::Export,
+            OwnerRequest::RegisterAgent { .. } => ticket.after = After::RegisterAgent,
             OwnerRequest::RotateToken { agent_id, .. } => {
                 ticket.after = After::Token {
                     agent_id: *agent_id,
@@ -362,6 +370,14 @@ impl DesktopApp {
         }
         let response = match after {
             After::Message => Response::ok(message, Data::None),
+            After::Export => match self.cli.fresh_export.take() {
+                Some(jsonl) => Response::ok(message, Data::Export { jsonl }),
+                None => Response::error("refused", message),
+            },
+            After::RegisterAgent => match self.cli.fresh_agent.take() {
+                Some((agent, token)) => Response::ok(message, Data::Token { agent, token }),
+                None => Response::error("refused", message),
+            },
             After::Session => match self.cli.issued.take() {
                 Some(token) => Response::ok(
                     message,
@@ -766,22 +782,7 @@ impl DesktopApp {
                 let view = self.agent_view(agent)?;
                 data(view.agent.name.clone(), Data::Agent(Box::new(view)))
             }
-            Command::AgentAdd { name } => {
-                let (agent, token) = self.owner_ui.session.register_agent(&name)?;
-                let token = SecretText::new(token.expose().to_owned());
-                let row = self.agent_row(agent);
-                self.set_ok(format!(
-                    "Command line: {} is registered. The command line got its token.",
-                    row.name
-                ));
-                data(
-                    format!(
-                        "{} is registered. Save the token now. Apassy does not show it again.",
-                        row.name
-                    ),
-                    Data::Token { agent: row, token },
-                )
-            }
+            Command::AgentAdd { name } => Ok(Step::Check(OwnerRequest::RegisterAgent { name })),
             Command::AgentRevoke { agent } => {
                 let agent = self.find_agent(&agent)?;
                 if agent.revoked {
@@ -1068,31 +1069,13 @@ impl DesktopApp {
                     Data::Activity { entries },
                 )
             }
-            Command::DecisionExport => {
-                let jsonl = self.owner_ui.session.export_decisions()?;
-                data(
-                    format!("{} decisions", jsonl.lines().count()),
-                    Data::Export { jsonl },
-                )
-            }
+            Command::DecisionExport => Ok(Step::Check(OwnerRequest::ExportDecisions)),
             Command::Backup { path } => {
                 let path = std::path::PathBuf::from(path.trim());
                 if !path.is_absolute() {
                     return Err(invalid("Use an absolute path for the backup file."));
                 }
-                let result = self.owner_ui.session.backup(&path);
-                // A backup locks the vault, also when it fails. Typed secrets go, as at
-                // a lock (key-memory review F1, F3).
-                self.end_waiting_runs();
-                self.erase_typed_secrets(Some(ctx));
-                self.pending_delete = false;
-                self.cli.sessions.clear();
-                result?;
-                self.set_ok("Command line: the backup is written. The vault is locked.");
-                done(format!(
-                    "The backup is written to {}. The vault is locked, and the session ended.",
-                    path.display()
-                ))
+                Ok(Step::Check(OwnerRequest::BackupVault { path }))
             }
             Command::ChangePassphrase { current, new } => {
                 let result = self.owner_ui.session.change_passphrase(
@@ -1971,4 +1954,40 @@ fn apply_input(
         put_secret(&mut secrets.key_passphrase, &passphrase);
     }
     Ok(())
+}
+
+impl DesktopApp {
+    pub(crate) fn complete_fresh_backup(&mut self, path: &std::path::Path, proof: OwnerProof) {
+        let result = self.owner_ui.session.backup_checked(path, proof);
+        self.end_waiting_runs();
+        self.erase_typed_secrets(None);
+        self.pending_delete = false;
+        self.cli.sessions.clear();
+        let _ = self.apply(
+            result,
+            "The backup is written. The vault is locked, and the command-line session ended.",
+        );
+    }
+    pub(crate) fn complete_fresh_export(&mut self, proof: OwnerProof) {
+        match self.owner_ui.session.export_decisions_checked(proof) {
+            Ok(jsonl) => {
+                self.set_ok(format!("Exported {} decisions.", jsonl.lines().count()));
+                self.cli.fresh_export = Some(jsonl);
+            }
+            Err(e) => self.set_err(e.message),
+        }
+    }
+    pub(crate) fn complete_fresh_agent(&mut self, name: &str, proof: OwnerProof) {
+        match self.owner_ui.session.register_agent_checked(name, proof) {
+            Ok((agent, token)) => {
+                let row = self.agent_row(agent);
+                self.set_ok(format!(
+                    "{} is registered. The command line got its token.",
+                    row.name
+                ));
+                self.cli.fresh_agent = Some((row, SecretText::new(token.expose().to_owned())));
+            }
+            Err(e) => self.set_err(e.message),
+        }
+    }
 }

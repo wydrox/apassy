@@ -665,3 +665,20 @@ fn device_rows_say_how_each_device_answers() {
         "iPhone · its Face ID key has not synced yet"
     );
 }
+
+#[test]
+fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.place = Place::Settings;
+    app.ui.settings_section = SettingsSection::Security;
+    let (text, _) = frames(&mut app, TALL);
+    for expected in [
+        "How often to ask for Touch ID",
+        "Every time",
+        "browser fills, passkey sign-ins, and Allow once",
+        "Mac locks or sleeps",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+}

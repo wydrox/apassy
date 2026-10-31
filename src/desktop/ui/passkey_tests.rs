@@ -245,8 +245,7 @@ fn pass_owner_check(app: &mut DesktopApp) -> OwnerRequest {
         .owner_gate()
         .authorize(request.action(), OwnerCheck::passphrase(PASS))
         .expect("owner check");
-    app.close_owner_check(None);
-    app.complete_owner_request(request.clone(), proof);
+    app.finish_owner_check_with(proof);
     request
 }
 

@@ -249,16 +249,38 @@ fn answer(
     gate: Gate<'_>,
     watch: Option<&Watch>,
 ) -> Zeroizing<Vec<u8>> {
-    let Some(line) = request_line(message) else {
+    let Some(mut line) = request_line(message) else {
         return encode(&Response::error(
             "bad_request",
             "The request is not a JSON object.",
         ));
     };
+    #[derive(serde::Deserialize)]
+    struct Gesture {
+        #[serde(default)]
+        trusted_gesture: bool,
+        #[serde(default)]
+        owner_window_host: u32,
+    }
+    let gesture = match serde_json::from_slice::<Gesture>(&line) {
+        Ok(g) if g.owner_window_host == 0 => g,
+        _ => {
+            return encode(&Response::error(
+                "bad_request",
+                "A browser cannot supply host provenance.",
+            ));
+        }
+    };
     match serde_json::from_slice::<Peek>(&line) {
         Ok(Peek { cmd: Some(cmd) }) if is_guarded_command(&cmd) => {
             if let Err(error) = gate() {
                 return encode(&Response::from(error));
+            }
+            if gesture.trusted_gesture {
+                // Append inside the checked object without parsing/copying secrets.
+                let end = line.iter().rposition(|b| *b == b'}').expect("JSON object");
+                line.truncate(end);
+                line.extend_from_slice(b",\"owner_window_host\":1}");
             }
         }
         Ok(_) => {}
@@ -284,7 +306,7 @@ fn request_line(message: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     if *first != b'{' {
         return None;
     }
-    let mut line = Zeroizing::new(Vec::with_capacity(message.len() + 1));
+    let mut line = Zeroizing::new(Vec::with_capacity(message.len() + 32));
     line.extend(message.iter().map(|byte| match byte {
         b'\n' | b'\r' => b' ',
         other => *other,

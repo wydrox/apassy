@@ -53,6 +53,8 @@
 //! waiting question even when its credential baseline has not changed.
 
 mod owner_auth;
+pub(crate) mod owner_window;
+pub use owner_window::OwnerFrequency;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
@@ -73,6 +75,7 @@ pub use owner_auth::{
     ProofRefusal, action_words, grant_declarations, grant_has_production, remote_key,
     touch_id_detail, verify_remote_action, verify_remote_answer,
 };
+pub(crate) use owner_auth::{LocalWindowSource, OwnerDeliveryFence};
 
 /// How often a waiting run checks that its vault session is still valid.
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);

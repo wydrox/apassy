@@ -53,6 +53,12 @@ pub fn default_socket_path() -> PathBuf {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// Set only after a trusted extension UI event. Absence always requires fresh authentication.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trusted_gesture: bool,
+    /// Added by the new caller-checked native host; older hosts require fresh checks.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub owner_window_host: u32,
     pub v: u32,
     pub cmd: String,
     /// The address of the active tab, from the browser.
@@ -76,6 +82,10 @@ pub struct Request {
     /// Symbols in a new password (`create`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbols: Option<bool>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// A checked request. Debug output hides the password of a save.
@@ -133,7 +143,15 @@ pub enum Command {
 
 /// The commands that the host passes to the app only after the caller check
 /// ([`super::caller::check_browser_parent`]).
-pub const GUARDED_COMMANDS: &[&str] = &["passkey_get", "passkey_create", "fill_code"];
+pub const GUARDED_COMMANDS: &[&str] = &[
+    "passkey_get",
+    "passkey_create",
+    "fill_code",
+    "fill",
+    "save",
+    "create",
+    "update",
+];
 
 /// True for a command of [`GUARDED_COMMANDS`].
 pub fn is_guarded_command(cmd: &str) -> bool {
@@ -380,6 +398,10 @@ impl SuggestionsPacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdatePacket {
+    #[serde(default, rename = "trusted_gesture")]
+    _trusted_gesture: bool,
+    #[serde(default, rename = "owner_window_host")]
+    _owner_window_host: u32,
     v: u32,
     #[allow(dead_code)]
     cmd: String,
@@ -498,6 +520,10 @@ fn page_text(text: &str, max: usize) -> Result<(), WireError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyGetPacket {
+    #[serde(default, rename = "trusted_gesture")]
+    _trusted_gesture: bool,
+    #[serde(default, rename = "owner_window_host")]
+    _owner_window_host: u32,
     v: u32,
     #[allow(dead_code)]
     cmd: String,
@@ -526,6 +552,10 @@ impl PasskeyGetPacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyCreatePacket {
+    #[serde(default, rename = "trusted_gesture")]
+    _trusted_gesture: bool,
+    #[serde(default, rename = "owner_window_host")]
+    _owner_window_host: u32,
     v: u32,
     #[allow(dead_code)]
     cmd: String,
@@ -584,6 +614,10 @@ impl PasskeyCreatePacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FillCodePacket {
+    #[serde(default, rename = "trusted_gesture")]
+    _trusted_gesture: bool,
+    #[serde(default, rename = "owner_window_host")]
+    _owner_window_host: u32,
     v: u32,
     #[allow(dead_code)]
     cmd: String,

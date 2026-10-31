@@ -483,6 +483,7 @@ impl fmt::Debug for LockHook {
 /// One vault file open inside this process. The broker shares the same slot.
 #[derive(Debug)]
 pub struct OwnerSession {
+    pub(crate) owner_window: crate::broker::approvals::owner_window::OwnerWindow,
     vault: SharedVault,
     path: Option<PathBuf>,
     revealed: BTreeMap<(u64, String), RevealedValue>,
@@ -513,6 +514,7 @@ impl DerefMut for Unlocked<'_> {
 impl OwnerSession {
     pub fn new() -> Self {
         Self {
+            owner_window: Default::default(),
             vault: Arc::new(Mutex::new(None)),
             path: None,
             revealed: BTreeMap::new(),
@@ -588,6 +590,25 @@ impl OwnerSession {
     }
 
     pub fn unlock(&mut self, passphrase: &str) -> ModelResult<()> {
+        self.unlock_checked(
+            passphrase,
+            None,
+            crate::broker::approvals::CheckMethod::Passphrase,
+        )
+    }
+
+    pub(crate) fn unlock_checked(
+        &mut self,
+        passphrase: &str,
+        expected: Option<u64>,
+        method: crate::broker::approvals::CheckMethod,
+    ) -> ModelResult<()> {
+        let generation = self.owner_window.begin_unlock(expected).ok_or_else(|| {
+            fail(
+                "owner_check_changed",
+                "The Mac session changed during unlock. Confirm again.",
+            )
+        })?;
         self.forget_all_reveals();
         require_passphrase(passphrase)?;
         let mut slot = self.slot();
@@ -595,6 +616,7 @@ impl OwnerSession {
             .as_mut()
             .ok_or_else(|| fail("vault_locked", "No vault file is open."))?;
         vault.unlock(passphrase).map_err(map_err)?;
+        self.owner_window.seed(vault.epoch(), method, generation);
         // Previous values that are no longer valid go now. A failure leaves them for the
         // next unlock; each reader treats an invalid one as gone already.
         let _ = vault.prune_previous_values();
@@ -604,6 +626,7 @@ impl OwnerSession {
     /// Change the master passphrase (goal item V5). The owner types the new passphrase
     /// two times. After a failure, the old passphrase stays valid.
     pub fn change_passphrase(&mut self, current: &str, new: &str, repeat: &str) -> ModelResult<()> {
+        self.owner_window.invalidate();
         if current.is_empty() {
             return Err(fail("invalid_input", "Type the current passphrase."));
         }
@@ -661,6 +684,7 @@ impl OwnerSession {
         approvals: Option<&ApprovalQueue>,
         why: &str,
     ) -> ModelResult<()> {
+        self.owner_window.invalidate();
         self.forget_all_reveals();
         let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         let result = match slot.as_mut() {
@@ -708,6 +732,12 @@ impl OwnerSession {
 
     /// All decisions as JSON Lines (`docs/operations/learning.md`). They have commands
     /// and user requests, but no secret value.
+    pub(crate) fn export_decisions_checked(&self, proof: OwnerProof) -> ModelResult<String> {
+        self.unlocked_for(proof, &OwnerAction::ExportDecisions)?
+            .export_decisions_jsonl()
+            .map_err(map_err)
+    }
+
     pub fn export_decisions(&self) -> ModelResult<String> {
         self.unlocked()?.export_decisions_jsonl().map_err(map_err)
     }
@@ -1024,6 +1054,18 @@ impl OwnerSession {
     }
 
     pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
+        self.backup_inner(destination, None)
+    }
+
+    pub(crate) fn backup_checked(
+        &mut self,
+        destination: &Path,
+        proof: OwnerProof,
+    ) -> ModelResult<()> {
+        self.backup_inner(destination, Some(proof))
+    }
+
+    fn backup_inner(&mut self, destination: &Path, proof: Option<OwnerProof>) -> ModelResult<()> {
         require_path(destination)?;
         let result = {
             let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1032,6 +1074,17 @@ impl OwnerSession {
                 Some(_) => return Err(fail("vault_locked", "The vault is locked.")),
                 None => return Err(fail("vault_locked", "No vault file is open.")),
             };
+            if let Some(proof) = proof {
+                proof
+                    .check(
+                        &OwnerAction::BackupVault {
+                            path: destination.into(),
+                        },
+                        &vault.epoch(),
+                    )
+                    .map_err(|e| fail("owner_check_required", e.message()))?;
+            }
+            self.owner_window.invalidate();
             self.before_lock.run(vault);
             vault.backup(destination)
         };
@@ -1047,6 +1100,7 @@ impl OwnerSession {
         destination: &Path,
         passphrase: &str,
     ) -> ModelResult<()> {
+        self.owner_window.invalidate();
         require_path(backup)?;
         require_path(destination)?;
         require_passphrase(passphrase)?;
@@ -1076,6 +1130,19 @@ impl OwnerSession {
             return Err(fail("invalid_input", "Type a name for the agent."));
         }
         self.unlocked()?.register_agent(name).map_err(map_err)
+    }
+
+    pub(crate) fn register_agent_checked(
+        &mut self,
+        name: &str,
+        proof: OwnerProof,
+    ) -> ModelResult<(AgentSummary, AgentToken)> {
+        if name.trim().is_empty() {
+            return Err(fail("invalid_input", "Type a name for the agent."));
+        }
+        self.unlocked_for(proof, &OwnerAction::RegisterAgent { name: name.into() })?
+            .register_agent(name)
+            .map_err(map_err)
     }
 
     pub fn revoke_agent(&mut self, agent_id: u64) -> ModelResult<()> {
@@ -1687,6 +1754,7 @@ impl OwnerSession {
     }
 
     fn detach(&mut self) -> HeldVault {
+        self.owner_window.invalidate();
         self.forget_all_reveals();
         let vault = self.slot().take();
         HeldVault {

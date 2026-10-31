@@ -129,9 +129,20 @@ fn now(answer: &Receiver<Response>) -> Response {
     answer.try_recv().expect("an answer without an owner check")
 }
 
-/// Run one command that needs no owner check.
+/// Run a fixture command, confirming newly fresh-only export/backup/token actions.
 fn run(app: &mut DesktopApp, ctx: &egui::Context, session: &str, command: Command) -> Response {
-    now(&ask(app, ctx, Some(session), command))
+    let answer = ask(app, ctx, Some(session), command);
+    if app.owner.check.as_ref().is_some_and(|d| {
+        matches!(
+            d.request,
+            crate::desktop::owner_check::OwnerRequest::ExportDecisions
+                | crate::desktop::owner_check::OwnerRequest::RegisterAgent { .. }
+                | crate::desktop::owner_check::OwnerRequest::BackupVault { .. }
+        )
+    }) {
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    }
+    now(&answer)
 }
 
 /// Log in with the passphrase in the owner check dialog. Returns the token.
@@ -961,6 +972,16 @@ fn program(
     while !thread.is_finished() {
         assert!(Instant::now() < deadline, "the program did not end");
         app.poll_cli(ctx);
+        if app.owner.check.as_ref().is_some_and(|d| {
+            matches!(
+                d.request,
+                crate::desktop::owner_check::OwnerRequest::ExportDecisions
+                    | crate::desktop::owner_check::OwnerRequest::RegisterAgent { .. }
+                    | crate::desktop::owner_check::OwnerRequest::BackupVault { .. }
+            )
+        }) {
+            app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
     thread.join().expect("program thread")
@@ -1635,4 +1656,38 @@ fn add_detects_and_adds_each_credential_of_a_paste() {
     let nothing = run(&mut app, &ctx, &token, paste("   ", None, false));
     assert_eq!(nothing.code, "invalid_input");
     assert_eq!(app.owner_ui.session.search("").unwrap().len(), 7);
+}
+
+#[test]
+fn owner_window_backup_export_and_token_issue_stay_fresh() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let token = login(&mut app, &ctx);
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(OwnerFrequency::OneHour);
+    for command in [
+        Command::DecisionExport,
+        Command::AgentAdd {
+            name: "Synthetic new agent".into(),
+        },
+        Command::Backup {
+            path: dir.path().join("fresh.backup").display().to_string(),
+        },
+    ] {
+        window.observe(true);
+        window.seed(
+            app.owner_ui.session.epoch().unwrap(),
+            CheckMethod::TouchId,
+            window.generation(),
+        );
+        let answer = ask(&mut app, &ctx, Some(&token), command);
+        assert!(app.owner.check.is_some());
+        assert!(answer.try_recv().is_err());
+        app.close_owner_check(None);
+        assert!(!now(&answer).ok);
+    }
+    assert!(!dir.path().join("fresh.backup").exists());
+    assert!(app.owner_ui.session.agents().unwrap().is_empty());
 }

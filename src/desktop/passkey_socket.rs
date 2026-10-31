@@ -350,6 +350,7 @@ fn json_line(value: &Value) -> Zeroizing<Vec<u8>> {
 /// The way back to one request of the bridge. A ticket that drops without an answer
 /// answers `cancelled`: for example when the owner closes the dialog.
 pub(crate) struct PlatformTicket {
+    pub(crate) delivery_fence: Option<crate::broker::approvals::OwnerDeliveryFence>,
     rid: String,
     out: Option<Sender<Out>>,
     cancel: PeerGone,
@@ -361,6 +362,7 @@ impl PlatformTicket {
     fn new(rid: String, out: Sender<Out>, cancel: PeerGone, waiting: Option<Waiting>) -> Self {
         Self {
             rid,
+            delivery_fence: None,
             out: Some(out),
             cancel,
             deadline: Instant::now() + REQUEST_TIME,
@@ -395,6 +397,9 @@ impl PlatformTicket {
     /// Send `{"ok":true,"result":…}`. False when the bridge is gone. A result with a
     /// secret is written straight into the erasing line buffer.
     fn ok(mut self, result: &impl Serialize) -> bool {
+        if !self.is_live() || self.delivery_fence.as_ref().is_some_and(|f| !f.valid()) {
+            return false;
+        }
         #[derive(Serialize)]
         struct Done<'a, T> {
             ok: bool,
@@ -1068,11 +1073,17 @@ impl DesktopApp {
             );
             return;
         }
-        self.ask_owner(request, Some(ctx));
+        let eligible = ticket.is_live();
+        self.prepare_owner(request, Some(ctx), false);
         if let Some(dialog) = self.owner.check.as_mut() {
             dialog.platform = Some(ticket);
         }
-        if !self.owner.touch_id_ready() {
+        self.start_local_owner(
+            crate::broker::approvals::LocalWindowSource::AutoFill,
+            eligible,
+            ctx,
+        );
+        if self.owner.check.is_some() && !self.owner.touch_id_ready() {
             bring_to_front(ctx);
         }
     }
