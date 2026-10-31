@@ -191,6 +191,8 @@ pub struct Vault {
     _lock_file: File,
     conn: Option<Connection>,
     epoch: [u8; 32],
+    #[cfg(feature = "desktop")]
+    access_expiry: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl std::fmt::Debug for Vault {
@@ -246,6 +248,8 @@ impl Vault {
             _lock_file: lock_file,
             conn: None,
             epoch,
+            #[cfg(feature = "desktop")]
+            access_expiry: None,
         })
     }
 
@@ -257,6 +261,8 @@ impl Vault {
             _lock_file: lock_file,
             conn: None,
             epoch: fresh_epoch()?,
+            #[cfg(feature = "desktop")]
+            access_expiry: None,
         })
     }
 
@@ -274,6 +280,10 @@ impl Vault {
     }
 
     pub fn lock(&mut self) -> VaultResult<()> {
+        #[cfg(feature = "desktop")]
+        {
+            self.access_expiry = None;
+        }
         let close_result = self.conn.take().map_or(Ok(()), close_conn);
         let epoch_result = fresh_epoch();
         if let Ok(epoch) = epoch_result {
@@ -284,7 +294,28 @@ impl Vault {
     }
 
     pub fn is_locked(&self) -> bool {
-        self.conn.is_none()
+        self.conn.is_none() || self.access_expired()
+    }
+
+    /// Read-only access fence, checked under the same mutex as broker secret reads.
+    /// The desktop subsequently performs its normal lock and UI cleanup.
+    pub(crate) fn access_expired(&self) -> bool {
+        #[cfg(feature = "desktop")]
+        {
+            self.access_expiry.as_ref().is_some_and(|expired| expired())
+        }
+        #[cfg(not(feature = "desktop"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn set_access_expiry(
+        &mut self,
+        expiry: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        self.access_expiry = Some(expiry);
     }
 
     pub fn epoch(&self) -> [u8; 32] {
@@ -496,6 +527,8 @@ impl Vault {
             _lock_file: dest_lock,
             conn: None,
             epoch: fresh_epoch()?,
+            #[cfg(feature = "desktop")]
+            access_expiry: None,
         })
     }
 

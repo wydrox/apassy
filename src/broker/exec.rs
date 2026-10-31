@@ -100,6 +100,30 @@ pub fn run_with(
     network: Network<'_>,
     timeout: Duration,
 ) -> io::Result<RunOutput> {
+    run_with_spawn(
+        command,
+        cwd,
+        path,
+        secrets,
+        masks,
+        network,
+        timeout,
+        |cmd| cmd.spawn(),
+    )
+}
+
+/// The broker holds its vault mutex only for the final check and process spawn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_spawn(
+    command: &[String],
+    cwd: &Path,
+    path: Option<&str>,
+    secrets: &[SecretEnv],
+    masks: &[SecretEnv],
+    network: Network<'_>,
+    timeout: Duration,
+    spawn: impl FnOnce(&mut Command) -> io::Result<std::process::Child>,
+) -> io::Result<RunOutput> {
     if secrets
         .iter()
         .chain(masks)
@@ -110,7 +134,7 @@ pub fn run_with(
             "A secret is shorter than four bytes, so its output cannot be safely masked. The command was not started.",
         ));
     }
-    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout)?;
+    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, spawn)?;
     let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
     let masked_out = mask_output(&raw.stdout, &all);
     let masked_err = mask_output(&raw.stderr, &all);
@@ -159,7 +183,15 @@ pub fn capture(
     path: Option<&str>,
     timeout: Duration,
 ) -> io::Result<Captured> {
-    let mut raw = spawn_collect(command, cwd, path, &[], Network::default(), timeout)?;
+    let mut raw = spawn_collect(
+        command,
+        cwd,
+        path,
+        &[],
+        Network::default(),
+        timeout,
+        |cmd| cmd.spawn(),
+    )?;
     raw.stderr.zeroize();
     Ok(Captured {
         exit_code: raw.exit_code,
@@ -195,6 +227,7 @@ fn spawn_collect(
     secrets: &[SecretEnv],
     network: Network<'_>,
     timeout: Duration,
+    spawn: impl FnOnce(&mut Command) -> io::Result<std::process::Child>,
 ) -> io::Result<Raw> {
     let (program, args) = command
         .split_first()
@@ -237,7 +270,7 @@ fn spawn_collect(
     for (name, value) in network.env {
         cmd.env(name, value);
     }
-    let spawned = cmd.spawn();
+    let spawned = spawn(&mut cmd);
     // The command keeps a copy of each value. The standard library cannot erase
     // it, so free it now and not at the end of the run.
     drop(cmd);
@@ -378,6 +411,44 @@ fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_lock_between_secret_preparation_and_spawn_refuses_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = crate::vault::Vault::create(
+            &dir.path().join("test.apassy"),
+            "synthetic review passphrase",
+        )
+        .unwrap();
+        vault.unlock("synthetic review passphrase").unwrap();
+        let epoch = vault.epoch();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(vault)));
+        let marker = dir.path().join("received-secret");
+        let command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s' \"$TOKEN\" > \"$1\"".into(),
+            "sh".into(),
+            marker.to_str().unwrap().into(),
+        ];
+        let result = run_with_spawn(
+            &command,
+            dir.path(),
+            None,
+            &[secret("TOKEN", "FAKE-review-secret")],
+            &[],
+            Network::default(),
+            Duration::from_secs(2),
+            |cmd| {
+                // Pause at the actual delivery seam, after Command contains the
+                // prepared environment. Model a lock winning the vault mutex.
+                shared.lock().unwrap().as_mut().unwrap().lock().unwrap();
+                crate::broker::run::spawn_in_session(&shared, epoch, cmd)
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(!marker.exists());
+    }
+
     #[test]
     fn review_short_secret_runs_are_refused_before_any_process_side_effect() {
         let dir = tempfile::tempdir().unwrap();

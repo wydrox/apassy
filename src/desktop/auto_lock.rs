@@ -5,7 +5,10 @@ use super::{
 };
 use eframe::egui;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -59,7 +62,9 @@ impl LockPolicy {
 
 #[derive(Default)]
 struct Sample {
-    idle: Option<(Duration, Instant)>,
+    idle: Option<(Duration, Instant, Duration)>,
+    peak: Option<Duration>,
+    generation: u64,
     session: bool,
 }
 /// Native heartbeat snapshots plus a sticky lock/sleep event (survives wake).
@@ -67,21 +72,54 @@ struct Sample {
 pub(crate) struct IdleSource(Arc<Mutex<Sample>>);
 impl IdleSource {
     pub(crate) fn record(&self, seconds: Option<f64>, session: bool) {
+        self.record_at(seconds, session, clock_now());
+    }
+    fn record_at(&self, seconds: Option<f64>, session: bool, now: Duration) {
         let mut s = self.0.lock().unwrap();
+        // Preserve inactivity across suspension even if wake input resets CGEventSource.
+        let suspended = s.idle.and_then(|(idle, at, clock)| {
+            let elapsed = now.saturating_sub(clock);
+            (elapsed > at.elapsed() + Duration::from_millis(10)).then_some(idle + elapsed)
+        });
+        s.peak = s.peak.max(suspended);
         s.idle = seconds
             .and_then(|v| Duration::try_from_secs_f64(v).ok())
-            .map(|d| (d, Instant::now()));
+            .map(|d| (d, Instant::now(), now));
+        s.peak = s.peak.max(s.idle.map(|(d, _, _)| d));
+        if session {
+            s.generation = s.generation.wrapping_add(1);
+        }
         s.session |= session;
     }
     fn take(&self) -> (Option<Duration>, bool) {
         let mut s = self.0.lock().unwrap();
         // Missing/stale telemetry must not unexpectedly interrupt agent runs.
-        let idle = s
-            .idle
-            .filter(|(_, at)| at.elapsed() < Duration::from_secs(2))
-            .map(|(d, at)| d + at.elapsed());
+        let idle = sample_idle(&s).max(s.peak.take());
         (idle, std::mem::take(&mut s.session))
     }
+}
+fn clock_now() -> Duration {
+    #[cfg(target_os = "macos")]
+    {
+        rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
+            .try_into()
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        START.get_or_init(Instant::now).elapsed()
+    }
+}
+fn sample_idle(s: &Sample) -> Option<Duration> {
+    s.idle.and_then(|(idle, at, clock)| {
+        let elapsed = clock_now().saturating_sub(clock);
+        // A stalled helper is not evidence of inactivity. Suspension is: the
+        // sleep-inclusive clock advances while Instant pauses on macOS.
+        (at.elapsed() < Duration::from_secs(2)
+            || elapsed > at.elapsed() + Duration::from_millis(10))
+        .then_some(idle + elapsed)
+    })
 }
 #[derive(Default)]
 struct Timer {
@@ -99,6 +137,15 @@ impl Timer {
         unlocked: bool,
         session: bool,
     ) -> bool {
+        let expired = unlocked
+            && self.unlocked
+            && (policy == LockPolicy::Session && session
+                || policy.timeout().is_some_and(|limit| {
+                    now.saturating_sub(self.owner_at) >= limit && idle.is_some_and(|d| d >= limit)
+                }));
+        if expired {
+            return true;
+        }
         if owner_input || unlocked && !self.unlocked {
             self.owner_at = now;
         }
@@ -116,7 +163,6 @@ pub(crate) struct AutoLock {
     pub(crate) note: Option<String>,
     task: Option<Task<Result<LockPolicy, String>>>,
     timer: Timer,
-    start: Instant,
     input_time: Option<u64>,
 }
 impl Default for AutoLock {
@@ -127,7 +173,6 @@ impl Default for AutoLock {
             note: None,
             task: None,
             timer: Timer::default(),
-            start: Instant::now(),
             input_time: None,
         }
     }
@@ -156,17 +201,7 @@ impl AutoLock {
         self.input_time.replace(time) != Some(time) && input
     }
     fn now(&self) -> Duration {
-        #[cfg(target_os = "macos")]
-        {
-            // CLOCK_MONOTONIC includes suspension on Darwin.
-            rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
-                .try_into()
-                .unwrap_or_else(|_| self.start.elapsed())
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.start.elapsed()
-        }
+        clock_now()
     }
     pub(crate) fn busy(&self) -> bool {
         self.task.is_some()
@@ -210,18 +245,49 @@ impl DesktopApp {
             }
         }
         let owner_input = self.auto_lock.owner_input(ctx);
+        let fenced = self
+            .owner_ui
+            .session
+            .with_vault(|v| v.access_expired())
+            .unwrap_or(false);
         let (idle, session) = self.auto_lock.source.take();
-        let unlocked = !self.owner_ui.session.is_locked();
-        if self.auto_lock.timer.due(
-            self.auto_lock.policy,
-            self.auto_lock.now(),
-            idle,
-            owner_input,
-            unlocked,
-            session,
-        ) {
+        let unlocked = fenced || !self.owner_ui.session.is_locked();
+        if fenced
+            || self.auto_lock.timer.due(
+                self.auto_lock.policy,
+                self.auto_lock.now(),
+                idle,
+                owner_input,
+                unlocked,
+                session,
+            )
+        {
             self.lock_vault(Some(ctx));
             self.auto_lock.timer.unlocked = false;
+        }
+        if unlocked && !self.owner_ui.session.is_locked() {
+            let policy = self.auto_lock.policy;
+            let owner_at = self.auto_lock.timer.owner_at;
+            let source = self.auto_lock.source.clone();
+            let generation = source.0.lock().unwrap().generation;
+            let expired = AtomicBool::new(false);
+            self.owner_ui.session.with_vault(|v| {
+                v.set_access_expiry(Arc::new(move || {
+                    if expired.load(Ordering::Acquire) {
+                        return true;
+                    }
+                    let s = source.0.lock().unwrap();
+                    let due = policy == LockPolicy::Session && s.generation != generation
+                        || policy.timeout().is_some_and(|limit| {
+                            clock_now().saturating_sub(owner_at) >= limit
+                                && sample_idle(&s).max(s.peak).is_some_and(|d| d >= limit)
+                        });
+                    if due {
+                        expired.store(true, Ordering::Release);
+                    }
+                    due
+                }))
+            });
         }
         if self.auto_lock.busy() || self.auto_lock.policy != LockPolicy::Never {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -256,6 +322,52 @@ mod tests {
         ctx.run_ui(raw, |_| assert!(lock.owner_input(&ctx)))
             .drop_without_applying_deltas();
     }
+    #[test]
+    fn auto_lock_wake_input_cannot_rescue_expired_deadline() {
+        let mut timer = Timer::default();
+        let p = LockPolicy::FifteenMinutes;
+        assert!(!timer.due(p, Duration::ZERO, Some(Duration::ZERO), false, true, false));
+        assert!(timer.due(
+            p,
+            Duration::from_secs(901),
+            Some(Duration::from_secs(901)),
+            true,
+            true,
+            false
+        ));
+        assert_eq!(timer.owner_at, Duration::ZERO);
+    }
+
+    #[test]
+    fn auto_lock_sleep_gap_survives_reset_idle_sample() {
+        let source = IdleSource::default();
+        // Model 901 seconds of sleep: the awake clock has not advanced.
+        source.0.lock().unwrap().idle = Some((Duration::ZERO, Instant::now(), Duration::ZERO));
+        source.record_at(Some(0.0), false, Duration::from_secs(901));
+        assert!(source.take().0.unwrap() >= Duration::from_secs(901));
+    }
+
+    #[test]
+    fn auto_lock_access_fence_blocks_worker_before_ui_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = crate::vault::Vault::create(
+            &dir.path().join("test.apassy"),
+            "synthetic review passphrase",
+        )
+        .unwrap();
+        vault.unlock("synthetic review passphrase").unwrap();
+        let expired = Arc::new(AtomicBool::new(false));
+        let fence = expired.clone();
+        vault.set_access_expiry(Arc::new(move || fence.load(Ordering::SeqCst)));
+        assert!(!vault.is_locked());
+        expired.store(true, Ordering::SeqCst);
+        assert!(vault.is_locked());
+        vault.lock().unwrap();
+        vault.unlock("synthetic review passphrase").unwrap();
+        assert!(!vault.is_locked());
+    }
+
     #[test]
     fn auto_lock_defaults_and_codes() {
         assert_eq!(LockPolicy::default(), LockPolicy::Never);
@@ -297,7 +409,38 @@ mod tests {
     fn auto_lock_agent_polls_do_not_reset_but_owner_input_does() {
         let mut t = Timer::default();
         let p = LockPolicy::FifteenMinutes;
-        for seconds in 0..900 {
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("broker.sock");
+        let mut vault = crate::vault::Vault::create(
+            &dir.path().join("test.apassy"),
+            "synthetic review passphrase",
+        )
+        .unwrap();
+        vault.unlock("synthetic review passphrase").unwrap();
+        let (_, token) = vault
+            .register_agent("Synthetic MCP metadata agent")
+            .unwrap();
+        let _broker = crate::broker::start_with_tls(
+            Arc::new(Mutex::new(Some(vault))),
+            &socket,
+            crate::broker::http::TlsClient::with_extra_roots(vec![]).unwrap(),
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut input = AutoLock::default();
+        for seconds in (0..900).step_by(150) {
+            // Real broker metadata traffic, as sent by the MCP adapter. It must
+            // produce no owner input and cannot extend the injected deadline.
+            let reply = crate::agent::client::send(
+                &socket,
+                token.expose(),
+                crate::agent::wire::Action::ListAccess,
+            )
+            .unwrap();
+            assert!(reply.ok);
+            assert!(!input.owner_input(&ctx));
             assert!(!t.due(
                 p,
                 Duration::from_secs(seconds),
@@ -318,7 +461,7 @@ mod tests {
         assert!(!t.due(
             p,
             Duration::from_secs(900),
-            Some(Duration::from_secs(900)),
+            Some(Duration::ZERO),
             true,
             true,
             false

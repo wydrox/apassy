@@ -537,6 +537,8 @@ impl Vault {
                 _lock_file: dest_lock,
                 conn: None,
                 epoch,
+                #[cfg(feature = "desktop")]
+                access_expiry: None,
             },
             AdoptedCopy {
                 identity,

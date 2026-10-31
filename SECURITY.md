@@ -85,6 +85,9 @@ while locked; processes already given credentials are not recalled.
 The policy uses a separate app-owned device-only, non-synchronizing Keychain
 item. Missing, unreadable, or unknown values use Never. Timed locking needs
 fresh native idle telemetry; unavailable telemetry does not trigger a lock.
+Sleep-inclusive deadlines survive wake input and idle-counter resets. A shared
+read-only access fence denies broker access at expiry before UI cleanup runs;
+the desktop then performs the normal vault lock.
 An unsigned fixture build cannot prove signed Keychain or OS-event acceptance.
 
 ## What is a known limit, not a vulnerability

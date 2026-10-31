@@ -64,7 +64,8 @@
 //!    exceptions, "Always ask me", the project, and canonical directories must also be
 //!    the same as in the original check. Evaluation scope lifetime IDs and command
 //!    bindings must also match before secrets are read.
-//! 9. The broker reads the secrets, releases the vault lock, and starts the process.
+//! 9. The broker reads the secrets, then rechecks the epoch and expiry under the
+//!    vault mutex immediately before spawning. Lock and spawn are serialized.
 //!    A variable in placeholder mode (ADR 0011) gets a placeholder. The broker then
 //!    starts a run proxy that puts the real value into HTTPS requests to the hosts of
 //!    the variable, and on macOS the process can connect only to that proxy.
@@ -1397,6 +1398,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             &answered_on,
         );
         super::corrections::consider_items(vault, request.items);
+        if vault.is_locked() {
+            return locked_response();
+        }
         match read_secrets(vault, request.items) {
             Ok(secrets) => {
                 for item_id in request.items {
@@ -1444,7 +1448,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         }
     };
     let network = proxy.as_ref().map(RunProxy::network);
-    let result = exec::run_with(
+    let result = exec::run_with_spawn(
         request.command,
         &checked.cwd,
         request.path,
@@ -1455,6 +1459,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             sandbox_profile: network.sandbox_profile.as_deref(),
         }),
         ctx.run_timeout,
+        |cmd| spawn_in_session(&ctx.vault, checked.epoch, cmd),
     );
     let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();
@@ -1994,6 +1999,26 @@ fn store_uses(
 
 /// The variables of a run. `env` has a real value or a placeholder for each item.
 /// `masks` has the real value behind each placeholder, so the output never shows it.
+/// Serialize credential delivery with lock without holding the mutex while the
+/// child runs. A prepared environment cannot cross a lock or an expiry boundary.
+pub(super) fn spawn_in_session(
+    vault: &super::SharedVault,
+    epoch: [u8; 32],
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let guard = lock(vault);
+    if !guard
+        .as_ref()
+        .is_some_and(|v| !v.is_locked() && v.epoch() == epoch)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            RELOCKED,
+        ));
+    }
+    cmd.spawn()
+}
+
 struct RunSecrets {
     env: Vec<SecretEnv>,
     masks: Vec<SecretEnv>,
