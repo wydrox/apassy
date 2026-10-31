@@ -469,7 +469,7 @@ Commands. A secret (member token, invite code, item value) is read from stdin, n
 | `run --items 1,2 --purpose TEXT [--request TEXT] [--ttl SECS] [--wait SECS] [--cwd DIR] -- CMD ARGS...` | agent token: `POST /v1/runs` with the exact argv; while `pending`, polls `GET /v1/runs/{id}?wait=25` and prints "Waiting for an approver (run N)." once on stderr (every run waits for the owner's host first); on `ready`, runs the command with `session.env` added to the inherited environment, inherited stdio, and exits with its code (128 + signal on a signal); `cwd` defaults to the current directory |
 | `mcp` | the stdio adapter (section 14) |
 
-Human output is short text; `--json` prints the result JSON where it makes sense. The CLI never prints a session environment. Exit codes: 0 success (or the child's code for `run`), 2 usage error, 3 run denied or timed out, 4 relay or network error.
+Human output is short text; `--json` opts finite commands into the consistent success/error envelope in section 29. The CLI never prints a session environment. Exit codes: 0 success (or the child's code for `run`), 2 usage error, 3 run denied or timed out, 4 relay or network error.
 
 ## 16. Docker image
 
@@ -1712,3 +1712,37 @@ queue/TTL limits, private readiness, archive retention and rollout/rollback.
   idle suspension plus 30-day deletion policy. Packaged systemd units default to
   dry-run and are not installed automatically. Automatic deletion first preserves
   an immutable master-key-encrypted DB snapshot including all append-only audit.
+
+
+## 29. CLI audit reliability addendum (F13/F15/F16)
+
+- Service identity is per saved team: launchd
+  `com.wydrox.apassy.team-host.<team>.plist`, systemd
+  `apassy-team-host-<team>.service`. Service logs carry the team id. Install migrates
+  the old pinned single service to its original team's name before installing
+  another team, preserving options and retaining/attempting restoration of the old
+  service on start failure. Ambiguous or conflicting files require manual review.
+  Status/uninstall select the requested team and never remove another team's service.
+- Per-team process locks allow several teams in one config directory. New hosts
+  share a compatibility fence against old single-host binaries and retain exclusive
+  locks for their own team. An old running host must stop before new hosts start.
+- Every finite CLI command accepts global `--json` before the child's delimiter.
+  One stdout document contains `ok`, `exit_code`, and `result` or `error` with stable
+  `code`, `message`, optional `status`/`retry_after` and `retryable`. Lists now share
+  the envelope with mutations/errors; progress is stderr. One-time secrets are
+  explicit result fields only. No session environment is emitted. Child exit codes
+  are preserved; JSON mode redirects child output to stderr. Streaming host/MCP
+  reject wrapping. Help leads with device create/join/recovery; expired legacy
+  token setup and refused approve are in Compatibility.
+- Installer platform pairs match published artifacts exactly (Darwin arm64/Linux
+  x86_64), downloads have total deadlines, and staged execution/version validation
+  precedes replacement. Update feedback names per-team restart/status commands.
+  Status reports `cli_version`; startup logs identify the actual running host.
+
+No relay API, schema, package version or release configuration changes in this CLI
+patch. Deployment and service installation/restart remain explicit owner actions.
+Before rolling back the CLI, uninstall/stop per-team services using the new CLI;
+older binaries use one global lock and cannot run concurrently per team. Reinstall
+one selected legacy host if needed. Saved settings/device keys and keys.json retain
+their existing formats. Installer hashes continue to detect corruption, not an
+independent compromise of the download origin.
