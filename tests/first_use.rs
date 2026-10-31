@@ -238,6 +238,28 @@ fn a_foreign_host_asks_even_without_a_literal_secret_reference() {
 }
 
 #[test]
+fn encoded_or_unicode_hosts_cannot_disappear_before_routing() {
+    for (host, program) in [
+        ("%65vil.example.net", "curl https"),
+        ("%65vil.example.net", "psql postgres"),
+        ("bücher.example.net", "curl https"),
+        ("bücher.example.net", "psql postgres"),
+        ("bu\u{308}cher.example.net", "curl https"),
+        ("[fe80::1%25en0]", "curl https"),
+    ] {
+        let fx = fixture_with(
+            Some(declaration(Environment::Staging, RiskLevel::Low)),
+            true,
+            Duration::from_millis(30),
+        );
+        let response = run_in(&fx, &fx.project, &format!("true || {program}://{host}/"));
+        assert_eq!(code(&response), "approval_timeout", "{host}");
+        assert!(response.error.unwrap().message.contains("host"));
+        assert_eq!(model_calls(&fx), 0, "{host}");
+    }
+}
+
+#[test]
 fn model_field_spoofing_in_each_agent_text_field_asks_before_inference() {
     for field in ["command", "purpose", "user_request"] {
         let fx = fixture_with(

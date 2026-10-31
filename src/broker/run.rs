@@ -1776,7 +1776,10 @@ fn db_host_from_command(analysis: &Analysis) -> bool {
 fn run_hosts(command: &[String]) -> Vec<String> {
     let mut hosts: Vec<String> = shell_risk::command_hosts(command)
         .iter()
-        .filter_map(|host| normal_host(host))
+        // A parsed destination that cannot be stored as an answer host is still
+        // a destination. Dropping it would hide encoded DNS names or IPv6 zones
+        // and could even clear the foreign-database flag before routing.
+        .map(|host| normal_host(host).unwrap_or_else(|| host.clone()))
         .collect();
     hosts.sort();
     hosts.dedup();

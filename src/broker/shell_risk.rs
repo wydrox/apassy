@@ -4658,9 +4658,13 @@ fn clean_host(text: &str) -> Option<String> {
     let host = host.trim_end_matches('.').to_lowercase();
     let good = !host.is_empty()
         && !host.starts_with(['.', '-'])
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'));
+        && host.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '-' | '_' | ':' | '%')
+                    // Retain IDNs as unknown destinations rather than silently
+                    // erasing a host that an HTTP/database client can resolve.
+                    || (!c.is_ascii() && !c.is_control() && !c.is_whitespace())
+        });
     good.then_some(host)
 }
 
