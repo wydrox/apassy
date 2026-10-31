@@ -783,11 +783,14 @@ enum Step {
     Embed(bool),
     /// Send the run that waits for the owner ([`ask_in_background`]).
     Ask,
+    ConnectPhone,
     Quit,
 }
 
 struct Tour {
     app: DesktopApp,
+    relay: Option<fake_relay::FakeRelay>,
+    phone: Option<apassy::sync::PendingJoin>,
     steps: VecDeque<Step>,
     events: Vec<egui::Event>,
     next_at: Instant,
@@ -802,7 +805,7 @@ struct Tour {
 
 fn run() {
     // The relay of the synthetic relay scene serves the whole run.
-    let _relay = relay_scene();
+    let relay = relay_scene();
     let steps = VecDeque::from(tour_steps());
     // A fixed size, so the positions of the tour hold on each screen.
     let mut options = native_options();
@@ -816,6 +819,8 @@ fn run() {
             cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             Ok(Box::new(Tour {
                 app: DesktopApp::from_creation_context(cc),
+                relay,
+                phone: None,
                 steps,
                 events: Vec::new(),
                 next_at: Instant::now() + Duration::from_secs(2),
@@ -833,7 +838,7 @@ fn run() {
 fn relay_mode() -> Option<String> {
     std::env::var("APASSY_TOUR_RELAY")
         .ok()
-        .filter(|mode| mode == "on" || mode == "old")
+        .filter(|mode| mode == "on" || mode == "old" || mode == "connect")
 }
 
 /// The synthetic relay scene (`APASSY_TOUR_RELAY`): a fake relay on 127.0.0.1, a
@@ -851,8 +856,12 @@ fn relay_scene() -> Option<fake_relay::FakeRelay> {
     if mode == "old" {
         relay.set_no_feed(true);
     }
-    let home = std::env::var_os("HOME").expect("HOME");
-    let path = Path::new(&home).join("Library/Application Support/Apassy/vault.db");
+    let data = apassy::paths::data_dir();
+    if mode == "connect" {
+        std::fs::write(data.join("connect-fake-url"), &relay.url).expect("fake URL");
+        return Some(relay);
+    }
+    let path = data.join("vault.db");
     let mut vault = Vault::open(&path).expect("the seeded vault");
     vault.unlock(PASS).expect("unlock");
     assert!(
@@ -1100,6 +1109,7 @@ fn parse_steps(text: &str) -> Vec<Step> {
             }
             Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
             Some("ask") => steps.push(Ask),
+            Some("connect-phone") => steps.push(ConnectPhone),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
             Some("restore") => steps.push(Minimize(false)),
@@ -1215,6 +1225,21 @@ impl Tour {
         };
         let mut pause = 0.4;
         match step {
+            Step::ConnectPhone => {
+                let relay = self.relay.as_ref().expect("APASSY_TOUR_RELAY=connect");
+                assert!(relay.url.starts_with("http://127.0.0.1:"));
+                let link = relay.latest_device_link().expect("Mac pairing link");
+                let answer = apassy::sync::DeviceKey::generate().expect("synthetic answer key");
+                let name = apassy::questions::device_link::link_device_name(
+                    "Synthetic iPhone",
+                    answer.public_key(),
+                )
+                .expect("name");
+                self.phone = Some(
+                    apassy::sync::PendingJoin::request(&link, &relay.url, &name)
+                        .expect("synthetic join"),
+                );
+            }
             Step::Wait(seconds) => pause = seconds,
             Step::Type(text) => self.events.push(egui::Event::Text(text.to_owned())),
             Step::Paste(text) => self.events.push(egui::Event::Paste(text.to_owned())),

@@ -212,7 +212,7 @@ pub(super) const RELAY_ROW: &str = "Questions through the relay";
 pub(super) const RELAY_QUESTIONS_ON: &str = "Questions also go to your other devices of this vault. The relay sees no command and no credential.";
 pub(super) const RELAY_QUESTIONS_OFF: &str =
     "Off. Turn it on to answer on your other devices away from this network.";
-pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Off. Turning it on makes a relay team for the questions only, with a team code from the operator.";
+pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Connect for free to approve requests on your iPhone on any network. No account or subscription needed.";
 pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
 pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. Turning it on joins the questions team of this vault, with a link from a Mac that has it on.";
 pub(super) const RELAY_QUESTIONS_REMOVED: &str =
@@ -501,9 +501,9 @@ fn relay_group(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     },
                 );
             }
-            if was {
+            if was || matches!(relay_state, Some(QuestionsAvailability::NeedsTeam)) {
                 add_relay_iphone = g
-                    .link(ADD_IPHONE)
+                    .link(if was { ADD_IPHONE } else { "Get approvals on your iPhone" })
                     .on_hover_text(
                         "An iPhone answers the questions with Face ID, also away from this network.",
                     )

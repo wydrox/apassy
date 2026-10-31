@@ -970,6 +970,30 @@ struct QuestionsModelTests {
         #expect(await fixture.service.attachedAnswerKey() == fixture.signer.key)
     }
 
+    @Test("Connect pairing offers push only after confirmation and an explicit notification action")
+    func connectPairingPush() async {
+        let fixture = Fixture()
+        await fixture.model.refresh()
+        await fixture.model.startAttach(
+            link: "https://relay.example.test/link#apassy_lnk_t_7k2m5q4x3c_00&handoff=synthetic.capsule",
+            pollInterval: .milliseconds(10))
+        guard case .waiting = fixture.model.attach else { Issue.record("no safety words"); return }
+        #expect(fixture.push.asked == 0)
+        #expect(fixture.signer.renewals == 1, "A retained Keychain key from before reinstall is not reused")
+        await fixture.model.attachFinished()
+        #expect(fixture.model.attach == .attached)
+        #expect(fixture.model.phase == .ready)
+        #expect(await fixture.service.attachedAnswerKey() == fixture.signer.key)
+        #expect(fixture.push.asked == 0, "Pairing does not prompt for notifications")
+        await fixture.model.setNotifications(true)
+        #expect(fixture.push.asked == 1)
+        await fixture.model.receivePushToken(Data([9, 8, 7]))
+        #expect(await fixture.service.currentPushToken() == Data([9, 8, 7]))
+        fixture.model.dismissAttach()
+        #expect(fixture.model.attach == nil)
+        #expect(fixture.model.phase == .ready, "Open Requests keeps the confirmed connection")
+    }
+
     @Test("a removed device connects again with a new answer key")
     func attachAfterRemoval() async {
         let fixture = Fixture()

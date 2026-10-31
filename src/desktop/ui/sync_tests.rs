@@ -2927,11 +2927,10 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     );
     let text = frames(&mut a);
     for expected in [
-        "Questions of “Personal” through the Apassy relay",
+        "Get approvals on your iPhone",
         "Relay address",
-        "Team code",
         "Name of this Mac",
-        "Turn On…",
+        "Connect…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -2975,7 +2974,7 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     assert!(
         request
             .describe()
-            .starts_with("Make a team for the questions of this vault on the Apassy relay"),
+            .starts_with("Connect this vault to the Apassy relay"),
         "{}",
         request.describe()
     );
@@ -3104,8 +3103,8 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         "{link}"
     );
     for expected in [
-        "Add a device to the questions of “Personal”",
-        "On the iPhone, open Apassy, select Questions, and scan this code",
+        "Connect your iPhone to “Personal”",
+        "On your iPhone, open the same vault from iCloud Drive",
         "Copy link",
         "Waiting for the other device…",
     ] {
@@ -3186,7 +3185,7 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     a.relay_settle_for_test();
     assert_eq!(
         a.status_text,
-        "Added. Test iPhone gets the questions of this vault and answers with Face ID once this vault syncs to it.",
+        "Connected. Test iPhone can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts.",
         "{}",
         a.status_text
     );
@@ -3346,7 +3345,7 @@ fn add_an_iphone_twice_adds_two_answering_devices() {
         a.relay_settle_for_test();
         assert!(
             a.status_text
-                .starts_with(&format!("Added. {name} gets the questions")),
+                .starts_with(&format!("Connected. {name} can now show requests")),
             "{}",
             a.status_text
         );
@@ -3545,4 +3544,55 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
         .expect("open");
     assert_eq!(rows_a.len(), 1, "A wrote no row for B");
     assert_eq!(relay.devices().len(), 2, "one team");
+}
+
+#[test]
+fn connect_onboarding_checks_the_owner_then_continues_to_iphone_pairing() {
+    use crate::broker::approvals::OwnerCheck;
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut app = folders.mac("connect-mac");
+    create(&mut app, "Personal", PASS, Some(&folders.icloud));
+    let id = current_id(&app);
+    super::open_settings(&mut app, super::SettingsSection::Devices);
+    app.questions_add_iphone(None);
+    let text = frames(&mut app);
+    assert!(text.contains("Get approvals on your iPhone"), "{text}");
+    assert!(!text.contains("Team code"), "{text}");
+    let entry = app.vault_list.registry.get(&id).unwrap().clone();
+    app.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(String::new()),
+        "Synthetic Mac",
+        None,
+    )
+    .unwrap();
+    assert!(relay.log().is_empty(), "no write before the owner check");
+    assert!(
+        app.owner_ui
+            .session
+            .with_vault(|v| v.pending_connect().unwrap().is_none())
+            .unwrap()
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    app.questions_settle_for_test();
+    assert!(questions_of(&app).is_some());
+    assert!(
+        app.owner_ui
+            .session
+            .with_vault(|v| v.pending_connect().unwrap().unwrap().created.is_some())
+            .unwrap()
+    );
+    assert!(matches!(
+        app.ui.sheet,
+        Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::AddIphone { .. })))
+    ));
+    assert!(relay.log().iter().any(|line| line == "POST /v1/connect"));
+    assert!(
+        !relay
+            .log()
+            .iter()
+            .any(|line| line.contains("/v1/teams") || line.contains("/v1/sync"))
+    );
 }

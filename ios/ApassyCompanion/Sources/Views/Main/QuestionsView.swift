@@ -42,7 +42,7 @@ struct ConnectQuestionsView: View {
                         if case .failed(let message) = model.attach {
                             Text(message).foregroundStyle(.red)
                         } else {
-                            Text("On your Mac: Settings > Devices > Notifications through the relay > Add an iPhone.")
+                            Text("On your Mac: Settings > Devices > Get approvals on your iPhone. Use the same vault from iCloud Drive on this iPhone. After reinstalling, make a new pairing code on the Mac.")
                         }
                     }
                 case .companion:
@@ -57,14 +57,15 @@ struct ConnectQuestionsView: View {
                     } header: {
                         Text("Your Mac shows these words")
                     } footer: {
-                        Text(
-                            "Confirm on the Mac only when it shows the same two words. Then this iPhone gets the questions of \(info.team)."
-                        )
+                        Text("Confirm on the Mac only when it shows the same two words. Keep that screen open while Apassy transfers the connection keys.")
+                        if let notice = model.attachNotice { Text(notice).foregroundStyle(.orange) }
                     }
                 case .attached:
                     Section {
-                        Label("Connected. The questions of this vault show here.", systemImage: "checkmark.circle")
+                        Label("Connected. Requests from your Mac appear on this iPhone on any network.", systemImage: "checkmark.circle")
+                        Button("Open Requests") { dismiss() }
                     }
+                    RequestsNotificationSettings(model: model)
                 }
             }
             .navigationTitle("Connect this iPhone")
@@ -83,6 +84,14 @@ struct ConnectQuestionsView: View {
                     }
                 }
             }
+            #if targetEnvironment(simulator)
+            .task {
+                if ProcessInfo.processInfo.arguments.contains("-ApassyPreviewVault"),
+                    let link = UserDefaults.standard.string(forKey: "ApassyConnectLink") {
+                    await model.startAttach(link: link)
+                }
+            }
+            #endif
             .onChange(of: model.attach) { _, step in
                 if step == .companion { dismiss() }
             }
