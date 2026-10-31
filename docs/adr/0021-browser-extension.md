@@ -9,6 +9,16 @@ The owner approved the main-flow UX plan on 2026-10-17. The current [browser con
 
 The owner also explicitly accepted desktop Copy on 2026-10-17. [ADR 0027](0027-owner-desktop-copy.md) supersedes only the two-owner-routes restriction in §1 by adding freshly authenticated, expiring desktop Copy. Broker and owner socket APIs remain secret-free, and every browser fill still needs its own owner check. The sections below preserve the decisions and proposals as recorded on their original dates.
 
+## Current supersession — 2026-10-31
+
+[ADR 0030](0030-owner-check-window.md) supersedes the every-fill identity-check
+rule below for the owner's opt-in local verification window. Every time is still
+the default. Covered browser actions can complete directly from a trusted browser
+gesture during that window. The earlier guarantee that browser automation always
+needs a new biometric check applies only to Every time. Reveals, copies, durable
+grants and passkey creation/removal stay fresh. The historical text below is
+preserved as the original decision.
+
 ## Context
 
 - The [product vision](../product-vision-v1.md) left "universal autofill" out of the MVP. Login items exist (`username`, `password`), and the 1Password import keeps their addresses as a visible detail "Website" ([import](../operations/import-1password.md)). The owner must copy a password out of the window today.

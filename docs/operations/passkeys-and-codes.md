@@ -4,6 +4,31 @@ Date: 2026-10-09. Status updated 2026-10-11.
 Branch: `feat/passkeys-totp`. Contract: [ios-core-v1](../contracts/ios-core-v1.md) (iPhone core) and [browser-v1](../contracts/browser-v1.md) section 9 (browser). The Mac AutoFill extension is in [mac-passkeys](mac-passkeys.md).
 Use only synthetic values for tests. This document does not open the real-secret gate.
 
+## Owner-check frequency (ADR 0030)
+
+On this Mac, Settings > Security > **How often to ask for Touch ID** offers
+Every time (default), 1 minute, 5 minutes, 15 minutes, 1 hour, and Until the Mac
+locks. A fresh local Touch ID or passphrase check, including unlock, starts an
+absolute window. Browser password/code fill, save, create/update, macOS AutoFill
+password/code fill, passkey sign-in, and an explicitly clicked Allow once can reuse
+it. Browser fills complete without an Apassy sheet. Passkey assertions still set
+UP and UV using the recent local owner verification. Passkey create/remove,
+reveal/copy (including OTP), exports/backups/restores, durable permissions,
+production/project approvals, bouncer evaluation permission, rule relaxations,
+tokens/connections, pairing and the setting itself stay fresh. Remote/iPhone
+answers neither spend nor start the window. The iPhone app is unchanged.
+
+Use does not extend the deadline. Lock, sleep, user switch, quit, vault lock or
+switch, setting changes, failed/cancelled checks and observer loss revoke it.
+The policy is protected in this Mac's app-owned device-only Keychain item; the
+window exists only in memory. Missing/unverified storage or lifecycle state means
+Every time. Older extension/host requests without trusted gesture provenance take
+the fresh path. See [ADR 0030](../adr/0030-owner-check-window.md) for the exact
+allowlist, residual browser-automation exposure and native acceptance limits.
+This section supersedes unqualified per-fill/per-sign-in freshness wording below;
+historical device acceptance remains historical.
+
+
 ## 1. Status
 
 Passkeys and one-time codes are in release 0.4.1 of 2026-10-12. The release workflow publishes the Mac app and the site. The iPhone app goes through TestFlight, and the browser extension through the Chrome Web Store, each separately. The owner released 0.4.1 with the open checks of the [acceptance checklist](#9-acceptance-checklist) and accepted that risk on 2026-10-12. Do not tell users that these features work on their devices until the checklist is complete.

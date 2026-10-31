@@ -2,6 +2,31 @@
 
 Date: 2026-10-06. Section 8 (save and create) added the same day. Section 9 (passkeys and one-time codes) added 2026-10-09. Suggestions, explicit updates, and target binding added 2026-10-17. Decision: [ADR 0021](../adr/0021-browser-extension.md). Code: `src/browser/` (types, site match, host relay), `src/bin/apassy-browser-host.rs` (native messaging host), `src/desktop/browser.rs` (app side), `extension/` (the extension).
 
+## Owner-check frequency (ADR 0030)
+
+On this Mac, Settings > Security > **How often to ask for Touch ID** offers
+Every time (default), 1 minute, 5 minutes, 15 minutes, 1 hour, and Until the Mac
+locks. A fresh local Touch ID or passphrase check, including unlock, starts an
+absolute window. Browser password/code fill, save, create/update, macOS AutoFill
+password/code fill, passkey sign-in, and an explicitly clicked Allow once can reuse
+it. Browser fills complete without an Apassy sheet. Passkey assertions still set
+UP and UV using the recent local owner verification. Passkey create/remove,
+reveal/copy (including OTP), exports/backups/restores, durable permissions,
+production/project approvals, bouncer evaluation permission, rule relaxations,
+tokens/connections, pairing and the setting itself stay fresh. Remote/iPhone
+answers neither spend nor start the window. The iPhone app is unchanged.
+
+Use does not extend the deadline. Lock, sleep, user switch, quit, vault lock or
+switch, setting changes, failed/cancelled checks and observer loss revoke it.
+The policy is protected in this Mac's app-owned device-only Keychain item; the
+window exists only in memory. Missing/unverified storage or lifecycle state means
+Every time. Older extension/host requests without trusted gesture provenance take
+the fresh path. See [ADR 0030](../adr/0030-owner-check-window.md) for the exact
+allowlist, residual browser-automation exposure and native acceptance limits.
+This section supersedes unqualified per-fill/per-sign-in freshness wording below;
+historical device acceptance remains historical.
+
+
 ## 1. Transport
 
 Two hops carry the same JSON messages.

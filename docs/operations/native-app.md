@@ -6,6 +6,23 @@ Scope: goal item A1, and the native side of A3, A4, N1, and N2 ([goal](../goal.m
 The desktop app calls the helper for the unlock method (A2, A3), the owner check (A4), authenticated owner Copy ([ADR 0027](../adr/0027-owner-desktop-copy.md)), and notifications (N1 to N3). See [Desktop integration](#desktop-integration) and [notifications.md](notifications.md).
 This document does not open the real-secret gate.
 
+## Owner-check window helper commands (ADR 0030)
+
+`owner_policy_read` and `owner_policy_write` use the existing protected Keychain
+helper and signed containing-app caller check. The only writable policy values
+are `every_time`, `1m`, `5m`, `15m`, `1h`, and `until_lock`; Rust requires a fresh
+setting-change proof before invoking the setter. The item is device-only and
+non-synchronizing. Unknown or failed reads/writes select Every time.
+
+`owner_session_active` reads CGSession and the IORegistry root's explicit
+`IOConsoleLocked` state. `owner_lifecycle` is the exception to the one-response
+exchange: it streams sequenced active/revoke heartbeats every 250 ms, while the
+caller-checked helper observes screen lock, sleep and session resignation. EOF,
+malformed/gapped data and stale health revoke reuse. The app owns and reaps the
+streaming helper; an unlock event never creates authorization. See
+[ADR 0030](../adr/0030-owner-check-window.md) for bounds and native acceptance.
+
+
 ## What this is
 
 The Rust crate forbids unsafe code. Touch ID, the data protection keychain, and native notifications need Apple APIs.

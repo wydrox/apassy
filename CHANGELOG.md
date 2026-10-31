@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Added
+
+- **Mac owner checks:** Settings > Security now offers How often to ask for Touch ID. Every time stays the default. Protected per-device windows cover browser and macOS AutoFill password/code actions, passkey sign-ins and explicitly clicked Allow once. Lock, sleep, user switch, vault lifecycle changes and failed/cancelled checks revoke them. Sensitive and durable actions still require fresh checks. Encrypted backup, CLI decision export and CLI token issuance now also take fresh checks. iPhone is unchanged.
+
 ### Fixed
 
 - **Mac, bouncer eligibility:** "Allow once and enable bouncer" uses a fresh local owner check to confirm each credential's environment/risk and authorize later model evaluation for the exact agent, credential revision, project, action, and hosts. Classification and permission save together after access is rechecked. Ordinary "Allow once" stays one-time only; old history never becomes permission. Production allowances, always-ask settings, and hard vetoes retain precedence.

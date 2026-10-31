@@ -35,7 +35,7 @@ Apassy makes these promises. A way to break one of them is a vulnerability.
 | In placeholder mode, the real value goes only into an auth position of an HTTPS request to a host of the variable. Never into a body, a path, another header, or another host. | [ADR 0011](docs/adr/0011-run-proxy-placeholders.md) §3 |
 | A process in the Seatbelt profile cannot read the vault, a backup, the model, or the Apassy app bundle, and cannot start a program outside the profile by a route the profile denies. | [Isolation](docs/operations/isolation.md) §1, §7 |
 | A run with a production credential, a hard rule failure, or an unavailable bouncer always waits for the owner or is denied. The model cannot override this. | [Goal](docs/goal.md) P2, [ADR 0007](docs/adr/0007-rules-and-local-bouncer.md) |
-| Reveal, approval of a run, grant and rule changes, "Approve and remember", and token rotation need a fresh owner check. | [Goal](docs/goal.md) A4 |
+| Reveal, grant and rule changes, "Approve and remember", and token rotation need a fresh owner check. Allow once may reuse recent local verification only after its explicit click, under ADR 0030. | [Goal](docs/goal.md) A4 |
 | Lock and restart deny waiting runs. An approval of an old or changed request fails. A notification is not an approval. | [Goal](docs/goal.md) V3, N4 |
 | A local rule pack can only add a restriction. It cannot mark a command safe, remove a flag, or replace a built-in pack. | [Rule packs](docs/operations/rule-packs.md) §4 |
 | A notification shows the agent name and the event type only. No command, request, or value. | [Goal](docs/goal.md) N2 |
@@ -45,6 +45,31 @@ Apassy makes these promises. A way to break one of them is a vulnerability.
 | The published `Apassy-<version>.dmg` and every program in it are signed with the Developer ID and notarized. | [Release](docs/operations/release.md) |
 
 Also in scope: an injection through the purpose, the user request, a command, or a tool output that changes a decision the documents say cannot change, and a dependency or build step that does not match what the documents say.
+
+## Local owner-check window
+
+[ADR 0030](docs/adr/0030-owner-check-window.md) defines an opt-in exception to
+per-action identity checks. Every time remains the default. Protected per-Mac
+choices can reuse a fresh local verification for browser and macOS AutoFill
+password/code actions, passkey sign-ins (UP/UV set), and an explicit Allow once
+click for each agent request. A window never answers an agent request itself.
+Browser fills from trusted extension gestures need no Apassy sheet in a window.
+Reveal/copy/OTP display, exports/backups/restores, production/project and durable
+grants, bouncer evaluation permission, relaxations, tokens/agent connect,
+devices/pairing, passkey create/remove and changing the setting remain fresh.
+Remote/iPhone answers never use or start the Mac window. No iPhone behavior changes.
+
+A fresh check opens an absolute monotonic window. Reuse cannot extend it. Lock,
+sleep, user switch, vault lifecycle changes, quit, policy change, failed/cancelled
+checks and lifecycle-observer loss revoke it and outstanding reuse proofs. The
+policy is in an app-owned, non-synchronizing device-only Keychain item; unverified
+state fails closed to Every time. Each reuse still makes one exact action-bound,
+vault-epoch-bound proof. Editing a preference file cannot widen the policy.
+
+Opting in accepts reduced identity-check frequency on an unlocked Mac. Trusted
+browser events can be produced by browser automation; gesture checks are not proof
+of a physical human. Existing signed caller and peer guards still apply. A source
+or unsigned fixture build does not prove native Keychain or OS lifecycle acceptance.
 
 ## What is a known limit, not a vulnerability
 
