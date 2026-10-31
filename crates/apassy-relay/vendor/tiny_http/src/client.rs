@@ -92,10 +92,22 @@ impl ClientConnection {
                 None => return Err(IoError::new(ErrorKind::ConnectionAborted, "Unexpected EOF")),
             };
 
-            if byte == b'\n' && prev_byte_was_cr {
+            if byte == b'\n' {
+                if !prev_byte_was_cr {
+                    return Err(IoError::new(
+                        ErrorKind::InvalidInput,
+                        "bare LF in HTTP line",
+                    ));
+                }
                 buf.pop(); // removing the '\r'
                 return AsciiString::from_ascii(buf)
                     .map_err(|_| IoError::new(ErrorKind::InvalidInput, "Header is not in ASCII"));
+            }
+            if prev_byte_was_cr {
+                return Err(IoError::new(
+                    ErrorKind::InvalidInput,
+                    "bare CR in HTTP line",
+                ));
             }
 
             prev_byte_was_cr = byte == b'\r';

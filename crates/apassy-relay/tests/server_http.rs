@@ -885,6 +885,8 @@ fn parser_refuses_ambiguous_framing_and_header_injection() {
         "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
         "Content-Length: nope\r\n",
         "X-Test: ok\nInjected: yes\r\n",
+        "X-Test: ok\n\r\n",
+        "X-Test: ok\rInjected: yes\r\n",
     ] {
         let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
         socket

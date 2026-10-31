@@ -16,7 +16,8 @@ release. Future upgrades must remove/reapply these changes deliberately.
 
 - Reject duplicate Content-Length or Transfer-Encoding, both together, invalid or
   overflowing lengths, and any transfer coding except a single `chunked`.
-- Header constructors/parser reject CR, LF, NUL and other prohibited control bytes;
+- The line reader rejects bare CR/LF before trimming; header constructors/parser
+  reject CR, LF, NUL and other prohibited control bytes;
   field names must be HTTP tokens. Lines are limited to 8 KiB and 100 header fields.
 - The relay uses one request per connection and explicitly closes it after the
   response. Absolute header/body budgets are 10/30 seconds, with at most 5 seconds
