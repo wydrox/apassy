@@ -7,6 +7,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 COPY src src
+COPY vendor vendor
 RUN cargo build --release --locked --bin apassy-relay --bin apassy-team
 
 FROM debian:trixie-slim

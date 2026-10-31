@@ -155,6 +155,8 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         session_ttl_secs: 60,
         approval_timeout_secs: 5,
         upstream,
+        request_read_timeout: std::time::Duration::from_secs(30),
+        request_handle_timeout: std::time::Duration::from_secs(90),
         limits: Default::default(),
         backup_dir: dir.join("backups"),
         push: None,

@@ -379,6 +379,8 @@ pub fn is_question_poll(method: &str, url: &str) -> bool {
 /// The threads a request runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lane {
+    Health,
+    Rejected,
     /// Members, approvers, the host, `/healthz`: any of `max_active`.
     Member,
     /// The proxy, MCP, runs, access: `max_active` without the member reserve.
@@ -397,11 +399,19 @@ struct Slots {
     agent: AtomicUsize,
     questions: AtomicUsize,
     feeds: AtomicUsize,
+    health: AtomicUsize,
+    rejected: AtomicUsize,
 }
 
 impl Slots {
     fn release(&self, lane: Lane) {
         match lane {
+            Lane::Health => {
+                self.health.fetch_sub(1, Ordering::Relaxed);
+            }
+            Lane::Rejected => {
+                self.rejected.fetch_sub(1, Ordering::Relaxed);
+            }
             Lane::Question => {
                 self.questions.fetch_sub(1, Ordering::Relaxed);
             }
@@ -508,6 +518,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         agent: AtomicUsize::new(0),
         questions: AtomicUsize::new(0),
         feeds: AtomicUsize::new(0),
+        health: AtomicUsize::new(0),
+        rejected: AtomicUsize::new(0),
     });
     // The maintenance of every team runs on its own thread, so many teams never slow the
     // accept loop.
@@ -555,7 +567,9 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
             Ok(Some(request)) => {
                 // Only the accept loop takes a slot, so a load and an add do not race.
                 let poll = poll_kind(request.method().as_str(), request.url());
-                let lane = if poll == Some(PollKind::Question)
+                let lane = if request.method().as_str() == "GET" && request.url() == "/healthz" {
+                    Lane::Health
+                } else if poll == Some(PollKind::Question)
                     && slots.questions.load(Ordering::Relaxed) < limits.question_long_polls
                 {
                     Lane::Question
@@ -569,6 +583,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     Lane::Member
                 };
                 let full = match lane {
+                    Lane::Health => slots.health.load(Ordering::Relaxed) >= 4,
+                    Lane::Rejected => unreachable!(),
                     Lane::Question | Lane::Feed => false,
                     Lane::Agent => {
                         slots.all.load(Ordering::Relaxed) >= limits.max_active
@@ -577,9 +593,31 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     Lane::Member => slots.all.load(Ordering::Relaxed) >= limits.max_active,
                 };
                 if full {
-                    respond_busy(request);
+                    // Never write or drain a refused body on the accept loop. A bounded
+                    // refusal lane closes input first; overflow closes the transport.
+                    request.abort_input();
+                    if slots.rejected.load(Ordering::Relaxed) >= 8 {
+                        request.abort();
+                        drop(request);
+                        continue;
+                    }
+                    slots.rejected.fetch_add(1, Ordering::Relaxed);
+                    let guard = SlotGuard {
+                        slots: slots.clone(),
+                        lane: Lane::Rejected,
+                    };
+                    let _ = std::thread::Builder::new()
+                        .name("relay-refusal".into())
+                        .spawn(move || {
+                            let _guard = guard;
+                            respond_busy(request);
+                        });
                 } else {
                     match lane {
+                        Lane::Health => {
+                            slots.health.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Lane::Rejected => unreachable!(),
                         Lane::Question => {
                             slots.questions.fetch_add(1, Ordering::Relaxed);
                         }
@@ -729,6 +767,7 @@ fn etag(version: u64) -> Option<Header> {
 
 /// 503 `busy` as an envelope, with `Retry-After`.
 fn respond_busy(request: Request) {
+    request.abort_input();
     let error = RelayError::new(codes::BUSY, "The relay is busy. Try again in a moment.");
     let body = serde_json::to_vec(&error.to_envelope()).unwrap_or_default();
     let mut response = Response::from_data(body)
@@ -1690,6 +1729,8 @@ mod tests {
             agent: AtomicUsize::new(1),
             questions: AtomicUsize::new(0),
             feeds: AtomicUsize::new(1),
+            health: AtomicUsize::new(0),
+            rejected: AtomicUsize::new(0),
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _global = SlotGuard {

@@ -592,9 +592,13 @@ impl Relay {
         let hub = Hub::open(config, stop.clone())?;
         let source: Arc<dyn SessionSource> = hub.clone();
         let proxy = Arc::new(Proxy::new(&hub.config.upstream, source)?);
-        let server = tiny_http::Server::http(hub.config.listen).map_err(|_| {
-            RelayError::internal(format!("Cannot listen on {}.", hub.config.listen))
-        })?;
+        let server = tiny_http::Server::http_with_deadlines(
+            hub.config.listen,
+            std::time::Duration::from_secs(10),
+            hub.config.request_read_timeout,
+            hub.config.request_handle_timeout,
+        )
+        .map_err(|_| RelayError::internal(format!("Cannot listen on {}.", hub.config.listen)))?;
         let addr = server
             .server_addr()
             .to_ip()
