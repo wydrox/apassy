@@ -787,6 +787,45 @@ fn shortcuts_section(ui: &mut egui::Ui) {
     });
 }
 
+/// Only states established by a successful inference warm-up are ready.
+fn model_ready(state: &ServerState) -> bool {
+    matches!(
+        state,
+        ServerState::Running { .. } | ServerState::External { up: Some(true), .. }
+    )
+}
+
+/// UTC bounds of the owner's calendar day. Resolve both boundaries in the system
+/// timezone: subtracting today's offset or adding 24 hours fails on DST days.
+fn local_day_bounds(now: u64) -> Option<(u64, u64)> {
+    local_day_bounds_with(now, |at| time::UtcOffset::local_offset_at(at).ok())
+}
+
+fn local_day_bounds_with(
+    now: u64,
+    offset_at: impl Fn(time::OffsetDateTime) -> Option<time::UtcOffset>,
+) -> Option<(u64, u64)> {
+    let now = time::OffsetDateTime::from_unix_timestamp(now.try_into().ok()?).ok()?;
+    let date = now.to_offset(offset_at(now)?).date();
+    let boundary = |date: time::Date| -> Option<u64> {
+        let nominal = date.midnight().assume_utc().unix_timestamp();
+        let (mut low, mut high) = (nominal - 172_800, nominal + 172_800);
+        // Search calendar dates rather than assuming that local midnight exists
+        // or has the same UTC offset as noon (some zones change at midnight).
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let at = time::OffsetDateTime::from_unix_timestamp(mid).ok()?;
+            if at.to_offset(offset_at(at)?).date() < date {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        low.try_into().ok()
+    };
+    Some((boundary(date)?, boundary(date.next_day()?)?))
+}
+
 /// Settings > Bouncer: the model server (ADR 0024) in one row with its state and its
 /// action, how it starts, a broker that does not take agent requests, and calibration
 /// and learning.
@@ -799,6 +838,49 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             action = model_server_rows(g, status);
         }
         broker_rows(app, g);
+        let ready = status
+            .as_ref()
+            .is_some_and(|status| model_ready(&status.state));
+        g.line(
+            "Bouncer",
+            Some(kit::text(
+                if ready {
+                    "Model ready"
+                } else {
+                    "Model not ready"
+                },
+                Font::Body,
+            )),
+            |_| {},
+        );
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vault) = guard.as_ref().filter(|vault| !vault.is_locked()) {
+            let counts = local_day_bounds(crate::broker::learning::now())
+                .and_then(|(start, end)| vault.bouncer_counts(start, end).ok());
+            match counts {
+                Some(counts) => {
+                    g.line(
+                        "Today",
+                        Some(kit::text(
+                            format!(
+                                "{} decided by the bouncer · {} asked you · {} failed",
+                                counts.by_model, counts.asked, counts.failed
+                            ),
+                            Font::Body,
+                        )),
+                        |_| {},
+                    );
+                    g.note_row("Failed: model or readiness errors, or questions left unanswered. These can also count as asked.");
+                }
+                None => g.tone_row(
+                    "Today's bouncer counts are unavailable.",
+                    Tone::Warning.text(),
+                ),
+            }
+        }
     });
     crate::desktop::learning_ui::settings_panel(app, ui);
     let Some(server) = server else {
@@ -915,7 +997,7 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             up: Some(true),
             model,
         } => (
-            "Answers".to_owned(),
+            "Ready".to_owned(),
             Tone::Good,
             Some(model.as_ref().map_or_else(
                 || format!("The model at {url} answers."),
@@ -925,7 +1007,7 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
         ServerState::External {
             up: Some(false), ..
         } => (
-            "No answer".to_owned(),
+            "Not running".to_owned(),
             Tone::Warning,
             Some(format!(
                 "Nothing answers at {url}. Until it answers, every run waits for you."
@@ -942,7 +1024,7 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             ),
         ),
         ServerState::Stopped => (
-            "Stopped".to_owned(),
+            "Not running".to_owned(),
             Tone::Neutral,
             Some(if status.settings.start == StartMode::WhenNeeded {
                 "The next run that needs the model starts it.".to_owned()
@@ -966,13 +1048,13 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             Some("The first start loads the model. This can take a minute.".to_owned()),
         ),
         ServerState::Running { model, outside } => (
-            if *outside {
-                "Running (started outside Apassy)".to_owned()
-            } else {
-                "Running".to_owned()
-            },
+            "Ready".to_owned(),
             Tone::Good,
-            model_note(model),
+            if *outside {
+                Some(format!("Started outside Apassy. {}", model_note(model).unwrap_or_default()))
+            } else {
+                model_note(model)
+            },
         ),
         ServerState::Failed { problem, .. } => (
             "Not running".to_owned(),

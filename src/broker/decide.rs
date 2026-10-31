@@ -72,6 +72,38 @@ pub struct BrokerContext {
     pub prompts: Arc<PromptStore>,
 }
 
+/// Opt-in local evaluation: the same run policy and authorization recheck, without
+/// credential delivery or execution. There is deliberately no agent wire action for this.
+pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
+    if request.v != WIRE_VERSION {
+        return WireResponse::failure("unsupported_version", "The wire version is not supported.");
+    }
+    let Action::Run {
+        items,
+        command,
+        cwd,
+        purpose,
+        path,
+        user_request,
+    } = &request.action
+    else {
+        return WireResponse::failure("invalid_request", "Evaluation requires a run request.");
+    };
+    super::run::evaluate(
+        ctx,
+        &request.token,
+        &super::run::RunRequest {
+            items,
+            command,
+            cwd,
+            purpose,
+            path: path.as_deref(),
+            user_request: user_request.as_deref(),
+            host_session: request.host_session.as_deref(),
+        },
+    )
+}
+
 /// Handle one request from an agent. The response never contains a secret value.
 pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
     let vault = &ctx.vault;

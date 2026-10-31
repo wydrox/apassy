@@ -1,7 +1,7 @@
 # ADR 0029: Explicit permission for bouncer evaluation
 
 Date: 2026-10-21.
-Status: Accepted by the maintainer in the implementation request.
+Status: Accepted by the maintainer in the implementation request. The routing permission requirement is superseded by [ADR 0031](0031-bouncer-decides-by-default.md), 2026-10-31. The decision below records the original history.
 Tracking: https://github.com/wydrox/apassy/issues/27.
 
 ## Problem

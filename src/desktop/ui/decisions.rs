@@ -1686,7 +1686,9 @@ fn unconfirmed(run: &PendingRun) -> Option<&QuestionItem> {
 /// A queued offer is a snapshot. Changed scope details require an explicit review;
 /// they never replace classification edits while the owner is reading the question.
 fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
-    let offer = (!app.owner_ui.session.is_locked())
+    // ADR 0031: keep compatibility code and stored scopes, hide obsolete setup.
+    const EVALUATION_SETUP_VISIBLE: bool = false;
+    let offer = (EVALUATION_SETUP_VISIBLE && !app.owner_ui.session.is_locked())
         .then(|| queue(app).and_then(|(queue, _)| queue.evaluation_offer(run_id)))
         .flatten();
     let Some(offer) = offer else {

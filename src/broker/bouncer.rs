@@ -20,8 +20,9 @@ use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, val
 /// the built-in packs know (`Analysis::known_command`). Version 6 sets the default
 /// `task_match` level to 0.75. Version 7 (dev round 3) needs 80% certainty that the
 /// command does not break the owner instruction of the grant, and a known write
-/// (`Analysis::known_write`) is never a certain read.
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v7";
+/// (`Analysis::known_write`) is never a certain read. Version 8 routes by default
+/// and requires 80% task match for default classifications (ADR 0031).
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v8";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
@@ -349,6 +350,16 @@ impl BouncerClient {
             }
         };
         if !(200..300).contains(&response.status) {
+            if response.status == 422
+                && serde_json::from_slice::<Value>(&response.body)
+                    .ok()
+                    .is_some_and(|body| body["detail"]["code"] == "input_too_long")
+            {
+                return BouncerVerdict::Unavailable(
+                    "the complete request does not fit the model context; the model did not decide"
+                        .to_owned(),
+                );
+            }
             return BouncerVerdict::Unavailable(format!("status {}", response.status));
         }
         self.check_model(parse_answers(&response.body, &facts_for(request)))
@@ -580,7 +591,19 @@ pub fn decide_learned(
             ),
         };
     }
-    model_step(verdict, context, learned.thresholds)
+    model_step(verdict, context, learned.thresholds, false)
+}
+
+/// Model step after `run::route` has checked the source-aware production veto and
+/// all other hard checks. Default classifications always need 80% task match,
+/// including known safe commands and reads; calibration cannot lower this check.
+pub(super) fn decide_routed(
+    verdict: &BouncerVerdict,
+    context: &DecisionContext<'_>,
+    learned: &Learned,
+    default_source: bool,
+) -> Decision {
+    model_step(verdict, context, learned.thresholds, default_source)
 }
 
 /// Steps 1 to 3 of [`decide_learned`]. `Some` when the owner decides before any model
@@ -618,6 +641,7 @@ fn model_step(
     verdict: &BouncerVerdict,
     context: &DecisionContext<'_>,
     thresholds: Thresholds,
+    default_source: bool,
 ) -> Decision {
     let ask = |confidence, note: String| Decision {
         ask_owner: true,
@@ -660,8 +684,16 @@ fn model_step(
     //   (held-out v3).
     let mut needed: Vec<(&str, bool, f64)> = Vec::new();
     let task_level = thresholds.task_match_level();
-    if !known_safe && !certain_read {
-        needed.push(("task_match", true, task_level));
+    if default_source || (!known_safe && !certain_read) {
+        needed.push((
+            "task_match",
+            true,
+            if default_source {
+                MIN_CONFIDENCE
+            } else {
+                task_level
+            },
+        ));
     }
     if sensitive && !known_safe {
         needed.push(("writes", false, MIN_CONFIDENCE));
@@ -712,6 +744,11 @@ fn model_step(
     } else {
         "normal credential"
     };
+    let source_note = if default_source {
+        " Classification is unconfirmed or has a default source; task_match needs 80% even for a known safe command or read."
+    } else {
+        ""
+    };
     let calibrated = if (task_level - DEFAULT_TASK_MATCH).abs() > f64::EPSILON {
         format!(" Calibrated task_match level: {:.0}%.", task_level * 100.0)
     } else {
@@ -722,7 +759,7 @@ fn model_step(
             ask_owner: false,
             confidence: Some(confidence),
             note: format!(
-                "Model allowed at {:.0}% certainty ({scope}{}). {}{calibrated}",
+                "Model allowed at {:.0}% certainty ({scope}{}). {}{calibrated}{source_note}",
                 confidence * 100.0,
                 if known_safe {
                     ", known safe command"
@@ -736,7 +773,7 @@ fn model_step(
         ask(
             Some(confidence),
             format!(
-                "Below the needed certainty: {}. {}{calibrated}",
+                "Below the needed certainty: {}. {}{calibrated}{source_note}",
                 failed.join(", "),
                 verdict.summary()
             ),

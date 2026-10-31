@@ -374,6 +374,15 @@ impl DayRate {
     }
 }
 
+/// Secret-free status counts over the decision log. Failure overlaps asked: it
+/// means unavailable inference/readiness, or an unanswered/invalidated question.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BouncerCounts {
+    pub by_model: u64,
+    pub asked: u64,
+    pub failed: u64,
+}
+
 /// What a pattern is bound to, and its template (ADR 0010).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternKey {
@@ -627,6 +636,36 @@ impl Vault {
             });
         }
         Ok(days)
+    }
+
+    /// Counts in the half-open Unix timestamp interval of the owner's local day,
+    /// using the same model and asked definitions as `ask_rate_by_day`.
+    pub fn bouncer_counts(&self, since: u64, until: u64) -> VaultResult<BouncerCounts> {
+        let counts = self
+            .conn_ref()?
+            .query_row(
+                "SELECT
+                COALESCE(SUM(decision = 'allow' AND asked = 0 AND decided_by = 'model'), 0),
+                COALESCE(SUM(asked), 0),
+                COALESCE(SUM(decided_by = 'no_answer' OR
+                    note LIKE 'Bouncer unavailable:%' OR note LIKE 'No bouncer runs,%'), 0)
+             FROM decision_log WHERE at >= ?1 AND at < ?2",
+                [to_sql_time(since)?, to_sql_time(until)?],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let count = |n| u64::try_from(n).map_err(|_| err(VaultErrorKind::Storage));
+        Ok(BouncerCounts {
+            by_model: count(counts.0)?,
+            asked: count(counts.1)?,
+            failed: count(counts.2)?,
+        })
     }
 
     /// All decisions as JSON Lines, oldest first (`docs/operations/learning.md`). The
