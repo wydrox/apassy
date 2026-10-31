@@ -29,12 +29,13 @@
 //!       below needs it.
 //!    3. A working directory that is no project (the root, the home folder, and its
 //!       parents) asks the owner: nothing can be remembered there.
-//!    4. Fitting remembered execution answers keep their action/host checks. An
+//!    4. Missing user request or declaration asks, including with a remembered answer.
+//!    5. Fitting remembered execution answers keep their action/host checks. An
 //!       existing answer that does not cover this run asks the owner.
-//!    5. A foreign-project declaration, missing user request or missing declaration
-//!       asks the owner. An execution answer can cover the foreign project.
-//!    6. An active owner-taught pattern starts the run.
-//!    7. Otherwise the model decides, including first use, default production and
+//!    6. A foreign host or project asks. Each credential must cover each host;
+//!       an explicit execution answer can add hosts or cover the foreign project.
+//!    7. An active owner-taught pattern starts the run.
+//!    8. Otherwise the model decides, including first use, default production and
 //!       default-source classifications (ADR 0031). Default sources need 80% task
 //!       match even for known safe commands and reads. Calibration cannot lower it.
 //!       Low confidence asks. Evaluation scopes are retained data, not routing gates.
@@ -95,6 +96,10 @@ use crate::vault::{
     DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, Vault,
     VaultErrorKind,
 };
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;
 
 /// A shadow thread waits this long after the owner time limit for the real outcome.
 const SHADOW_MARGIN: Duration = Duration::from_secs(30);
@@ -446,6 +451,16 @@ fn route<F: FnMut() -> Result<(), String>>(
             "The folder is not a project (the root, the home folder, or a parent of it), so Apassy remembers nothing there.".to_owned(),
         );
     }
+    // Required context is a hard veto, including when an execution answer fits.
+    if !run.has_user_request {
+        return Route::Ask("The agent did not send the user request.".to_owned());
+    }
+    if let Some(index) = checked.declarations.iter().position(Option::is_none) {
+        return Route::Ask(format!(
+            "\"{}\" has no declaration.",
+            checked.facts[index].name
+        ));
+    }
     if !known.answer.is_empty() && known.answer.iter().all(|answer| *answer) {
         return Route::Answer;
     }
@@ -460,6 +475,25 @@ fn route<F: FnMut() -> Result<(), String>>(
             ));
         }
     }
+    // Every requested secret enters the process environment. A client may use it
+    // implicitly, without spelling its variable in argv. Each item must cover
+    // every detected destination; only an explicit fitting owner answer can add
+    // hosts for that item. The database veto above is stricter and never waived.
+    for (index, facts) in checked.facts.iter().enumerate() {
+        if !known.answer.get(index).copied().unwrap_or(false)
+            && let Some(host) = run.hosts.iter().find(|host| {
+                !facts
+                    .known_hosts
+                    .iter()
+                    .any(|known| host_matches(host, known))
+            })
+        {
+            return Route::Ask(format!(
+                "The command goes to another host, {host}, which is not a host of \"{}\". You decide whether it may use this credential there.",
+                facts.name
+            ));
+        }
+    }
     // The item of another project (ADR 0025 §3): only the owner decides, and an answer
     // of the owner for this project counts.
     for (index, facts) in checked.facts.iter().enumerate() {
@@ -471,15 +505,6 @@ fn route<F: FnMut() -> Result<(), String>>(
                 facts.name
             ));
         }
-    }
-    if !run.has_user_request {
-        return Route::Ask("The agent did not send the user request.".to_owned());
-    }
-    if let Some(index) = checked.declarations.iter().position(Option::is_none) {
-        return Route::Ask(format!(
-            "\"{}\" has no declaration.",
-            checked.facts[index].name
-        ));
     }
     if run.pattern {
         return Route::Pattern;
@@ -510,6 +535,8 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
     // "Always ask me" of an item asks every agent, so nothing can be remembered for it.
     // "Always ask for this agent" asks this agent only: an answer covers the others.
     let can_remember = checked.project.is_some()
+        && run.has_user_request
+        && checked.declarations.iter().all(Option::is_some)
         && run.analysis.flags.is_empty()
         && foreign_db_host(checked, run).is_none()
         && checked.facts.iter().all(|facts| !facts.always_ask)
@@ -641,7 +668,9 @@ fn run_inner(
     let user_request = resolved.text.as_str();
     // Dev round 2: an instruction to the reviewer in the user request asks the owner,
     // as one in the purpose does (`shell_risk::injection_flag`).
-    if let Some(flag) = injection_flag(user_request)
+    if let Some(flag) = std::iter::once(user_request)
+        .chain(request.command.iter().map(String::as_str))
+        .find_map(injection_flag)
         && !analysis.flags.iter().any(|known| known == flag)
     {
         analysis.flags.push(flag.to_owned());

@@ -1171,37 +1171,79 @@ fn blocked_evaluation_model() -> (
 
 #[test]
 fn changing_access_during_inference_prevents_execution_and_secret_delivery() {
-    let (model, started, release, server) = blocked_evaluation_model();
-    let fx = fixture_with_model(
-        Some(declaration(Environment::Staging, RiskLevel::Medium)),
-        true,
-        Duration::from_secs(10),
-        None,
-        model,
-    );
-    let script = fx.project.join("scoped-task.sh");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\ntouch command-started\nprintf '%s' \"${ENV_NAME}\" > delivered-secret\n"
-        ),
-    )
-    .expect("script");
-    let argv = &["/bin/sh", "./scoped-task.sh"];
-    let handle = argv_later(&fx, &[fx.item_id], argv);
-    started
-        .recv_timeout(Duration::from_secs(5))
-        .expect("model reached through explicit scope");
-    with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).unwrap();
-    release.send(()).expect("release model");
-    let response = handle.join().expect("in-flight run");
-    server.join().expect("model server");
-    assert_eq!(code(&response), "authorization_changed", "{response:?}");
-    assert!(!fx.project.join("command-started").exists());
-    assert!(!fx.project.join("delivered-secret").exists());
-    assert!(!format!("{response:?}").contains(SECRET));
-    assert!(!fx.bouncer.bodies.lock().expect("body")[0].contains(SECRET));
-    assert_eq!(model_calls(&fx), 1);
+    for change in ["access", "declaration", "sources", "provider", "script"] {
+        let (model, started, release, server) = blocked_evaluation_model();
+        let fx = fixture_with_model(
+            Some(declaration(Environment::Staging, RiskLevel::Medium)),
+            true,
+            Duration::from_secs(10),
+            None,
+            model,
+        );
+        let script = fx.project.join("scoped-task.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch command-started\nprintf '%s' \"${ENV_NAME}\" > delivered-secret\n"
+            ),
+        )
+        .expect("script");
+        let argv = &["/bin/sh", "./scoped-task.sh"];
+        let handle = argv_later(&fx, &[fx.item_id], argv);
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("model reached through explicit scope");
+        match change {
+            "access" => with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).unwrap(),
+            "declaration" => with_vault(&fx, |v| {
+                v.save_declaration(
+                    fx.item_id,
+                    &declaration(Environment::Production, RiskLevel::Low),
+                    Some("sentry"),
+                    None,
+                )
+                .map(|_| ())
+            })
+            .unwrap(),
+            "sources" => with_vault(&fx, |v| {
+                v.set_declaration_sources(
+                    fx.item_id,
+                    &apassy::vault::DeclarationSources {
+                        environment: apassy::vault::DeclarationSource::Default,
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap(),
+            "provider" => with_vault(&fx, |v| {
+                v.save_declaration(
+                    fx.item_id,
+                    &declaration(Environment::Staging, RiskLevel::Medium),
+                    Some("stripe"),
+                    None,
+                )
+                .map(|_| ())
+            })
+            .unwrap(),
+            "script" => {
+                std::fs::write(&script, "#!/bin/sh\ntouch changed-command-started\n").unwrap()
+            }
+            _ => unreachable!(),
+        }
+        release.send(()).expect("release model");
+        let response = handle.join().expect("in-flight run");
+        server.join().expect("model server");
+        assert_eq!(code(&response), "authorization_changed", "{response:?}");
+        assert!(!fx.project.join("command-started").exists(), "{change}");
+        assert!(
+            !fx.project.join("changed-command-started").exists(),
+            "{change}"
+        );
+        assert!(!fx.project.join("delivered-secret").exists());
+        assert!(!format!("{response:?}").contains(SECRET));
+        assert!(!fx.bouncer.bodies.lock().expect("body")[0].contains(SECRET));
+        assert_eq!(model_calls(&fx), 1);
+    }
 }
 
 #[test]

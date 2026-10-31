@@ -1,0 +1,119 @@
+use super::*;
+use crate::contracts::CredentialKind;
+use crate::vault::bouncer_scopes::EvaluationConfirmation;
+use crate::vault::{Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue};
+
+#[test]
+fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
+    for declared_project in ["project", "foreign-project"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("vault.db"), "synthetic-review-pass").unwrap();
+        vault.unlock("synthetic-review-pass").unwrap();
+        let item = vault
+            .add(ItemDraft {
+                title: "Synthetic review key".into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("FAKE-review31-only".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        vault
+            .set_env_binding(item.id, "SYNTH_REVIEW_KEY", "token")
+            .unwrap();
+        vault
+            .save_declaration(
+                item.id,
+                &Declaration {
+                    project: declared_project.into(),
+                    environment: Environment::Staging,
+                    risk: RiskLevel::Low,
+                    scope: Scope::ReadWrite,
+                    reversibility: Reversibility::Reversible,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        let (agent, _) = vault.register_agent("Synthetic reviewer").unwrap();
+        vault.set_agent_sees_all(agent.id, true).unwrap();
+        let project = project_of(&cwd, None).unwrap();
+        // A real retained schema-20 row, deliberately for another action, host
+        // and binding. It can neither veto fresh inference nor waive a hard gate.
+        vault
+            .authorize_evaluation(
+                agent.id,
+                &ProjectRef {
+                    key: project.key,
+                    label: project.label,
+                },
+                ActionKind::Change,
+                &[EvaluationConfirmation {
+                    item_id: item.id,
+                    revision: item.revision,
+                    environment: Environment::Staging,
+                    risk: RiskLevel::Low,
+                    hosts: vec!["foreign.example.test".into()],
+                }],
+                Some("obsolete-command-binding"),
+                "synthetic test",
+            )
+            .unwrap();
+        let items = [item.id];
+        let command = vec!["git".to_owned(), "status".into()];
+        let request = RunRequest {
+            items: &items,
+            command: &command,
+            cwd: cwd.to_str().unwrap(),
+            purpose: "Check status.",
+            path: Some("/usr/bin:/bin"),
+            user_request: Some("Check status."),
+            host_session: None,
+        };
+        let mut checked = check(&vault, &agent, &request).unwrap();
+        let analysis = Analysis::default();
+        let facts = RunFacts {
+            analysis: &analysis,
+            has_user_request: true,
+            pattern: false,
+            action: ActionKind::Read,
+            hosts: &[],
+        };
+        let known = known_state(
+            &vault,
+            &items,
+            &checked,
+            ActionKind::Read,
+            Some(ActionKind::Read),
+            &[],
+        );
+        let mut ready = Readiness::new(|| Ok(()));
+        let actual = route(&checked, &facts, &known, &mut ready);
+        if declared_project == "project" {
+            assert_eq!(actual, Route::Model);
+        } else {
+            assert!(matches!(actual, Route::Ask(ref reason) if reason.contains("foreign-project")));
+        }
+        assert_eq!(vault.evaluation_scopes(item.id).unwrap().len(), 1);
+        assert!(vault.answers_for_item(item.id).unwrap().is_empty());
+        assert!(vault.patterns().unwrap().is_empty());
+
+        // Even crafted pre-existing execution metadata cannot fill in a missing
+        // declaration. This veto precedes both remembered execution paths.
+        checked.declarations[0] = None;
+        let known = Known {
+            answer: vec![true],
+            unfit: vec![None],
+        };
+        assert!(
+            matches!(route(&checked, &facts, &known, &mut ready), Route::Ask(ref reason) if reason.contains("no declaration"))
+        );
+    }
+}
