@@ -72,18 +72,27 @@ pub fn run_stdio(config: &AdapterConfig) -> io::Result<()> {
     let mut input = stdin.lock();
     loop {
         line.clear();
-        let read = read_frame(&mut input, &mut line)?;
+        let read = match read_frame(&mut input, &mut line) {
+            Ok(read) => read,
+            Err(err) => {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    let reply = rpc_error(&Value::Null, -32600, &err.to_string());
+                    serde_json::to_writer(&mut stdout, &reply).map_err(io::Error::other)?;
+                    stdout.write_all(b"\n")?;
+                    stdout.flush()?;
+                }
+                // Do not drain an unbounded stream or interpret its remainder as
+                // another frame. The peer gets an error before the adapter exits.
+                return Err(err);
+            }
+        };
         if read == 0 {
             return Ok(());
         }
         if line.trim().is_empty() {
             continue;
         }
-        let reply = if line.len() > MAX_LINE_BYTES {
-            Some(rpc_error(&Value::Null, -32600, "The request is too large."))
-        } else {
-            handle_message(config, &line)
-        };
+        let reply = handle_message(config, &line);
         if let Some(reply) = reply {
             serde_json::to_writer(&mut stdout, &reply).map_err(io::Error::other)?;
             stdout.write_all(b"\n")?;
