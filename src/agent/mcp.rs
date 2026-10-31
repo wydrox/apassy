@@ -706,10 +706,10 @@ fn capture_action(arguments: &Value) -> Result<Action, String> {
 
 fn generate_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments_object(arguments, &["name", "length", "alphabet", "cwd", "folder"])?;
-    if let Some(alphabet) = optional_text(object, "alphabet")? {
-        if !["alnum", "hex", "base64url", "symbols"].contains(&alphabet.as_str()) {
-            return Err("Choose alphabet: alnum, hex, base64url, or symbols.".to_owned());
-        }
+    if let Some(alphabet) = optional_text(object, "alphabet")?
+        && !["alnum", "hex", "base64url", "symbols"].contains(&alphabet.as_str())
+    {
+        return Err("Choose alphabet: alnum, hex, base64url, or symbols.".to_owned());
     }
     if length(object)?.is_some_and(|n| !(16..=128).contains(&n)) {
         return Err("Use a generated length from 16 through 128.".to_owned());
@@ -866,6 +866,7 @@ fn tool_error(code: &str, message: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "vault")]
     #[test]
     fn socket_permission_and_refusal_are_distinct() {
         use std::os::unix::fs::PermissionsExt;
@@ -890,23 +891,22 @@ mod tests {
     fn source_schema_one_of_validation_matches_adapter() {
         // Evaluate the standard required/not/anyOf predicates used in source branches.
         fn accepts(schema: &Value, value: &Value) -> bool {
-            if let Some(required) = schema.get("required").and_then(Value::as_array) {
-                if !required
+            if let Some(required) = schema.get("required").and_then(Value::as_array)
+                && !required
                     .iter()
                     .all(|key| value.get(key.as_str().unwrap()).is_some())
-                {
-                    return false;
-                }
+            {
+                return false;
             }
-            if let Some(not) = schema.get("not") {
-                if accepts(not, value) {
-                    return false;
-                }
+            if let Some(not) = schema.get("not")
+                && accepts(not, value)
+            {
+                return false;
             }
-            if let Some(any) = schema.get("anyOf").and_then(Value::as_array) {
-                if !any.iter().any(|branch| accepts(branch, value)) {
-                    return false;
-                }
+            if let Some(any) = schema.get("anyOf").and_then(Value::as_array)
+                && !any.iter().any(|branch| accepts(branch, value))
+            {
+                return false;
             }
             true
         }
@@ -961,6 +961,7 @@ mod tests {
         assert!(!result.to_string().contains("synthetic-secret"));
     }
 
+    #[cfg(feature = "vault")]
     #[test]
     fn stub_broker_refusals_and_client_timeout_keep_their_causes() {
         use std::os::unix::net::UnixListener;
@@ -1062,6 +1063,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "vault")]
     #[test]
     fn malformed_stub_broker_keeps_protocol_cause() {
         use std::os::unix::net::UnixListener;

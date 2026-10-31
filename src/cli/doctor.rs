@@ -463,7 +463,7 @@ fn server_check(report: &mut Report, host: &'static str, value: &serde_json::Val
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vault"))]
 mod tests {
     use super::*;
     #[test]

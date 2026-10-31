@@ -268,7 +268,7 @@ apassy --json item list | jq -r '.data.items[] | select(.variable == null) | .na
 
 ## JSON output contract
 
-For doctor, setup browser, logout, and decisions export, `--json` writes exactly one JSON document to stdout. Progress belongs on stderr. Parse the whole document, then inspect `ok` and the exit status. Results use `ok`, `code`, and command data; completed stages include `stage` and `partial_state`. Failures before a stage starts use the standard `ok`, `code`, `message`, `data` error envelope. Partial browser changes are reported and are not rolled back. Setup host configuration follows the same envelope convention.
+For doctor, setup browser, logout, and decisions export, `--json` writes exactly one JSON document to stdout. Progress belongs on stderr. Parse the whole document, then inspect `ok` and the exit status. Results use `ok`, `code`, and command data; completed stages include `stage` and `partial_state`. Failures before a stage starts use the standard `ok`, `code`, `message`, `data` error envelope. Partial browser changes are reported and are not rolled back.
 
 Doctor includes `checks`; a failed report exits 1 without a second error document. `unverified` means the diagnostic cannot prove connection, hook execution, or enforcement. Doctor reads configuration and never launches referenced commands.
 
