@@ -3,6 +3,8 @@
 //! This module is a demo UI. It is not a secure vault, authenticated owner
 //! channel, or verified isolation boundary.
 
+#[cfg(feature = "vault")]
+pub(crate) mod auto_lock;
 /// The browser socket (ADR 0021).
 #[cfg(feature = "vault")]
 pub(crate) mod browser;
@@ -141,6 +143,8 @@ pub struct DesktopApp {
     /// A4, N1 to N4).
     #[cfg(feature = "vault")]
     pub(crate) owner: owner_check::OwnerFlows,
+    #[cfg(feature = "vault")]
+    pub(crate) auto_lock: auto_lock::AutoLock,
     /// Learning view state (goal item B10).
     #[cfg(feature = "vault")]
     pub(crate) learning: learning_ui::LearningUiState,
@@ -225,6 +229,8 @@ impl DesktopApp {
             broker: BrokerState::NotStarted,
             #[cfg(feature = "vault")]
             owner: owner_check::OwnerFlows::default(),
+            #[cfg(feature = "vault")]
+            auto_lock: auto_lock::AutoLock::default(),
             #[cfg(feature = "vault")]
             learning: learning_ui::LearningUiState::default(),
             #[cfg(feature = "vault")]
@@ -484,6 +490,7 @@ impl eframe::App for DesktopApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(feature = "vault")]
         {
+            self.poll_auto_lock(ctx);
             self.poll_cli(ctx);
             self.poll_browser(ctx);
             self.poll_platform(ctx);

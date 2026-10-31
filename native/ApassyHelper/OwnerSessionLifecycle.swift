@@ -25,7 +25,8 @@ func runOwnerLifecycle() throws -> Never {
     func emit(revoke: Bool = false) {
         do { try requireApassyParent() } catch { exit(1) }
         sequence += 1
-        writeResponse(["sequence": sequence, "active": ownerSessionActive(), "revoke": revoke])
+        writeResponse(["sequence": sequence, "active": ownerSessionActive(), "revoke": revoke,
+                       "idle_seconds": CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: UInt32.max)!)])
     }
     let workspace = NSWorkspace.shared.notificationCenter
     var observers: [NSObjectProtocol] = []

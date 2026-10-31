@@ -1490,8 +1490,10 @@ impl DesktopApp {
             self.owner.lifecycle = crate::native::owner_lifecycle::OwnerLifecycle::start(
                 helper,
                 self.owner_ui.session.owner_window.clone(),
+                self.auto_lock.source.clone(),
             )
             .ok();
+            self.start_auto_lock_read(helper.clone(), ctx);
             let helper = helper.clone();
             self.owner.frequency_read = Some(Task::spawn(Some(ctx.clone()), move || {
                 helper.owner_policy_read().map_err(|e| e.to_string())

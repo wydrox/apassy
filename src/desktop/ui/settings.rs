@@ -586,6 +586,34 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         });
         g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills, passkey sign-ins, and Allow once until this time is up. It always asks again when your Mac locks or sleeps.");
     });
+    let lock_policy = app.auto_lock.policy;
+    let mut lock_selected = lock_policy;
+    rows::group(ui, Some("Vault locking"), |g| {
+        g.field("Lock after inactivity", |ui| {
+            let options: Vec<_> = crate::desktop::auto_lock::LockPolicy::ALL
+                .into_iter()
+                .map(|value| (value, value.label().to_owned()))
+                .collect();
+            ui.add_enabled_ui(app.owner.helper.is_some() && !app.auto_lock.busy(), |ui| {
+                kit::picker(
+                    ui,
+                    "auto-lock",
+                    &mut lock_selected,
+                    &options,
+                    lock_policy.label(),
+                    260.0,
+                )
+            })
+            .inner
+        });
+        g.note_row("Agents can't use your credentials while the vault is locked.");
+    });
+    if let Some(note) = &app.auto_lock.note {
+        rows::footnote(ui, note);
+    }
+    if lock_selected != lock_policy {
+        app.save_auto_lock(lock_selected, &ctx);
+    }
     if let Some(note) = &app.owner.frequency_note {
         rows::footnote(ui, note);
     }

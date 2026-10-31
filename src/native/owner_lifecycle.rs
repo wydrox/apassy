@@ -12,7 +12,11 @@ pub(crate) struct OwnerLifecycle {
     window: OwnerWindow,
 }
 impl OwnerLifecycle {
-    pub(crate) fn start(helper: &NativeHelper, window: OwnerWindow) -> Result<Self, NativeError> {
+    pub(crate) fn start(
+        helper: &NativeHelper,
+        window: OwnerWindow,
+        source: crate::desktop::auto_lock::IdleSource,
+    ) -> Result<Self, NativeError> {
         window.observe(false);
         let mut child = Command::new(helper.helper_path())
             .stdin(Stdio::piped())
@@ -58,6 +62,12 @@ impl OwnerLifecycle {
                 }
                 if !apply_event(&bytes, &mut sequence, &observed) {
                     break;
+                }
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    source.record(
+                        v["idle_seconds"].as_f64(),
+                        v["revoke"].as_bool() == Some(true),
+                    );
                 }
             }
             observed.observe(false);
