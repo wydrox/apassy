@@ -146,9 +146,11 @@ fn cases() -> [(
                 "Unlock",
                 "Touch ID",
                 "Owner checks use",
+                "How often to ask for Touch ID",
+                "Every time",
                 "Change passphrase…",
             ],
-            &["Back up now…", "Install tools…", "Owner checks\n"],
+            &["Back up now…", "Install tools…"],
         ),
         (
             SettingsSection::Devices,
