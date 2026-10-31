@@ -1677,7 +1677,10 @@ fn launcher_passes_each_listed_vault_outside_the_data_directory() {
     let (ok, out, err) = print_with_data_dir(&data);
     assert!(ok, "{err}");
     assert!(
-        out.contains(&format!(" '-D' 'APASSY_VAULT_FILE_2={}' ", outside.display())),
+        out.contains(&format!(
+            " '-D' 'APASSY_VAULT_FILE_2={}' ",
+            outside.display()
+        )),
         "{out}"
     );
     assert!(!out.contains("APASSY_VAULT_FILE_3"), "{out}");

@@ -373,7 +373,7 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         let response = cli.call(Command::AgentConnect { name: name.clone() })?;
         match response.data {
             Data::Token { token, agent } => {
-                terminal::tell(&format!("Registered {} (ID {}).", agent.name, agent.id));
+                eprintln!("Connected {} (ID {}).", agent.name, agent.id);
                 stages.push("agent_connected");
                 token
             }
@@ -425,7 +425,7 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
         eprintln!("Use /hooks to trust the Apassy hook before the first request.");
     }
     eprintln!(
-        "Next: nothing to give. {name} lists the credentials available to it without values and uses them; the bouncer decides each use."
+        "Next: nothing to give. The connected agent lists the credentials available to it without values and uses them; the bouncer decides each use."
     );
     eprintln!("When the bouncer asks you, answer in Decisions in the Apassy window.");
     eprintln!("From the project folder, start the host in the Apassy sandbox:");

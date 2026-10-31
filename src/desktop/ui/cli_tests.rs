@@ -1736,7 +1736,9 @@ fn terminal_setup_checks_catalog_consent_without_widening_existing_agents() {
             &mut app,
             &ctx,
             Some(&session),
-            Command::AgentConnect { name: name.into() },
+            Command::AgentConnect {
+                name: format!(" {name} "),
+            },
         ));
         assert!(!retry.ok);
     }

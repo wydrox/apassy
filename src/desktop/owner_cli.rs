@@ -787,6 +787,7 @@ impl DesktopApp {
             }
             Command::AgentAdd { name } => Ok(Step::Check(OwnerRequest::RegisterAgent { name })),
             Command::AgentConnect { name } => {
+                let name = name.trim().to_owned();
                 let existing = self
                     .owner_ui
                     .session
