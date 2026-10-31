@@ -22,6 +22,7 @@ async function openRp(ph, query = "") {
 }
 
 const status = (page) => page.locator("#status");
+const passkeyScripts = async (ph) => (await ph.registered()).filter((s) => s.id.startsWith("apassy-passkey-"));
 
 test("passkeys off: the page gets the browser's own WebAuthn, nothing reaches the host", async ({ ph }) => {
   const page = await openRp(ph);
@@ -30,12 +31,12 @@ test("passkeys off: the page gets the browser's own WebAuthn, nothing reaches th
   await expect(status(page)).toHaveAttribute("data-state", "registered");
   expect(await browser.credentials()).toHaveLength(1);
   expect(ph.requests("passkey_create")).toHaveLength(0);
-  expect(await ph.registered()).toEqual([]);
+  expect(await passkeyScripts(ph)).toEqual([]);
 });
 
 test("turning on registers the two scripts: MAIN and ISOLATED, document_start, top frame only", async ({ ph }) => {
   await turnOn(ph);
-  const scripts = (await ph.registered()).sort((a, b) => a.id.localeCompare(b.id));
+  const scripts = (await passkeyScripts(ph)).sort((a, b) => a.id.localeCompare(b.id));
   expect(scripts.map((s) => [s.id, s.world, s.runAt, s.allFrames, s.js])).toEqual([
     ["apassy-passkey-bridge", "ISOLATED", "document_start", false, ["passkey-bridge.js"]],
     ["apassy-passkey-page", "MAIN", "document_start", false, ["passkey-page.js"]],
@@ -117,10 +118,12 @@ test("a navigation during the owner check closes the host before it answers", as
 test("the popup shows the passkey switch and turns passkeys off", async ({ ph }) => {
   await turnOn(ph);
   const popup = await ph.openPopupPage();
+  await popup.locator("#settings-link").click();
   await expect(popup.locator("#passkeys-row")).toBeVisible();
   await expect(popup.locator("#passkeys")).toBeChecked();
   await popup.locator("#passkeys").click();
   await expect(popup.locator("#passkeys")).not.toBeChecked();
   await expect(popup.locator("#passkeys-note")).toHaveText("Off: sites use the passkeys of the browser.");
-  expect(await ph.registered()).toEqual([]);
+  expect(await passkeyScripts(ph)).toEqual([]);
+  expect((await ph.registered()).filter((s) => s.id === "apassy-login-suggestions")).toHaveLength(1);
 });

@@ -1,31 +1,55 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="color-scheme" content="light dark">
-  <title>Apassy</title>
-  <link rel="stylesheet" href="popup.css">
-</head>
-<body>
-  <header>
-    <img src="icons/32.png" width="20" height="20" alt="">
-    <span class="brand">Apassy</span>
-    <span class="site" id="site"></span>
-  </header>
-  <main id="main" aria-live="polite">
-    <p class="note" id="note">Asking Apassy…</p>
-  </main>
-  <footer id="suggestions-row" hidden>
-    <label class="check toggle"><input type="checkbox" id="suggestions"><span>Show login suggestions on this site</span></label>
-    <p class="hint" id="suggestions-note">Optional site access lets Apassy suggest accounts when you focus a login field. Filling still requires your choice and approval.</p>
-  </footer>
-  <footer id="passkeys-row" hidden>
-    <label class="check toggle">
-      <input type="checkbox" id="passkeys">
-      <span>Use Apassy passkeys in this browser</span>
-    </label>
-    <p class="hint" id="passkeys-note"></p>
-  </footer>
-  <script src="popup.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Apassy</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/32.png" width="20" height="20" alt="" /><span
+        class="brand"
+        >Apassy</span
+      ><span class="site" id="site"></span>
+    </header>
+    <main id="main" aria-live="polite">
+      <p class="note" id="note">Asking Apassy…</p>
+    </main>
+    <aside id="settings" hidden aria-label="Apassy settings">
+      <h2>Settings</h2>
+      <section id="suggestions-row" hidden>
+        <label class="check toggle"
+          ><input type="checkbox" id="suggestions" /><span
+            >Suggest logins on all sites</span
+          ></label
+        >
+        <p class="hint" id="suggestions-note"></p>
+        <button type="button" class="link" id="site-toggle">
+          Not on this site
+        </button>
+      </section>
+      <section id="passkeys-row" hidden>
+        <label class="check toggle"
+          ><input type="checkbox" id="passkeys" /><span
+            >Use Apassy passkeys in this browser</span
+          ></label
+        >
+        <p class="hint" id="passkeys-note"></p>
+      </section>
+    </aside>
+    <div id="access-prompt" hidden>
+      <p class="hint">
+        Allow site access to suggest accounts when you focus a login field.
+      </p>
+      <button type="button" class="action" id="allow-sites">
+        Allow suggestions on all sites
+      </button>
+    </div>
+    <footer>
+      <span id="connection">Connecting to your Mac</span
+      ><button class="link" type="button" id="settings-link">Settings</button>
+    </footer>
+    <script src="popup.js"></script>
+  </body>
 </html>

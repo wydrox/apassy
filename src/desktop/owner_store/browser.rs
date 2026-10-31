@@ -907,3 +907,80 @@ fn system_login(vault: &Vault, id: u64) -> ModelResult<Option<SystemLogin>> {
         code_field,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop::model::DetailDraft;
+
+    #[test]
+    fn browser_matching_canonicalizes_idn_and_refuses_imported_public_suffixes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut session = OwnerSession::new();
+        session
+            .create_file(
+                &dir.path().join("browser.apassy"),
+                "synthetic-test-passphrase",
+            )
+            .unwrap();
+        session.unlock("synthetic-test-passphrase").unwrap();
+        for (title, website) in [
+            ("IDN", "bücher.de"),
+            ("Suffix", "co.uk"),
+            ("Private suffix", "github.io"),
+            ("Missing Website", ""),
+        ] {
+            let mut secrets = SecretForm::default();
+            secrets.password = "synthetic-unused-password".to_owned();
+            // Imported/custom details can contain invalid legacy Website values.
+            session
+                .add(
+                    &ItemDraft {
+                        name: title.to_owned(),
+                        kind: CredentialKind::Login,
+                        username: "alice@example.test".to_owned(),
+                        details: if website.is_empty() {
+                            vec![]
+                        } else {
+                            vec![DetailDraft {
+                                label: "Website imported".to_owned(),
+                                value: website.to_owned(),
+                                ..DetailDraft::default()
+                            }]
+                        },
+                        ..ItemDraft::default()
+                    },
+                    &secrets,
+                )
+                .unwrap();
+        }
+        let page = Page::parse("https://xn--bcher-kva.de/login").unwrap();
+        let rows = session.logins_for_page(&page).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "IDN");
+        assert_eq!(
+            session.suggestions_for_page(&page, " ALI ").unwrap().len(),
+            1
+        );
+        assert!(
+            session
+                .suggestions_for_page(&page, "bob")
+                .unwrap()
+                .is_empty()
+        );
+        for url in [
+            "https://unrelated.co.uk",
+            "https://unrelated.github.io",
+            "https://bücher.de:8443",
+            "https://other.de",
+        ] {
+            assert!(
+                session
+                    .logins_for_page(&Page::parse(url).unwrap())
+                    .unwrap()
+                    .is_empty(),
+                "{url}"
+            );
+        }
+    }
+}

@@ -1,322 +1,344 @@
 :root {
-  --accent: #0061d6;
-  --button-bg: #0061d6;
-  --text: #0e1820;
-  --muted: #5b6670;
-  --line: #e3e7eb;
-  --bg: #ffffff;
-  --hover: #eef5ff;
-  --error: #c5221f;
   color-scheme: light dark;
+  --canvas: #f6f6f7;
+  --surface: #fff;
+  --text: #1d1d1f;
+  --secondary: #63636b;
+  --edge: #e1e1e5;
+  --control: #85858e;
+  --blue: #0066d6;
+  --on-blue: #fff;
+  --tint: #edf3ff;
+  --error: #b42318;
+  --good: #25633c;
+  font:
+    13px/1.45 -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
 }
-
 @media (prefers-color-scheme: dark) {
   :root {
-    --accent: #3d94ff;
-    --text: #e8edf2;
-    --muted: #9aa5b0;
-    --line: #2b3640;
-    --bg: #141c23;
-    --hover: #1d2a36;
-    --error: #ff7b72;
+    --canvas: #19191b;
+    --surface: #242426;
+    --text: #f5f5f7;
+    --secondary: #b5b5bd;
+    --edge: #424246;
+    --blue: #80b8ff;
+    --on-blue: #10233a;
+    --tint: #303c50;
+    --error: #ffaaa3;
+    --good: #9dd5ad;
   }
 }
-
 * {
   box-sizing: border-box;
 }
-
-html,
 body {
   margin: 0;
-  background: var(--bg);
+  width: 360px;
+  background: var(--surface);
   color: var(--text);
-  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
-
-body {
-  width: 340px;
-}
-
 header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--edge);
 }
-
 .brand {
   font-weight: 600;
 }
-
 .site {
   margin-left: auto;
-  overflow: hidden;
-  color: var(--muted);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  max-width: 200px;
+  font-size: 12px;
+  color: var(--secondary);
+  max-width: 220px;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
-
+main,
+aside,
+#access-prompt {
+  padding: 16px;
+}
 main {
-  padding: 12px 14px 14px;
+  min-height: 160px;
 }
-
+h2 {
+  font-size: 17px;
+  letter-spacing: -0.2px;
+  margin: 0 0 10px;
+}
+p {
+  margin: 0 0 12px;
+}
 .note {
-  margin: 0;
+  overflow-wrap: anywhere;
 }
-
-.note.error {
+.hint,
+.username,
+.label {
+  color: var(--secondary);
+  font-size: 12px;
+}
+.hint {
+  margin-top: 8px;
+}
+.error {
   color: var(--error);
 }
-
-.note + .note,
-.note + ul,
-.note + .command,
-.note + .action,
-.note + .form,
-.note + .link,
-.note + .actions {
-  margin-top: 10px;
+.success {
+  color: var(--good);
 }
-
-.command {
-  display: block;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
-  user-select: all;
-  -webkit-user-select: all;
-  cursor: text;
-}
-
-.action {
-  display: inline-block;
-  padding: 6px 14px;
-  border: 0;
-  border-radius: 6px;
-  background: var(--button-bg);
-  color: #ffffff;
+button,
+input {
   font: inherit;
-  font-weight: 600;
+  color: inherit;
+}
+button {
   cursor: pointer;
 }
-
-.action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.action:disabled {
+button:disabled {
+  opacity: 0.55;
   cursor: default;
-  opacity: 0.5;
 }
-
-.actions {
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+button {
+  border-radius: 7px;
+  min-height: 34px;
+  padding: 7px 12px;
+}
+.action {
+  background: var(--blue);
+  color: var(--on-blue);
+  border: 1px solid var(--blue);
+  font-weight: 500;
+}
+.secondary,
+.code {
+  background: var(--surface);
+  border: 1px solid var(--control);
+}
+.link,
+.details {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  padding: 4px;
+  min-height: 28px;
+}
+.actions,
+.buttons,
+.row {
   display: flex;
   gap: 8px;
   margin-top: 12px;
+}
+.actions {
+  border-top: 1px solid var(--edge);
   padding-top: 12px;
-  border-top: 1px solid var(--line);
 }
-
-.secondary {
+.actions > * {
   flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
 }
-
-.secondary:hover {
-  background: var(--hover);
+.buttons {
+  align-items: center;
 }
-
-.secondary:focus-visible,
-.link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+.buttons #back {
+  margin-left: auto;
 }
-
-.link {
-  display: inline-block;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  cursor: pointer;
-}
-
-.link:hover {
-  text-decoration: underline;
-}
-
-.form {
-  display: grid;
-  gap: 10px;
-}
-
-.field {
-  display: grid;
-  gap: 4px;
-}
-
-.label {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.field input {
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-}
-
-.field input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-
 .row {
-  display: flex;
-  align-items: end;
-  gap: 14px;
+  align-items: center;
 }
-
+.field {
+  display: block;
+  margin-bottom: 12px;
+}
+.field input {
+  display: block;
+  margin-top: 5px;
+  width: 100%;
+}
+input[type="text"],
+input[type="search"],
+input[type="number"] {
+  border: 1px solid var(--control);
+  background: var(--canvas);
+  border-radius: 7px;
+  padding: 8px 10px;
+  min-height: 36px;
+}
+input[type="search"] {
+  width: 100%;
+  margin-bottom: 10px;
+}
 .length {
-  width: 90px;
+  flex: 1;
 }
-
 .check {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding-bottom: 7px;
-  cursor: pointer;
+  gap: 8px;
 }
-
 .check input {
-  margin: 0;
-  accent-color: var(--accent);
+  accent-color: var(--blue);
 }
-
-.hint {
-  margin: 0;
-  color: var(--muted);
+.toggle {
+  font-weight: 500;
 }
-
-.buttons {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-ul {
-  margin: 0 -6px;
-  padding: 0;
-  list-style: none;
-}
-
-.login {
+.command {
   display: block;
-  width: 100%;
-  padding: 7px 8px;
+  user-select: all;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  background: var(--canvas);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+}
+#logins {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 292px;
+  overflow: auto;
+}
+#logins li {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-height: 58px;
+  padding: 2px 8px;
+  border-radius: 7px;
+}
+#logins li:hover,
+#logins li:focus-within {
+  background: var(--tint);
+}
+#logins li:has(:focus-visible) {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+#logins .details {
+  flex: 0 0 28px;
+}
+.login {
   border: 0;
-  border-radius: 6px;
   background: transparent;
-  color: inherit;
-  font: inherit;
+  display: flex;
+  gap: 10px;
+  align-items: center;
   text-align: left;
-  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  min-height: 58px;
+  padding: 8px 4px;
 }
-
-.login:hover,
-.login:focus {
-  outline: none;
-  background: var(--hover);
-}
-
 .login:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--accent);
+  outline: none;
 }
-
-.login:disabled {
-  cursor: default;
-  opacity: 0.5;
+.login:hover,
+.details:hover {
+  background: var(--tint);
 }
-
+.mark {
+  width: 30px;
+  height: 30px;
+  background: var(--canvas);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--secondary);
+}
+.identity {
+  flex: 1;
+  min-width: 0;
+}
 .title,
 .username {
   display: block;
   overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
-
 .title {
   font-weight: 600;
 }
-
-.username {
-  color: var(--muted);
+.fill-label {
+  color: var(--blue);
+  font-size: 12px;
+  flex-shrink: 0;
 }
-
-/* A login with a one-time code: the login button, then "Fill code". */
-li.with-code {
+.count {
+  color: var(--secondary);
+  font-size: 11px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+.context {
+  padding: 12px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: var(--canvas);
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.context span {
+  display: block;
+  color: var(--secondary);
+  font-size: 12px;
+}
+.state-panel {
+  padding: 12px 4px;
+}
+.state-panel h2 {
+  margin-bottom: 8px;
+}
+.state-panel > .action {
+  width: 100%;
+  margin-top: 8px;
+}
+footer {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--edge);
+  background: var(--canvas);
+  font-size: 12px;
+  color: var(--secondary);
 }
-
-li.with-code .login {
-  flex: 1;
-  min-width: 0;
+footer button {
+  font-size: 12px;
 }
-
-.code {
-  flex: none;
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  cursor: pointer;
+aside section + section {
+  border-top: 1px solid var(--edge);
+  padding-top: 16px;
+  margin-top: 16px;
 }
-
-.code:hover {
-  background: var(--hover);
+#access-prompt {
+  border-top: 1px solid var(--edge);
 }
-
-.code:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--accent);
+[hidden] {
+  display: none !important;
 }
-
-footer {
-  padding: 10px 14px 12px;
-  border-top: 1px solid var(--line);
+@media (prefers-reduced-motion: no-preference) {
+  button {
+    transition: background 100ms ease;
+  }
 }
-
-footer .toggle {
-  margin: 0;
-  padding-bottom: 0;
-}
-
-footer .hint {
-  margin: 4px 0 0;
-}
-
-footer .hint.error {
-  color: var(--error);
+@media (forced-colors: active) {
+  input,
+  button {
+    border: 1px solid CanvasText;
+  }
 }

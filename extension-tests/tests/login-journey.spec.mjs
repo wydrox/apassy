@@ -76,7 +76,8 @@ test("popup update requires selecting and confirming the exact existing account"
   await page.fill("#username", LOGINS[0].username);
   await page.fill("#password", "Explicit-Popup-Update-42");
   const popup = await h.openPopupPage();
-  await popup.getByRole("button", { name: `Update password for ${LOGINS[0].username} in ${LOGINS[0].title}`, exact: true }).click();
+  await popup.getByRole("button", { name: `Details for ${LOGINS[0].title}`, exact: true }).click();
+  await popup.getByRole("button", { name: "Update login", exact: true }).click();
   await expect(popup.locator("#note")).toContainText(LOGINS[0].username);
   expect(h.requests("update")).toEqual([]);
   await popup.getByRole("button", { name: "Update this login", exact: true }).click();

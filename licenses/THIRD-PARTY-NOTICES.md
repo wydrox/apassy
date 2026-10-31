@@ -148,3 +148,7 @@ The vault core of the iPhone app (`ios/ApassyCore`) links the storage and TLS st
 | Component | Version | License used | Text | In the binary |
 | --- | --- | --- | --- | --- |
 | EFF Long Wordlist (Electronic Frontier Foundation) | 2016 | CC BY 3.0 US | `eff-wordlist/NOTICE.md` | Yes, the words, for memorable passwords |
+
+## Browser domain matching
+
+IDNA and public suffix dependency notices and license texts are in [browser-domains](browser-domains/README.md).

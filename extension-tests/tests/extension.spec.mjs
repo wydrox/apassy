@@ -31,6 +31,8 @@ test("the extension folder holds only extension files", () => {
   const sources = files.filter((file) => /\.(js|html)$/.test(file))
     .map((file) => fs.readFileSync(path.join(EXTENSION_DIR, file), "utf8"));
   for (const source of sources) {
-    expect(source).not.toMatch(/console\.|eval\(|new Function|clipboard|fetch\(|XMLHttpRequest|https?:\/\/(?!127\.0\.0\.1)/);
+    // Literal Chrome permission/registration patterns are not remote requests.
+    const withoutMatchPatterns = source.replace(/https?:\/\/(?:\*|localhost|\$\{host\})\/\*/g, "");
+    expect(withoutMatchPatterns).not.toMatch(/console\.|eval\(|new Function|clipboard|fetch\(|XMLHttpRequest|https?:\/\/(?!127\.0\.0\.1)/);
   }
 });

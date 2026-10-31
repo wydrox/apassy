@@ -33,6 +33,8 @@ const MESSAGES = {
   no_page: "Open a login page, then click Apassy.",
   page_changed: "The page changed. Nothing was filled.",
   no_fields: "Apassy found no login fields on this page.",
+  form_origin: "This form sends the login to another origin. Open the sign-in site in its own tab before filling.",
+  frame: "This sign-in form is in another frame. Open it in its own tab, then use Apassy.",
   fill_failed: "Apassy could not fill this page.",
   no_password: "Type your password on the page first.",
   ambiguous_password: "Apassy cannot identify the new password in this form. Open the login in Apassy to update it.",
@@ -605,13 +607,20 @@ async function handleMessage(message) {
       return withBadge(() => updateLogin(message.tabId, message.url, message.item, message.username, target));
     }
     case "login_access_state": {
+      await loginAccessWrites;
       const tab = await targetTab();
-      return { ok: true, url: tab?.url || "", on: tab ? await loginAccess(tab.url) : false };
+      const prefs = await loginPreferences();
+      return { ok: true, url: tab?.url || "", on: prefs.enabled,
+        broad: await chrome.permissions.contains({ origins: LOGIN_ORIGINS }),
+        siteOff: Boolean(tab && loginMatch(tab.url) && prefs.excluded.includes(new URL(tab.url).hostname)) };
     }
-    case "login_access": {
+    case "login_access":
+      if (typeof message.on !== "boolean") return bad();
+      return loginAccessChange(message.url, message.on);
+    case "login_site": {
       const tab = await targetTab();
       if (typeof message.on !== "boolean" || !tab || originOf(tab.url) !== originOf(message.url)) return bad();
-      return loginAccessChange(tab.url, message.on);
+      return loginSiteChange(tab.url, message.on);
     }
     case "passkeys_state":
       return passkeyState();
