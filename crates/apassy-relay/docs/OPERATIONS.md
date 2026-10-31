@@ -21,6 +21,15 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    version tag `apassy-relay:release-<version>`, and immutable tag
    `apassy-relay:sha-<full SHA>` must agree. Archive these artifacts and the previous
    image/compose configuration for rollback. Tags alone are not identity proof.
+   CI's `relay-image.id` records the image **config digest**. Docker's containerd
+   image store can instead report a **manifest digest** as the loaded image ID.
+   In that case, require the archive's `index.json` descriptor to match the loaded
+   ID, hash the referenced manifest blob to verify that digest, then require its
+   `config.digest` and the hashed config blob to match CI's recorded ID. Check the
+   config's architecture and OCI version/revision labels against the approved
+   release, and verify the archive checksum above. Record both digests and commands;
+   a digest-type difference alone is not a failed identity check. With a config-ID
+   store, the loaded ID must match CI's config digest directly. Stop on any mismatch.
 3. Verify both CLI artifacts against their platform checksum files and
    `release-linux.json` / `release-darwin.json`. Both metadata files must name the
    approved version and full commit. CI runs each binary's `--version`, verifies
@@ -46,7 +55,8 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    its file, size and digest. Keep the master-key backup separately. A failed
    backup or restore check stops the rollout. Hidden `.partial` folders are failed
    attempts, never recovery points; inspect and remove them only after diagnosing.
-6. Confirm the loaded image ID/OCI labels, select its immutable tag in the approved compose
+6. Confirm the loaded image identity/OCI labels using the digest chain in step 2,
+   select its immutable tag in the approved compose
    configuration, then restart with the existing service/data settings. Read back
    `/healthz` HTTP 200, `ok\n`, `x-apassy-relay-version`, and
    `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
