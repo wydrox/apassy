@@ -175,7 +175,10 @@ fn parse_env(text: &str, options: &Options) -> (Vec<Entry>, Vec<Skipped>) {
 
 /// RFC 4180 records: quoted fields can hold commas, quotes (`""`), and newlines.
 /// Returns each record with the line where it starts.
-pub fn parse_csv(text: &str) -> Vec<(usize, Vec<String>)> {
+pub fn parse_csv(text: &str) -> Result<Vec<(usize, Vec<String>)>, crate::import::csv::CsvError> {
+    // Validate the entire export before producing any entries. The shared parser
+    // erases its temporary fields and gives errors without credential values.
+    crate::import::csv::parse(text)?;
     let mut records = Vec::new();
     let mut record = Vec::new();
     let mut field = String::new();
@@ -229,7 +232,7 @@ pub fn parse_csv(text: &str) -> Vec<(usize, Vec<String>)> {
         record.push(field);
         records.push((start, record));
     }
-    records
+    Ok(records)
 }
 
 /// The column of the first header name that matches.
@@ -244,7 +247,19 @@ fn column(header: &[String], names: &[&str]) -> Option<usize> {
 }
 
 fn parse_csv_items(text: &str) -> (Vec<Entry>, Vec<Skipped>) {
-    let mut records = parse_csv(text).into_iter();
+    let records = match parse_csv(text) {
+        Ok(records) => records,
+        Err(err) => {
+            return (
+                Vec::new(),
+                vec![Skipped {
+                    line: 0,
+                    reason: err.to_string(),
+                }],
+            );
+        }
+    };
+    let mut records = records.into_iter();
     let Some((_, header)) = records.next() else {
         return (Vec::new(), Vec::new());
     };
@@ -305,7 +320,6 @@ fn parse_csv_items(text: &str) -> (Vec<Entry>, Vec<Skipped>) {
             service: Some(service_of(&url)).filter(|service| !service.is_empty()),
             ..ItemInput::default()
         };
-        let password = password.trim_end_matches(['\r', '\n']).to_owned();
         if !password.is_empty() && !username.is_empty() {
             item.kind = Some(CredentialKind::Login);
             item.username = Some(username);
@@ -333,6 +347,13 @@ fn parse_csv_items(text: &str) -> (Vec<Entry>, Vec<Skipped>) {
                 label: OTP_LABEL.to_owned(),
                 value: SecretText::new(otp),
                 hidden: true,
+            });
+        }
+        if !url.is_empty() {
+            item.details.push(DetailInput {
+                label: "Website".to_owned(),
+                value: SecretText::new(url),
+                hidden: false,
             });
         }
         for (label, value) in custom_fields(&fields) {
@@ -414,6 +435,46 @@ fn service_of(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_csv_preserves_website() {
+        let url = "https://example.com:8443/path?q=1\nhttps://other.example/login";
+        let (entries, _) = parse(
+            Format::Csv,
+            &format!("name,url,username,password\nx,\"{url}\",alice,p\n"),
+            &Options::default(),
+        );
+        let website = entries[0]
+            .item
+            .details
+            .iter()
+            .find(|d| d.label == "Website")
+            .expect("Website metadata");
+        assert_eq!(website.value.expose(), url);
+    }
+    #[test]
+    fn audit_csv_preserves_password_bytes() {
+        for password in ["pass  ", "pass\n", "pass\r\n"] {
+            let (entries, _) = parse(
+                Format::Csv,
+                &format!("name,username,password\nx,alice,\"{password}\"\n"),
+                &Options::default(),
+            );
+            assert_eq!(secret(&entries[0]), password);
+        }
+    }
+    #[test]
+    fn audit_csv_rejects_truncated_export_before_any_entries() {
+        for tail in ["\"unterminated", "\"closed\"junk"] {
+            let (entries, skipped) = parse(
+                Format::Csv,
+                &format!("name,password\ngood,pass\nbad,{tail}"),
+                &Options::default(),
+            );
+            assert!(entries.is_empty());
+            assert!(!skipped.is_empty());
+        }
+    }
+
     use super::*;
 
     fn secret(entry: &Entry) -> &str {
@@ -477,7 +538,7 @@ mod tests {
     #[test]
     fn csv_records_handle_quotes_commas_and_newlines() {
         let text = "a,b,c\r\n\"x, y\",\"say \"\"hi\"\"\",\"line1\nline2\"\n\n1,2,3";
-        let records = parse_csv(text);
+        let records = parse_csv(text).unwrap();
         assert_eq!(records.len(), 3);
         assert_eq!(records[1].1, ["x, y", "say \"hi\"", "line1\nline2"]);
         assert_eq!(records[2].0, 5);

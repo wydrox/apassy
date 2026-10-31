@@ -842,6 +842,9 @@ pub fn import(cli: &Cli, mut args: Args) -> Outcome {
             "Apassy cannot tell the format of the file. Add --format env, 1password, bitwarden, or csv.",
         ))
     })?;
+    if format != import::Format::Env {
+        crate::import::csv::parse(&text).map_err(|err| Failure::Other(err.to_string()))?;
+    }
     let (entries, skipped) = import::parse(format, &text, &options);
     use zeroize::Zeroize;
     text.zeroize();
