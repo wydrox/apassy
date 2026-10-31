@@ -62,6 +62,7 @@ pub(crate) struct BrowserWire;
 /// One request of the browser socket, with the hang-up state of its connection.
 pub(crate) struct BrowserRequest {
     pub(crate) command: Command,
+    pub(crate) trusted_gesture: bool,
     pub(crate) gone: PeerGone,
 }
 
@@ -85,6 +86,17 @@ impl LineWire for BrowserWire {
     fn parse(line: &[u8]) -> Result<BrowserRequest, Response> {
         Request::parse(line)
             .map(|command| BrowserRequest {
+                trusted_gesture: {
+                    #[derive(serde::Deserialize)]
+                    struct Gesture {
+                        #[serde(default)]
+                        trusted_gesture: bool,
+                        #[serde(default)]
+                        owner_window_host: u32,
+                    }
+                    serde_json::from_slice::<Gesture>(line)
+                        .is_ok_and(|g| g.trusted_gesture && g.owner_window_host == 1)
+                },
                 command,
                 gone: PeerGone::default(),
             })
@@ -98,7 +110,7 @@ impl LineWire for BrowserWire {
     /// A passkey or a code comes only from the signed Apassy host that the signed
     /// browser started. The check fails closed.
     fn check_peer(stream: &UnixStream, request: &BrowserRequest) -> Result<(), Response> {
-        if guarded(&request.command) {
+        if guarded(&request.command) || request.trusted_gesture {
             crate::browser::caller::check_peer(stream).map_err(Response::from)?;
         }
         Ok(())
@@ -108,7 +120,10 @@ impl LineWire for BrowserWire {
         (guarded(&request.command)
             || matches!(
                 request.command,
-                Command::Fill { .. } | Command::Update { .. }
+                Command::Fill { .. }
+                    | Command::Update { .. }
+                    | Command::Save { .. }
+                    | Command::Create { .. }
             ))
         .then(|| request.gone.clone())
     }
@@ -198,6 +213,9 @@ struct Filled {
 /// extension that nothing was filled: for example when the owner closes the dialog.
 pub(crate) struct BrowserTicket {
     reply: Option<Sender<Response>>,
+    /// True only for a new extension gesture on a peer-checked connection.
+    trusted_gesture: bool,
+    pub(crate) delivery_fence: Option<crate::broker::approvals::OwnerDeliveryFence>,
     /// After this time the socket no longer waits for the answer.
     deadline: Instant,
     /// The password of a save. It is erased when the ticket drops.
@@ -212,11 +230,17 @@ impl BrowserTicket {
     fn new(reply: Sender<Response>, gone: Option<PeerGone>) -> Self {
         Self {
             reply: Some(reply),
+            trusted_gesture: false,
+            delivery_fence: None,
             deadline: Instant::now() + owner_socket::REPLY_TIMEOUT.saturating_sub(TICKET_MARGIN),
             secret: None,
             gone,
             echo: None,
         }
+    }
+
+    pub(crate) fn allows_window(&self) -> bool {
+        self.trusted_gesture && self.is_live()
     }
 
     /// True when the browser hung up.
@@ -232,6 +256,11 @@ impl BrowserTicket {
 
     /// Send the answer. False when nobody waits for it any more.
     pub(crate) fn send(mut self, response: Response) -> bool {
+        if response.ok
+            && (!self.is_live() || self.delivery_fence.as_ref().is_some_and(|f| !f.valid()))
+        {
+            return false;
+        }
         self.reply
             .take()
             .is_some_and(|reply| reply.send(response).is_ok())
@@ -283,13 +312,18 @@ impl DesktopApp {
         };
         let envelopes: Vec<WireEnvelope<BrowserWire>> = inbox.try_iter().collect();
         for Envelope { request, reply } in envelopes {
-            let BrowserRequest { command, gone } = request;
-            self.handle_browser_watched(
+            let BrowserRequest {
+                command,
+                gone,
+                trusted_gesture,
+            } = request;
+            self.handle_browser_verified(
                 Envelope {
                     request: command,
                     reply,
                 },
                 Some(gone),
+                trusted_gesture,
                 ctx,
             );
         }
@@ -306,15 +340,27 @@ impl DesktopApp {
     }
 
     /// Answer one request whose connection sets `gone` when the browser hangs up.
+    #[cfg(test)]
     pub(crate) fn handle_browser_watched(
         &mut self,
         envelope: Envelope<Command, Response>,
         gone: Option<PeerGone>,
         ctx: &egui::Context,
     ) {
+        self.handle_browser_verified(envelope, gone, false, ctx);
+    }
+
+    pub(super) fn handle_browser_verified(
+        &mut self,
+        envelope: Envelope<Command, Response>,
+        gone: Option<PeerGone>,
+        trusted_gesture: bool,
+        ctx: &egui::Context,
+    ) {
         let Envelope { request, reply } = envelope;
         self.browser.last_seen = Some(Instant::now());
-        let ticket = BrowserTicket::new(reply, gone);
+        let mut ticket = BrowserTicket::new(reply, gone);
+        ticket.trusted_gesture = trusted_gesture;
         match request {
             Command::Status => {
                 ticket.send(self.browser_status());
@@ -480,23 +526,16 @@ impl DesktopApp {
             ));
             return;
         }
-        self.ask_owner(
+        self.ask_owner_for_browser(
             OwnerRequest::FillLogin {
                 item_id: login.id,
                 item_name: login.title,
                 username: login.username,
                 origin: page.origin(),
             },
-            Some(ctx),
+            ticket,
+            ctx,
         );
-        if let Some(dialog) = self.owner.check.as_mut() {
-            dialog.browser = Some(ticket);
-        }
-        // The macOS Touch ID prompt shows over the browser. The passphrase field is in
-        // the window.
-        if !self.owner.touch_id_ready() {
-            bring_to_front(ctx);
-        }
     }
 
     /// Explicit password update. Browser target attestation stays in the extension;
@@ -593,13 +632,7 @@ impl DesktopApp {
                 symbols,
             },
         };
-        self.ask_owner(request, Some(ctx));
-        if let Some(dialog) = self.owner.check.as_mut() {
-            dialog.browser = Some(ticket);
-        }
-        if !self.owner.touch_id_ready() {
-            bring_to_front(ctx);
-        }
+        self.ask_owner_for_browser(request, ticket, ctx);
     }
 
     /// The vault state before a passkey request: an open, unlocked vault. Both answers
@@ -633,11 +666,17 @@ impl DesktopApp {
             ));
             return;
         }
-        self.ask_owner(request, Some(ctx));
+        let eligible = ticket.trusted_gesture && ticket.is_live();
+        self.prepare_owner(request, Some(ctx), false);
         if let Some(dialog) = self.owner.check.as_mut() {
             dialog.browser = Some(ticket);
         }
-        if !self.owner.touch_id_ready() {
+        self.start_local_owner(
+            crate::broker::approvals::LocalWindowSource::BrowserGesture,
+            eligible,
+            ctx,
+        );
+        if self.owner.check.is_some() && !self.owner.touch_id_ready() {
             bring_to_front(ctx);
         }
     }
@@ -1264,5 +1303,61 @@ impl DesktopApp {
     #[cfg(test)]
     pub(crate) fn browser_results_are_empty(&self) -> bool {
         self.browser.code.is_none() && self.browser.passkey.is_none()
+    }
+}
+
+#[cfg(test)]
+mod owner_window_delivery_tests {
+    use super::*;
+    #[test]
+    fn owner_window_revocation_after_vault_read_refuses_browser_delivery() {
+        use crate::broker::approvals::{CheckMethod, LocalWindowSource, OwnerFrequency};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(
+                &dir.path().join("delivery.db"),
+                "synthetic-delivery-passphrase",
+            )
+            .unwrap();
+        app.owner_ui
+            .session
+            .unlock("synthetic-delivery-passphrase")
+            .unwrap();
+        let window = app.owner_ui.session.owner_window.clone();
+        window.configure(OwnerFrequency::OneMinute);
+        window.observe(true);
+        window.seed(
+            app.owner_ui.session.epoch().unwrap(),
+            CheckMethod::TouchId,
+            window.generation(),
+        );
+        let action = OwnerAction::FillLogin {
+            item_id: 1,
+            login: "Synthetic".into(),
+            origin: "https://example.test".into(),
+        };
+        let proof = app
+            .owner_gate()
+            .reuse_local(action, LocalWindowSource::BrowserGesture)
+            .unwrap();
+        let (reply, answer) = std::sync::mpsc::channel();
+        let mut ticket = BrowserTicket::new(reply, None);
+        ticket.delivery_fence = Some(proof.delivery_fence(app.owner_ui.session.shared_vault()));
+        window.invalidate();
+        assert!(!ticket.send(Response::ok(
+            "Synthetic fill",
+            Data::Fill {
+                item: 1,
+                origin: "https://example.test".into(),
+                username: "synthetic".into(),
+                password: SecretText::new("synthetic-canary".into())
+            }
+        )));
+        assert!(
+            !answer.try_recv().unwrap().ok,
+            "revocation must deliver only cancellation, never the computed secret"
+        );
     }
 }

@@ -61,6 +61,15 @@ fn main() {
         [cmd, home] if cmd == "seed" => seed(Path::new(home)),
         [cmd, home] if cmd == "seed-empty" => seed_empty(Path::new(home)),
         [cmd] if cmd == "run" => run(),
+        // NSArgumentDomain changes only this tour process, never the owner's
+        // global appearance preference. The product kit remains light-only.
+        [cmd, flag, appearance]
+            if cmd == "run"
+                && flag == "-AppleInterfaceStyle"
+                && ["Light", "Dark"].contains(&appearance.as_str()) =>
+        {
+            run()
+        }
         [] => {
             eprintln!(
                 "usage: screenshots seed HOME | screenshots seed-empty HOME | screenshots run | screenshots COMMAND…"

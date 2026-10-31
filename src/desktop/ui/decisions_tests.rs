@@ -2057,3 +2057,63 @@ fn queued_notification_is_downgraded_across_lock_and_vault_switch_with_reused_id
         "A must never open B's request"
     );
 }
+
+#[test]
+fn owner_window_allow_once_requires_each_click_and_skips_only_touch_id() {
+    use crate::broker::approvals::OwnerFrequency;
+    let dir = TempDir::new().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let (agent, _) = app
+        .owner_ui
+        .session
+        .register_agent("Synthetic window agent")
+        .unwrap();
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(OwnerFrequency::OneMinute);
+    window.observe(true);
+    app.owner_ui.session.lock().unwrap();
+    app.owner_ui.session.unlock(PASS).unwrap();
+    window.observe(true);
+    let ctx = egui::Context::default();
+    let (waiter, pending) = ask(
+        &app,
+        &queue,
+        agent.id,
+        run(
+            "Synthetic window agent",
+            question(vec![item(item_id, "Synthetic key")], &[]),
+        ),
+    );
+    assert!(
+        queue.pending().iter().any(|r| r.id == pending.id),
+        "a window must never answer on its own"
+    );
+    decisions::apply(&mut app, &ctx, &pending, Answer::Once);
+    assert!(
+        app.owner.check.is_none(),
+        "the explicit click can reuse local verification"
+    );
+    assert_eq!(
+        waiter.join().unwrap().unwrap().outcome,
+        ApprovalOutcome::Approved
+    );
+    window.invalidate();
+    let (waiter, pending) = ask(
+        &app,
+        &queue,
+        agent.id,
+        run(
+            "Synthetic window agent",
+            question(vec![item(item_id, "Synthetic key")], &[]),
+        ),
+    );
+    decisions::apply(&mut app, &ctx, &pending, Answer::Once);
+    assert!(
+        app.owner.check.is_some(),
+        "outside the window, authenticate again"
+    );
+    queue.deny(pending.id);
+    waiter.join().unwrap().unwrap();
+    app.close_owner_check(None);
+}

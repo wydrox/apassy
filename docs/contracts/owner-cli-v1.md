@@ -2,6 +2,16 @@
 
 Date: 2026-10-01. Decision: [ADR 0017](../adr/0017-owner-command-line.md). Code: `src/owner/wire.rs` (types), `src/owner/client.rs` (client), `src/desktop/owner_socket.rs` (listener), `src/desktop/owner_cli.rs` (commands).
 
+## Fresh checks for backup, export and tokens (2026-10-31)
+
+[ADR 0030](../adr/0030-owner-check-window.md) requires a fresh local owner
+check for an encrypted backup (from Settings or the CLI), CLI decision export,
+and registering an agent/issuing its token. A command-line session and the new
+owner-check window cannot replace those checks. Restore still verifies the typed
+backup passphrase and opens the restored vault locked. This supersedes earlier
+wording below that allowed these commands using only an open CLI session.
+
+
 ## 1. Transport
 
 - A Unix socket: `owner.sock` in the data directory ([`paths::data_dir`](../../src/paths.rs)), or `APASSY_OWNER_SOCKET`. The directory has mode `0700`, the socket `0600`. There is no peer-credential check.

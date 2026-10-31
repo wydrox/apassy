@@ -1,4 +1,5 @@
 import { test, expect, LOGINS, PASSWORD, USERNAME } from "../support/fixtures.mjs";
+import { goto } from "../support/helium.mjs";
 // A temporary extension copy grants localhost, as the existing passkey fixture
 // does. The production manifest and all real browser profiles remain untouched.
 test.use({ loginSiteAccess: true });
@@ -11,7 +12,9 @@ async function setup(h, path = "/typed") {
 }
 async function choose(page, frame = page) {
   await expect(frame.locator(selector)).toHaveAttribute("data-state", "list");
+  await expect(frame.locator(selector)).toBeVisible();
   await frame.locator("#username").press("Alt+ArrowDown");
+  await expect(frame.locator(selector)).toBeFocused();
   await page.keyboard.press("Enter");
 }
 
@@ -32,6 +35,7 @@ test("focus retrieves metadata only, keyboard choice fills after explicit native
   await choose(page);
   await expect(page.locator("#password")).toHaveValue(PASSWORD);
   expect(h.requests("fill")).toHaveLength(1);
+  expect(h.requests("fill")[0].trusted_gesture).toBe(true);
   await expect(page.locator("#username")).toHaveValue(USERNAME);
 });
 
@@ -51,6 +55,7 @@ test("same-origin iframe chooser fills only that frame document", async ({ h }) 
   await choose(page, frame);
   await expect(frame.locator("#password")).toHaveValue(PASSWORD);
   expect(h.requests("fill")).toHaveLength(1);
+  expect(h.requests("fill")[0].trusted_gesture).toBe(true);
 });
 
 test("navigation during owner approval drops the password and retains a safe result", async ({ h }) => {
@@ -61,7 +66,7 @@ test("navigation during owner approval drops the password and retains a safe res
     await page.focus("#username");
     await choose(page);
     await expect.poll(() => h.requests("fill").length).toBe(1);
-    await page.goto(h.url("/typed", "localhost"));
+    await goto(page, h.url("/typed", "localhost"));
   } finally {
     h.releaseReply(barrier);
   }

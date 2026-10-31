@@ -16,8 +16,8 @@ async function waitFor(check) {
     await delay(5);
   }
 }
-for (const command of ["fill", "create"]) {
-  test(`synthetic ${command} replies only after the fixture releases its barrier`, async () => {
+for (const command of ["fill", "create"]) for (const gesture of [false, true]) {
+  test(`synthetic ${command} (gesture=${gesture}) replies only after the fixture releases its barrier`, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "apassy-reply-barrier-"));
     const token = `${command}-held`;
     fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify({
@@ -31,6 +31,7 @@ for (const command of ["fill", "create"]) {
       const request = command === "fill"
         ? { v: 1, cmd: command, url: "https://example.test/login", item: 7 }
         : { v: 1, cmd: command, url: "https://example.test/signup", title: "Synthetic", username: "synthetic", length: 20, symbols: true };
+      if (gesture) request.trusted_gesture = true;
       const body = Buffer.from(JSON.stringify(request));
       const header = Buffer.alloc(4); header.writeUInt32LE(body.length);
       child.stdin.write(Buffer.concat([header, body]));

@@ -289,7 +289,7 @@ export function loadPage({ connect, bridge = true, clock = new FakeClock() } = {
     clearTimeout: clock.clearTimeout,
   });
   win.top = win;
-  win.navigator = { credentials: new interfaces.CredentialsContainer() };
+  win.navigator = { credentials: new interfaces.CredentialsContainer(), userActivation: { isActive: true } };
   const requests = [];
   win.addEventListener("apassy-passkey-request", (e) => {
     try { requests.push(JSON.parse(e.detail)); } catch { requests.push(null); }

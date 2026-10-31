@@ -158,11 +158,17 @@ tour() {
   "$TOUR" "$seed" "$home"
   rm -f "$WORK/events"
   mkfifo "$WORK/events"
-  (cd "$WORK" && exec env HOME="$home" "$@" "$TOUR" run >"$WORK/events" 2>"$WORK/app.log") &
+  (cd "$WORK" && exec env HOME="$home" APASSY_SNAP_DIR="${APASSY_SNAP_DIR:-$OUT}" "$@" "$TOUR" run -AppleInterfaceStyle "${APASSY_TOUR_SYSTEM_APPEARANCE:-Light}" >"$WORK/events" 2>"$WORK/app.log") &
   APP_PID=$!
   local line name wid file
   while IFS= read -r line; do
     case "$line" in
+      "SNAP "*)
+        file="${line#SNAP }"
+        [ -s "$file" ] || fail "the tour did not save $file"
+        echo "captured $file"
+        COUNT=$((COUNT + 1))
+        ;;
       "SHOT "*)
         name="${line#SHOT }"
         wid=""
@@ -184,13 +190,18 @@ tour() {
 }
 
 tour seed
-if [ -z "${APASSY_TOUR:-}" ]; then
+# A focused APASSY_TOUR may use `snap` (egui capture, no Screen Recording
+# permission). It has no README aliases or empty/relay scenes to collect.
+if [ -n "${APASSY_TOUR:-}" ]; then
+  [ "$COUNT" -gt 0 ] || fail "no screenshot"
+  echo "Done: $COUNT screenshots in $OUT"
+  exit 0
+fi
 tour seed-empty APASSY_TOUR_FIRST_STEPS=1
 # The relay group of Devices with the questions on and one iPhone, on the fake relay of
 # the tests in the app's process; then a relay without the feed routes.
 tour seed APASSY_TOUR_RELAY=on
 tour seed APASSY_TOUR_RELAY=old
-fi
 [ "$COUNT" -gt 0 ] || fail "no screenshot"
 
 # The names of the README and the site.

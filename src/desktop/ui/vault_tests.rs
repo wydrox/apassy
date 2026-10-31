@@ -226,8 +226,13 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         ),
         (
             SettingsSection::Security,
-            &["Touch ID", "Change passphrase…"][..],
-            &["Back up now…", "Token lifetime", "Owner checks\n"][..],
+            &[
+                "Touch ID",
+                "Change passphrase…",
+                "How often to ask for Touch ID",
+                "Every time",
+            ][..],
+            &["Back up now…", "Token lifetime"][..],
         ),
         (
             SettingsSection::Devices,

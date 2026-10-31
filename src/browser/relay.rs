@@ -249,16 +249,38 @@ fn answer(
     gate: Gate<'_>,
     watch: Option<&Watch>,
 ) -> Zeroizing<Vec<u8>> {
-    let Some(line) = request_line(message) else {
+    let Some(mut line) = request_line(message) else {
         return encode(&Response::error(
             "bad_request",
             "The request is not a JSON object.",
         ));
     };
+    #[derive(serde::Deserialize)]
+    struct Gesture {
+        #[serde(default)]
+        trusted_gesture: bool,
+        #[serde(default)]
+        owner_window_host: u32,
+    }
+    let gesture = match serde_json::from_slice::<Gesture>(&line) {
+        Ok(g) if g.owner_window_host == 0 => g,
+        _ => {
+            return encode(&Response::error(
+                "bad_request",
+                "A browser cannot supply host provenance.",
+            ));
+        }
+    };
     match serde_json::from_slice::<Peek>(&line) {
         Ok(Peek { cmd: Some(cmd) }) if is_guarded_command(&cmd) => {
             if let Err(error) = gate() {
                 return encode(&Response::from(error));
+            }
+            if gesture.trusted_gesture {
+                // Append inside the checked object without parsing/copying secrets.
+                let end = line.iter().rposition(|b| *b == b'}').expect("JSON object");
+                line.truncate(end);
+                line.extend_from_slice(b",\"owner_window_host\":1}");
             }
         }
         Ok(_) => {}
@@ -284,7 +306,7 @@ fn request_line(message: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     if *first != b'{' {
         return None;
     }
-    let mut line = Zeroizing::new(Vec::with_capacity(message.len() + 1));
+    let mut line = Zeroizing::new(Vec::with_capacity(message.len() + 32));
     line.extend(message.iter().map(|byte| match byte {
         b'\n' | b'\r' => b' ',
         other => *other,
@@ -608,6 +630,49 @@ mod tests {
         }
 
         const PASSKEY_GET: &[u8] = br#"{"v":1,"cmd":"passkey_get","rid":"00000000-0000-4000-8000-000000000000","origin":"https://example.com","rp_id":"example.com","client_data_json":"e30=","allowed":[]}"#;
+
+        #[test]
+        fn every_window_command_requires_the_host_caller_check_and_cannot_forge_its_marker() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("browser.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let checks = std::cell::Cell::new(0);
+            let refuse = || {
+                checks.set(checks.get() + 1);
+                Err(WireError::new("unsupported", "Synthetic caller refused."))
+            };
+            for cmd in [
+                "fill",
+                "save",
+                "create",
+                "update",
+                "fill_code",
+                "passkey_get",
+                "passkey_create",
+            ] {
+                for gesture in [false, true] {
+                    let packet = serde_json::to_vec(&serde_json::json!({
+                        "v": 1, "cmd": cmd, "trusted_gesture": gesture,
+                    }))
+                    .unwrap();
+                    let before = checks.get();
+                    let response: serde_json::Value =
+                        serde_json::from_slice(&answer(&packet, &socket, &refuse, None)).unwrap();
+                    assert_eq!(response["code"], "unsupported", "{cmd}");
+                    assert_eq!(checks.get(), before + 1, "{cmd}");
+                    assert!(listener.accept().is_err());
+                }
+                let forged = serde_json::to_vec(&serde_json::json!({
+                    "v": 1, "cmd": cmd, "trusted_gesture": true, "owner_window_host": 1,
+                }))
+                .unwrap();
+                let response: serde_json::Value =
+                    serde_json::from_slice(&answer(&forged, &socket, &refuse, None)).unwrap();
+                assert_eq!(response["code"], "bad_request", "{cmd}");
+                assert!(listener.accept().is_err());
+            }
+        }
 
         #[test]
         fn a_guarded_command_reaches_the_app_only_after_the_caller_check() {

@@ -16,7 +16,7 @@ test("the list and the empty state show Save this login and New password", async
 
   h.setScenario({ vault: "unlocked", logins: [LOGINS[2]] });
   popup = await h.openPopupPage();
-  await expect(popup.locator("h2")).toHaveText(`No logins for ${new URL(page.url()).host}`);
+  await expect(popup.locator("main h2")).toHaveText(`No logins for ${new URL(page.url()).host}`);
   await expect(popup.locator("#save-open")).toBeVisible();
   await expect(popup.locator("#new-open")).toBeVisible();
   await popup.close();
@@ -57,7 +57,7 @@ test("the Save view saves the typed login after the owner check", async ({ h }) 
   await expect(popup.locator("#note")).toHaveText("Approve in Apassy, or use your vault passphrase if asked.");
   await expect(popup.locator("#note")).toHaveText("Saved.");
   expect(h.requests("save")).toEqual([{
-    v: 1, cmd: "save", url: page.url(), title: "Typed site", username: "typed-user", password: TYPED_PASSWORD,
+    v: 1, cmd: "save", url: page.url(), title: "Typed site", username: "typed-user", password: TYPED_PASSWORD, trusted_gesture: true,
   }]);
   expect(await popup.content()).not.toContain(TYPED_PASSWORD);
   // Back asks Apassy again for the list.
@@ -110,7 +110,7 @@ test("the New password view sends the length and symbols and shows the result", 
   await expect(popup.locator("#note")).toHaveText("Approve in Apassy, or use your vault passphrase if asked.");
   await expect(popup.locator("#note")).toHaveText(FILLED);
   expect(h.requests("create")).toEqual([{
-    v: 1, cmd: "create", url: page.url(), title: new URL(page.url()).host, username: "new@example.com", length: 32, symbols: false,
+    v: 1, cmd: "create", url: page.url(), title: new URL(page.url()).host, username: "new@example.com", length: 32, symbols: false, trusted_gesture: true,
   }]);
   expect(await page.locator("#new-password").inputValue()).toBe(NEW_PASSWORD);
   expect(await page.locator("#confirm-password").inputValue()).toBe(NEW_PASSWORD);

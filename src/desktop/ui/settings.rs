@@ -559,6 +559,45 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .clicked();
         });
     });
+    let policy = app.owner_ui.session.owner_window.policy();
+    let mut selected = policy;
+    rows::group(ui, Some("Owner checks"), |g| {
+        g.field("How often to ask for Touch ID", |ui| {
+            let options: Vec<_> = crate::broker::approvals::OwnerFrequency::ALL
+                .into_iter()
+                .map(|value| (value, value.label().to_owned()))
+                .collect();
+            ui.add_enabled_ui(
+                app.owner.helper.is_some()
+                    && app.owner.frequency_read.is_none()
+                    && app.owner.frequency_write.is_none(),
+                |ui| {
+                    kit::picker(
+                        ui,
+                        "owner-check-frequency",
+                        &mut selected,
+                        &options,
+                        policy.label(),
+                        200.0,
+                    )
+                },
+            )
+            .inner
+        });
+        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills, passkey sign-ins, and Allow once until this time is up. It always asks again when your Mac locks or sleeps.");
+    });
+    if let Some(note) = &app.owner.frequency_note {
+        rows::footnote(ui, note);
+    }
+    if selected != policy {
+        app.ask_owner(
+            crate::desktop::owner_check::OwnerRequest::ChangeOwnerFrequency {
+                old: policy,
+                new: selected,
+            },
+            Some(&ctx),
+        );
+    }
     ctx.data_mut(|data| data.insert_temp(setup_id, setup));
     match action {
         Some(TouchIdAction::Off) => app.start_touch_id_off(
@@ -1549,16 +1588,11 @@ pub(super) fn backup_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
     backup |= super::save_pressed(app, ctx);
     if backup {
         let path = PathBuf::from(app.owner_ui.backup_path.trim());
-        let result = app.owner_ui.session.backup(&path);
-        if app
-            .apply(result, "The backup is written. The vault is locked.")
-            .is_some()
-        {
-            app.pending_delete = false;
-            app.ui.sheet = None;
-        }
-        // Backup locks the vault, also when it fails.
-        app.end_waiting_runs();
+        app.ui.sheet = None;
+        app.ask_owner(
+            crate::desktop::owner_check::OwnerRequest::BackupVault { path },
+            Some(ctx),
+        );
     }
     if cancel {
         close_sheet(app, ctx);

@@ -146,9 +146,11 @@ fn cases() -> [(
                 "Unlock",
                 "Touch ID",
                 "Owner checks use",
+                "How often to ask for Touch ID",
+                "Every time",
                 "Change passphrase…",
             ],
-            &["Back up now…", "Install tools…", "Owner checks\n"],
+            &["Back up now…", "Install tools…"],
         ),
         (
             SettingsSection::Devices,
@@ -765,4 +767,21 @@ fn today_uses_local_calendar_boundaries_including_dst_and_skipped_midnight() {
         );
     }
     assert!(super::local_day_bounds_with(ts(2026, 10, 31, 12), |_| None).is_none());
+}
+
+#[test]
+fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.place = Place::Settings;
+    app.ui.settings_section = SettingsSection::Security;
+    let (text, _) = frames(&mut app, TALL);
+    for expected in [
+        "How often to ask for Touch ID",
+        "Every time",
+        "browser fills, passkey sign-ins, and Allow once",
+        "Mac locks or sleeps",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
 }

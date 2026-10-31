@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPasskeyRp } from "../passkey-rp/rp-server.mjs";
+import { goto, warmUpHelium } from "../../support/helium.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE_EXTENSION = path.resolve(HERE, "../../../extension");
@@ -152,7 +153,7 @@ class Harness {
 
   async openPopupPage() {
     const popup = await this.context.newPage();
-    await popup.goto(`${EXTENSION_ORIGIN}popup.html`);
+    await goto(popup, `${EXTENSION_ORIGIN}popup.html`);
     return popup;
   }
 
@@ -189,8 +190,9 @@ export const test = base.extend({
     });
     const harness = new Harness(context, root, mockDir, rp, pages);
     await harness.worker();
-    // Helium may reload the first tab about a second after the start.
-    await sleep(1500);
+    const warmUp = await context.newPage();
+    await warmUpHelium(warmUp, harness.pageUrl("/blank"));
+    await warmUp.close();
     await use(harness);
     await context.close();
     await rp.stop();

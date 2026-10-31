@@ -26,6 +26,14 @@ func handle(_ request: Request) throws -> Fields {
             "keychain_access_group": keychainAccessGroup() ?? NSNull(),
             "biometry": biometryStatus(),
         ]
+    case "owner_policy_read":
+        return try handleOwnerPolicyRead()
+    case "owner_policy_write":
+        return try handleOwnerPolicyWrite(request)
+    case "owner_session_active":
+        return ["active": ownerSessionActive()]
+    case "owner_lifecycle":
+        try runOwnerLifecycle()
     case "authenticate":
         return try handleAuthenticate(request)
     case "keychain_store":

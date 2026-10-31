@@ -28,6 +28,8 @@ pub mod owner_check;
 #[cfg(feature = "vault")]
 pub(crate) mod owner_cli;
 #[cfg(feature = "vault")]
+mod owner_frequency;
+#[cfg(feature = "vault")]
 pub(crate) mod owner_socket;
 #[cfg(feature = "vault")]
 pub mod owner_store;

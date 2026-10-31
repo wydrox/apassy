@@ -49,6 +49,9 @@ stricter treatment. Shadow decisions use the same treatment.
 A model allow permits only the current run. It creates no grant, remembered answer,
 evaluation scope, classification confirmation or pattern approval. Each later run
 is evaluated afresh unless an explicit owner execution answer or pattern covers it.
+The local verification window of ADR 0030 is separate: it may supply identity proof
+only after an explicit Allow once click. It never answers a question or bypasses
+a routing veto. A model allow neither uses nor seeds that window.
 The credential revision, declaration and sources, access, project, canonical
 folders and supported command/script binding are checked again before secret use.
 Existing limits of the binding (no transitive dependency pinning or atomic

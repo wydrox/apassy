@@ -4,6 +4,16 @@ Date: 2026-09-26.
 Scope: the encrypted vault file (goal item V4 in [the goal](../goal.md)). Decisions: [ADR 0003](../adr/0003-passphrase-vault.md), [ADR 0004](../adr/0004-agent-path-first.md), [ADR 0010](../adr/0010-closing-open-decisions.md).
 Use only synthetic values for tests. The real-secret gate stays BLOCKED.
 
+## Fresh checks for backup, export and tokens (2026-10-31)
+
+[ADR 0030](../adr/0030-owner-check-window.md) requires a fresh local owner
+check for an encrypted backup (from Settings or the CLI), CLI decision export,
+and registering an agent/issuing its token. A command-line session and the new
+owner-check window cannot replace those checks. Restore still verifies the typed
+backup passphrase and opens the restored vault locked. This supersedes earlier
+wording below that allowed these commands using only an open CLI session.
+
+
 ## 1. What a backup is
 
 - A backup is a closed copy of the encrypted vault file. SQLCipher encrypts it with the passphrase that the vault has at the time of the backup.

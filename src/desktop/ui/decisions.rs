@@ -2159,7 +2159,7 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
                 app.set_err("The question no longer waits.");
             }
         }
-        Answer::Once => app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(ctx)),
+        Answer::Once => app.allow_once_clicked(OwnerRequest::ApproveRun(run.clone()), ctx),
         Answer::Evaluate {
             offer,
             confirmations,
