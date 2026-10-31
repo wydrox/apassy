@@ -6,12 +6,13 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Fixed
 
-- **Mac, bouncer eligibility:** "Allow once and enable bouncer" uses a fresh local owner check to confirm each credential's environment/risk and authorize later model evaluation for the exact agent, credential revision, project, action, and hosts. Classification and permission save together after access is rechecked. Ordinary "Allow once" stays one-time only; old history never becomes permission. Production allowances, always-ask settings, and hard vetoes retain precedence.
-- **Mac, approval choices:** evaluation permission is separate from existing project answers that immediately allow fitting future execution. CLI patterns still require 3 explicit "Approve and remember" actions. The new offer stays outside existing relay/iPhone cards and signed answers; their wire format and meanings are unchanged.
-- **Command classification and scripts:** split Git global path flags retain conservative read classification. Uncertain commands can receive evaluation permission bound to exact argv, working directory, `PATH`, executable resolution, and directly selected project script bytes; changes need review. This permits evaluation only and does not sandbox or pin transitive dependencies.
+- **Mac, bouncer decides by default:** first use, staging, unconfirmed production and default-source classifications reach the model without evaluation setup (ADR 0031). Defaults require 80% task match even for safe commands or reads; calibration cannot lower this check. Confirmed production, Always ask, foreign projects/DB hosts, missing context and unfit owner answers keep their vetoes. A model allow permits one run and remembers nothing.
+- **Mac, bouncer visibility:** Settings > Bouncer shows inference readiness and today's UTC counts for model decisions, owner questions and failures. Decisions hides the obsolete evaluation setup offer. Stored schema-20 scopes and compatibility APIs remain; routing no longer requires or reads them.
+- **Evaluation safety and coverage:** the scratch project matches fixture declarations. A non-executing broker evaluator replaces stale grant revocation and stops before credential delivery or process creation. Missing intended inference and unsafe allowances fail the harness. A frozen routing smoke set reports model calls and latency.
+- **Model diagnostics:** temperature warnings name each affected bucket and whether it affects the bouncer's yes/no questions. Model weights and calibration are unchanged.
 - **Model readiness:** a healthy HTTP endpoint alone no longer marks a failed warm-up ready. Readiness requires valid inference with the active model pin when configured; external mode never launches a process.
 - **Model deadlines:** each real inference attempt has an absolute 10-second deadline and at most one timeout retry (20 seconds by default). HTTP errors, invalid answers, and model-version mismatches ask the owner without retrying. Only inference repeats, never command execution.
-- **Automatic-use summaries:** both totals include allowed requests without an owner question from the model, patterns, and remembered execution answers, with the same breakdown. Denials and unanswered/manual requests do not count as successful automation.
+- **Automatic-use summaries:** both totals include allowed requests without an owner question from the model, patterns, and remembered execution answers. Denials and unanswered/manual requests do not count as successful automation.
 
 ## [0.5.7] - 2026-10-20
 

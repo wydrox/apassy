@@ -74,7 +74,7 @@ The setting is in `bouncer.json` in the Apassy data directory, mode `0600`. It i
 
 ### Start command with the base model (goal B8)
 
-The base model `apassy-base-v1+83224960` is the default model of the bouncer. It passed the B2 gate on the blind set held-out v4 with policy `apassy-bouncer-v7`: 0 violations and 0 critical cases ran in 3 runs ([heldout-v4.md](../evaluation/heldout-v4.md), Results).
+The base model `apassy-base-v1+83224960` is the default model of the bouncer. It passed the B2 gate on the blind set held-out v4 with policy `apassy-bouncer-v7`: 0 violations and 0 critical cases ran in 3 runs ([heldout-v4.md](../evaluation/heldout-v4.md), Results). These are historical results that predate current project routing, not fresh end-to-end acceptance. The current bounded smoke evidence is in [bouncer-default-v1.md](../evaluation/bouncer-default-v1.md).
 
 Apassy ships a fine-tuned base model, `apassy-base-v1`. See [base-model.md](base-model.md). It is a small file with new decision heads for the same Laya checkpoint. Use the start script from the repository instead of `laya-serve`:
 
@@ -95,37 +95,55 @@ Since 0.5.0 there is no rule to set for an agent and a credential ([ADR 0025](..
 
 ## 3. Decision order
 
-### 3.0 Order of the broker (ADR 0025, ADR 0029)
+### 3.0 Order of the broker (ADR 0025, ADR 0031)
 
-A process grant is no longer the authority for a run. Schema 18 converted grants with a rule, instruction, or an ask mode into "Always ask for this agent". A connected agent can request any non-archived item that its standing exceptions permit. "Not for this agent" and "Only these items" remain access restrictions. The broker uses this order (`src/broker/run.rs`):
+A process grant is no longer authority for a run. Schema 18 converted grants with a
+rule, instruction or ask mode into "Always ask for this agent". Access restrictions
+such as Never and Only these items still refuse hidden credentials. For visible,
+non-archived credentials with valid process bindings, `src/broker/run.rs` uses:
 
-1. Hard rules and security vetoes ask the owner: command-analysis flags, an unknown database destination, always-ask settings, and production from the owner, a value signal, or usage without a fitting production allowance. Production allowances still require the item, project, certain action kind, and covered destination hosts. Evaluation permission cannot override these checks.
-2. A bouncer without successful readiness inference asks the owner. Remembered routes below also require readiness.
-3. A directory without a usable project (root, home, or a parent of home) asks the owner.
-4. Production only by default remains unconfirmed and asks unless a fitting execution answer already covers it. The owner can review its classification on the Mac, or use the existing environment correction/project answers.
-5. A fitting remembered execution answer for every item starts the run directly. It covers the item, project, action kind, and hosts; production requires a production allowance and a certain action kind. An existing answer that does not fit asks the owner.
-6. An item declared for another project asks unless a fitting execution answer or explicit evaluation scope covers this project.
-7. A missing user request or declaration asks the owner.
-8. An active remembered pattern starts the run. Its existing three explicit "Approve and remember" approvals are unchanged; see [learning](learning.md).
-9. Environment or risk with source `default` asks the owner.
-10. Each item needs either confirmed development/local with low risk, or an explicit local evaluation scope for this connected agent, item revision, project, action, and destination hosts. A scope that does not fit asks for review on this Mac. Prior model decisions, ordinary approvals, project answers, and use history never create evaluation permission.
-11. The model evaluates the current user request and command. Only a sufficiently certain answer without a veto starts the run.
+1. Hard rules ask: analysis flags, foreign database destinations, Always ask, and
+   production from an owner, signal or usage without a fitting production allowance.
+   Production allowances retain the exact project, certain action and host checks.
+2. Failed inference readiness, no model or Off asks. Remembered routes need readiness.
+3. Root, HOME or a parent of HOME is not a project and asks.
+4. Fitting remembered owner execution answers retain their action and host checks.
+   An existing answer that does not fit the run asks with the exact reason.
+5. A foreign-project declaration asks unless a fitting execution answer covers it.
+   An evaluation scope is never an exception. Missing user request/declaration asks.
+6. An active owner-taught pattern retains its existing execution semantics.
+7. Every remaining request reaches the model: first use, staging, unconfirmed
+   production and default-source environment/risk included. No evaluation scope is
+   required. Defaults always require at least 80% task match, even for safe commands
+   and certain reads; calibration cannot lower this check. The sensitive declaration
+   is preserved. Low confidence and model failures ask with their exact reasons.
 
-A question waits up to 300 seconds. "Allow once" approves only that run: it neither confirms classification nor creates an evaluation scope. Existing "Allow ACTION in PROJECT" and "Allow production: ACTION in PROJECT" remain immediate execution answers for all agents, with their original host/action and production checks. They are distinct from evaluation permission and from CLI pattern learning.
+A model allow permits one run, after the authorization recheck. It creates no grant,
+remembered answer, evaluation scope, pattern approval or classification confirmation.
+A later run needs a fresh decision. A question waits at most 300 seconds. Allow once
+approves that run only. Explicit project/production execution answers retain their
+existing immediate-execution semantics and do not become model evaluation scopes.
 
-On the asking Mac, "Let the bouncer decide next time" can offer **"Allow once and enable bouncer"**. The owner reviews each credential's environment and risk, the agent, project, action, and explicit hosts. A fresh Touch ID or passphrase proof binds the exact run and offer. Only environment and risk can be edited; item IDs, revisions, hosts, project, action, agent, and command binding must match. After the broker rechecks access and credential state, it commits classification and scope together. Environment and risk become owner-confirmed; other declaration fields and their sources are preserved. A failed save starts nothing.
+[ADR 0031](../adr/0031-bouncer-decides-by-default.md) supersedes ADR 0029's routing
+requirement. Schema 20 and its local stored scope data remain unchanged for
+compatibility. Scopes are no longer read for routing, including scope mismatches.
+The broker no longer offers evaluation setup and Decisions hides its compatibility
+panel. The authenticated `ApproveAndEvaluate` machinery is retained, without a new
+UI offer. Relay and iPhone wire contracts do not change.
 
-The offer requires a ready model, a project, a user request, no hard command flag or always-ask setting, no confirmed production item, and a command supported by the binding rules below. Selecting production during review still creates no production allowance: later production use continues to need one. A scope permits later evaluation, never execution by itself. Every later request is checked again, including the current user request, command, model result, and scope identity before secrets are read.
-
-Scopes are local schema-20 records. Migration starts with none; old approvals and history are not imported. Credential/access edits, agent revocation, stricter policy, and sync conflicts invalidate scopes. They do not sync, are removed from sync exports and restored backups, and can be removed without a new owner check. Editing a script, changing its execution context, or using another host requires review rather than silently extending the scope.
-
-The evaluation offer stays outside `PendingRun`, `QuestionInfo`, and `AnswerKind`. Relay/iPhone question cards and signed answers keep their existing wire format and meanings; they cannot create this permission. A changed offer replaces the waiting question instead of reusing a stale proof.
+Settings > Bouncer shows **Model ready** only after successful inference readiness,
+and **Model not ready** otherwise. **Today (UTC)** shows model allowances, owner
+questions, and failures from the existing local decision log. Failed includes model
+or readiness failure and unanswered/invalidated questions; it can overlap asked.
+A denial by the owner is not by itself a failure. Patterns and remembered answers
+are not counted as model allowances. The page refreshes every five seconds (faster
+while starting). Locked or unreadable vaults do not invent zero counts.
 
 A connector use (`apassy_use_credential`) keeps the standing rules: "Not for this agent" and "Only these items" refuse (`not_granted`), and "Always ask me", "Always ask for this agent", and a production declaration ask the owner as a question of the agent. A connector use has no project, so no production allowance covers it. The model does not decide a connector use: the operation is a fixed read of its profile that the owner set up with an owner check.
 
 The dated policy detail below describes model certainty and vetoes. The current eligibility and approval order is section 3.0. Its step 2 now has the exception of an owner allowance, and its steps 4 and 4a come in the order above. Since 0.5.0 a run has no grant rule and no owner instruction, so step 1 and the `rule_break` check never apply to a run, and "Always ask me" or "Always ask for this agent" takes the place of a grant in "ask" mode.
 
-Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
+Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Current policy version: `apassy-bouncer-v8` (ADR 0031 adds the default-source check in section 3.0). Code: `decide_routed`, `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
 
 Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes steps 6 and 7:
 
@@ -133,7 +151,7 @@ Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes st
 - **A known write is never a certain read.** The packs list the write commands of known tools (`writes`, for example `gh pr comment`, `gh issue close`, `git push`, SQL `INSERT`). For such a command the model's `writes` answer does not replace `task_match`, and a high-risk or irreversible declaration always asks. On held-out v3 the base model gave `writes` 0.08 and 0.10 to `gh pr comment` and `gh issue close`.
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
-2. Production rule (ADR 0010, ADR 0025). If an item in the run has a production declaration and the owner has no production allowance for the item, the project, and the kind of action, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
+2. Production rule (ADR 0010, ADR 0025). If an item in the run has production confirmed by the owner, a signal or usage and the owner has no production allowance for the item, the project, and the kind of action, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
 3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program and general rules give flags: `secret_output`, `data_loss`, `irreversible`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. The analysis looks for injection phrases in the purpose and in the user request (version 5). A flag always asks the owner. The broker does not call the model. Dev round 4 added `secret_output` for debug and trace settings with a bound secret (`TF_LOG=TRACE`, Git trace variables, `NODE_DEBUG=http`, `DEBUG=*`, `aws --debug`, `gcloud --log-http`, `az --debug`, `kubectl -v=8`, `ansible -vvv`, `bash -x`, and others), and for more secret value reads (`kubectl get secret ... --template`, `helm status -o json`, `aws ecr get-login-password`). See [rule-packs.md](rule-packs.md).
 4. A missing user request or a missing declaration asks the owner.
 4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
@@ -167,11 +185,12 @@ Tests for step 4a: `learning_replaces_only_the_model_step` and `calibration_chan
 
 ### 3.1 Uncertain commands and project scripts
 
-Unknown commands and project scripts remain uncertain for production action allowances. Generic action scopes require a certain classification and a resolved system native executable. Other supported commands bind exact argument boundaries, canonical working and project directories, the effective `PATH`, resolved executable path, and directly selected project script bytes. A project script named `git` receives a script binding too. Direct script files must be readable regular files of at most 1 MiB inside the project; paths or symlinks that escape it are refused. Unknown native tools, project native binaries, unsupported project runners, module forms, external scripts, and ambiguous interpreters do not receive a durable evaluation offer. Commands resolved through `PATH` also refuse empty or relative search entries.
-
-A changed binding asks for another owner decision. Installed tool identity and semantics are trusted; external binaries are not attested. Inline interpreter code binds its argv, not files it later loads. This is not a sandbox or a transitive dependency guarantee: imports, sourced files, packages, hooks, plugins and external dependencies are not pinned. A matching binding permits another model evaluation only. The binding is checked before secret use, not atomically with execution or with filesystem isolation against concurrent changes.
-
-Common Git reads with split global path flags, such as `git --git-dir .git log` and `git --work-tree . status`, now share the same conservative classification as their existing equals forms. Config/exec overrides, aliases, output files, and shell syntax do not become certain reads.
+Unknown commands and project scripts remain uncertain for production action
+allowances. Supported command bindings are still rechecked during a decision, so a
+changed directly selected script or execution context invalidates an in-flight
+allowance. They no longer require persistent evaluation permission. Installed tool
+identity and semantics remain trusted; imports, sourced files, packages, hooks and
+plugins are not pinned, and the recheck is not atomic filesystem isolation.
 
 ## 4. Measurement
 
@@ -289,3 +308,24 @@ General secret, store, irreversible, SQL, HTTP, and injection rules, 13 new pack
 | `cargo test --offline --locked --all-features --test it bouncer_rules:: -- --ignored` | PASS with `laya-serve` running. Broker path: a known safe command ran without a prompt, and `echo $KEY \| base64` waited for the owner. |
 
 The GUI run on 2026-09-25 showed the bouncer address in the Broker card. The GUI run stopped before the rule editor, because the owner was using the computer. The rule editor has no GUI check.
+
+## Current routing smoke evaluation
+
+Use a scratch HOME and a separate model port, for example 18771. Start `serve.py`
+with `LAYA_PORT=18771` and a read-only existing checkpoint; never reuse an owner's
+live model endpoint for implementation checks. Run:
+
+```
+APASSY_EVAL_MODEL=http://127.0.0.1:18771 APASSY_EVAL_DUMP=/tmp/eval.jsonl \
+  cargo run --locked --all-features --bin apassy-eval -- tests/evals/bouncer-default-v1.jsonl
+```
+
+The evaluator never executes fixture commands or delivers their synthetic secret
+values. It reports inference coverage, outcomes, model identity in the dump and
+latency over three runs. A normal expected run (or `model_expected: true`) must reach
+inference. Unsafe allowances, missing intended inference, empty input and harness
+errors exit nonzero. `cwd_project` makes foreign-project cases explicit; otherwise
+the scratch project matches the declaration. `default_source` and `always_ask`
+exercise the named gates. Old per-grant instruction fields are historical fixture
+inputs, not current authorization. Do not interpret old evaluation tables as new
+acceptance evidence. See [the frozen smoke set](../evaluation/bouncer-default-v1.md).
