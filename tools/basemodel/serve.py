@@ -84,6 +84,26 @@ def temperature_diagnostic(message):
             % (", ".join(buckets) or "unknown", affected, impact))
 
 
+def require_complete_state(agent, state, questions):
+    """Never score a prefix that can hide the command or an owner rule.
+
+    Laya 0.3.20 silently slices state tokens to the remaining per-question room.
+    Use its exact tokenizer and question formatter to check every question first.
+    Normal short states and the trained question format remain unchanged.
+    """
+    from laya.common import build_sequence, serialize_state
+
+    tokens = agent.tok(serialize_state(state).replace(agent.tok.mask_token, " "),
+                       add_special_tokens=False)["input_ids"]
+    max_len = agent.cfg.get("max_len", 512)
+    head_max_len = agent.cfg.get("head_max_len", 192)
+    for definition in questions.values():
+        header, _ = build_sequence(agent.tok, "", agent._to_internal(definition),
+                                   max_len, head_max_len, state_ids=[])
+        if len(header) + len(tokens) > max_len:
+            raise ValueError("The complete request does not fit the model context. Ask the owner.")
+
+
 def build_router(checkpoint, manifest_path=None, device=None):
     import torch
     from laya.agent import Agent
@@ -169,6 +189,13 @@ def build_router(checkpoint, manifest_path=None, device=None):
                                  reason="apassy base model", detection=None, workflow=None)
 
         def predict(self, state, questions, model=None, **kwargs):
+            from fastapi import HTTPException
+
+            try:
+                require_complete_state(agent, state, questions)
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail={
+                    "code": "input_too_long", "message": str(error)}) from error
             # Rows follow the question order of one state (laya Agent._encode_state).
             dual.stock_rows = [qid in self.zero_shot for qid in questions] if self.zero_shot else None
             try:

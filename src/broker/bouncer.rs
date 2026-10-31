@@ -350,6 +350,16 @@ impl BouncerClient {
             }
         };
         if !(200..300).contains(&response.status) {
+            if response.status == 422
+                && serde_json::from_slice::<Value>(&response.body)
+                    .ok()
+                    .is_some_and(|body| body["detail"]["code"] == "input_too_long")
+            {
+                return BouncerVerdict::Unavailable(
+                    "the complete request does not fit the model context; the model did not decide"
+                        .to_owned(),
+                );
+            }
             return BouncerVerdict::Unavailable(format!("status {}", response.status));
         }
         self.check_model(parse_answers(&response.body, &facts_for(request)))
