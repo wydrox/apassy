@@ -491,7 +491,11 @@ fn app_for_executable(exe: &Path) -> Option<PathBuf> {
             return Some(bundle.to_path_buf());
         }
     }
-    (contents.file_name()? == "target").then(|| contents.join(BUILD_APP_NAME))
+    // Cargo permits any target directory name. Recognize the profile directory
+    // rather than assuming the parent is literally named `target`.
+    (contents.file_name()? == "target"
+        || matches!(dir.file_name()?.to_str(), Some("debug" | "release")))
+    .then(|| contents.join(BUILD_APP_NAME))
 }
 
 /// Find the SBPL profile. Order: the flag, the environment, next to the
@@ -646,14 +650,15 @@ mod tests {
             let exe = Path::new(bundle).join("Contents/MacOS/apassy-sandbox");
             assert_eq!(app_for_executable(&exe), Some(PathBuf::from(bundle)));
         }
-        for profile in ["debug", "release"] {
-            let exe = Path::new("/Users/me/Project/target")
-                .join(profile)
-                .join("apassy-sandbox");
-            assert_eq!(
-                app_for_executable(&exe),
-                Some(PathBuf::from("/Users/me/Project/target/Apassy.app"))
-            );
+        for (target, profile) in [
+            ("target", "debug"),
+            ("target", "release"),
+            (".target-review30", "debug"),
+            ("Build output", "release"),
+        ] {
+            let target = Path::new("/Users/me/Project").join(target);
+            let exe = target.join(profile).join("apassy-sandbox");
+            assert_eq!(app_for_executable(&exe), Some(target.join("Apassy.app")));
         }
         assert_eq!(
             app_for_executable(Path::new("/usr/local/bin/apassy-sandbox")),
