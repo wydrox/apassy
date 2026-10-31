@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_rechecks_conflicts_after_authentication() {
+    fn enrollment_rechecks_stale_authentication_and_key_conflicts() {
         let (_dir, core, bearer) = fixture();
         let now = crate::now_unix();
         let owner = crate::server::auth::authenticate_core(&core, bearer.expose(), now)
@@ -666,7 +666,7 @@ mod tests {
         enroll(&core, &owner, &request, now).unwrap();
         assert_eq!(
             enroll(&core, &owner, &request, now).unwrap_err().code,
-            codes::CONFLICT
+            codes::UNAUTHENTICATED
         );
         // A different member cannot enroll the same live public key.
         let second = core.store.tx(|conn| {
