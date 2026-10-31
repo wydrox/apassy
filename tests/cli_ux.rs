@@ -399,6 +399,53 @@ fn audit_doctor_honors_custom_claude_configs_and_disabled_entries() {
 }
 
 #[test]
+fn audit_doctor_handles_malformed_disabled_entries_and_unreadable_codex_config() {
+    let dir = TempDir::new().unwrap();
+    let custom = dir.path().join("custom");
+    let codex = dir.path().join("codex");
+    std::fs::create_dir(&custom).unwrap();
+    // A directory at the config path must be diagnosed as unreadable, not empty.
+    std::fs::create_dir_all(codex.join("config.toml")).unwrap();
+    for entry in [
+        serde_json::json!(false),
+        serde_json::json!("synthetic-secret"),
+        serde_json::json!(null),
+    ] {
+        let cwd = dir.path().to_str().unwrap();
+        let config = serde_json::json!({
+            "mcpServers": {"apassy": entry},
+            "projects": {(cwd): {"disabledMcpServers": ["apassy"]}}
+        });
+        std::fs::write(custom.join(".claude.json"), config.to_string()).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+            .args([
+                "doctor",
+                "--json",
+                "--socket",
+                dir.path().join("missing.sock").to_str().unwrap(),
+            ])
+            .env_remove("APASSY_SESSION")
+            .env("HOME", dir.path())
+            .env("CLAUDE_CONFIG_DIR", &custom)
+            .env("CODEX_HOME", &codex)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let checks = value["checks"].as_array().unwrap();
+        for host in ["Claude Code", "Codex"] {
+            assert!(
+                checks
+                    .iter()
+                    .any(|check| check["name"] == host && check["level"] == "problem")
+            );
+        }
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-secret"));
+    }
+}
+
+#[test]
 fn audit_export_json_wraps_jsonl_and_file_metadata() {
     for to_file in [false, true] {
         let dir = TempDir::new().unwrap();

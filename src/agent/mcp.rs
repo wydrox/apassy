@@ -298,7 +298,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_ASK_OWNER_FOR_CREDENTIAL,
             "title": "Ask the owner to add a credential",
-            "description": "Ask the owner to paste a credential into Apassy. The call waits up to 5 minutes. When the owner saves it, you get item_id and env_name, never the value. On waiting, call again with the same name: the same name in the same project is the same request. On dismissed, tell the user. On question_waiting, another question of yours waits (the text names it): wait for it first. At most 5 open or new requests per hour.",
+            "description": "Ask the owner to paste a credential into Apassy. The call waits up to 5 minutes. When the owner saves it, you get item_id and env_name, never the value. On waiting, call again with the same name: the same name in the same project is the same request. On dismissed, tell the user. On question_waiting, another question of yours waits: wait for it first. At most 5 open or new requests per hour.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -429,7 +429,7 @@ fn call_action(arguments: &Value) -> Result<Action, String> {
         for (key, value) in raw {
             let text = value
                 .as_str()
-                .ok_or_else(|| format!("The parameter \"{key}\" must be a string."))?;
+                .ok_or_else(|| "Each operation parameter must be a string.".to_owned())?;
             params.insert(key.clone(), text.to_owned());
         }
     }
@@ -800,17 +800,80 @@ fn tool_result(response: WireResponse) -> Value {
             "isError": false,
         })
     } else {
-        let (code, message) = response.error.map_or_else(
-            || {
-                (
-                    "broker_error".to_owned(),
-                    "The broker refused the request.".to_owned(),
-                )
-            },
-            |error| (error.code, error.message),
-        );
-        tool_error(&code, &message)
+        broker_error(
+            response
+                .error
+                .as_ref()
+                .map_or("broker_error", |error| &error.code),
+        )
     }
+}
+
+/// Broker messages can contain request names, paths, or command text. Only
+/// recognized codes and fixed messages cross the MCP diagnostic boundary.
+fn broker_error(code: &str) -> Value {
+    let (code, message) = match code {
+        "token_expired" => (code, "The Apassy agent token expired."),
+        "unauthenticated" => (
+            code,
+            "The agent token is not valid for the Apassy vault that is open now.",
+        ),
+        "vault_locked" => (code, "The Apassy vault is locked."),
+        "question_waiting" => (code, "A different owner question is pending."),
+        "waiting" => (
+            code,
+            "The credential request is still waiting for the owner.",
+        ),
+        "dismissed" => (code, "The owner dismissed the credential request."),
+        "owner_timeout" | "approval_timeout" => (code, "The owner approval timed out."),
+        "timeout" => (code, "The operation timed out; its outcome may be unknown."),
+        "approval_denied" => (code, "The owner denied the request."),
+        "not_visible" | "not_granted" | "not_owner" | "item_archived" | "review_required" => (
+            code,
+            "The credential is unavailable for this request. Ask the owner to review its access settings.",
+        ),
+        "approval_invalidated" | "authorization_changed" => (
+            code,
+            "The authorization changed. Review the request with the owner.",
+        ),
+        "invalid_request" | "bad_request" | "unknown_folder" | "env_name_taken" => (
+            code,
+            "The broker refused the request parameters. Check the tool schema and catalog.",
+        ),
+        "too_many_items" | "too_many_requests" | "busy" => (
+            code,
+            "The broker cannot accept another request yet. Wait and consult the owner.",
+        ),
+        "capture_refused" => (
+            code,
+            "The credential capture was refused. Review the capture rules with the owner.",
+        ),
+        "answer_failed" => (code, "The broker could not save the owner's answer."),
+        "permission_denied" => (code, "The broker denied permission for this request."),
+        "start_failed" => (
+            code,
+            "The command did not start. Check the program name and PATH.",
+        ),
+        "missing_secret"
+        | "proxy_failed"
+        | "tls_failed"
+        | "destination_error"
+        | "destination_not_found"
+        | "destination_refused"
+        | "destination_unreachable"
+        | "bad_output"
+        | "output_blocked"
+        | "unsupported_version"
+        | "broker_error" => (
+            code,
+            "The broker could not complete the request. Inspect Apassy activity for details.",
+        ),
+        _ => (
+            "broker_error",
+            "The broker returned an unrecognized refusal. Inspect Apassy activity for details.",
+        ),
+    };
+    tool_error(code, message)
 }
 
 /// Next step for a refusal that only the user can fix. The agent host shows the text.
@@ -837,10 +900,10 @@ fn hint(code: &str) -> Option<&'static str> {
         "question_waiting" => Some(
             "A different owner question is pending. Wait for it to finish before submitting this request; do not repeat it in a loop.",
         ),
-        "owner_timeout" | "approval_timeout" | "timeout" => {
+        "owner_timeout" | "approval_timeout" => {
             Some("The owner approval timed out. Ask the owner to resolve it before retrying.")
         }
-        "unknown_outcome" | "protocol_error" => Some(
+        "timeout" | "unknown_outcome" | "protocol_error" => Some(
             "Inspect activity and verify the external target with the owner before retrying. Never blindly repeat a mutating call.",
         ),
         "permission_denied" | "connection_refused" | "app_not_running" | "too_large" => {
@@ -858,7 +921,7 @@ fn tool_error(code: &str, message: &str) -> Value {
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": { "code": code, "message": message,
-            "next_step": hint(code).unwrap_or("Review the refusal and correct the request before retrying."),
+            "next_step": hint(code).unwrap_or("Review the refusal with the owner. If the call could have changed external state, verify the outcome first. Never blindly repeat a mutating call."),
             "retryable": false },
         "isError": true,
     })
@@ -866,6 +929,32 @@ fn tool_error(code: &str, message: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn validation_and_broker_errors_never_echo_request_content() {
+        let canary = "synthetic-secret /private/path command --token";
+        let result = call_tool(
+            &config(),
+            &json!({"name": TOOL_USE_CREDENTIAL, "arguments": {
+                "item_id": 1, "operation": "test", "params": {(canary): {}}
+            }}),
+        );
+        assert_eq!(result["structuredContent"]["code"], "invalid_arguments");
+        assert!(!result.to_string().contains(canary));
+        for code in ["question_waiting", "invalid_request", "timeout", canary] {
+            let result = tool_result(WireResponse::failure(code, canary));
+            assert!(!result.to_string().contains(canary));
+            assert_eq!(result["structuredContent"]["retryable"], false);
+            if code == "timeout" {
+                assert!(
+                    result["structuredContent"]["next_step"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Never blindly repeat")
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "vault")]
     #[test]
     fn socket_permission_and_refusal_are_distinct() {
@@ -1221,7 +1310,8 @@ mod tests {
         assert!(text.contains("Rotate token"), "{text}");
         assert!(text.contains("APASSY_AGENT_TOKEN"), "{text}");
         let other = tool_result(WireResponse::failure("not_granted", "No."));
-        assert_eq!(other["content"][0]["text"], "not_granted: No.");
+        assert_eq!(other["structuredContent"]["code"], "not_granted");
+        assert!(!other.to_string().contains("No."));
     }
 
     /// ADR 0013: a token of a vault that is not open gets a clear next step. The text

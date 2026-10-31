@@ -125,11 +125,11 @@ cargo test --locked --all-features                # the test suite
 
    Do not commit a file with a token. Give the host a tool time-out of at least 660 seconds (for Claude Code, `MCP_TOOL_TIMEOUT=660000`): a question waits up to 5 minutes for you. The agent can then call `apassy_list_access`, `apassy_run_with_secrets`, and `apassy_use_credential`.
 3. Launch the copied sandbox command for your project, trust the Codex hooks if prompted, and check `/mcp`. Test with a synthetic credential and inspect Decisions. The catalog shows credential names without values. Run output has the masking limits described in “What Apassy does not protect”. The bouncer decides each use, and asks you in **Decisions** when it is not sure ([ADR 0025](docs/adr/0025-low-friction-access.md)).
-4. Setup installs the sibling prompt hook ([host hooks](docs/operations/host-hooks.md)). Start the host in Apassy's sandbox with its own sandbox off, for example `apassy-sandbox -- codex -c sandbox_mode=danger-full-access` ([isolation](docs/operations/isolation.md), section 3).
+4. Claude Code and Codex setup install the sibling prompt hook. Configure the hook explicitly for Other hosts ([host hooks](docs/operations/host-hooks.md)). Start the host in Apassy's sandbox with its own sandbox off, for example `apassy-sandbox -- codex -c sandbox_mode=danger-full-access` ([isolation](docs/operations/isolation.md), section 3).
 
 The full first-day checklist is [daily use](docs/operations/daily-use.md).
 
-Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write` registers the agent and connects the MCP server, with the token in a wrapper script instead of the host configuration. Setup selects the bundled sibling `apassy-hook` automatically. Follow the [installed-app checklist](docs/operations/cli.md#installed-app-first-use).
+Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write` registers the agent and connects the MCP server, with the token in a wrapper script instead of the host configuration. Setup selects the bundled sibling `apassy-hook` automatically. Without `--write`, it only validates and previews; a write retry reuses complete managed wrappers. New connections include catalog consent in the owner approval, while existing agents keep their access. Follow the [installed-app checklist](docs/operations/cli.md#installed-app-first-use).
 
 ## Command line
 

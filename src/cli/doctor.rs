@@ -54,10 +54,6 @@ impl Report {
     }
 }
 
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
-}
-
 pub fn run(cli: &Cli, args: Args) -> Outcome {
     args.finish()?;
     let mut report = Report(Vec::new());
@@ -289,7 +285,7 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
         effective = local;
     }
     if locally_disabled {
-        effective["disabled"] = serde_json::json!(true);
+        effective = serde_json::json!({"disabled": true});
     }
     server_check(&mut report, "Claude Code", &effective);
     let mut hooks_disabled = false;
@@ -326,27 +322,29 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
     let path = codex_home.join("config.toml");
-    if path.exists() {
-        match read(&path).parse::<toml_edit::DocumentMut>() {
-            Ok(doc) => {
-                let server = doc.get("mcp_servers").and_then(|v| v.get("apassy"));
-                let value = serde_json::json!({"command": server.and_then(|v| v.get("command")).and_then(toml_edit::Item::as_str), "enabled": server.and_then(|v| v.get("enabled")).and_then(toml_edit::Item::as_bool).unwrap_or(true)});
-                server_check(&mut report, "Codex", &value);
-            }
-            Err(_) => report.add(
-                Level::Problem,
-                "Codex",
-                "invalid or unreadable config.toml",
-                Some("Repair the TOML configuration."),
-            ),
+    match std::fs::read_to_string(&path)
+        .map_err(|error| error.kind())
+        .and_then(|text| {
+            text.parse::<toml_edit::DocumentMut>()
+                .map_err(|_| std::io::ErrorKind::InvalidData)
+        }) {
+        Ok(doc) => {
+            let server = doc.get("mcp_servers").and_then(|v| v.get("apassy"));
+            let value = serde_json::json!({"command": server.and_then(|v| v.get("command")).and_then(toml_edit::Item::as_str), "enabled": server.and_then(|v| v.get("enabled")).and_then(toml_edit::Item::as_bool).unwrap_or(true)});
+            server_check(&mut report, "Codex", &value);
         }
-    } else {
-        report.add(
+        Err(std::io::ErrorKind::NotFound) => report.add(
             Level::Note,
             "Codex",
             "MCP entry missing",
             Some("apassy setup codex --write"),
-        );
+        ),
+        Err(_) => report.add(
+            Level::Problem,
+            "Codex",
+            "invalid or unreadable config.toml",
+            Some("Repair the TOML configuration."),
+        ),
     }
     report.add(Level::Unverified, "Host connection", "unverified: static config does not prove MCP reachability, hook execution, trust, or enforcement", Some("In the sandboxed host check /mcp, hook trust, and a synthetic first request."));
     if std::env::var_os(SESSION_ENV).is_some() && std::env::var_os("CLAUDECODE").is_some() {
@@ -391,13 +389,13 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
 
 fn json_config(report: &mut Report, path: &Path) -> Option<serde_json::Value> {
     match std::fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(value) => Some(value),
-            Err(_) => {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) if value.is_object() => Some(value),
+            Ok(_) | Err(_) => {
                 report.add(
                     Level::Problem,
                     "Host config",
-                    format!("{}: invalid JSON", path.display()),
+                    format!("{}: invalid JSON object", path.display()),
                     Some("Repair the configuration."),
                 );
                 None
@@ -429,6 +427,15 @@ fn executable(command: &str) -> bool {
 }
 
 fn server_check(report: &mut Report, host: &'static str, value: &serde_json::Value) {
+    if !value.is_object() {
+        report.add(
+            Level::Problem,
+            host,
+            "MCP entry is not an object",
+            Some("Repair the Apassy MCP entry."),
+        );
+        return;
+    }
     if value.get("disabled").and_then(serde_json::Value::as_bool) == Some(true)
         || value.get("enabled").and_then(serde_json::Value::as_bool) == Some(false)
     {
