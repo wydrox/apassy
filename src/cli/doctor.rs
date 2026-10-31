@@ -522,7 +522,19 @@ mod tests {
 /// A process lock protects the dedicated fixture namespace. A killed doctor releases
 /// the lock; its next run removes only fixture directories in this private root.
 #[cfg(feature = "vault")]
-fn live_fixture_root() -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+struct FixtureLock(std::fs::File);
+
+#[cfg(feature = "vault")]
+impl Drop for FixtureLock {
+    fn drop(&mut self) {
+        // Release explicitly: a concurrent fork can temporarily inherit the open
+        // file description even after our File closes.
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(feature = "vault")]
+fn live_fixture_root() -> std::io::Result<(std::path::PathBuf, FixtureLock)> {
     use std::os::unix::fs::MetadataExt;
     let uid = std::fs::metadata(
         std::env::var_os("HOME")
@@ -537,7 +549,7 @@ fn live_fixture_root() -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
 }
 
 #[cfg(feature = "vault")]
-fn clean_live_fixture_root(root: &Path, uid: u32) -> std::io::Result<std::fs::File> {
+fn clean_live_fixture_root(root: &Path, uid: u32) -> std::io::Result<FixtureLock> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     match std::fs::DirBuilder::new().mode(0o700).create(root) {
         Ok(()) => {}
@@ -569,7 +581,7 @@ fn clean_live_fixture_root(root: &Path, uid: u32) -> std::io::Result<std::fs::Fi
             std::fs::remove_dir_all(entry.path())?;
         }
     }
-    Ok(lock)
+    Ok(FixtureLock(lock))
 }
 
 /// The diagnostic fixture is a separate vault and broker; it has no owner items,
