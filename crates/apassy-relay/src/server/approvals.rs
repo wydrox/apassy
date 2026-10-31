@@ -501,6 +501,10 @@ pub fn deny(
         Denier::Host(_) => (DecidedBy::Host, None),
     };
     let result = core.store.tx(|tx| {
+        match who {
+            Denier::Host(_) => crate::server::devices::authorize_host_on(tx, by)?,
+            Denier::Approver(_) => crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?,
+        }
         let run = load_run(tx, run_id)?.ok_or_else(|| RelayError::not_found("run"))?;
         let run = settle(core, tx, run, now)?;
         if run.status != RunStatus::Pending {

@@ -481,6 +481,7 @@ pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> R
     let limits = core.limits();
     // A refusal commits too: its `limit_reached` row stays.
     let outcome = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let exists: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM question WHERE qid = ?1)",
@@ -691,6 +692,7 @@ pub fn answer(
     let device = device_of(by)?;
     let sealed = envelope(request, MAX_ANSWER_BYTES)?;
     let outcome = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let question = load(tx, &qid)?.ok_or_else(|| RelayError::not_found("question"))?;
         if !question.routes_to(device, by) {
             return Ok(Err(RelayError::new(
@@ -881,6 +883,7 @@ pub fn settle(
     let device = device_of(by)?;
     let sealed = envelope(request, MAX_SETTLE_BYTES)?;
     let outcome = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let question = own_question(tx, &qid, device)?;
         if question.state == "settled" {
             let same = sealed.key_id == question.key_id
@@ -973,6 +976,7 @@ pub fn push_token_put(
         ));
     }
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         // The same token again (the app sends it at each start) moves its time and clears
         // a failed mark, but writes no new audit row.
         let same: bool = tx
@@ -1021,6 +1025,7 @@ pub fn push_token_put(
 pub fn push_token_delete(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value> {
     let device = device_of(by)?;
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let removed = tx
             .execute(
                 "DELETE FROM push_token WHERE device_id = ?1",

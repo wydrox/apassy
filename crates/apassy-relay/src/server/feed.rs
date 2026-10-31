@@ -603,6 +603,7 @@ pub fn put(core: &Core, by: &MemberAuth, request: &FeedPut, now: u64) -> RelayRe
         .copied();
     // A refusal commits too: its `limit_reached` row stays.
     let outcome = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let old: Option<(u64, u64)> = tx
             .query_row(
                 "SELECT seq, updated_at FROM feed WHERE device_id = ?1",
@@ -772,6 +773,7 @@ pub fn drop_devices(
 pub fn delete(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value> {
     let device = device_of(by)?;
     let (change, step) = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let had: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM feed WHERE device_id = ?1)",
@@ -1004,6 +1006,7 @@ pub fn post_action(
     let to = DeviceId(request.to_device);
     let expires_at = now.saturating_add(ACTION_LIFETIME_SECS);
     let outcome = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let routed: bool = to != device
             && tx
                 .query_row(
@@ -1229,6 +1232,7 @@ pub fn settle(
     let nonce = nonce(&request.nonce)?;
     let ciphertext = ciphertext(&request.ciphertext, MAX_SETTLE_BYTES)?;
     let (settled_at, changed) = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let action = own_action(tx, &id, |row| row.to_device == device)?;
         if action.state == "settled" {
             let same = action.outcome.as_deref() == Some(request.outcome.as_str())

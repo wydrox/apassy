@@ -154,7 +154,7 @@ fn enrollment_ends_the_member_token_and_marks_the_initial_key_holder() {
         devices::enroll(&core, &legacy_auth, &duplicate, now_unix())
             .unwrap_err()
             .code,
-        "conflict"
+        "unauthenticated"
     );
     relay.ok("GET", "/v1/host/requests", &relay.owner_token, None);
     assert_eq!(
@@ -1060,4 +1060,82 @@ fn a_device_revoked_while_its_body_arrives_cannot_finish_the_request() {
     // No invite was made.
     let invites = relay.ok("GET", "/v1/invites", &second_owner, None);
     assert_eq!(invites, invites_before);
+}
+
+#[test]
+fn demotion_and_revocation_win_over_queued_mutations() {
+    use apassy_relay::api::{InviteRequest, Role, RoleChange};
+    use apassy_relay::server::admin;
+    use std::sync::{Arc, Barrier};
+    let mut relay = start(UpstreamOptions::default());
+    enroll_owner(&mut relay);
+    let (member, token, _) = relay.join_device("owner", "queued-owner");
+    let core = relay.hub().team(&relay.team_id).unwrap();
+    let stale = auth::authenticate_core(&core, &token, now_unix())
+        .unwrap()
+        .member()
+        .clone();
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        let gate = barrier.clone();
+        let core = core.clone();
+        let stale = stale.clone();
+        let queued = scope.spawn(move || {
+            gate.wait();
+            admin::role_change(
+                &core,
+                &stale,
+                stale.id,
+                &RoleChange { role: Role::Owner },
+                now_unix(),
+            )
+        });
+        relay.ok(
+            "PUT",
+            &format!("/v1/members/{member}/role"),
+            &relay.owner_token,
+            Some(&json!({"role":"member"})),
+        );
+        barrier.wait();
+        assert_eq!(queued.join().unwrap().unwrap_err().code, "unauthenticated");
+    });
+    assert_eq!(relay.ok("GET", "/v1/me", &token, None)["role"], "member");
+    let current = auth::authenticate_core(&core, &token, now_unix())
+        .unwrap()
+        .member()
+        .clone();
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        let gate = barrier.clone();
+        let core = core.clone();
+        let queued = scope.spawn(move || {
+            gate.wait();
+            admin::agent_create(
+                &core,
+                &current,
+                &serde_json::from_value(json!({"name":"revoked-queued"})).unwrap(),
+                now_unix(),
+            )
+        });
+        relay.ok(
+            "DELETE",
+            &format!("/v1/devices/{}", stale.device.unwrap().id.0),
+            &relay.owner_token,
+            None,
+        );
+        barrier.wait();
+        assert_eq!(queued.join().unwrap().unwrap_err().code, "unauthenticated");
+    });
+    let request: InviteRequest = serde_json::from_value(json!({"role":"owner"})).unwrap();
+    assert_eq!(
+        admin::invite_create(&core, &stale, &request, now_unix())
+            .unwrap_err()
+            .code,
+        "unauthenticated"
+    );
+    assert!(
+        relay
+            .vault_rows("SELECT id, name FROM agent WHERE name = 'revoked-queued'")
+            .is_empty()
+    );
 }

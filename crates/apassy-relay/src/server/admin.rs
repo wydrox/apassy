@@ -181,6 +181,7 @@ pub fn invite_create(
     let hash = token_hash(code.expose());
     let expires_at = now + u64::from(hours) * 3600;
     let id = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         for collection in &grants {
             if collection_view(tx, *collection)?.is_none() {
                 return Err(RelayError::not_found("collection"));
@@ -336,6 +337,10 @@ pub fn leave(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value> {
 
 fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayResult<Value> {
     let devices = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
+        if id != by.id && by.role != Role::Owner {
+            return Err(RelayError::forbidden("Only an owner revokes a member."));
+        }
         if last_owner(tx, id)? {
             return Err(RelayError::new(codes::CONFLICT, "The last live owner cannot leave or be revoked."));
         }
@@ -460,6 +465,7 @@ pub fn role_change(
         ));
     }
     let view = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Owner, now)?;
         let (old_role, kind): (String, String) = tx
             .query_row(
                 "SELECT role, kind FROM member WHERE id = ?1 AND revoked_at IS NULL",
@@ -559,6 +565,7 @@ pub fn collection_create(
     refuse_unused(core, now, &["items"])?;
     let text = policy_json(&policy)?;
     let id = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         match tx.execute(
             "INSERT INTO collection (name, policy, created_at) VALUES (?1, ?2, ?3)",
             params![name, text, to_i(now)],
@@ -644,6 +651,7 @@ pub fn policy_put(
     let text = policy_json(&policy)?;
     refuse_unused(core, now, &["items"])?;
     let view = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         let changed = tx
             .execute(
                 "UPDATE collection SET policy = ?2 WHERE id = ?1",
@@ -780,6 +788,7 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
     let hosts_text = serde_json::to_string(&hosts)
         .map_err(|_| RelayError::internal("The hosts cannot be written."))?;
     let id = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         let name = core.audit.mask_text(&name);
         let exists: i64 = tx
             .query_row(
@@ -916,6 +925,7 @@ pub fn item_list(
 
 pub fn item_archive(core: &Core, by: &MemberAuth, id: ItemId, now: u64) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         let changed = tx
             .execute(
                 "UPDATE item SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL",
@@ -960,6 +970,7 @@ pub fn grant_create(
 ) -> RelayResult<Value> {
     refuse_unused(core, now, &["items"])?;
     let id = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         let collection = collection_view(tx, request.collection_id)?
             .ok_or_else(|| RelayError::not_found("collection"))?;
         let member_live: i64 = tx
@@ -1032,6 +1043,7 @@ pub fn grant_list(core: &Core) -> RelayResult<Value> {
 
 pub fn grant_revoke(core: &Core, by: &MemberAuth, id: GrantId, now: u64) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         let grant: Option<(i64, i64)> = tx
             .query_row(
                 "SELECT collection_id, member_id FROM access_grant WHERE id = ?1 AND revoked_at IS NULL",
@@ -1101,6 +1113,7 @@ pub fn agent_create(
     let hash = token_hash(token.expose());
     let expires_at = now + u64::from(days) * 86_400;
     let id = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         // Authentication precedes body reads. Enrollment or revocation can finish
         // while the body waits, so never create an agent from an old principal.
         if let Some(device) = by.device {
@@ -1191,6 +1204,7 @@ pub fn agent_list(core: &Core, who: &MemberAuth) -> RelayResult<Value> {
 
 pub fn agent_revoke(core: &Core, by: &MemberAuth, id: AgentId, now: u64) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let owner: Option<i64> = tx
             .query_row(
                 "SELECT member_id FROM agent WHERE id = ?1 AND revoked_at IS NULL",

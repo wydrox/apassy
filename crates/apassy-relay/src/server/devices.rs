@@ -264,6 +264,7 @@ pub fn enroll(
     let public = device::decode_public_key(&request.public_key)
         .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
     core.store.tx(|conn| {
+        crate::server::auth::require_member(conn, by, crate::server::auth::Need::Member, now)?;
         let (role, has_token): (String, bool) = conn.query_row("SELECT role, token_hash IS NOT NULL FROM member WHERE id = ?1 AND revoked_at IS NULL", params![to_i(by.id.0)], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(db)?.ok_or_else(RelayError::unauthenticated)?;
         let conflict: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM device WHERE revoked_at IS NULL AND (member_id = ?1 OR public_key = ?2))", params![to_i(by.id.0), public.as_slice()], |row| row.get(0)).map_err(db)?;
         if conflict { return Err(RelayError::new(codes::CONFLICT, "The member has a device or the public key is in use.")); }
@@ -292,6 +293,7 @@ pub fn list(core: &Core, by: &MemberAuth) -> RelayResult<Value> {
 
 pub fn revoke(core: &Core, by: &MemberAuth, id: DeviceId, now: u64) -> RelayResult<Value> {
     let was_holder = core.store.tx(|conn| {
+        crate::server::auth::require_member(conn, by, crate::server::auth::Need::Member, now)?;
         let target = view(conn, id, None)?;
         if by.role != Role::Owner && target.member_id != by.id { return Err(RelayError::not_found("device")); }
         // No change may leave the team without an owner who can sign in (review).
@@ -332,6 +334,7 @@ pub fn key_holder(core: &Core, by: &MemberAuth, id: DeviceId, now: u64) -> Relay
         )
     })?;
     core.store.tx(|conn| {
+        crate::server::auth::require_member(conn, by, crate::server::auth::Need::Owner, now)?;
         let member = device_member(conn, caller.id)?;
         if member.role != Role::Owner { return Err(RelayError::forbidden("Only an owner can move or claim the keys.")); }
         let holder: Option<i64> = conn.query_row("SELECT d.id FROM device d JOIN member m ON m.id = d.member_id WHERE d.key_holder = 1 AND d.revoked_at IS NULL AND m.revoked_at IS NULL AND m.role = 'owner'", [], |row| row.get(0)).optional().map_err(db)?;
@@ -372,20 +375,43 @@ pub fn end_host_bootstrap_on(conn: &Connection, audit: &Audit, now: u64) -> Rela
 }
 
 pub fn authorize_host(core: &Core, by: &MemberAuth) -> RelayResult<()> {
-    core.store.with(|conn| {
-        if let Some(device) = by.device {
-            let member = device_member(conn, device.id)?;
-            if member.role != Role::Owner { return Err(RelayError::forbidden("Only an owner can use the host endpoints.")); }
-            if member.device.is_some_and(|d| d.key_holder) { return Ok(()); }
-        } else {
-            let owner: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM member WHERE id = ?1 AND role = 'owner' AND revoked_at IS NULL)", params![to_i(by.id.0)], |row| row.get(0)).map_err(db)?;
-            if !owner { return Err(RelayError::forbidden("Only an owner can use the host endpoints.")); }
-            // A revoked owner device also closes the bootstrap path permanently.
-            let owner_device: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'host_bootstrap_ended') OR EXISTS(SELECT 1 FROM device d JOIN member m ON m.id = d.member_id WHERE m.role = 'owner')", [], |row| row.get(0)).map_err(db)?;
-            if !owner_device { return Ok(()); }
+    core.store.with(|conn| authorize_host_on(conn, by))
+}
+
+pub fn authorize_host_on(conn: &Connection, by: &MemberAuth) -> RelayResult<()> {
+    crate::server::auth::require_member(
+        conn,
+        by,
+        crate::server::auth::Need::Owner,
+        crate::now_unix(),
+    )?;
+    if let Some(device) = by.device {
+        let member = device_member(conn, device.id)?;
+        if member.role != Role::Owner {
+            return Err(RelayError::forbidden(
+                "Only an owner can use the host endpoints.",
+            ));
         }
-        Err(RelayError::new(codes::NOT_KEY_HOLDER, "Only the key-holder device can use the host endpoints."))
-    })
+        if member.device.is_some_and(|d| d.key_holder) {
+            return Ok(());
+        }
+    } else {
+        let owner: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM member WHERE id = ?1 AND role = 'owner' AND revoked_at IS NULL)", params![to_i(by.id.0)], |row| row.get(0)).map_err(db)?;
+        if !owner {
+            return Err(RelayError::forbidden(
+                "Only an owner can use the host endpoints.",
+            ));
+        }
+        // A revoked owner device also closes the bootstrap path permanently.
+        let owner_device: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM audit WHERE action = 'host_bootstrap_ended') OR EXISTS(SELECT 1 FROM device d JOIN member m ON m.id = d.member_id WHERE m.role = 'owner')", [], |row| row.get(0)).map_err(db)?;
+        if !owner_device {
+            return Ok(());
+        }
+    }
+    Err(RelayError::new(
+        codes::NOT_KEY_HOLDER,
+        "Only the key-holder device can use the host endpoints.",
+    ))
 }
 
 fn expire_waits(conn: &Connection, now: u64) -> RelayResult<()> {

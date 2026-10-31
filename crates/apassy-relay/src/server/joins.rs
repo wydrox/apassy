@@ -95,6 +95,12 @@ fn check_device_count(conn: &Connection, member: MemberId) -> RelayResult<()> {
 
 /// Read the caller's role again under the mutation transaction.
 fn approver(conn: &Connection, by: &MemberAuth) -> RelayResult<Role> {
+    crate::server::auth::require_member(
+        conn,
+        by,
+        crate::server::auth::Need::Approver,
+        crate::now_unix(),
+    )?;
     let role: Option<String> = conn
         .query_row(
             "SELECT role FROM member WHERE id = ?1 AND revoked_at IS NULL",
@@ -298,6 +304,7 @@ pub fn confirm(
     now: u64,
 ) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         let caller_role = approver(tx, by)?;
         type PendingJoinRow = (i64, String, String, Vec<u8>, String, String, i64);
         let join: Option<PendingJoinRow> = tx.query_row(
@@ -387,6 +394,7 @@ fn audit_device(
 
 pub fn refuse(core: &Core, by: &MemberAuth, id: u64, now: u64) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
         approver(tx, by)?;
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM join_request WHERE id = ?1)", params![to_i(id)], |row| row.get(0)).map_err(db)?;
         if !exists { return Err(RelayError::not_found("join")); }
@@ -403,6 +411,7 @@ pub fn links_create(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value
     let hash = token_hash(code.expose());
     let expires = now.saturating_add(LINK_SECS);
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let (device, kind) = own_device(tx, by)?;
         if kind != "person" { return Err(RelayError::forbidden("A shared member cannot make a device link.")); }
         check_device_count(tx, by.id)?;
@@ -554,6 +563,7 @@ pub fn links_confirm(
     now: u64,
 ) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let link = own_link(tx, by, id, now)?;
         if !link.safety.as_deref().is_some_and(|words| device::same_safety(&request.safety, words)) { return Err(conflict("The safety words do not match.")); }
         let name = link.name.ok_or_else(|| RelayError::internal("The link has no device name."))?;
@@ -568,6 +578,7 @@ pub fn links_confirm(
 
 pub fn links_refuse(core: &Core, by: &MemberAuth, id: u64, now: u64) -> RelayResult<Value> {
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         own_link(tx, by, id, now)?;
         tx.execute(
             "UPDATE device_link SET state = 'refused', decided_at = ?1 WHERE id = ?2",

@@ -644,6 +644,7 @@ pub fn push(
     let head_hash = request.head.hash();
     let text = String::from_utf8_lossy(&request.head.text).into_owned();
     let committed = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         // A removal of the device or its member takes the store too: one that came after
         // the check above still stops the push, so a removed device never gets a head.
         let live: bool = tx
@@ -779,6 +780,7 @@ pub fn open_snapshot<'a>(
 pub fn record_fetch(core: &Core, by: &MemberAuth, version: u64, now: u64) -> RelayResult<()> {
     let device = device_of(by)?;
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let pushed_at: Option<i64> = tx
             .query_row(
                 "SELECT pushed_at FROM sync_head WHERE version = ?1",
@@ -828,6 +830,7 @@ pub fn receipt(
         return Err(plan_required());
     }
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let latest = current_version(tx)?;
         if request.version > latest {
             return Err(RelayError::new(
@@ -882,6 +885,7 @@ pub fn delete(core: &Core, by: &MemberAuth, if_match: u64, now: u64) -> SyncResu
         return Ok(json!({"last_version": 0}));
     }
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Owner, now)?;
         tx.execute("DELETE FROM sync_head", []).map_err(db)?;
         tx.execute("DELETE FROM sync_receipt", []).map_err(db)?;
         core.audit.write_on(
