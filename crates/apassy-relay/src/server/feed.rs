@@ -885,7 +885,7 @@ pub fn list(
         |conn, _, _| {
             let list = feeds_now(conn, by, since)?;
             let present = first.get_or_insert_with(|| list.present.clone());
-            let done = !list.feeds.is_empty() || list.change < since || *present != list.present;
+            let done = !list.feeds.is_empty() || list.change != since || *present != list.present;
             Ok((list, done))
         },
     )?;

@@ -5,7 +5,7 @@
 //! private half never leaves this table and is never written to disk. A release
 //! takes the key out, so it is used once. A key is dropped when its run is released,
 //! denied, timed out, or invalidated by a revocation. A restart drops them all: a
-//! pending run without a key is never shown to the host and times out.
+//! pending run is ended explicitly at startup with a safe retry instruction.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};

@@ -1344,9 +1344,23 @@ impl Hub {
     }
 }
 
-/// Ends the sessions that a stop ended: each `ready` run becomes `ended`.
+/// Ends runs whose session or one-time release key was lost at restart.
 fn end_ready_runs(store: &Store, audit: &Audit, now: u64) -> RelayResult<()> {
     store.tx(|tx| {
+        let interrupted: Vec<u64> = {
+            let mut statement = tx.prepare("SELECT id FROM run WHERE status = 'pending'").map_err(db)?;
+            statement.query_map([], |row| Ok(to_u(row.get(0)?))).map_err(db)?
+                .collect::<Result<_, _>>().map_err(db)?
+        };
+        for id in interrupted {
+            tx.execute("UPDATE run SET status = 'ended', code = ?2, decided_by = 'revocation', decided_at = ?3, note = ?4 WHERE id = ?1",
+                params![to_i(id), codes::RUN_INTERRUPTED, to_i(now),
+                    "The relay restarted and discarded this run's one-time key. Request a new run when you are ready; the command was not rerun."])
+                .map_err(db)?;
+            audit.write_on(tx, now, RELAY_ACTOR, "run_interrupted", Some(crate::ids::RunId(id)),
+                &json!({"reason": "restart"}))?;
+        }
+
         let ended: Vec<u64> = {
             let mut statement = tx
                 .prepare("SELECT id FROM run WHERE status = 'ready'")

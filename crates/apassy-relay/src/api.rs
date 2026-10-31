@@ -815,7 +815,7 @@ pub struct RunView {
     /// The name of the approver that denied the run, when `decided_by` is `approver`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver: Option<String>,
-    /// An error code for `denied` and `timed_out`.
+    /// An error code for `denied`, `timed_out`, or restart-interrupted `ended`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     /// Why: the relay's verdict while the run waits, then the reason of the host or
