@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional per-Mac Lock after inactivity in Security, defaulting to Never to preserve unattended agent access.
+
 - Refuse agent command execution with secrets shorter than four bytes before starting the process; preserve ordinary words in the standalone token masker.
 - Preserve CLI CSV Website metadata and exact passwords; reject malformed quotes before import.
 - Start configured desktop agents through the Apassy sandbox launcher.
