@@ -238,6 +238,8 @@ fn timed_out_and_ended_runs_exit_3() {
     for (status, code_text, words) in [
         ("timed_out", "approval_timeout", "timed out"),
         ("ended", "", "ended"),
+        ("ended", "run_interrupted", "ended"),
+        ("ended", "future_terminal_reason", "ended"),
     ] {
         let mut view = run_view(5, status, None);
         if !code_text.is_empty() {
@@ -249,6 +251,7 @@ fn timed_out_and_ended_runs_exit_3() {
             None,
         );
         assert_eq!(code(&output), 3, "{status}");
+        assert_eq!(mock.requests().len(), 2, "terminal codes must stop polling");
         assert!(
             text(&output.stderr).contains(words),
             "{}",

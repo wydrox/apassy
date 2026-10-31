@@ -79,6 +79,8 @@ fn initialize_negotiates_the_protocol_version() {
     let instructions = result["instructions"].as_str().unwrap();
     assert!(instructions.starts_with("Apassy relay. Call apassy_list_access"));
     assert!(instructions.contains("apassy-team run"));
+    assert!(instructions.contains("or ended"));
+    assert!(instructions.contains("Do not automatically retry"));
 }
 
 #[test]
