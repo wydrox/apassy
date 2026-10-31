@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Mask short secrets at token boundaries in broker output; preserve ordinary words.
+- Preserve CLI CSV Website metadata and exact passwords; reject malformed quotes before import.
+- Start configured desktop agents through the Apassy sandbox launcher.
+- Bound MCP input while reading, terminating oversized streams.
+- Retain deletion tombstones indefinitely to block stale-replica resurrection.
+- Stop marking imported accounts as duplicates based only on their name and kind.
+
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
 ## [Unreleased]
