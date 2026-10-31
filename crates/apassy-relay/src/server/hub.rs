@@ -1148,7 +1148,14 @@ impl Hub {
         let name = crate::cli::commands::fmt_time(now)
             .replace(' ', "T")
             .replace(':', "-");
-        let dir = self.config.backup_dir.join(&name);
+        let published = self.config.backup_dir.join(&name);
+        if published.exists() {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "A backup of this second exists. Try again.",
+            ));
+        }
+        let dir = self.config.backup_dir.join(format!(".{name}.partial"));
         let teams_dir = dir.join(crate::config::TEAMS_DIR);
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -1173,28 +1180,50 @@ impl Hub {
             .create(&teams_dir)
             .map_err(|_| RelayError::internal("The backup folder cannot be created."))?;
         let mut copied: Vec<(String, std::path::PathBuf, u64)> = Vec::new();
-        let target = dir.join(crate::config::DIRECTORY_FILE);
-        let bytes = self
-            .directory
-            .store
-            .copy_to(&self.config.directory_path(), &target)?;
-        copied.push((crate::config::DIRECTORY_FILE.to_string(), target, bytes));
-        let rows = self.directory.teams()?;
-        for row in &rows {
-            let source = self.config.team_path(&row.id);
-            let file = format!("{}/{}.db", crate::config::TEAMS_DIR, row.id);
-            let target = dir.join(&file);
-            let bytes = match self.team(&row.id) {
-                Some(core) => core.store.copy_to(&source, &target)?,
-                // A suspended team (or one that did not open) has no open connection.
-                None if std::fs::symlink_metadata(&source).is_ok() => {
-                    crate::server::store::copy_private(&source, &target)?
-                }
-                None => continue,
-            };
-            copied.push((file, target, bytes));
-            copied.extend(self.copy_snapshots(&row.id, &dir)?);
-        }
+        // Freeze directory membership and keys until every referenced team is copied.
+        // Lock order: directory -> sync_commit -> team store (the sync commit order).
+        let rows = self.directory.store.with(|conn| {
+            let target = dir.join(crate::config::DIRECTORY_FILE);
+            let bytes = Store::snapshot_on(conn, &target, &self.config.master_key)?;
+            copied.push((crate::config::DIRECTORY_FILE.to_string(), target, bytes));
+            let rows = directory::read_teams(conn)?;
+            for row in &rows {
+                let core = self.team(&row.id).or_else(|| {
+                    self.draining
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&row.id)
+                        .and_then(Weak::upgrade)
+                });
+                let _commit = core.as_ref().map(|core| {
+                    core.sync_commit
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                });
+                let file = format!("{}/{}.db", crate::config::TEAMS_DIR, row.id);
+                let target = dir.join(&file);
+                let bytes = if let Some(core) = &core {
+                    core.store
+                        .with(|conn| Store::snapshot_on(conn, &target, &row.file_key))?
+                } else {
+                    // Includes suspended and failed-open teams. Missing/unreadable is
+                    // an explicit backup failure, never a successful partial manifest.
+                    let store =
+                        Store::open_read_only(&self.config.team_path(&row.id), &row.file_key)?;
+                    store.with(|conn| Store::snapshot_on(conn, &target, &row.file_key))?
+                };
+                copied.push((file, target.clone(), bytes));
+                copied.extend(self.copy_snapshots(&row.id, &dir)?);
+                let saved = Store::open_read_only(&target, &row.file_key)?;
+                saved.with(|conn| {
+                    crate::server::sync::verify_snapshots(
+                        conn,
+                        &dir.join(format!("teams/{}.sync", row.id)),
+                    )
+                })?;
+            }
+            Ok(rows)
+        })?;
         let mut files = Vec::new();
         for (file, path, bytes) in &copied {
             // Read back in pieces: a snapshot can be large.
@@ -1214,7 +1243,7 @@ impl Hub {
             files.push(json!({"name": file, "bytes": bytes, "sha256": hex}));
         }
         let manifest = json!({
-            "dir": dir.to_string_lossy(),
+            "dir": published.to_string_lossy(),
             "created_at": now,
             "teams": rows.len(),
             "files": files,
@@ -1230,6 +1259,12 @@ impl Hub {
         std::io::Write::write_all(&mut file, &text)
             .and_then(|()| file.sync_all())
             .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
+        // A partial directory is never advertised as a completed backup.
+        std::fs::rename(&dir, &published)
+            .map_err(|_| RelayError::internal("The backup cannot be published."))?;
+        File::open(&self.config.backup_dir)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RelayError::internal("The backup directory cannot be synced."))?;
         let _ = self.directory.audit.write(
             &self.directory.store,
             now,
@@ -1251,12 +1286,6 @@ impl Hub {
     ) -> RelayResult<Vec<(String, std::path::PathBuf, u64)>> {
         use std::os::unix::fs::DirBuilderExt;
         let source = self.config.sync_dir(id);
-        let core = self.team(id);
-        let _commit = core.as_ref().map(|core| {
-            core.sync_commit
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-        });
         let entries = match std::fs::read_dir(&source) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),

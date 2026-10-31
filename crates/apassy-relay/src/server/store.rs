@@ -505,6 +505,30 @@ impl Store {
         copy_private(source, dest)
     }
 
+    /// SQLite's backup API copies a consistent, keyed database, including committed
+    /// WAL pages if a future configuration enables WAL. Caller owns the source lock.
+    pub fn snapshot_on(conn: &Connection, dest: &Path, key: &SecretString) -> RelayResult<u64> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dest)
+            .map_err(|_| RelayError::internal("The backup file cannot be created."))?;
+        let mut target = open_keyed(dest, key)?;
+        rusqlite::backup::Backup::new(conn, &mut target)
+            .map_err(db)?
+            .run_to_completion(128, std::time::Duration::from_millis(1), None)
+            .map_err(db)?;
+        drop(target);
+        let file =
+            fs::File::open(dest).map_err(|_| RelayError::internal("The backup cannot be read."))?;
+        file.sync_all()
+            .map_err(|_| RelayError::internal("The backup cannot be synced."))?;
+        file.metadata()
+            .map(|m| m.len())
+            .map_err(|_| RelayError::internal("The backup cannot be read."))
+    }
+
     /// Caps the file at `bytes` (`PRAGMA max_page_count`, rounded up to whole pages);
     /// `None` lifts the cap. A write past it fails with `SQLITE_FULL`, which `db` turns
     /// into 403 `team_limit`. SQLite never sets the cap below the pages the file has.

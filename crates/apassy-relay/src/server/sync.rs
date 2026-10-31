@@ -121,6 +121,63 @@ pub fn is_snapshot_name(name: &str) -> bool {
         .is_some_and(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Offline recovery check: every retained head must have a regular snapshot of
+/// exactly its declared length and SHA-256. Extra orphan files are not served.
+pub fn verify_snapshots(conn: &Connection, dir: &Path) -> RelayResult<()> {
+    let mut statement = conn
+        .prepare("SELECT version, size, snapshot_sha256 FROM sync_head")
+        .map_err(db)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                to_u(row.get(0)?),
+                to_u(row.get(1)?),
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(db)?;
+    for row in rows {
+        let (version, size, digest) = row.map_err(db)?;
+        let path = dir.join(format!("{version}.bin"));
+        let failed = || {
+            RelayError::internal(format!(
+                "Snapshot {version} is missing or differs from its retained head."
+            ))
+        };
+        let meta = fs::symlink_metadata(&path).map_err(|_| failed())?;
+        if !meta.is_file() || meta.len() != size {
+            return Err(failed());
+        }
+        let mut file = File::open(&path).map_err(|_| failed())?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|_| failed())?;
+            if read == 0 {
+                break;
+            }
+            hash.update(&buffer[..read]);
+        }
+        if hash.finalize().as_slice() != digest {
+            return Err(failed());
+        }
+    }
+    Ok(())
+}
+
+/// Validates a restored data directory, read-only, including suspended teams.
+pub fn verify_restored(config: &crate::config::RelayConfig) -> RelayResult<usize> {
+    let directory =
+        crate::server::store::Store::open_read_only(&config.directory_path(), &config.master_key)?;
+    let rows = directory.with(crate::server::directory::read_teams)?;
+    for row in &rows {
+        let store =
+            crate::server::store::Store::open_read_only(&config.team_path(&row.id), &row.file_key)?;
+        store.with(|conn| verify_snapshots(conn, &config.sync_dir(&row.id)))?;
+    }
+    Ok(rows.len())
+}
+
 fn snapshot_path(core: &Core, version: u64) -> PathBuf {
     core.config
         .sync_dir(&core.team)

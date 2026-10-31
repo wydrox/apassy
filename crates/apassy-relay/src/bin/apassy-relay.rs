@@ -25,6 +25,7 @@ const USAGE: &str = "Usage:
   apassy-relay init [--team <name> --owner <name>]
   apassy-relay migrate
   apassy-relay rollback-check
+  apassy-relay snapshot-check
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
@@ -64,6 +65,7 @@ enum Command {
     Init { team: Option<(String, String)> },
     Migrate,
     RollbackCheck,
+    SnapshotCheck,
     Admin(Operator),
     Help,
     Version,
@@ -238,6 +240,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "serve" if args.len() == 1 => Ok(Command::Serve),
         "migrate" if args.len() == 1 => Ok(Command::Migrate),
         "rollback-check" if args.len() == 1 => Ok(Command::RollbackCheck),
+        "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
             let flags = parse_flags(&args[1..], &["--team", "--owner"])?;
@@ -366,6 +369,13 @@ fn main() -> ExitCode {
                     );
                     ExitCode::from(1)
                 }
+            }
+            Err(error) => fail(&error.message),
+        },
+        Command::SnapshotCheck => match apassy_relay::server::sync::verify_restored(&config) {
+            Ok(teams) => {
+                println!("Verified snapshots of {teams} teams.");
+                ExitCode::SUCCESS
             }
             Err(error) => fail(&error.message),
         },
