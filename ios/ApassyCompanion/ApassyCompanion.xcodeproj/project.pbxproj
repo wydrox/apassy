@@ -18,7 +18,6 @@
 		11E32DAE9B618713C2D006E7 /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35FEB27DAC4943C23B689CEA /* ScanView.swift */; };
 		142D89311379F85A2A898CEF /* ApassyVaultCore in Frameworks */ = {isa = PBXBuildFile; productRef = 492453E946A35E682FE6C4B4 /* ApassyVaultCore */; };
 		142FD425EE8AE3FDADFDA131 /* CredentialExchangeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFF914663017A172F14134C /* CredentialExchangeModel.swift */; };
-		1955443234C72836803D7DDB /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = BCD8BB479DDDDAE12AB05B20 /* licenses */; };
 		1A52B124D8933244BA388026 /* MacView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C707E9B88A62DDDE31571CE /* MacView.swift */; };
 		1B8D96E0A0805572C396DEED /* FolderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF2A79F57FF5990313CBF219 /* FolderView.swift */; };
 		1CEEF50BFCB6D847B049A3D6 /* AutoFillModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A7B7089BA3A509093E8685 /* AutoFillModel.swift */; };
@@ -30,6 +29,7 @@
 		2E32DF09D768D97DC6730172 /* CredentialExchangeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */; };
 		30F9B448A66FE1F9D585A005 /* RequestActionsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754D0A680B489E063530750F /* RequestActionsModel.swift */; };
 		32E26ABF44D434EC0B4A3556 /* ItemDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3D12AC62CA251B3BDB3D870 /* ItemDetailView.swift */; };
+		3572E585BAA47252578D366F /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = 3A4288300EB4A13212F37EB2 /* licenses */; };
 		38B508EE5348F73A6274D175 /* AgentsPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11C8AB137A3B07A6A0CE37D9 /* AgentsPreview.swift */; };
 		3C9D4C120707FEF65A02F1B3 /* OwnerGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E4146357404F8C913371D3F /* OwnerGate.swift */; };
 		3EB151FA4F3F4C95FDA98FE8 /* ApassyCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB347F790915A1B646346265 /* ApassyCompanionApp.swift */; };
@@ -173,6 +173,7 @@
 		38500713C126F8B4EEE9C6F5 /* VaultSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultSettings.swift; sourceTree = "<group>"; };
 		38F3E0A15FE766FA331F02FD /* GeneratorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratorView.swift; sourceTree = "<group>"; };
 		39C43929D42C487DA3C99614 /* VaultRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultRootView.swift; sourceTree = "<group>"; };
+		3A4288300EB4A13212F37EB2 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = licenses; path = ../../licenses; sourceTree = SOURCE_ROOT; };
 		3EDA31F3AF01F47775C3288F /* QuestionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionsView.swift; sourceTree = "<group>"; };
 		52A768E41BE6FD6BA91F0FC9 /* CodeScannerPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeScannerPanel.swift; sourceTree = "<group>"; };
 		5A24AC166DBA7F3F58D3F484 /* JoinModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinModel.swift; sourceTree = "<group>"; };
@@ -220,7 +221,6 @@
 		BAB6D224CFEE5DDF4F2459B2 /* RequestsList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestsList.swift; sourceTree = "<group>"; };
 		BB4A7BA9C612A81A002BFFDC /* AnswerSigners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerSigners.swift; sourceTree = "<group>"; };
 		BB933AE905E8B9227A343AAB /* DecisionComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionComponents.swift; sourceTree = "<group>"; };
-		BCD8BB479DDDDAE12AB05B20 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = licenses; path = ../../licenses; sourceTree = SOURCE_ROOT; };
 		BCDF2D0D076678612EDDA49F /* ICloudVaultFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudVaultFlowView.swift; sourceTree = "<group>"; };
 		BF2A79F57FF5990313CBF219 /* FolderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderView.swift; sourceTree = "<group>"; };
 		C03D253B246ED503A21556A3 /* GeneratorModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratorModel.swift; sourceTree = "<group>"; };
@@ -290,15 +290,6 @@
 				7600063A6C34AC63E06F2378 /* StatusCapsule.swift */,
 			);
 			path = Main;
-			sourceTree = "<group>";
-		};
-		41EDC07176404A6EE2DFFAD4 /* apassy-release-055 */ = {
-			isa = PBXGroup;
-			children = (
-				BCD8BB479DDDDAE12AB05B20 /* licenses */,
-			);
-			name = "apassy-release-055";
-			path = ../..;
 			sourceTree = "<group>";
 		};
 		47F184B0B0DAC0AB82A3563C /* Resources */ = {
@@ -379,11 +370,11 @@
 		72C2FA9447F32FFF3EF0552B = {
 			isa = PBXGroup;
 			children = (
-				41EDC07176404A6EE2DFFAD4 /* apassy-release-055 */,
 				751942F1E044A6B3896124D2 /* AutoFill */,
 				869A26A7BA633E3F312E5677 /* Packages */,
 				47F184B0B0DAC0AB82A3563C /* Resources */,
 				E409E008BFAF2CE02E8FC229 /* Sources */,
+				8105C17FC5DA957E659FC26E /* t3-bdd20fdc */,
 				69C07771ACD15672D409A137 /* UITests */,
 				BE3E088099E8720E3A1C3836 /* Frameworks */,
 				4CCBEF17C0233B8C4A5BA55B /* Products */,
@@ -424,6 +415,15 @@
 				F1E05AAEBDDF4BC4EF048A3C /* WatchtowerView.swift */,
 			);
 			path = Vault;
+			sourceTree = "<group>";
+		};
+		8105C17FC5DA957E659FC26E /* t3-bdd20fdc */ = {
+			isa = PBXGroup;
+			children = (
+				3A4288300EB4A13212F37EB2 /* licenses */,
+			);
+			name = "t3-bdd20fdc";
+			path = ../..;
 			sourceTree = "<group>";
 		};
 		851D92E78BC2F2B7FEB466DE /* Models */ = {
@@ -657,7 +657,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				691C57166953082B01AC26AB /* Assets.xcassets in Resources */,
-				1955443234C72836803D7DDB /* licenses in Resources */,
+				3572E585BAA47252578D366F /* licenses in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -847,7 +847,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LM_SKIP_METADATA_EXTRACTION = YES;
-				MARKETING_VERSION = 0.5.7;
+				MARKETING_VERSION = 0.5.8;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1032,7 +1032,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LM_SKIP_METADATA_EXTRACTION = YES;
-				MARKETING_VERSION = 0.5.7;
+				MARKETING_VERSION = 0.5.8;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

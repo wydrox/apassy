@@ -53,6 +53,31 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.8 staged app release
+
+Owner decision for 0.5.8: prepare the app repository and extension only. Leave
+relay, edge Worker and Linux CLI unchanged; no relay deploy is authorized.
+This is an explicit exception to coordinated delivery, not a completed
+six-component release. `release-versions.json` retains all six target components;
+its checker has no per-component exception contract. App CI invokes it without
+`--require-relay`; neither `ci-release-ready.py` nor `release.yml` requires a
+matching relay checkout/version. No publication gate has been weakened.
+
+Keep the release PR in draft. Merging an eligible dated 0.5.8 changelog to main
+can publish the Mac automatically after CI. Install the exact candidate's
+schema-20 TestFlight 0.5.8 build on the owner's iPhone before that merge.
+Keep all clients of the shared vault closed, preserve an encrypted backup, then
+update every Mac to 0.5.8 before resuming unlock/sync. Successful unlock migrates
+the local vault to schema 20; sync can publish schema 20 without an edit. Older
+iPhones and Macs cannot read it. Upload the verified CWS ZIP after the Mac update.
+Refresh the provisional changelog date (2026-10-31) on the actual merge day.
+
+The 0.5.8 extension probes native app status for each trusted action. Only a
+stable version at least 0.5.8 receives `trusted_gesture`; unknown/older apps
+receive the legacy request and perform their normal fresh owner check. New apps
+still require both a trusted gesture and native-host provenance to reuse a
+window. Old extensions remain on the fresh-check path.
+
 ## How it works
 
 | Part | File | What it does |
@@ -174,20 +199,14 @@ The job `provider-check` does not depend on `ready`. It is a test build of a bra
 
 The site workflow also runs the eligibility helper before deployment. An ineligible version still gets a site check and build, but no Cloudflare deployment, including a manual run on `main`. The existing public site stays unchanged. `VERSION` in `site/src/lib/site.ts` is the first dated release section of `CHANGELOG.md`. While `Cargo.toml` names a version that has no dated section, the site still shows the last released version and `/latest.json` is unchanged.
 
-## Relay first
+## Relay releases
 
-A release that uses relay sync needs the relay in step with the app, so deploy in this order. The relay code is in the separate repository `apassy-relay` (the branch that holds SPEC section 24); its deploy commands are in its `docs/OPERATIONS.md`, section 16. Stop at the first step that fails.
-
-1. Commit the relay branch. Deploy only a commit, so the image tag names it.
-2. Back up on the VPS: `ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'`. Check that the new folder in `/opt/apassy/backups/relay` has `MANIFEST.json`.
-3. Build and deploy the relay image as in OPERATIONS section 16: send `git archive` of the commit to the VPS, `docker build -t apassy-relay:<tag>`, set the tag in `/opt/apassy/compose.yaml`, then `docker compose up -d --wait`. On the first start every team file migrates to schema 4 and keeps `teams/<id>.db.pre-v4`. An image of schema 3 cannot open a migrated file. A restart ends every session.
-   - Rollback: stop the relay, put the `.pre-v4` copy back as `teams/<id>.db` (or restore the backup of step 2), start the old image. Pushes made after the migration are lost with it.
-4. Confirm that the sync routes exist: `GET https://apassy-relay.wyderka.cc/v1/sync/head` without a token must answer 401, not 404. A 404 means the old image still runs.
-5. In `deploy/worker`: `npm test` and `npm run typecheck`, then `wrangler deploy`. This adds the new routes, the body length checks, and the rate limits (`SYNC_LIMITER`, `CREATE_LIMITER` for `link/cancel`). Put the CLI binaries in `public/dl/` first, as OPERATIONS section 18 says.
-6. Verify a `PUT /v1/sync/snapshot` of a few MiB through the real edge and the tunnel, with a test team and its device (or the app against a scratch vault). The relay must see the `Content-Length` header: the Worker refuses `Transfer-Encoding`, and the relay refuses a chunked body. Check that an oversized declared length gets 413 at the edge, and that the 64 MiB limit of the Cloudflare plan holds (ADR 0022, open question 3). Delete the test team with `admin delete`.
-7. Only then publish the app: the source release and tags of [Source releases](#source-releases), or the push to `main` that runs the release workflow.
-
-Vault schema 17 (it was 16). A build of schema 17 migrates a vault of schema 16 when the owner unlocks it, and it reads a copy of schema 16. A build of schema 16 cannot open a vault of schema 17 (`verify_user_version`) or read a copy of it, and a merge refuses a copy of a newer schema (`src/vault/merge.rs`). So every Mac and iPhone that shares one vault through a folder, iCloud Drive, or the relay must update, and the owner must make an encrypted backup first. Say this in the release notes: the "Upgrade notes" of the changelog do.
+Use the separate relay repository's current `docs/OPERATIONS.md`. Build images
+and CLI artifacts in GitHub CI; never build or run development/test containers
+on the production VPS. Production deployment requires separate owner approval of
+the exact image and backup. Historical schema-17 vault and schema-4 relay deploy
+instructions do not describe the 0.5.8 rollout. Vault schema 20 is independent of
+the relay protocol and database schema; 0.5.8 needs no relay migration.
 
 ## One-time setup
 

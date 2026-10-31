@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
+
+## [0.5.8] - 2026-10-31
+
+### Fixed
 
 - Refuse agent command execution with secrets shorter than four bytes before starting the process; preserve ordinary words in the standalone token masker.
 - Preserve CLI CSV Website metadata and exact passwords; reject malformed quotes before import.
@@ -8,10 +12,6 @@
 - Bound MCP input while reading, terminating oversized streams.
 - Retain deletion tombstones indefinitely to block stale-replica resurrection.
 - Stop marking imported accounts as duplicates based only on their name and kind.
-
-All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
-
-## [Unreleased]
 
 ### Added
 
@@ -33,6 +33,14 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - **Model readiness:** a healthy HTTP endpoint alone no longer marks a failed warm-up ready. Readiness requires valid inference with the active model pin when configured; external mode never launches a process.
 - **Model deadlines:** each real inference attempt has an absolute 10-second deadline and at most one timeout retry (20 seconds by default). HTTP errors, invalid answers, and model-version mismatches ask the owner without retrying. Only inference repeats, never command execution.
 - **Automatic-use summaries:** both totals include allowed requests without an owner question from the model, patterns, and remembered execution answers. Denials and unanswered/manual requests do not count as successful automation.
+
+- **Extension compatibility:** negotiate trusted-gesture support from native app status; older apps receive legacy requests with fresh owner checks. New-app window reuse still requires trusted gestures and signed-host provenance.
+
+### Upgrade notes
+
+- A 0.5.8 Mac converts the vault to schema 20 at unlock; sync can also write schema 20 without an edit. Every iPhone and Mac sharing the vault must update to 0.5.8 before reopening it. Older apps cannot read schema 20.
+- Keep shared-vault clients locked/closed and preserve an encrypted pre-upgrade backup. Install TestFlight 0.5.8 on the iPhone first, then update every Mac before resuming unlock/sync; upload the extension to the Chrome Web Store after the Mac update.
+- Relay and Linux CLI are intentionally unchanged for this app release; this is not a completed coordinated six-component release.
 
 ## [0.5.7] - 2026-10-20
 

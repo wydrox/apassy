@@ -65,7 +65,29 @@ const NEW_LENGTH = { min: 12, max: 64 };
 
 // One native port per request. The open port keeps this service worker alive
 // while the app waits for Touch ID.
-function ask(request) {
+// Probe each trusted action rather than caching across an app downgrade/reconnect.
+// Unknown/legacy versions omit the new field and receive a fresh owner check.
+function supportsTrustedGesture(answer) {
+  if (answer?.ok !== true || answer.data?.type !== "status") return false;
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(answer.data.version);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major > 0 || minor > 5 || (minor === 5 && patch >= 8);
+}
+
+async function compatibleGestureRequest(request) {
+  if (!Object.hasOwn(request, "trusted_gesture")) return request;
+  const status = await askNative({ cmd: "status" });
+  if (supportsTrustedGesture(status)) return request;
+  const { trusted_gesture: _gesture, ...legacy } = request;
+  return legacy;
+}
+
+async function ask(request) {
+  return askNative(await compatibleGestureRequest(request));
+}
+
+function askNative(request) {
   return new Promise((resolve) => {
     let done = false;
     let port;
@@ -1222,6 +1244,11 @@ async function startPasskey(session, message) {
   // Only the isolated bridge can attest a browser user activation. Page data
   // never carries a window, deadline, secret, or reusable approval.
   if (message.trustedGesture === true && request.op === "get") wire.trusted_gesture = true;
+  const compatibleWire = await compatibleGestureRequest(wire);
+  if (session.done || !(await tabStillOn(peer))) {
+    endPasskey(session, null);
+    return;
+  }
   session.expect = {
     op: request.op,
     rid,
@@ -1261,7 +1288,7 @@ async function startPasskey(session, message) {
   });
   // The deadline of the page (30 to 180 s). Ending closes the native port.
   session.timers.push(setTimeout(() => endPasskey(session, NOT_ALLOWED), request.timeout));
-  native.postMessage(wire);
+  native.postMessage(compatibleWire);
 }
 
 async function deliverPasskey(session, answer) {
