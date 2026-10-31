@@ -384,10 +384,37 @@ fn pinned_team(text: &str) -> Option<TeamId> {
     TeamId::parse(teams[0][1])
 }
 
-fn selected_team(settings: &Settings) -> Result<TeamId, CliError> {
-    settings.team_id.clone().or_else(|| settings.member_token.as_ref()
-        .and_then(|token| crate::secret::parse_token(token.expose())).and_then(|token| token.team))
-        .ok_or_else(|| CliError::usage("Select a saved team with --team ID or team use ID before managing its host service."))
+/// Service status/removal must work after credentials/settings were removed, and
+/// must never contact the relay or migrate legacy authentication settings.
+fn selected_service_team(selected: Option<&str>) -> Result<TeamId, CliError> {
+    if let Some(text) = selected.map(str::to_owned).or_else(|| {
+        std::env::var(settings::ENV_TEAM)
+            .ok()
+            .filter(|text| !text.is_empty())
+    }) {
+        return TeamId::parse(&text).ok_or_else(|| CliError::usage("The team id is not valid."));
+    }
+    #[derive(serde::Deserialize)]
+    struct Selection {
+        current: Option<TeamId>,
+    }
+    let path = settings::settings_path()?;
+    if let Ok(text) = fs::read_to_string(&path) {
+        let text = zeroize::Zeroizing::new(text);
+        if let Ok(selection) = serde_json::from_str::<Selection>(&text)
+            && let Some(team) = selection.current
+        {
+            return Ok(team);
+        }
+    }
+    if let Ok(text) = fs::read_to_string(service_path(None)?)
+        && let Some(team) = pinned_team(&text)
+    {
+        return Ok(team);
+    }
+    Err(CliError::usage(
+        "Select the host service with --team ID, or select a saved current team.",
+    ))
 }
 
 /// Preserve arguments/options when converting the old single service to its pinned team.
@@ -605,9 +632,9 @@ pub fn install(settings: &Settings, options: HostOptions) -> Result<i32, CliErro
     Ok(0)
 }
 
-/// Stop and remove the per-user service. Does not read credentials or contact the relay.
-pub fn uninstall(settings: &Settings) -> Result<i32, CliError> {
-    let team = selected_team(settings)?;
+/// Stop and remove the selected service. Does not require credentials or contact the relay.
+pub fn uninstall(selected: Option<&str>) -> Result<i32, CliError> {
+    let team = selected_service_team(selected)?;
     let (path, name) = selected_service(&team)?;
     if cfg!(target_os = "macos") {
         bootout(&launch_domain()?, &name)?;
@@ -671,8 +698,8 @@ fn recent_log(path: &Path) -> Result<(), CliError> {
 }
 
 /// Show local installation, service state, and the last ten lines of each log.
-pub fn status(settings: &Settings) -> Result<i32, CliError> {
-    let team = selected_team(settings)?;
+pub fn status(selected: Option<&str>) -> Result<i32, CliError> {
+    let team = selected_service_team(selected)?;
     let (path, name) = selected_service(&team)?;
     let installed = path
         .try_exists()
@@ -751,6 +778,15 @@ mod tests {
 
     fn test_team() -> TeamId {
         TeamId::parse("t_abcdefgh23").unwrap()
+    }
+
+    #[test]
+    fn explicit_service_selection_needs_no_saved_credentials_or_relay() {
+        assert_eq!(
+            selected_service_team(Some("t_abcdefgh23")).unwrap(),
+            test_team()
+        );
+        assert!(selected_service_team(Some("bad-id")).is_err());
     }
 
     #[test]

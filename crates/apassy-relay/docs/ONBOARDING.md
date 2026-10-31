@@ -364,6 +364,8 @@ previous team's service. Installing also migrates a pinned legacy single service
 to its original team's name, preserving its options. An unpinned/custom legacy file
 requires manual identification before migration; its file is retained on failure.
 Use `apassy-team --team TEAM_ID host uninstall` to stop and remove one team's service.
+Explicit-team status/removal also work after saved credentials were removed, without
+contacting the relay.
 After a CLI update, run `host install` for each team to restart its running host,
 then `host status`. `cli_version` is the CLI being queried; the service startup log
 prints the actual host version. Replacing a binary alone does not restart hosts.

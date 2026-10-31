@@ -241,7 +241,19 @@ fn install_migrates_team_a_then_installs_and_removes_team_b_without_replacing_a(
         result["result"]["service"],
         format!("apassy-team-host-{TEAM_A}.service")
     );
+    // Removing saved credentials must not strand an installed service.
+    std::fs::remove_file(cli.settings_file()).unwrap();
     run(&["--team", TEAM_B, "host", "uninstall"]);
+    assert_eq!(
+        a.requests().len(),
+        1,
+        "status/removal never contact the relay"
+    );
+    assert_eq!(
+        b.requests().len(),
+        1,
+        "status/removal never contact the relay"
+    );
     assert!(path_a.exists());
     assert!(!path_b.exists());
     let commands = std::fs::read_to_string(calls).unwrap();
