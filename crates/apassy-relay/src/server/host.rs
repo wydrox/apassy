@@ -172,6 +172,7 @@ pub fn release(
     let reason = checked_reason(request.reason.as_deref())?;
     let mut created = None;
     let result = core.store.tx(|tx| {
+        crate::server::devices::authorize_host_on(tx, owner)?;
         let run = load_run(tx, run_id)?.ok_or_else(|| RelayError::not_found("run"))?;
         let run = settle(core, tx, run, now)?;
         let not_pending = || {

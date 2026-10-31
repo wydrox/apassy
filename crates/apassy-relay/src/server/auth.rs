@@ -147,6 +147,27 @@ pub fn device_member(conn: &Connection, id: DeviceId) -> RelayResult<MemberAuth>
     ).optional().map_err(db)?.ok_or_else(RelayError::unauthenticated)
 }
 
+/// Rechecks the authenticated identity in the mutation transaction. Cached authority
+/// is never sufficient: a role change, enrollment, or device/member revocation wins.
+pub fn require_member(conn: &Connection, by: &MemberAuth, need: Need, now: u64) -> RelayResult<()> {
+    let current = if let Some(device) = by.device {
+        device_member(conn, device.id)?
+    } else {
+        check_member_token_deadline(conn, now)?;
+        conn.query_row(
+            "SELECT id, name, role FROM member WHERE id = ?1 AND revoked_at IS NULL AND token_hash IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM device WHERE member_id = member.id AND revoked_at IS NULL)",
+            params![to_i(by.id.0)],
+            |row| Ok(MemberAuth { id: by.id, name: row.get(1)?,
+                role: parse_role(&row.get::<_, String>(2)?), device: None }),
+        ).optional().map_err(db)?.ok_or_else(RelayError::unauthenticated)?
+    };
+    if current.id != by.id || current.role != by.role || current.device != by.device {
+        return Err(RelayError::unauthenticated());
+    }
+    allow(need, Some(&Principal::Member(current)))
+}
+
 fn check_member_token_deadline(conn: &Connection, now: u64) -> RelayResult<()> {
     let until: Option<i64> = conn
         .query_row(

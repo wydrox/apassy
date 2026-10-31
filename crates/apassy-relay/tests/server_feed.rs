@@ -2201,3 +2201,24 @@ fn a_connect_team_deleted_with_its_key_freed_lets_the_key_connect_again() {
             .is_some()
     );
 }
+
+#[test]
+fn deletion_between_polls_returns_the_absent_publisher_immediately() {
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    let made = publish(&relay, &mac, 1);
+    let since = made["change"].as_u64().unwrap();
+    relay.ok("DELETE", "/v1/feed", &mac.token, None);
+    let (list, took) = timed(|| {
+        relay.ok(
+            "GET",
+            &format!("/v1/feed?since={since}&wait=25"),
+            &phone.token,
+            None,
+        )
+    });
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert_eq!(list["present"], json!([]));
+    assert!(list["change"].as_u64().unwrap() > since);
+}

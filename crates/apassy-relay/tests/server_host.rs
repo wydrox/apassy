@@ -796,7 +796,7 @@ fn a_host_denial_is_approval_denied_and_drops_the_key() {
 // ---- Runs that the host never sees ----
 
 #[test]
-fn a_run_that_waited_through_a_restart_is_never_shown_and_times_out() {
+fn a_pending_run_ends_explicitly_at_restart_without_replaying_the_command() {
     let relay = start_with(
         |config| config.approval_timeout_secs = 3,
         UpstreamOptions::default(),
@@ -805,32 +805,44 @@ fn a_run_that_waited_through_a_restart_is_never_shown_and_times_out() {
     let run = pending_run(&relay, &team, &["git", "status"]);
     assert_eq!(relay.host_requests().len(), 1);
     let relay = relay.restart();
-    // The run is still pending, and an approver can see it, but the host cannot.
-    assert_eq!(view(&relay, &team, run)["status"], "pending");
-    assert_eq!(
+    let ended = view(&relay, &team, run);
+    assert_eq!(ended["status"], "ended");
+    assert_eq!(ended["code"], "run_interrupted");
+    assert!(
+        ended["note"]
+            .as_str()
+            .unwrap()
+            .contains("Request a new run")
+    );
+    assert!(
         relay
             .ok("GET", "/v1/approvals", &relay.owner_token, None)
             .as_array()
             .unwrap()
-            .len(),
-        1
+            .is_empty()
     );
     assert!(relay.host_requests().is_empty());
-    // A release for it finds no key.
-    let mut body = json!({"host_key": "x", "nonce": "x", "sealed_keys": "x"});
+    let body = json!({"host_key": "x", "nonce": "x", "sealed_keys": "x"});
     let (status, answer) = post_release(&relay, run, &body);
     assert_eq!(status, 409, "{answer}");
     assert_eq!(answer["error"]["code"], "run_not_pending");
-    body["reason"] = json!("again");
-    // It times out as any run does.
+    let started = std::time::Instant::now();
     let ended = relay.ok(
         "GET",
-        &format!("/v1/runs/{run}?wait=10"),
+        &format!("/v1/runs/{run}?wait=25"),
         &team.agent_token,
         None,
     );
-    assert_eq!(ended["status"], "timed_out");
-    assert_eq!(ended["code"], "approval_timeout");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(ended["code"], "run_interrupted");
+    assert!(
+        relay
+            .ok("GET", "/v1/audit?limit=500", &relay.owner_token, None)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["action"] == "run_interrupted")
+    );
 }
 
 #[test]

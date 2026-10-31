@@ -828,3 +828,452 @@ fn the_proxy_path_goes_to_the_proxy_after_the_edge_check() {
     assert!(answered.status().as_u16() >= 400);
     assert_eq!(answered.headers().get("x-apassy-relay").unwrap(), "refused");
 }
+
+#[test]
+fn stalled_and_refused_bodies_leave_health_and_approvals_available() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let relay = relay::start_with(
+        |config| {
+            config.limits.max_active = 2;
+            config.limits.member_reserve = 1;
+            config.request_read_timeout = Duration::from_millis(450);
+        },
+        UpstreamOptions::default(),
+    );
+    let stalled = || {
+        let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(socket, "POST /v1/invites HTTP/1.1\r\nHost: relay\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 4096\r\n\r\n{{", relay.edge_secret, relay.owner_token).unwrap();
+        socket.flush().unwrap();
+        socket
+    };
+    let _first = stalled();
+    std::thread::sleep(Duration::from_millis(60));
+    // A single slow upload does not take all of the member lane.
+    relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
+    let _second = stalled();
+    std::thread::sleep(Duration::from_millis(60));
+    let refused = stalled();
+    let started = Instant::now();
+    let mut line = String::new();
+    BufReader::new(refused).read_line(&mut line).unwrap();
+    assert!(line.contains("503"), "{line}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        relay::call_url(&relay.url, None, "GET", "/healthz", None, None).0,
+        200
+    );
+    std::thread::sleep(Duration::from_millis(550));
+    relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
+}
+
+#[test]
+fn parser_refuses_ambiguous_framing_and_header_injection() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let relay = start(UpstreamOptions::default());
+    for framing in [
+        "Transfer-Encoding: identity\r\n",
+        "Transfer-Encoding: gzip, chunked\r\n",
+        "Transfer-Encoding: chunked\r\nContent-Length: 0\r\n",
+        "Content-Length: 0\r\nContent-Length: 10\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+        "Content-Length: nope\r\n",
+        "Content-Length: 0\r\nContent-Length: 0\r\n",
+        "Content-Length: 18446744073709551616\r\n",
+        "Transfer-Encoding: chunked\u{000b}\r\n",
+        "Connection: upgrade\r\nContent-Length: 0\r\n",
+        " Content-Length: 0\r\n",
+        "X-Test: first\r\n\tContent-Length: 0\r\n",
+        "X-Test: ok\nInjected: yes\r\n",
+        "X-Test: ok\n\r\n",
+        "X-Test: ok\rInjected: yes\r\n",
+    ] {
+        let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(socket, "GET /healthz HTTP/1.1\r\nHost: relay\r\n{framing}\r\nGET /healthz HTTP/1.1\r\nHost: relay\r\n\r\n").unwrap();
+        let mut text = String::new();
+        let _ = socket.read_to_string(&mut text);
+        assert!(!text.contains("200 OK"), "{framing:?}: {text}");
+    }
+    for bad in ["x\r\nInjected: yes", "x\ny", "x\0y"] {
+        assert!(tiny_http::Header::from_bytes("X-Test", bad).is_err());
+    }
+    assert!(tiny_http::Header::from_bytes("X-Test", "plain value").is_ok());
+}
+
+#[test]
+fn parser_bounds_header_lines_count_and_total_bytes() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let relay = start(UpstreamOptions::default());
+    for headers in [
+        format!("X-Large: {}\r\n", "a".repeat(8193)),
+        "X-Count: a\r\n".repeat(100), // plus Host = 101
+        format!("X-Large: {}\r\n", "a".repeat(8000)).repeat(9),
+    ] {
+        let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let _ = write!(
+            socket,
+            "GET /healthz HTTP/1.1\r\nHost: relay\r\n{headers}\r\n"
+        );
+        let mut response = String::new();
+        let _ = socket.read_to_string(&mut response);
+        assert!(!response.contains("200 OK"), "oversized headers accepted");
+    }
+}
+
+#[test]
+fn trickling_body_has_an_absolute_deadline() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let relay = relay::start_with(
+        |config| {
+            config.limits.max_active = 1;
+            config.request_read_timeout = Duration::from_millis(250);
+        },
+        UpstreamOptions::default(),
+    );
+    let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+    write!(socket, "POST /v1/invites HTTP/1.1\r\nHost: relay\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 4096\r\n\r\n", relay.edge_secret, relay.owner_token).unwrap();
+    for _ in 0..7 {
+        let _ = socket.write_all(b" ");
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
+}
+
+#[test]
+fn health_bodies_cannot_hold_the_reserved_seats() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let relay = start(UpstreamOptions::default());
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: relay\r\nContent-Length: 4096\r\n\r\n")
+            .unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        socket.read_line(&mut line).unwrap();
+        assert!(line.contains("200"), "{line}");
+        held.push(socket);
+    }
+    let start = Instant::now();
+    // Repeated checks must succeed while all four untrusted bodies are still open.
+    for _ in 0..8 {
+        assert_eq!(
+            relay::call_url(&relay.url, None, "GET", "/healthz", None, None).0,
+            200
+        );
+    }
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn chunk_metadata_is_strict_bounded_and_requires_complete_data() {
+    use std::io::Write;
+    use std::net::{Shutdown, TcpStream};
+    use std::time::Duration;
+    for body in [
+        "2\r\na", // a truncated chunk must be an error, not a clean EOF
+        "\n1\r\na\r\n0\r\n\r\n",
+        "+1\r\na\r\n0\r\n\r\n",
+        "10000000000000000\r\n",
+        &format!("{}\r\n", "0".repeat(8193)),
+        &format!("1;{}\r\na\r\n0\r\n\r\n", "x".repeat(8193)),
+    ] {
+        let server = tiny_http::Server::http_with_deadlines(
+            "127.0.0.1:0",
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut socket = TcpStream::connect(server.server_addr().to_ip().unwrap()).unwrap();
+        write!(
+            socket,
+            "POST / HTTP/1.1\r\nHost: relay\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
+        )
+        .unwrap();
+        socket.shutdown(Shutdown::Write).unwrap();
+        let mut request = server
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert!(
+            request.as_reader().read_to_end(&mut Vec::new()).is_err(),
+            "accepted {body:?}"
+        );
+        request.abort();
+    }
+}
+
+#[test]
+fn a_truncated_length_delimited_body_is_not_successful_eof() {
+    use std::io::Write;
+    use std::net::{Shutdown, TcpStream};
+    use std::time::Duration;
+    let server = tiny_http::Server::http_with_deadlines(
+        "127.0.0.1:0",
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let mut socket = TcpStream::connect(server.server_addr().to_ip().unwrap()).unwrap();
+    socket
+        .write_all(b"POST / HTTP/1.1\r\nHost: relay\r\nContent-Length: 4096\r\n\r\n{}")
+        .unwrap();
+    socket.shutdown(Shutdown::Write).unwrap();
+    let mut request = server
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    assert!(request.as_reader().read_to_end(&mut Vec::new()).is_err());
+    request.abort();
+}
+
+#[test]
+fn small_slow_bodies_take_a_bounded_member_seat() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let relay = relay::start_with(
+        |config| {
+            config.limits.max_active = 1;
+            config.request_read_timeout = Duration::from_secs(2);
+        },
+        UpstreamOptions::default(),
+    );
+    let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+    write!(socket, "POST /v1/invites HTTP/1.1\r\nHost: relay\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\n\r\n{{", relay.edge_secret, relay.owner_token).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    relay.fails(
+        "GET",
+        "/v1/approvals",
+        Some(&relay.owner_token),
+        None,
+        503,
+        "busy",
+    );
+    assert_eq!(
+        relay::call_url(&relay.url, None, "GET", "/healthz", None, None).0,
+        200
+    );
+}
+
+#[test]
+fn valid_chunks_work_and_pipelining_never_dispatches_a_successor() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let server = tiny_http::Server::http_with_deadlines(
+        "127.0.0.1:0",
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let mut socket = TcpStream::connect(server.server_addr().to_ip().unwrap()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket.write_all(b"POST / HTTP/1.1\r\nHost: relay\r\nTransfer-Encoding: ChUnKeD\r\n\r\n2;foo=bar\r\nab\r\n1\r\nc\r\n0\r\n\r\nGET /second HTTP/1.1\r\nHost: relay\r\n\r\n").unwrap();
+    let mut request = server
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    let mut body = String::new();
+    request.as_reader().read_to_string(&mut body).unwrap();
+    assert_eq!(body, "abc");
+    request
+        .respond(tiny_http::Response::from_string("done"))
+        .unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    assert_eq!(response.matches("200 OK").count(), 1);
+    assert!(response.contains("Connection: close"));
+    assert!(
+        server
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_blocked_response_write_obeys_the_absolute_handle_deadline() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let server = tiny_http::Server::http_with_deadlines(
+        "127.0.0.1:0",
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_millis(350),
+    )
+    .unwrap();
+    let mut socket = TcpStream::connect(server.server_addr().to_ip().unwrap()).unwrap();
+    socket
+        .write_all(b"GET / HTTP/1.1\r\nHost: relay\r\n\r\n")
+        .unwrap();
+    let request = server
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    let (done, result) = mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let response = tiny_http::Response::new(
+            tiny_http::StatusCode(200),
+            Vec::new(),
+            std::io::repeat(42).take(64 * 1024 * 1024),
+            Some(64 * 1024 * 1024),
+            None,
+        );
+        done.send(request.respond(response)).unwrap();
+    });
+    // Never read the response: its size exceeds the TCP buffers on both ends.
+    let _ = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("response writer survived its deadline");
+    writer.join().unwrap();
+    drop(socket);
+}
+
+/// Run in its own test process: other integration tests deliberately start servers.
+#[test]
+#[ignore = "isolated transport resource check; run with --ignored --exact"]
+fn repeated_connection_bursts_release_threads_and_file_descriptors() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    fn resources() -> (usize, usize) {
+        #[cfg(target_os = "linux")]
+        let result = (
+            std::fs::read_dir("/proc/self/fd").unwrap().count(),
+            std::fs::read_dir("/proc/self/task").unwrap().count(),
+        );
+        #[cfg(target_os = "macos")]
+        let result = {
+            let output = std::process::Command::new("ps")
+                .args(["-M", "-p", &std::process::id().to_string(), "-o", "pid="])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            (
+                std::fs::read_dir("/dev/fd").unwrap().count(),
+                String::from_utf8(output.stdout).unwrap().lines().count(),
+            )
+        };
+        result
+    }
+    let server = tiny_http::Server::http_with_deadlines(
+        "127.0.0.1:0",
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let before = resources();
+    for _ in 0..4 {
+        let mut clients = Vec::new();
+        for _ in 0..64 {
+            let mut socket = TcpStream::connect(server.server_addr().to_ip().unwrap()).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket.write_all(b"GET / HTTP/1.1\r\nHost:").unwrap();
+            clients.push(socket);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        for socket in &mut clients {
+            socket.write_all(b" relay\r\n\r\n").unwrap();
+        }
+        for _ in 0..clients.len() {
+            let request = server
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+            request
+                .respond(tiny_http::Response::from_string("ok"))
+                .unwrap();
+        }
+        for socket in &mut clients {
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.contains("200 OK"));
+        }
+    }
+    // The upstream worker pool retires excess idle threads after five seconds.
+    std::thread::sleep(Duration::from_secs(6));
+    let after = resources();
+    eprintln!("transport resources (fds, threads): {before:?} -> {after:?}; 256 connections");
+    assert!(
+        after.0 <= before.0 + 2,
+        "file descriptors leaked: {before:?} -> {after:?}"
+    );
+    assert!(
+        after.1 <= before.1 + 2,
+        "threads leaked: {before:?} -> {after:?}"
+    );
+}
+
+#[test]
+fn header_and_handle_deadlines_close_the_actual_transport() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let server = tiny_http::Server::http_with_deadlines(
+        "127.0.0.1:0",
+        Duration::from_millis(150),
+        Duration::from_millis(300),
+        Duration::from_millis(450),
+    )
+    .unwrap();
+    let addr = server.server_addr().to_ip().unwrap();
+    let mut partial = TcpStream::connect(addr).unwrap();
+    partial
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    partial.write_all(b"GET / HTTP/1.1\r\nHost: ").unwrap();
+    let start = Instant::now();
+    let mut answer = String::new();
+    let _ = partial.read_to_string(&mut answer);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(!answer.contains("200 OK"));
+    let mut handled = TcpStream::connect(addr).unwrap();
+    handled
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    handled
+        .write_all(b"GET / HTTP/1.1\r\nHost: relay\r\n\r\n")
+        .unwrap();
+    let request = server
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    let start = Instant::now();
+    let _ = handled.read_to_string(&mut String::new());
+    assert!(start.elapsed() < Duration::from_secs(1));
+    drop(request);
+}

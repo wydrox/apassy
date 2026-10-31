@@ -172,14 +172,15 @@ fn data_survives_a_restart_and_sessions_do_not() {
     );
     assert_eq!(run["status"], "ended");
     assert!(run.get("session").is_none());
-    // The run that waited is still pending, but its key is gone: the host never sees it.
+    // The pending run ends explicitly because its one-time key is gone.
     let waiting = relay.ok(
         "GET",
         &format!("/v1/runs/{waiting_id}"),
         &team.agent_token,
         None,
     );
-    assert_eq!(waiting["status"], "pending");
+    assert_eq!(waiting["status"], "ended");
+    assert_eq!(waiting["code"], "run_interrupted");
     assert!(relay.host_requests().is_empty());
     // A new run works, and its key is new.
     let run = relay.run_released(

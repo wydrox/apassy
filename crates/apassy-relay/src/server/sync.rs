@@ -121,6 +121,66 @@ pub fn is_snapshot_name(name: &str) -> bool {
         .is_some_and(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Offline recovery check: current and previous heads must have regular snapshots
+/// of their declared length and SHA-256. Older heads are chain metadata: their
+/// snapshots are intentionally pruned by push (SPEC 24), so they need no file.
+pub fn verify_snapshots(conn: &Connection, dir: &Path) -> RelayResult<()> {
+    let mut statement = conn
+        .prepare(
+            "SELECT version, size, snapshot_sha256 FROM sync_head ORDER BY version DESC LIMIT 2",
+        )
+        .map_err(db)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                to_u(row.get(0)?),
+                to_u(row.get(1)?),
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(db)?;
+    for row in rows {
+        let (version, size, digest) = row.map_err(db)?;
+        let path = dir.join(format!("{version}.bin"));
+        let failed = || {
+            RelayError::internal(format!(
+                "Snapshot {version} is missing or differs from its retained head."
+            ))
+        };
+        let meta = fs::symlink_metadata(&path).map_err(|_| failed())?;
+        if !meta.is_file() || meta.len() != size {
+            return Err(failed());
+        }
+        let mut file = File::open(&path).map_err(|_| failed())?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|_| failed())?;
+            if read == 0 {
+                break;
+            }
+            hash.update(&buffer[..read]);
+        }
+        if hash.finalize().as_slice() != digest {
+            return Err(failed());
+        }
+    }
+    Ok(())
+}
+
+/// Validates a restored data directory, read-only, including suspended teams.
+pub fn verify_restored(config: &crate::config::RelayConfig) -> RelayResult<usize> {
+    let directory =
+        crate::server::store::Store::open_read_only(&config.directory_path(), &config.master_key)?;
+    let rows = directory.with(crate::server::directory::read_teams)?;
+    for row in &rows {
+        let store =
+            crate::server::store::Store::open_read_only(&config.team_path(&row.id), &row.file_key)?;
+        store.with(|conn| verify_snapshots(conn, &config.sync_dir(&row.id)))?;
+    }
+    Ok(rows.len())
+}
+
 fn snapshot_path(core: &Core, version: u64) -> PathBuf {
     core.config
         .sync_dir(&core.team)
@@ -644,6 +704,7 @@ pub fn push(
     let head_hash = request.head.hash();
     let text = String::from_utf8_lossy(&request.head.text).into_owned();
     let committed = core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         // A removal of the device or its member takes the store too: one that came after
         // the check above still stops the push, so a removed device never gets a head.
         let live: bool = tx
@@ -779,6 +840,7 @@ pub fn open_snapshot<'a>(
 pub fn record_fetch(core: &Core, by: &MemberAuth, version: u64, now: u64) -> RelayResult<()> {
     let device = device_of(by)?;
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let pushed_at: Option<i64> = tx
             .query_row(
                 "SELECT pushed_at FROM sync_head WHERE version = ?1",
@@ -828,6 +890,7 @@ pub fn receipt(
         return Err(plan_required());
     }
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
         let latest = current_version(tx)?;
         if request.version > latest {
             return Err(RelayError::new(
@@ -882,6 +945,7 @@ pub fn delete(core: &Core, by: &MemberAuth, if_match: u64, now: u64) -> SyncResu
         return Ok(json!({"last_version": 0}));
     }
     core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Owner, now)?;
         tx.execute("DELETE FROM sync_head", []).map_err(db)?;
         tx.execute("DELETE FROM sync_receipt", []).map_err(db)?;
         core.audit.write_on(

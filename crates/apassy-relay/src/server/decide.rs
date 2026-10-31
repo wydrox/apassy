@@ -304,6 +304,10 @@ pub fn request_run(
     validate(request, core.config.session_ttl_secs)?;
     let mut pending_key: Option<(RunId, RunKey, Suggestion)> = None;
     let result = core.store.tx(|tx| {
+        let current = crate::server::auth::agent_by_id(tx, agent.id, now)?;
+        if current.member != agent.member {
+            return Err(RelayError::unauthenticated());
+        }
         let actor = agent_actor(agent.id.0);
         let items = match check_access(tx, agent.member.id, &request.items) {
             Ok(items) => items,

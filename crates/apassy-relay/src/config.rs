@@ -227,6 +227,9 @@ pub struct RelayConfig {
     pub approval_timeout_secs: u64,
     pub upstream: UpstreamOptions,
     pub limits: Limits,
+    /// Absolute transport deadlines, including body draining on refusal.
+    pub request_read_timeout: Duration,
+    pub request_handle_timeout: Duration,
     /// Where `apassy-relay admin backup` writes (`APASSY_RELAY_BACKUP_DIR`).
     pub backup_dir: PathBuf,
     /// The push trigger (docs/SPEC.md section 25.6). `None`: push is off.
@@ -364,6 +367,8 @@ impl RelayConfig {
             session_ttl_secs,
             approval_timeout_secs,
             upstream,
+            request_read_timeout: Duration::from_secs(30),
+            request_handle_timeout: Duration::from_secs(90),
             limits: Limits {
                 connect_long_polls: usize::try_from(connect_long_polls)
                     .unwrap_or(DEFAULT_CONNECT_LONG_POLLS),

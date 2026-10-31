@@ -1511,3 +1511,108 @@ fn a_new_device_cancels_its_pending_link() {
         "conflict",
     );
 }
+
+#[test]
+fn backups_racing_delete_push_or_team_creation_restore_complete_sets() {
+    use apassy_relay::server::sync;
+    use std::sync::mpsc;
+    for action in ["delete", "push", "create"] {
+        let mut relay = start(UpstreamOptions::default());
+        let mac = personal_team(&mut relay);
+        let team = team_of(&mac.token);
+        let mut pusher = Pusher::new(&team);
+        pusher.push(&relay, &mac, &vec![42; 1024 * 1024]);
+        let hub = relay.hub();
+        let core = hub.team(&team).unwrap();
+        // Force the backup to stop after directory capture and before the team copy.
+        let commit = core.sync_commit.lock().unwrap();
+        let at = apassy_relay::now_unix();
+        let stamp = apassy_relay::cli::commands::fmt_time(at)
+            .replace(' ', "T")
+            .replace(':', "-");
+        let captured = relay
+            .config
+            .backup_dir
+            .join(format!(".{stamp}.partial/relay.db"));
+        let backup = std::thread::scope(|scope| {
+            let work = scope.spawn(|| hub.backup(at));
+            let until = Instant::now() + Duration::from_secs(5);
+            while !captured.exists() {
+                assert!(Instant::now() < until, "backup did not capture directory");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let (done, completed) = mpsc::channel();
+            let relay = &relay;
+            let mutation = scope.spawn(move || {
+                match action {
+                    "delete" => {
+                        send(
+                            &relay.url,
+                            "DELETE",
+                            "/v1/sync",
+                            Some(&mac.token),
+                            &[("If-Match", "\"1\"".into())],
+                            Vec::new(),
+                        )
+                        .result();
+                    }
+                    "push" => {
+                        pusher.push(relay, &mac, b"second");
+                    }
+                    "create" => {
+                        relay.new_team_device("concurrent", "owner");
+                    }
+                    _ => unreachable!(),
+                }
+                done.send(()).unwrap();
+            });
+            assert!(
+                completed.recv_timeout(Duration::from_millis(100)).is_err(),
+                "mutation finished while backup holds its consistency locks"
+            );
+            drop(commit);
+            let result = work.join().unwrap();
+            mutation.join().unwrap();
+            result
+        })
+        .unwrap();
+        let mut restored = relay.config.clone();
+        restored.data_dir = Path::new(backup["dir"].as_str().unwrap()).to_path_buf();
+        assert_eq!(
+            sync::verify_restored(&restored).unwrap(),
+            backup["teams"].as_u64().unwrap() as usize
+        );
+    }
+}
+
+#[test]
+fn snapshot_validation_includes_suspended_teams_and_rejects_missing_or_corrupt_files() {
+    use apassy_relay::server::sync;
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let team = team_of(&mac.token);
+    let mut pusher = Pusher::new(&team);
+    pusher.push(&relay, &mac, b"old chain metadata");
+    pusher.push(&relay, &mac, b"previous snapshot");
+    pusher.push(&relay, &mac, b"recoverable");
+    assert!(!relay.config.sync_dir(&team).join("1.bin").exists());
+    relay
+        .operator(Command::Suspend { team: team.clone() })
+        .unwrap();
+    let manifest = relay.operator(Command::Backup).unwrap();
+    let mut restored = relay.config.clone();
+    restored.data_dir = Path::new(manifest["dir"].as_str().unwrap()).to_path_buf();
+    assert_eq!(
+        sync::verify_restored(&restored).unwrap(),
+        manifest["teams"].as_u64().unwrap() as usize
+    );
+    let file = restored.sync_dir(&team).join("3.bin");
+    std::fs::write(&file, b"unrecoverab").unwrap();
+    assert!(sync::verify_restored(&restored).is_err());
+    std::fs::remove_file(&file).unwrap();
+    assert!(sync::verify_restored(&restored).is_err());
+    // Even with no open core, a failed verification cannot publish a manifest.
+    let failed_time = apassy_relay::now_unix() + 10;
+    std::fs::remove_file(relay.config.sync_dir(&team).join("3.bin")).unwrap();
+    assert!(relay.hub().backup(failed_time).is_err());
+}

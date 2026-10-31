@@ -56,6 +56,8 @@ pub mod codes {
     pub const UPSTREAM_FAILED: &str = "upstream_failed";
     pub const ENCODED_RESPONSE: &str = "encoded_response";
     // Load.
+    /// Pending run whose one-time key was discarded at restart.
+    pub const RUN_INTERRUPTED: &str = "run_interrupted";
     pub const BUSY: &str = "busy";
     pub const TEAM_LIMIT: &str = "team_limit";
     // Vault sync (docs/SPEC.md section 24).
