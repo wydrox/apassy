@@ -50,3 +50,32 @@ for (const command of ["fill", "create"]) for (const gesture of [false, true]) {
     }
   });
 }
+
+for (const legacy of [false, true]) for (const [vault, message] of Object.entries({
+  none: "No vault is open in Apassy.", locked: "Apassy is locked.", unlocked: "Apassy is unlocked.",
+})) {
+  test(`synthetic status matches the app (legacy=${legacy}, vault=${vault})`, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "apassy-status-"));
+    fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify({ legacy, vault }));
+    const child = spawn(process.execPath, [host, extension], {
+      env: { ...process.env, APASSY_MOCK_DIR: dir }, stdio: ["pipe", "pipe", "pipe"],
+    });
+    let output = Buffer.alloc(0);
+    child.stdout.on("data", (chunk) => { output = Buffer.concat([output, chunk]); });
+    try {
+      const body = Buffer.from(JSON.stringify({ v: 1, cmd: "status" }));
+      const header = Buffer.alloc(4); header.writeUInt32LE(body.length);
+      child.stdin.end(Buffer.concat([header, body]));
+      await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
+      assert.equal(child.exitCode, 0);
+      assert.equal(output.readUInt32LE(0), output.length - 4);
+      assert.deepEqual(JSON.parse(output.subarray(4)), {
+        ok: true, code: "ok", message,
+        data: { type: "status", vault, version: legacy ? "0.5.7" : "0.5.8" },
+      });
+    } finally {
+      child.kill();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

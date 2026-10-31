@@ -235,6 +235,11 @@ export const test = base.extend({
       fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     }
     const server = await startServer();
+    // Worker setup never asks the native host for status. Keep startup stages
+    // in CI logs so a fixture timeout identifies the browser wait that stalled.
+    const started = Date.now();
+    const stage = (name) => console.log(`[Helium setup +${Date.now() - started}ms] ${name}`);
+    stage("launch persistent context");
     const context = await chromium.launchPersistentContext(profile, {
       executablePath: HELIUM,
       headless: HEADLESS,
@@ -246,13 +251,18 @@ export const test = base.extend({
         "--enable-unsafe-extension-debugging",
       ],
     });
+    stage("create browser CDP session");
     const browserSession = await context.browser().newBrowserCDPSession();
     const harness = new Harness({ context, browserSession, server, ...host });
     harness.popupPages = new Set();
+    stage("wait for extension worker");
     await harness.worker();
+    stage("open warm-up page");
     const warmUp = await context.newPage();
+    stage("wait for Helium startup navigation to settle");
     await warmUpHelium(warmUp, harness.url("/blank"));
     await warmUp.close();
+    stage("ready");
     await use(harness);
     await context.close();
     server.close();

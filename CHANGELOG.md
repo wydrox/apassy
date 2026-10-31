@@ -1,8 +1,20 @@
 # Changelog
 
-## Unreleased
+All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
+
+## [0.5.8] - 2026-10-31
+
+### Added
 
 - Add optional per-Mac Lock after inactivity in Security, defaulting to Never to preserve unattended agent access.
+
+- **Mac owner checks:** Settings > Security now offers How often to ask for Touch ID. Every time stays the default. Protected per-device windows cover browser and macOS AutoFill password/code actions, passkey sign-ins and explicitly clicked Allow once. Lock, sleep, user switch, vault lifecycle changes and failed/cancelled checks revoke them. Sensitive and durable actions still require fresh checks. Encrypted backup, CLI decision export and CLI token issuance now also take fresh checks. iPhone is unchanged.
+
+### Changed
+
+- **Browser extension:** suggest site-matched account metadata on all granted HTTPS sites and localhost by default, including existing broad passkey grants. One permission button, one global switch and per-site exclusions replace per-host activation. Compact account rows, site-local search, account details, approval context and paired light/dark styling keep settings behind a small link.
+
+### Fixed
 
 - Refuse agent command execution with secrets shorter than four bytes before starting the process; preserve ordinary words in the standalone token masker.
 - Preserve CLI CSV Website metadata and exact passwords; reject malformed quotes before import.
@@ -11,18 +23,7 @@
 - Retain deletion tombstones indefinitely to block stale-replica resurrection.
 - Stop marking imported accounts as duplicates based only on their name and kind.
 
-All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
-
-## [Unreleased]
-
-### Added
-
-- **Mac owner checks:** Settings > Security now offers How often to ask for Touch ID. Every time stays the default. Protected per-device windows cover browser and macOS AutoFill password/code actions, passkey sign-ins and explicitly clicked Allow once. Lock, sleep, user switch, vault lifecycle changes and failed/cancelled checks revoke them. Sensitive and durable actions still require fresh checks. Encrypted backup, CLI decision export and CLI token issuance now also take fresh checks. iPhone is unchanged.
-### Changed
-
-- **Browser extension:** suggest site-matched account metadata on all granted HTTPS sites and localhost by default, including existing broad passkey grants. One permission button, one global switch and per-site exclusions replace per-host activation. Compact account rows, site-local search, account details, approval context and paired light/dark styling keep settings behind a small link.
-
-### Fixed
+- **CLI setup and diagnostics:** setup verifies runnable host commands and reports JSON state consistently. Doctor diagnoses malformed host configuration; MCP refusals return sanitized errors.
 
 - **Mac, bouncer decides by default:** first use, staging, unconfirmed production and default-source classifications reach the model without evaluation setup (ADR 0031). Defaults require 80% task match even for safe commands or reads; calibration cannot lower this check. Confirmed production, Always ask, foreign projects/DB hosts, missing context and unfit owner answers keep their vetoes. A model allow permits one run and remembers nothing.
 - **Mac, bouncer visibility:** Settings > Bouncer shows inference readiness and counts for the owner's local day for model decisions, owner questions and failures. Decisions hides the obsolete evaluation setup offer. Stored schema-20 scopes and compatibility APIs remain; routing no longer requires or reads them.
@@ -35,6 +36,14 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - **Model readiness:** a healthy HTTP endpoint alone no longer marks a failed warm-up ready. Readiness requires valid inference with the active model pin when configured; external mode never launches a process.
 - **Model deadlines:** each real inference attempt has an absolute 10-second deadline and at most one timeout retry (20 seconds by default). HTTP errors, invalid answers, and model-version mismatches ask the owner without retrying. Only inference repeats, never command execution.
 - **Automatic-use summaries:** both totals include allowed requests without an owner question from the model, patterns, and remembered execution answers. Denials and unanswered/manual requests do not count as successful automation.
+
+- **Extension compatibility:** negotiate trusted-gesture support from native app status; older apps receive legacy requests with fresh owner checks. New-app window reuse still requires trusted gestures and signed-host provenance.
+
+### Upgrade notes
+
+- A 0.5.8 Mac converts the vault to schema 20 at unlock; sync can also write schema 20 without an edit. Every iPhone and Mac sharing the vault must update to 0.5.8 before reopening it. Older apps cannot read schema 20.
+- Keep shared-vault clients locked/closed and preserve an encrypted pre-upgrade backup. Install TestFlight 0.5.8 on the iPhone first, then update every Mac before resuming unlock/sync; upload the extension to the Chrome Web Store after the Mac update.
+- Relay and Linux CLI are intentionally unchanged for this app release; this is not a completed coordinated six-component release.
 
 ## [0.5.7] - 2026-10-20
 

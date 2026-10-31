@@ -8,6 +8,7 @@
 // Scenario (APASSY_MOCK_DIR/scenario.json), read again for each request:
 //   notRunning   true: answer not_running to everything
 //   vault        "unlocked" | "locked" | "none"
+//   legacy       true: emulate 0.5.7, including rejection of trusted_gesture
 //   logins       [{ item, title, username, password, site }]; site is a host
 //   loginsCode   an error code to answer to logins
 //   fill         { code: "ok" | "cancelled" | ..., delayMs, origin, holdReply }
@@ -138,12 +139,17 @@ async function answer(request) {
   const s = scenario();
   if (!request || request.v !== 1) return error("bad_version");
   if (s.notRunning) return error("not_running");
+  if (s.legacy && Object.hasOwn(request, "trusted_gesture")) return error("bad_request");
   if (!wellFormed(request)) return error("bad_request");
   const vault = s.vault || "unlocked";
 
   switch (request.cmd) {
     case "status":
-      return { ok: true, code: "ok", message: "Apassy runs.", data: { type: "status", vault, version: "0.3.2" } };
+      return {
+        ok: true, code: "ok",
+        message: { none: "No vault is open in Apassy.", locked: "Apassy is locked.", unlocked: "Apassy is unlocked." }[vault],
+        data: { type: "status", vault, version: s.legacy ? "0.5.7" : "0.5.8" },
+      };
     case "show":
       return { ok: true, code: "ok", message: "Apassy is in front.", data: { type: "none" } };
     case "suggestions":

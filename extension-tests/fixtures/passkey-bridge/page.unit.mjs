@@ -19,7 +19,7 @@ const b64u = (bytes) => Buffer.from(bytes).toString("base64url");
 const bytesOf = (buffer) => Buffer.from(new Uint8Array(buffer));
 
 // scenario(wire) -> an answer, or undefined to keep the app waiting.
-function pipeline({ scenario, origin = ORIGIN, bridge = true } = {}) {
+function pipeline({ scenario, origin = ORIGIN, bridge = true, status = true } = {}) {
   const bg = loadBackground();
   bg.tabs.set(5, `${origin}/login`);
   bg.documents.set("DOC-1", origin);
@@ -30,6 +30,11 @@ function pipeline({ scenario, origin = ORIGIN, bridge = true } = {}) {
     return signed ? ok(signed) : fail("no_match");
   };
   bg.setHost((wire, record) => {
+    // Status is capability negotiation, never an authenticator operation.
+    if (wire.cmd === "status") {
+      if (status) record.port.postMessage({ ok: true, data: { type: "status", version: "0.5.8" } });
+      return;
+    }
     const answer = (scenario || app)(wire, app);
     if (answer !== undefined) record.port.postMessage(answer);
   });
@@ -228,7 +233,7 @@ test("no passkey of the site in Apassy (before any owner check): the browser's o
   const options = { publicKey: { challenge: new Uint8Array(randomBytes(32)), rpId: RP_ID } };
   assert.equal(await p.credentials.get(options), "browser-get");
   assert.equal(p.bg.natives.length, 1);
-  assert.equal(p.bg.natives[0].sent[0].cmd, "passkey_get");
+  assert.deepEqual(p.bg.natives[0].sent.map((wire) => wire.cmd), ["status", "passkey_get"]);
   assert.equal(p.page.calls.length, 1);
   assert.equal(p.page.calls[0].options, options);
 });
@@ -339,7 +344,7 @@ test("a page that calls the bridge itself gets only its own origin into clientDa
     rid, op: "get", origin: "https://bank.example", options: { challenge: b64u(randomBytes(32)), rpId: RP_ID, allowCredentials: [] },
   }) }));
   await flush();
-  const wire = p.bg.natives[0].sent[0];
+  const wire = p.bg.natives[0].sent.find((wire) => wire.cmd === "passkey_get");
   assert.equal(wire.origin, ORIGIN);
   const clientData = JSON.parse(Buffer.from(wire.client_data_json, "base64").toString("utf8"));
   assert.equal(clientData.origin, ORIGIN);

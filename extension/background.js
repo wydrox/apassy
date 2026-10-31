@@ -65,7 +65,29 @@ const NEW_LENGTH = { min: 12, max: 64 };
 
 // One native port per request. The open port keeps this service worker alive
 // while the app waits for Touch ID.
-function ask(request) {
+// Probe each trusted action rather than caching across an app downgrade/reconnect.
+// Unknown/legacy versions omit the new field and receive a fresh owner check.
+function supportsTrustedGesture(answer) {
+  if (answer?.ok !== true || answer.data?.type !== "status") return false;
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(answer.data.version);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major > 0 || minor > 5 || (minor === 5 && patch >= 8);
+}
+
+async function compatibleGestureRequest(request) {
+  if (!Object.hasOwn(request, "trusted_gesture")) return request;
+  const status = await askNative({ cmd: "status" });
+  if (supportsTrustedGesture(status)) return request;
+  const { trusted_gesture: _gesture, ...legacy } = request;
+  return legacy;
+}
+
+async function ask(request) {
+  return askNative(await compatibleGestureRequest(request));
+}
+
+function askNative(request) {
   return new Promise((resolve) => {
     let done = false;
     let port;
@@ -1242,9 +1264,23 @@ async function startPasskey(session, message) {
     return;
   }
   session.native = native;
+  // Negotiate on this session's port: cancellation and the request deadline
+  // cover status as well as the owner check. Never cache across app reconnects.
+  let awaitingStatus = Object.hasOwn(wire, "trusted_gesture");
   native.onMessage.addListener((answer) => {
     if (session.done || session.native !== native) return;
-    // One answer per request: the host is done.
+    if (awaitingStatus) {
+      awaitingStatus = false;
+      if (!supportsTrustedGesture(answer)) delete wire.trusted_gesture;
+      // Navigation may have happened while the app answered status.
+      tabStillOn(peer).then((current) => {
+        if (session.done || session.native !== native) return;
+        if (!current) endPasskey(session, null);
+        else native.postMessage(wire);
+      }).catch(() => endPasskey(session, NOT_ALLOWED));
+      return;
+    }
+    // One answer per passkey request: the host is done.
     closeNative(session);
     for (const timer of session.timers) clearTimeout(timer);
     session.timers = [];
@@ -1261,7 +1297,7 @@ async function startPasskey(session, message) {
   });
   // The deadline of the page (30 to 180 s). Ending closes the native port.
   session.timers.push(setTimeout(() => endPasskey(session, NOT_ALLOWED), request.timeout));
-  native.postMessage(wire);
+  native.postMessage(awaitingStatus ? { v: WIRE_VERSION, cmd: "status" } : wire);
 }
 
 async function deliverPasskey(session, answer) {

@@ -39,7 +39,7 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 **Owner** pastes these texts into the dashboard.
 
 - **Name:** Apassy (from the manifest).
-- **Summary:** from the manifest: "Fill, save, and create logins from the Apassy app on your Mac. Each fill asks for Touch ID or your passphrase."
+- **Summary:** from the manifest: "Fill, save, and create logins from the Apassy app on your Mac. Your Mac settings control how often routine fills ask for Touch ID."
 - **Category:** Privacy & Security, or Productivity › Tools if the dashboard has no such category.
 - **Language:** English.
 - **Homepage:** <https://apassy.wyderka.cc>. **Support:** <https://github.com/wydrox/apassy/issues>.
@@ -49,12 +49,12 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
   ```text
   Apassy is a credential manager for you and your AI agents, on your Mac. This extension fills your Apassy logins into websites in your browser.
 
-  • Fill: open the extension on a login page, choose a login, and confirm with Touch ID or your Apassy passphrase. Apassy asks every time, so nothing fills without you, not even an agent that drives your browser.
+  • Fill: open the extension on a login page, choose a login, and confirm with Touch ID or your Apassy passphrase. Every time is the default. An optional Touch ID window in Mac settings can cover trusted routine actions after an owner check.
   • Save this login: type your username and password on a page, click Save this login, and confirm. The login goes into your Apassy vault with the address of the site.
   • New password: on a sign-up page, Apassy makes a strong password, keeps it in your vault, and fills it into the form. It never goes to the clipboard.
   • Update login: choose an existing account and confirm a fresh approval to replace its password with the one typed in the selected form.
-  • Optional field suggestions: enable them for a site, then focus a login field to see matching account titles and usernames. Focusing never fills a secret; choosing an account asks for a fresh approval in Apassy.
-  • One-time codes and optional passkeys: use codes and passkeys kept in Apassy. Each use requires Touch ID or your passphrase.
+  • Optional field suggestions: enable them for a site, then focus a login field to see matching account titles and usernames. Focusing never fills a secret; choosing an account requires approval under your Mac owner-check settings.
+  • One-time codes and optional passkeys: use codes and passkeys kept in Apassy. Uses require owner approval; eligible routine actions can use the optional Mac Touch ID window.
   • Strict site match: a login fills only on its own site, over https.
 
   The extension needs the Apassy app for macOS (https://apassy.wyderka.cc). Apassy keeps the logins in an encrypted vault on your Mac and talks to the extension through the browser's native messaging. The extension has no servers, makes no network requests, and never uses the clipboard. It retains nonsecret feature settings and short-lived action/recovery metadata in the browser, never passwords, passkeys, or one-time codes.
