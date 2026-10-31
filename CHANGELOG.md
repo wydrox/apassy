@@ -2,6 +2,12 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## [Unreleased]
+
+### Added
+
+- **MCP:** bounded concurrent calls with a reserved catalog/status slot, cancellation that withdraws pending questions, and 15-second progress. Broker operation receipts support reconnect recovery and optional idempotency keys without blind mutation replay. Receipts retain metadata only for 15 minutes after completion; executing commands are not undone by cancellation.
+
 ## [0.5.8] - 2026-10-31
 
 ### Added
