@@ -4,9 +4,17 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [0.5.8] - 2026-10-31
 
-### Fixed
+### Added
 
 - Add optional per-Mac Lock after inactivity in Security, defaulting to Never to preserve unattended agent access.
+
+- **Mac owner checks:** Settings > Security now offers How often to ask for Touch ID. Every time stays the default. Protected per-device windows cover browser and macOS AutoFill password/code actions, passkey sign-ins and explicitly clicked Allow once. Lock, sleep, user switch, vault lifecycle changes and failed/cancelled checks revoke them. Sensitive and durable actions still require fresh checks. Encrypted backup, CLI decision export and CLI token issuance now also take fresh checks. iPhone is unchanged.
+
+### Changed
+
+- **Browser extension:** suggest site-matched account metadata on all granted HTTPS sites and localhost by default, including existing broad passkey grants. One permission button, one global switch and per-site exclusions replace per-host activation. Compact account rows, site-local search, account details, approval context and paired light/dark styling keep settings behind a small link.
+
+### Fixed
 
 - Refuse agent command execution with secrets shorter than four bytes before starting the process; preserve ordinary words in the standalone token masker.
 - Preserve CLI CSV Website metadata and exact passwords; reject malformed quotes before import.
@@ -15,14 +23,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - Retain deletion tombstones indefinitely to block stale-replica resurrection.
 - Stop marking imported accounts as duplicates based only on their name and kind.
 
-### Added
-
-- **Mac owner checks:** Settings > Security now offers How often to ask for Touch ID. Every time stays the default. Protected per-device windows cover browser and macOS AutoFill password/code actions, passkey sign-ins and explicitly clicked Allow once. Lock, sleep, user switch, vault lifecycle changes and failed/cancelled checks revoke them. Sensitive and durable actions still require fresh checks. Encrypted backup, CLI decision export and CLI token issuance now also take fresh checks. iPhone is unchanged.
-### Changed
-
-- **Browser extension:** suggest site-matched account metadata on all granted HTTPS sites and localhost by default, including existing broad passkey grants. One permission button, one global switch and per-site exclusions replace per-host activation. Compact account rows, site-local search, account details, approval context and paired light/dark styling keep settings behind a small link.
-
-### Fixed
+- **CLI setup and diagnostics:** setup verifies runnable host commands and reports JSON state consistently. Doctor diagnoses malformed host configuration; MCP refusals return sanitized errors.
 
 - **Mac, bouncer decides by default:** first use, staging, unconfirmed production and default-source classifications reach the model without evaluation setup (ADR 0031). Defaults require 80% task match even for safe commands or reads; calibration cannot lower this check. Confirmed production, Always ask, foreign projects/DB hosts, missing context and unfit owner answers keep their vetoes. A model allow permits one run and remembers nothing.
 - **Mac, bouncer visibility:** Settings > Bouncer shows inference readiness and counts for the owner's local day for model decisions, owner questions and failures. Decisions hides the obsolete evaluation setup offer. Stored schema-20 scopes and compatibility APIs remain; routing no longer requires or reads them.
