@@ -21,7 +21,7 @@ test("the popup lists the logins and fills one with the keyboard", async ({ h })
 
   h.setScenario({ vault: "unlocked", logins: LOGINS, fill: { delayMs: 800 } });
   await popup.keyboard.press("Enter");
-  await expect(popup.locator("#note")).toHaveText("Confirm with Touch ID or your passphrase in Apassy.");
+  await expect(popup.locator("#note")).toHaveText("Approve in Apassy, or use your vault passphrase if asked.");
   await expect(popup.locator("#note")).toHaveText("Username and password filled. Submit the form on the page.");
   expect(h.requests("fill")).toEqual([{ v: 1, cmd: "fill", url: page.url(), item: 7 }]);
   expect(await page.locator("#password").inputValue()).toBe(PASSWORD);
@@ -63,8 +63,8 @@ test("the popup explains an empty list", async ({ h }) => {
   h.setScenario({ vault: "unlocked", logins: [LOGINS[2]] });
   const popup = await h.openPopupPage();
   const host = new URL(page.url()).host;
-  await expect(popup.locator("#note")).toHaveText(
-    `No login for ${host}. Edit the login’s built-in Website field in Apassy and add this address.`);
+  await expect(popup.locator("h2")).toHaveText(`No logins for ${host}`);
+  await expect(popup.locator("main")).toContainText("A missing Website field prevents matching.");
 });
 
 test("the popup asks to open Apassy when it does not run", async ({ h }) => {
