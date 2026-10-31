@@ -43,7 +43,11 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
 4. With the owner's explicit deployment approval, verify account/bindings/secrets
    and deploy the Worker with `npm run deploy`. Preserve routing, limits and secrets.
    Read back its deployment ID, both public download hashes, `SHA256SUMS`,
-   `release.json`, installer and guide. A Worker deploy alone does not update relay.
+   `release.json`, installer and guide with the public gate below. Run the same
+   gate before deploy as a connectivity check against the currently verified
+   release files (not the candidate files). A Worker deploy alone does not update relay.
+   Stop before the relay restart unless all six candidate responses are HTTP 200
+   with the exact verified bytes; exhausted retries, challenges and redirects fail.
 5. On the approved target, record the running image ID and service settings and
    check free disk. Transfer and load the verified candidate GitHub image archive
    without restarting. Run `apassy-relay admin backup` on the current relay and
@@ -99,6 +103,46 @@ for folder, platform, meta in [(sys.argv[1], 'linux-x86_64', 'release-linux.json
 PY_STAGE
 (cd deploy/worker && npm run preflight)
 ```
+
+Public delivery gate, from the repository root after staging and the approved
+Worker deployment (replace values with the approved artifact version/source and
+use a new evidence directory):
+
+```sh
+python3 deploy/worker/scripts/check-public-assets.py \
+  --version 0.5.8 \
+  --commit 9dd5172897268862e9806893bcf2b5fe8e463b92 \
+  --evidence-dir /tmp/relay-public-0.5.8-attempt-3
+```
+
+This sends full GETs with `User-Agent: apassy-release-check/<version>`, without
+credentials, Range or an edge secret. Four attempts per file use 2, 4, 8 second
+backoff for network errors, 403/404/429/5xx and stale HTTP-200 bytes. It prints
+response headers and `cf-mitigated` (including its absence), retains a JSON record
+per request and up to 4 KiB of each failed body, and compares both binaries,
+`SHA256SUMS`, `release.json`, installer and guide byte-for-byte. Archive the output
+and evidence directory with the release receipt. `--base-url http://127.0.0.1:8787`
+uses the same gate with `npx wrangler dev --local`; no production bindings are needed.
+
+For an existing artifact retry, keep the release checkout at its approved source
+SHA so staging and the deploy preflight still match those artifacts. If these
+operations changes were merged later, extract the checker from that reviewed
+operations commit to a temporary file with `git show <operations-merge-SHA>:deploy/worker/scripts/check-public-assets.py`.
+Run that file with `--public-dir "$PWD/deploy/worker/public"` and the same explicit
+version/source arguments above. Documentation or checker commits do not change
+the provenance of already built artifacts. Delete the temporary checker afterwards.
+
+Diagnose a failed gate before continuing: `cf-mitigated: challenge` plus HTML
+identifies a Cloudflare Challenge Page; its absence does not rule out a block.
+A 403 body `error code: 1010` indicates browser-signature filtering, including
+Browser Integrity Check. A 429/`Retry-After` or 1015 suggests a rate limit. Retain
+UTC time and `CF-Ray` for correlation in Cloudflare Security Events; an event's
+service/rule/action distinguishes WAF, bot and rate-limit decisions (some
+Cloudflare-managed-zone blocks are absent from your zone's events). Record
+`CF-Cache-Status`, `Age`, status and body hashes across retries to investigate stale
+delivery; a later pass alone does not establish why the earlier request failed.
+Do not change Cloudflare settings or substitute challenge HTML for a download.
+See [the 0.5.8 investigation](WORKER-DOWNLOAD-403.md) for the user-agent failure.
 
 For the 2026-10-31 audit patch, version remains **0.5.7**; the owner coordinates the
 later release bump. Preparation and CI do not grant deployment authorization.
