@@ -18,7 +18,7 @@ default-members = ["."]
 default = []
 desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2", "dep:ciborium"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2", "dep:ciborium", "dep:rustix"]
 
 [dependencies]
 toml_edit = { version = "=0.25.15", optional = true, default-features = false, features = ["parse"] }
@@ -56,7 +56,7 @@ flate2 = { version = "=1.1.10", optional = true, default-features = false, featu
 # Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
 # process. The same version is already in Cargo.lock through tempfile. `termios`:
 # the owner command line turns off the echo when it reads a secret (ADR 0017).
-rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios"] }
+rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios", "time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Main-process native menus through a safe API; no application framework or GTK.

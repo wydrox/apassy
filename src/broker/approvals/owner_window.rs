@@ -1,6 +1,8 @@
 //! Device-local identity window (ADR 0030). No secrets or reusable bearer tokens.
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_os = "macos"))]
+use std::time::Instant;
 
 /// The six owner-approved choices. Unknown stored values fail closed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -61,11 +63,27 @@ impl OwnerFrequency {
 pub(crate) trait WindowClock: std::fmt::Debug + Send + Sync {
     fn now(&self) -> Duration;
 }
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
 struct Monotonic(Instant);
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct Monotonic;
 impl WindowClock for Monotonic {
     fn now(&self) -> Duration {
-        self.0.elapsed()
+        #[cfg(target_os = "macos")]
+        {
+            // Darwin's std::time::Instant uses CLOCK_UPTIME_RAW, which pauses
+            // during sleep. CLOCK_MONOTONIC advances during suspension, so an
+            // overdue heartbeat fences reuse even before a queued sleep event.
+            rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
+                .try_into()
+                .expect("nonnegative monotonic boot clock")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.0.elapsed()
+        }
     }
 }
 
@@ -89,7 +107,11 @@ pub(crate) struct OwnerWindow {
 }
 impl Default for OwnerWindow {
     fn default() -> Self {
-        Self::with_clock(Arc::new(Monotonic(Instant::now())))
+        #[cfg(target_os = "macos")]
+        let clock = Monotonic;
+        #[cfg(not(target_os = "macos"))]
+        let clock = Monotonic(Instant::now());
+        Self::with_clock(Arc::new(clock))
     }
 }
 impl OwnerWindow {
@@ -317,5 +339,34 @@ mod tests {
         w.observe(false);
         w.observe(true);
         assert!(w.ticket([1; 32]).is_none());
+    }
+
+    #[test]
+    fn owner_session_suspension_revokes_before_the_next_heartbeat() {
+        for policy in [OwnerFrequency::OneMinute, OwnerFrequency::UntilLock] {
+            let (w, c) = fixture();
+            w.configure(policy);
+            w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
+            let (proof, _) = w.ticket([1; 32]).unwrap();
+            c.0.store(3600, Ordering::SeqCst);
+            assert!(!proof.valid());
+            assert!(w.ticket([1; 32]).is_none());
+            w.observe(true);
+            assert!(!proof.valid());
+            assert!(w.ticket([1; 32]).is_none());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owner_session_production_clock_uses_sleep_inclusive_macos_time() {
+        let before: Duration = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
+            .try_into()
+            .unwrap();
+        let now = OwnerWindow::default().clock.now();
+        let after: Duration = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
+            .try_into()
+            .unwrap();
+        assert!(before <= now && now <= after);
     }
 }

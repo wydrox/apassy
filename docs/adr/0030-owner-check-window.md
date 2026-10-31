@@ -60,7 +60,7 @@ generation and absolute deadline as well as the existing proof lifetime. A proof
 cannot outlive the remaining window. Fresh local proofs also carry a generation
 fence. A read-only delivery fence rechecks the vault epoch, window generation and
 deadline immediately before browser or AutoFill response delivery; revocation
-between computation and delivery erases the response rather than releasing it. Clocks are injected in tests; production uses monotonic `Instant` time.
+between computation and delivery erases the response rather than releasing it. Clocks are injected in tests; production uses the sleep-inclusive macOS `CLOCK_MONOTONIC` through the existing safe rustix API. Rust `Instant` pauses during macOS sleep and is not used for this Mac window or its heartbeat health bound.
 
 The effective policy is a versioned Data Protection Keychain item:
 service `com.wydrox.apassy.owner-policy`, account `frequency-v1`, the signed app's

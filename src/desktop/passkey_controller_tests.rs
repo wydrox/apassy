@@ -2300,6 +2300,72 @@ fn owner_window_old_browser_without_gesture_stays_fresh() {
     assert!(app.owner.check.is_some());
     assert!(answer.try_recv().is_err());
 }
+
+#[test]
+fn owner_window_browser_mutations_and_codes_keep_their_exact_scope() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let item = add_code_login(&mut app, ORIGIN, Some(OTP), SEED);
+    let username = app
+        .owner_ui
+        .session
+        .page_login(item, &Page::parse(ORIGIN).unwrap())
+        .unwrap()
+        .username;
+    seed_owner_window(&mut app);
+    for command in [
+        Command::Save {
+            url: ORIGIN.into(),
+            title: "Saved window login".into(),
+            username: "saved@example.com".into(),
+            password: crate::owner::wire::SecretText::new("synthetic-save".into()),
+        },
+        Command::Create {
+            url: ORIGIN.into(),
+            title: "Created window login".into(),
+            username: "created@example.com".into(),
+            length: 20,
+            symbols: true,
+        },
+        Command::Update {
+            url: ORIGIN.into(),
+            item,
+            username,
+            password: crate::owner::wire::SecretText::new("synthetic-update".into()),
+        },
+        Command::FillCode {
+            url: ORIGIN.into(),
+            item,
+            field: None,
+        },
+    ] {
+        app.owner_ui.session.owner_window.observe(true);
+        let answer = ask_gesture(&mut app, &ctx, command);
+        assert!(app.owner.check.is_none());
+        let response = now(&answer);
+        assert!(response.ok, "{}", response.message);
+    }
+    // An item is still site-bound, even with an authentic gesture and valid window.
+    let answer = ask_gesture(
+        &mut app,
+        &ctx,
+        Command::Fill {
+            url: "https://evil.example".into(),
+            item,
+        },
+    );
+    assert!(!now(&answer).ok);
+    // Registering a passkey remains a fresh check inside the same window.
+    let answer = ask_gesture(
+        &mut app,
+        &ctx,
+        Command::PasskeyCreate(create_request("new@example.com", &[], &[-7])),
+    );
+    assert!(app.owner.check.is_some());
+    assert!(answer.try_recv().is_err());
+    app.close_owner_check(None);
+}
 #[test]
 fn owner_window_passkey_get_skips_prompt_and_sets_up_uv() {
     let dir = TempDir::new().unwrap();
@@ -2394,6 +2460,25 @@ fn owner_window_proofs_are_exact_action_and_vault_bound() {
         .unwrap();
     let epoch = app.owner_ui.session.epoch().unwrap();
     assert!(proof.check(&action, &epoch).is_ok());
+    for changed in [
+        OwnerAction::FillLogin {
+            item_id: 2,
+            login: "Synthetic".into(),
+            origin: ORIGIN.into(),
+        },
+        OwnerAction::FillLogin {
+            item_id: 1,
+            login: "Synthetic".into(),
+            origin: "https://evil.example".into(),
+        },
+        OwnerAction::FillSystemLogin {
+            rid: RID.into(),
+            item_id: 1,
+            login: "Synthetic".into(),
+        },
+    ] {
+        assert!(proof.check(&changed, &epoch).is_err());
+    }
     assert!(
         proof
             .check(&OwnerAction::Reveal { item_id: 1 }, &epoch)
