@@ -148,61 +148,23 @@
     if (launcher) fieldButton();
     const section = root?.querySelector("section");
     if (!section) return;
-    const box = focused.getBoundingClientRect(),
-      avoid = obstacles();
+    const box = focused.getBoundingClientRect();
+    const preferredWidth = Math.max(280, Math.min(420, box.width));
+    const width = Math.min(Math.max(box.width, preferredWidth), innerWidth - 16);
+    section.style.width = `${width}px`;
     section.style.maxHeight = `${Math.min(440, innerHeight - 16)}px`;
-    const width = section.getBoundingClientRect().width,
-      natural = section.getBoundingClientRect().height;
-    const xs = [
-      ...new Set([
-        box.left,
-        box.right + 8,
-        box.left - width - 8,
-        8,
-        innerWidth - width - 8,
-      ]),
-    ].map((x) => Math.max(8, Math.min(x, innerWidth - width - 8)));
-    // Measure the actual panel. Flip, move beside the form, or shorten the list before covering an action.
-    for (const height of [
-      ...new Set([natural, Math.min(natural, 180), Math.min(natural, 150)]),
-    ]) {
-      const ys = [
-        box.bottom + 6,
-        box.top - height - 6,
-        8,
-        innerHeight - height - 8,
-      ];
-      const candidates = xs.flatMap((x) =>
-        ys.map((y) => ({
-          x,
-          y,
-          score: Math.hypot(x - box.left, y - box.bottom),
-        })),
-      );
-      candidates.sort((a, b) => a.score - b.score);
-      for (const { x, y } of candidates) {
-        const rect = { left: x, right: x + width, top: y, bottom: y + height };
-        if (
-          y < 8 ||
-          rect.bottom > innerHeight - 8 ||
-          overlaps(rect, box) ||
-          avoid.some((r) => overlaps(rect, r))
-        )
-          continue;
-        section.classList.toggle(
-          "compact",
-          height < 180 && Boolean(section.querySelector(".accounts")),
-        );
-        section.style.maxHeight = `${height}px`;
-        host.style.left = `${x}px`;
-        host.style.top = `${y}px`;
-        host.style.visibility = "visible";
-        return;
-      }
-    }
-    // No safe space: leave the field affordance/toolbar available instead of covering page actions.
-    host.style.visibility = "hidden";
+    const submits = [...(focused.form || focused.getRootNode()).querySelectorAll(
+      'button:not([type="reset"]), input[type="submit"], input[type="button"], [role="button"]',
+    )].map((el) => el.getBoundingClientRect()).filter((r) => r.width && r.height);
+    const placement = api.placement(box, { width, height: section.getBoundingClientRect().height },
+      { width: innerWidth, height: innerHeight }, submits);
+    if (!placement) { host.style.visibility = "hidden"; return; }
+    section.style.maxHeight = `${placement.height}px`;
+    host.style.left = `${placement.left}px`;
+    host.style.top = `${placement.top}px`;
+    host.style.visibility = "visible";
   }
+
   function context(login) {
     const el = node("div", "", "context");
     el.append(
