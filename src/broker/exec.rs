@@ -368,6 +368,37 @@ fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn review_short_masking_preserves_words_and_masks_delimited_values() {
+        for value in ["a", "ab", "abc", "é", "€", "!"] {
+            for (left, right) in [("", ""), ("\"", "\""), ("key=", "\n"), ("[", "]")] {
+                assert_eq!(
+                    mask(&format!("{left}{value}{right}"), &[secret("TOKEN", value)]),
+                    format!("{left}[apassy:TOKEN]{right}")
+                );
+            }
+            // The explicitly documented trade-off: embedded short values remain.
+            let word = format!("prefix{value}suffix");
+            assert_eq!(mask(&word, &[secret("TOKEN", value)]), word);
+        }
+        assert_eq!(
+            mask("a cat has a name", &[secret("TOKEN", "a")]),
+            "[apassy:TOKEN] cat has [apassy:TOKEN] name"
+        );
+        // Replacements must not be rescanned, even when another secret occurs in them.
+        assert_eq!(
+            mask(
+                "long-secret abc",
+                &[
+                    secret("LONG", "long-secret"),
+                    secret("SHORT", "abc"),
+                    secret("LABEL", "apassy")
+                ]
+            ),
+            "[apassy:LONG] [apassy:SHORT]"
+        );
+    }
+
+    #[test]
     fn audit_short_secrets_are_masked_at_token_boundaries() {
         for value in ["x", "xy", "xyz"] {
             let input = format!("value={value} \"{value}\" prefix{value}suffix");
