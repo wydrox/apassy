@@ -28,6 +28,19 @@ test("the popup lists the logins and fills one with the keyboard", async ({ h })
   expect(await popup.content()).not.toContain(PASSWORD);
 });
 
+test("a legacy app fills from the popup without the unsupported gesture flag", async ({ h }) => {
+  const page = await h.openGranted("/login");
+  h.setScenario({ legacy: true, vault: "unlocked", logins: LOGINS });
+  const popup = await h.openPopupPage();
+  await expect(popup.locator("button.login")).toHaveCount(2);
+  await popup.locator("button.login").nth(0).click();
+  await expect(popup.locator("#note")).toHaveText("Username and password filled. Submit the form on the page.");
+  expect(h.requests("fill")).toEqual([{ v: 1, cmd: "fill", url: page.url(), item: 7 }]);
+  expect(Object.hasOwn(h.requests("fill")[0], "trusted_gesture")).toBe(false);
+  await expect(page.locator("#username")).toHaveValue(USERNAME);
+  await expect(page.locator("#password")).toHaveValue(PASSWORD);
+});
+
 test("the popup shows the error of a cancelled fill and keeps the list", async ({ h }) => {
   const page = await h.openGranted("/login");
   h.setScenario({ vault: "unlocked", logins: LOGINS, fill: { code: "cancelled" } });
