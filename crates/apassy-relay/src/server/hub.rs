@@ -1139,9 +1139,9 @@ impl Hub {
 
     /// `admin backup`: a consistent copy of `relay.db` and of every team file in a new
     /// folder `<backup dir>/<UTC time>` (mode 0700, files 0600), with `MANIFEST.json`.
-    /// Each file is copied while its connection is locked. The vault snapshots of a team
-    /// go to `teams/<id>.sync/`. The files stay encrypted: the master key is not in the
-    /// backup.
+    /// SQLite snapshots and the frozen directory list retain the same file keys.
+    /// Each team's DB and vault snapshots are copied under its commit lock, verified,
+    /// then published together. The master key is never included.
     pub fn backup(&self, now: u64) -> RelayResult<serde_json::Value> {
         use sha2::{Digest, Sha256};
         use std::os::unix::fs::DirBuilderExt;
@@ -1259,6 +1259,11 @@ impl Hub {
         std::io::Write::write_all(&mut file, &text)
             .and_then(|()| file.sync_all())
             .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
+        for folder in [&teams_dir, &dir] {
+            File::open(folder)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| RelayError::internal("The backup directory cannot be synced."))?;
+        }
         // A partial directory is never advertised as a completed backup.
         std::fs::rename(&dir, &published)
             .map_err(|_| RelayError::internal("The backup cannot be published."))?;
@@ -1316,6 +1321,9 @@ impl Hub {
             let bytes = crate::server::store::copy_private(&source.join(&name), &target)?;
             copied.push((file, target, bytes));
         }
+        File::open(dir.join(&folder))
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RelayError::internal("The snapshot backup directory cannot be synced."))?;
         Ok(copied)
     }
 

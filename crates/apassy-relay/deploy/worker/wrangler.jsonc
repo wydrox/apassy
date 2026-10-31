@@ -1,6 +1,7 @@
 {
   "name": "apassy-relay-edge",
   "main": "src/index.ts",
+  "build": { "command": "node scripts/verify-assets.mjs" },
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "routes": [{ "pattern": "apassy-relay.wyderka.cc", "custom_domain": true }],

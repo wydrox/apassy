@@ -7,7 +7,9 @@
   "license": "FSL-1.1-ALv2",
   "scripts": {
     "test": "node --test 'test/*.test.ts'",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "preflight": "node scripts/verify-assets.mjs",
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260929.1",

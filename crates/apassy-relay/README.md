@@ -25,12 +25,11 @@ The relay is under the Functional Source License, Version 1.1, with the Apache-2
 
 You need Rust 1.97 and Docker. The relay runs as a Linux container. Cloudflare terminates TLS, so the relay itself serves plain HTTP.
 
-Build the CLI and the image:
-
-```sh
-cargo build --release --bin apassy-team
-docker build -t apassy-relay:alpha .
-```
+Obtain the relay image and both CLI downloads from GitHub Actions, using the
+[CI-only release runbook](docs/OPERATIONS.md#current-release-runbook-github-artifacts-only).
+Load a verified image archive on the approved runtime; no production or local-VM
+image builds are part of this procedure. The examples below use `apassy-relay:alpha`
+as a placeholder for that verified image.
 
 Make a master key and an edge secret. Keep them in files, never in a shell history:
 

@@ -1557,7 +1557,7 @@ fn backups_racing_delete_push_or_team_creation_restore_complete_sets() {
                         .result();
                     }
                     "push" => {
-                        pusher.push(&relay, &mac, b"second");
+                        pusher.push(relay, &mac, b"second");
                     }
                     "create" => {
                         relay.new_team_device("concurrent", "owner");

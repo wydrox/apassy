@@ -1,53 +1,105 @@
 # Running apassy-relay
 
-## Coordinated 0.5.5 release (2026-10-17)
+## Current release runbook: GitHub artifacts only
 
-This section supersedes the historical build/deploy examples below. Keep one public version across the macOS app, iOS companion, Linux CLI, Chromium extension, relay (server and edge Worker), and website (root `AGENTS.md`). The pinned `apassy` core dependency is intentionally unchanged; do not renumber dependencies, schemas, or protocols for a product release.
+This is the only current release procedure. Sections 19–21 describe feature and
+schema history; they do not authorize a deployment. Release approval is separate
+from merging a PR. Keep one public version across all six Apassy surfaces. Do not
+bump schemas or dependencies to match a product version. No build or test container
+runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
 
-1. Commit the prepared release in this repository and the coordinated application release in `wydrox/apassy`. Run the normal CI on the exact relay commit and wait for green. Push an `image-*` tag on that commit to run `.github/workflows/image.yml`. Its three independent GitHub jobs return `relay-image`, `apassy-team-linux-x86_64`, and `apassy-team-darwin-arm64`; they do not deploy. No local VM or production build/test container is needed.
-2. Download all three artifacts from the same successful run. Check the CLI metadata (`release-linux.json`, `release-darwin.json`): both must name version `0.5.5` and the exact relay source SHA. Check each platform checksum. CI executes each CLI's `--version`; Linux is built in pinned Bullseye and rejects required GLIBC symbol versions above 2.31. Darwin must be arm64. The relay image remains Trixie and is not the portable Linux download.
-3. Verify `relay-image.tar.gz.sha256`, `relay-image.id`, `relay-image.inspect.json`, and `relay-image.release.json`. The image has both `apassy-relay:release-0.5.5` and `apassy-relay:sha-<full SHA>` tags; its OCI version/revision labels must match the release metadata. The stable version tag permits a reviewed compose change without embedding a commit hash inside its own commit. Never identify an artifact by its tag alone.
-4. Stage both verified CLI binaries in `deploy/worker/public/dl/`. This ignored directory is absent from a fresh checkout: deploying without it removes the downloads. Generate one `SHA256SUMS` containing both filenames and a `release.json` recording the coordinated version, source SHA, and each platform's SHA-256. Check the Worker package/root lock metadata is `0.5.5`, run Worker tests/typecheck, then deploy only with release authorization. Preserve bindings, secrets, limits, and routing. Read back the Worker deployment ID and fetch/check both public downloads, combined checksums, installer, guide, and metadata.
-5. Follow the existing operational backup/load/restart procedure with the verified CI image, preserving service settings and data. Use `apassy-relay --version` for the package version without opening configuration or data. After authorized deployment, `GET /healthz` must still return `ok\n` and HTTP 200; `x-apassy-relay-version` must be `0.5.5` and `x-apassy-relay-commit` the exact source SHA. The Worker forwards these headers unchanged. Unknown commit metadata means it was built outside the release workflow and is not release proof.
-6. Verify the other application publication surfaces independently, including TestFlight and Chrome Web Store. A relay/Worker release does not publish those packages. Report any pending review/processing or old public version separately.
+1. Prepare the coordinated release version in the app and relay repositories.
+   Review the exact relay commit and require all CI checks, including dependency
+   advisories. Only after owner approval, push `image-*` on that exact commit.
+   `.github/workflows/image.yml` builds on GitHub; it never deploys. Download
+   `relay-image`, `apassy-team-linux-x86_64`, and `apassy-team-darwin-arm64` from
+   the **same successful image run**, recording its URL and full source SHA.
+2. Verify `relay-image.tar.gz.sha256`, `relay-image.id`,
+   `relay-image.inspect.json`, and `relay-image.release.json`. The metadata version
+   must equal Cargo/Worker versions; the full commit must equal the approved SHA.
+   Architecture must be `amd64`, and OCI version/revision labels, recorded image ID,
+   version tag `apassy-relay:release-<version>`, and immutable tag
+   `apassy-relay:sha-<full SHA>` must agree. Archive these artifacts and the previous
+   image/compose configuration for rollback. Tags alone are not identity proof.
+3. Verify both CLI artifacts against their platform checksum files and
+   `release-linux.json` / `release-darwin.json`. Both metadata files must name the
+   approved version and full commit. CI runs each binary's `--version`, verifies
+   Darwin arm64, and builds Linux on pinned Bullseye with GLIBC requirements no
+   higher than 2.31. Never extract the portable CLI from the relay image.
+   Stage verified files and combined metadata as shown below. In `deploy/worker`,
+   run `npm ci --no-audit --no-fund`, `npm test`, `npm run typecheck`, and
+   `npm run preflight`. The Wrangler build hook repeats the preflight even for a
+   direct `npx wrangler deploy`; do not bypass it with `--no-bundle` or an alternate
+   config. A fresh checkout with missing downloads must fail.
+4. With the owner's explicit deployment approval, verify account/bindings/secrets
+   and deploy the Worker with `npm run deploy`. Preserve routing, limits and secrets.
+   Read back its deployment ID, both public download hashes, `SHA256SUMS`,
+   `release.json`, installer and guide. A Worker deploy alone does not update relay.
+5. On the approved target, record the running image ID and service settings, check
+   free disk, run `apassy-relay admin backup`, and complete the isolated restore
+   drill in `deploy/vps/backup/`. The updated drill runs `snapshot-check` before
+   startup: every retained head of every team, including suspended teams, must have
+   its file, size and digest. Keep the master-key backup separately. A failed
+   backup or restore check stops the rollout. Hidden `.partial` folders are failed
+   attempts, never recovery points; inspect and remove them only after diagnosing.
+6. Transfer the verified GitHub image archive, load it on the target (no build),
+   confirm its image ID/OCI labels, select its immutable tag in the approved compose
+   configuration, then restart with the existing service/data settings. Read back
+   `/healthz` HTTP 200, `ok\n`, `x-apassy-relay-version`, and
+   `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
+   backup timer. Public liveness alone is not acceptance for those paths.
+7. Rollback: stop the relay and select the archived previous **schema-6** image and
+   compose settings. This patch preserves team schema 6 and directory schema 1003;
+   no DB downgrade is needed. Restart discards sessions and ends pending runs with
+   `run_interrupted`; users explicitly request a new run. Restore the entire
+   verified backup only for data recovery, while stopped, reconciling all access
+   changes since it was taken (restoring can revive revoked identities). Revalidate
+   snapshots before reopening. An older image reintroduces the audited defects.
+   Worker rollback must retain both downloads from its matching verified artifacts.
+8. Verify the other application publication surfaces separately. Record pending
+   store reviews and old public versions explicitly; the relay does not publish them.
 
-To stage downloads from the extracted CLI artifacts (paths below are examples):
+Stage both CLI artifacts from an extracted, verified CI run (example paths):
 
 ```sh
-mkdir -p deploy/worker/public/dl
-cp /tmp/relay-release/linux/apassy-team-linux-x86_64 deploy/worker/public/dl/
-cp /tmp/relay-release/darwin/apassy-team-darwin-arm64 deploy/worker/public/dl/
-(cd deploy/worker/public/dl && shasum -a 256 apassy-team-darwin-arm64 apassy-team-linux-x86_64 > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+python3 - /tmp/relay-release/linux /tmp/relay-release/darwin <<'PY_STAGE'
+import hashlib, json, pathlib, re, shutil, subprocess, sys
+root = pathlib.Path.cwd()
+commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+version = re.search(r'^version = "([^"]+)"', (root/'Cargo.toml').read_text(), re.M)[1]
+out = root/'deploy/worker/public/dl'
+out.mkdir(parents=True, exist_ok=True)
+artifacts = {}
+for folder, platform, meta in [(sys.argv[1], 'linux-x86_64', 'release-linux.json'),
+                                (sys.argv[2], 'darwin-arm64', 'release-darwin.json')]:
+    folder = pathlib.Path(folder)
+    data = json.loads((folder/meta).read_text())
+    name = 'apassy-team-' + platform
+    blob = (folder/name).read_bytes()
+    digest = hashlib.sha256(blob).hexdigest()
+    assert data['version'] == version and data['commit'] == commit
+    assert data['filename'] == name and data['sha256'] == digest
+    shutil.copyfile(folder/name, out/name)
+    artifacts[platform] = dict(filename=name, sha256=digest, size=len(blob))
+(out/'release.json').write_text(json.dumps(dict(version=version, commit=commit, artifacts=artifacts), indent=2)+'\n')
+(out/'SHA256SUMS').write_text(''.join(f"{a['sha256']}  {a['filename']}\n" for a in artifacts.values()))
+PY_STAGE
+(cd deploy/worker && npm run preflight)
 ```
 
-For release image builds, CI supplies `APASSY_RELEASE_VERSION` and the full `APASSY_RELEASE_COMMIT` as Docker build arguments. The latter is compiled into health metadata; local builds without it report `unknown`. Keep the production image's recorded ID/OCI revision and the CI artifact checksum together with the deployment evidence.
-
-Plain steps to run the alpha. The design is in [SPEC.md](SPEC.md). Names such as `apassy-relay.wyderka.cc` are the ones of the first deployment. Change them for yours.
+For the 2026-10-31 audit patch, version remains **0.5.7**; the owner coordinates the
+later release bump. Preparation and CI do not grant deployment authorization.
 
 ## 1. What runs where
 
-Since 2026-10-01 the relay runs on a Linux VPS, behind a named tunnel and a Workers VPC binding. See section 16. The layout below, with a quick tunnel to a container on the owner's Mac, is the first setup. It still works as a fallback.
+The relay runs in a Linux container behind Cloudflare Worker, Workers VPC and a
+named tunnel (section 16). TLS terminates at Cloudflare; the origin accepts plain
+HTTP with the edge secret. The owner runs `apassy-team host` separately.
 
-```
-agent (cloud session, CI, laptop)
-   │ HTTPS
-   ▼
-Cloudflare Worker  apassy-relay.wyderka.cc   adds X-Apassy-Edge: <edge secret>
-   │ HTTPS, fetch()
-   ▼
-cloudflared quick tunnel  https://<random>.trycloudflare.com   (URL in the Worker var RELAY_ORIGIN)
-   │ HTTP
-   ▼
-container apassy-relay  0.0.0.0:8080 plain HTTP, /data volume   (Docker in colima on the owner's Mac, aarch64)
-   │ HTTPS (rustls, ring, system roots)
-   ▼
-upstream API hosts (api.stripe.com, api.openai.com, ...)
-```
-
-- The relay refuses every request without the right `X-Apassy-Edge`, except `GET /healthz`. The tunnel URL alone gives no access.
-- The Worker forwards everything and streams bodies. It checks nothing else.
-- The image is portable: one binary, one port, one volume, config from variables. It can move to Cloudflare Containers later. That needs an amd64 image and persistent storage.
-- The relay holds no readable item value. The keys of the items are on the owner's Mac, in `keys.json`. `apassy-team host` runs there and talks to the relay through the same Worker and tunnel. See section 11.
+The relay refuses requests without the edge secret except `/healthz`. Item values
+remain sealed at rest; the owner keeps item keys outside relay backups. The Worker
+applies route/size limits before forwarding. The origin also enforces transport
+deadlines; see [the parser mitigation](HTTP-SECURITY.md).
 
 ## 2. Secrets
 
@@ -65,23 +117,15 @@ The examples below use `master_key` as the file name.
 - Never put a secret in a shell history, a repo, or an image.
 - The master key opens `relay.db`, which holds the random key of each team file (section 17). If you lose it, every team is lost. Back it up somewhere apart from the vault backup.
 - The edge secret must be the same text in the relay and in the Worker.
-- Keep the folder under your home folder. Colima shares only the home folder with its VM. A folder in `/tmp` shows up empty in the container, and the relay then says it cannot read the file.
 - Every secret the CLI needs (a member token, an invite code, an item value) is read from stdin. The CLI refuses to read it from a terminal.
 - The vault holds only sealed item values, so the master key protects less than before: a stolen vault or backup gives only ciphertext. The item keys are in `keys.json` on each owner's machine (section 9). Back that file up apart from the vault.
 
-## 3. Build the image
+## 3. Obtain the image
 
-```sh
-docker build -t apassy-relay:alpha .
-```
-
-The build is native (arm64 on colima). For Cloudflare Containers later, build for amd64:
-
-```sh
-docker buildx build --platform linux/amd64 -t apassy-relay:alpha-amd64 .
-```
-
-The image holds two programs: `apassy-relay` (the entry point) and `apassy-team`. It runs as user 10001 and keeps its data in the volume `/data`.
+Use the GitHub artifacts and verification steps in the current release runbook.
+The image holds `apassy-relay` and `apassy-team`, runs as UID 10001, and stores data
+in `/data`. The initial setup examples below assume an already verified image;
+their `alpha` names are placeholders, not a separate build procedure.
 
 ## 4. Create the relay and the first team
 
@@ -154,7 +198,7 @@ Without the edge secret, or without both `RELAY` and `RELAY_ORIGIN`, the Worker 
 
 The Worker makes the target URL by string concatenation: origin, path, query. It does not use `new URL(path, origin)`, so a path like `//evil.example/x` cannot send the edge secret to another host. It deletes any `X-Apassy-Edge` from the client and sets its own. It does not log URLs, because paths hold session keys.
 
-Who deploys: the owner of the Cloudflare account. The repository holds the code only. Deploy with `wrangler deploy` from `deploy/worker/`, after `npm install`. Test the Worker before that with:
+Who deploys: the owner of the Cloudflare account. The repository holds the code only. Deploy with `npm run deploy` from `deploy/worker/` only through the current release runbook and asset preflight. Test the Worker before that with:
 
 ```sh
 node --test 'deploy/worker/test/*.test.ts'
@@ -673,14 +717,9 @@ ssh ottervibe 'cd /opt/apassy && docker compose ps && docker compose logs --tail
 apassy-team me
 ```
 
-Deploy a new commit:
-
-```sh
-git archive --format=tar HEAD | ssh ottervibe 'rm -rf /opt/apassy/build && mkdir -p /opt/apassy/build && tar -x -C /opt/apassy/build'
-ssh ottervibe 'cd /opt/apassy/build && docker build -t apassy-relay:host-keys-<commit> .'
-# Set the new tag in /opt/apassy/compose.yaml, then:
-ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
-```
+Deploy a reviewed commit through the current release runbook above. Load the
+verified GitHub image archive and use its recorded immutable tag and image ID.
+Never copy source to the VPS for a build.
 
 A restart ends every session (section 5).
 
@@ -692,11 +731,8 @@ The operator commands of section 17 run in the container:
 ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'
 ```
 
-Go back to the Mac:
-
-1. On the VPS: `docker compose stop relay`. Copy `team.db` to the Mac volume if the VPS changed it.
-2. On the Mac: start the container and a quick tunnel (sections 5 and 6).
-3. In `deploy/worker/wrangler.jsonc`, remove `vpc_services` and set `RELAY_ORIGIN` to the tunnel URL. Then `wrangler deploy`.
+Changing the production topology requires a separately reviewed owner plan.
+Do not start a local VM as a fallback.
 
 ## 17. Teams
 
@@ -828,17 +864,15 @@ Users install with:
 curl -fsSL https://apassy-relay.wyderka.cc/install.sh -o install.sh && sh install.sh
 ```
 
-The binaries are not in git (`deploy/worker/public/dl/` is ignored). Before `wrangler deploy`, put them there:
-
-- `apassy-team-darwin-arm64`: `cargo build --release --locked --bin apassy-team` on an Apple silicon Mac.
-- `apassy-team-linux-x86_64`: the same in a `rust:1.97.0-bullseye` container (glibc 2.31, so it runs on Debian 11 and Ubuntu 20.04 or later), then `strip`.
-- `SHA256SUMS`: `shasum -a 256 apassy-team-* > SHA256SUMS` in that folder.
+The binaries are ignored by git. Stage both GitHub CI artifacts and their verified
+combined checksums/metadata through the current release runbook; the Worker asset
+preflight refuses missing, modified or mismatched files.
 
 The installer refuses a binary whose checksum is not in `SHA256SUMS`. A missing platform is a clear error.
 
 `POST /v1/join`, `POST /v1/teams`, `POST /v1/devices/link`, and `POST /v1/devices/link/cancel` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting, binding `CREATE_LIMITER`). `POST /v1/connect` has its own, 1 a minute per IPv4 address or IPv6 /64 (`CONNECT_LIMITER`, section 20). Device sign-in (`POST /v1/auth/challenge` and `/v1/auth/token`) has a looser one, about 60 a minute (`AUTH_LIMITER`), because a waiting CLI asks every 5 seconds and several people can share one address. Vault snapshot pushes (`PUT /v1/sync/snapshot`) have their own, about 60 a minute (`SYNC_LIMITER`). Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, or its binding is missing, requests go on: the relay checks every code itself. The four bindings are in `wrangler.jsonc`; a deploy creates them.
 
-The Worker also checks the declared length of every request body before it forwards it, because the relay reads every declared byte of a body even when it answers early, on any path (docs/SPEC.md section 24.10). A snapshot push (exactly `PUT /v1/sync/snapshot`) with `Transfer-Encoding` or with a missing or non-numeric `Content-Length` gets 400 `invalid_request`; one that declares more than 64 MiB plus 64 KiB gets 413 `payload_too_large`. A body under `/p/` (the agent proxy) may declare up to 8 MiB plus 64 KiB; a feed (exactly `PUT /v1/feed`, section 21) must declare its length as a push does, and may declare up to 352 KiB; every other body, on any other path or method (`PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and the other feed routes included), up to 128 KiB. Above that: 413; a non-numeric length: 400. The relay keeps its own checks. This bounds bytes, not time: a client that sends a body slowly still holds a relay thread until the connection ends, and only pushes are rate-limited.
+The Worker also checks the declared length of every request body before it forwards it, because the relay reads every declared byte of a body even when it answers early, on any path (docs/SPEC.md section 24.10). A snapshot push (exactly `PUT /v1/sync/snapshot`) with `Transfer-Encoding` or with a missing or non-numeric `Content-Length` gets 400 `invalid_request`; one that declares more than 64 MiB plus 64 KiB gets 413 `payload_too_large`. A body under `/p/` (the agent proxy) may declare up to 8 MiB plus 64 KiB; a feed (exactly `PUT /v1/feed`, section 21) must declare its length as a push does, and may declare up to 352 KiB; every other body, on any other path or method (`PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and the other feed routes included), up to 128 KiB. Above that: 413; a non-numeric length: 400. The relay keeps its own checks. Origin header/body/handle deadlines and a bounded refusal lane additionally limit stalled reads; see [HTTP-SECURITY.md](HTTP-SECURITY.md).
 
 A workflow in `.github/workflows/health.yml` checks `/healthz` and `/v1/me` (401) every hour. A failed run is the alert: GitHub notifies the owner of the repository.
 
@@ -871,91 +905,13 @@ What changes at the first start of this version:
 - The `.p8` key never goes on the VPS, into git, or into an image. It is only a Worker secret.
 - The push secret goes only from the relay to the Worker (`X-Apassy-Push`); the edge secret only from the Worker to the relay. Rotate it like the edge secret (section 14): a new file on the VPS, a restart, and `wrangler secret put PUSH_SECRET` with the same text.
 
-### 19.2 Owner steps for the deploy
+### 19.2 Owner steps for the deploy (historical)
 
-The live relay (`sync-4208643`) gets questions with the Connect image of section 20: follow 20.2, which ships this section with Connect off and push off. The push steps below (1 to 4, and the `APASSY_RELAY_PUSH_*` lines of step 6) come in a later deploy.
-
-Run them in this order. Steps 1 to 4 change nothing on the live relay.
-
-1. **The A4 spike.** Can a Worker reach APNs over HTTP/2? From `deploy/worker/`:
-
-   ```sh
-   npx wrangler dev --remote -c spike/wrangler.jsonc     # runs on Cloudflare's network, deploys nothing
-   curl -s http://127.0.0.1:8787/                        # in another terminal
-   ```
-
-   Expect `"status":403`, `MissingProviderToken`, and `"ok":true`. Stop wrangler with Ctrl-C. Anything else: stop here; push needs the fallback of SPEC 25.7 (the APNs key on the VPS), which is the owner's decision and is not built. Write the result in this section.
-
-2. **The APNs key.** In the Apple Developer account (team `7S3F9767BM`), Certificates, Identifiers & Profiles, Keys: make a key with Apple Push Notifications service (APNs), environment Sandbox & Production. Download the `.p8` once and put its text into an Apassy item (for example "APNs key"). Note its Key ID. Set `APNS_KEY_ID` in `deploy/worker/wrangler.jsonc` to it.
-
-3. **The secrets.** Make the push secret on the Mac and copy it to the VPS and the Worker without typing or echoing it:
-
-   ```sh
-   umask 077; openssl rand -hex 32 > ~/.apassy-relay/push_secret
-   ssh ottervibe 'sudo sh -c "umask 077; cat > /opt/apassy/secrets/relay/push_secret && chown 10001:10001 /opt/apassy/secrets/relay/push_secret && chmod 0400 /opt/apassy/secrets/relay/push_secret"' < ~/.apassy-relay/push_secret
-   cd deploy/worker
-   npx wrangler secret put PUSH_SECRET < ~/.apassy-relay/push_secret
-   ```
-
-   Put the key through Apassy (`apassy_run_with_secrets` with the item of step 2, from `deploy/worker/`):
-
-   ```sh
-   printf '%s' "$APNS_KEY" | npx wrangler secret put APNS_KEY
-   ```
-
-4. **The Worker.** It must serve `/internal/push` before the relay calls it. Test and deploy (section 7):
-
-   ```sh
-   cd deploy/worker && npm test && npm run typecheck && npx wrangler deploy
-   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://apassy-relay.wyderka.cc/internal/push   # 404: no secret
-   curl -s https://apassy-relay.wyderka.cc/healthz                                                # ok
-   ```
-
-   Optional: a call with the secret and a token of 64 zeros (through Apassy, never on the command line) answers `{"results":[{"token":"00…","status":400,"reason":"BadDeviceToken"}]}`: Apple took the provider token. `403` with `InvalidProviderToken` means a wrong key, Key ID, or team id.
-
-5. **The backup.** Note the image the relay runs now (the rollback target), then back up:
-
-   ```sh
-   ssh ottervibe 'grep "image: apassy-relay" /opt/apassy/compose.yaml'     # for example apassy-relay:sync-4208643
-   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'
-   ```
-
-   Keep the folder name it prints (`/opt/apassy/backups/relay/<UTC time>`).
-
-6. **The relay.** Build the image of the commit, as in section 16, with the tag `apassy-relay:questions-<commit>`:
-
-   ```sh
-   git archive --format=tar <commit> | ssh ottervibe 'rm -rf /opt/apassy/build && mkdir -p /opt/apassy/build && tar -x -C /opt/apassy/build'
-   ssh ottervibe 'cd /opt/apassy/build && docker build -t apassy-relay:questions-<commit> .'
-   ```
-
-   In `/opt/apassy/compose.yaml` (and in `deploy/vps/compose.yaml`, committed with the deploy) set `image: apassy-relay:questions-<commit>` and add to `environment` of `relay`:
-
-   ```yaml
-      APASSY_RELAY_PUSH_URL: https://apassy-relay.wyderka.cc/internal/push
-      APASSY_RELAY_PUSH_TOPIC: com.wydrox.apassy.companion
-      APASSY_RELAY_PUSH_SECRET_FILE: /run/secrets/relay/push_secret
-   ```
-
-   Then:
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
-   ```
-
-7. **Checks.**
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose logs --tail 20 relay'            # no "cannot be moved to schema version 5", no "push is off"
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay ls -l /data/teams'     # a .db.pre-v5 next to each .db
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'   # every team "open": true, with open_questions and push_tokens
-   curl -s https://apassy-relay.wyderka.cc/healthz
-   apassy-team me
-   ```
-
-   A Mac with relay sync still syncs (its sync rows are untouched). The first push shows as `push_sent` in the team audit; a `push_failed` with `reason: "worker"` means the relay could not reach the Worker or the secrets differ.
-
-8. **Later.** Delete the `.pre-v5` files when no rollback to schema 4 is needed any more (they hold the team as it was at the migration).
+Use the current release runbook at the top of this document. This feature is
+already represented in schema 6 / directory 1003. Do not repeat its old migration
+or build/deploy recipe on an existing installation. For an older installation,
+review migration copies, free disk and access changes before any owner-approved
+rollout; the rollback analysis below describes that historical boundary.
 
 ### 19.3 Rollback
 
@@ -1046,88 +1002,13 @@ What changes at the first start of this version:
 - Disk: Connect teams take at most `APASSY_RELAY_CONNECT_TEAMS_MAX` × 10 MiB (about 1 GiB at the defaults), plus one journal while a transaction runs. The backup copies each file (section 13), so a backup can be as large.
 - The start time of the relay, its memory, and its open files (20.5).
 
-### 20.2 Owner steps for the deploy
+### 20.2 Owner steps for the deploy (historical)
 
-The live relay runs `apassy-relay:sync-4208643`: team schema 4, directory 1002, no questions, no push. This deploy brings one image built from `feat/connect`, which has questions (section 19, team schema 5) and Connect (directory 1003). It goes live in two stages: first questions only, with Connect off and push off; then Connect. Push (19.2 steps 1 to 4) is a later, separate deploy: leave every `APASSY_RELAY_PUSH_*` line out.
-
-Run the steps in this order. **The Worker always goes before the relay**, and Connect stays off (`APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "0"`) while any Worker older than this one is live: an older Worker has no Connect limiters and sends no prefix HMAC, so every call would count as one network.
-
-1. **The Worker.** Test and deploy the Worker of the same commit (section 7). It adds the Connect limiters, the prefix and its HMAC, and `/internal/push` (404 without `PUSH_SECRET`, which is not set yet):
-
-   ```sh
-   cd deploy/worker && npm test && npm run typecheck && npx wrangler deploy
-   npx wrangler deployments list | head -20                                                      # the new version has 100 %
-   curl -s https://apassy-relay.wyderka.cc/healthz                                                 # ok
-   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://apassy-relay.wyderka.cc/internal/push   # 404
-   apassy-team me                                                                                  # the old relay answers as before
-   ```
-
-   The new Worker in front of the old relay is harmless: the old relay ignores the new headers, and `POST /v1/connect` gets 404 from it.
-
-2. **The backup.** Note the image the relay runs now (the rollback target), then back up:
-
-   ```sh
-   ssh ottervibe 'grep "image: apassy-relay" /opt/apassy/compose.yaml'     # apassy-relay:sync-4208643
-   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'
-   ```
-
-   Keep the folder name it prints (`/opt/apassy/backups/relay/<UTC time>`). Its `relay.db` is the way back to directory 1002, and its `teams/` is the state of the `.pre-v5` copies of step 3.
-
-3. **The relay, Connect off.** Build the image of the commit, as in section 16, with the tag `apassy-relay:connect-<commit>`:
-
-   ```sh
-   git archive --format=tar <commit> | ssh ottervibe 'rm -rf /opt/apassy/build && mkdir -p /opt/apassy/build && tar -x -C /opt/apassy/build'
-   ssh ottervibe 'cd /opt/apassy/build && docker build -t apassy-relay:connect-<commit> .'
-   ```
-
-   In `/opt/apassy/compose.yaml` (and in `deploy/vps/compose.yaml`, committed with the deploy), service `relay`:
-
-   - `image: apassy-relay:connect-<commit>`;
-   - under `environment`, `APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "0"` (already in `deploy/vps/compose.yaml`), and no `APASSY_RELAY_PUSH_*` line;
-   - `ulimits: nofile: 65536`, and `start_period: 300s` in `healthcheck` (both already in `deploy/vps/compose.yaml`; copy them).
-
-   Then:
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
-   ```
-
-4. **Check questions.** Connect is still off.
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose logs --tail 30 relay'            # "push is off" once; no "cannot be moved to schema version 5", no "unknown version", no "removed the file of team"
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay ls -l /data/teams'     # a .db.pre-v5 next to each .db
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'   # every team "open": true, "kind": "operator", "file_cap": null, with open_questions
-   ssh ottervibe 'cd /opt/apassy && docker inspect --format "{{.State.Health.Status}}" apassy-relay'   # healthy
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay sh -c "ulimit -n"'      # 65536
-   curl -s https://apassy-relay.wyderka.cc/healthz                                                    # ok
-   curl -s -X POST -H 'content-type: application/json' -d '{}' https://apassy-relay.wyderka.cc/v1/connect   # 400 invalid_request: the route exists
-   apassy-team me
-   ```
-
-   Then one question end to end in an operator team: from a Mac of the team, ask a question (the app's broker, or `POST /v1/questions`); another device of the team lists it with its long poll, answers, and the Mac reads the answer and settles. `admin teams` shows `open_questions` 1 while it is open. A Mac with relay sync still syncs. If anything fails, stop here: 20.3 step 3 (the image) is the way back, and nothing of Connect exists yet.
-
-5. **Connect on.** Only after step 4 passed, and while the Worker of step 1 is the live one (`npx wrangler deployments list`). In `/opt/apassy/compose.yaml` (and `deploy/vps/compose.yaml`), service `relay`, `environment`:
-
-   ```yaml
-      APASSY_RELAY_CONNECT_TEAMS_PER_DAY: "50"
-      APASSY_RELAY_CONNECT_TEAMS_MAX: "100"
-   ```
-
-   (50 and 100 are the defaults; write them anyway, so the file says what runs. Leave `APASSY_RELAY_CONNECT_LONG_POLLS` out: 96.) Raise `APASSY_RELAY_CONNECT_TEAMS_MAX` only after the measurement of 20.5, and size it to the free disk of the volume: 10 MiB a team, twice that with backups. Then:
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
-   ```
-
-6. **Check Connect.**
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose logs --tail 20 relay'
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'   # every team "open": true
-   ```
-
-   The first Connect team made by the app shows in `admin teams` as `"kind": "connect"` with the limits of 20, `"file_cap": 10485760`, and `"file_level": "ok"`, and the relay audit has its `team_created` row. After a restart it is still `"open": true`. A `connect_refused {reason: "rate_limited"}` right after the first few teams means the prefix HMAC does not verify (20.1): set the cap back to 0 and compare the edge secrets.
+Use the current release runbook at the top of this document. This feature is
+already represented in schema 6 / directory 1003. Do not repeat its old migration
+or build/deploy recipe on an existing installation. For an older installation,
+review migration copies, free disk and access changes before any owner-approved
+rollout; the rollback analysis below describes that historical boundary.
 
 ### 20.3 Rollback
 
@@ -1234,78 +1115,13 @@ What changes at the first start of this version:
 - The team audit: `limit_reached {"limit": "feed_bytes"}` means the Macs of a team publish more than its budget (many Macs, or many agents): raise `feed_bytes` for it. `member_feed_bytes` means one member's Macs do: raising `feed_bytes` raises the share too. `open_feed_actions`, `feed_actions_per_hour`, or their `member_` rows mean an iPhone sends actions in bulk. Each kind writes at most one row an hour.
 - Disk: each team holds at most its `feed_bytes` of feeds (4 MiB, or 1 MiB for a Connect team) and a few KiB of actions.
 
-### 21.2 Owner steps for the deploy
+### 21.2 Owner steps for the deploy (historical)
 
-The live relay runs `apassy-relay:connect-3510b68` (team schema 5, questions, Connect on, push on). This deploy brings one image built from `feat/feed` (team schema 6). Push and Connect stay as they are: change no `APASSY_RELAY_*` line.
-
-Run the steps in this order. **The Worker goes first**, and the image is built on GitHub, never on the VPS (the VPS is production).
-
-1. **The Worker.** It raises the body cap of `PUT /v1/feed` only and serves every other route as before. Test and deploy from the commit (section 7):
-
-   ```sh
-   cd deploy/worker && npm test && npm run typecheck && npx wrangler deploy
-   npx wrangler deployments list | head -20                                       # the new version has 100 %
-   curl -s https://apassy-relay.wyderka.cc/healthz                                  # ok
-   head -c 360449 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' -X PUT --data-binary @- https://apassy-relay.wyderka.cc/v1/feed   # 413: the Worker's cap
-   head -c 200000 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' -X PUT --data-binary @- https://apassy-relay.wyderka.cc/v1/feed   # 404: the old relay has no feed route
-   apassy-team me                                                                   # the old relay answers as before
-   ```
-
-   The new Worker in front of the old relay is harmless: the old relay answers 404 on `/v1/feed`, and the Macs stop publishing until the relay has it (contract 14.2).
-
-2. **The image, on GitHub.** Push a tag `image-*` on the commit; `.github/workflows/image.yml` builds the x86_64 image `apassy-relay:feed-<short commit>` and returns it as the artifact `relay-image` (kept 3 days). `image.yml` only builds: it runs no test. The push of the tag also runs `.github/workflows/ci.yml` on the same commit; do not load the image until that run succeeded:
-
-   ```sh
-   git tag image-feed-<short commit> <commit> && git push origin image-feed-<short commit>
-   gh run list --workflow ci.yml --commit <commit> --limit 3                       # wait for CI (fmt, clippy, cargo test, the Worker) to succeed on this commit
-   gh run list --workflow image.yml --limit 3                                       # wait for the run to succeed
-   gh run download <run id> --name relay-image --dir /tmp/relay-image
-   cd /tmp/relay-image && shasum -a 256 -c relay-image.tar.gz.sha256 && cat relay-image.id   # OK, and amd64
-   scp relay-image.tar.gz ottervibe:/opt/apassy/relay-image.tar.gz
-   ssh ottervibe 'gunzip -c /opt/apassy/relay-image.tar.gz | docker load && rm /opt/apassy/relay-image.tar.gz'   # Loaded image: apassy-relay:feed-<short>
-   ```
-
-3. **The disk, then the backup.** The backup and the `.pre-v6` copies of step 4 each copy the team files: together about two more copies of `/data/teams` on the same disk (the backup also copies the vault snapshots in `teams/<id>.sync/`). Check first:
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay du -sk /data/teams'      # KiB of the team files and snapshots
-   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay df -k /data /backups'    # KiB free on the volume and where the backups go
-   ```
-
-   Go on only when every `Available` is at least twice the `du` figure plus 1 GiB (1048576 KiB). If not, stop: delete old backup folders under `/opt/apassy/backups/relay/` and old `.pre-v4` and `.pre-v5` copies (`docker compose exec relay sh -c 'ls -l /data/teams/*.pre-v*'`; keep the newest backup), and check again. A team whose `.pre-v6` copy cannot be made stays at version 5 and does not open (step 5 shows it), so a full disk fails safe, but every such team is out of service until there is room.
-
-   Note the image the relay runs now (the rollback target), then back up:
-
-   ```sh
-   ssh ottervibe 'grep "image: apassy-relay" /opt/apassy/compose.yaml'     # apassy-relay:connect-3510b68
-   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'
-   ```
-
-   Keep the folder name it prints (`/opt/apassy/backups/relay/<UTC time>`). Its `teams/` is the state of the `.pre-v6` copies of step 4, and its `relay.db` the directory as it was.
-
-4. **The relay.** In `/opt/apassy/compose.yaml` (and in `deploy/vps/compose.yaml`, committed with the deploy), service `relay`: `image: apassy-relay:feed-<short commit>`. Nothing else changes. Then:
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
-   ```
-
-5. **Checks.**
-
-   ```sh
-   ssh ottervibe 'cd /opt/apassy && docker compose logs --tail 30 relay'            # no "cannot be moved to schema version 6", no "unknown schema version"
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay ls -l /data/teams'     # a .db.pre-v6 next to each .db of an active team
-   ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'   # every team "open": true; Connect teams "file_cap": 11534336
-   ssh ottervibe 'cd /opt/apassy && docker inspect --format "{{.State.Health.Status}}" apassy-relay'   # healthy
-   curl -s https://apassy-relay.wyderka.cc/healthz                                   # ok
-   curl -s -o /dev/null -w '%{http_code}\n' https://apassy-relay.wyderka.cc/v1/feed  # 401: the route exists
-   apassy-team me
-   ```
-
-   A suspended team has no `.pre-v6`: the relay does not open suspended teams at start, so their files stay at version 5 (and move to 6 when resumed, with the copy then). `rollback-check` counts such a file as clean.
-
-   Then end to end with the apps: a Mac with the feed on publishes (`feed_started` in its team audit once), the iPhone of the same member shows its agents, and a removal of a "Not for this agent" exception from the iPhone shows `feed_action_posted` and `feed_action_settled {"outcome":"applied"}`. A question still goes from the Mac to the iPhone and back. If anything fails, 21.3 is the way back.
-
-6. **Later.** Delete the `.pre-v6` files when no rollback to schema 5 is needed any more (they hold each team as it was at the migration).
+Use the current release runbook at the top of this document. This feature is
+already represented in schema 6 / directory 1003. Do not repeat its old migration
+or build/deploy recipe on an existing installation. For an older installation,
+review migration copies, free disk and access changes before any owner-approved
+rollout; the rollback analysis below describes that historical boundary.
 
 ### 21.3 Rollback
 
