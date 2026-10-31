@@ -1,6 +1,6 @@
 # The browser extension
 
-Date: 2026-10-06.
+Updated: 2026-10-31.
 Decision: [ADR 0021](../adr/0021-browser-extension.md). Wire: [browser-v1](../contracts/browser-v1.md). Code: `extension/` (the extension), `src/bin/apassy-browser-host.rs` and `src/browser/` (the host, the wire, the site match, the new passwords, and the install), `src/desktop/browser.rs` (the app side), `src/desktop/ui/browser_settings.rs` (Settings), `src/cli/browser.rs` (`apassy setup browser`).
 
 The Apassy extension fills a login on a website in Helium, Google Chrome, Chromium, Brave, Microsoft Edge, Arc, or Vivaldi. It also saves a login that you type on a page, and makes a new password for a sign-up. Each fill and each save asks for Touch ID or the passphrase in Apassy. Agents never get the password: it needs you, every time.
@@ -32,12 +32,22 @@ A login fills only on the sites of its websites.
 1. Open the login page.
 2. Click the Apassy button, or press ⌘⇧L.
 3. The popup shows the logins for the site. Choose one with the mouse, or with the arrow keys and Return.
-4. Confirm with Touch ID, or type the passphrase in the Apassy window. The Touch ID prompt names the login and the site. The window comes to the front only when the passphrase is needed. After about 4 minutes the request ends, and nothing is filled.
+4. Confirm with Touch ID, or type the passphrase in the Apassy window. The Touch ID prompt names the login and the site. The window comes to the front only when the passphrase is needed. After about 3 minutes the owner check ends, and nothing is filled.
 5. Apassy fills the username and the password. The page gets the values once. The history of the login shows "You filled it in your browser" with the site.
 
 To fill nothing, click Cancel in the Apassy window. When you cancel the Touch ID prompt, the window comes to the front and asks for the passphrase; click Cancel there.
 
 Each fill asks again. There is no setting that turns the check off.
+
+### Inline suggestions
+
+With broad HTTPS and localhost access, **Suggest logins on all sites** is on by default, including after an update from per-site suggestions. Existing passkey access is sufficient. Without access, click **Allow suggestions on all sites** once in the popup. Browser permission requests need a click. Settings contains the global switch, passkeys and **Not on this site**. The site exclusion is stored locally by hostname and can be undone there. Turning suggestions off does not revoke passkey access.
+
+Focus a username or password field, including on a username-first page, to see account titles and usernames. An already-focused field is queried on injection and reload. Labels, aria-label and placeholders can identify a username; search, OTP, hidden, read-only, newsletter-only and shown-as-text password fields are excluded. Press Option-Down (or Down on the field) to enter the chooser, use arrows and Return to choose, and Escape to dismiss and return to the field. The account list scrolls separately. The menu moves above or beside controls to avoid page actions. If space is insufficient, use the field button or toolbar.
+
+Typing a username filters matching accounts. **No login matches this username** offers **Show all accounts**; **No logins for this site** means there are no site matches. If a saved login has no Website, add one in Apassy. An empty result does not prove that a Website is missing. Popup search filters only this site's returned metadata, not the vault. Account **Details** contains Update login and Fill code when available.
+
+No focus or unlock fills a field. Every fill needs a trusted account choice and the app's owner check. Same-origin frames, including `srcdoc` and `about:blank`, are document-bound. Cross-origin frames and form actions are refused with an own-tab instruction. A username-only fill does not automatically fill the next password step.
 
 ## 4. Save a login, or make a new password
 
@@ -45,7 +55,7 @@ Each fill asks again. There is no setting that turns the check off.
 
 **New password.** On a sign-up page, type your email or username, open the popup, and click **New password**. Check the title and the username, choose the length (12 to 64) and symbols, and click **Create and fill**. After Touch ID or the passphrase, Apassy makes the password, keeps it in the vault, and fills it into the page, also into the "repeat password" field. Then submit the form. The password never goes to the pasteboard.
 
-A login with the same username for the site is refused: the popup names it. To change the password of a login that exists, edit it in Apassy.
+A login with the same username for the site is refused: the popup names it. To change an existing password, open that account’s Details, choose Update login, review the exact account, then approve Update this login on your Mac. Only its password changes. New-password confirmations must agree. After an uncertain save or update, check Apassy before trying again.
 
 ## 5. Which site gets a login
 
@@ -54,6 +64,7 @@ A login with the same username for the site is refused: the popup names it. To c
 - `www.tumblr.com` fills on `www.tumblr.com` and `tumblr.com`, but not on `someone.tumblr.com`.
 - `accounts.google.com` does not fill on `google.com`. `github.com` does not fill on `github.com.evil.example`.
 - The port must match. `localhost` fills only on `http://localhost/`. For a development server, store the port: `localhost:3000`. An IP address fills only on itself.
+- Unicode and punycode hosts canonicalize identically. A Website that is a public suffix, such as `co.uk` or `github.io`, is refused. Matching does not widen to sibling sites.
 - Archived logins never fill.
 
 The app checks the site when the popup opens, before the owner check, and again after it. The extension fills only a page whose origin is still the origin that Apassy answered. A page that went to another site while you confirmed gets nothing.
@@ -83,8 +94,9 @@ The app checks the site when the popup opens, before the owner check, and again 
 
 ## 8. Limits
 
-- Logins in a frame of another site are not filled. Copy the password from the Apassy window there.
-- The extension does not change the password of a login that exists.
+- Cross-origin frames and form actions are not filled. Open the sign-in site in its own tab. Same-origin blank/srcdoc frames are supported.
+- Automatic post-submit save offers are not implemented. Use Save this login before submitting. Closed page shadow roots are not accessible.
+- Metadata lists contain at most 50 accounts, with username filtering before that limit. Targets and nonsecret result messages expire after five minutes. Owner checks wait up to 180 seconds; native transport waits up to 240 seconds and the extension timeout is 250 seconds.
 - A process of your user outside the sandbox can ask for the titles and usernames of the logins of a site while the vault is unlocked. It gets no password without your Touch ID (ADR 0021, D1).
 
 ## 9. Development
@@ -99,6 +111,14 @@ APASSY_BROWSER_HOST="$PWD/../target/debug/apassy-browser-host" npx playwright te
 ```
 
 The tests never use Google Chrome or a browser that Playwright downloads. `HEADED=1` shows the browser. Without the host binary, the real-host test is skipped.
+
+For a Playwright-free smoke and paired screenshots in an isolated Helium profile:
+
+```sh
+node extension-tests/cdp/suggest-smoke.mjs /absolute/path/to/evidence
+```
+
+This uses CDP port 9361, a profile-local mock host and synthetic metadata only. It checks broad access, autofocus, labels, exclusions, empty reasons, frames, refusals and public-page geometry. It never opens the owner's profile or vault. Render-state screenshots are UI fixtures, not proof of native Touch ID or successful sign-in.
 
 The Rust side has unit tests in `src/browser/`, the app tests in `src/desktop/ui/browser_tests.rs`, and the profile tests `profile_denies_the_browser_socket` and `profile_denies_native_messaging_host_manifests` in `tests/isolation/product_profile.rs`.
 
