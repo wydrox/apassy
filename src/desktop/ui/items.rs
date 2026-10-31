@@ -1662,7 +1662,7 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
     ui.add_space(rows::GROUP_GAP);
 }
 
-/// Model-evaluation permission is separate from a remembered execution allowance.
+/// Legacy scope records remain inspectable, without implying routing authority.
 fn evaluation_scopes_group(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
     let scopes = match app.owner_ui.session.evaluation_scopes(item_id) {
         Ok(scopes) if !scopes.is_empty() => scopes,
@@ -1670,7 +1670,7 @@ fn evaluation_scopes_group(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64
     };
     let agents = app.owner_ui.session.agents().unwrap_or_default();
     let mut remove = None;
-    rows::group_label(ui, "Bouncer decisions", None);
+    rows::group_label(ui, "Stored bouncer scopes", None);
     rows::group(ui, |s| {
         for scope in &scopes {
             let agent = agents
@@ -1698,10 +1698,10 @@ fn evaluation_scopes_group(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64
                     if scope.command_binding.is_some() {
                         ui.add(Label::new(rows::small("Only this exact command, execution context and directly selected script version.")).wrap());
                     }
-                    ui.add(Label::new(rows::small("Model evaluation only; production, always-ask, and hard checks still apply.")).wrap());
+                    ui.add(Label::new(rows::small("Legacy record; the bouncer now evaluates by default. This scope has no routing effect.")).wrap());
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if rows::pill_button(ui, "Remove", &format!("Remove bouncer permission: {title}")).clicked() {
+                    if rows::pill_button(ui, "Remove", &format!("Remove stored bouncer scope: {title}")).clicked() {
                         remove = Some(scope.id);
                     }
                 });
@@ -1713,9 +1713,9 @@ fn evaluation_scopes_group(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64
         let result = app.owner_ui.session.remove_evaluation_scope(id);
         match result {
             Ok(true) => {
-                app.set_ok("Bouncer permission removed. Matching uses require your decision again.")
+                app.set_ok("Stored bouncer scope removed. The bouncer still evaluates each use.")
             }
-            Ok(false) => app.set_note("This bouncer permission was already removed."),
+            Ok(false) => app.set_note("This stored bouncer scope was already removed."),
             Err(error) => app.set_err(error.message),
         }
     }

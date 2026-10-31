@@ -71,7 +71,15 @@ fn fixture_full(
     wait: Duration,
     gate: Option<Arc<dyn ModelGate>>,
 ) -> Fixture {
-    fixture_with_model(declared, see_all, wait, gate, common::fake_bouncer(&[]))
+    // Owner-answer tests deliberately use an unavailable model so even known-safe
+    // commands ask. Model routing/confidence is tested with valid answers below.
+    fixture_with_model(
+        declared,
+        see_all,
+        wait,
+        gate,
+        common::fake_bouncer(&[("task_match", -1.0)]),
+    )
 }
 
 fn fixture_with_model(
@@ -306,7 +314,7 @@ fn allow_in_project_remembers_the_answer_for_all_agents_and_only_for_that_action
         &sentry_call(),
     );
     assert_eq!(decided_by(&other), "Remembered answer");
-    assert_eq!(model_calls(&fx), 0);
+    assert_eq!(model_calls(&fx), 1);
     // Another kind of action and another project still ask.
     assert_eq!(
         asks(&fx, &fx.project, &deploy_call()).question.action,
@@ -738,7 +746,7 @@ fn an_answer_covers_only_the_hosts_of_its_run() {
         "{}",
         run.question.why
     );
-    assert_eq!(model_calls(&fx), 0);
+    assert_eq!(model_calls(&fx), 1);
 }
 
 /// A-2: a command that prints the secret never runs by a remembered answer, and the
@@ -957,7 +965,7 @@ fn a_default_production_item_asks_once_then_remembers() {
     assert!(run.question.items[0].unconfirmed);
     assert!(!run.question.items[0].production);
     assert!(
-        run.question.why.contains("production only by default"),
+        run.question.why.contains("Bouncer unavailable"),
         "{}",
         run.question.why
     );
@@ -1001,7 +1009,7 @@ fn a_default_production_item_asks_once_then_remembers() {
     })
     .expect("sources");
     assert!(asks_argv(&fx, &[item], COMMIT).question.production);
-    assert_eq!(model_calls(&fx), 0);
+    assert_eq!(model_calls(&fx), 1);
 }
 
 /// B-3: a run that a remembered answer allowed is in the decision log as `Answer`, not
@@ -1026,137 +1034,9 @@ fn a_remembered_answer_is_logged_as_an_answer() {
     assert_eq!(line["asked"], false);
 }
 
-// Explicit evaluation permission is different from permission to execute future runs.
-fn approve_and_evaluate(fx: &Fixture, run: PendingRun) -> OwnerAction {
-    let offer = fx
-        .broker
-        .approvals()
-        .evaluation_offer(run.id)
-        .expect("local evaluation offer");
-    assert_eq!(offer.agent_id, fx.agent_id);
-    assert_eq!(offer.project.key, project_key(&fx.project));
-    let confirmations = offer
-        .items
-        .iter()
-        .map(|item| {
-            let mut confirmation = item.confirmation.clone();
-            confirmation.environment = Environment::Staging;
-            confirmation.risk = RiskLevel::Medium;
-            confirmation
-        })
-        .collect();
-    OwnerAction::ApproveAndEvaluate {
-        run,
-        offer,
-        confirmations,
-    }
-}
-
-fn grant_evaluation(fx: &Fixture, argv: &[&str]) {
-    let handle = argv_later(fx, &[fx.item_id], argv);
-    let run = waiting(fx);
-    owner(fx, approve_and_evaluate(fx, run)).expect("confirmed evaluation permission");
-    let response = handle.join().expect("initial run");
-    assert_eq!(decided_by(&response), "Owner approved");
-}
-
-fn deny_waiting(fx: &Fixture, handle: std::thread::JoinHandle<WireResponse>) -> PendingRun {
-    let run = waiting(fx);
-    assert!(fx.broker.approvals().deny(run.id));
-    assert_eq!(code(&handle.join().expect("run")), "approval_denied");
-    run
-}
-
+/// Stored schema-20 data is not needed; default routing still asks on uncertainty.
 #[test]
-fn once_preserves_defaults_but_explicit_confirmation_enables_only_future_evaluation() {
-    let fx = fixture(Some(declaration(Environment::Production, RiskLevel::High)));
-    with_vault(&fx, |v| {
-        v.set_declaration_sources(
-            fx.item_id,
-            &DeclarationSources {
-                environment: DeclarationSource::Default,
-                risk: DeclarationSource::Default,
-                scope: DeclarationSource::Default,
-                reversibility: DeclarationSource::Default,
-            },
-        )
-    })
-    .expect("default sources");
-    let before = with_vault(&fx, |v| {
-        (
-            v.declaration(fx.item_id).expect("declaration"),
-            v.declaration_sources(fx.item_id).expect("sources"),
-        )
-    });
-    assert!(answer_argv(&fx, &[fx.item_id], COMMIT, OwnerAction::ApproveRun).ok);
-    let after = with_vault(&fx, |v| {
-        (
-            v.declaration(fx.item_id).expect("declaration"),
-            v.declaration_sources(fx.item_id).expect("sources"),
-        )
-    });
-    assert_eq!(
-        after, before,
-        "allow once must not confirm inferred classification"
-    );
-    assert!(
-        with_vault(&fx, |v| v.evaluation_scopes(fx.item_id))
-            .expect("scopes")
-            .is_empty()
-    );
-    assert_eq!(model_calls(&fx), 0);
-    // The ordinary approval did not turn the second call into an automatic decision.
-    grant_evaluation(&fx, COMMIT);
-    assert_eq!(
-        model_calls(&fx),
-        0,
-        "this run was approved once, without evaluating it"
-    );
-    let (confirmed, sources, scopes, answers) = with_vault(&fx, |v| {
-        (
-            v.declaration(fx.item_id)
-                .expect("declaration")
-                .expect("confirmed"),
-            v.declaration_sources(fx.item_id).expect("sources"),
-            v.evaluation_scopes(fx.item_id).expect("scopes"),
-            v.answers_for_item(fx.item_id).expect("execution answers"),
-        )
-    });
-    assert_eq!(
-        (confirmed.environment, confirmed.risk),
-        (Environment::Staging, RiskLevel::Medium)
-    );
-    assert_eq!(
-        (sources.environment, sources.risk),
-        (DeclarationSource::Owner, DeclarationSource::Owner)
-    );
-    assert_eq!(scopes.len(), 1);
-    assert_eq!(
-        (scopes[0].agent_id, scopes[0].action),
-        (fx.agent_id, ActionKind::Change)
-    );
-    assert_eq!(scopes[0].project.key, project_key(&fx.project));
-    assert!(
-        answers.is_empty(),
-        "evaluation permission is not a remembered execution answer"
-    );
-    assert_eq!(
-        decided_by(&send_argv(&fx, &[fx.item_id], COMMIT)),
-        "Bouncer allowed"
-    );
-    assert_eq!(model_calls(&fx), 1);
-    assert!(with_vault(&fx, |v| v.remove_evaluation_scope(scopes[0].id)).expect("remove scope"));
-    asks_argv(&fx, &[fx.item_id], COMMIT);
-    assert_eq!(
-        model_calls(&fx),
-        1,
-        "previous successful model use creates no history bypass"
-    );
-    assert!(!format!("{scopes:?}").contains(SECRET));
-}
-
-#[test]
-fn an_evaluation_scope_still_asks_for_negative_and_uncertain_model_answers() {
+fn no_scope_is_needed_but_low_confidence_still_asks() {
     for overrides in [&[("task_match", 0.10)][..], &[("task_match", 0.65)][..]] {
         let fx = fixture_with_model(
             Some(declaration(Environment::Staging, RiskLevel::Medium)),
@@ -1165,113 +1045,63 @@ fn an_evaluation_scope_still_asks_for_negative_and_uncertain_model_answers() {
             None,
             common::fake_bouncer(overrides),
         );
-        // `git commit` is known safe local work and deliberately does not require
-        // task_match. Unknown project code must meet the model's match threshold.
-        std::fs::write(fx.project.join("uncertain-task.sh"), "#!/bin/sh\nexit 0\n")
-            .expect("project script");
-        let argv = &["/bin/sh", "./uncertain-task.sh"];
-        grant_evaluation(&fx, argv);
-        assert_eq!(model_calls(&fx), 0);
-        let run = deny_waiting(&fx, argv_later(&fx, &[fx.item_id], argv));
-        assert_eq!(
-            model_calls(&fx),
-            1,
-            "scope allows evaluation, not execution"
-        );
+        std::fs::write(fx.project.join("uncertain-task.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let handle = argv_later(&fx, &[fx.item_id], &["/bin/sh", "./uncertain-task.sh"]);
+        let run = waiting(&fx);
         assert!(
             run.question.why.contains("task_match"),
             "{}",
             run.question.why
         );
-        assert_eq!(
+        assert!(fx.broker.approvals().evaluation_offer(run.id).is_none());
+        assert!(fx.broker.approvals().deny(run.id));
+        assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+        assert_eq!(model_calls(&fx), 1);
+        assert!(
             with_vault(&fx, |v| v.evaluation_scopes(fx.item_id))
-                .expect("scopes")
-                .len(),
-            1
+                .unwrap()
+                .is_empty()
         );
     }
 }
 
 #[test]
-fn an_evaluation_scope_does_not_cover_changed_hosts_actions_projects_or_agents() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    grant_evaluation(&fx, COMMIT);
-    assert_eq!(
-        decided_by(&send_argv(&fx, &[fx.item_id], COMMIT)),
-        "Bouncer allowed"
+fn changed_script_and_arguments_get_fresh_evaluation_without_setup() {
+    let fx = fixture_with_model(
+        Some(declaration(Environment::Staging, RiskLevel::Medium)),
+        true,
+        Duration::from_secs(10),
+        None,
+        common::fake_bouncer(&[]),
     );
-    assert_eq!(model_calls(&fx), 1);
-    let other = other_project(&fx);
-    deny_waiting(&fx, argv_later_at(&fx, &other, &[fx.item_id], COMMIT));
-    assert_eq!(model_calls(&fx), 1, "another project cannot use this scope");
-    assert_eq!(
-        asks_argv(&fx, &[fx.item_id], &["git", "push"])
-            .question
-            .action,
-        ActionKind::Deploy
-    );
-    assert_eq!(model_calls(&fx), 1, "another action cannot use this scope");
-    asks(&fx, &fx.project, &sentry_call());
-    assert_eq!(
-        model_calls(&fx),
-        1,
-        "adding a destination host requires a new confirmation"
-    );
-    let other_token = with_vault(&fx, |v| {
-        let (agent, token) = v.register_agent("No evaluation permission").expect("agent");
-        v.set_agent_sees_all(agent.id, true).expect("visibility");
-        token.expose().to_owned()
-    });
-    let socket = fx.socket.clone();
-    let cwd = fx.project.clone();
-    let item = fx.item_id;
-    let other_run = std::thread::spawn(move || {
-        send_run(&socket, &other_token, item, &cwd, "git commit -m synthetic")
-    });
-    deny_waiting(&fx, other_run);
-    assert_eq!(
-        model_calls(&fx),
-        1,
-        "another agent cannot inherit evaluation permission"
-    );
-}
-
-#[test]
-fn uncertain_script_permission_binds_both_argv_and_script_bytes() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     let script = fx.project.join("safe-task.sh");
-    std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("script");
-    let argv = &["/bin/sh", "./safe-task.sh"];
-    grant_evaluation(&fx, argv);
-    let scopes = with_vault(&fx, |v| v.evaluation_scopes(fx.item_id)).expect("scope");
-    assert!(
-        scopes[0].command_binding.is_some(),
-        "uncertain scripts need exact command binding"
-    );
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    for argv in [
+        vec!["/bin/sh", "./safe-task.sh"],
+        vec!["/bin/sh", "./safe-task.sh", "new-argument"],
+    ] {
+        assert_eq!(
+            decided_by(&send_argv(&fx, &[fx.item_id], &argv)),
+            "Bouncer allowed"
+        );
+    }
+    std::fs::write(&script, "#!/bin/sh\n# new synthetic version\nexit 0\n").unwrap();
     assert_eq!(
-        decided_by(&send_argv(&fx, &[fx.item_id], argv)),
+        decided_by(&send_argv(
+            &fx,
+            &[fx.item_id],
+            &["/bin/sh", "./safe-task.sh"]
+        )),
         "Bouncer allowed"
     );
-    assert_eq!(model_calls(&fx), 1);
-    asks_argv(
-        &fx,
-        &[fx.item_id],
-        &["/bin/sh", "./safe-task.sh", "different-argument"],
-    );
-    assert_eq!(
-        model_calls(&fx),
-        1,
-        "changed argv needs another confirmation"
-    );
-    std::fs::write(&script, "#!/bin/sh\ntouch changed-script-started\n")
-        .expect("change script bytes");
-    asks_argv(&fx, &[fx.item_id], argv);
-    assert_eq!(
-        model_calls(&fx),
-        1,
-        "same argv with changed script bytes needs another confirmation"
-    );
-    assert!(!fx.project.join("changed-script-started").exists());
+    assert_eq!(model_calls(&fx), 3);
+    let other = other_project(&fx);
+    let handle = argv_later_at(&fx, &other, &[fx.item_id], COMMIT);
+    let run = waiting(&fx);
+    assert!(run.question.why.contains("is declared for the project"));
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+    assert_eq!(model_calls(&fx), 3);
 }
 
 /// One model exchange that pauses after recording its secret-free inference body.
@@ -1340,7 +1170,7 @@ fn blocked_evaluation_model() -> (
 }
 
 #[test]
-fn revoking_evaluation_permission_during_inference_prevents_execution_and_secret_delivery() {
+fn changing_access_during_inference_prevents_execution_and_secret_delivery() {
     let (model, started, release, server) = blocked_evaluation_model();
     let fx = fixture_with_model(
         Some(declaration(Environment::Staging, RiskLevel::Medium)),
@@ -1358,19 +1188,11 @@ fn revoking_evaluation_permission_during_inference_prevents_execution_and_secret
     )
     .expect("script");
     let argv = &["/bin/sh", "./scoped-task.sh"];
-    grant_evaluation(&fx, argv);
-    std::fs::remove_file(fx.project.join("command-started")).expect("reset command marker");
-    std::fs::remove_file(fx.project.join("delivered-secret"))
-        .expect("reset synthetic secret marker");
     let handle = argv_later(&fx, &[fx.item_id], argv);
     started
         .recv_timeout(Duration::from_secs(5))
         .expect("model reached through explicit scope");
-    let scope = with_vault(&fx, |v| v.evaluation_scopes(fx.item_id)).expect("scope")[0].id;
-    assert!(
-        with_vault(&fx, |v| v.remove_evaluation_scope(scope))
-            .expect("revoke evaluation permission")
-    );
+    with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).unwrap();
     release.send(()).expect("release model");
     let response = handle.join().expect("in-flight run");
     server.join().expect("model server");
@@ -1403,7 +1225,6 @@ fn production_always_ask_and_hard_flags_never_offer_evaluation_permission() {
     assert_eq!(model_calls(&production), 0);
 
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    grant_evaluation(&fx, COMMIT);
     with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).expect("always ask");
     let run = argv_later(&fx, &[fx.item_id], COMMIT);
     let pending = waiting(&fx);

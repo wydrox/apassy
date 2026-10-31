@@ -230,39 +230,6 @@ fn run_later(fx: &Fixture, command: &[&str]) -> std::thread::JoinHandle<WireResp
     })
 }
 
-/// Authenticate the exact queued offer. The first command runs only by this owner
-/// approval; the scope permits later evaluation and teaches no execution answer.
-fn enable_evaluation(fx: &Fixture, command: &[&str]) {
-    let runner = run_later(fx, command);
-    let pending = waiting(fx);
-    let offer = fx
-        .broker
-        .approvals()
-        .evaluation_offer(pending.id)
-        .expect("evaluation offer");
-    let confirmations = offer
-        .items
-        .iter()
-        .map(|item| item.confirmation.clone())
-        .collect();
-    let proof = OwnerGate::new(Arc::clone(&fx.vault), None)
-        .authorize(
-            OwnerAction::ApproveAndEvaluate {
-                run: pending,
-                offer,
-                confirmations,
-            },
-            OwnerCheck::passphrase(PASS),
-        )
-        .expect("owner check");
-    fx.broker
-        .approvals()
-        .approve(proof)
-        .expect("enable evaluation");
-    let response = runner.join().expect("runner");
-    assert!(response.ok, "{response:?}");
-}
-
 fn add_exception(fx: &Fixture, kind: ExceptionKind) {
     let mut guard = fx.vault.lock().expect("vault");
     guard
@@ -369,8 +336,8 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
     assert!(last_reason(&fx).contains("Below the needed certainty: task_match 70% (needs 75%)"));
 
     // A high-risk declaration needs a certain read-only command.
-    // Preserve the staging/high classification. An exact authenticated evaluation
-    // scope, not historical uses, lets this sensitive case reach the model.
+    // Preserve staging/high: it reaches the model without an evaluation scope,
+    // and its sensitive write check still asks.
     let writes = common::fake_bouncer(&[("writes", 0.9)]);
     let mut declaration = staging_declaration();
     declaration.risk = RiskLevel::High;
@@ -382,7 +349,6 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
     )
     .expect("synthetic report");
     let command = ["sh", "-c", "node scripts/report.js"];
-    enable_evaluation(&fx, &command);
     {
         let guard = fx.vault.lock().expect("vault");
         let vault = guard.as_ref().expect("open");
@@ -396,7 +362,7 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
         );
         assert_eq!(
             vault.evaluation_scopes(fx.item_id).expect("scopes").len(),
-            1
+            0
         );
         assert!(
             vault

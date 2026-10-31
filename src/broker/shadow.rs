@@ -22,7 +22,7 @@ use super::SharedVault;
 use super::approvals::{OwnerAction, OwnerProof};
 use super::bouncer::{
     BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, Thresholds,
-    decide_learned,
+    decide_learned, decide_routed,
 };
 use super::decide::lock;
 use super::learning;
@@ -101,6 +101,10 @@ pub struct ShadowInput {
     pub has_user_request: bool,
     /// The active `task_match` level. The candidate decides at the same level.
     pub thresholds: Thresholds,
+    /// The broker has already checked all routing vetoes, including production.
+    pub routed: bool,
+    /// At least one declaration has default environment or risk.
+    pub default_source: bool,
 }
 
 /// The candidate outcome with the policy of the broker at the model step. A remembered
@@ -118,7 +122,12 @@ pub fn candidate_answer(verdict: &BouncerVerdict, input: &ShadowInput) -> Shadow
         thresholds: input.thresholds,
         pattern: None,
     };
-    if decide_learned(verdict, &context, &learned).ask_owner {
+    let decision = if input.routed {
+        decide_routed(verdict, &context, &learned, input.default_source)
+    } else {
+        decide_learned(verdict, &context, &learned)
+    };
+    if decision.ask_owner {
         ShadowAnswer::Ask
     } else {
         ShadowAnswer::Run
@@ -303,6 +312,8 @@ mod tests {
             })],
             has_user_request: true,
             thresholds: Thresholds::default(),
+            routed: false,
+            default_source: false,
         }
     }
 
