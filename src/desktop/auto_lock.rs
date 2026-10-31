@@ -128,6 +128,13 @@ fn sampled_idle(idle: Duration, awake: Duration, elapsed: Duration) -> Option<Du
         (awake < Duration::from_secs(32)).then_some(idle)
     }
 }
+fn session_due(s: &Sample, generation: u64, now: Duration) -> bool {
+    s.generation != generation
+        || s.idle.is_some_and(|(_, at, clock)| {
+            // The helper's sleep notification can still be queued at wake.
+            now.saturating_sub(clock) > at.elapsed() + Duration::from_millis(10)
+        })
+}
 #[derive(Default)]
 struct Timer {
     owner_at: Duration,
@@ -285,7 +292,8 @@ impl DesktopApp {
                             return true;
                         }
                         let s = source.0.lock().unwrap();
-                        let due = policy == LockPolicy::Session && s.generation != generation
+                        let due = policy == LockPolicy::Session
+                            && session_due(&s, generation, clock_now())
                             || policy.timeout().is_some_and(|limit| {
                                 clock_now().saturating_sub(owner_at) >= limit
                                     && sample_idle(&s).max(s.peak).is_some_and(|d| d >= limit)
@@ -361,6 +369,17 @@ mod tests {
         source.0.lock().unwrap().idle = Some((Duration::ZERO, Instant::now(), Duration::ZERO));
         source.record_at(Some(0.0), false, Duration::from_secs(901));
         assert!(source.take().0.unwrap() >= Duration::from_secs(901));
+    }
+
+    #[test]
+    fn auto_lock_session_sleep_fence_precedes_the_queued_notification() {
+        let sample = Sample {
+            idle: Some((Duration::ZERO, Instant::now(), Duration::ZERO)),
+            ..Default::default()
+        };
+        assert!(!session_due(&sample, 0, Duration::ZERO));
+        assert!(session_due(&sample, 0, Duration::from_secs(901)));
+        assert!(session_due(&sample, 1, Duration::ZERO));
     }
 
     #[test]
