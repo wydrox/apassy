@@ -1159,6 +1159,31 @@ impl NativeHelper {
         Ok(())
     }
     #[cfg(all(feature = "vault", feature = "desktop"))]
+    pub(crate) fn auto_lock_read(
+        &self,
+    ) -> Result<crate::desktop::auto_lock::LockPolicy, NativeError> {
+        let fields = self.call(
+            &self.keychain_helper,
+            request("auto_lock_read"),
+            self.timeouts.quick,
+        )?;
+        crate::desktop::auto_lock::LockPolicy::parse(str_field(&fields, "policy")?)
+            .ok_or_else(|| NativeError::Protocol("unknown owner-check policy".into()))
+    }
+    #[cfg(all(feature = "vault", feature = "desktop"))]
+    pub(crate) fn auto_lock_write(
+        &self,
+        policy: crate::desktop::auto_lock::LockPolicy,
+    ) -> Result<(), NativeError> {
+        let mut req = request("auto_lock_write");
+        req.insert("policy".into(), Value::String(policy.code().into()));
+        let fields = self.call(&self.keychain_helper, req, self.timeouts.quick)?;
+        if str_field(&fields, "policy")? != policy.code() {
+            return Err(NativeError::Protocol("owner policy readback failed".into()));
+        }
+        Ok(())
+    }
+    #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn owner_session_active(&self) -> bool {
         self.call(
             &self.helper,
@@ -1908,6 +1933,51 @@ mod owner_policy_tests {
         );
         helper
             .owner_policy_write(crate::broker::approvals::OwnerFrequency::OneHour)
+            .unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "vault", feature = "desktop", unix))]
+mod auto_lock_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn auto_lock_unknown_corrupt_or_failed_readback_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("policy-helper");
+        for response in [
+            r#"{"ok":true,"policy":"unknown"}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":false,"error":"keychain_unavailable","message":"Synthetic"}"#,
+        ] {
+            std::fs::write(
+                &file,
+                format!("#!/bin/sh\nread request\nprintf '%s\\n' '{}'\n", response),
+            )
+            .unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let helper = NativeHelper::with_paths(&file, &file);
+            assert!(helper.auto_lock_read().is_err());
+            assert!(
+                helper
+                    .auto_lock_write(crate::desktop::auto_lock::LockPolicy::OneHour)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn auto_lock_read_and_exact_write_readback_use_narrow_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("policy-helper");
+        std::fs::write(&file,"#!/usr/bin/python3\nimport sys,json\nr=json.loads(sys.stdin.readline())\nassert r['cmd'] in ('auto_lock_read','auto_lock_write')\nassert set(r)==({'cmd'} if r['cmd']=='auto_lock_read' else {'cmd','policy'})\nprint(json.dumps({'ok':True,'policy':r.get('policy','15m')}))\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let helper = NativeHelper::with_paths(&file, &file);
+        assert_eq!(
+            helper.auto_lock_read().unwrap(),
+            crate::desktop::auto_lock::LockPolicy::FifteenMinutes
+        );
+        helper
+            .auto_lock_write(crate::desktop::auto_lock::LockPolicy::OneHour)
             .unwrap();
     }
 }

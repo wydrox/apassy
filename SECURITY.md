@@ -71,6 +71,25 @@ browser events can be produced by browser automation; gesture checks are not pro
 of a physical human. Existing signed caller and peer guards still apply. A source
 or unsigned fixture build does not prove native Keychain or OS lifecycle acceptance.
 
+## Optional vault inactivity lock
+
+Settings > Security offers Lock after inactivity: Never (default), 15 minutes,
+1 hour, 4 hours, or When the Mac locks or sleeps. Never preserves agent access
+through idle, screen-lock, sleep, and user-switch events; explicit Lock and quit
+still lock the vault. The timed choices require both no input in Apassy and no
+Mac user input for the interval. Agent requests do not reset it. The session
+choice also locks on user switch. All choices use the normal vault-lock path,
+ending waiting runs and the owner-check window. Agents cannot use credentials
+while locked; processes already given credentials are not recalled.
+
+The policy uses a separate app-owned device-only, non-synchronizing Keychain
+item. Missing, unreadable, or unknown values use Never. Timed locking needs
+fresh native idle telemetry; unavailable telemetry does not trigger a lock.
+Sleep-inclusive deadlines survive wake input and idle-counter resets. A shared
+read-only access fence denies broker access at expiry before UI cleanup runs;
+the desktop then performs the normal vault lock.
+An unsigned fixture build cannot prove signed Keychain or OS-event acceptance.
+
 ## What is a known limit, not a vulnerability
 
 These are recorded. A report that only restates one of them gets a pointer to the record.

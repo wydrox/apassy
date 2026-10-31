@@ -53,7 +53,8 @@
 //!    exceptions, "Always ask me", the project, and canonical directories must also be
 //!    the same as in the original check. Command bindings are rechecked before
 //!    secrets are read. Evaluation scopes do not affect authorization.
-//! 9. The broker reads the secrets, releases the vault lock, and starts the process.
+//! 9. The broker rechecks the epoch and expiry before spawning. A session delivery
+//!    guard serializes lock and spawn without holding the vault mutex over spawn.
 //!    A variable in placeholder mode (ADR 0011) gets a placeholder. The broker then
 //!    starts a run proxy that puts the real value into HTTPS requests to the hosts of
 //!    the variable, and on macOS the process can connect only to that proxy.
@@ -1283,6 +1284,9 @@ fn run_inner(
             &answered_on,
         );
         super::corrections::consider_items(vault, request.items);
+        if vault.is_locked() {
+            return locked_response();
+        }
         match read_secrets(vault, request.items) {
             Ok(secrets) => {
                 for item_id in request.items {
@@ -1330,7 +1334,7 @@ fn run_inner(
         }
     };
     let network = proxy.as_ref().map(RunProxy::network);
-    let result = exec::run_with(
+    let result = exec::run_with_spawn(
         request.command,
         &checked.cwd,
         request.path,
@@ -1341,6 +1345,7 @@ fn run_inner(
             sandbox_profile: network.sandbox_profile.as_deref(),
         }),
         ctx.run_timeout,
+        |cmd| spawn_in_session(&ctx.vault, checked.epoch, cmd),
     );
     let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();
@@ -1870,6 +1875,30 @@ fn store_uses(
             decision_log_id: None,
         });
     }
+}
+
+/// Serialize credential delivery with lock. The vault mutex is released before
+/// process creation; the session guard is held only until spawn returns.
+pub(super) fn spawn_in_session(
+    vault: &super::SharedVault,
+    epoch: [u8; 32],
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let delivery = {
+        let guard = lock(vault);
+        guard
+            .as_ref()
+            .filter(|v| !v.is_locked() && v.epoch() == epoch)
+            .map(Vault::delivery_fence)
+    };
+    delivery
+        .and_then(|fence| fence.deliver(|| cmd.spawn()))
+        .unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                RELOCKED,
+            ))
+        })
 }
 
 /// The variables of a run. `env` has a real value or a placeholder for each item.

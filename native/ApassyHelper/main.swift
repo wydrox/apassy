@@ -26,6 +26,10 @@ func handle(_ request: Request) throws -> Fields {
             "keychain_access_group": keychainAccessGroup() ?? NSNull(),
             "biometry": biometryStatus(),
         ]
+    case "auto_lock_read":
+        return try handleAutoLockPolicyRead()
+    case "auto_lock_write":
+        return try handleAutoLockPolicyWrite(request)
     case "owner_policy_read":
         return try handleOwnerPolicyRead()
     case "owner_policy_write":

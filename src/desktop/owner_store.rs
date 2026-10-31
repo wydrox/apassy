@@ -693,7 +693,7 @@ impl OwnerSession {
                 // The broker stores a record for each waiting run (schema 7). Each
                 // record becomes one entry, also for a run that the queue does not
                 // list yet.
-                if !vault.is_locked() {
+                if !vault.is_locked() || vault.access_expired() {
                     let _ = vault.end_waits(why);
                 }
                 self.before_lock.run(vault);

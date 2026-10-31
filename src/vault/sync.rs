@@ -537,6 +537,9 @@ impl Vault {
                 _lock_file: dest_lock,
                 conn: None,
                 epoch,
+                delivery: Default::default(),
+                #[cfg(feature = "desktop")]
+                access_expiry: None,
             },
             AdoptedCopy {
                 identity,
@@ -580,6 +583,7 @@ impl Vault {
         if theirs.vault_id != self.sync_identity()?.vault_id {
             return Err(err(VaultErrorKind::OtherVault).into());
         }
+        self.end_delivery();
         let conn = self
             .conn
             .take()
@@ -596,6 +600,7 @@ impl Vault {
                 rekeyed: true,
             })?,
         );
+        self.delivery = std::sync::Arc::new(std::sync::RwLock::new(true));
         Ok(())
     }
 }
