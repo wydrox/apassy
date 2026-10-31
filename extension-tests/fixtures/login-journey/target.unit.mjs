@@ -146,3 +146,60 @@ test("update rejects multiple unmarked passwords rather than storing the old one
   const target = s.api.capture();
   assert.equal(s.api.read(target.token, true, "update").reason, "ambiguous_password");
 });
+
+test("submit capture requires typed password and excludes Apassy-filled unchanged values", () => {
+  const s = setup(); s.username.value = "alice@example.test"; s.password.value = "typed";
+  assert.equal(s.api.submission(s.form, () => false), null);
+  assert.equal(s.api.submission(s.form, (el) => el === s.password).password, "typed");
+  const target = s.api.capture(); s.api.fill(target.token, s.location.origin, "alice", "filled");
+  assert.equal(s.api.submission(s.form, () => false), null);
+});
+
+test("submit capture selects typed new-password and checks confirmations", () => {
+  const s = setup(); s.password.value = "old";
+  const next = new Input("next", "password", "new-password"); next.form = s.form; next.value = "new";
+  const confirm = new Input("confirm", "password", "new-password"); confirm.form = s.form; confirm.value = "new";
+  s.form.append(next, confirm);
+  assert.equal(s.api.submission(s.form, (el) => el === next).password, "new");
+  confirm.value = "mismatch"; assert.equal(s.api.submission(s.form, () => true), null);
+});
+
+test("submit capture refuses cross-origin, OTP, search forms and ambiguous passwords", () => {
+  for (const change of [(s) => { s.form.action = "https://other.example/login"; },
+    (s) => { s.password.autocomplete = "one-time-code"; }, (s) => { s.form.id = "search"; },
+    (s) => { const next = new Input("next", "password"); next.form = s.form; s.form.append(next); }]) {
+    const s = setup(); s.password.value = "typed"; change(s);
+    assert.equal(s.api.submission(s.form, () => true), null);
+  }
+});
+
+test("username-only submission preserves metadata for the second step", () => {
+  const s = setup({ firstOnly: true }); s.username.value = "alice@example.test";
+  const result = s.api.submission(s.form, () => true);
+  assert.equal(result.username, "alice@example.test"); assert.equal(result.password, "");
+});
+
+test("placement stays field-aligned below, flips above a submit, clamps and shortens inside viewport", () => {
+  const { api } = setup();
+  const field = { left: 400, right: 700, top: 360, bottom: 400 };
+  const panel = { width: 320, height: 220 }, viewport = { width: 1200, height: 900 };
+  assert.equal(api.placement(field, panel, viewport).top, 406);
+  const flipped = api.placement(field, panel, viewport, [{ left: 400, right: 700, top: 430, bottom: 470 }]);
+  assert.equal(flipped.left, 400); assert.equal(flipped.top, 134);
+  const small = api.placement({ ...field, left: 20, right: 300, top: 20, bottom: 60 }, panel, { width: 320, height: 240 });
+  assert.equal(small.left, 8); assert.equal(small.top, 66); assert.equal(small.height, 166);
+  assert.equal(api.placement({ ...field, top: 1000, bottom: 1040 }, panel, viewport), null);
+});
+
+test("typing provenance expires, clears on fill/consumption, and rejects a programmatic value replacement", () => {
+  const s = setup(); let time = 0, next = 1; const timers = new Map();
+  const tracker = s.api.typedTracker({ now: () => time, schedule: (fn) => { timers.set(next, fn); return next++; }, cancel: (id) => timers.delete(id) });
+  s.password.value = "typed";
+  tracker.input(s.password, false); assert.equal(tracker.has(s.password), false);
+  tracker.input(s.password, true); assert.equal(tracker.has(s.password), true);
+  s.password.value = "programmatically-replaced"; assert.equal(tracker.has(s.password), false);
+  tracker.input(s.password, true); time = 180000; assert.equal(tracker.has(s.password), false);
+  for (const fn of timers.values()) fn(); assert.equal(timers.size, 0);
+  time++; tracker.input(s.password, true); tracker.clear(s.password); assert.equal(tracker.has(s.password), false);
+  tracker.input(s.password, true); tracker.clearAll(); assert.equal(tracker.has(s.password), false); assert.equal(timers.size, 0);
+});

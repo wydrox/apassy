@@ -174,6 +174,8 @@ export function loadBackground({ permissions = [] } = {}) {
       },
     },
     tabs: {
+      onRemoved: event(),
+      onUpdated: event(),
       get: async (id) => {
         if (!tabs.has(id)) throw new Error("No tab with id");
         return { id, url: tabs.get(id) };
