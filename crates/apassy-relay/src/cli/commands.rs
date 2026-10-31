@@ -852,7 +852,11 @@ fn decide(
         }
         Err(error) => return Err(error.into_cli()),
     };
-    crate::cli::output::result(&view)?;
+    // A decision result must never expose RunView.session.env, even if a relay
+    // answers with an unexpected ready view.
+    crate::cli::output::result(&serde_json::json!({
+        "run_id":view.run_id,"status":view.status,"code":view.code,"note":view.note
+    }))?;
     println!(
         "Run {}: {}. {}",
         view.run_id,

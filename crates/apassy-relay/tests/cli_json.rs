@@ -124,3 +124,15 @@ fn json_rejects_streaming_wrappers_and_duplicate_flags_as_one_error_document() {
         assert_eq!(document(&output)["error"]["code"], "usage");
     }
 }
+
+#[test]
+fn json_decision_output_never_serializes_a_session_environment() {
+    let mock = Mock::start(|_, _| ok(run_view(5, "ready", Some(json!({"SYNTHETIC_KEY":CANARY})))));
+    let output = Cli::new()
+        .member(&mock.url)
+        .run(&["--json", "deny", "5"], None);
+    assert_eq!(code(&output), 0);
+    assert_eq!(document(&output)["result"]["run_id"], 5);
+    assert!(!text(&output.stdout).contains(CANARY));
+    assert!(!text(&output.stderr).contains(CANARY));
+}
