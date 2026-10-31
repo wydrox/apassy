@@ -613,8 +613,9 @@ impl OwnerRequest {
         match self {
             Self::BackupVault { path } => OwnerAction::BackupVault { path: path.clone() },
             Self::ExportDecisions => OwnerAction::ExportDecisions,
-            Self::RegisterAgent { name } | Self::RegisterSetupAgent { name } => {
-                OwnerAction::RegisterAgent { name: name.clone() }
+            Self::RegisterAgent { name } => OwnerAction::RegisterAgent { name: name.clone() },
+            Self::RegisterSetupAgent { name } => {
+                OwnerAction::RegisterSetupAgent { name: name.clone() }
             }
             Self::ChangeOwnerFrequency { old, new } => OwnerAction::ChangeOwnerFrequency {
                 old: *old,

@@ -1138,12 +1138,18 @@ impl OwnerSession {
         show_all: bool,
         proof: OwnerProof,
     ) -> ModelResult<(AgentSummary, AgentToken)> {
-        let (agent, token) = self.register_agent_checked(name, proof)?;
-        if show_all {
-            self.unlocked()?
-                .set_agent_sees_all(agent.id, true)
-                .map_err(map_err)?;
+        if !show_all {
+            return self.register_agent_checked(name, proof);
         }
+        if name.trim().is_empty() {
+            return Err(fail("invalid_input", "Type a name for the agent."));
+        }
+        let mut vault = self.unlocked_for(
+            proof,
+            &OwnerAction::RegisterSetupAgent { name: name.into() },
+        )?;
+        let (agent, token) = vault.register_agent(name).map_err(map_err)?;
+        vault.set_agent_sees_all(agent.id, true).map_err(map_err)?;
         Ok((agent, token))
     }
 

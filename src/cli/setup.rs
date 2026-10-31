@@ -139,7 +139,7 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
             | Failure::Other(message)
             | Failure::NotRunning(message) => message.as_str(),
             Failure::Usage(usage) => usage.0.as_str(),
-            Failure::Printed => "Setup failed.",
+            Failure::Printed | Failure::PrintedExit(_) => "Setup failed.",
         };
         eprintln!("apassy setup: {}", super::print::clean(message));
     }
@@ -154,7 +154,12 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
     let code = status_code(&result);
     result.map_err(|failure| {
         if setup_json {
-            Failure::Printed
+            let exit = match failure {
+                Failure::Usage(_) => super::EXIT_USAGE,
+                Failure::NotRunning(_) => super::EXIT_NOT_RUNNING,
+                _ => super::EXIT_FAILED,
+            };
+            Failure::PrintedExit(exit)
         } else {
             match failure {
                 Failure::App { message, .. } if code != "failed" => Failure::Other(message),
@@ -310,8 +315,8 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
             &read_optional_config(&config)?,
             &codex_section(&mcp_wrapper),
         )?;
-    } else {
-        claude_server_present(&config, &mcp_wrapper)?;
+    } else if !claude_server_present(&config, &mcp_wrapper)? && !executable_on_path("claude") {
+        return Err(at_stage(Failure::Other("Cannot find an executable Claude Code command in PATH. Install Claude Code before connecting an agent.".into()), "host_start"));
     }
     merge_hook_checked(&hooks, &hook_wrapper_path, false)?;
     if host == Host::Claude {
@@ -331,6 +336,7 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
     }
     stages.push("preflight");
     if !write {
+        stages.push("preview");
         eprintln!("Preflight passed. Run with --write to connect and save settings.");
         return match host {
             Host::Claude => claude(
@@ -439,12 +445,28 @@ fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcom
 }
 
 fn setup_report(result: &Outcome, stages: &[&str]) -> serde_json::Value {
+    let code = match result {
+        Err(Failure::App { code, .. }) => code.as_str(),
+        Err(Failure::Usage(_)) => "usage",
+        Err(Failure::NotRunning(_)) => "not_running",
+        _ => status_code(result),
+    };
     serde_json::json!({
-        "ok": result.is_ok(), "code": status_code(result),
+        "ok": result.is_ok(), "code": code,
         "message": if result.is_ok() { "Setup completed; connection and first use remain unverified." } else { "Setup failed. Check stderr and completed stages before retrying." },
         "data": { "type": "setup", "stages": stages,
-            "partial": result.is_err() && stages.iter().any(|stage| *stage != "preflight"),
+            "partial": result.is_err() && stages.iter().any(|stage| stage.ends_with("_written") || *stage == "agent_connected"),
+            "changes_unknown": matches!(result, Err(Failure::Other(_))) && stages.contains(&"connection_requested") && !stages.contains(&"agent_connected"),
             "connection_verified": false }
+    })
+}
+
+fn executable_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            fs::metadata(dir.join(name))
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
     })
 }
 
@@ -864,13 +886,10 @@ fn codex(
     } else {
         let current = read_optional_config(&config)?;
         if codex_section_present(&current, &section)? {
-            let mut document = current
-                .parse::<toml_edit::DocumentMut>()
-                .map_err(|e| Failure::Other(e.to_string()))?;
-            if document["mcp_servers"]["apassy"]["tool_timeout_sec"].as_integer() == Some(330) {
-                document["mcp_servers"]["apassy"]["tool_timeout_sec"] = toml_edit::value(660);
+            let migrated = migrate_codex_timeout(&current);
+            if migrated != current {
                 fs::copy(&config, config.with_extension("toml.before-apassy"))?;
-                fs::write(&config, document.to_string())?;
+                fs::write(&config, migrated)?;
             }
             eprintln!("{} has the Apassy settings already.", config.display());
         } else {
@@ -917,6 +936,25 @@ fn codex(
         );
     }
     Ok(())
+}
+
+/// Called only after the exact managed block has passed validation.
+fn migrate_codex_timeout(current: &str) -> String {
+    let mut managed = false;
+    current
+        .split_inclusive('\n')
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                managed = trimmed == "[mcp_servers.apassy]";
+            }
+            if managed && trimmed == "tool_timeout_sec = 330" {
+                line.replacen("330", "660", 1)
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect()
 }
 
 /// Recognize only the block that this setup command writes. Do not report success
@@ -1086,6 +1124,23 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn codex_migration_changes_only_the_legacy_managed_timeout() {
+        let current = "# tool_timeout_sec = 330\n[mcp_servers.other]\ntool_timeout_sec = 330\n[mcp_servers.apassy]\ncommand = \"/tmp/mcp\"\ntool_timeout_sec = 330\n";
+        let migrated = migrate_codex_timeout(current);
+        assert!(
+            migrated.starts_with(
+                "# tool_timeout_sec = 330\n[mcp_servers.other]\ntool_timeout_sec = 330"
+            )
+        );
+        assert!(migrated.ends_with("tool_timeout_sec = 660\n"));
+        assert_eq!(migrate_codex_timeout(&migrated), migrated);
+        assert_eq!(
+            migrate_codex_timeout(&current.replace("= 330", "= 900")),
+            current.replace("= 330", "= 900")
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ mod automatic_access;
 mod bouncer_eval;
 mod bouncer_rules;
 mod browser_passkeys;
+mod cli_setup;
 mod cli_ux;
 mod companion;
 mod companion_activity;

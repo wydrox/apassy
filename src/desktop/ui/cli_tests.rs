@@ -1771,3 +1771,26 @@ fn terminal_setup_checks_catalog_consent_without_widening_existing_agents() {
     assert!(visible.unwrap().is_empty());
     assert_eq!(app.owner_ui.session.agents().unwrap().len(), 3);
 }
+
+#[test]
+fn raw_registration_proof_cannot_connect_the_full_catalog() {
+    use crate::broker::approvals::OwnerAction;
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let proof = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::RegisterAgent {
+                name: "Synthetic".into(),
+            },
+            OwnerCheck::passphrase(PASS),
+        )
+        .unwrap();
+    assert!(
+        app.owner_ui
+            .session
+            .register_setup_agent_checked("Synthetic", true, proof)
+            .is_err()
+    );
+    assert!(app.owner_ui.session.agents().unwrap().is_empty());
+}

@@ -96,6 +96,10 @@ pub enum OwnerAction {
     RegisterAgent {
         name: String,
     },
+    /// Connect a new setup agent with catalog visibility and issue its token.
+    RegisterSetupAgent {
+        name: String,
+    },
     /// Change the protected, device-local owner-check frequency. Always fresh.
     ChangeOwnerFrequency {
         old: super::OwnerFrequency,
@@ -386,6 +390,9 @@ impl OwnerAction {
             Self::BackupVault { .. } => "write an encrypted vault backup".to_owned(),
             Self::ExportDecisions => "export the decision log".to_owned(),
             Self::RegisterAgent { .. } => "register an agent and issue its token".to_owned(),
+            Self::RegisterSetupAgent { .. } => {
+                "connect an agent and share the credential catalog without values".to_owned()
+            }
             Self::ChangeOwnerFrequency { .. } => {
                 "change how often Apassy asks for Touch ID".to_owned()
             }

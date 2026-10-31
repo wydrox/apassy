@@ -43,6 +43,8 @@ pub enum Failure {
     /// The command printed its own JSON answer with `"ok": false`. Only the exit code
     /// is left, so `--json` prints one document.
     Printed,
+    /// A structured result was printed; preserve the command exit status.
+    PrintedExit(i32),
 }
 
 impl From<Usage> for Failure {
@@ -207,6 +209,7 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
 fn report(failure: Failure, json: bool) -> i32 {
     let (code, message, exit) = match failure {
         Failure::Printed => return EXIT_FAILED,
+        Failure::PrintedExit(exit) => return exit,
         Failure::Usage(usage) if usage.0.contains("apassy help") || usage.0.contains("--help") => {
             ("usage".to_owned(), usage.0, EXIT_USAGE)
         }
