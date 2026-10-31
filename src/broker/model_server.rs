@@ -3816,9 +3816,9 @@ mod tests {
         let setup =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/setup.rs"))
                 .expect("setup.rs");
-        assert!(setup.contains("MCP_TOOL_TIMEOUT=330000"), "Claude Code");
-        assert!(setup.contains("tool_timeout_sec = 330"), "Codex");
-        let host_limit = Duration::from_secs(330);
+        assert!(setup.contains("MCP_TOOL_TIMEOUT=660000"), "Claude Code");
+        assert!(setup.contains("tool_timeout_sec = 660"), "Codex");
+        let host_limit = Duration::from_secs(660);
         let owner_wait = crate::broker::server::BrokerOptions::with_tls(
             crate::broker::http::TlsClient::platform().expect("tls"),
         )
