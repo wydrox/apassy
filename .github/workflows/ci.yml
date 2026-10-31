@@ -93,6 +93,9 @@ jobs:
       - name: Check Rust format
         run: cargo fmt --all -- --check
 
+      - name: Typecheck the native session and Keychain helper
+        run: xcrun --sdk macosx swiftc -typecheck -swift-version 5 -warnings-as-errors native/ApassyHelper/*.swift
+
       - name: Run Clippy
         run: cargo clippy --offline --locked --all-features --all-targets -- -D warnings
 

@@ -114,17 +114,19 @@ fn clock_now() -> Duration {
 }
 fn sample_idle(s: &Sample) -> Option<Duration> {
     s.idle.and_then(|(idle, at, clock)| {
-        let elapsed = clock_now().saturating_sub(clock);
-        // A stalled helper is not evidence of inactivity. Suspension is: the
-        // sleep-inclusive clock advances while Instant pauses on macOS.
-        if elapsed > at.elapsed() + Duration::from_millis(10) {
-            Some(idle + elapsed)
-        } else {
-            // The helper samples idle every 30 seconds. Do not extrapolate awake
-            // time: system input since the last sample may have reset idle.
-            (at.elapsed() < Duration::from_secs(32)).then_some(idle)
-        }
+        sampled_idle(idle, at.elapsed(), clock_now().saturating_sub(clock))
     })
+}
+fn sampled_idle(idle: Duration, awake: Duration, elapsed: Duration) -> Option<Duration> {
+    // A stalled helper is not evidence of inactivity. Suspension is: the
+    // sleep-inclusive clock advances while Instant pauses on macOS.
+    if elapsed > awake + Duration::from_millis(10) {
+        Some(idle + elapsed)
+    } else {
+        // Do not extrapolate awake time: input may have reset system idle since
+        // the last 30-second sample. Wait for the next real sample instead.
+        (awake < Duration::from_secs(32)).then_some(idle)
+    }
 }
 #[derive(Default)]
 struct Timer {
@@ -393,10 +395,45 @@ mod tests {
 
     #[test]
     fn auto_lock_idle_samples_do_not_extrapolate_awake_time() {
-        let mut sample = Sample::default();
-        let now = clock_now();
-        sample.idle = Some((Duration::from_secs(899), Instant::now(), now));
-        assert_eq!(sample_idle(&sample), Some(Duration::from_secs(899)));
+        let idle = Duration::from_secs(899);
+        let awake = Duration::from_secs(29);
+        assert_eq!(sampled_idle(idle, awake, awake), Some(idle));
+        let stale = Duration::from_secs(33);
+        assert_eq!(sampled_idle(idle, stale, stale), None);
+        assert_eq!(
+            sampled_idle(idle, awake, Duration::from_secs(930)),
+            Some(Duration::from_secs(1829))
+        );
+    }
+
+    #[test]
+    fn auto_lock_never_vault_access_does_not_wait_for_idle_telemetry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(&dir.path().join("never.db"), "synthetic-never-passphrase")
+            .unwrap();
+        app.owner_ui
+            .session
+            .unlock("synthetic-never-passphrase")
+            .unwrap();
+        app.poll_auto_lock(&egui::Context::default());
+        let source = app.auto_lock.source.clone();
+        let sample = source.0.lock().unwrap();
+        let vault = app.owner_ui.session.shared_vault();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let guard = vault.lock().unwrap();
+            let vault = guard.as_ref().unwrap();
+            assert!(!vault.is_locked());
+            assert_eq!(vault.delivery_fence().deliver(|| 1), Some(1));
+            tx.send(()).unwrap();
+        });
+        let completed = rx.recv_timeout(Duration::from_secs(5));
+        drop(sample);
+        reader.join().unwrap();
+        assert!(completed.is_ok(), "Never waited for idle telemetry");
     }
     #[test]
     fn auto_lock_each_option_with_injected_clock_and_idle() {
