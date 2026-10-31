@@ -843,7 +843,7 @@ pub fn import(cli: &Cli, mut args: Args) -> Outcome {
         ))
     })?;
     if format != import::Format::Env {
-        crate::import::csv::parse(&text).map_err(|err| Failure::Other(err.to_string()))?;
+        crate::csv::parse(&text).map_err(|err| Failure::Other(err.to_string()))?;
     }
     let (entries, skipped) = import::parse(format, &text, &options);
     use zeroize::Zeroize;

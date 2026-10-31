@@ -175,64 +175,19 @@ fn parse_env(text: &str, options: &Options) -> (Vec<Entry>, Vec<Skipped>) {
 
 /// RFC 4180 records: quoted fields can hold commas, quotes (`""`), and newlines.
 /// Returns each record with the line where it starts.
-pub fn parse_csv(text: &str) -> Result<Vec<(usize, Vec<String>)>, crate::import::csv::CsvError> {
-    // Validate the entire export before producing any entries. The shared parser
-    // erases its temporary fields and gives errors without credential values.
-    crate::import::csv::parse(text)?;
-    let mut records = Vec::new();
-    let mut record = Vec::new();
-    let mut field = String::new();
-    let mut quoted = false;
-    let mut line = 1;
-    let mut start = 1;
-    let mut chars = text.chars().peekable();
-    let mut any = false;
-    while let Some(c) = chars.next() {
-        if quoted {
-            match c {
-                '"' if chars.peek() == Some(&'"') => {
-                    chars.next();
-                    field.push('"');
-                }
-                '"' => quoted = false,
-                '\n' => {
-                    line += 1;
-                    field.push('\n');
-                }
-                _ => field.push(c),
-            }
-            continue;
-        }
-        match c {
-            '"' if field.is_empty() => {
-                quoted = true;
-                any = true;
-            }
-            ',' => {
-                record.push(std::mem::take(&mut field));
-                any = true;
-            }
-            '\r' if chars.peek() == Some(&'\n') => {}
-            '\n' => {
-                if any || !field.is_empty() {
-                    record.push(std::mem::take(&mut field));
-                    records.push((start, std::mem::take(&mut record)));
-                }
-                any = false;
-                line += 1;
-                start = line;
-            }
-            _ => {
-                field.push(c);
-                any = true;
-            }
-        }
-    }
-    if any || !field.is_empty() {
-        record.push(field);
-        records.push((start, record));
-    }
-    Ok(records)
+pub fn parse_csv(text: &str) -> Result<Vec<(usize, Vec<String>)>, crate::csv::CsvError> {
+    crate::csv::parse_with_lines(text).map(|records| {
+        records
+            .into_iter()
+            .map(|(line, record)| {
+                let fields = record
+                    .into_iter()
+                    .map(|mut field| std::mem::take(&mut *field))
+                    .collect();
+                (line, fields)
+            })
+            .collect()
+    })
 }
 
 /// The column of the first header name that matches.
@@ -435,6 +390,26 @@ fn service_of(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_csv_decoding_matches_validation() {
+        for text in [
+            "\u{feff}\"name\",username,password\r\nExample,alice,\"p\"\"ass  \"\r\n",
+            "name,username,password\rExample,alice,\"p\r\nass  \"\r",
+        ] {
+            let (entries, skipped) = parse(Format::Csv, text, &Options::default());
+            assert!(skipped.is_empty(), "{skipped:?}");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].item.name.as_deref(), Some("Example"));
+            assert_eq!(entries[0].line, 2);
+            let expected = if text.starts_with('\u{feff}') {
+                "p\"ass  "
+            } else {
+                "p\r\nass  "
+            };
+            assert_eq!(secret(&entries[0]), expected);
+        }
+    }
+
     #[test]
     fn audit_csv_preserves_website() {
         let url = "https://example.com:8443/path?q=1\nhttps://other.example/login";

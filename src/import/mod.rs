@@ -20,7 +20,7 @@
 //! review: `serde_json` keeps a scratch copy of a string with escapes, the deflate
 //! window is not erased, and the allocator does not erase freed memory.
 
-pub mod csv;
+pub use crate::csv;
 mod onepassword;
 pub mod zip;
 
