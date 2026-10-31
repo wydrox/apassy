@@ -672,6 +672,107 @@ fn device_rows_say_how_each_device_answers() {
 }
 
 #[test]
+fn bouncer_status_requires_inference_readiness_including_external_mode() {
+    use crate::broker::model_server::{Problem, ServerState};
+    assert!(super::model_ready(&ServerState::Running {
+        model: None,
+        outside: false
+    }));
+    assert!(super::model_ready(&ServerState::External {
+        up: Some(true),
+        model: None
+    }));
+    for state in [
+        ServerState::Off,
+        ServerState::Stopped,
+        ServerState::External {
+            up: None,
+            model: None,
+        },
+        ServerState::External {
+            up: Some(false),
+            model: None,
+        },
+        ServerState::Starting {
+            since: std::time::Instant::now(),
+        },
+        ServerState::Failed {
+            problem: Problem::Readiness("failed inference".into()),
+            log_tail: vec![],
+        },
+    ] {
+        assert!(!super::model_ready(&state), "{state:?}");
+    }
+}
+
+#[test]
+fn today_uses_local_calendar_boundaries_including_dst_and_skipped_midnight() {
+    use time::{Date, Month, UtcOffset};
+    let ts = |year, month, day, hour| {
+        Date::from_calendar_date(year, Month::try_from(month).unwrap(), day)
+            .unwrap()
+            .with_hms(hour, 0, 0)
+            .unwrap()
+            .assume_utc()
+            .unix_timestamp() as u64
+    };
+    for (offset, start, end) in [
+        (-7 * 3600, ts(2026, 10, 31, 7), ts(2026, 11, 1, 7)),
+        (
+            5 * 3600 + 45 * 60,
+            ts(2026, 10, 30, 18) + 900,
+            ts(2026, 10, 31, 18) + 900,
+        ),
+    ] {
+        assert_eq!(
+            super::local_day_bounds_with(ts(2026, 10, 31, 12), |_| {
+                UtcOffset::from_whole_seconds(offset).ok()
+            }),
+            Some((start, end))
+        );
+    }
+    for (transition, before, after, now, start, end) in [
+        (
+            ts(2026, 3, 29, 1),
+            1,
+            2,
+            ts(2026, 3, 29, 12),
+            ts(2026, 3, 28, 23),
+            ts(2026, 3, 29, 22),
+        ),
+        (
+            ts(2026, 10, 25, 1),
+            2,
+            1,
+            ts(2026, 10, 25, 12),
+            ts(2026, 10, 24, 22),
+            ts(2026, 10, 25, 23),
+        ),
+        (
+            ts(2018, 11, 4, 3),
+            -3,
+            -2,
+            ts(2018, 11, 4, 12),
+            ts(2018, 11, 4, 3),
+            ts(2018, 11, 5, 2),
+        ),
+    ] {
+        assert_eq!(
+            super::local_day_bounds_with(now, |at| {
+                UtcOffset::from_whole_seconds(if at.unix_timestamp() < transition as i64 {
+                    before * 3600
+                } else {
+                    after * 3600
+                })
+                .ok()
+            }),
+            Some((start, end))
+        );
+    }
+    assert!(super::local_day_bounds_with(ts(2026, 10, 31, 12), |_| None).is_none());
+}
+
+#[test]
 fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     let dir = TempDir::new().unwrap();
     let (mut app, _) = unlocked_app_with_item(&dir);

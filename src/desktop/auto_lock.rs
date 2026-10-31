@@ -71,10 +71,10 @@ struct Sample {
 #[derive(Clone, Default)]
 pub(crate) struct IdleSource(Arc<Mutex<Sample>>);
 impl IdleSource {
-    pub(crate) fn record(&self, seconds: Option<f64>, session: bool) {
-        self.record_at(seconds, session, clock_now());
+    pub(crate) fn record(&self, seconds: Option<f64>, session: bool) -> bool {
+        self.record_at(seconds, session, clock_now())
     }
-    fn record_at(&self, seconds: Option<f64>, session: bool, now: Duration) {
+    fn record_at(&self, seconds: Option<f64>, session: bool, now: Duration) -> bool {
         let mut s = self.0.lock().unwrap();
         // Preserve inactivity across suspension even if wake input resets CGEventSource.
         let suspended = s.idle.and_then(|(idle, at, clock)| {
@@ -90,6 +90,7 @@ impl IdleSource {
             s.generation = s.generation.wrapping_add(1);
         }
         s.session |= session;
+        session || suspended.is_some()
     }
     fn take(&self) -> (Option<Duration>, bool) {
         let mut s = self.0.lock().unwrap();
@@ -116,9 +117,13 @@ fn sample_idle(s: &Sample) -> Option<Duration> {
         let elapsed = clock_now().saturating_sub(clock);
         // A stalled helper is not evidence of inactivity. Suspension is: the
         // sleep-inclusive clock advances while Instant pauses on macOS.
-        (at.elapsed() < Duration::from_secs(2)
-            || elapsed > at.elapsed() + Duration::from_millis(10))
-        .then_some(idle + elapsed)
+        if elapsed > at.elapsed() + Duration::from_millis(10) {
+            Some(idle + elapsed)
+        } else {
+            // The helper samples idle every 30 seconds. Do not extrapolate awake
+            // time: system input since the last sample may have reset idle.
+            (at.elapsed() < Duration::from_secs(32)).then_some(idle)
+        }
     })
 }
 #[derive(Default)]
@@ -269,28 +274,34 @@ impl DesktopApp {
             let policy = self.auto_lock.policy;
             let owner_at = self.auto_lock.timer.owner_at;
             let source = self.auto_lock.source.clone();
-            let generation = source.0.lock().unwrap().generation;
-            let expired = AtomicBool::new(false);
-            self.owner_ui.session.with_vault(|v| {
-                v.set_access_expiry(Arc::new(move || {
-                    if expired.load(Ordering::Acquire) {
-                        return true;
-                    }
-                    let s = source.0.lock().unwrap();
-                    let due = policy == LockPolicy::Session && s.generation != generation
-                        || policy.timeout().is_some_and(|limit| {
-                            clock_now().saturating_sub(owner_at) >= limit
-                                && sample_idle(&s).max(s.peak).is_some_and(|d| d >= limit)
-                        });
-                    if due {
-                        expired.store(true, Ordering::Release);
-                    }
-                    due
-                }))
-            });
+            let expiry: Option<Arc<dyn Fn() -> bool + Send + Sync>> = (policy != LockPolicy::Never)
+                .then(|| {
+                    let generation = source.0.lock().unwrap().generation;
+                    let expired = AtomicBool::new(false);
+                    Arc::new(move || {
+                        if expired.load(Ordering::Acquire) {
+                            return true;
+                        }
+                        let s = source.0.lock().unwrap();
+                        let due = policy == LockPolicy::Session && s.generation != generation
+                            || policy.timeout().is_some_and(|limit| {
+                                clock_now().saturating_sub(owner_at) >= limit
+                                    && sample_idle(&s).max(s.peak).is_some_and(|d| d >= limit)
+                            });
+                        if due {
+                            expired.store(true, Ordering::Release);
+                        }
+                        due
+                    }) as Arc<dyn Fn() -> bool + Send + Sync>
+                });
+            self.owner_ui
+                .session
+                .with_vault(|v| v.set_access_expiry(expiry));
         }
-        if self.auto_lock.busy() || self.auto_lock.policy != LockPolicy::Never {
+        if self.auto_lock.busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
+        } else if self.auto_lock.policy != LockPolicy::Never {
+            ctx.request_repaint_after(Duration::from_secs(30));
         }
     }
 }
@@ -359,7 +370,7 @@ mod tests {
         vault.unlock("synthetic review passphrase").unwrap();
         let expired = Arc::new(AtomicBool::new(false));
         let fence = expired.clone();
-        vault.set_access_expiry(Arc::new(move || fence.load(Ordering::SeqCst)));
+        vault.set_access_expiry(Some(Arc::new(move || fence.load(Ordering::SeqCst))));
         assert!(!vault.is_locked());
         expired.store(true, Ordering::SeqCst);
         assert!(vault.is_locked());
@@ -378,6 +389,14 @@ mod tests {
         for p in LockPolicy::ALL {
             assert_eq!(LockPolicy::parse(p.code()), Some(p));
         }
+    }
+
+    #[test]
+    fn auto_lock_idle_samples_do_not_extrapolate_awake_time() {
+        let mut sample = Sample::default();
+        let now = clock_now();
+        sample.idle = Some((Duration::from_secs(899), Instant::now(), now));
+        assert_eq!(sample_idle(&sample), Some(Duration::from_secs(899)));
     }
     #[test]
     fn auto_lock_each_option_with_injected_clock_and_idle() {

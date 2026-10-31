@@ -22,11 +22,19 @@ func ownerSessionActive() -> Bool {
 }
 func runOwnerLifecycle() throws -> Never {
     var sequence: UInt64 = 0
+    var nextIdleSample = Date.distantPast
     func emit(revoke: Bool = false) {
         do { try requireApassyParent() } catch { exit(1) }
         sequence += 1
-        writeResponse(["sequence": sequence, "active": ownerSessionActive(), "revoke": revoke,
-                       "idle_seconds": CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: UInt32.max)!)])
+        var fields: Fields = ["sequence": sequence, "active": ownerSessionActive(), "revoke": revoke]
+        // Reuse the identity-window heartbeat without polling system idle at 4 Hz.
+        // Lifecycle events sample immediately and wake the Rust UI for cleanup.
+        let now = Date()
+        if revoke || now >= nextIdleSample {
+            fields["idle_seconds"] = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: UInt32.max)!)
+            nextIdleSample = now.addingTimeInterval(30)
+        }
+        writeResponse(fields)
     }
     let workspace = NSWorkspace.shared.notificationCenter
     var observers: [NSObjectProtocol] = []

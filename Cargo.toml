@@ -16,7 +16,7 @@ default-members = ["."]
 
 [features]
 default = []
-desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda"]
+desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2", "dep:ciborium", "dep:rustix"]
 

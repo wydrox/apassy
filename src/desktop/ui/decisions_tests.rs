@@ -154,67 +154,6 @@ fn ask_with_evaluation(
     (waiter, run)
 }
 
-/// Keep the same egui context while opening a picker and choosing its value.
-struct DecisionClicks(egui::Context);
-
-impl DecisionClicks {
-    fn new() -> Self {
-        Self(egui::Context::default())
-    }
-
-    fn frame(&self, app: &mut DesktopApp, events: Vec<egui::Event>) -> Vec<(String, Pos2)> {
-        let output = self.0.run_ui(
-            RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, WIDE)),
-                events,
-                ..Default::default()
-            },
-            |ui| draw(app, ui),
-        );
-        fn placed(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
-            match shape {
-                egui::Shape::Text(text) => out.push((text.galley.text().to_owned(), text.pos)),
-                egui::Shape::Vec(shapes) => {
-                    for shape in shapes {
-                        placed(shape, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut texts = Vec::new();
-        for clipped in &output.shapes {
-            placed(&clipped.shape, &mut texts);
-        }
-        output.drop_without_applying_deltas();
-        texts
-    }
-
-    fn click(&self, app: &mut DesktopApp, needle: &str) {
-        self.frame(app, Vec::new());
-        let texts = self.frame(app, Vec::new());
-        let at = texts
-            .iter()
-            .rev()
-            .find(|(text, _)| text == needle)
-            .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
-            .unwrap_or_else(|| panic!("{needle:?} missing: {texts:?}"));
-        self.frame(app, vec![egui::Event::PointerMoved(at)]);
-        for pressed in [true, false] {
-            self.frame(
-                app,
-                vec![egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-        }
-        self.frame(app, Vec::new());
-    }
-}
-
 fn evaluation_offer(item_id: u64) -> EvaluationOffer {
     EvaluationOffer {
         agent_id: 1,
@@ -235,137 +174,36 @@ fn evaluation_offer(item_id: u64) -> EvaluationOffer {
 }
 
 #[test]
-fn local_evaluation_controls_preserve_defaults_and_authenticate_exact_classification() {
-    use crate::broker::approvals::OwnerAction;
-    use crate::desktop::owner_check::OwnerRequest;
-    use crate::vault::{Environment, RiskLevel};
-
+fn obsolete_evaluation_setup_is_hidden_even_for_a_queued_compatibility_offer() {
     let dir = TempDir::new().expect("dir");
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     let queue = queue_of(&mut app, &dir);
-    let offer = evaluation_offer(item_id);
-    let mut unknown = item(item_id, "Unclassified key");
-    unknown.unconfirmed = true;
-    unknown.production = true;
     let (waiter, pending) = ask_with_evaluation(
         &app,
         &queue,
         1,
-        run("Claude Code", question(vec![unknown], &[])),
-        Some(offer.clone()),
+        run(
+            "Claude Code",
+            question(vec![item(item_id, "Unclassified key")], &[]),
+        ),
+        Some(evaluation_offer(item_id)),
     );
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("Let the bouncer decide next time"), "{text}");
-    let initial = decisions::evaluation_confirmations(&app).expect("draft");
-    assert_eq!(initial, vec![offer.items[0].confirmation.clone()]);
-    assert_eq!(initial[0].environment, Environment::Production);
-    assert_eq!(initial[0].risk, RiskLevel::High);
-    let clicks = DecisionClicks::new();
-    clicks.click(&mut app, "Let the bouncer decide next time");
-    let (text, past) = frames(&mut app, WIDE, 2);
-    for expected in [
-        "Environment",
-        "Risk",
-        "high",
-        "Production",
+    for hidden in [
+        "Let the bouncer decide next time",
         "Allow once and enable bouncer",
-        "api.stripe.com",
-        "Only this exact command, execution context and directly selected script version.",
     ] {
-        assert!(text.contains(expected), "{expected}: {text}");
+        assert!(!text.contains(hidden), "{text}");
     }
-    assert!(past.is_empty(), "{past:?}");
-    assert!(
-        !text.contains("synthetic-command-and-script-digest"),
-        "{text}"
-    );
-    clicks.click(&mut app, "Production");
-    clicks.click(&mut app, "Development");
-    clicks.click(&mut app, "high");
-    clicks.click(&mut app, "low");
-    clicks.click(&mut app, "Allow once and enable bouncer");
-    let request = app
-        .owner
-        .check
-        .as_ref()
-        .expect("owner check")
-        .request
-        .clone();
-    let OwnerRequest::ApproveAndEvaluate {
-        run,
-        offer: signed_offer,
-        confirmations,
-    } = &request
-    else {
-        panic!("unexpected request: {request:?}");
-    };
-    assert_eq!(run, &pending);
-    assert_eq!(
-        signed_offer, &offer,
-        "the actual offer is never rewritten by the pickers"
-    );
-    let mut chosen = initial;
-    chosen[0].environment = Environment::Development;
-    chosen[0].risk = RiskLevel::Low;
-    assert_eq!(confirmations, &chosen);
-    assert_eq!(
-        request.action(),
-        OwnerAction::ApproveAndEvaluate {
-            run: pending.clone(),
-            offer: offer.clone(),
-            confirmations: chosen.clone(),
-        }
-    );
-    let description = request.describe();
-    for expected in [
-        "Claude Code",
-        "development",
-        "low",
-        "api.stripe.com",
-        "acme-billing",
-        "reading",
-        "Only this exact command, execution context and directly selected script version.",
-        "next matching use",
-        "model evaluation",
-    ] {
-        assert!(description.contains(expected), "{expected}: {description}");
-    }
-    assert!(
-        !description.contains("synthetic-command-and-script-digest"),
-        "{description}"
-    );
-    assert!(
-        app.confirm_owner_now(OwnerCheck::passphrase(WRONG))
-            .is_err()
-    );
-    assert_eq!(
-        queue.pending().len(),
-        1,
-        "nothing is approved before authentication"
-    );
-    decisions::apply(
-        &mut app,
-        &egui::Context::default(),
-        &pending,
-        Answer::Evaluate {
-            offer: offer.clone(),
-            confirmations: chosen.clone(),
-        },
-    );
-    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
-        .expect("authenticate");
-    let settled = waiter.join().expect("waiter").expect("settled");
-    assert_eq!(settled.outcome, ApprovalOutcome::Approved);
-    let evaluation = settled.evaluation.expect("separate evaluation permission");
-    assert_eq!(evaluation.offer, offer);
-    assert_eq!(evaluation.confirmations, chosen);
-    assert!(settled.answer.is_none(), "no standing execution allowance");
-    assert!(settled.grant.is_none(), "no new credential grant");
+    assert!(decisions::evaluation_confirmations(&app).is_none());
+    assert!(app.owner.check.is_none());
+    assert!(queue.deny(pending.id));
+    waiter.join().expect("waiter").expect("denied");
 }
 
 #[test]
-fn evaluation_requires_a_local_offer_and_drafts_clear_on_selection_and_lock() {
+fn compatibility_evaluation_cannot_be_encoded_remotely_and_has_no_ui_draft() {
     let dir = TempDir::new().expect("dir");
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     let queue = queue_of(&mut app, &dir);
@@ -401,17 +239,14 @@ fn evaluation_requires_a_local_offer_and_drafts_clear_on_selection_and_lock() {
 
     let (waiter, pending) = ask_with_evaluation(&app, &queue, 1, pending_run, Some(offer.clone()));
     frames(&mut app, WIDE, 2);
-    assert!(decisions::evaluation_confirmations(&app).is_some());
+    assert!(decisions::evaluation_confirmations(&app).is_none());
     decisions::select_key(&mut app, Key::Run(pending.id));
     assert!(
         decisions::evaluation_confirmations(&app).is_none(),
         "selection clears edits"
     );
     frames(&mut app, WIDE, 2);
-    assert_eq!(
-        decisions::evaluation_confirmations(&app),
-        Some(vec![offer.items[0].confirmation.clone()])
-    );
+    assert_eq!(decisions::evaluation_confirmations(&app), None);
     app.lock_vault(None);
     assert!(
         decisions::evaluation_confirmations(&app).is_none(),

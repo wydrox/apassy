@@ -60,7 +60,15 @@ fn fixture(declared: Option<Declaration>) -> Fixture {
 }
 
 fn fixture_with(declared: Option<Declaration>, see_all: bool, wait: Duration) -> Fixture {
-    let bouncer = common::fake_bouncer(&[]);
+    fixture_with_model(declared, see_all, wait, common::fake_bouncer(&[]))
+}
+
+fn fixture_with_model(
+    declared: Option<Declaration>,
+    see_all: bool,
+    wait: Duration,
+    bouncer: common::FakeBouncer,
+) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
     std::fs::create_dir_all(project.join("sub")).expect("project dir");
@@ -346,7 +354,13 @@ fn turning_see_all_off_restricts_the_agent_to_its_listed_items() {
 /// answer. Another agent uses the answer.
 #[test]
 fn always_ask_for_an_agent_asks_each_time_even_with_an_answer() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
+    // Owner-question mechanics must not depend on staging being ineligible.
+    let fx = fixture_with_model(
+        Some(declaration(Environment::Staging, RiskLevel::Medium)),
+        true,
+        Duration::from_secs(10),
+        common::fake_bouncer(&[("task_match", -1.0)]),
+    );
     let handle = run_later(&fx, &fx.project, &sentry_call());
     let run = waiting(&fx);
     let project = run.question.project.clone().expect("project");
@@ -401,7 +415,13 @@ fn always_ask_for_an_agent_asks_each_time_even_with_an_answer() {
 /// The stricter answers deny the run and need no owner check.
 #[test]
 fn stricter_answers_deny_and_make_the_agent_stricter_without_an_owner_check() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
+    // Owner-question mechanics must not depend on staging being ineligible.
+    let fx = fixture_with_model(
+        Some(declaration(Environment::Staging, RiskLevel::Medium)),
+        true,
+        Duration::from_secs(10),
+        common::fake_bouncer(&[("task_match", -1.0)]),
+    );
     // "Always ask for this agent".
     let handle = run_later(&fx, &fx.project, &sentry_call());
     let run = waiting(&fx);

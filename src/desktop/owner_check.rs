@@ -1491,6 +1491,7 @@ impl DesktopApp {
                 helper,
                 self.owner_ui.session.owner_window.clone(),
                 self.auto_lock.source.clone(),
+                ctx.clone(),
             )
             .ok();
             self.start_auto_lock_read(helper.clone(), ctx);

@@ -112,7 +112,7 @@ pub fn run_with(
     )
 }
 
-/// The broker holds its vault mutex only for the final check and process spawn.
+/// The broker supplies a session-fenced spawn, without its vault mutex held.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_spawn(
     command: &[String],

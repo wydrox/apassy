@@ -427,7 +427,7 @@ pub fn analyze_with_providers(
 pub const INJECTION_FLAG: &str = "injection_phrase";
 
 /// The flag for a text that addresses the reviewer or claims an approval: the stated
-/// purpose, or the user request (goal item B2). The owner sees such a run. The model
+/// purpose, user request, or command text (goal item B2). The owner sees such a run. The model
 /// does not decide it, because the text tries to steer the model.
 pub fn injection_flag(text: &str) -> Option<&'static str> {
     has_injection(text).then_some(INJECTION_FLAG)
@@ -446,6 +446,22 @@ fn has_injection(text: &str) -> bool {
         || lower
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|word| INJECTION_WORDS.contains(&word))
+        // These are the broker's model-state labels and answer identifiers,
+        // never instructions an agent may introduce inside an input field.
+        || [
+            "user request:",
+            "shell command:",
+            "agent's stated purpose:",
+            "owner rule:",
+            "task_match",
+            "rule_break",
+            "<|system|>",
+            "<|assistant|>",
+            "[inst]",
+            "[system]",
+        ]
+        .iter()
+        .any(|label| lower.contains(label))
 }
 
 // ---- Parsing ----
@@ -4642,9 +4658,13 @@ fn clean_host(text: &str) -> Option<String> {
     let host = host.trim_end_matches('.').to_lowercase();
     let good = !host.is_empty()
         && !host.starts_with(['.', '-'])
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'));
+        && host.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '-' | '_' | ':' | '%')
+                    // Retain IDNs as unknown destinations rather than silently
+                    // erasing a host that an HTTP/database client can resolve.
+                    || (!c.is_ascii() && !c.is_control() && !c.is_whitespace())
+        });
     good.then_some(host)
 }
 

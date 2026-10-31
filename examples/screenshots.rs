@@ -120,6 +120,21 @@ fn data_dir(home: &Path) -> PathBuf {
         r#"{"auto_check": false, "auto_install": false}"#,
     )
     .expect("update settings");
+    // Optional isolated model endpoint for a live readiness/status screenshot.
+    if let Ok(url) = std::env::var("APASSY_TOUR_BOUNCER_URL") {
+        assert!(
+            url.starts_with("http://127.0.0.1:"),
+            "tour model must be loopback"
+        );
+        std::fs::write(
+            data.join("bouncer.json"),
+            serde_json::json!({
+                "start":"external", "idle_minutes":30, "url":url
+            })
+            .to_string(),
+        )
+        .expect("scratch bouncer settings");
+    }
     data
 }
 
@@ -671,6 +686,10 @@ fn seed(home: &Path) {
     )
     .expect("correction");
 
+    // Keep the question scene deterministic even when a ready model and the seeded
+    // remembered production answer are present. This affects only synthetic data.
+    v.set_always_ask(id("Stripe live"), true)
+        .expect("tour question veto");
     v.lock().expect("lock");
     println!("seeded {}", path.display());
 }
@@ -1288,6 +1307,16 @@ impl eframe::App for Tour {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Test the application's response to a system theme without changing the
+        // owner's appearance settings. The current product intentionally forces light.
+        if let Ok(theme) = std::env::var("APASSY_TOUR_SYSTEM_THEME") {
+            raw_input.system_theme = match theme.as_str() {
+                "dark" => Some(egui::Theme::Dark),
+                "light" => Some(egui::Theme::Light),
+                _ => raw_input.system_theme,
+            };
+        }
+
         for event in &raw_input.events {
             if let egui::Event::Screenshot { image, .. } = event
                 && let Some(name) = self.snapping.take()

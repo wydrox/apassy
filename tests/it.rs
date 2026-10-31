@@ -43,6 +43,7 @@ mod corrections;
 mod declaration_suggestions;
 mod desktop_model;
 mod detect;
+mod eval_harness;
 mod exceptions;
 mod first_use;
 mod folder_sync;

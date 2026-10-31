@@ -624,7 +624,7 @@ fn settings_show_start_now_and_the_first_start_download() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let text = frames(&mut app);
-    assert!(text.contains("Stopped"), "{text}");
+    assert!(text.contains("Not running"), "{text}");
     assert!(text.contains("Start now"), "{text}");
 
     // The weights are not in the cache: the start downloads them.
@@ -709,7 +709,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
     for expected in [
         "The install failed. Downloading the model weights failed",
         "The first start of the model server downloads the weights.",
-        "Stopped",
+        "Not running",
         "Install…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -1458,12 +1458,12 @@ fn a_credential_lists_and_revokes_bouncer_evaluation_permission_without_authenti
     app.select_item(item_id.to_string());
     let text = frames(&mut app);
     for expected in [
-        "Bouncer decisions",
+        "Stored bouncer scopes",
         "Claude Code",
         "reading in apassy",
         "api.example.com",
         "Only this exact command, execution context and directly selected script version.",
-        "Model evaluation only",
+        "This scope has no routing effect",
         "Remove",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -1483,7 +1483,7 @@ fn a_credential_lists_and_revokes_bouncer_evaluation_permission_without_authenti
     click_text(&mut app, "Remove");
     assert!(
         app.owner.check.is_none(),
-        "revocation is stricter and starts no owner check"
+        "removing a legacy record starts no owner check"
     );
     assert!(
         app.owner_ui
@@ -1492,7 +1492,7 @@ fn a_credential_lists_and_revokes_bouncer_evaluation_permission_without_authenti
             .expect("scopes")
             .is_empty()
     );
-    assert!(!frames(&mut app).contains("Bouncer decisions"));
+    assert!(!frames(&mut app).contains("Stored bouncer scopes"));
     assert!(
         !app.owner_ui
             .session
