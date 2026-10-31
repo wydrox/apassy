@@ -111,6 +111,12 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     match &request.action {
+        Action::Tracked { .. }
+        | Action::OperationStatus { .. }
+        | Action::CancelOperation { .. } => WireResponse::failure(
+            "invalid_request",
+            "Operation envelopes require the socket server.",
+        ),
         Action::ListAccess => list_access(vault, &request.token),
         Action::Call {
             item_id,
@@ -739,6 +745,9 @@ fn call(
         }
     };
 
+    if !super::operations::start_effect() {
+        return super::operations::cancelled_response();
+    }
     let outcome = execute(&prepared, &ctx.tls);
     let (decision, reason) = match &outcome {
         Ok(_) => (ActivityDecision::Allow, "The operation ran.".to_owned()),

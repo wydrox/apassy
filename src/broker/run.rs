@@ -1884,6 +1884,12 @@ pub(super) fn spawn_in_session(
     epoch: [u8; 32],
     cmd: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
+    if !super::operations::start_effect() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Operation cancelled before spawn.",
+        ));
+    }
     let delivery = {
         let guard = lock(vault);
         guard

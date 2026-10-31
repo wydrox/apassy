@@ -811,8 +811,21 @@ fn tool_result(response: WireResponse) -> Value {
 
 /// Broker messages can contain request names, paths, or command text. Only
 /// recognized codes and fixed messages cross the MCP diagnostic boundary.
-fn broker_error(code: &str) -> Value {
+pub(crate) fn broker_error(code: &str) -> Value {
     let (code, message) = match code {
+        "cancelled" => (code, "The operation was cancelled before execution."),
+        "unknown_outcome" | "cancellation_requested" => (
+            code,
+            "The operation may already have run; retrieve its status before retrying.",
+        ),
+        "operation_not_found" => (
+            code,
+            "No retained operation was found. It may have expired, or the broker or vault session restarted. Verify the external target before retrying.",
+        ),
+        "operation_conflict" | "idempotency_conflict" => (
+            code,
+            "The key or operation ID was used with different arguments. Nothing was replayed.",
+        ),
         "token_expired" => (code, "The Apassy agent token expired."),
         "unauthenticated" => (
             code,
