@@ -799,6 +799,9 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         None => (url.clone(), String::new()),
     };
     if method == "GET" && path == paths::HEALTH {
+        // Health has no request body. Do not let destructor draining occupy its
+        // reserved seats; guarded connections cannot have a pipelined successor.
+        request.abort_input();
         let version = Header::from_bytes("x-apassy-relay-version", env!("CARGO_PKG_VERSION"))
             .expect("the Cargo version is a valid header");
         let commit = Header::from_bytes(

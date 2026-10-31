@@ -18,6 +18,13 @@ Changes relative to that base (plus rustfmt):
   declare `Connection: close`. `response.rs` permits that header value.
 - `util/equal_reader.rs`: bounded destructor buffer. `util/mod.rs` and the dummy
   Send/Sync assertion suppress/remove preexisting unused-code warnings.
+- Independent review: reject obs-fold before trimming and restrict optional
+  whitespace to SP/HTAB; cap aggregate headers at 64 KiB; reject guarded upgrades;
+  disable guarded small-body prefetch before relay admission; cap live transports
+  at 1024 before spawning parser work. New `util/chunked.rs` replaces the inbound
+  decoder with bounded metadata, checked sizes, strict CRLF and incomplete body
+  errors. EqualReader also rejects premature EOF. `test.rs` retains the original
+  prefetch behavior for synthetic requests.
 
 The relay regression tests exercise this path dependency directly. This is a
 bounded local mitigation of the published reports, not an upstream release or a

@@ -319,24 +319,28 @@ impl Server {
             while !inside_close_trigger.load(Relaxed) {
                 let new_client = match server.accept() {
                     Ok((sock, _)) => {
-                        let guard =
-                            if let Some((header, body, handle)) = deadlines {
-                                if sock.write_timeout().is_err() {
-                                    continue;
-                                }
-                                let copy = match sock.try_clone() {
-                                    Ok(copy) => copy,
-                                    Err(_) => continue,
-                                };
-                                let guard = deadline::Deadline::new(copy, header, body);
-                                reaper.as_ref().unwrap().lock().unwrap().push((
-                                    Arc::downgrade(&guard),
-                                    std::time::Instant::now() + handle,
-                                ));
-                                Some(guard)
-                            } else {
-                                None
+                        let guard = if let Some((header, body, handle)) = deadlines {
+                            let mut tracked = reaper.as_ref().unwrap().lock().unwrap();
+                            tracked.retain(|(weak, _)| weak.strong_count() > 0);
+                            // Bound work before parsing or spawning a connection
+                            // thread, including clients that never finish headers.
+                            if tracked.len() >= 1024 {
+                                continue;
+                            }
+                            if sock.write_timeout().is_err() {
+                                continue;
+                            }
+                            let copy = match sock.try_clone() {
+                                Ok(copy) => copy,
+                                Err(_) => continue,
                             };
+                            let guard = deadline::Deadline::new(copy, header, body);
+                            tracked
+                                .push((Arc::downgrade(&guard), std::time::Instant::now() + handle));
+                            Some(guard)
+                        } else {
+                            None
+                        };
                         use util::RefinedTcpStream;
                         let (mut read_closable, mut write_closable) = match ssl {
                             None => RefinedTcpStream::new(sock),

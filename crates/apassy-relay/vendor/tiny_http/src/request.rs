@@ -7,9 +7,8 @@ use std::str::FromStr;
 
 use std::sync::mpsc::Sender;
 
-use crate::util::{EqualReader, FusedReader};
+use crate::util::{ChunkedReader, EqualReader, FusedReader};
 use crate::{HTTPVersion, Header, Method, Response, StatusCode};
-use chunked_transfer::Decoder;
 
 /// Represents an HTTP request made by a client.
 ///
@@ -138,6 +137,7 @@ pub fn new_request<R, W>(
     remote_addr: Option<SocketAddr>,
     mut source_data: R,
     writer: W,
+    prefetch_body: bool,
 ) -> Result<Request, RequestCreationError>
 where
     R: Read + Send + 'static,
@@ -216,7 +216,7 @@ where
     } else if let Some(content_length) = content_length {
         if content_length == 0 {
             Box::new(io::empty()) as Box<dyn Read + Send + 'static>
-        } else if content_length <= 1024 && !expects_continue {
+        } else if prefetch_body && content_length <= 1024 && !expects_continue {
             // if the content-length is small enough, we just read everything into a buffer
 
             let mut buffer = vec![0; content_length];
@@ -243,7 +243,8 @@ where
     } else if transfer_encoding.is_some() {
         // if a transfer-encoding was specified, then "chunked" is ALWAYS applied
         // over the message (RFC2616 #3.6)
-        Box::new(FusedReader::new(Decoder::new(source_data))) as Box<dyn Read + Send + 'static>
+        Box::new(FusedReader::new(ChunkedReader::new(source_data)))
+            as Box<dyn Read + Send + 'static>
     } else {
         // if we have neither a Content-Length nor a Transfer-Encoding,
         // assuming that we have no data

@@ -198,7 +198,7 @@ impl FromStr for Header {
         let field: HeaderField = elems.next().and_then(|f| f.parse().ok()).ok_or(())?;
         let value = elems
             .next()
-            .and_then(|v| AsciiString::from_ascii(v.trim()).ok())
+            .and_then(|v| AsciiString::from_ascii(v.trim_matches(&[' ', '\t'][..])).ok())
             .ok_or(())?;
 
         Header::from_bytes(field.as_str().as_str().as_bytes(), value.as_bytes())

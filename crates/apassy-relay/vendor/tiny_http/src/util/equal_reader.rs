@@ -39,7 +39,7 @@ where
     R: Read,
 {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        if self.size == 0 {
+        if self.size == 0 || buf.is_empty() {
             return Ok(0);
         }
 
@@ -51,6 +51,12 @@ where
 
         match self.reader.read(buf) {
             Ok(len) => {
+                if len == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "incomplete body",
+                    ));
+                }
                 self.size -= len;
                 Ok(len)
             }

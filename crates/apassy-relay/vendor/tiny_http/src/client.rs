@@ -138,16 +138,27 @@ impl ClientConnection {
             // getting all headers
             let headers = {
                 let mut headers = Vec::new();
+                let mut header_bytes = 0usize;
                 loop {
                     let line = self.read_next_line().map_err(ReadError::ReadIoError)?;
 
                     if line.is_empty() {
                         break;
                     };
-                    if headers.len() >= 100 {
+                    header_bytes += line.len() + 2;
+                    if headers.len() >= 100 || header_bytes > 64 * 1024 {
                         return Err(ReadError::WrongHeader(version));
                     }
-                    headers.push(match FromStr::from_str(line.as_str().trim()) {
+                    // Never reinterpret obs-fold as an independent header. A proxy
+                    // may unfold it into the preceding field instead.
+                    if line
+                        .as_bytes()
+                        .first()
+                        .map_or(false, |b| *b == b' ' || *b == b'\t')
+                    {
+                        return Err(ReadError::WrongHeader(version));
+                    }
+                    headers.push(match FromStr::from_str(line.as_str()) {
                         // TODO: remove this conversion
                         Ok(h) => h,
                         _ => return Err(ReadError::WrongHeader(version)),
@@ -160,6 +171,20 @@ impl ClientConnection {
             (method, path, version, headers)
         };
 
+        if self.deadline.is_some()
+            && headers.iter().any(|h: &crate::Header| {
+                h.field.equiv("Upgrade")
+                    || (h.field.equiv("Connection")
+                        && h.value
+                            .as_str()
+                            .split(',')
+                            .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
+            })
+        {
+            // Relay endpoints do not upgrade. Upstream's upgrade reader ignores
+            // Content-Length and Transfer-Encoding, so never select it here.
+            return Err(ReadError::WrongHeader(version));
+        }
         if let Some(deadline) = &self.deadline {
             deadline.body();
         }
@@ -180,6 +205,7 @@ impl ClientConnection {
             *self.remote_addr.as_ref().unwrap(),
             data_source,
             writer,
+            self.deadline.is_none(),
         )
         .map_err(|e| {
             use crate::request;
