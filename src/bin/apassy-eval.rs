@@ -39,7 +39,7 @@ use serde_json::Value;
 
 use apassy::agent::wire::{Action, WIRE_VERSION, WireRequest};
 use apassy::broker::approvals::ApprovalQueue;
-use apassy::broker::bouncer::BouncerClient;
+use apassy::broker::bouncer::{BouncerClient, BouncerVerdict, parse_answers};
 use apassy::broker::decide::{BrokerContext, evaluate_run};
 use apassy::broker::http::{
     DestinationUrl, HttpResponse, TlsClient, parse_destination, post_json_loopback,
@@ -97,7 +97,6 @@ impl Proxy {
 
     /// Forward and record inference. Execution safety does not depend on the proxy.
     fn handle_call(&self, body: &[u8]) -> HttpResponse {
-        self.calls.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
         let response = post_json_loopback(
             &self.laya,
@@ -118,6 +117,22 @@ impl Proxy {
         };
         let mut facts = BTreeMap::new();
         let mut model = None;
+        // An HTTP attempt or a malformed answer is not scored-case inference.
+        // Otherwise an all-500/all-invalid run can pass the zero-coverage gate.
+        let request: Value = serde_json::from_slice(body).unwrap_or_default();
+        let asked: Vec<_> = request["questions"]
+            .as_object()
+            .map(|questions| questions.keys().map(|name| (name.as_str(), "")).collect())
+            .unwrap_or_default();
+        if (200..300).contains(&response.status)
+            && !asked.is_empty()
+            && matches!(
+                parse_answers(&response.body, &asked),
+                BouncerVerdict::Scored { .. }
+            )
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
         if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
             model = value
                 .get("model")
