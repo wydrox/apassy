@@ -92,11 +92,11 @@ impl IdleSource {
         s.session |= session;
         session || suspended.is_some()
     }
-    fn take(&self) -> (Option<Duration>, bool) {
+    fn take(&self) -> (Option<Duration>, bool, u64) {
         let mut s = self.0.lock().unwrap();
         // Missing/stale telemetry must not unexpectedly interrupt agent runs.
         let idle = sample_idle(&s).max(s.peak.take());
-        (idle, std::mem::take(&mut s.session))
+        (idle, std::mem::take(&mut s.session), s.generation)
     }
 }
 fn clock_now() -> Duration {
@@ -264,7 +264,7 @@ impl DesktopApp {
             .session
             .with_vault(|v| v.access_expired())
             .unwrap_or(false);
-        let (idle, session) = self.auto_lock.source.take();
+        let (idle, session, generation) = self.auto_lock.source.take();
         let unlocked = fenced || !self.owner_ui.session.is_locked();
         if fenced
             || self.auto_lock.timer.due(
@@ -285,7 +285,8 @@ impl DesktopApp {
             let source = self.auto_lock.source.clone();
             let expiry: Option<Arc<dyn Fn() -> bool + Send + Sync>> = (policy != LockPolicy::Never)
                 .then(|| {
-                    let generation = source.0.lock().unwrap().generation;
+                    // Keep the generation of the consumed sample. An event that
+                    // arrives during this UI pass must invalidate the new fence.
                     let expired = AtomicBool::new(false);
                     Arc::new(move || {
                         if expired.load(Ordering::Acquire) {
@@ -380,6 +381,15 @@ mod tests {
         assert!(!session_due(&sample, 0, Duration::ZERO));
         assert!(session_due(&sample, 0, Duration::from_secs(901)));
         assert!(session_due(&sample, 1, Duration::ZERO));
+    }
+
+    #[test]
+    fn auto_lock_event_during_fence_install_keeps_the_consumed_generation() {
+        let source = IdleSource::default();
+        let (_, _, generation) = source.take();
+        source.record(Some(0.0), true);
+        let sample = source.0.lock().unwrap();
+        assert!(session_due(&sample, generation, clock_now()));
     }
 
     #[test]
