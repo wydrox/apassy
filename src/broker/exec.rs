@@ -24,7 +24,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Output bytes kept for each stream. The rest is read and dropped.
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
-/// Shorter secret values are not masked. They would damage ordinary output.
+/// Execution rejects shorter values; the standalone masker uses token boundaries.
 const MIN_MASK_BYTES: usize = 4;
 const POLL: Duration = Duration::from_millis(50);
 /// Time to collect output after the main process ends.
@@ -90,6 +90,7 @@ pub fn run(
 
 /// Run `command` with a network setup. `masks` are more values that the output
 /// must not show, for example the real values behind placeholders.
+/// Nonempty values shorter than four bytes are refused before spawning a process.
 pub fn run_with(
     command: &[String],
     cwd: &Path,
@@ -99,6 +100,16 @@ pub fn run_with(
     network: Network<'_>,
     timeout: Duration,
 ) -> io::Result<RunOutput> {
+    if secrets
+        .iter()
+        .chain(masks)
+        .any(|secret| !secret.value.is_empty() && secret.value.len() < MIN_MASK_BYTES)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A secret is shorter than four bytes, so its output cannot be safely masked. The command was not started.",
+        ));
+    }
     let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout)?;
     let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
     let masked_out = mask_output(&raw.stdout, &all);
@@ -328,8 +339,8 @@ fn mask_output(raw: &[u8], secrets: &[&SecretEnv]) -> String {
     }
 }
 
-/// Replace each secret value with `[apassy:NAME]`. Longer values go first.
-/// Each intermediate text can still contain a later secret, so it is erased.
+/// Replace secrets with `[apassy:NAME]`, preferring the longest match at each position.
+/// Short secrets require token boundaries. Replacement labels are never scanned.
 pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
     let all: Vec<&SecretEnv> = secrets.iter().collect();
     mask_all(text, &all)
@@ -339,20 +350,114 @@ fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
     let mut ordered: Vec<&SecretEnv> = secrets
         .iter()
         .copied()
-        .filter(|secret| secret.value.len() >= MIN_MASK_BYTES)
+        .filter(|secret| !secret.value.is_empty())
         .collect();
     ordered.sort_by_key(|secret| std::cmp::Reverse(secret.value.len()));
-    let mut out = text.to_owned();
-    for secret in ordered {
-        let mut replaced = out.replace(secret.value.as_str(), &format!("[apassy:{}]", secret.name));
-        std::mem::swap(&mut out, &mut replaced);
-        replaced.zeroize();
+    let mut out = String::new();
+    let mut pos = 0;
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    while pos < text.len() {
+        let matched = ordered.iter().find(|secret| {
+            let value = secret.value.as_str();
+            text[pos..].starts_with(value)
+                && (value.len() >= MIN_MASK_BYTES
+                    || (!text[..pos].chars().next_back().is_some_and(word)
+                        && !text[pos + value.len()..].chars().next().is_some_and(word)))
+        });
+        if let Some(secret) = matched {
+            out.push_str(&format!("[apassy:{}]", secret.name));
+            pos += secret.value.len();
+        } else {
+            let c = text[pos..].chars().next().expect("character boundary");
+            out.push(c);
+            pos += c.len_utf8();
+        }
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_short_secret_runs_are_refused_before_any_process_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let command = [
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'prefix%ssuffix' \"$TOKEN\"; printf '%s' \"$TOKEN\" >&2; touch \"$1\""
+                .to_owned(),
+            "sh".to_owned(),
+            marker.to_str().unwrap().to_owned(),
+        ];
+        for value in ["a", "ab", "abc", "é", "€"] {
+            let result = run(
+                &command,
+                dir.path(),
+                None,
+                &[secret("TOKEN", value)],
+                Duration::from_secs(5),
+            );
+            assert!(result.is_err(), "short value was passed to a process");
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert!(!marker.exists(), "the process must never start");
+        }
+        // Real proxy values in the additional mask list need the same protection.
+        let result = run_with(
+            &command,
+            dir.path(),
+            None,
+            &[secret("TOKEN", "placeholder")],
+            &[secret("REAL", "ab")],
+            Network::default(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn review_short_masking_preserves_words_and_masks_delimited_values() {
+        for value in ["a", "ab", "abc", "é", "€", "!"] {
+            for (left, right) in [("", ""), ("\"", "\""), ("key=", "\n"), ("[", "]")] {
+                assert_eq!(
+                    mask(&format!("{left}{value}{right}"), &[secret("TOKEN", value)]),
+                    format!("{left}[apassy:TOKEN]{right}")
+                );
+            }
+            // The explicitly documented trade-off: embedded short values remain.
+            let word = format!("prefix{value}suffix");
+            assert_eq!(mask(&word, &[secret("TOKEN", value)]), word);
+        }
+        assert_eq!(
+            mask("a cat has a name", &[secret("TOKEN", "a")]),
+            "[apassy:TOKEN] cat has [apassy:TOKEN] name"
+        );
+        // Replacements must not be rescanned, even when another secret occurs in them.
+        assert_eq!(
+            mask(
+                "long-secret abc",
+                &[
+                    secret("LONG", "long-secret"),
+                    secret("SHORT", "abc"),
+                    secret("LABEL", "apassy")
+                ]
+            ),
+            "[apassy:LONG] [apassy:SHORT]"
+        );
+    }
+
+    #[test]
+    fn audit_short_secrets_are_masked_at_token_boundaries() {
+        for value in ["x", "xy", "xyz"] {
+            let input = format!("value={value} \"{value}\" prefix{value}suffix");
+            assert_eq!(
+                mask(&input, &[secret("TOKEN", value)]),
+                format!("value=[apassy:TOKEN] \"[apassy:TOKEN]\" prefix{value}suffix")
+            );
+        }
+    }
+
     use super::*;
 
     fn secret(name: &str, value: &str) -> SecretEnv {
@@ -515,12 +620,15 @@ mod tests {
     }
 
     #[test]
-    fn mask_prefers_longer_values_and_skips_short_ones() {
+    fn mask_prefers_longer_values_and_masks_short_tokens() {
         let secrets = [
             secret("A", "abcd"),
             secret("B", "abcdef"),
             secret("C", "xy"),
         ];
-        assert_eq!(mask("abcdef abcd xy", &secrets), "[apassy:B] [apassy:A] xy");
+        assert_eq!(
+            mask("abcdef abcd xy", &secrets),
+            "[apassy:B] [apassy:A] [apassy:C]"
+        );
     }
 }

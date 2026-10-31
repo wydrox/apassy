@@ -19,6 +19,39 @@ fn cli(args: &[&str]) -> Output {
 }
 
 #[test]
+fn review_malformed_import_never_contacts_the_owner_socket() {
+    let dir = TempDir::new().unwrap();
+    let socket = dir.path().join("owner.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let file = dir.path().join("export.csv");
+    for tail in ["\"SYNTHETIC-unclosed", "\"SYNTHETIC-closed\"junk"] {
+        std::fs::write(
+            &file,
+            format!("name,password\ngood,SYNTHETIC-pass\nbad,{tail}"),
+        )
+        .unwrap();
+        let output = cli(&[
+            "import",
+            file.to_str().unwrap(),
+            "--format",
+            "csv",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        let reply: Response = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(reply.message.contains("Row 3"), "{}", reply.message);
+        assert!(!reply.message.contains("SYNTHETIC"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
 fn complete_help_paths_and_unknown_subjects_have_correct_exit_codes() {
     let direct = cli(&["help", "item", "show"]);
     assert_eq!(direct.status.code(), Some(0));

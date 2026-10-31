@@ -9,6 +9,8 @@ pub mod browser;
 #[cfg(feature = "desktop")]
 pub mod cli;
 pub mod contracts;
+/// CSV framing shared by the owner CLI and the vault import preview.
+pub mod csv;
 
 /// Local agent broker (ADR 0004). It needs the vault.
 #[cfg(feature = "vault")]

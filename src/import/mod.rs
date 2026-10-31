@@ -20,7 +20,7 @@
 //! review: `serde_json` keeps a scratch copy of a string with escapes, the deflate
 //! window is not erased, and the allocator does not erase freed memory.
 
-pub mod csv;
+pub use crate::csv;
 mod onepassword;
 pub mod zip;
 
@@ -275,21 +275,14 @@ pub struct ImportPreview {
 }
 
 impl ImportPreview {
-    /// Mark each item with the same title (trimmed, case-insensitive) and the same kind
-    /// as an existing credential. A marked item is not selected by default.
+    /// Names and kinds alone cannot establish account identity. Keep same-name
+    /// items eligible for review; no values or source IDs are available here.
     pub fn mark_existing<'a>(
         &mut self,
-        existing: impl IntoIterator<Item = (&'a str, CredentialKind)>,
+        _existing: impl IntoIterator<Item = (&'a str, CredentialKind)>,
     ) {
-        let known: BTreeSet<(String, &'static str)> = existing
-            .into_iter()
-            .map(|(title, kind)| (title.trim().to_lowercase(), kind.label()))
-            .collect();
         for item in &mut self.items {
-            if let Some(draft) = item.draft() {
-                let key = (draft.title.trim().to_lowercase(), draft.kind.label());
-                item.duplicate = known.contains(&key);
-            }
+            item.duplicate = false;
         }
     }
 
@@ -793,6 +786,15 @@ fn unique_label(raw: &str, used: &mut BTreeSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_same_name_is_not_proof_of_an_existing_account() {
+        let mut preview =
+            parse_csv("title,url,username,password\nExample,https://example.com,second,p\n")
+                .unwrap();
+        preview.mark_existing([("Example", CredentialKind::Login)]);
+        assert!(!preview.items[0].duplicate);
+    }
+
     use super::*;
 
     #[test]

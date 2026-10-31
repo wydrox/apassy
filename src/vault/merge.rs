@@ -247,8 +247,8 @@ const LWW_TABLES: [LwwTable; 4] = [
     },
 ];
 
-/// A tombstone stays this long. A copy that is older than this can bring a deleted
-/// credential back.
+/// The historical retention horizon. Deletion knowledge now stays indefinitely;
+/// time alone cannot establish that an offline replica has seen a deletion.
 pub const TOMBSTONE_DAYS: i64 = 180;
 
 /// The alias of the other copy during a merge.
@@ -1968,47 +1968,55 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
             (None, None) => {}
         }
     }
-    // Tombstones: keep the delete that saw more, drop a tombstone of a record that is
-    // here, and drop the old ones.
+    // Tombstones join clocks and take the maximum metadata independently. Both
+    // operations are associative, commutative, and idempotent, including under
+    // clock skew; the digest must converge just as the deletion decision does.
     for (uuid, theirs) in &remote_tombs {
-        let take = match local_tombs.get(uuid) {
-            None => true,
-            Some(ours) => matches!(compare(&theirs.clock, &ours.clock), Order::Newer),
-        };
-        if take {
-            tx.execute(
-                "INSERT OR REPLACE INTO sync_tombstone (uuid, deleted_at, deleted_by, clock)
-                 VALUES (?1, ?2, ?3, ?4)",
-                (
-                    uuid,
-                    theirs.deleted_at,
-                    &theirs.deleted_by,
-                    clock_text(&theirs.clock),
-                ),
+        let live: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM item WHERE uuid = ?1)",
+                [uuid],
+                |row| row.get(0),
             )
             .map_err(storage)?;
-            set_stamp(&tx, uuid, &(theirs.deleted_at, theirs.deleted_by.clone()))?;
-        } else if let Some(ours) = local_tombs.get(uuid)
-            && compare(&theirs.clock, &ours.clock) == Order::Concurrent
-        {
-            let clock = joined(&theirs.clock, &ours.clock);
-            tx.execute(
-                "UPDATE sync_tombstone SET clock = ?1 WHERE uuid = ?2",
-                (clock_text(&clock), uuid),
-            )
-            .map_err(storage)?;
+        if live {
+            // A newer or concurrent record survived the delete. Do not replace its
+            // stamp with tombstone metadata: that would invent a local edit on the
+            // next merge, even when replaying the very same remote copy.
+            continue;
         }
+        let tomb = match local_tombs.get(uuid) {
+            None => theirs.clone(),
+            Some(ours) => {
+                let later = (ours.deleted_at, &ours.deleted_by)
+                    .max((theirs.deleted_at, &theirs.deleted_by));
+                Tombstone {
+                    deleted_at: later.0,
+                    deleted_by: later.1.clone(),
+                    clock: joined(&ours.clock, &theirs.clock),
+                }
+            }
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO sync_tombstone (uuid, deleted_at, deleted_by, clock)
+                 VALUES (?1, ?2, ?3, ?4)",
+            (
+                uuid,
+                tomb.deleted_at,
+                &tomb.deleted_by,
+                clock_text(&tomb.clock),
+            ),
+        )
+        .map_err(storage)?;
+        set_stamp(&tx, uuid, &(tomb.deleted_at, tomb.deleted_by))?;
     }
     tx.execute(
         "DELETE FROM sync_tombstone WHERE uuid IN (SELECT uuid FROM item WHERE uuid IS NOT NULL)",
         [],
     )
     .map_err(storage)?;
-    tx.execute(
-        "DELETE FROM sync_tombstone WHERE deleted_at < ?1",
-        [now_ms() - TOMBSTONE_DAYS * 86_400_000],
-    )
-    .map_err(storage)?;
+    // Wall-clock age cannot prove that offline replicas saw a deletion.
+    // Keep deletion knowledge until replica-aware compaction is available.
     merge_events(&tx)?;
     preserve_legacy_conflict_origins(&tx)?;
     set_applying(&tx, false)?;
@@ -2200,7 +2208,7 @@ mod tests {
 
     const PASS: &str = "synthetic-conflict-pass";
 
-    fn draft(title: &str, value: &str) -> super::super::ItemDraft {
+    pub(super) fn draft(title: &str, value: &str) -> super::super::ItemDraft {
         super::super::ItemDraft {
             title: title.to_owned(),
             kind: crate::contracts::CredentialKind::ApiKey,
@@ -3240,5 +3248,171 @@ mod schema16_tests {
             local.sync_content(&SyncScope::vault()).unwrap(),
             expected.sync_content(&SyncScope::vault()).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    const PASS: &str = "synthetic-review-pass";
+
+    fn pair(dir: &Path) -> (Vault, Vault) {
+        let mut a = Vault::create(&dir.join("a.db"), PASS).unwrap();
+        a.unlock(PASS).unwrap();
+        let seed = dir.join("seed.db");
+        a.write_sync_copy(&seed, "A").unwrap();
+        let (mut b, _) = Vault::adopt_sync_copy(&seed, &dir.join("b.db"), PASS).unwrap();
+        b.unlock(PASS).unwrap();
+        (a, b)
+    }
+
+    fn tomb(vault: &mut Vault, uuid: &str, at: i64, by: &str, clock: &str) {
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO sync_tombstone VALUES (?1, ?2, ?3, ?4)",
+                (uuid, at, by, clock),
+            )
+            .unwrap();
+        mark_seen(vault.conn_mut().unwrap()).unwrap();
+    }
+
+    fn merge_both(dir: &Path, a: &mut Vault, b: &mut Vault) {
+        let a_copy = dir.join("a-copy.db");
+        let b_copy = dir.join("b-copy.db");
+        a.write_sync_copy(&a_copy, "A").unwrap();
+        b.write_sync_copy(&b_copy, "B").unwrap();
+        a.merge_from(&b_copy, &SyncScope::vault()).unwrap();
+        b.merge_from(&a_copy, &SyncScope::vault()).unwrap();
+        let digest = a.sync_content(&SyncScope::vault()).unwrap();
+        assert_eq!(digest, b.sync_content(&SyncScope::vault()).unwrap());
+        // Replaying either original input cannot change the union.
+        a.merge_from(&b_copy, &SyncScope::vault()).unwrap();
+        b.merge_from(&a_copy, &SyncScope::vault()).unwrap();
+        assert_eq!(digest, a.sync_content(&SyncScope::vault()).unwrap());
+        assert_eq!(digest, b.sync_content(&SyncScope::vault()).unwrap());
+    }
+
+    #[test]
+    fn review_deletions_converge_including_metadata_and_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, mut b) = pair(dir.path());
+        let clocks = ["A=1", "A=2", "B=1", "A=1;B=1"];
+        for (i, ca) in clocks.iter().enumerate() {
+            for (j, cb) in clocks.iter().enumerate() {
+                let uuid = format!("deleted-{i}-{j}");
+                // Clock skew: the causally older delete can have a later timestamp.
+                tomb(&mut a, &uuid, 2, "A", ca);
+                tomb(&mut b, &uuid, 1, "B", cb);
+            }
+        }
+        merge_both(dir.path(), &mut a, &mut b);
+        assert_eq!(
+            load_tombstones(a.conn_ref().unwrap(), "main")
+                .unwrap()
+                .len(),
+            16
+        );
+    }
+
+    #[test]
+    fn review_delete_record_clock_table_and_new_identity() {
+        let cases = [
+            ("A=1", false),    // stale record
+            ("A=2", false),    // deletion saw this exact version
+            ("A=3", true),     // same UUID, causally newer recreation
+            ("A=1;B=1", true), // edit unseen by the deleting replica
+        ];
+        for (clock, survives) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut a, mut b) = pair(dir.path());
+            let id = b
+                .add(super::tests::draft("Recreated", "SYNTH-recreated"))
+                .unwrap()
+                .id;
+            let uuid = b.item_uuids().unwrap()[&id].clone();
+            let conn = b.conn_mut().unwrap();
+            conn.execute_batch("UPDATE sync_device SET applying = 1")
+                .unwrap();
+            // A high form revision alone is not a sync version: vector clocks rule.
+            conn.execute(
+                "UPDATE item SET clock = ?1, revision = 99 WHERE id = ?2",
+                (clock, i64::try_from(id).unwrap()),
+            )
+            .unwrap();
+            conn.execute_batch("UPDATE sync_device SET applying = 0")
+                .unwrap();
+            mark_seen(conn).unwrap();
+            tomb(&mut a, &uuid, 1, "A", "A=2");
+            merge_both(dir.path(), &mut a, &mut b);
+            assert_eq!(!a.search("").unwrap().is_empty(), survives, "{clock}");
+            assert_eq!(
+                load_tombstones(a.conn_ref().unwrap(), "main")
+                    .unwrap()
+                    .is_empty(),
+                survives
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, mut b) = pair(dir.path());
+        tomb(&mut a, "deleted-identity", 1, "A", "A=2");
+        b.add(super::tests::draft("Recreated", "SYNTH-new-id"))
+            .unwrap();
+        merge_both(dir.path(), &mut a, &mut b);
+        assert_eq!(a.search("").unwrap().len(), 1);
+        assert_eq!(
+            load_tombstones(a.conn_ref().unwrap(), "main")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn audit_old_tombstone_still_blocks_a_stale_replica() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("local.db"), "synthetic-audit-pass").unwrap();
+        vault.unlock("synthetic-audit-pass").unwrap();
+        let id = vault
+            .add(crate::vault::ItemDraft {
+                title: "Synthetic".into(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![crate::vault::Field {
+                    name: "token".into(),
+                    value: crate::vault::SecretValue::new("synthetic-token".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        let stale = dir.path().join("stale.db");
+        vault.backup(&stale).unwrap();
+        vault.unlock("synthetic-audit-pass").unwrap();
+        let rev = vault.details(id).unwrap().summary.revision;
+        vault.delete(id, rev).unwrap();
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute("UPDATE sync_tombstone SET deleted_at = 1", [])
+            .unwrap();
+        let scope = SyncScope::vault();
+        // The first merge must preserve deletion knowledge, as must the next one.
+        for _ in 0..2 {
+            vault
+                .merge_from_with_passphrase(&stale, &scope, "synthetic-audit-pass")
+                .unwrap();
+            assert!(vault.search("").unwrap().is_empty());
+            let count: i64 = vault
+                .conn_ref()
+                .unwrap()
+                .query_row("SELECT count(*) FROM sync_tombstone", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
     }
 }

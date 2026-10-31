@@ -40,7 +40,7 @@ For Claude Code or Codex, use the guided setup ([ADR 0024](../adr/0024-access-at
 
 1. In Agents, click "+" ("Connect an Agent"). Select Claude Code, Codex, or T3 Code. T3 Code uses the settings of Claude Code.
 2. Click "Connect Claude Code" (or "Connect Codex", "Connect T3 Code"). One owner check gives the new token. Apassy saves the host settings and shows "Connection settings saved." There is nothing else to set: the agent sees the names of your credentials without values, and the bouncer decides each use (section 8d).
-3. Start the host from the project folder: `MCP_TOOL_TIMEOUT=330000 claude` or `codex`. The Apassy sandbox is optional ("More protection").
+3. Start the host from the project folder: `MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{"sandbox":{"enabled":false}}'` or `apassy-sandbox -- codex -c sandbox_mode=danger-full-access`. The desktop handoff uses these macOS sandbox launch commands. Configuration saved does not prove that an existing host is sandboxed or connected.
 4. In Codex, use `/hooks` to trust the hook. Use `/mcp` to check the connection.
 5. Ask the agent for a task that needs a credential. When the bouncer cannot allow the run, Apassy shows a question in Decisions (section 8d).
 
@@ -274,3 +274,9 @@ Corrections: after each allowed run, Apassy compares the use log with the declar
 ## 9. Limits
 
 See section 10 of the [broker contract](../contracts/broker-v0.md). The real-secret gate stays BLOCKED.
+
+Agent command execution refuses nonempty secret values shorter than four bytes,
+including real values behind proxy placeholders, before starting the command.
+Whole-token masking cannot safely conceal those values when embedded in output.
+
+MCP stdio input is limited to 64 KiB while reading. An oversized frame sends a JSON-RPC error with code -32600 and a null request ID, then terminates the adapter, including when the sender never writes a newline. Restart the host connection after correcting the input.
