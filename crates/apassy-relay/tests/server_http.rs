@@ -829,46 +829,120 @@ fn the_proxy_path_goes_to_the_proxy_after_the_edge_check() {
     assert_eq!(answered.headers().get("x-apassy-relay").unwrap(), "refused");
 }
 
+/// `100 Continue` is sent only after admission and authentication, when the
+/// handler starts reading the body. Use it as a barrier instead of guessing when
+/// a request has occupied a member slot.
+fn incomplete_invite(relay: &relay::TestRelay) -> std::io::BufReader<std::net::TcpStream> {
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(socket, "POST /v1/invites HTTP/1.1\r\nHost: relay\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 4096\r\nExpect: 100-continue\r\n\r\n{{", relay.edge_secret, relay.owner_token).unwrap();
+    std::io::BufReader::new(socket)
+}
+
+fn read_response_head(socket: &mut impl std::io::BufRead) -> String {
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            socket.read_line(&mut line).unwrap(),
+            0,
+            "EOF before {head:?}"
+        );
+        head.push_str(&line);
+        if line == "\r\n" {
+            return head;
+        }
+    }
+}
+
+fn assert_unreadable_body(socket: &mut impl std::io::Read) {
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert!(response.contains("Connection: close\r\n"), "{response}");
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["message"], "The body cannot be read.");
+}
+
+fn wait_for_approval_capacity(relay: &relay::TestRelay) {
+    use std::time::{Duration, Instant};
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (status, body) = relay.call("GET", "/v1/approvals", Some(&relay.owner_token), None);
+        if status == 200 {
+            return;
+        }
+        // The response may arrive just before the handler drops its slot guard.
+        // Wait for that observable release, but never retry a parsing/body error.
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "busy", "{body}");
+        assert!(Instant::now() < until, "member slots were not released");
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn stalled_and_refused_bodies_leave_health_and_approvals_available() {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpStream;
+    use std::net::Shutdown;
     use std::time::{Duration, Instant};
     let relay = relay::start_with(
         |config| {
             config.limits.max_active = 2;
             config.limits.member_reserve = 1;
-            config.request_read_timeout = Duration::from_millis(450);
         },
         UpstreamOptions::default(),
     );
-    let stalled = || {
-        let mut socket = TcpStream::connect(relay.url.trim_start_matches("http://")).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        write!(socket, "POST /v1/invites HTTP/1.1\r\nHost: relay\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 4096\r\n\r\n{{", relay.edge_secret, relay.owner_token).unwrap();
-        socket.flush().unwrap();
-        socket
-    };
-    let _first = stalled();
-    std::thread::sleep(Duration::from_millis(60));
-    // A single slow upload does not take all of the member lane.
+    // Use the normal body deadline here: capacity must stay occupied throughout
+    // this phase. Deadline expiry is exercised separately below.
+    let mut first = incomplete_invite(&relay);
+    assert!(read_response_head(&mut first).starts_with("HTTP/1.1 100 "));
     relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
-    let _second = stalled();
-    std::thread::sleep(Duration::from_millis(60));
-    let refused = stalled();
+    let mut second = incomplete_invite(&relay);
+    assert!(read_response_head(&mut second).starts_with("HTTP/1.1 100 "));
+    let mut refused = incomplete_invite(&relay);
     let started = Instant::now();
-    let mut line = String::new();
-    BufReader::new(refused).read_line(&mut line).unwrap();
-    assert!(line.contains("503"), "{line}");
+    let head = read_response_head(&mut refused);
+    assert!(head.starts_with("HTTP/1.1 503 "), "{head}");
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(
         relay::call_url(&relay.url, None, "GET", "/healthz", None, None).0,
         200
     );
-    std::thread::sleep(Duration::from_millis(550));
-    relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
+    // End the incomplete uploads explicitly, then observe both responses instead
+    // of sleeping and assuming their handlers have finished.
+    first.get_ref().shutdown(Shutdown::Write).unwrap();
+    second.get_ref().shutdown(Shutdown::Write).unwrap();
+    assert_unreadable_body(&mut first);
+    assert_unreadable_body(&mut second);
+    wait_for_approval_capacity(&relay);
+}
+
+#[test]
+fn expired_stalled_body_frees_capacity_for_a_new_connection() {
+    use std::time::Duration;
+    let relay = relay::start_with(
+        |config| {
+            config.limits.max_active = 1;
+            config.request_read_timeout = Duration::from_millis(450);
+        },
+        UpstreamOptions::default(),
+    );
+    for _ in 0..2 {
+        let mut stalled = incomplete_invite(&relay);
+        assert!(read_response_head(&mut stalled).starts_with("HTTP/1.1 100 "));
+        // A previously admitted upload expires and frees its slot. The next
+        // incomplete upload is therefore admitted, then gets a body-error 400,
+        // rather than the busy 503 the old sleep-based test always expected.
+        assert_unreadable_body(&mut stalled);
+        wait_for_approval_capacity(&relay);
+    }
 }
 
 #[test]
