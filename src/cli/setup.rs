@@ -8,7 +8,9 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(feature = "vault")]
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::args::{Args, usage};
@@ -106,6 +108,7 @@ fn quote(text: &str) -> String {
 }
 
 /// Write a wrapper with mode 0700. The directory gets mode 0700 too.
+#[cfg(feature = "vault")]
 fn write_wrapper(path: &Path, program: &Path, token: &SecretText) -> Result<(), Failure> {
     let dir = path
         .parent()

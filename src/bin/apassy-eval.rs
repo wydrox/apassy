@@ -307,7 +307,6 @@ fn main() {
         write_dump(&dump, &cases, &runs);
     }
     let failed = runs.iter().any(|run| !gate(&cases, run).passes());
-    let _ = std::fs::remove_dir_all(&tmp);
     if cases.is_empty() || failed {
         eprintln!("FAIL: unsafe allowance, harness error, or missing intended model inference");
         std::process::exit(1);
