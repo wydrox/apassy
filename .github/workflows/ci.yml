@@ -24,6 +24,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  extension:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install pinned Helium for synthetic extension tests
+        shell: bash
+        run: |
+          case "$(uname -m)" in
+            arm64) arch=arm64; sha=f9b2f312ebbaa9be09fc59a5de9191404dc008f1502434a6f319af2a4dccbac5 ;;
+            x86_64) arch=x86_64; sha=b2f7d2a8cd066c18e5d6f42d30227d77e7b39d1dc5e146fc0b09a3f225ecdadd ;;
+            *) exit 1 ;;
+          esac
+          image="$RUNNER_TEMP/helium.dmg"
+          mount="$RUNNER_TEMP/helium-volume"
+          curl --fail --location --retry 3 "https://github.com/imputnet/helium-macos/releases/download/0.20.3.1/helium_0.20.3.1_${arch}-macos.dmg" -o "$image"
+          printf '%s  %s\n' "$sha" "$image" | shasum -a 256 -c -
+          hdiutil attach "$image" -nobrowse -readonly -mountpoint "$mount"
+          trap 'hdiutil detach "$mount"' EXIT
+          ditto "$mount/Helium.app" /Applications/Helium.app
+      - name: Install Node test dependencies
+        working-directory: extension-tests
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run extension Node models
+        working-directory: extension-tests
+        run: node --test fixtures/login-journey/*.unit.mjs fixtures/passkey-bridge/*.unit.mjs fixtures/passkey-rp/unit-checks.mjs
+      - name: Run extension Playwright tests in isolated Helium profiles
+        working-directory: extension-tests
+        run: npm test
+
   macos:
     runs-on: macos-15
     steps:

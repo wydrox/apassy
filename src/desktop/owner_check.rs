@@ -226,6 +226,17 @@ pub struct PasskeyRequest {
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
+    BackupVault {
+        path: PathBuf,
+    },
+    ExportDecisions,
+    RegisterAgent {
+        name: String,
+    },
+    ChangeOwnerFrequency {
+        old: crate::broker::approvals::OwnerFrequency,
+        new: crate::broker::approvals::OwnerFrequency,
+    },
     Reveal {
         item_id: u64,
     },
@@ -561,6 +572,8 @@ impl OwnerRequest {
         matches!(
             self,
             Self::FillCode { .. }
+                | Self::SaveLogin { .. }
+                | Self::CreateLogin { .. }
                 | Self::FillLogin { .. }
                 | Self::UpdateLogin { .. }
                 | Self::SignPasskey { .. }
@@ -595,6 +608,13 @@ impl OwnerRequest {
     /// The action that the proof must name.
     pub fn action(&self) -> OwnerAction {
         match self {
+            Self::BackupVault { path } => OwnerAction::BackupVault { path: path.clone() },
+            Self::ExportDecisions => OwnerAction::ExportDecisions,
+            Self::RegisterAgent { name } => OwnerAction::RegisterAgent { name: name.clone() },
+            Self::ChangeOwnerFrequency { old, new } => OwnerAction::ChangeOwnerFrequency {
+                old: *old,
+                new: *new,
+            },
             Self::SystemFillLogin {
                 rid,
                 item_id,
@@ -894,6 +914,10 @@ impl OwnerRequest {
     /// One sentence for the owner check dialog. It has no secret value.
     pub fn describe(&self) -> String {
         match self {
+            Self::BackupVault { path } => format!("Write an encrypted vault backup to {}? The vault locks afterwards.",page_text(&path.display().to_string())),
+            Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
+            Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
+            Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
             Self::ShowCode { field, .. } => format!(
                 "Show the code of \"{}\" for 30 seconds. The other secret values stay hidden.",
@@ -1390,7 +1414,10 @@ pub(crate) struct UnlockState {
     pub(crate) setting: Option<UnlockSetting>,
     pub(crate) reading: Option<Task<UnlockSetting>>,
     pub(crate) unlocking: Option<Task<Result<Zeroizing<String>, TouchIdUnlockError>>>,
+    pub(crate) check_generation: Option<u64>,
     pub(crate) changing: Option<Task<Result<String, String>>>,
+    /// Touch ID setup verifies the passphrase outside OwnerGate (audit M33).
+    pub(crate) fresh_setup: Option<(u64, [u8; 32])>,
     /// The passphrase for Touch ID setup (A2). The app erases it after each try.
     pub(crate) setup_passphrase: String,
 }
@@ -1401,6 +1428,12 @@ pub(crate) struct UnlockState {
 pub struct OwnerFlows {
     /// `None` in tests and when the app cannot find its own executable.
     pub(crate) helper: Option<NativeHelper>,
+    pub(crate) lifecycle: Option<crate::native::owner_lifecycle::OwnerLifecycle>,
+    pub(crate) frequency_read:
+        Option<Task<Result<crate::broker::approvals::OwnerFrequency, String>>>,
+    pub(crate) frequency_write:
+        Option<Task<Result<crate::broker::approvals::OwnerFrequency, String>>>,
+    pub(crate) frequency_note: Option<String>,
     pub(crate) native: NativeState,
     native_probe: Option<Task<NativeState>>,
     pub(crate) check: Option<CheckDialog>,
@@ -1453,6 +1486,17 @@ impl DesktopApp {
     pub(crate) fn start_native(&mut self, ctx: &egui::Context) {
         let helper = NativeHelper::locate().ok();
         self.owner.helper = helper.clone();
+        if let Some(helper) = &helper {
+            self.owner.lifecycle = crate::native::owner_lifecycle::OwnerLifecycle::start(
+                helper,
+                self.owner_ui.session.owner_window.clone(),
+            )
+            .ok();
+            let helper = helper.clone();
+            self.owner.frequency_read = Some(Task::spawn(Some(ctx.clone()), move || {
+                helper.owner_policy_read().map_err(|e| e.to_string())
+            }));
+        }
         if let Some(helper) = helper.clone() {
             self.owner.native_probe = Some(Task::spawn(Some(ctx.clone()), move || {
                 match helper.ping() {
@@ -1498,11 +1542,23 @@ impl DesktopApp {
             self.owner_ui.session.shared_vault(),
             self.owner.helper.clone(),
         )
+        .with_window(self.owner_ui.session.owner_window.clone())
     }
 
     /// Ask the owner to confirm `request` (goal item A4). Nothing happens before the
     /// check passes. Touch ID starts at once when it is available.
     pub(crate) fn ask_owner(&mut self, request: OwnerRequest, ctx: Option<&egui::Context>) {
+        self.prepare_owner(request, ctx, true);
+    }
+
+    /// Prepare the exact action before attaching its source ticket. Reuse is only
+    /// attempted after provenance and ticket liveness have been checked.
+    pub(crate) fn prepare_owner(
+        &mut self,
+        request: OwnerRequest,
+        ctx: Option<&egui::Context>,
+        start: bool,
+    ) {
         self.close_owner_check(ctx);
         // The dialog of a variable names a setup key also when only its value shows it.
         let request = match request {
@@ -1539,9 +1595,43 @@ impl DesktopApp {
             .check
             .as_ref()
             .is_some_and(|dialog| dialog.request.starts_touch_id());
-        if starts && self.owner.touch_id_ready() {
+        if start && starts && self.owner.touch_id_ready() {
             self.start_owner_check(OwnerCheck::TouchId, ctx.cloned());
         }
+    }
+
+    pub(crate) fn start_local_owner(
+        &mut self,
+        source: crate::broker::approvals::LocalWindowSource,
+        eligible: bool,
+        ctx: &egui::Context,
+    ) {
+        let Some(dialog) = self.owner.check.as_ref() else {
+            return;
+        };
+        if eligible
+            && dialog.request.is_ready()
+            && let Some(proof) = self
+                .owner_gate()
+                .reuse_local(dialog.request.action(), source)
+        {
+            let dialog = self.owner.check.take().expect("checked dialog");
+            self.finish_owner_check(dialog, proof);
+            return;
+        }
+        if dialog.request.starts_touch_id() && self.owner.touch_id_ready() {
+            self.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
+        }
+    }
+
+    /// Called only after the owner clicks Allow once for this exact pending run.
+    pub(crate) fn allow_once_clicked(&mut self, request: OwnerRequest, ctx: &egui::Context) {
+        self.prepare_owner(request, Some(ctx), false);
+        self.start_local_owner(
+            crate::broker::approvals::LocalWindowSource::AllowOnceClick,
+            true,
+            ctx,
+        );
     }
 
     /// Choose account `index` of an open passkey dialog. A check that runs is for the
@@ -1560,6 +1650,9 @@ impl DesktopApp {
         };
         if index >= accounts.len() || index == *chosen {
             return;
+        }
+        if dialog.running.is_some() {
+            self.owner_ui.session.owner_window.invalidate();
         }
         *chosen = index;
         dialog.identity = next_check_dialog_identity();
@@ -1607,6 +1700,7 @@ impl DesktopApp {
     /// Close the dialog. The passphrase field and its undo history are erased.
     pub(crate) fn close_owner_check(&mut self, ctx: Option<&egui::Context>) {
         if let Some(mut dialog) = self.owner.check.take() {
+            self.owner_ui.session.owner_window.invalidate();
             dialog.passphrase.zeroize();
         }
         if let Some(ctx) = ctx {
@@ -1624,6 +1718,10 @@ impl DesktopApp {
         }
         let session = &mut self.owner_ui.session;
         match request {
+            OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
+            OwnerRequest::ExportDecisions => self.complete_fresh_export(proof),
+            OwnerRequest::RegisterAgent { name } => self.complete_fresh_agent(&name, proof),
+            OwnerRequest::ChangeOwnerFrequency { old, new } => self.save_owner_frequency(old, new, proof),
             OwnerRequest::RemovePasskey {
                 item_id,
                 revision,
@@ -2170,11 +2268,19 @@ impl DesktopApp {
             request,
             origin,
             mut browser,
-            platform,
+            mut platform,
             ..
         } = dialog;
+        let fence = proof.delivery_fence(self.owner_ui.session.shared_vault());
+        if let Some(ticket) = &mut browser {
+            ticket.delivery_fence = Some(fence.clone());
+        }
+        if let Some(ticket) = &mut platform {
+            ticket.delivery_fence = Some(fence);
+        }
         // A request without an account signs nothing, whatever proof it gets.
         if !request.is_ready() {
+            self.owner_ui.session.owner_window.invalidate();
             drop(proof);
             self.set_note("Choose an account first. Nothing was signed.");
             return;
@@ -2192,6 +2298,7 @@ impl DesktopApp {
                 })
                 .unwrap_or(false);
             if !live {
+                self.owner_ui.session.owner_window.invalidate();
                 drop(proof);
                 self.set_note(
                     "The request ended before the owner check finished. Nothing was signed or filled.",
@@ -2204,6 +2311,9 @@ impl DesktopApp {
         }
         let before = self.status_seq;
         self.complete_owner_request(request, proof);
+        if self.status_seq != before && matches!(self.status_kind, super::StatusKind::Error) {
+            self.owner_ui.session.owner_window.invalidate();
+        }
         if let Some(ticket) = origin {
             self.answer_cli_ticket(ticket, before);
         }
@@ -2243,6 +2353,7 @@ impl DesktopApp {
             self.owner.native = state;
             self.owner.native_probe = None;
         }
+        self.poll_owner_frequency(ctx);
         self.poll_owner_check(ctx);
         self.expire_browser_check(ctx);
         self.expire_platform_check(ctx);
@@ -2287,6 +2398,9 @@ impl DesktopApp {
             )),
         };
         dialog.running = None;
+        if result.is_err() {
+            self.owner_ui.session.owner_window.invalidate();
+        }
         match result {
             Ok(proof) => {
                 let Some(dialog) = self.owner.check.take() else {
@@ -2366,6 +2480,7 @@ impl DesktopApp {
             self.set_err(unlock::HELPER_MISSING_NOTE);
             return;
         };
+        self.owner.unlock.check_generation = Some(self.owner_ui.session.owner_window.generation());
         self.owner.unlock.unlocking = Some(Task::spawn(Some(ctx.clone()), move || {
             unlock::read_unlock_key(&helper, &path)
         }));
@@ -2376,13 +2491,39 @@ impl DesktopApp {
         let typed = Ephemeral::take(&mut self.owner.unlock.setup_passphrase).into_zeroizing();
         super::ui::forget_secret_field(ctx, super::ui::TOUCH_ID_SETUP_FIELD);
         let Some(helper) = self.owner.helper.clone() else {
+            self.owner_ui.session.owner_window.invalidate();
             self.set_err(unlock::HELPER_MISSING_NOTE);
             return;
         };
+        self.owner.unlock.fresh_setup = self
+            .owner_ui
+            .session
+            .epoch()
+            .map(|epoch| (self.owner_ui.session.owner_window.generation(), epoch));
         let vault = self.owner_ui.session.shared_vault();
+        let fresh = self.owner.unlock.fresh_setup;
+        let window = self.owner_ui.session.owner_window.clone();
         self.owner.unlock.changing = Some(Task::spawn(Some(ctx.clone()), move || {
-            unlock::turn_on(&helper, &vault, typed)
-                .map(|()| "Touch ID unlock is on. Touch ID can unlock this vault file now. The passphrase still works.".to_owned())
+            let result = unlock::turn_on_after_verification(&helper, &vault, typed, || {
+                let slot = vault
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some((generation, epoch)) = fresh
+                    && slot
+                        .as_ref()
+                        .is_some_and(|v| !v.is_locked() && v.epoch() == epoch)
+                {
+                    window.seed(
+                        epoch,
+                        crate::broker::approvals::CheckMethod::Passphrase,
+                        generation,
+                    );
+                }
+            });
+            if result.is_err() {
+                window.invalidate();
+            }
+            result.map(|()| "Touch ID unlock is on. Touch ID can unlock this vault file now. The passphrase still works.".to_owned())
                 .map_err(|err| err.message())
         }));
     }
@@ -2395,6 +2536,7 @@ impl DesktopApp {
         ) else {
             return;
         };
+        self.owner.unlock.fresh_setup = None;
         self.owner.unlock.changing = Some(Task::spawn(ctx.cloned(), move || {
             unlock::turn_off(&helper, &path)
                 .map(|_| note.to_owned())
@@ -2436,9 +2578,15 @@ impl DesktopApp {
             };
             if let Some(result) = result {
                 self.owner.unlock.changing = None;
+                let fresh = self.owner.unlock.fresh_setup.take();
                 match result {
                     Ok(message) => self.set_ok(message),
-                    Err(message) => self.set_err(message),
+                    Err(message) => {
+                        if fresh.is_some() {
+                            self.owner_ui.session.owner_window.invalidate();
+                        }
+                        self.set_err(message);
+                    }
                 }
                 self.refresh_unlock_setting(Some(ctx));
             }
@@ -2465,6 +2613,7 @@ impl DesktopApp {
         let key = match result {
             Ok(key) => key,
             Err(err) => {
+                self.owner_ui.session.owner_window.invalidate();
                 if matches!(
                     err,
                     TouchIdUnlockError::BiometryChanged
@@ -2477,7 +2626,16 @@ impl DesktopApp {
                 return;
             }
         };
-        let result = self.owner_ui.session.unlock(&key);
+        let Some(generation) = self.owner.unlock.check_generation.take() else {
+            self.owner_ui.session.owner_window.invalidate();
+            self.set_err("The unlock check ended. Confirm again.");
+            return;
+        };
+        let result = self.owner_ui.session.unlock_checked(
+            &key,
+            Some(generation),
+            crate::broker::approvals::CheckMethod::TouchId,
+        );
         drop(key);
         // Sync before the owner sees the list (ADR 0020).
         let loaded = if result.is_ok() {

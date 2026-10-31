@@ -6,6 +6,16 @@ The `apassy` program opens the window when it runs without arguments. With a com
 
 The command line never shows a secret value, and never takes one as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
 
+## Fresh checks for backup, export and tokens (2026-10-31)
+
+[ADR 0030](../adr/0030-owner-check-window.md) requires a fresh local owner
+check for an encrypted backup (from Settings or the CLI), CLI decision export,
+and registering an agent/issuing its token. A command-line session and the new
+owner-check window cannot replace those checks. Restore still verifies the typed
+backup passphrase and opens the restored vault locked. This supersedes earlier
+wording below that allowed these commands using only an open CLI session.
+
+
 ## 1. Install
 
 The app contains `apassy`, `apassy-mcp`, `apassy-hook`, and `apassy-sandbox`. It also contains the Seatbelt profile for `apassy-sandbox`.

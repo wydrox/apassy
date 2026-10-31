@@ -333,6 +333,7 @@ fn unlock_merges_before_the_list_and_a_lock_pushes() {
     add_item(&mut b, "From B again", "SYNTH-b2");
     lock(&mut b);
     let ctx = egui::Context::default();
+    a.owner.unlock.check_generation = Some(a.owner_ui.session.owner_window.generation());
     a.finish_touch_id_unlock(Ok(Zeroizing::new(PASS.to_owned())), &ctx);
     assert!(!a.owner_ui.session.is_locked(), "{}", a.status_text);
     assert!(names(&a).contains(&"From B again".to_owned()));

@@ -391,6 +391,7 @@
     draw("Check Touch ID on your Mac", [], "waiting");
     const reply = await send({
       type: "login_fill",
+      trustedGesture: true,
       token: target.token,
       item: login.item,
     });

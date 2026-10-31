@@ -6,6 +6,31 @@ Scope: the native side of the Mac credential provider (passkeys, passwords, one-
 Released in 0.4.1 on 2026-10-12 (the checks below were made before the release). Current evidence is at `82c641d`: [native registration and sign-in](#native-registration-and-sign-in-on-82c641d-2026-10-11). The checks at `11ca5b6` are history ([Checks on a Mac](#checks-on-a-mac-2026-10-09)), and the passkey flag correction is at `1ad43fb`. Source integration into `main` is separate from a release: the release workflow holds production until the version is dated in the changelog ([release](release.md#release-eligibility)).
 This document does not open the real-secret gate.
 
+## Owner-check frequency (ADR 0030)
+
+On this Mac, Settings > Security > **How often to ask for Touch ID** offers
+Every time (default), 1 minute, 5 minutes, 15 minutes, 1 hour, and Until the Mac
+locks. A fresh local Touch ID or passphrase check, including unlock, starts an
+absolute window. Browser password/code fill, save, create/update, macOS AutoFill
+password/code fill, passkey sign-in, and an explicitly clicked Allow once can reuse
+it. Browser fills complete without an Apassy sheet. Passkey assertions still set
+UP and UV using the recent local owner verification. Passkey create/remove,
+reveal/copy (including OTP), exports/backups/restores, durable permissions,
+production/project approvals, bouncer evaluation permission, rule relaxations,
+tokens/connections, pairing and the setting itself stay fresh. Remote/iPhone
+answers neither spend nor start the window. The iPhone app is unchanged.
+
+Use does not extend the deadline. Lock, sleep, user switch, quit, vault lock or
+switch, setting changes, failed/cancelled checks and observer loss revoke it.
+The policy is protected in this Mac's app-owned device-only Keychain item; the
+window exists only in memory. Missing/unverified storage or lifecycle state means
+Every time. Older extension/host requests without trusted gesture provenance take
+the fresh path. See [ADR 0030](../adr/0030-owner-check-window.md) for the exact
+allowlist, residual browser-automation exposure and native acceptance limits.
+This section supersedes unqualified per-fill/per-sign-in freshness wording below;
+historical device acceptance remains historical.
+
+
 ## What this is
 
 macOS asks a credential provider extension for passkeys in Safari, in native apps, and in the system passkey sheet of Chrome. It also asks for passwords and one-time codes.

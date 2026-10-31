@@ -281,6 +281,7 @@ async function ownerAction(event, message, login) {
       url: current.url,
       target: current.target,
       ...message,
+      trustedGesture: true,
     });
   } finally {
     delete main.dataset.busy;

@@ -5,7 +5,10 @@
 //! "Approve and remember", changes to grants and rules, token rotation, and a new Mac for
 //! relay sync need a fresh owner check: Touch ID now, the master passphrase now, or,
 //! for the approval of a run only, the Face ID signature of a paired iPhone (ADR 0020).
-//! [`OwnerGate::authorize`] is the only function that does this check. It is also the
+//! ADR 0030 permits narrowly scoped local reuse through the same gate for opted-in
+//! browser/AutoFill actions and an explicitly clicked Allow once. Always-fresh actions
+//! still call `authorize`. A reused proof also ends at its window deadline/revocation.
+//! [`OwnerGate::authorize`] does the fresh check. The gate is also the
 //! only way to make an [`OwnerProof`]. Each guarded action takes a proof by value:
 //!
 //! - a proof names one action and its target, for example one waiting run exactly as
@@ -86,14 +89,34 @@ const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerAction {
+    BackupVault {
+        path: PathBuf,
+    },
+    ExportDecisions,
+    RegisterAgent {
+        name: String,
+    },
+    /// Change the protected, device-local owner-check frequency. Always fresh.
+    ChangeOwnerFrequency {
+        old: super::OwnerFrequency,
+        new: super::OwnerFrequency,
+    },
     /// Show the secret values of one item.
-    Reveal { item_id: u64 },
+    Reveal {
+        item_id: u64,
+    },
     /// Show the code of one one-time password (TOTP) of one item. `field` is the field of
     /// the seed. The proof opens that field only: no password and no other secret value.
-    ShowCode { item_id: u64, field: String },
+    ShowCode {
+        item_id: u64,
+        field: String,
+    },
     /// Copy the current code of one one-time password of one item. The app computes the
     /// code itself. The seed never leaves the session.
-    CopyCode { item_id: u64, field: String },
+    CopyCode {
+        item_id: u64,
+        field: String,
+    },
     /// Copy one ordinary secret field after a fresh local owner check. The proof names
     /// its exact revision; it never contains the value or authorizes an agent read.
     CopyField {
@@ -171,7 +194,10 @@ pub enum OwnerAction {
     },
     /// Remove the passkey of one login at one revision. A login without a password is
     /// deleted with it: the dialog says so.
-    RemovePasskey { item_id: u64, revision: u64 },
+    RemovePasskey {
+        item_id: u64,
+        revision: u64,
+    },
     /// Make one passkey, for one registration request exactly as the owner saw it: the
     /// account, the algorithms, the excluded credentials, and where it goes. `origin` and
     /// `rid` as in [`OwnerAction::SignPasskey`].
@@ -230,42 +256,71 @@ pub enum OwnerAction {
     },
     /// Remove a remembered answer (ADR 0025 §3b). Removing is stricter and needs no
     /// check; the variant exists for a caller that confirms it anyway.
-    RemoveOwnerAnswer { answer_id: u64 },
+    RemoveOwnerAnswer {
+        answer_id: u64,
+    },
     /// Give an agent access to an item or change that access: a connector operation
     /// or process access.
-    ChangeGrant { agent_id: u64, item_id: u64 },
+    ChangeGrant {
+        agent_id: u64,
+        item_id: u64,
+    },
     /// Give an agent process access to several items in one change (ADR 0012).
-    ChangeGrants { agent_id: u64, item_ids: Vec<u64> },
+    ChangeGrants {
+        agent_id: u64,
+        item_ids: Vec<u64>,
+    },
     /// Let an agent see all items without values (ADR 0012). Turning it off takes
     /// authority away and needs no check.
-    ShowAllCredentials { agent_id: u64 },
+    ShowAllCredentials {
+        agent_id: u64,
+    },
     /// Change the hard rule of a process grant (ADR 0007).
-    ChangeRule { agent_id: u64, item_id: u64 },
+    ChangeRule {
+        agent_id: u64,
+        item_id: u64,
+    },
     /// Change the agent settings of an item: the declaration, the environment
     /// variable, the connector, or the review after a restore.
-    ChangeItemRules { item_id: u64 },
+    ChangeItemRules {
+        item_id: u64,
+    },
     /// Give an agent a new token.
-    RotateToken { agent_id: u64 },
+    RotateToken {
+        agent_id: u64,
+    },
     /// Connect a host in the agent guide (ADR 0024): give the agent a new token and, with
     /// `show_all`, let it see all credentials without values. One check for both.
-    ConnectAgent { agent_id: u64, show_all: bool },
+    ConnectAgent {
+        agent_id: u64,
+        show_all: bool,
+    },
     /// Change the token lifetime of all agents.
     ChangeTokenLifetime,
     /// Apply a calibrated `task_match` level of the bouncer, in hundredths (ADR 0009
     /// step 3). A return to the default level is stricter and needs no check.
-    ChangeCalibration { level: u32 },
+    ChangeCalibration {
+        level: u32,
+    },
     /// Make a candidate model from shadow mode the active model of the bouncer (ADR 0010,
     /// goal item B9). The proof names the candidate and its version.
-    PromoteModel { candidate_id: u64, version: String },
+    PromoteModel {
+        candidate_id: u64,
+        version: String,
+    },
     /// Return the bouncer to the model before one promotion (goal item B9). The proof
     /// names the promotion.
-    RollbackModel { activation_id: u64 },
+    RollbackModel {
+        activation_id: u64,
+    },
     /// Open a command-line session (ADR 0017). The session can read and change the vault
     /// like the views, but every action in this list still needs its own check.
     OpenCliSession,
     /// Bind the environment variables of several items with one check (ADR 0017, D1).
     /// The proof names each item and its variable, in the order of the dialog.
-    BindVariables { variables: Vec<(u64, String)> },
+    BindVariables {
+        variables: Vec<(u64, String)>,
+    },
     /// Bind one secret field of one item to one environment variable (ADR 0006, 0011).
     /// The proof names the field, the variable, how a process gets the value, and
     /// whether the field holds the setup key of a one-time password, exactly as the
@@ -328,6 +383,12 @@ impl OwnerAction {
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
+            Self::BackupVault { .. } => "write an encrypted vault backup".to_owned(),
+            Self::ExportDecisions => "export the decision log".to_owned(),
+            Self::RegisterAgent { .. } => "register an agent and issue its token".to_owned(),
+            Self::ChangeOwnerFrequency { .. } => {
+                "change how often Apassy asks for Touch ID".to_owned()
+            }
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
             Self::ShowCode { .. } => "show a one-time code".to_owned(),
             Self::CopyCode { .. } => "copy a one-time code".to_owned(),
@@ -862,6 +923,8 @@ pub struct OwnerProof {
     method: CheckMethod,
     epoch: [u8; 32],
     issued: Instant,
+    window: Option<super::owner_window::WindowProof>,
+    local_generation: Option<(super::owner_window::OwnerWindow, u64)>,
 }
 
 /// Why a guarded action refused a proof.
@@ -894,6 +957,8 @@ impl OwnerProof {
             method,
             epoch,
             issued: Instant::now(),
+            window: None,
+            local_generation: None,
         }
     }
 
@@ -906,6 +971,22 @@ impl OwnerProof {
             method: CheckMethod::Passphrase,
             epoch,
             issued,
+            window: None,
+            local_generation: None,
+        }
+    }
+
+    /// Read-only delivery fence, never an authorization proof. It cannot mint or
+    /// consume an action; it only prevents sending an already computed result after
+    /// expiry, lock, cancellation or a vault/session change.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn delivery_fence(&self, vault: SharedVault) -> OwnerDeliveryFence {
+        OwnerDeliveryFence {
+            vault,
+            epoch: self.epoch,
+            issued: self.issued,
+            window: self.window.clone(),
+            local_generation: self.local_generation.clone(),
         }
     }
 
@@ -920,6 +1001,11 @@ impl OwnerProof {
     /// True while the proof is younger than [`PROOF_LIFETIME`].
     pub fn is_fresh(&self) -> bool {
         self.issued.elapsed() <= PROOF_LIFETIME
+            && self.window.as_ref().is_none_or(|p| p.valid())
+            && self
+                .local_generation
+                .as_ref()
+                .is_none_or(|(w, g)| w.generation() == *g)
     }
 
     /// Check the proof for `expected` in the vault session `epoch`. Call it just before
@@ -944,13 +1030,52 @@ impl OwnerProof {
 pub struct OwnerGate {
     vault: SharedVault,
     touch_id: Option<NativeHelper>,
+    window: super::owner_window::OwnerWindow,
 }
 
 impl OwnerGate {
     /// `touch_id` is `None` when this build has no native helper. Then only the
     /// passphrase check works.
     pub fn new(vault: SharedVault, touch_id: Option<NativeHelper>) -> Self {
-        Self { vault, touch_id }
+        Self {
+            vault,
+            touch_id,
+            window: Default::default(),
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn with_window(mut self, window: super::owner_window::OwnerWindow) -> Self {
+        self.window = window;
+        self
+    }
+
+    /// Called only by the local controller after checking a live, signed browser or
+    /// AutoFill ticket, or an explicit Allow once click. Never by remote/agent APIs.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn reuse_local(
+        &self,
+        action: OwnerAction,
+        source: LocalWindowSource,
+    ) -> Option<OwnerProof> {
+        if !source.permits(&action) {
+            return None;
+        }
+        // Current OS state is checked outside the vault mutex, in addition to the
+        // revocation stream and its bounded heartbeat at proof consumption.
+        if self
+            .touch_id
+            .as_ref()
+            .is_some_and(|h| !h.owner_session_active())
+        {
+            self.window.observe(false);
+            return None;
+        }
+        let (_, epoch) = self.session().ok()?;
+        let (fence, method) = self.window.ticket(epoch)?;
+        let mut proof = OwnerProof::issue(action, method, epoch);
+        proof.window = Some(fence);
+        Some(proof)
     }
 
     /// The one owner-authorization function (goal item A4).
@@ -985,6 +1110,38 @@ impl OwnerGate {
     }
 
     fn authorize_with(
+        &self,
+        action: OwnerAction,
+        check: OwnerCheck,
+        cancel: Option<&AuthCancel>,
+    ) -> Result<OwnerProof, OwnerAuthError> {
+        let generation = self.window.generation();
+        let local = matches!(check, OwnerCheck::TouchId | OwnerCheck::Passphrase(_));
+        let mut result = self.authorize_fresh(action.clone(), check, cancel);
+        if local && result.is_ok() {
+            if self.window.generation() != generation {
+                result = Err(OwnerAuthError::SessionChanged);
+            } else if let Ok(proof) = &mut result {
+                proof.local_generation = Some((self.window.clone(), generation));
+            }
+        }
+        match &result {
+            Ok(proof)
+                if !matches!(
+                    action,
+                    OwnerAction::AnswerRemoteQuestion { .. }
+                        | OwnerAction::ChangeOwnerFrequency { .. }
+                ) =>
+            {
+                self.window.seed(proof.epoch, proof.method, generation)
+            }
+            Err(_) => self.window.invalidate(),
+            _ => {}
+        }
+        result
+    }
+
+    fn authorize_fresh(
         &self,
         action: OwnerAction,
         check: OwnerCheck,
@@ -1483,5 +1640,65 @@ mod evaluation_tests {
             proof.check(&other, &[1; 32]),
             Err(ProofRefusal::WrongAction)
         );
+    }
+}
+
+/// Internal provenance, never deserialized from a socket request.
+#[derive(Clone, Copy)]
+#[cfg(feature = "desktop")]
+pub(crate) enum LocalWindowSource {
+    BrowserGesture,
+    AutoFill,
+    AllowOnceClick,
+}
+#[cfg(feature = "desktop")]
+impl LocalWindowSource {
+    fn permits(self, action: &OwnerAction) -> bool {
+        match self {
+            Self::BrowserGesture => matches!(
+                action,
+                OwnerAction::FillLogin { .. }
+                    | OwnerAction::SaveLogin { .. }
+                    | OwnerAction::CreateLogin { .. }
+                    | OwnerAction::UpdateLogin { .. }
+                    | OwnerAction::FillCode { .. }
+                    | OwnerAction::SignPasskey {
+                        origin: Some(_),
+                        ..
+                    }
+            ),
+            Self::AutoFill => matches!(
+                action,
+                OwnerAction::FillSystemLogin { .. }
+                    | OwnerAction::FillSystemCode { .. }
+                    | OwnerAction::SignPasskey { origin: None, .. }
+            ),
+            Self::AllowOnceClick => matches!(action, OwnerAction::ApproveRun(_)),
+        }
+    }
+}
+
+#[derive(Clone)]
+#[cfg(feature = "desktop")]
+pub(crate) struct OwnerDeliveryFence {
+    vault: SharedVault,
+    epoch: [u8; 32],
+    issued: Instant,
+    window: Option<super::owner_window::WindowProof>,
+    local_generation: Option<(super::owner_window::OwnerWindow, u64)>,
+}
+#[cfg(feature = "desktop")]
+impl OwnerDeliveryFence {
+    pub(crate) fn valid(&self) -> bool {
+        let vault = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+        vault
+            .as_ref()
+            .is_some_and(|v| !v.is_locked() && v.epoch() == self.epoch)
+            && self.issued.elapsed() <= PROOF_LIFETIME
+            && self.window.as_ref().is_none_or(|w| w.valid())
+            && self
+                .local_generation
+                .as_ref()
+                .is_none_or(|(w, g)| w.generation() == *g)
     }
 }

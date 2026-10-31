@@ -275,18 +275,21 @@ impl OwnerSession {
         page: &Page,
         proof: OwnerProof,
     ) -> ModelResult<u64> {
-        drop(self.unlocked_for(
+        let mut secrets = SecretForm::default();
+        secrets.password.push_str(password.expose());
+        drop(password);
+        self.add_page_login(
+            title,
+            username,
+            page,
+            &secrets,
             proof,
             &OwnerAction::SaveLogin {
                 title: title.to_owned(),
                 username: username.to_owned(),
                 origin: page.origin(),
             },
-        )?);
-        let mut secrets = SecretForm::default();
-        secrets.password.push_str(password.expose());
-        drop(password);
-        self.add_page_login(title, username, page, &secrets)
+        )
     }
 
     /// Add a login with a new password for `page`, after the owner check (ADR 0021).
@@ -301,16 +304,6 @@ impl OwnerSession {
         symbols: bool,
         proof: OwnerProof,
     ) -> ModelResult<(u64, FillValues)> {
-        drop(self.unlocked_for(
-            proof,
-            &OwnerAction::CreateLogin {
-                title: title.to_owned(),
-                username: username.to_owned(),
-                origin: page.origin(),
-                length,
-                symbols,
-            },
-        )?);
         let password = crate::browser::password::generate(length, symbols).map_err(|_| {
             fail(
                 "refused",
@@ -319,7 +312,20 @@ impl OwnerSession {
         })?;
         let mut secrets = SecretForm::default();
         secrets.password.push_str(&password);
-        let id = self.add_page_login(title, username, page, &secrets)?;
+        let id = self.add_page_login(
+            title,
+            username,
+            page,
+            &secrets,
+            proof,
+            &OwnerAction::CreateLogin {
+                title: title.to_owned(),
+                username: username.to_owned(),
+                origin: page.origin(),
+                length,
+                symbols,
+            },
+        )?;
         Ok((
             id,
             FillValues {
@@ -335,6 +341,8 @@ impl OwnerSession {
         username: &str,
         page: &Page,
         secrets: &SecretForm,
+        proof: OwnerProof,
+        action: &OwnerAction,
     ) -> ModelResult<u64> {
         if let Some(existing) = self.login_with_username(page, username)? {
             return Err(fail(
@@ -352,7 +360,15 @@ impl OwnerSession {
             website: page.origin(),
             ..ItemDraft::default()
         };
-        Ok(self.add(&draft, secrets)?.id)
+        let mut vault = self.unlocked()?;
+        let draft = super::build_vault_draft(&vault, None, &draft, secrets)?;
+        // Retain the exact proof through preparation, then check it under the same
+        // vault mutex as the write. Generating a password or reacquiring the mutex
+        // must not carry an expired/revoked proof into another session.
+        proof
+            .check(action, &vault.epoch())
+            .map_err(|refusal| fail("owner_check_required", refusal.message()))?;
+        Ok(vault.add(draft).map_err(map_err)?.id)
     }
 
     /// Every login that may go to `page`, by title.

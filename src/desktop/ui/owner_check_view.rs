@@ -209,6 +209,23 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
     } else if let Some(index) = picked {
         // The call drops a check that runs for the account before: its proof never signs.
         app.choose_passkey(index);
+        if let Some(dialog) = app.owner.check.as_ref() {
+            let (source, eligible) = if let Some(ticket) = &dialog.browser {
+                (
+                    crate::broker::approvals::LocalWindowSource::BrowserGesture,
+                    ticket.allows_window(),
+                )
+            } else {
+                (
+                    crate::broker::approvals::LocalWindowSource::AutoFill,
+                    dialog
+                        .platform
+                        .as_ref()
+                        .is_some_and(crate::desktop::passkey_socket::PlatformTicket::is_live),
+                )
+            };
+            app.start_local_owner(source, eligible, ctx);
+        }
     } else if touch_id && ready {
         app.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
     } else if passphrase && ready {

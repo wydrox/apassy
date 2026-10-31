@@ -250,6 +250,17 @@ pub fn turn_on(
     vault: &SharedVault,
     passphrase: Zeroizing<String>,
 ) -> Result<(), SetupError> {
+    turn_on_after_verification(helper, vault, passphrase, || {})
+}
+
+/// The app observes the fresh passphrase verification at its monotonic completion,
+/// before Keychain I/O or UI polling can delay the start of an owner window.
+pub(crate) fn turn_on_after_verification(
+    helper: &NativeHelper,
+    vault: &SharedVault,
+    passphrase: Zeroizing<String>,
+    verified: impl FnOnce(),
+) -> Result<(), SetupError> {
     if passphrase.is_empty() {
         return Err(SetupError::EmptyPassphrase);
     }
@@ -274,6 +285,7 @@ pub fn turn_on(
         }
         Err(err) => return Err(SetupError::Failed(err.to_string())),
     }
+    verified();
     let secret = KeychainSecret::new(passphrase.as_bytes().to_vec())
         .map_err(|err| SetupError::Failed(err.to_string()))?;
     drop(passphrase);
