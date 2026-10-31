@@ -88,7 +88,7 @@ Apassy and the installer do not change shell files. Write the script again after
 
 ## 2. A session
 
-Only `status`, `login`, `lock`, and `unlock` work without a session.
+`status`, `login`, `lock`, and `unlock` contact the app without a session. Local help, version, completions, doctor, and browser setup also need no session. Logout without a session prints local cleanup instructions.
 
 ```sh
 apassy unlock                 # brings the window to the front; unlock it there
@@ -257,3 +257,23 @@ apassy --json item list | jq -r '.data.items[] | select(.variable == null) | .na
 - A process of the same user outside the agent profile can connect to the owner socket. Without a session, it can only read the status, lock, bring the window to the front, and ask for a login that you see in the window and can cancel.
 - The session token is in the environment of the shell and of each program that it starts. A process of the same user can read the environment of a running process (F11).
 - A process of the same user outside the profile can replace the socket before Apassy starts and read what the command line sends. Inside the profile, the socket is denied ([isolation](isolation.md)).
+
+
+## Installed-app first use
+
+1. Open and unlock Apassy. In Settings > Tools install the command links; follow the PATH instructions above.
+2. Connect the host in Agents, or run `eval "$(apassy login)"` and `apassy setup claude --write` (use `codex` for Codex). Setup selects the bundled MCP and hook programs automatically.
+3. Start the copied `apassy-sandbox` command in your project. For Codex, accept hook trust through `/hooks`.
+4. Check `/mcp`, list the catalog, and make a first request using a synthetic credential. Inspect the result and Decisions. A saved config or doctor result does not prove this connection works.
+
+## JSON output contract
+
+For doctor, setup browser, logout, and decisions export, `--json` writes exactly one JSON document to stdout. Progress belongs on stderr. Parse the whole document, then inspect `ok` and the exit status. Results use `ok`, `code`, and command data; completed stages include `stage` and `partial_state`. Failures before a stage starts use the standard `ok`, `code`, `message`, `data` error envelope. Partial browser changes are reported and are not rolled back. Setup host configuration follows the same envelope convention.
+
+Doctor includes `checks`; a failed report exits 1 without a second error document. `unverified` means the diagnostic cannot prove connection, hook execution, or enforcement. Doctor reads configuration and never launches referenced commands.
+
+Logout returns `data.shell_command` for clearing the local environment; JSON itself is not shell code. Decisions export returns `data.jsonl` as a JSON string, or `data.output` and `data.bytes` after a mode-0600 create-new file write. Without `--json`, export remains JSON Lines.
+
+No stored secret values or wrapper contents belong in diagnostics. Issued session/agent tokens are exceptions only for commands deliberately requesting issuance. Help, version, and completions are text-only even with `--json`.
+
+MCP errors expose `structuredContent.code`, `message`, `next_step`, and `retryable`. `question_waiting` means another owner question must finish. A transport timeout or lost response can leave execution outcome unknown: inspect activity and the external target before retrying a mutation. The synchronous adapter does not promise deduplication or safe replay. Supplied literal secrets are masked in run output; transformed, fragmented, or unrelated secrets may remain. Request only needed non-secret fields.

@@ -47,7 +47,7 @@ flowchart LR
     D -.->|"placeholder mode"| G["Apassy proxy<br/>real key only to the<br/>hosts you allow"]
 ```
 
-- **The agent never receives the value.** The broker socket never returns a secret. The secret exists only in the environment of the command ([ADR 0006](docs/adr/0006-process-secrets.md)).
+- **Credential values stay out of catalog responses.** Run output masks supplied literal values, but transformed, fragmented, or unrelated secrets may remain. Commands should return only needed non-secret fields. The command receives its credential ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - **Placeholders.** A variable can hold a placeholder that looks like the key. Apassy's proxy puts the real value only into HTTPS requests to the hosts of that credential, and refuses the placeholder anywhere else ([ADR 0011](docs/adr/0011-run-proxy-placeholders.md)).
 - **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential waits for you, unless you allowed production for that project and kind of action ([bouncer](docs/operations/bouncer.md), [ADR 0025](docs/adr/0025-low-friction-access.md)).
 - **It learns.** "Allow ACTION in PROJECT" remembers your answer for the credential, the project, and the kind of action, and the line under Decisions shows how often you were asked this week ([learning](docs/operations/learning.md)).
@@ -123,13 +123,13 @@ cargo test --locked --all-features                # the test suite
    }
    ```
 
-   Do not commit a file with a token. Give the host a tool time-out of at least 330 seconds (for Claude Code, `MCP_TOOL_TIMEOUT=330000`): a question waits up to 5 minutes for you. The agent can then call `apassy_list_access`, `apassy_run_with_secrets`, and `apassy_use_credential`.
-3. There is nothing else to set up. The agent sees the names of your credentials, never their values. The bouncer decides each use, and asks you in **Decisions** when it is not sure ([ADR 0025](docs/adr/0025-low-friction-access.md)).
-4. Recommended: install the prompt hook ([host hooks](docs/operations/host-hooks.md)), and start the host in Apassy's sandbox with its own sandbox off, for example `apassy-sandbox -- codex -c sandbox_mode=danger-full-access` ([isolation](docs/operations/isolation.md), section 3).
+   Do not commit a file with a token. Give the host a tool time-out of at least 660 seconds (for Claude Code, `MCP_TOOL_TIMEOUT=660000`): a question waits up to 5 minutes for you. The agent can then call `apassy_list_access`, `apassy_run_with_secrets`, and `apassy_use_credential`.
+3. Launch the copied sandbox command for your project, trust the Codex hooks if prompted, and check `/mcp`. Test with a synthetic credential and inspect Decisions. The catalog shows credential names without values. Run output has the masking limits described in “What Apassy does not protect”. The bouncer decides each use, and asks you in **Decisions** when it is not sure ([ADR 0025](docs/adr/0025-low-friction-access.md)).
+4. Setup installs the sibling prompt hook ([host hooks](docs/operations/host-hooks.md)). Start the host in Apassy's sandbox with its own sandbox off, for example `apassy-sandbox -- codex -c sandbox_mode=danger-full-access` ([isolation](docs/operations/isolation.md), section 3).
 
 The full first-day checklist is [daily use](docs/operations/daily-use.md).
 
-Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write` registers the agent and connects the MCP server, with the token in a wrapper script instead of the host configuration. The prompt hook needs `--hook PATH` with an `apassy-hook` from a source build.
+Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write` registers the agent and connects the MCP server, with the token in a wrapper script instead of the host configuration. Setup selects the bundled sibling `apassy-hook` automatically. Follow the [installed-app checklist](docs/operations/cli.md#installed-app-first-use).
 
 ## Command line
 
