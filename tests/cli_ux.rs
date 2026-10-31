@@ -162,10 +162,11 @@ fn doctor_json_session_fix_has_shell_quotes_without_extra_backslashes() {
         .output()
         .unwrap();
     server.join().unwrap();
-    // Doctor emits its report, followed by a failure response when a check fails.
+    // Doctor emits exactly one report even when checks fail.
     let mut values =
         serde_json::Deserializer::from_slice(&output.stdout).into_iter::<serde_json::Value>();
     let report = values.next().unwrap().unwrap();
+    assert!(values.next().is_none());
     let session = report["checks"]
         .as_array()
         .unwrap()
@@ -312,4 +313,239 @@ fn add_reads_the_paste_from_stdin_and_prints_one_line_for_each_credential() {
             .unwrap()
             .contains("apassy add [--folder PATH")
     );
+}
+
+#[test]
+fn audit_output_commands_emit_one_json_document_in_scratch_home() {
+    let dir = TempDir::new().unwrap();
+    for words in [
+        vec!["logout", "--json"],
+        vec!["doctor", "--json"],
+        vec!["setup", "browser", "--json"],
+        vec!["decisions", "export", "--json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+            .args(&words)
+            .args([
+                "--socket",
+                dir.path().join("missing.sock").to_str().unwrap(),
+            ])
+            .env_remove("APASSY_SESSION")
+            .env("HOME", dir.path())
+            .env("CLAUDE_CONFIG_DIR", dir.path().join("custom-claude"))
+            .env("CODEX_HOME", dir.path().join("codex"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{words:?}: {e}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+        assert!(value["ok"].is_boolean());
+        if words[0] == "logout" {
+            assert!(output.status.success());
+            assert!(value["data"]["shell_command"].is_string());
+        } else {
+            assert!(!output.status.success());
+        }
+    }
+}
+
+#[test]
+fn audit_doctor_honors_custom_claude_configs_and_disabled_entries() {
+    let dir = TempDir::new().unwrap();
+    let custom = dir.path().join("custom");
+    std::fs::create_dir(&custom).unwrap();
+    for config in [
+        "not json",
+        r#"{"mcpServers":{"apassy":{"command":"/missing/wrapper"}}}"#,
+        r#"{"mcpServers":{"apassy":{"command":"/bin/sh","disabled":true}}}"#,
+    ] {
+        std::fs::write(custom.join(".claude.json"), config).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+            .args([
+                "doctor",
+                "--json",
+                "--socket",
+                dir.path().join("missing.sock").to_str().unwrap(),
+            ])
+            .env_remove("APASSY_SESSION")
+            .env("HOME", dir.path())
+            .env("CLAUDE_CONFIG_DIR", &custom)
+            .env("CODEX_HOME", dir.path().join("codex"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            value["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["level"] == "problem"
+                    && (c["name"] == "Claude Code" || c["name"] == "Host config"))
+        );
+        assert!(
+            value["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["level"] == "unverified")
+        );
+    }
+}
+
+#[test]
+fn audit_doctor_handles_malformed_disabled_entries_and_unreadable_codex_config() {
+    let dir = TempDir::new().unwrap();
+    let custom = dir.path().join("custom");
+    let codex = dir.path().join("codex");
+    std::fs::create_dir(&custom).unwrap();
+    // A directory at the config path must be diagnosed as unreadable, not empty.
+    std::fs::create_dir_all(codex.join("config.toml")).unwrap();
+    for entry in [
+        serde_json::json!(false),
+        serde_json::json!("synthetic-secret"),
+        serde_json::json!(null),
+    ] {
+        let cwd = dir.path().to_str().unwrap();
+        let config = serde_json::json!({
+            "mcpServers": {"apassy": entry},
+            "projects": {(cwd): {"disabledMcpServers": ["apassy"]}}
+        });
+        std::fs::write(custom.join(".claude.json"), config.to_string()).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_apassy"))
+            .args([
+                "doctor",
+                "--json",
+                "--socket",
+                dir.path().join("missing.sock").to_str().unwrap(),
+            ])
+            .env_remove("APASSY_SESSION")
+            .env("HOME", dir.path())
+            .env("CLAUDE_CONFIG_DIR", &custom)
+            .env("CODEX_HOME", &codex)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let checks = value["checks"].as_array().unwrap();
+        for host in ["Claude Code", "Codex"] {
+            assert!(
+                checks
+                    .iter()
+                    .any(|check| check["name"] == host && check["level"] == "problem")
+            );
+        }
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-secret"));
+    }
+}
+
+#[test]
+fn audit_export_json_wraps_jsonl_and_file_metadata() {
+    for to_file in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let socket = dir.path().join("owner.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let response = Response {
+                ok: true,
+                code: "ok".into(),
+                message: "Synthetic export".into(),
+                data: Data::Export {
+                    jsonl: "{\"synthetic\":true}\n".into(),
+                },
+            };
+            serde_json::to_writer(&mut stream, &response).unwrap();
+            stream.write_all(b"\n").unwrap();
+        });
+        let path = dir.path().join("export.jsonl");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_apassy"));
+        cmd.args([
+            "decisions",
+            "export",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ]);
+        if to_file {
+            cmd.args(["--output", path.to_str().unwrap()]);
+        }
+        let output = cmd
+            .env_remove("APASSY_SESSION")
+            .env("HOME", dir.path())
+            .env("CLAUDE_CONFIG_DIR", dir.path().join("claude"))
+            .output()
+            .unwrap();
+        server.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if to_file {
+            assert_eq!(value["data"]["output"], path.to_str().unwrap());
+            assert!(path.is_file());
+        } else {
+            assert_eq!(value["data"]["jsonl"], "{\"synthetic\":true}\n");
+        }
+    }
+}
+
+#[test]
+fn audit_browser_json_reports_success_and_partial_manifest_changes() {
+    let dir = TempDir::new().unwrap();
+    let macos = dir.path().join("Synthetic.app/Contents/MacOS");
+    std::fs::create_dir_all(&macos).unwrap();
+    let program = macos.join("apassy");
+    std::fs::hard_link(env!("CARGO_BIN_EXE_apassy"), &program).unwrap();
+    std::fs::write(
+        macos.join("apassy-browser-host"),
+        "synthetic placeholder, never executed",
+    )
+    .unwrap();
+    let support = dir.path().join("Library/Application Support");
+    std::fs::create_dir_all(support.join("net.imput.helium")).unwrap();
+    let run = |words: &[&str]| {
+        let output = Command::new(&program)
+            .args(words)
+            .env_remove("APASSY_SESSION")
+            .env("HOME", dir.path())
+            .env("CLAUDE_CONFIG_DIR", dir.path().join("claude"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status, value)
+    };
+    let (status, result) = run(&["setup", "browser", "--browser", "helium", "--json"]);
+    assert!(status.success());
+    assert_eq!(result["partial_state"]["changes"][0]["state"], "written");
+    let (status, result) = run(&[
+        "setup",
+        "browser",
+        "--browser",
+        "helium",
+        "--remove",
+        "--json",
+    ]);
+    assert!(status.success());
+    assert_eq!(result["partial_state"]["changes"][0]["state"], "removed");
+    let chrome = support.join("Google/Chrome");
+    std::fs::create_dir_all(&chrome).unwrap();
+    std::fs::write(chrome.join("NativeMessagingHosts"), "synthetic blocker").unwrap();
+    let (status, result) = run(&["setup", "browser", "--json"]);
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(result["stage"], "manifests");
+    assert_eq!(result["partial_state"]["changes"][0]["state"], "written");
 }

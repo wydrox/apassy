@@ -18,7 +18,7 @@ pub fn usage(text: impl Into<String>) -> Usage {
 }
 
 /// The words after the command name. Taken words become `None`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Args {
     words: Vec<Option<String>>,
 }

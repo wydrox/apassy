@@ -197,7 +197,14 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
         "vault" => commands::vault(cli, args),
         "backup" => commands::backup(cli, args),
         "doctor" => doctor::run(cli, args),
-        "setup" => setup::run(cli, args),
+        "setup" => {
+            if args.clone().positional().as_deref() == Some("browser") {
+                args.positional();
+                browser::run_with_json(args, cli.json)
+            } else {
+                setup::run(cli, args)
+            }
+        }
         "completions" => completions::run(args),
         other => Err(Failure::Usage(args::usage(format!(
             "Unknown command \"{other}\". Run apassy --help."
@@ -223,12 +230,10 @@ fn report(failure: Failure, json: bool) -> i32 {
         Failure::Other(message) => ("failed".to_owned(), message, EXIT_FAILED),
     };
     if json {
-        print_json(&Response {
-            ok: false,
-            code,
-            message,
-            data: Data::None,
-        });
+        print_json(&serde_json::json!({
+            "ok": false, "code": code, "message": message, "data": Data::None,
+            "stage": "request", "partial_state": {}
+        }));
     } else {
         eprintln!("apassy: {}", print::clean(&message));
     }

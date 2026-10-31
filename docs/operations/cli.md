@@ -88,7 +88,7 @@ Apassy and the installer do not change shell files. Write the script again after
 
 ## 2. A session
 
-Only `status`, `login`, `lock`, and `unlock` work without a session.
+`status`, `login`, `lock`, and `unlock` contact the app without a session. Local help, version, completions, doctor, and browser setup also need no session. Logout without a session prints local cleanup instructions.
 
 ```sh
 apassy unlock                 # brings the window to the front; unlock it there
@@ -196,23 +196,23 @@ apassy agent lifetime 30                  # owner check
 apassy grant operation "Claude Code" Reporting get_sales_summary   # owner check
 ```
 
-Since 0.5.0 an agent needs no grant ([ADR 0025](../adr/0025-low-friction-access.md)). Connecting it is the only setup, and the bouncer decides each use of each credential.
+Since 0.5.0 a connected agent needs no process grant ([ADR 0025](../adr/0025-low-friction-access.md)). A new terminal setup connection asks for catalog consent in its fresh owner approval, as GUI onboarding does. Raw registration with `agent add` stays restricted. Existing agents keep their visibility and token; the bouncer decides each use of each visible credential.
 
 - `apassy grant operation` allows one connector operation for `apassy_use_credential`. The app has no switch for it.
 - `apassy grant set`, `grant rule`, and `grant remove` still save or remove a process grant with its folder, mode, and rule. The broker does not read them for a run. A process grant only adds the credential to the list of an agent with "Only these items", and shows in `process_access` of `apassy_list_access`.
 - `apassy agent see-all AGENT off` gives the agent "Only these items" (no owner check). `on` removes it.
 - The command line has no command for exceptions. Answer a question in Decisions with "Never for AGENT" or "Always Ask for AGENT", and remove an exception on the page of the agent.
 
-`setup` writes `~/.config/apassy/apassy-mcp-HOST.sh` and `~/.config/apassy/apassy-hook-HOST.sh` with mode 0700. These wrapper scripts hold the token. The host configuration files do not hold the token.
+`setup --write` writes `~/.config/apassy/apassy-mcp-HOST.sh` and `~/.config/apassy/apassy-hook-HOST.sh` with mode 0700. These wrapper scripts hold the token. The host configuration files do not hold the token.
 
 The app contains both programs. `setup` uses them without a source build or `--hook PATH` ([host hooks](host-hooks.md)). For an older app without `apassy-hook`, install the current app first.
 
-Without `--write`, `setup` prints the configuration. With `--write`, it adds the MCP server and the prompt hook:
+Without `--write`, Claude/Codex setup validates and previews configuration only: it creates no agent or files and needs no session. With `--write`, setup checks helpers, host/hook configuration, and destinations before connecting. A retry reuses complete managed wrappers and their existing token. Incomplete wrappers require explicit repair with the existing token through `--token-stdin`; setup does not rotate or broaden an existing agent. With `--write`, it adds the MCP server and the prompt hook:
 
 - Claude Code gets the MCP server through `claude mcp add --scope user`. It gets the prompt hook in `~/.claude/settings.json`.
 - Codex gets `[mcp_servers.apassy]` in `~/.codex/config.toml`. It gets the prompt hook in `~/.codex/hooks.json`.
 
-A copy of each changed file stays next to it (`.before-apassy`). Trust the hook in Codex with `/hooks`.
+The default paths above honor `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. Managed setup uses 660 seconds for Codex and `MCP_TOOL_TIMEOUT=660000` for Claude Code, above the default 300-second owner wait plus 300-second run budget. It migrates the recognized legacy 330-second value once and preserves other custom timeout values. A copy of an existing changed host/hook file stays next to it (`.before-apassy`). Trust the hook in Codex with `/hooks`.
 
 `apassy setup browser` connects the browser extension: it writes the native messaging host manifest for each browser on this Mac and prints the folder of the extension. It registers no agent and needs no session. `--browser NAME` selects one browser, and `--remove` deletes the manifests ([browser](browser.md)).
 
@@ -246,7 +246,7 @@ apassy vault restore /Volumes/Backup/apassy.backup   # opens the restore sheet i
 
 ## 8. Scripts
 
-`--json` prints the full response. A failure prints `{"ok": false, "code": …, "message": …}`. The exit code is 0 for done, 1 when Apassy refused, 2 for a usage error, and 3 when Apassy is not running.
+`--json` prints one response document on stdout, with progress on stderr. The exit code is 0 for done, 1 when Apassy refused or a diagnostic failed, 2 for a usage error, and 3 when an app request cannot connect. Doctor reports a missing app as a failed diagnostic with exit 1. See the JSON output contract below for command data and partial changes.
 
 ```sh
 apassy --json item list | jq -r '.data.items[] | select(.variable == null) | .name'
@@ -257,3 +257,25 @@ apassy --json item list | jq -r '.data.items[] | select(.variable == null) | .na
 - A process of the same user outside the agent profile can connect to the owner socket. Without a session, it can only read the status, lock, bring the window to the front, and ask for a login that you see in the window and can cancel.
 - The session token is in the environment of the shell and of each program that it starts. A process of the same user can read the environment of a running process (F11).
 - A process of the same user outside the profile can replace the socket before Apassy starts and read what the command line sends. Inside the profile, the socket is denied ([isolation](isolation.md)).
+
+
+## Installed-app first use
+
+1. Open and unlock Apassy. In Settings > Tools install the command links; follow the PATH instructions above.
+2. Connect the host in Agents, or run `eval "$(apassy login)"` and `apassy setup claude --write` (use `codex` for Codex). Setup selects the bundled MCP and hook programs automatically.
+3. Start the copied `apassy-sandbox` command in your project. For Codex, accept hook trust through `/hooks`.
+4. Check `/mcp`, list the catalog, and make a first request using a synthetic credential. Inspect the result and Decisions. A saved config or doctor result does not prove this connection works.
+
+## JSON output contract
+
+For doctor, setup (Claude, Codex, and browser), logout, and decisions export, `--json` writes exactly one JSON document to stdout. Progress and human instructions belong on stderr. Parse the whole document, then inspect `ok` and the exit status. These results share `ok`, `code`, `stage`, and `partial_state`; command data is in `data`, or `checks` for doctor. A `message` may explain the result. Failures before command work starts use the standard `ok`, `code`, `message`, `data` error envelope with `stage: "request"` and empty `partial_state`. Partial browser changes are reported and are not rolled back.
+
+Claude/Codex setup returns `data.type: "setup"` and `data.connection_verified: false`. Its top-level `stage` is the last marker reached (or `preflight` before any marker). `partial_state.stages` lists the ordered markers reached; `partial_state.partial` means a failed setup made confirmed changes, and `partial_state.changes_unknown` means a connection request lost its response and may have created an agent. Check both flags before recovery. Without `--write`, a successful preview has `stage: "preview"` and neither flag set. Setup usage errors exit 2, a missing app during connection exits 3, and other failures exit 1.
+
+Doctor includes `checks`; a failed report exits 1 without a second error document. `unverified` means the diagnostic cannot prove connection, hook execution, or enforcement. Doctor reads configuration and never launches referenced commands.
+
+Logout returns `data.shell_command` for clearing the local environment; JSON itself is not shell code. Decisions export returns `data.jsonl` as a JSON string, or `data.output` and `data.bytes` after a mode-0600 create-new file write. Without `--json`, export remains JSON Lines.
+
+No stored secret values or wrapper contents belong in diagnostics. Issued session/agent tokens are exceptions only for commands deliberately requesting issuance. Help, version, and completions are text-only even with `--json`.
+
+MCP errors expose `structuredContent.code`, `message`, `next_step`, and `retryable`. Error codes and messages are allowlisted; raw broker text and caller-controlled parameter names are not copied into diagnostics. Unknown broker refusal codes become `broker_error`. `question_waiting` means another owner question must finish. A transport timeout or lost response can leave execution outcome unknown: inspect activity and the external target before retrying a mutation. The synchronous adapter does not promise deduplication or safe replay. Supplied literal secrets are masked in run output; transformed, fragmented, or unrelated secrets may remain. Request only needed non-secret fields.

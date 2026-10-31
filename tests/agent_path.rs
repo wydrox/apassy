@@ -682,8 +682,12 @@ fn mcp_adapter_explains_an_expired_token() {
         .as_str()
         .unwrap_or_default();
     assert!(
-        text.starts_with("token_expired: The Apassy agent token expired on"),
+        text.starts_with("token_expired: The Apassy agent token expired."),
         "{text}"
+    );
+    assert_eq!(
+        reply["result"]["structuredContent"]["code"],
+        "token_expired"
     );
     assert!(text.contains("Rotate token"), "{text}");
     assert!(!text.contains(&fx.token));
