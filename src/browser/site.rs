@@ -11,10 +11,9 @@
 //!   website: a website without a port matches only the default port. On a loopback
 //!   host another port is another program.
 //!
-//! The code needs no URL crate and no public suffix list. The browser gives the page
-//! address in its canonical form (lowercase, punycode), so the page parser refuses what
-//! it does not expect. The website parser takes what an owner types or what an import
-//! brings: no scheme, uppercase, a path.
+//! Both hosts use IDNA canonicalization. A Website cannot be an ICANN or private
+//! public suffix; the pinned PSL is also used by WebAuthn. No registrable-domain
+//! widening is performed. Website values may omit a scheme or include a path.
 
 use std::fmt;
 
@@ -165,6 +164,11 @@ impl Website {
             None => (Scheme::Https, value),
         };
         let (host, port) = parse_authority(&authority(rest).to_ascii_lowercase(), scheme)?;
+        if let Host::Name(name) = &host
+            && is_public_suffix(name)
+        {
+            return None;
+        }
         Some(Self { host, port })
     }
 
@@ -176,9 +180,9 @@ impl Website {
         match (&self.host, &page.host) {
             (Host::Name(site), Host::Name(host)) => {
                 host == site
-                    || site
-                        .strip_prefix("www.")
-                        .is_some_and(|bare| bare.contains('.') && host == bare)
+                    || site.strip_prefix("www.").is_some_and(|bare| {
+                        bare.contains('.') && !is_public_suffix(bare) && host == bare
+                    })
                     || (site.contains('.')
                         && host.len() > site.len()
                         && host.ends_with(site.as_str())
@@ -189,6 +193,11 @@ impl Website {
             _ => false,
         }
     }
+}
+
+fn is_public_suffix(name: &str) -> bool {
+    psl::suffix(name.as_bytes())
+        .is_some_and(|suffix| suffix.is_known() && suffix.as_bytes() == name.as_bytes())
 }
 
 /// True when a visible field of a login holds a website: the field `website` or `url`,
@@ -257,7 +266,7 @@ fn parse_host(text: &str) -> Option<Host> {
                 .all(|byte| byte.is_ascii_hexdigit() || byte == b':' || byte == b'.');
         return valid.then(|| Host::V6(format!("[{}]", inner.to_ascii_lowercase())));
     }
-    let name = text.strip_suffix('.').unwrap_or(text).to_ascii_lowercase();
+    let name = idna::domain_to_ascii_strict(text.strip_suffix('.').unwrap_or(text)).ok()?;
     if name.is_empty() || name.len() > 253 {
         return None;
     }
@@ -414,6 +423,29 @@ mod tests {
         assert_eq!(Website::parse("ftp://files.example.com"), None);
         assert_eq!(Website::parse("user@example.com"), None);
         assert_eq!(Website::parse("not a host"), None);
+    }
+
+    #[test]
+    fn idn_hosts_canonicalize_on_both_sides_without_widening() {
+        assert!(matches("bücher.de", "https://xn--bcher-kva.de/"));
+        assert!(matches("xn--bcher-kva.de", "https://bücher.de/"));
+        assert!(matches("BÜCHER.de", "https://shop.bücher.de/"));
+        assert!(!matches("shop.bücher.de", "https://auth.bücher.de/"));
+        assert!(!matches("bücher.de:8443", "https://bücher.de/"));
+        assert_eq!(Page::parse("http://bücher.de/"), Err(PageError::Insecure));
+        assert_eq!(page("https://bücher.de").host(), "xn--bcher-kva.de");
+    }
+
+    #[test]
+    fn public_suffix_websites_are_refused_including_private_and_idn() {
+        for suffix in ["com", "co.uk", "github.io", "appspot.com", "рф"] {
+            assert_eq!(Website::parse(suffix), None, "{suffix}");
+        }
+        assert!(matches("alice.github.io", "https://alice.github.io/"));
+        assert!(!matches("alice.github.io", "https://bob.github.io/"));
+        assert!(matches("example.co.uk", "https://app.example.co.uk/"));
+        assert!(!matches("www.github.io", "https://github.io/"));
+        assert!(!matches("www.co.uk", "https://co.uk/"));
     }
 
     #[test]

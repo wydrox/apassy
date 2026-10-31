@@ -7,8 +7,14 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 ### Added
 
 - **Mac owner checks:** Settings > Security now offers How often to ask for Touch ID. Every time stays the default. Protected per-device windows cover browser and macOS AutoFill password/code actions, passkey sign-ins and explicitly clicked Allow once. Lock, sleep, user switch, vault lifecycle changes and failed/cancelled checks revoke them. Sensitive and durable actions still require fresh checks. Encrypted backup, CLI decision export and CLI token issuance now also take fresh checks. iPhone is unchanged.
+### Changed
+
+- **Browser extension:** suggest site-matched account metadata on all granted HTTPS sites and localhost by default, including existing broad passkey grants. One permission button, one global switch and per-site exclusions replace per-host activation. Compact account rows, site-local search, account details, approval context and paired light/dark styling keep settings behind a small link.
 
 ### Fixed
+
+- **Browser suggestions:** query already-focused fields on injection, enablement and reload; recognize conservative label-only username fields while excluding search, OTP, newsletters and text-displayed passwords. Distinguish username filter misses from no site logins and missing Website guidance. Support same-origin blank/srcdoc frames, explain cross-origin refusals, and measure inline placement to avoid page actions. Fill and save triggers refuse untrusted events and retain app approval.
+- **Browser matching:** canonicalize IDNs on both sides and reject ICANN/private public-suffix Websites with the existing pinned PSL. Preserve exact ports, HTTPS and host/subdomain boundaries. Add IDNA redistribution notices and regression coverage.
 
 - **Mac, bouncer eligibility:** "Allow once and enable bouncer" uses a fresh local owner check to confirm each credential's environment/risk and authorize later model evaluation for the exact agent, credential revision, project, action, and hosts. Classification and permission save together after access is rechecked. Ordinary "Allow once" stays one-time only; old history never becomes permission. Production allowances, always-ask settings, and hard vetoes retain precedence.
 - **Mac, approval choices:** evaluation permission is separate from existing project answers that immediately allow fitting future execution. CLI patterns still require 3 explicit "Approve and remember" actions. The new offer stays outside existing relay/iPhone cards and signed answers; their wire format and meanings are unchanged.

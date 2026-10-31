@@ -10,10 +10,21 @@
   const usable = (el) => el instanceof HTMLInputElement && !el.disabled && !el.readOnly &&
     el.type !== "hidden" && el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0 &&
     (typeof el.checkVisibility !== "function" || el.checkVisibility({ visibilityProperty: true }));
+  const signals = (el) => [el.name, el.id, el.autocomplete, el.getAttribute("aria-label"), el.placeholder,
+    ...Array.from(el.labels || [], (label) => label.textContent)].join(" ");
+  const negative = /search|one-time|\botp\b|verification|newsletter|subscribe/i;
   const user = (el) => ["text", "email", "tel"].includes(el.type) &&
-    !passwordWords.test([el.name, el.id, el.autocomplete, el.getAttribute("aria-label"), el.placeholder].join(" "));
-  const eligible = (el) => usable(el) && (el.type === "password" || (user(el) &&
-    (el.type === "email" || tokens(el).includes("username") || words.test([el.name, el.id, el.autocomplete].join(" ")))));
+    !passwordWords.test(signals(el)) && !negative.test(signals(el));
+  const eligible = (el) => {
+    if (!usable(el)) return false;
+    if (el.type === "password") return !tokens(el).includes("one-time-code");
+    if (!user(el)) return false;
+    const scope = el.form || el.closest("fieldset, [role=group]") || el.parentElement;
+    if (scope && /newsletter|subscribe/i.test([scope.id, scope.getAttribute("aria-label"),
+      ...Array.from(scope.querySelectorAll("button, input[type=submit]"), (b) => b.textContent || b.value)].join(" ")) &&
+      !scope.querySelector('input[type=password]')) return false;
+    return el.type === "email" || tokens(el).includes("username") || words.test(signals(el));
+  };
   function inputs(root = document) {
     const out = [];
     for (const el of root.querySelectorAll("*")) {
@@ -50,9 +61,9 @@
     }
     const scope = group(field);
     const all = members(scope);
-    const passwords = all.filter((el) => el.type === "password");
+    const passwords = all.filter((el) => el.type === "password" && !tokens(el).includes("one-time-code"));
     const username = user(field) ? field : all.find((el) => user(el) && tokens(el).includes("username")) ||
-      all.find((el) => user(el) && (el.type === "email" || words.test([el.name, el.id].join(" ")))) ||
+      all.find((el) => user(el) && (el.type === "email" || words.test(signals(el)))) ||
       all.find(user) || null;
     const current = field.type === "password" ? field : passwords.find((el) => tokens(el).includes("current-password")) ||
       passwords.find((el) => !tokens(el).includes("new-password")) || passwords[0] || null;
@@ -60,7 +71,7 @@
     if (!field.form && passwords.length > 1 && field.type !== "password") return { ok: false, reason: "ambiguous" };
     const token = crypto.randomUUID();
     const form = field.form;
-    if (form && new URL(form.action, location.href).origin !== location.origin) return { ok: false, reason: "form_origin" };
+    if (form && form.hasAttribute("action") && new URL(form.action, document.baseURI).origin !== self.origin) return { ok: false, reason: "form_origin" };
     targets.set(token, { at: Date.now(), href: location.href, scope, field, username, current,
       passwords, all, signatures: all.map(signature), action: form ? form.action : null });
     return { ok: true, token, username: username ? username.value : "", hasPassword: Boolean(current && current.value),
@@ -100,7 +111,7 @@
   }
 
   function fill(token, origin, username, password, mode) {
-    const t = location.origin === origin && valid(token);
+    const t = self.origin === origin && valid(token);
     if (!t) return { ok: false, reason: "target" };
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
     const put = (el, value) => {

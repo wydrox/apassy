@@ -1,10 +1,11 @@
 // Login target and optional site-suggestion helpers. Imported only by the worker.
 const LOGIN_SCRIPT = "apassy-login-suggestions";
 const LOGIN_RESULT_TTL = 5 * 60 * 1000;
-const loginIntents = new Map();
+const LOGIN_ORIGINS = ["https://*/*", "http://localhost/*"];
 const loginOffers = new Map();
 const loginBusy = new Set();
 let loginFeatureGeneration = 0;
+let loginAccessWrites = Promise.resolve();
 
 function loginMatch(url) {
   try {
@@ -13,56 +14,65 @@ function loginMatch(url) {
   } catch (_) { return null; }
 }
 
+async function loginPreferences() {
+  const stored = await chrome.storage.local.get(["loginSuggestionsEnabled", "loginSuggestionsExcluded"]);
+  return { enabled: stored.loginSuggestionsEnabled !== false,
+    excluded: Array.isArray(stored.loginSuggestionsExcluded) ? stored.loginSuggestionsExcluded : [] };
+}
+
 async function loginAccess(url) {
   const match = loginMatch(url);
-  const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: [LOGIN_SCRIPT] });
-  return Boolean(match && scripts.some((s) => s.matches.includes(match)) &&
+  const prefs = await loginPreferences();
+  return Boolean(match && prefs.enabled && !prefs.excluded.includes(new URL(url).hostname) &&
     await chrome.permissions.contains({ origins: [match] }));
 }
 
-let loginAccessWrites = Promise.resolve();
-function loginAccessChange(url, on) {
-  if (!on) { loginFeatureGeneration++; loginOffers.clear(); }
-  const next = loginAccessWrites.then(() => writeLoginAccess(url, on));
+// One serialized registration replaces the legacy per-host script, including on update.
+function reconcileLoginScripts() {
+  const next = loginAccessWrites.then(writeLoginScripts);
   loginAccessWrites = next.catch(() => {});
   return next;
 }
-
-async function writeLoginAccess(url, on) {
-  const match = loginMatch(url);
-  if (!match) return failure("unsupported_page");
+async function writeLoginScripts() {
+  const prefs = await loginPreferences();
+  const granted = (await chrome.permissions.getAll()).origins || [];
+  const matches = prefs.enabled ? granted.filter((m) => /^https:\/\//.test(m) || m === "http://localhost/*") : [];
   const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: [LOGIN_SCRIPT] });
-  const matches = new Set((scripts[0] && scripts[0].matches) || []);
-  if (on) {
-    if (!(await chrome.permissions.contains({ origins: [match] }))) {
-      loginIntents.set(match, Date.now());
-      return { ok: true, on: false };
-    }
-    matches.add(match);
-  } else {
-    loginIntents.delete(match);
-    matches.delete(match);
-    loginOffers.clear();
-    for (const tab of await chrome.tabs.query({})) {
-      if (loginMatch(tab.url) !== match) continue;
-      try {
+  const excludeMatches = prefs.excluded.flatMap((host) => [ `https://${host}/*`, ...(host === "localhost" ? ["http://localhost/*"] : []) ]);
+  const spec = { id: LOGIN_SCRIPT, matches, excludeMatches, js: ["login-target.js", "login-suggestions.js"],
+    runAt: "document_idle", allFrames: true, matchOriginAsFallback: true, persistAcrossSessions: true };
+  const old = scripts[0];
+  if (old && JSON.stringify([old.matches, old.excludeMatches || [], old.matchOriginAsFallback]) ===
+      JSON.stringify([matches, excludeMatches, true])) return;
+  if (old) await chrome.scripting.unregisterContentScripts({ ids: [LOGIN_SCRIPT] });
+  if (matches.length) await chrome.scripting.registerContentScripts([spec]);
+  for (const tab of await chrome.tabs.query({})) {
+    if (!loginMatch(tab.url)) continue;
+    try {
+      if (await loginAccess(tab.url)) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: spec.js });
+      } else {
         await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true },
-          func: () => { self.apassyLoginSuggestionsEnabled = false; self.apassyStopLoginSuggestions?.(); } });
-      } catch (_) { /* no remaining access */ }
-    }
+          func: () => self.apassyStopLoginSuggestions?.() });
+      }
+    } catch (_) { /* Browser may refuse a frame or a tab that just navigated. */ }
   }
-  if (scripts.length) await chrome.scripting.unregisterContentScripts({ ids: [LOGIN_SCRIPT] });
-  if (matches.size) await chrome.scripting.registerContentScripts([{
-    id: LOGIN_SCRIPT, matches: [...matches], js: ["login-target.js", "login-suggestions.js"],
-    runAt: "document_idle", allFrames: true, matchOriginAsFallback: false, persistAcrossSessions: true,
-  }]);
-  if (on) {
-    loginIntents.delete(match);
-    const tab = await targetTab();
-    if (tab && originOf(tab.url) === originOf(url)) {
-      try { await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["login-target.js", "login-suggestions.js"] }); } catch (_) { /* next navigation */ }
-    }
-  }
+}
+async function loginAccessChange(_url, on) {
+  loginFeatureGeneration++; loginOffers.clear();
+  await chrome.storage.local.set({ loginSuggestionsEnabled: on });
+  await reconcileLoginScripts();
+  return { ok: true, on };
+}
+async function loginSiteChange(url, on) {
+  if (!loginMatch(url)) return failure("unsupported_page");
+  loginFeatureGeneration++; loginOffers.clear();
+  const prefs = await loginPreferences();
+  const excluded = new Set(prefs.excluded);
+  const host = new URL(url).hostname;
+  if (on) excluded.delete(host); else excluded.add(host);
+  await chrome.storage.local.set({ loginSuggestionsExcluded: [...excluded] });
+  await reconcileLoginScripts();
   return { ok: true, on };
 }
 
@@ -72,7 +82,7 @@ async function captureLoginTarget(tabId, url) {
     await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["login-target.js"] });
     const [result] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: () => self.apassyLoginTarget.capture() });
     if (!result || !result.documentId || !result.result) return null;
-    if (!result.result.ok) return { failure: result.result.reason === "no_fields" ? "no_fields" : "page_changed" };
+    if (!result.result.ok) return { failure: ["no_fields", "form_origin", "frame"].includes(result.result.reason) ? result.result.reason : "page_changed" };
     return { tabId, url, origin: originOf(url), frameId: 0, documentId: result.documentId, token: result.result.token };
   } catch (_) { return null; }
 }
@@ -94,7 +104,7 @@ async function targetCall(target, method, args = []) {
   try {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: target.tabId, documentIds: [target.documentId] },
-      func: (origin, token, op, values, inline) => location.origin === origin && self.apassyLoginTarget && (!inline || self.apassyLoginSuggestionsEnabled === true)
+      func: (origin, token, op, values, inline) => self.origin === origin && self.apassyLoginTarget && (!inline || self.apassyLoginSuggestionsEnabled === true)
         ? self.apassyLoginTarget[op](token, ...values) : { ok: false, reason: "target" },
       args: [target.origin, target.token, method, args, target.inline === true],
     });
@@ -133,7 +143,7 @@ async function recentLoginResult(tab) {
 }
 
 async function boundLoginAction(target, action) {
-  if (target?.failure) return failure(target.failure, target.failure === "no_fields" ? MESSAGES.no_fields : "Focus the intended login field, then open Apassy. Frames can be opened in their own tab.");
+  if (target?.failure) return failure(target.failure, MESSAGES[target.failure] || "Focus the intended login field, then open Apassy. Frames can be opened in their own tab.");
   if (!target) return failure("page_changed", "Focus the login field, then choose the account again. The page or form may have changed.");
   const key = `${target.tabId}:${target.documentId}`;
   if (loginBusy.has(key)) return failure("busy", "Finish the current Apassy check before trying again.");
@@ -174,16 +184,17 @@ async function handleLoginField(message, sender) {
   // Separate from the extension-page route. All authority comes from browser sender metadata.
   if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender.tab?.id) || sender.tab.id < 0 ||
       !Number.isInteger(sender.frameId) || sender.frameId < 0 || sender.documentLifecycle !== "active" ||
-      typeof sender.documentId !== "string" || !sender.documentId || !loginMatch(sender.url) ||
-      originOf(sender.url) !== sender.origin || originOf(sender.tab.url) !== sender.origin) return failure("unsupported_frame", "Open this sign-in page in its own tab, then use Apassy.");
-  if (!(await loginAccess(sender.url))) return failure("site_access", "Enable login suggestions for this site from the Apassy toolbar.");
+      typeof sender.documentId !== "string" || !sender.documentId ||
+      !(loginMatch(sender.url) || ["about:blank", "about:srcdoc"].includes(sender.url)) ||
+      (loginMatch(sender.url) && originOf(sender.url) !== sender.origin) || originOf(sender.tab.url) !== sender.origin) return failure("unsupported_frame", "Open this sign-in page in its own tab, then use Apassy.");
+  if (!(await loginAccess(sender.tab.url))) return failure("site_access", "Enable login suggestions for this site from the Apassy toolbar.");
   const active = await targetTab();
   if (!active || active.id !== sender.tab.id || originOf(active.url) !== sender.origin) return failure("page_changed");
   if (!message || !["login_suggestions", "login_fill", "login_show"].includes(message.type) ||
       Object.keys(message).some((key) => !["type", "token", "username", "item", "trustedGesture"].includes(key))) return failure("bad_request");
   const target = { tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId,
-    origin: sender.origin, url: sender.url, token: message.token, inline: true, generation: loginFeatureGeneration };
-  if (!validLoginTarget(target, sender.tab.id, sender.url) || !(await targetCall(target, "read"))?.ok) return failure("page_changed");
+    origin: sender.origin, url: sender.tab.url, token: message.token, inline: true, generation: loginFeatureGeneration };
+  if (!validLoginTarget(target, sender.tab.id, sender.tab.url) || !(await targetCall(target, "read"))?.ok) return failure("page_changed");
   const key = `${target.tabId}:${target.documentId}:${target.token}`;
   if (message.type === "login_show") {
     const answer = await ask({ cmd: "show" });
@@ -191,7 +202,7 @@ async function handleLoginField(message, sender) {
   }
   if (message.type === "login_suggestions") {
     if (typeof message.username !== "string" || bytes(message.username) > 1024) return failure("bad_request");
-    const answer = await ask({ cmd: "suggestions", url: sender.url, username: message.username });
+    const answer = await ask({ cmd: "suggestions", url: sender.tab.url, username: message.username });
     if (!answer?.ok) { loginOffers.clear(); return failure(answer?.code || "host_failed", messageOf(answer)); }
     if (answer.data?.type !== "logins" || answer.data.origin !== sender.origin || !(await targetCall(target, "read"))?.ok) return failure("page_changed");
     const logins = (answer.data.logins || []).filter((l) => Number.isInteger(l.item) && typeof l.title === "string" && typeof l.username === "string")
@@ -199,7 +210,14 @@ async function handleLoginField(message, sender) {
     for (const [offerKey, offer] of loginOffers) if (Date.now() - offer.at > LOGIN_RESULT_TTL) loginOffers.delete(offerKey);
     while (loginOffers.size >= 128) loginOffers.delete(loginOffers.keys().next().value);
     loginOffers.set(key, { at: Date.now(), items: logins.map((l) => l.item) });
-    return { ok: true, logins };
+    let emptyReason = logins.length ? null : "no_logins";
+    if (!logins.length && message.username.trim()) {
+      const all = await ask({ cmd: "suggestions", url: sender.tab.url, username: "" });
+      if (!all?.ok) return failure(all?.code || "host_failed", messageOf(all));
+      if (all.data?.type !== "logins" || all.data.origin !== sender.origin || !(await targetCall(target, "read"))?.ok) return failure("page_changed");
+      if (all.data.logins?.length) emptyReason = "username";
+    }
+    return { ok: true, logins, emptyReason };
   }
   const offer = loginOffers.get(key);
   if (!Number.isInteger(message.item) || !offer || Date.now() - offer.at > LOGIN_RESULT_TTL || !offer.items.includes(message.item)) return failure("bad_request");
@@ -207,12 +225,10 @@ async function handleLoginField(message, sender) {
   return withBadge(() => fill(target.tabId, target.url, message.item, target, message.trustedGesture === true));
 }
 
-chrome.permissions.onAdded.addListener(async () => {
-  for (const [match, at] of loginIntents) if (Date.now() - at < 120000) await loginAccessChange(match.slice(0, -2), true).catch(() => {});
+chrome.permissions.onAdded.addListener(() => { reconcileLoginScripts().catch(() => {}); });
+chrome.permissions.onRemoved.addListener(() => {
+  loginFeatureGeneration++; loginOffers.clear();
+  reconcileLoginScripts().catch(() => {});
 });
-chrome.permissions.onRemoved.addListener(async () => {
-  loginFeatureGeneration++;
-  loginOffers.clear();
-  const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: [LOGIN_SCRIPT] });
-  for (const match of scripts[0]?.matches || []) if (!(await chrome.permissions.contains({ origins: [match] }))) await loginAccessChange(match.slice(0, -2), false).catch(() => {});
-});
+// Runs when the worker starts, including the first start after an extension update.
+reconcileLoginScripts().catch(() => {});

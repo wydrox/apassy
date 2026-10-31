@@ -16,7 +16,7 @@ test("the list and the empty state show Save this login and New password", async
 
   h.setScenario({ vault: "unlocked", logins: [LOGINS[2]] });
   popup = await h.openPopupPage();
-  await expect(popup.locator("#note")).toContainText(`No login for ${new URL(page.url()).host}.`);
+  await expect(popup.locator("h2")).toHaveText(`No logins for ${new URL(page.url()).host}`);
   await expect(popup.locator("#save-open")).toBeVisible();
   await expect(popup.locator("#new-open")).toBeVisible();
   await popup.close();
@@ -37,7 +37,7 @@ test("the Save view prefills the username and disables Save without a typed pass
   await expect(popup.locator("#title")).toHaveValue(new URL(page.url()).host);
   await expect(popup.locator("#note")).toHaveText("Type your password on the page first.");
   await expect(popup.locator("#save")).toBeDisabled();
-  await expect(popup.locator("#save-form")).toContainText("The password comes from the page.");
+  await expect(popup.locator("#save-form")).toContainText("The password comes from the selected form on this page.");
   // Escape goes back to the list.
   await popup.keyboard.press("Escape");
   await expect(popup.locator("button.login")).toHaveCount(2);
@@ -54,7 +54,7 @@ test("the Save view saves the typed login after the owner check", async ({ h }) 
   await expect(popup.locator("#save")).toBeEnabled();
   await popup.locator("#title").fill("Typed site");
   await popup.locator("#title").press("Enter");
-  await expect(popup.locator("#note")).toHaveText("Confirm in Apassy.");
+  await expect(popup.locator("#note")).toHaveText("Approve in Apassy, or use your vault passphrase if asked.");
   await expect(popup.locator("#note")).toHaveText("Saved.");
   expect(h.requests("save")).toEqual([{
     v: 1, cmd: "save", url: page.url(), title: "Typed site", username: "typed-user", password: TYPED_PASSWORD,
@@ -88,7 +88,7 @@ test("the Save view requires a title and a username", async ({ h }) => {
   await popup.locator("#save-open").click();
   await expect(popup.locator("#username")).toBeFocused();
   await popup.locator("#username").press("Enter");
-  await expect(popup.locator("#note")).toHaveText("Enter a title and a username.");
+  await expect(popup.locator("#note")).toHaveText("Enter a username.");
   await expect(popup.locator("#username")).toBeFocused();
   expect(h.requests("save")).toEqual([]);
 });
@@ -102,12 +102,12 @@ test("the New password view sends the length and symbols and shows the result", 
   await expect(popup.locator("#length")).toHaveValue("20");
   await expect(popup.locator("#symbols")).toBeChecked();
   await expect(popup.locator("#create")).toBeEnabled();
-  await expect(popup.locator("#new-form")).toContainText("Apassy makes the password and keeps it before the page gets it.");
+  await expect(popup.locator("#new-form")).toContainText("Approve on your Mac. Apassy saves the password before filling this page.");
   await popup.locator("#username").fill("new@example.com");
   await popup.locator("#length").fill("32");
   await popup.locator("#symbols").uncheck();
   await popup.locator("#username").press("Enter");
-  await expect(popup.locator("#note")).toHaveText("Confirm with Touch ID or your passphrase in Apassy.");
+  await expect(popup.locator("#note")).toHaveText("Approve in Apassy, or use your vault passphrase if asked.");
   await expect(popup.locator("#note")).toHaveText(FILLED);
   expect(h.requests("create")).toEqual([{
     v: 1, cmd: "create", url: page.url(), title: new URL(page.url()).host, username: "new@example.com", length: 32, symbols: false,
@@ -125,7 +125,7 @@ test("the New password view clamps the length and requires a username", async ({
   await popup.locator("#new-open").click();
   await popup.locator("#length").fill("100");
   await popup.locator("#length").press("Enter");
-  await expect(popup.locator("#note")).toHaveText("Enter a title and a username.");
+  await expect(popup.locator("#note")).toHaveText("Enter a username.");
   await expect(popup.locator("#length")).toHaveValue("64");
   expect(h.requests("create")).toEqual([]);
   await popup.locator("#username").fill("new@example.com");

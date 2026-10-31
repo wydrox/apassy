@@ -18,6 +18,15 @@ gesture during that window. The earlier guarantee that browser automation always
 needs a new biometric check applies only to Every time. Reveals, copies, durable
 grants and passkey creation/removal stay fresh. The historical text below is
 preserved as the original decision.
+## Owner decision — suggestions on all sites, 2026-10-31
+
+Suggestions are on by default for every granted HTTPS origin and `http://localhost/*`. Existing broad passkey access also enables suggestions after updating, without another setup step. The popup has one **Suggest logins on all sites** switch in Settings. Without broad access it offers one user-gesture permission request. **Not on this site** stores a hostname exclusion in extension local storage; it does not revoke another feature's access. One dynamic registration replaces the old per-host registration, without duplicates.
+
+Focus, including an already-focused field after injection or reload, requests only site-matched titles and usernames. Username filtering has a separate empty state and Show all recovery. Missing Website guidance is conditional advice, never an assertion inferred from an empty username filter. Both stored and page hosts use IDNA canonicalization; ICANN and private public suffix Website values are refused using the existing pinned `psl` crate. Ports, HTTPS requirements and host/subdomain rules remain strict; there is no eTLD+1 or sibling widening. IDNA and PSL redistribution notices are in `licenses/browser-domains/`.
+
+Same-origin `srcdoc` and `about:blank` frames use origin fallback only when browser sender origin equals the top-level origin, with the exact document and form token revalidated. Cross-origin frames and form actions explain refusal. The popup and closed-shadow inline chooser each have one trusted-event owner-action gate; every fill/save/update/create still goes through the app's owner gate. ADR 0030 above defines when that gate can reuse a recent local check.
+
+The popup uses account rows, site-local metadata search and a separate settings route. Inline placement measures the panel and avoids visible page actions, flips or moves beside the form, and collapses when no safe space exists. Dismissing an approval panel does not cancel the app request. A post-submit save banner is deferred: it needs a reviewed capture lifecycle and must not infer successful sign-in or persist plaintext credentials.
 
 ## Context
 
