@@ -88,7 +88,7 @@ test("the popup offers Fill code only for the login with a code, and never shows
   await expect(buttons).toHaveCount(1);
   await expect(buttons).toHaveAttribute("data-item", "21");
   await buttons.click();
-  await expect(popup.locator("h2")).toHaveText("Code filled");
+  await expect(popup.locator("main h2")).toHaveText("Code filled");
   expect(await values(page, ["code"])).toEqual([CODE]);
   expect(await popup.content()).not.toContain(CODE);
 });

@@ -51,15 +51,16 @@ const FIELDS = {
   show: {},
   logins: { url: true },
   suggestions: { url: true, username: false },
-  update: { url: true, item: true, username: true, password: true },
-  fill: { url: true, item: true },
-  save: { url: true, title: true, username: true, password: true },
-  create: { url: true, title: true, username: true, length: true, symbols: true },
+  update: { url: true, item: true, username: true, password: true, trusted_gesture: false },
+  fill: { url: true, item: true, trusted_gesture: false },
+  save: { url: true, title: true, username: true, password: true, trusted_gesture: false },
+  create: { url: true, title: true, username: true, length: true, symbols: true, trusted_gesture: false },
 };
 
 function wellFormed(request) {
   const fields = FIELDS[request.cmd];
   if (!fields) return false;
+  if ("trusted_gesture" in request && typeof request.trusted_gesture !== "boolean") return false;
   for (const key of Object.keys(request)) {
     if (key !== "v" && key !== "cmd" && !(key in fields)) return false;
   }
