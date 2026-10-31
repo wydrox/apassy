@@ -619,7 +619,7 @@ fn settings_show_start_now_and_the_first_start_download() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let text = frames(&mut app);
-    assert!(text.contains("Stopped"), "{text}");
+    assert!(text.contains("Not running"), "{text}");
     assert!(text.contains("Start now"), "{text}");
 
     // The weights are not in the cache: the start downloads them.
@@ -704,7 +704,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
     for expected in [
         "The install failed. Downloading the model weights failed",
         "The first start of the model server downloads the weights.",
-        "Stopped",
+        "Not running",
         "Install…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
