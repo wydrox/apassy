@@ -313,3 +313,32 @@ fn generated_plist_passes_the_mac_validator() {
         String::from_utf8_lossy(&output.stdout).trim()
     );
 }
+
+#[test]
+fn team_host_locks_allow_two_teams_but_fence_duplicates_and_legacy_hosts() {
+    use apassy_relay::cli::host::lock_team_host;
+    use apassy_relay::ids::TeamId;
+    let dir = tempfile::tempdir().unwrap();
+    let a = TeamId::parse("t_abcdefgh23").unwrap();
+    let b = TeamId::parse("t_abcdefgh24").unwrap();
+    let first = lock_team_host(dir.path(), &a).unwrap();
+    let second = lock_team_host(dir.path(), &b).unwrap();
+    assert!(lock_team_host(dir.path(), &a).is_err());
+    assert!(
+        lock_host(dir.path()).is_err(),
+        "an old binary cannot run beside per-team hosts"
+    );
+    drop(first);
+    assert!(
+        lock_host(dir.path()).is_err(),
+        "team B still fences old hosts"
+    );
+    drop(second);
+    let old = lock_host(dir.path()).unwrap();
+    assert!(
+        lock_team_host(dir.path(), &a).is_err(),
+        "new binary cannot bypass a running old host"
+    );
+    drop(old);
+    assert!(lock_team_host(dir.path(), &a).is_ok());
+}

@@ -645,6 +645,37 @@ pub fn lock_host(dir: &Path) -> Result<std::fs::File, CliError> {
     Ok(file)
 }
 
+/// Per-team exclusion plus a shared legacy fence: new teams can run together,
+/// while an old binary holding the single exclusive host.lock must stop first.
+pub struct TeamHostLocks(Vec<std::fs::File>);
+impl Drop for TeamHostLocks {
+    fn drop(&mut self) {
+        for file in &self.0 {
+            let _ = file.unlock();
+        }
+    }
+}
+
+pub fn lock_team_host(dir: &Path, team: &crate::ids::TeamId) -> Result<TeamHostLocks, CliError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    crate::cli::settings::ensure_private_dir(dir)?;
+    let legacy = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("host.lock"))
+        .map_err(|_| CliError::usage("Cannot open the legacy host lock."))?;
+    legacy.try_lock_shared().map_err(|_| CliError::usage(
+        "A legacy host still runs for this config directory. Stop it before starting per-team hosts."))?;
+    let mut locks = TeamHostLocks(vec![legacy]);
+    locks
+        .0
+        .push(lock_host(&dir.join("hosts").join(team.as_str()))?);
+    Ok(locks)
+}
+
 // ---- The log ----
 
 /// What the host did with a run. The names are the words of the log.
@@ -990,7 +1021,17 @@ pub fn check_owner(settings: &Settings) -> Result<(Client, MeView), CliError> {
 /// `apassy-team host`.
 pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i32, CliError> {
     let store = KeyStore::open()?;
-    let _lock = lock_host(store.dir())?;
+    let team = settings.team_id.clone().or_else(|| {
+        settings
+            .member_token
+            .as_ref()
+            .and_then(|token| crate::secret::parse_token(token.expose()))
+            .and_then(|token| token.team)
+    });
+    let _locks = match team.as_ref() {
+        Some(team) => lock_team_host(store.dir(), team)?,
+        None => TeamHostLocks(vec![lock_host(store.dir())?]), // old relays without team ids
+    };
     let (client, me) = check_owner(settings)?;
     let count = store
         .load()?
@@ -1000,9 +1041,10 @@ pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i3
     let rules = RuleSet::builtin()
         .map_err(|_| CliError::relay("The built-in rule packs of the core cannot be loaded."))?;
     eprintln!(
-        "apassy-team host: team {} at {}. {count} item keys in {}. {}",
+        "apassy-team host: team {} at {}. Version {}. {count} item keys in {}. {}",
         clean(&me.team),
         client.base(),
+        env!("CARGO_PKG_VERSION"),
         store.path().display(),
         if options.ask_all {
             "Asking for every run (--ask-all).".to_string()

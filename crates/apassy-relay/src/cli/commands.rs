@@ -150,8 +150,8 @@ fn execute_for(command: Command, selected: Option<&str>) -> Result<i32, CliError
                 auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
             },
         ),
-        Command::HostUninstall => crate::cli::service::uninstall(),
-        Command::HostStatus => crate::cli::service::status(),
+        Command::HostUninstall => crate::cli::service::uninstall(&settings::load_for(selected)?),
+        Command::HostStatus => crate::cli::service::status(&settings::load_for(selected)?),
         other => {
             let settings = settings::load_for(selected)?;
             member_command(&settings, other)?;
