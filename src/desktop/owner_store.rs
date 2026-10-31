@@ -1132,6 +1132,21 @@ impl OwnerSession {
         self.unlocked()?.register_agent(name).map_err(map_err)
     }
 
+    pub(crate) fn register_setup_agent_checked(
+        &mut self,
+        name: &str,
+        show_all: bool,
+        proof: OwnerProof,
+    ) -> ModelResult<(AgentSummary, AgentToken)> {
+        let (agent, token) = self.register_agent_checked(name, proof)?;
+        if show_all {
+            self.unlocked()?
+                .set_agent_sees_all(agent.id, true)
+                .map_err(map_err)?;
+        }
+        Ok((agent, token))
+    }
+
     pub(crate) fn register_agent_checked(
         &mut self,
         name: &str,

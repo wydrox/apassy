@@ -20,7 +20,9 @@ pub const HELP: &str = "\
 apassy setup claude|codex [--name NAME] [--token-stdin] [--hook PATH] [--write]
 
 Prepare an agent host for Apassy:
-  1. Register an agent named NAME (default: Claude Code or Codex) and take its token.
+  Without --write, validate and preview only; no agent or files are changed.
+  With --write:
+  1. Connect an agent named NAME (default: Claude Code or Codex) and take its token.
      --token-stdin uses a token that you already have, from stdin.
   2. Write two scripts with mode 0700 that hold the token:
        ~/.config/apassy/apassy-mcp-HOST.sh    starts apassy-mcp
@@ -40,7 +42,7 @@ This command writes configuration. It does not check the host connection or a fi
 Then there is nothing to give: the agent lists your credentials without values and uses
 them, and the bouncer decides each use. When it asks you, the question is in Decisions.
 Start the host in the Apassy sandbox (see docs/operations/isolation.md):
-  claude: MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
+  claude: MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
   codex:  apassy-sandbox -- codex -c sandbox_mode=danger-full-access
 Host approval prompts stay active.
 ";
@@ -111,7 +113,6 @@ fn write_wrapper(path: &Path, program: &Path, token: &SecretText) -> Result<(), 
         quote(&program.display().to_string())
     ));
     let temp = path.with_extension("sh.tmp");
-    let _ = fs::remove_file(&temp);
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -130,15 +131,36 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
     let mut status = status_path
         .map(|path| open_desktop_status(Path::new(&path)))
         .transpose()?;
-    let result = run_host(cli, args);
+    let mut stages = Vec::new();
+    let result = run_host(cli, args, &mut stages);
+    if let Err(failure) = &result {
+        let message = match failure {
+            Failure::App { message, .. }
+            | Failure::Other(message)
+            | Failure::NotRunning(message) => message.as_str(),
+            Failure::Usage(usage) => usage.0.as_str(),
+            Failure::Printed => "Setup failed.",
+        };
+        eprintln!("apassy setup: {}", super::print::clean(message));
+    }
+    let setup_json = cli.json && stages.first() != Some(&"browser_delegated");
+    if setup_json {
+        println!("{}", setup_report(&result, &stages));
+    }
     if let Some(status) = status.as_mut() {
         status.write_all(status_code(&result).as_bytes())?;
     }
     // Keep the existing public CLI error format and exit behavior.
     let code = status_code(&result);
-    result.map_err(|failure| match failure {
-        Failure::App { message, .. } if code != "failed" => Failure::Other(message),
-        failure => failure,
+    result.map_err(|failure| {
+        if setup_json {
+            Failure::Printed
+        } else {
+            match failure {
+                Failure::App { message, .. } if code != "failed" => Failure::Other(message),
+                failure => failure,
+            }
+        }
     })
 }
 
@@ -203,12 +225,15 @@ fn at_stage(failure: Failure, code: &str) -> Failure {
     }
 }
 
-fn run_host(cli: &Cli, mut args: Args) -> Outcome {
+fn run_host(cli: &Cli, mut args: Args, stages: &mut Vec<&'static str>) -> Outcome {
     let host = match args.required("host: claude, codex, or browser")?.as_str() {
         "claude" | "claude-code" => Host::Claude,
         "codex" => Host::Codex,
         // ADR 0021: the browser extension. It registers no agent.
-        "browser" => return super::browser::run(args),
+        "browser" => {
+            stages.push("browser_delegated");
+            return super::browser::run(args);
+        }
         other => {
             return Err(Failure::Usage(usage(format!(
                 "Unknown host \"{other}\". Use claude, codex, or browser."
@@ -265,6 +290,63 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
         claude_server_present(&config, &mcp_wrapper)?;
     }
 
+    let hook_wrapper_path = dir.join(format!("apassy-hook-{}.sh", host.id()));
+    for program in std::iter::once(&mcp).chain(hook.iter()) {
+        if fs::metadata(program)?.permissions().mode() & 0o111 == 0 {
+            return Err(Failure::Other(
+                "A required helper is not executable.".into(),
+            ));
+        }
+    }
+    let (config, hooks) = match host {
+        Host::Claude => claude_paths(&home()?, std::env::var_os("CLAUDE_CONFIG_DIR")),
+        Host::Codex => (
+            codex_home()?.join("config.toml"),
+            codex_home()?.join("hooks.json"),
+        ),
+    };
+    if host == Host::Codex {
+        codex_section_present(
+            &read_optional_config(&config)?,
+            &codex_section(&mcp_wrapper),
+        )?;
+    } else {
+        claude_server_present(&config, &mcp_wrapper)?;
+    }
+    merge_hook_checked(&hooks, &hook_wrapper_path, false)?;
+    if host == Host::Claude {
+        claude_timeout(&hooks, false)?;
+    }
+    for path in [&mcp_wrapper, &hook_wrapper_path, &config, &hooks] {
+        writable_destination(path)?;
+    }
+    let existing = managed_token(&mcp_wrapper, &mcp)?;
+    if let Some(hook) = &hook {
+        let other = managed_token(&hook_wrapper_path, hook)?;
+        if !token_stdin
+            && existing.as_ref().map(SecretText::expose) != other.as_ref().map(SecretText::expose)
+        {
+            return Err(Failure::Other("Managed wrappers are incomplete. Repair with the existing token using --token-stdin; do not register another agent.".into()));
+        }
+    }
+    stages.push("preflight");
+    if !write {
+        eprintln!("Preflight passed. Run with --write to connect and save settings.");
+        return match host {
+            Host::Claude => claude(
+                &mcp_wrapper,
+                hook.as_ref().map(|_| hook_wrapper_path.as_path()),
+                false,
+                stages,
+            ),
+            Host::Codex => codex(
+                &mcp_wrapper,
+                hook.as_ref().map(|_| hook_wrapper_path.as_path()),
+                false,
+                stages,
+            ),
+        };
+    }
     let token = if token_stdin {
         let token =
             terminal::read_stdin_secret().map_err(|error| at_stage(error.into(), "token_read"))?;
@@ -277,11 +359,16 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
             )));
         }
         token
+    } else if let Some(token) = existing {
+        stages.push("connection_reused");
+        token
     } else {
-        let response = cli.call(Command::AgentAdd { name: name.clone() })?;
+        stages.push("connection_requested");
+        let response = cli.call(Command::AgentConnect { name: name.clone() })?;
         match response.data {
             Data::Token { token, agent } => {
                 terminal::tell(&format!("Registered {} (ID {}).", agent.name, agent.id));
+                stages.push("agent_connected");
                 token
             }
             _ => return Err(Failure::Other("Apassy sent no token.".to_owned())),
@@ -290,30 +377,34 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
 
     write_wrapper(&mcp_wrapper, &mcp, &token)
         .map_err(|failure| at_stage(failure, "wrapper_write"))?;
-    println!("Wrote {} (mode 0700).", mcp_wrapper.display());
+    stages.push("mcp_wrapper_written");
+    eprintln!("Wrote {} (mode 0700).", mcp_wrapper.display());
     let hook_wrapper = match &hook {
         Some(hook) => {
             let wrapper = dir.join(format!("apassy-hook-{}.sh", host.id()));
             write_wrapper(&wrapper, hook, &token)
                 .map_err(|failure| at_stage(failure, "wrapper_write"))?;
-            println!("Wrote {} (mode 0700).", wrapper.display());
+            stages.push("hook_wrapper_written");
+            eprintln!("Wrote {} (mode 0700).", wrapper.display());
             Some(wrapper)
         }
         None => {
-            println!(
+            eprintln!(
                 "The prompt hook is missing. Reinstall the complete Apassy.app package, then run setup again. The MCP server alone does not provide prompt context."
             );
             None
         }
     };
     drop(token);
+    stages.push("host_config_started");
 
     match host {
-        Host::Claude => claude(&mcp_wrapper, hook_wrapper.as_deref(), write),
-        Host::Codex => codex(&mcp_wrapper, hook_wrapper.as_deref(), write),
+        Host::Claude => claude(&mcp_wrapper, hook_wrapper.as_deref(), write, stages),
+        Host::Codex => codex(&mcp_wrapper, hook_wrapper.as_deref(), write, stages),
     }
     .map_err(|failure| at_stage(failure, "config_write"))?;
-    println!(
+    stages.push("host_config_written");
+    eprintln!(
         "{}. The host connection and first request are not checked.",
         if write {
             "Host settings were written"
@@ -321,49 +412,147 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
             "Host configuration is shown above"
         }
     );
-    println!(
+    eprintln!(
         "Keep Apassy.app open and the vault unlocked. Restart the host. Check Apassy with /mcp."
     );
     if host == Host::Codex {
-        println!("Use /hooks to trust the Apassy hook before the first request.");
+        eprintln!("Use /hooks to trust the Apassy hook before the first request.");
     }
-    println!(
-        "Next: nothing to give. {name} lists your credentials without values and uses them; the bouncer decides each use."
+    eprintln!(
+        "Next: nothing to give. {name} lists the credentials available to it without values and uses them; the bouncer decides each use."
     );
-    println!("When the bouncer asks you, answer in Decisions in the Apassy window.");
-    println!("From the project folder, start the host in the Apassy sandbox:");
+    eprintln!("When the bouncer asks you, answer in Decisions in the Apassy window.");
+    eprintln!("From the project folder, start the host in the Apassy sandbox:");
     match host {
-        Host::Claude => println!(
-            "MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
+        Host::Claude => eprintln!(
+            "MCP_TOOL_TIMEOUT=660000 apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
         ),
-        Host::Codex => println!("apassy-sandbox -- codex -c sandbox_mode=danger-full-access"),
+        Host::Codex => eprintln!("apassy-sandbox -- codex -c sandbox_mode=danger-full-access"),
     }
-    println!(
+    eprintln!(
         "The Apassy sandbox replaces the host's inner sandbox. Host approval prompts stay active."
     );
-    println!(
+    eprintln!(
         "Use a test credential for the first request. Check its result and its entry in Decisions."
     );
+    Ok(())
+}
+
+fn setup_report(result: &Outcome, stages: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "ok": result.is_ok(), "code": status_code(result),
+        "message": if result.is_ok() { "Setup completed; connection and first use remain unverified." } else { "Setup failed. Check stderr and completed stages before retrying." },
+        "data": { "type": "setup", "stages": stages,
+            "partial": result.is_err() && stages.iter().any(|stage| *stage != "preflight"),
+            "connection_verified": false }
+    })
+}
+
+fn writable_destination(path: &Path) -> Outcome {
+    let mut current = path;
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || meta.permissions().readonly() {
+                    return Err(Failure::Other(
+                        "A setup destination is a symlink or read-only.".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                current = current
+                    .parent()
+                    .ok_or_else(|| Failure::Other("No writable parent.".into()))?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Read only the exact private wrapper format generated by setup, never execute it.
+fn managed_token(path: &Path, program: &Path) -> Result<Option<SecretText>, Failure> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let conflict = || {
+        Failure::Other(
+            "An existing wrapper is not managed by setup. No command was replaced.".into(),
+        )
+    };
+    if !meta.is_file() || meta.permissions().mode() & 0o777 != 0o700 {
+        return Err(conflict());
+    }
+    let text = zeroize::Zeroizing::new(fs::read_to_string(path)?);
+    let prefix = "#!/bin/sh\n# Written by apassy setup. It holds an agent token: keep mode 0700, never commit it.\nAPASSY_AGENT_TOKEN=";
+    let suffix = format!(" exec {} \"$@\"\n", quote(&program.display().to_string()));
+    let encoded = text
+        .strip_prefix(prefix)
+        .and_then(|text| text.strip_suffix(&suffix))
+        .ok_or_else(conflict)?;
+    let value = encoded
+        .strip_prefix('\'')
+        .and_then(|text| text.strip_suffix('\''))
+        .ok_or_else(conflict)?;
+    let token = SecretText::new(value.replace("'\\''", "'"));
+    if quote(token.expose()) != encoded
+        || !token
+            .expose()
+            .starts_with(crate::owner::wire::AGENT_TOKEN_PREFIX)
+    {
+        return Err(conflict());
+    }
+    Ok(Some(token))
+}
+
+fn claude_timeout(file: &Path, write: bool) -> Outcome {
+    let text = read_optional_config(file)?;
+    let mut root: serde_json::Value = if text.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|_| Failure::Other("Claude settings are not valid JSON.".into()))?
+    };
+    let env = root
+        .as_object_mut()
+        .ok_or_else(|| Failure::Other("Claude settings are not an object.".into()))?
+        .entry("env")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| Failure::Other("Claude settings env is not an object.".into()))?;
+    let current = env.get("MCP_TOOL_TIMEOUT");
+    if current.is_none() || current == Some(&serde_json::json!("330000")) {
+        env.insert("MCP_TOOL_TIMEOUT".into(), serde_json::json!("660000"));
+        if write {
+            fs::write(
+                file,
+                format!("{}\n", serde_json::to_string_pretty(&root).unwrap()),
+            )?;
+        }
+    }
     Ok(())
 }
 
 fn hook_entry(hook_wrapper: &Path) -> serde_json::Value {
     serde_json::json!({
         "hooks": [
-            { "type": "command", "command": hook_wrapper.display().to_string(), "timeout": 5 }
+            { "type": "command", "command": quote(&hook_wrapper.display().to_string()), "timeout": 5 }
         ]
     })
 }
 
 /// Add the hook to a hooks file. Returns false when it is there already.
 fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
+    merge_hook_checked(file, hook_wrapper, true)
+}
+
+fn merge_hook_checked(file: &Path, hook_wrapper: &Path, write: bool) -> Result<bool, Failure> {
     let mut root: serde_json::Value = match fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text).map_err(|err| {
             at_stage(
-                Failure::Other(format!(
-                    "{} is not valid JSON ({err}). Nothing was changed.",
-                    file.display()
-                )),
+                Failure::Other(format!("{} is not valid JSON ({err}).", file.display())),
                 "hooks_invalid",
             )
         })?,
@@ -413,8 +602,22 @@ fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
                 "hooks_invalid",
             )
         })?;
-    let command = hook_wrapper.display().to_string();
-    if list.iter().any(|entry| {
+    let command = quote(&hook_wrapper.display().to_string());
+    for entry in list.iter_mut() {
+        if let Some(hooks) = entry
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for hook in hooks {
+                if hook["type"] == "command"
+                    && hook["command"] == hook_wrapper.display().to_string()
+                {
+                    hook["command"] = serde_json::json!(command);
+                }
+            }
+        }
+    }
+    let present = list.iter().any(|entry| {
         entry
             .get("hooks")
             .and_then(serde_json::Value::as_array)
@@ -425,14 +628,25 @@ fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
                             == Some(command.as_str())
                 })
             })
-    }) {
+    });
+    if !present {
+        list.push(hook_entry(hook_wrapper));
+    }
+    if !write {
+        return Ok(!present);
+    }
+    if fs::read_to_string(file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .as_ref()
+        == Some(&root)
+    {
         return Ok(false);
     }
-    list.push(hook_entry(hook_wrapper));
     if file.exists() {
         let backup = file.with_extension("json.before-apassy");
         fs::copy(file, &backup).map_err(|error| at_stage(error.into(), "hooks_write"))?;
-        println!(
+        eprintln!(
             "Saved a copy of {} as {}.",
             file.display(),
             backup.display()
@@ -510,20 +724,25 @@ fn claude_server_present(config: &Path, mcp_wrapper: &Path) -> Result<bool, Fail
     Ok(true)
 }
 
-fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcome {
+fn claude(
+    mcp_wrapper: &Path,
+    hook_wrapper: Option<&Path>,
+    write: bool,
+    stages: &mut Vec<&'static str>,
+) -> Outcome {
     let (config, settings) = claude_paths(&home()?, std::env::var_os("CLAUDE_CONFIG_DIR"));
     let mcp_json = serde_json::json!({ "mcpServers": { "apassy": { "command": mcp_wrapper.display().to_string() } } });
     if !write {
-        println!(
+        eprintln!(
             "\nAdd the MCP server (user scope):\n  claude mcp add --scope user apassy -- {}",
             mcp_wrapper.display()
         );
-        println!(
+        eprintln!(
             "or put this in .mcp.json:\n{}",
             serde_json::to_string_pretty(&mcp_json).unwrap_or_default()
         );
         if let Some(hook_wrapper) = hook_wrapper {
-            println!(
+            eprintln!(
                 "\nAdd the prompt hook to {}:\n{}",
                 settings.display(),
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -532,10 +751,10 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
                 .unwrap_or_default()
             );
         }
-        println!("\nOr run this command again with --write.");
+        eprintln!("\nOr run this command again with --write.");
     } else {
         if claude_server_present(&config, mcp_wrapper)? {
-            println!("Claude Code has the Apassy settings already (user scope).");
+            eprintln!("Claude Code has the Apassy settings already (user scope).");
         } else {
             if config.exists() {
                 fs::copy(&config, config.with_extension("json.before-apassy"))?;
@@ -543,12 +762,13 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
             let added = std::process::Command::new("claude")
                 .args(["mcp", "add", "--scope", "user", "apassy", "--"])
                 .arg(mcp_wrapper)
-                .status();
+                .output();
             match added {
-                Ok(status) if status.success() => {
-                    println!("Added the MCP server apassy to Claude Code (user scope).")
+                Ok(output) if output.status.success() => {
+                    eprintln!("Added the MCP server apassy to Claude Code (user scope).")
                 }
-                Ok(status) => {
+                Ok(output) => {
+                    let status = output.status;
                     return Err(at_stage(
                         Failure::Other(format!(
                             "Claude Code setup failed ({status}). Check `claude mcp list`. If an old apassy server exists, remove it with `claude mcp remove apassy --scope user`, then run setup again."
@@ -572,16 +792,22 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
                 ), "host_verify"));
             }
         }
+        stages.push("mcp_config_written");
         if let Some(hook_wrapper) = hook_wrapper {
             if merge_hook(&settings, hook_wrapper)? {
-                println!("Added the prompt hook to {}.", settings.display());
+                eprintln!("Added the prompt hook to {}.", settings.display());
             } else {
-                println!("{} has the prompt hook already.", settings.display());
+                eprintln!("{} has the prompt hook already.", settings.display());
             }
         }
     }
-    println!(
-        "Set MCP_TOOL_TIMEOUT to at least 330000 for Claude Code: a question can wait 5 minutes for you. In the Apassy sandbox, also set \"sandbox\": {{\"enabled\": false}} in the Claude Code settings."
+    if write {
+        stages.push("hook_config_written");
+        claude_timeout(&settings, true)?;
+        stages.push("timeout_written");
+    }
+    eprintln!(
+        "Set MCP_TOOL_TIMEOUT to at least 660000 for Claude Code: a question can wait 5 minutes for you. In the Apassy sandbox, also set \"sandbox\": {{\"enabled\": false}} in the Claude Code settings."
     );
     Ok(())
 }
@@ -595,7 +821,7 @@ fn codex_home() -> Result<PathBuf, Failure> {
 
 fn codex_section(mcp_wrapper: &Path) -> String {
     format!(
-        "[mcp_servers.apassy]\ncommand = \"{}\"\ntool_timeout_sec = 330\n",
+        "[mcp_servers.apassy]\ncommand = \"{}\"\ntool_timeout_sec = 660\n",
         mcp_wrapper
             .display()
             .to_string()
@@ -612,15 +838,20 @@ fn read_optional_config(config: &Path) -> Result<String, Failure> {
     }
 }
 
-fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcome {
+fn codex(
+    mcp_wrapper: &Path,
+    hook_wrapper: Option<&Path>,
+    write: bool,
+    stages: &mut Vec<&'static str>,
+) -> Outcome {
     let codex_home = codex_home()?;
     let config = codex_home.join("config.toml");
     let hooks = codex_home.join("hooks.json");
     let section = codex_section(mcp_wrapper);
     if !write {
-        println!("\nAdd to {}:\n\n{section}", config.display());
+        eprintln!("\nAdd to {}:\n\n{section}", config.display());
         if let Some(hook_wrapper) = hook_wrapper {
-            println!(
+            eprintln!(
                 "Add the prompt hook to {}:\n{}",
                 hooks.display(),
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -629,16 +860,24 @@ fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcom
                 .unwrap_or_default()
             );
         }
-        println!("\nOr run this command again with --write.");
+        eprintln!("\nOr run this command again with --write.");
     } else {
         let current = read_optional_config(&config)?;
         if codex_section_present(&current, &section)? {
-            println!("{} has the Apassy settings already.", config.display());
+            let mut document = current
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| Failure::Other(e.to_string()))?;
+            if document["mcp_servers"]["apassy"]["tool_timeout_sec"].as_integer() == Some(330) {
+                document["mcp_servers"]["apassy"]["tool_timeout_sec"] = toml_edit::value(660);
+                fs::copy(&config, config.with_extension("toml.before-apassy"))?;
+                fs::write(&config, document.to_string())?;
+            }
+            eprintln!("{} has the Apassy settings already.", config.display());
         } else {
             if config.exists() {
                 let backup = config.with_extension("toml.before-apassy");
                 fs::copy(&config, &backup)?;
-                println!(
+                eprintln!(
                     "Saved a copy of {} as {}.",
                     config.display(),
                     backup.display()
@@ -658,18 +897,22 @@ fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcom
                 "\n\n"
             };
             write!(file, "{separator}{section}")?;
-            println!("Added [mcp_servers.apassy] to {}.", config.display());
+            eprintln!("Added [mcp_servers.apassy] to {}.", config.display());
         }
+        stages.push("mcp_config_written");
         if let Some(hook_wrapper) = hook_wrapper {
             if merge_hook(&hooks, hook_wrapper)? {
-                println!("Added the prompt hook to {}.", hooks.display());
+                eprintln!("Added the prompt hook to {}.", hooks.display());
             } else {
-                println!("{} has the prompt hook already.", hooks.display());
+                eprintln!("{} has the prompt hook already.", hooks.display());
             }
         }
     }
+    if write {
+        stages.push("hook_config_written");
+    }
     if hook_wrapper.is_some() {
-        println!(
+        eprintln!(
             "Start Codex, open /hooks, and trust the hook. Codex does not run it before that."
         );
     }
@@ -709,6 +952,20 @@ fn codex_section_present(current: &str, expected: &str) -> Result<bool, Failure>
         "The existing Apassy server in Codex has different settings. Check it in Advanced setup before you try again."
             .to_owned(),
     ), "config_conflict")
+    };
+    let expected_owned;
+    let expected = if let Some(timeout) = server
+        .get("tool_timeout_sec")
+        .and_then(toml_edit::Item::as_integer)
+        .filter(|n| *n > 0)
+    {
+        expected_owned = expected.replace(
+            "tool_timeout_sec = 660",
+            &format!("tool_timeout_sec = {timeout}"),
+        );
+        expected_owned.as_str()
+    } else {
+        expected
     };
     let expected_document = expected
         .parse::<toml_edit::DocumentMut>()
@@ -768,6 +1025,91 @@ fn codex_append_is_valid(current: &str, expected: &str) -> Result<bool, Failure>
 #[cfg(all(test, feature = "vault"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_leaves_invalid_hooks_unchanged_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hooks.json");
+        fs::write(&file, r#"{"disableAllHooks":true}"#).unwrap();
+        assert!(merge_hook_checked(&file, Path::new("/tmp/hook"), false).is_err());
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            r#"{"disableAllHooks":true}"#
+        );
+        fs::write(&file, "{}").unwrap();
+        assert!(merge_hook_checked(&file, Path::new("/tmp/hook"), false).unwrap());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "{}");
+        assert!(merge_hook(&file, Path::new("/tmp/hook")).unwrap());
+        assert!(!merge_hook(&file, Path::new("/tmp/hook")).unwrap());
+    }
+
+    #[test]
+    fn managed_wrapper_repair_reuses_token_and_rejects_user_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wrapper.sh");
+        let program = Path::new("/tmp/App space/mcp");
+        assert!(managed_token(&file, program).unwrap().is_none());
+        let token = SecretText::new("apassy_agt_synthetic'quote".into());
+        write_wrapper(&file, program, &token).unwrap();
+        assert_eq!(
+            managed_token(&file, program).unwrap().unwrap().expose(),
+            token.expose()
+        );
+        fs::write(&file, "#!/bin/sh\necho custom\n").unwrap();
+        assert!(managed_token(&file, program).is_err());
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "#!/bin/sh\necho custom\n"
+        );
+    }
+
+    #[test]
+    fn timeouts_migrate_legacy_values_and_preserve_custom_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        for (old, expected) in [("330000", "660000"), ("900000", "900000")] {
+            let text =
+                serde_json::json!({"env":{"MCP_TOOL_TIMEOUT":old,"OTHER":"keep"}}).to_string();
+            fs::write(&file, &text).unwrap();
+            claude_timeout(&file, false).unwrap();
+            assert_eq!(fs::read_to_string(&file).unwrap(), text);
+            claude_timeout(&file, true).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(value["env"]["MCP_TOOL_TIMEOUT"], expected);
+            assert_eq!(value["env"]["OTHER"], "keep");
+        }
+        let expected = codex_section(Path::new("/tmp/mcp"));
+        for timeout in [330, 660, 900] {
+            assert!(
+                codex_section_present(&expected.replace("660", &timeout.to_string()), &expected)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn setup_json_is_one_document_with_completed_stages_and_partial_state() {
+        for (result, stages, partial) in [
+            (Ok(()), vec!["preflight"], false),
+            (
+                Err(Failure::Other("synthetic failure".into())),
+                vec![],
+                false,
+            ),
+            (
+                Err(Failure::Other("synthetic failure".into())),
+                vec!["preflight", "mcp_wrapper_written"],
+                true,
+            ),
+        ] {
+            let text = setup_report(&result, &stages).to_string();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["ok"], result.is_ok());
+            assert_eq!(value["data"]["partial"], partial);
+            assert_eq!(value["data"]["stages"], serde_json::json!(stages));
+        }
+    }
 
     #[test]
     fn claude_setup_reuses_only_its_managed_user_server() {
@@ -845,7 +1187,7 @@ mod tests {
 
     #[test]
     fn codex_setup_accepts_only_its_existing_configuration() {
-        let expected = "[mcp_servers.apassy]\ncommand = \"/tmp/apassy-mcp-codex.sh\"\ntool_timeout_sec = 330\n";
+        let expected = "[mcp_servers.apassy]\ncommand = \"/tmp/apassy-mcp-codex.sh\"\ntool_timeout_sec = 660\n";
         assert!(!codex_section_present("model = \"test\"\n", expected).unwrap());
         let current = format!(
             "model = \"test\"\n{expected}\n# user note\n[mcp_servers.other]\ncommand = \"other\"\n"
@@ -1068,7 +1410,7 @@ mod tests {
         assert!(value["hooks"]["Stop"].is_array());
         assert_eq!(
             value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-            wrapper.display().to_string()
+            quote(&wrapper.display().to_string())
         );
         assert!(dir.path().join("settings.json.before-apassy").is_file());
     }

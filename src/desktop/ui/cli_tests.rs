@@ -1691,3 +1691,83 @@ fn owner_window_backup_export_and_token_issue_stay_fresh() {
     assert!(!dir.path().join("fresh.backup").exists());
     assert!(app.owner_ui.session.agents().unwrap().is_empty());
 }
+
+#[test]
+fn terminal_setup_checks_catalog_consent_without_widening_existing_agents() {
+    let dir = TempDir::new().unwrap();
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let session = login(&mut app, &ctx);
+    for name in ["Synthetic Claude", "Synthetic Codex"] {
+        let response = ask(
+            &mut app,
+            &ctx,
+            Some(&session),
+            Command::AgentConnect { name: name.into() },
+        );
+        assert!(
+            app.owner_ui
+                .session
+                .agents()
+                .unwrap()
+                .iter()
+                .all(|a| a.name != name)
+        );
+        app.close_owner_check(None);
+        assert!(!now(&response).ok);
+        let response = ask(
+            &mut app,
+            &ctx,
+            Some(&session),
+            Command::AgentConnect { name: name.into() },
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+        let Data::Token { agent, .. } = now(&response).data else {
+            panic!("no connected agent")
+        };
+        let visible = app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.visible_items_for_agent(agent.id))
+            .unwrap()
+            .unwrap();
+        assert!(visible.is_none(), "all catalog items are visible");
+        let retry = now(&ask(
+            &mut app,
+            &ctx,
+            Some(&session),
+            Command::AgentConnect { name: name.into() },
+        ));
+        assert!(!retry.ok);
+    }
+    let added = run(
+        &mut app,
+        &ctx,
+        &session,
+        Command::AgentAdd {
+            name: "Restricted".into(),
+        },
+    );
+    let Data::Token { agent, .. } = added.data else {
+        panic!("no raw agent")
+    };
+    assert!(
+        !now(&ask(
+            &mut app,
+            &ctx,
+            Some(&session),
+            Command::AgentConnect {
+                name: "Restricted".into()
+            }
+        ))
+        .ok
+    );
+    let visible = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.visible_items_for_agent(agent.id))
+        .unwrap()
+        .unwrap();
+    assert!(visible.unwrap().is_empty());
+    assert_eq!(app.owner_ui.session.agents().unwrap().len(), 3);
+}
