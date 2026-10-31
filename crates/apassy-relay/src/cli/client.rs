@@ -39,6 +39,7 @@ impl Method {
 /// A raw answer: the status and the body text.
 pub struct RawReply {
     pub status: u16,
+    pub retry_after: Option<u64>,
     pub body: Zeroizing<String>,
 }
 
@@ -75,6 +76,7 @@ fn none<T>() -> Option<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
     pub status: u16,
+    pub retry_after: Option<u64>,
     pub code: String,
     pub message: String,
 }
@@ -108,11 +110,24 @@ impl CallError {
     pub fn into_cli(self) -> CliError {
         match self {
             Self::Usage(m) => CliError::usage(m),
-            Self::Api(e) if e.code == "not_key_holder" => CliError::relay(
-                "This device is not the key holder. Copy keys.json and move the key-holder flag before you start host.",
-            ),
-            Self::Api(e) => CliError::relay(format!("relay: {}: {}", e.code, e.message)),
-            Self::Transport(m) | Self::Unsent(m) => CliError::relay(m),
+            Self::Api(e) => {
+                let mut error = CliError::relay(if e.code == "not_key_holder" {
+                    "This device is not the key holder. Copy keys.json and move the key-holder flag before you start host.".to_owned()
+                } else {
+                    format!("relay: {}: {}", e.code, e.message)
+                });
+                error.retryable = e.status == 429 || e.status >= 500;
+                error.kind = e.code;
+                error.status = Some(e.status);
+                error.retry_after = e.retry_after;
+                error
+            }
+            Self::Transport(m) | Self::Unsent(m) => {
+                let mut error = CliError::relay(m);
+                error.kind = "transport_error".into();
+                error.retryable = true;
+                error
+            }
         }
     }
 }
@@ -279,6 +294,11 @@ impl Client {
             api: None,
         })?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| text.parse::<u64>().ok());
         let text = response.body_mut().read_to_string().map_err(|e| RawError {
             status: Some(status),
             message: format!("Cannot read the relay answer: {}", transport_words(&e)),
@@ -288,6 +308,7 @@ impl Client {
         })?;
         Ok(RawReply {
             status,
+            retry_after,
             body: Zeroizing::new(text),
         })
     }
@@ -311,7 +332,13 @@ impl Client {
                 CallError::Unsent(e.message)
             }
         })?;
-        parse_reply(reply.status, &reply.body)
+        parse_reply(reply.status, &reply.body).map_err(|error| match error {
+            CallError::Api(mut error) => {
+                error.retry_after = reply.retry_after;
+                CallError::Api(error)
+            }
+            other => other,
+        })
     }
 
     /// Like `call`, mapped to a CLI error (exit 4).
@@ -375,6 +402,7 @@ pub fn parse_reply<T: DeserializeOwned>(status: u16, body: &str) -> Result<T, Ca
             ..
         }) => Err(CallError::Api(ApiError {
             status,
+            retry_after: None,
             code: error.code,
             message: error.message,
         })),

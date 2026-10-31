@@ -377,7 +377,6 @@ pub const USAGE: &str = "\
 apassy-team: the CLI of the Apassy team relay
 
 Setup
-  init --relay URL              read a member token from stdin, check it, save settings
   create --relay URL --team NAME --name NAME [--device NAME]
                                 read a team code of the operator from stdin, make a new
                                 team with you as its owner, save settings
@@ -403,7 +402,6 @@ Team (owner or manager)
   item list [--collection ID] | item archive ID
   grant --collection ID --member ID | grants | revoke --grant ID
   pending | deny RUN_ID [--reason TEXT]
-  approve RUN_ID [--reason TEXT]   (refused: the keys are on the owner's host; use `host`)
   audit [--after ID] [--limit N] [--json]
 
 Devices
@@ -436,7 +434,16 @@ Agents (APASSY_TOKEN)
       [--cwd DIR] -- CMD ARGS...   ask for a run, then run the command
   mcp                           stdio MCP adapter
 
-Most list commands take --json. Member commands take --team ID.
+Compatibility (legacy relays only)
+  init --relay URL              import a legacy member token; current setup uses create/join
+  approve RUN_ID                unavailable: the key-holder `host` decides runs
+  Existing device recovery: device link --resume or device enroll to check saved enrollment
+
+Finite commands take --json before the child delimiter: one success/error envelope on stdout,
+progress on stderr. Lists and mutations use the same envelope. One-time secrets appear once.
+For run --json, child output goes to stderr and its exit code is preserved.
+MCP and foreground host use streaming protocols and cannot be wrapped with --json.
+Member commands take --team ID.
 Environment: APASSY_RELAY_URL, APASSY_TEAM, APASSY_TEAM_TOKEN, APASSY_TOKEN, APASSY_EDGE_SECRET.
 Secrets are read from stdin, never from arguments.
 Exit codes: 0 ok (or the child's code), 2 usage, 3 run denied or timed out, 4 relay or network error.

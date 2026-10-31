@@ -303,7 +303,7 @@ fn me_works_with_an_agent_token_and_json_prints_the_result() {
     let output = Cli::new().agent(&mock.url).run(&["me", "--json"], None);
     assert_eq!(code(&output), 0);
     let printed: Value = serde_json::from_str(&text(&output.stdout)).unwrap();
-    assert_eq!(printed["agent_name"], "ci");
+    assert_eq!(printed["result"]["agent_name"], "ci");
     assert_eq!(
         mock.requests()[0].header("authorization"),
         Some(format!("Bearer {AGENT_TOKEN}").as_str())

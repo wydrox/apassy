@@ -182,18 +182,24 @@ fn spawn(
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
+    if crate::cli::output::enabled() {
+        command.stdout(Stdio::from(std::io::stderr()));
+    }
     let status = command.status().map_err(|e| {
         let code = match e.kind() {
             std::io::ErrorKind::NotFound => 127,
             std::io::ErrorKind::PermissionDenied => 126,
             _ => 4,
         };
-        CliError {
-            code,
-            message: format!("Cannot run `{}`: {}.", clean(&argv[0]), e.kind()),
-        }
+        let mut error = CliError::relay(format!("Cannot run `{}`: {}.", clean(&argv[0]), e.kind()));
+        error.code = code;
+        error.kind = "child_start_failed".into();
+        error.retryable = false;
+        error
     })?;
-    Ok(exit_code(status))
+    let code = exit_code(status);
+    crate::cli::output::result(&serde_json::json!({"child_exit_code":code}))?;
+    Ok(code)
 }
 
 /// The exit code of a child: its code, or 128 plus the signal number.
