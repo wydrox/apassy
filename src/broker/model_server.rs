@@ -3808,9 +3808,8 @@ mod tests {
     }
 
     /// A run that waits for a first start reaches its question before the hosts stop the
-    /// tool call: 330 s in the commands of `apassy setup`. The question itself waits 5
-    /// minutes (ADR 0025 §3e); when the host stops the call earlier, the same request
-    /// again joins the waiting question (`ApprovalQueue::wait_for_question`).
+    /// tool call. The host budget also exceeds the owner wait plus execution budget;
+    /// a lost response never establishes that repeating a mutation is safe.
     #[test]
     fn a_run_that_waits_for_a_first_start_ends_within_the_tool_time_out() {
         let setup =
@@ -3819,13 +3818,16 @@ mod tests {
         assert!(setup.contains("MCP_TOOL_TIMEOUT=660000"), "Claude Code");
         assert!(setup.contains("tool_timeout_sec = 660"), "Codex");
         let host_limit = Duration::from_secs(660);
-        let owner_wait = crate::broker::server::BrokerOptions::with_tls(
+        let options = crate::broker::server::BrokerOptions::with_tls(
             crate::broker::http::TlsClient::platform().expect("tls"),
-        )
-        .approval_timeout;
-        assert_eq!(owner_wait, crate::broker::server::QUESTION_WAIT);
+        );
+        assert_eq!(
+            options.approval_timeout,
+            crate::broker::server::QUESTION_WAIT
+        );
         // Time for the hook, the request checks, and the answer of the model.
         let margin = Duration::from_secs(10);
+        assert!(options.approval_timeout + options.run_timeout + margin < host_limit);
         for gate in [NEEDED_WAIT, FIRST_START_WAIT] {
             assert!(
                 gate + margin <= host_limit,

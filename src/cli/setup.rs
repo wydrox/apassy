@@ -454,10 +454,11 @@ fn setup_report(result: &Outcome, stages: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "ok": result.is_ok(), "code": code,
         "message": if result.is_ok() { "Setup completed; connection and first use remain unverified." } else { "Setup failed. Check stderr and completed stages before retrying." },
-        "data": { "type": "setup", "stages": stages,
+        "stage": stages.last().copied().unwrap_or("preflight"),
+        "partial_state": { "stages": stages,
             "partial": result.is_err() && stages.iter().any(|stage| stage.ends_with("_written") || *stage == "agent_connected"),
-            "changes_unknown": matches!(result, Err(Failure::Other(_))) && stages.contains(&"connection_requested") && !stages.contains(&"agent_connected"),
-            "connection_verified": false }
+            "changes_unknown": matches!(result, Err(Failure::Other(_))) && stages.contains(&"connection_requested") && !stages.contains(&"agent_connected") },
+        "data": { "type": "setup", "connection_verified": false }
     })
 }
 
@@ -757,7 +758,7 @@ fn claude(
     if !write {
         eprintln!(
             "\nAdd the MCP server (user scope):\n  claude mcp add --scope user apassy -- {}",
-            mcp_wrapper.display()
+            quote(&mcp_wrapper.display().to_string())
         );
         eprintln!(
             "or put this in .mcp.json:\n{}",
@@ -1116,6 +1117,9 @@ mod tests {
                 serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
             assert_eq!(value["env"]["MCP_TOOL_TIMEOUT"], expected);
             assert_eq!(value["env"]["OTHER"], "keep");
+            let migrated = fs::read(&file).unwrap();
+            claude_timeout(&file, true).unwrap();
+            assert_eq!(fs::read(&file).unwrap(), migrated);
         }
         let expected = codex_section(Path::new("/tmp/mcp"));
         for timeout in [330, 660, 900] {
@@ -1161,8 +1165,12 @@ mod tests {
             let text = setup_report(&result, &stages).to_string();
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(value["ok"], result.is_ok());
-            assert_eq!(value["data"]["partial"], partial);
-            assert_eq!(value["data"]["stages"], serde_json::json!(stages));
+            assert_eq!(value["partial_state"]["partial"], partial);
+            assert_eq!(value["partial_state"]["stages"], serde_json::json!(stages));
+            assert_eq!(
+                value["stage"],
+                stages.last().copied().unwrap_or("preflight")
+            );
         }
     }
 

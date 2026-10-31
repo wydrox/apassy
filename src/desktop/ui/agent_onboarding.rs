@@ -367,6 +367,33 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_commands_preserve_shell_words_in_bash_and_zsh() {
+        let path = std::path::Path::new("/tmp/App space 'quote $dollar;/apassy-sandbox");
+        for host in [Host::Claude, Host::Codex] {
+            let command = launch_command_at(host, path);
+            let words = command
+                .strip_prefix("MCP_TOOL_TIMEOUT=660000 ")
+                .unwrap_or(&command);
+            for shell in ["/bin/bash"]
+                .into_iter()
+                .chain(cfg!(target_os = "macos").then_some("/bin/zsh"))
+            {
+                let output = std::process::Command::new(shell)
+                    .args(["-c", &format!("printf '%s\\0' {words}")])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let fields: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
+                assert_eq!(fields[0], path.as_os_str().as_encoded_bytes());
+                assert_eq!(fields[1], b"--");
+                if host == Host::Claude {
+                    assert_eq!(fields[4], br#"{"sandbox":{"enabled":false}}"#);
+                }
+            }
+        }
+    }
+
     use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
     use super::*;
     use crate::broker::approvals::OwnerCheck;

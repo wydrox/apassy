@@ -55,7 +55,7 @@ fn preview_preflight_and_retry_do_not_register_or_replace_credentials() {
         Some("apassy_agt_synthetic_contract"),
         1,
     );
-    assert_eq!(failure["data"]["partial"], false);
+    assert_eq!(failure["partial_state"]["partial"], false);
     assert!(!home.join(".config").exists());
     std::fs::write(&hooks, "{}").unwrap();
     setup(
@@ -81,7 +81,7 @@ fn missing_app_is_one_json_document_with_exit_three_and_no_files_written() {
     let dir = tempfile::tempdir().unwrap();
     let failure = setup(dir.path(), &["--write"], None, 3);
     assert_eq!(failure["code"], "not_running");
-    assert_eq!(failure["data"]["partial"], false);
-    assert_eq!(failure["data"]["changes_unknown"], false);
+    assert_eq!(failure["partial_state"]["partial"], false);
+    assert_eq!(failure["partial_state"]["changes_unknown"], false);
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }

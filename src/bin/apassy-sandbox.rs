@@ -623,18 +623,23 @@ mod tests {
         let words = command
             .strip_prefix("'env' '-u' 'APASSY_SESSION' ")
             .unwrap();
-        let output = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("printf '%s\\0' {words}")])
-            .output()
-            .unwrap();
-        let fields: Vec<_> = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|part| !part.is_empty())
-            .collect();
-        assert_eq!(fields[2], odd.as_bytes());
-        assert_eq!(fields[4], format!("PATH={odd}").as_bytes());
-        assert_eq!(fields[5], odd.as_bytes());
+        for shell in ["/bin/bash"]
+            .into_iter()
+            .chain(cfg!(target_os = "macos").then_some("/bin/zsh"))
+        {
+            let output = std::process::Command::new(shell)
+                .args(["-c", &format!("printf '%s\\0' {words}")])
+                .output()
+                .unwrap();
+            let fields: Vec<_> = output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|part| !part.is_empty())
+                .collect();
+            assert_eq!(fields[2], odd.as_bytes());
+            assert_eq!(fields[4], format!("PATH={odd}").as_bytes());
+            assert_eq!(fields[5], odd.as_bytes());
+        }
         assert!(command.starts_with("'env' '-u' 'APASSY_SESSION' "));
         assert!(command.contains("'\\''"));
     }
