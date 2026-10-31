@@ -846,3 +846,25 @@ fn ordinary_field_copy_rejects_totp_uris_in_passwords_tokens_and_custom_secrets(
     );
     assert_eq!(board.with(|b| b.writes), 0);
 }
+
+#[test]
+fn auto_lock_uses_normal_lock_path_and_ends_touch_id_window() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    use crate::desktop::auto_lock::LockPolicy;
+    let dir = TempDir::new().unwrap();
+    let (mut app, _, _) = app_with_login(&dir);
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(OwnerFrequency::UntilLock);
+    window.observe(true);
+    let epoch = app.owner_ui.session.epoch().unwrap();
+    window.seed(epoch, CheckMethod::TouchId, window.generation());
+    let (proof, _) = window.ticket(epoch).unwrap();
+    app.owner_ui.passphrase = "synthetic draft".into();
+    app.auto_lock.policy = LockPolicy::Session;
+    app.auto_lock.source.record(Some(0.0), true);
+    app.poll_auto_lock(&egui::Context::default());
+    assert!(app.owner_ui.session.is_locked());
+    assert!(app.owner_ui.passphrase.is_empty());
+    assert!(!proof.valid());
+    assert!(window.ticket(epoch).is_none());
+}

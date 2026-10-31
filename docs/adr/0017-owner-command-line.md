@@ -20,6 +20,8 @@ The wire is in [owner-cli-v1](../contracts/owner-cli-v1.md).
 
 ### 2. Three levels of authority
 
+The table below is historical and superseded by [ADR 0030](0030-owner-check-window.md) and the current [CLI authority note](../operations/cli.md).
+
 | Level | Commands | What protects them |
 | --- | --- | --- |
 | No session | `status`, `login`, `lock`, `unlock` (brings the window to the front) | They show no vault content and give no authority. |

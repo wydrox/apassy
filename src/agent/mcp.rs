@@ -160,7 +160,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use the owner's credentials without seeing them. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. If your host ends the call first, or you get question_waiting, call again with the same request: it joins the waiting question. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: inspect activity and the external target with the owner before retrying a mutating call. Repeating a call is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -214,7 +214,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_RUN_WITH_SECRETS,
             "title": "Run a command with secrets in its environment",
-            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. You never get the values; in the output they show as [apassy:NAME]. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. If your host ends the call first, or you get question_waiting, call again with the same request: it joins the waiting question. The command is an argument list, not a shell string.",
+            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: inspect activity and the external target with the owner before retrying a mutating call. Repeating a call is not guaranteed safe. The command is an argument list, not a shell string.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -231,7 +231,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_REQUEST_ACCESS,
             "title": "Tell the owner why you need a credential",
-            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. This tool only records a note to the owner about one catalog credential and returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
+            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. This legacy tool gives no permission and creates no Decisions question. Its owner inbox is CLI-only (apassy request list). It requires a visible catalog item ID and only records a note to the owner about one catalog credential and returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -246,7 +246,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_CAPTURE_CREDENTIAL,
             "title": "Save a command output or a file as a new credential",
-            "description": "The best way to store a credential: you never see it. Apassy runs a command or reads a file and saves the trimmed output (or the part that extract names); you get item_id and env_name. Known token commands run at once, such as [\"gh\", \"auth\", \"token\"], [\"op\", \"read\", \"op://vault/item/field\"], [\"gcloud\", \"auth\", \"print-access-token\"]. Any other command, or a file outside your project, waits for the owner (up to 5 minutes; on question_waiting or a host timeout call again with the same request). Refused: Apassy paths, more than 64 KiB, empty output, a non-zero exit code. At most 10 new or changed credentials per hour.",
+            "description": "The best way to store a credential: you never see it. Apassy runs a command or reads a file and saves the trimmed output (or the part that extract names); you get item_id and env_name. Known token commands run at once, such as [\"gh\", \"auth\", \"token\"], [\"op\", \"read\", \"op://vault/item/field\"], [\"gcloud\", \"auth\", \"print-access-token\"]. Any other command, or a file outside your project, waits for the owner (up to 5 minutes; on question_waiting wait for the other question; after a host timeout verify the outcome before retrying). Refused: Apassy paths, more than 64 KiB, empty output, a non-zero exit code. At most 10 new or changed credentials per hour.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -258,6 +258,7 @@ pub fn tool_list() -> Value {
                     "folder": { "type": "string", "description": "Folder path as the catalog shows it, such as \"Work / Stripe\". Optional." },
                     "purpose": { "type": "string", "description": "Why you add it. Optional." }
                 },
+                "oneOf": [{"required": ["command"], "not": {"anyOf": [{"required": ["file"]}]}}, {"required": ["file"], "not": {"anyOf": [{"required": ["command"]}]}}],
                 "additionalProperties": false
             }
         },
@@ -285,7 +286,7 @@ pub fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "value": { "type": "string", "description": "The secret value. At most 64 KiB." },
+                    "value": { "type": "string", "description": "The secret value. The entire serialized request, including escaping and envelope, must fit in 64 KiB; prefer file capture for large values." },
                     "name": { "type": "string", "description": "Name of the new credential. Optional." },
                     "cwd": { "type": "string", "description": "Absolute project folder. Default: the folder of this MCP server." },
                     "folder": { "type": "string", "description": "Folder path as the catalog shows it. Optional." }
@@ -297,7 +298,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_ASK_OWNER_FOR_CREDENTIAL,
             "title": "Ask the owner to add a credential",
-            "description": "Ask the owner to paste a credential into Apassy. The call waits up to 5 minutes. When the owner saves it, you get item_id and env_name, never the value. On waiting, call again with the same name: the same name in the same project is the same request. On dismissed, tell the user. On question_waiting, another question of yours waits (the text names it): wait for it first. At most 5 open or new requests per hour.",
+            "description": "Ask the owner to paste a credential into Apassy. The call waits up to 5 minutes. When the owner saves it, you get item_id and env_name, never the value. On waiting, call again with the same name: the same name in the same project is the same request. On dismissed, tell the user. On question_waiting, another question of yours waits: wait for it first. At most 5 open or new requests per hour.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -334,6 +335,7 @@ pub fn tool_list() -> Value {
                     "cwd": { "type": "string", "description": "Absolute working directory of the command. Default: the folder of this MCP server." }
                 },
                 "required": ["item_id"],
+                "oneOf": [{"required": ["command"], "not": {"anyOf": [{"required": ["file"]}, {"required": ["generate"]}]}}, {"required": ["file"], "not": {"anyOf": [{"required": ["command"]}, {"required": ["generate"]}]}}, {"required": ["generate"], "not": {"anyOf": [{"required": ["command"]}, {"required": ["file"]}]}}],
                 "additionalProperties": false
             }
         },
@@ -367,7 +369,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
     let action = match name {
-        TOOL_LIST_ACCESS => Ok(Action::ListAccess),
+        TOOL_LIST_ACCESS => arguments_object(&arguments, &[]).map(|_| Action::ListAccess),
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
@@ -395,10 +397,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
     };
     match client::send_with(&config.socket, token, action, options) {
         Ok(response) => tool_result(response),
-        Err(_) => tool_error(
-            "broker_unavailable",
-            "The Apassy broker did not answer. Make sure that the Apassy desktop app is open.",
-        ),
+        Err(error) => transport_error(&error),
     }
 }
 
@@ -406,11 +405,11 @@ fn call_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
-    if let Some(extra) = object
+    if let Some(_extra) = object
         .keys()
         .find(|key| !matches!(key.as_str(), "item_id" | "operation" | "params"))
     {
-        return Err(format!("The argument \"{extra}\" is not permitted."));
+        return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
     }
     let item_id = object
         .get("item_id")
@@ -430,7 +429,7 @@ fn call_action(arguments: &Value) -> Result<Action, String> {
         for (key, value) in raw {
             let text = value
                 .as_str()
-                .ok_or_else(|| format!("The parameter \"{key}\" must be a string."))?;
+                .ok_or_else(|| "Each operation parameter must be a string.".to_owned())?;
             params.insert(key.clone(), text.to_owned());
         }
     }
@@ -445,13 +444,13 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
-    if let Some(extra) = object.keys().find(|key| {
+    if let Some(_extra) = object.keys().find(|key| {
         !matches!(
             key.as_str(),
             "items" | "command" | "cwd" | "purpose" | "user_request"
         )
     }) {
-        return Err(format!("The argument \"{extra}\" is not permitted."));
+        return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
     }
     let items = object
         .get("items")
@@ -482,15 +481,15 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
             .map(str::to_owned)
             .ok_or_else(|| format!("The {name} argument must be a string."))
     };
+    if items.is_empty() || command.is_empty() {
+        return Err("Give at least one item and a nonempty command argument list.".to_owned());
+    }
     Ok(Action::Run {
         items,
         command,
         cwd: text("cwd")?,
         purpose: text("purpose")?,
-        user_request: object
-            .get("user_request")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        user_request: Some(text("user_request")?),
         // The process uses the PATH of the agent host, so tools such as npm resolve the same way.
         path: std::env::var("PATH").ok(),
     })
@@ -500,11 +499,11 @@ fn request_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
-    if let Some(extra) = object
+    if let Some(_extra) = object
         .keys()
         .find(|key| !matches!(key.as_str(), "item_id" | "reason" | "cwd"))
     {
-        return Err(format!("The argument \"{extra}\" is not permitted."));
+        return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
     }
     let item_id = object
         .get("item_id")
@@ -540,8 +539,8 @@ fn arguments_object<'a>(
     let object = arguments
         .as_object()
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
-    if let Some(extra) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Err(format!("The argument \"{extra}\" is not permitted."));
+    if let Some(_extra) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
     }
     Ok(object)
 }
@@ -557,7 +556,9 @@ fn optional_text(object: &Map<String, Value>, name: &str) -> Result<Option<Strin
 }
 
 fn required_text(object: &Map<String, Value>, name: &str) -> Result<String, String> {
-    optional_text(object, name)?.ok_or_else(|| format!("The {name} argument must be a string."))
+    optional_text(object, name)?
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("The {name} argument must be a nonempty string."))
 }
 
 fn optional_strings(
@@ -621,6 +622,67 @@ fn extract(object: &Map<String, Value>) -> Result<Option<Extract>, String> {
     }
 }
 
+fn exactly_one_source(object: &Map<String, Value>, keys: &[&str]) -> Result<(), String> {
+    if keys
+        .iter()
+        .any(|key| object.get(*key).is_some_and(Value::is_null))
+    {
+        return Err("Omit unused source fields instead of sending null.".to_owned());
+    }
+    if keys
+        .iter()
+        .filter(|key| object.get(**key).is_some_and(|v| !v.is_null()))
+        .count()
+        != 1
+    {
+        return Err(format!("Give exactly one source: {}.", keys.join(", ")));
+    }
+    if object
+        .get("file")
+        .is_some_and(|v| v.as_str().is_none_or(str::is_empty))
+        || object
+            .get("command")
+            .is_some_and(|v| v.as_array().is_none_or(Vec::is_empty))
+    {
+        return Err("The selected file or command must be nonempty.".to_owned());
+    }
+    Ok(())
+}
+
+fn transport_error(error: &io::Error) -> Value {
+    let (code, message) = match error.kind() {
+        io::ErrorKind::InvalidInput => (
+            "too_large",
+            "The serialized request exceeds the wire limit. Use a smaller value or capture from a file.",
+        ),
+        io::ErrorKind::PermissionDenied => (
+            "permission_denied",
+            "Access to the broker socket was denied. Check socket permissions and the sandbox configuration.",
+        ),
+        io::ErrorKind::NotFound => (
+            "app_not_running",
+            "The broker socket is missing. Check APASSY_BROKER_SOCKET; open Apassy if it is closed.",
+        ),
+        io::ErrorKind::ConnectionRefused => (
+            "connection_refused",
+            "The broker refused the connection. Check APASSY_BROKER_SOCKET and the app broker status.",
+        ),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => (
+            "unknown_outcome",
+            "The broker response timed out. The operation may have executed.",
+        ),
+        io::ErrorKind::InvalidData => (
+            "protocol_error",
+            "The broker response is invalid or incomplete. Check that app and MCP versions match; execution outcome may be unknown.",
+        ),
+        _ => (
+            "unknown_outcome",
+            "The broker connection ended without a usable response. The operation may have executed.",
+        ),
+    };
+    tool_error(code, message)
+}
+
 fn capture_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments_object(
         arguments,
@@ -628,6 +690,7 @@ fn capture_action(arguments: &Value) -> Result<Action, String> {
             "name", "command", "file", "cwd", "folder", "purpose", "extract",
         ],
     )?;
+    exactly_one_source(object, &["command", "file"])?;
     Ok(Action::CaptureCredential {
         name: optional_text(object, "name")?,
         command: optional_strings(object, "command")?,
@@ -643,6 +706,14 @@ fn capture_action(arguments: &Value) -> Result<Action, String> {
 
 fn generate_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments_object(arguments, &["name", "length", "alphabet", "cwd", "folder"])?;
+    if let Some(alphabet) = optional_text(object, "alphabet")?
+        && !["alnum", "hex", "base64url", "symbols"].contains(&alphabet.as_str())
+    {
+        return Err("Choose alphabet: alnum, hex, base64url, or symbols.".to_owned());
+    }
+    if length(object)?.is_some_and(|n| !(16..=128).contains(&n)) {
+        return Err("Use a generated length from 16 through 128.".to_owned());
+    }
     Ok(Action::GenerateCredential {
         name: required_text(object, "name")?,
         length: length(object)?,
@@ -693,6 +764,7 @@ fn update_action(arguments: &Value) -> Result<Action, String> {
             })?,
         ),
     };
+    exactly_one_source(object, &["command", "file", "generate"])?;
     Ok(Action::UpdateCredential {
         item_id: item_id(object)?,
         command: optional_strings(object, "command")?,
@@ -728,17 +800,80 @@ fn tool_result(response: WireResponse) -> Value {
             "isError": false,
         })
     } else {
-        let (code, message) = response.error.map_or_else(
-            || {
-                (
-                    "broker_error".to_owned(),
-                    "The broker refused the request.".to_owned(),
-                )
-            },
-            |error| (error.code, error.message),
-        );
-        tool_error(&code, &message)
+        broker_error(
+            response
+                .error
+                .as_ref()
+                .map_or("broker_error", |error| &error.code),
+        )
     }
+}
+
+/// Broker messages can contain request names, paths, or command text. Only
+/// recognized codes and fixed messages cross the MCP diagnostic boundary.
+fn broker_error(code: &str) -> Value {
+    let (code, message) = match code {
+        "token_expired" => (code, "The Apassy agent token expired."),
+        "unauthenticated" => (
+            code,
+            "The agent token is not valid for the Apassy vault that is open now.",
+        ),
+        "vault_locked" => (code, "The Apassy vault is locked."),
+        "question_waiting" => (code, "A different owner question is pending."),
+        "waiting" => (
+            code,
+            "The credential request is still waiting for the owner.",
+        ),
+        "dismissed" => (code, "The owner dismissed the credential request."),
+        "owner_timeout" | "approval_timeout" => (code, "The owner approval timed out."),
+        "timeout" => (code, "The operation timed out; its outcome may be unknown."),
+        "approval_denied" => (code, "The owner denied the request."),
+        "not_visible" | "not_granted" | "not_owner" | "item_archived" | "review_required" => (
+            code,
+            "The credential is unavailable for this request. Ask the owner to review its access settings.",
+        ),
+        "approval_invalidated" | "authorization_changed" => (
+            code,
+            "The authorization changed. Review the request with the owner.",
+        ),
+        "invalid_request" | "bad_request" | "unknown_folder" | "env_name_taken" => (
+            code,
+            "The broker refused the request parameters. Check the tool schema and catalog.",
+        ),
+        "too_many_items" | "too_many_requests" | "busy" => (
+            code,
+            "The broker cannot accept another request yet. Wait and consult the owner.",
+        ),
+        "capture_refused" => (
+            code,
+            "The credential capture was refused. Review the capture rules with the owner.",
+        ),
+        "answer_failed" => (code, "The broker could not save the owner's answer."),
+        "permission_denied" => (code, "The broker denied permission for this request."),
+        "start_failed" => (
+            code,
+            "The command did not start. Check the program name and PATH.",
+        ),
+        "missing_secret"
+        | "proxy_failed"
+        | "tls_failed"
+        | "destination_error"
+        | "destination_not_found"
+        | "destination_refused"
+        | "destination_unreachable"
+        | "bad_output"
+        | "output_blocked"
+        | "unsupported_version"
+        | "broker_error" => (
+            code,
+            "The broker could not complete the request. Inspect Apassy activity for details.",
+        ),
+        _ => (
+            "broker_error",
+            "The broker returned an unrecognized refusal. Inspect Apassy activity for details.",
+        ),
+    };
+    tool_error(code, message)
 }
 
 /// Next step for a refusal that only the user can fix. The agent host shows the text.
@@ -761,6 +896,19 @@ fn hint(code: &str) -> Option<&'static str> {
         "item_archived" => Some(
             "Tell the user: this credential is archived in Apassy. Only the user can bring it back: in the Apassy app, open the credential and click \"Restore from archive\". Do not retry before that, and do not look for the secret elsewhere.",
         ),
+        "vault_locked" => Some("Ask the owner to unlock the vault in Apassy, then retry."),
+        "question_waiting" => Some(
+            "A different owner question is pending. Wait for it to finish before submitting this request; do not repeat it in a loop.",
+        ),
+        "owner_timeout" | "approval_timeout" => {
+            Some("The owner approval timed out. Ask the owner to resolve it before retrying.")
+        }
+        "timeout" | "unknown_outcome" | "protocol_error" => Some(
+            "Inspect activity and verify the external target with the owner before retrying. Never blindly repeat a mutating call.",
+        ),
+        "permission_denied" | "connection_refused" | "app_not_running" | "too_large" => {
+            Some("Correct the reported cause before retrying.")
+        }
         _ => None,
     }
 }
@@ -772,12 +920,261 @@ fn tool_error(code: &str, message: &str) -> Value {
     };
     json!({
         "content": [{ "type": "text", "text": text }],
+        "structuredContent": { "code": code, "message": message,
+            "next_step": hint(code).unwrap_or("Review the refusal with the owner. If the call could have changed external state, verify the outcome first. Never blindly repeat a mutating call."),
+            "retryable": false },
         "isError": true,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn validation_and_broker_errors_never_echo_request_content() {
+        let canary = "synthetic-secret /private/path command --token";
+        let result = call_tool(
+            &config(),
+            &json!({"name": TOOL_USE_CREDENTIAL, "arguments": {
+                "item_id": 1, "operation": "test", "params": {(canary): {}}
+            }}),
+        );
+        assert_eq!(result["structuredContent"]["code"], "invalid_arguments");
+        assert!(!result.to_string().contains(canary));
+        for code in ["question_waiting", "invalid_request", "timeout", canary] {
+            let result = tool_result(WireResponse::failure(code, canary));
+            assert!(!result.to_string().contains(canary));
+            assert_eq!(result["structuredContent"]["retryable"], false);
+            if code == "timeout" {
+                assert!(
+                    result["structuredContent"]["next_step"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Never blindly repeat")
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
+    fn socket_permission_and_refusal_are_distinct() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let socket = private.join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut cfg = config();
+        cfg.socket = socket;
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = call_tool(&cfg, &json!({"name": TOOL_LIST_ACCESS}));
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(denied["structuredContent"]["code"], "permission_denied");
+        drop(listener);
+        let refused = call_tool(&cfg, &json!({"name": TOOL_LIST_ACCESS}));
+        assert_eq!(refused["structuredContent"]["code"], "connection_refused");
+    }
+
+    #[test]
+    fn source_schema_one_of_validation_matches_adapter() {
+        // Evaluate the standard required/not/anyOf predicates used in source branches.
+        fn accepts(schema: &Value, value: &Value) -> bool {
+            if let Some(required) = schema.get("required").and_then(Value::as_array)
+                && !required
+                    .iter()
+                    .all(|key| value.get(key.as_str().unwrap()).is_some())
+            {
+                return false;
+            }
+            if let Some(not) = schema.get("not")
+                && accepts(not, value)
+            {
+                return false;
+            }
+            if let Some(any) = schema.get("anyOf").and_then(Value::as_array)
+                && !any.iter().any(|branch| accepts(branch, value))
+            {
+                return false;
+            }
+            true
+        }
+        let tools = tool_list();
+        for (tool_name, sources) in [
+            (TOOL_CAPTURE_CREDENTIAL, vec!["command", "file"]),
+            (TOOL_UPDATE_CREDENTIAL, vec!["command", "file", "generate"]),
+        ] {
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == tool_name)
+                .unwrap();
+            let branches = tool["inputSchema"]["oneOf"].as_array().unwrap();
+            for mask in 0..(1 << sources.len()) {
+                let mut value = json!({"item_id":1});
+                for (bit, source) in sources.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        value[*source] = match *source {
+                            "command" => json!(["true"]),
+                            "file" => json!("/tmp/synthetic"),
+                            _ => json!({}),
+                        };
+                    }
+                }
+                let schema_valid = branches
+                    .iter()
+                    .filter(|branch| accepts(branch, &value))
+                    .count()
+                    == 1;
+                if tool_name == TOOL_CAPTURE_CREDENTIAL {
+                    value.as_object_mut().unwrap().remove("item_id");
+                }
+                let adapter_valid = if tool_name == TOOL_CAPTURE_CREDENTIAL {
+                    capture_action(&value).is_ok()
+                } else {
+                    update_action(&value).is_ok()
+                };
+                assert_eq!(schema_valid, adapter_valid, "{tool_name}: {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_request_fails_before_connection_and_excludes_value() {
+        let result = call_tool(
+            &config(),
+            &json!({"name":TOOL_SAVE_CREDENTIAL,"arguments":{"value":"synthetic-secret".repeat(MAX_LINE_BYTES)}}),
+        );
+        assert_eq!(result["structuredContent"]["code"], "too_large");
+        assert!(!result.to_string().contains("synthetic-secret"));
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
+    fn stub_broker_refusals_and_client_timeout_keep_their_causes() {
+        use std::os::unix::net::UnixListener;
+        for code in ["vault_locked", "approval_timeout", "permission_denied"] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("broker.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let broker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                std::io::BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                serde_json::to_writer(
+                    &mut stream,
+                    &WireResponse::failure(code, "Synthetic refusal"),
+                )
+                .unwrap();
+                stream.write_all(b"\n").unwrap();
+            });
+            let mut cfg = config();
+            cfg.socket = socket;
+            let result = call_tool(&cfg, &json!({"name": TOOL_LIST_ACCESS}));
+            broker.join().unwrap();
+            assert_eq!(result["structuredContent"]["code"], code);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let broker = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        let error = client::send_with(
+            &socket,
+            "synthetic-token",
+            Action::ListAccess,
+            client::SendOptions {
+                timeout: Some(Duration::from_millis(10)),
+                host_session: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            transport_error(&error)["structuredContent"]["code"],
+            "unknown_outcome"
+        );
+        broker.join().unwrap();
+    }
+
+    #[test]
+    fn error_categories_are_structured_and_sanitized() {
+        for (kind, code) in [
+            (io::ErrorKind::InvalidInput, "too_large"),
+            (io::ErrorKind::PermissionDenied, "permission_denied"),
+            (io::ErrorKind::ConnectionRefused, "connection_refused"),
+            (io::ErrorKind::NotFound, "app_not_running"),
+            (io::ErrorKind::TimedOut, "unknown_outcome"),
+            (io::ErrorKind::InvalidData, "protocol_error"),
+        ] {
+            let result = transport_error(&io::Error::new(kind, "synthetic-secret"));
+            assert_eq!(result["structuredContent"]["code"], code);
+            assert!(!result.to_string().contains("synthetic-secret"));
+            assert_eq!(result["structuredContent"]["retryable"], false);
+        }
+        for code in ["vault_locked", "owner_timeout", "question_waiting"] {
+            let result = tool_result(WireResponse::failure(code, "Synthetic refusal"));
+            assert!(
+                result["structuredContent"]["next_step"]
+                    .as_str()
+                    .unwrap()
+                    .len()
+                    > 20
+            );
+        }
+    }
+
+    #[test]
+    fn source_schemas_and_adapter_refuse_ambiguous_calls() {
+        for arguments in [json!({}), json!({"command":["true"],"file":"/tmp/x"})] {
+            assert!(capture_action(&arguments).is_err());
+        }
+        assert!(update_action(&json!({"item_id":1})).is_err());
+        assert!(
+            run_action(&json!({"items":[1],"command":["true"],"cwd":"/tmp","purpose":"test"}))
+                .is_err()
+        );
+        let result = call_tool(
+            &config(),
+            &json!({"name":TOOL_LIST_ACCESS,"arguments":{"extra":true}}),
+        );
+        assert_eq!(result["structuredContent"]["code"], "invalid_arguments");
+        for tool in tool_list().as_array().unwrap() {
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["additionalProperties"], false);
+            if tool["name"] == TOOL_CAPTURE_CREDENTIAL || tool["name"] == TOOL_UPDATE_CREDENTIAL {
+                assert!(schema["oneOf"].as_array().unwrap().len() >= 2);
+            }
+        }
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
+    fn malformed_stub_broker_keeps_protocol_cause() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let broker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            stream.write_all(b"synthetic-secret\n").unwrap();
+        });
+        let mut cfg = config();
+        cfg.socket = socket;
+        let result = call_tool(&cfg, &json!({"name":TOOL_LIST_ACCESS}));
+        broker.join().unwrap();
+        assert_eq!(result["structuredContent"]["code"], "protocol_error");
+        assert!(!result.to_string().contains("synthetic-secret"));
+    }
+
     #[test]
     fn audit_mcp_frame_is_bounded_without_a_newline() {
         let mut input = std::io::Cursor::new(vec![b'x'; MAX_LINE_BYTES * 8]);
@@ -833,7 +1230,7 @@ mod tests {
         assert!(run_action(&shell_string).is_err());
         let env_override = json!({"items": [1], "command": ["env"], "cwd": "/tmp", "purpose": "p", "env": {"X": "1"}});
         assert!(run_action(&env_override).is_err());
-        let good = json!({"items": [1], "command": ["env"], "cwd": "/tmp", "purpose": "p"});
+        let good = json!({"items": [1], "command": ["env"], "cwd": "/tmp", "purpose": "p", "user_request": "test"});
         assert!(matches!(run_action(&good), Ok(Action::Run { .. })));
     }
 
@@ -867,7 +1264,8 @@ mod tests {
             assert!(!text.contains("process_access"), "{name}: {text}");
             assert!(!text.contains("chooses the folder"), "{name}: {text}");
         }
-        assert!(description(TOOL_RUN_WITH_SECRETS).contains("call again with the same request"));
+        assert!(description(TOOL_RUN_WITH_SECRETS).contains("execution outcome is unknown"));
+        assert!(description(TOOL_RUN_WITH_SECRETS).contains("different owner question"));
         assert!(description(TOOL_SAVE_CREDENTIAL).contains("Prefer apassy_capture_credential"));
         let describe = tools
             .as_array()
@@ -896,7 +1294,7 @@ mod tests {
         let text = reply["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or_default();
-        assert!(text.starts_with("broker_unavailable"));
+        assert!(text.starts_with("app_not_running"));
         assert!(!text.contains("apassy_agt_test"));
     }
 
@@ -912,7 +1310,8 @@ mod tests {
         assert!(text.contains("Rotate token"), "{text}");
         assert!(text.contains("APASSY_AGENT_TOKEN"), "{text}");
         let other = tool_result(WireResponse::failure("not_granted", "No."));
-        assert_eq!(other["content"][0]["text"], "not_granted: No.");
+        assert_eq!(other["structuredContent"]["code"], "not_granted");
+        assert!(!other.to_string().contains("No."));
     }
 
     /// ADR 0013: a token of a vault that is not open gets a clear next step. The text

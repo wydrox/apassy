@@ -146,6 +146,9 @@ fn cases() -> [(
                 "Unlock",
                 "Touch ID",
                 "Owner checks use",
+                "Lock after inactivity",
+                "Never",
+                "Agents can't use your credentials while the vault is locked.",
                 "How often to ask for Touch ID",
                 "Every time",
                 "Change passphrase…",
@@ -777,6 +780,9 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     app.ui.settings_section = SettingsSection::Security;
     let (text, _) = frames(&mut app, TALL);
     for expected in [
+        "Lock after inactivity",
+        "Never",
+        "Agents can't use your credentials while the vault is locked.",
         "How often to ask for Touch ID",
         "Every time",
         "browser fills, passkey sign-ins, and Allow once",

@@ -191,6 +191,34 @@ pub struct Vault {
     _lock_file: File,
     conn: Option<Connection>,
     epoch: [u8; 32],
+    delivery: std::sync::Arc<std::sync::RwLock<bool>>,
+    #[cfg(feature = "desktop")]
+    access_expiry: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+/// A session-specific handoff. Ordinary vault operations never take this lock.
+/// Lock/rekey/drop revoke it before closing the connection. Delivery never takes
+/// the vault mutex, so vault -> delivery cannot form a lock cycle.
+pub(crate) struct DeliveryFence {
+    live: std::sync::Arc<std::sync::RwLock<bool>>,
+    #[cfg(feature = "desktop")]
+    expiry: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+impl DeliveryFence {
+    pub(crate) fn deliver<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        let live = self
+            .live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*live {
+            return None;
+        }
+        #[cfg(feature = "desktop")]
+        if self.expiry.as_ref().is_some_and(|expired| expired()) {
+            return None;
+        }
+        Some(action())
+    }
 }
 
 impl std::fmt::Debug for Vault {
@@ -203,6 +231,7 @@ impl std::fmt::Debug for Vault {
 
 impl Drop for Vault {
     fn drop(&mut self) {
+        self.end_delivery();
         if let Some(conn) = self.conn.take() {
             drop(close_conn(conn));
         }
@@ -246,6 +275,9 @@ impl Vault {
             _lock_file: lock_file,
             conn: None,
             epoch,
+            delivery: Default::default(),
+            #[cfg(feature = "desktop")]
+            access_expiry: None,
         })
     }
 
@@ -257,6 +289,9 @@ impl Vault {
             _lock_file: lock_file,
             conn: None,
             epoch: fresh_epoch()?,
+            delivery: Default::default(),
+            #[cfg(feature = "desktop")]
+            access_expiry: None,
         })
     }
 
@@ -266,6 +301,7 @@ impl Vault {
         self.lock()?;
         validate_unlock_passphrase(passphrase)?;
         self.conn = Some(open_working_conn(&self.path, passphrase)?);
+        self.delivery = std::sync::Arc::new(std::sync::RwLock::new(true));
         // Goal item N3: a run that waited when the process ended or the vault was
         // locked has no final entry. It gets one now. A broker thread that still holds
         // its wait ticket writes its own entry. A failure here does not stop the unlock.
@@ -274,6 +310,11 @@ impl Vault {
     }
 
     pub fn lock(&mut self) -> VaultResult<()> {
+        self.end_delivery();
+        #[cfg(feature = "desktop")]
+        {
+            self.access_expiry = None;
+        }
         let close_result = self.conn.take().map_or(Ok(()), close_conn);
         let epoch_result = fresh_epoch();
         if let Ok(epoch) = epoch_result {
@@ -284,7 +325,43 @@ impl Vault {
     }
 
     pub fn is_locked(&self) -> bool {
-        self.conn.is_none()
+        self.conn.is_none() || self.access_expired()
+    }
+
+    /// Read-only access fence, checked under the same mutex as broker secret reads.
+    /// The desktop subsequently performs its normal lock and UI cleanup.
+    pub(crate) fn access_expired(&self) -> bool {
+        #[cfg(feature = "desktop")]
+        {
+            self.access_expiry.as_ref().is_some_and(|expired| expired())
+        }
+        #[cfg(not(feature = "desktop"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn set_access_expiry(
+        &mut self,
+        expiry: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) {
+        self.access_expiry = expiry;
+    }
+
+    fn end_delivery(&self) {
+        *self
+            .delivery
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+    }
+
+    pub(crate) fn delivery_fence(&self) -> DeliveryFence {
+        DeliveryFence {
+            live: self.delivery.clone(),
+            #[cfg(feature = "desktop")]
+            expiry: self.access_expiry.clone(),
+        }
     }
 
     pub fn epoch(&self) -> [u8; 32] {
@@ -496,6 +573,9 @@ impl Vault {
             _lock_file: dest_lock,
             conn: None,
             epoch: fresh_epoch()?,
+            delivery: Default::default(),
+            #[cfg(feature = "desktop")]
+            access_expiry: None,
         })
     }
 
@@ -533,6 +613,7 @@ impl Vault {
             && let Ok(conn) = open_working_conn(&self.path, new)
         {
             self.conn = Some(conn);
+            self.delivery = std::sync::Arc::new(std::sync::RwLock::new(true));
             return Ok(());
         }
         // The old passphrase must still open the file.
@@ -1723,6 +1804,55 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("harden.db"), passphrase).unwrap();
         vault.unlock(passphrase).unwrap();
         vault
+    }
+
+    #[test]
+    fn delivery_fence_stays_revoked_after_lock_unlock_and_drop() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = unlocked(&dir, PASS);
+        let old = vault.delivery_fence();
+        assert_eq!(old.deliver(|| 1), Some(1));
+        vault.lock().unwrap();
+        assert_eq!(old.deliver(|| 1), None);
+        vault.unlock(PASS).unwrap();
+        assert_eq!(old.deliver(|| 1), None);
+        let current = vault.delivery_fence();
+        assert_eq!(current.deliver(|| 1), Some(1));
+        drop(vault);
+        assert_eq!(current.deliver(|| 1), None);
+    }
+
+    #[test]
+    fn delivery_does_not_hold_the_vault_mutex_or_serialize_other_deliveries() {
+        let dir = TempDir::new().unwrap();
+        let shared = std::sync::Mutex::new(unlocked(&dir, PASS));
+        let first = shared.lock().unwrap().delivery_fence();
+        let second = shared.lock().unwrap().delivery_fence();
+        first
+            .deliver(|| {
+                assert!(!shared.try_lock().unwrap().is_locked());
+                assert_eq!(second.deliver(|| 2), Some(2));
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn delivery_rechecks_expiry_after_preparation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new().unwrap();
+        let mut vault = unlocked(&dir, PASS);
+        let expired = std::sync::Arc::new(AtomicBool::new(false));
+        let signal = expired.clone();
+        vault.set_access_expiry(Some(std::sync::Arc::new(move || {
+            signal.load(Ordering::Acquire)
+        })));
+        let delivery = vault.delivery_fence();
+        expired.store(true, Ordering::Release);
+        assert_eq!(
+            delivery.deliver::<()>(|| panic!("expired secret delivered")),
+            None
+        );
     }
 
     fn compile_options(conn: &Connection) -> Vec<String> {

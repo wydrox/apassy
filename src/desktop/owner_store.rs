@@ -693,7 +693,7 @@ impl OwnerSession {
                 // The broker stores a record for each waiting run (schema 7). Each
                 // record becomes one entry, also for a run that the queue does not
                 // list yet.
-                if !vault.is_locked() {
+                if !vault.is_locked() || vault.access_expired() {
                     let _ = vault.end_waits(why);
                 }
                 self.before_lock.run(vault);
@@ -1130,6 +1130,27 @@ impl OwnerSession {
             return Err(fail("invalid_input", "Type a name for the agent."));
         }
         self.unlocked()?.register_agent(name).map_err(map_err)
+    }
+
+    pub(crate) fn register_setup_agent_checked(
+        &mut self,
+        name: &str,
+        show_all: bool,
+        proof: OwnerProof,
+    ) -> ModelResult<(AgentSummary, AgentToken)> {
+        if !show_all {
+            return self.register_agent_checked(name, proof);
+        }
+        if name.trim().is_empty() {
+            return Err(fail("invalid_input", "Type a name for the agent."));
+        }
+        let mut vault = self.unlocked_for(
+            proof,
+            &OwnerAction::RegisterSetupAgent { name: name.into() },
+        )?;
+        let (agent, token) = vault.register_agent(name).map_err(map_err)?;
+        vault.set_agent_sees_all(agent.id, true).map_err(map_err)?;
+        Ok((agent, token))
     }
 
     pub(crate) fn register_agent_checked(

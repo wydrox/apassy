@@ -73,7 +73,26 @@ fn apply(
     Ok(changes)
 }
 
-pub fn run(mut args: Args) -> Outcome {
+fn changes_json(changes: &[(&str, Change)]) -> Vec<serde_json::Value> {
+    changes
+        .iter()
+        .map(|(name, change)| {
+            let (state, path) = match change {
+                Change::Wrote(path) => ("written", Some(path)),
+                Change::Removed(path) => ("removed", Some(path)),
+                Change::Missing => ("browser_missing", None),
+                Change::Absent => ("manifest_absent", None),
+            };
+            serde_json::json!({"browser": name, "state": state, "path": path})
+        })
+        .collect()
+}
+
+pub fn run(args: Args) -> Outcome {
+    run_with_json(args, false)
+}
+
+pub fn run_with_json(mut args: Args, json: bool) -> Outcome {
     let only = args.value(&["--browser"])?;
     let remove = args.flag(&["--remove"]);
     args.finish()?;
@@ -104,7 +123,40 @@ pub fn run(mut args: Args) -> Outcome {
                 .to_owned(),
         ));
     }
-    let changes = apply(&home, &app.host(), only, remove)?;
+    let changes = if json {
+        let mut completed = Vec::new();
+        for browser in BROWSERS
+            .iter()
+            .filter(|browser| only.is_none_or(|selected| selected.id == browser.id))
+        {
+            if !remove
+                && only.is_none()
+                && install::state(&home, browser, &app.host()) == State::Missing
+            {
+                completed.push((browser.name, Change::Missing));
+                continue;
+            }
+            match apply(&home, &app.host(), Some(browser), remove) {
+                Ok(changes) => completed.extend(changes),
+                Err(_) => {
+                    super::print_json(
+                        &serde_json::json!({"ok": false, "code": "browser_write", "stage": "manifests", "message": "A manifest could not be changed. Check browser directory permissions.", "partial_state": {"changes": changes_json(&completed)}, "data": {"failed_browser": browser.name}}),
+                    );
+                    return Err(Failure::Printed);
+                }
+            }
+        }
+        let ok = remove
+            || completed
+                .iter()
+                .any(|(_, change)| matches!(change, Change::Wrote(_)));
+        super::print_json(
+            &serde_json::json!({"ok": ok, "code": if ok {"ok"} else {"no_browser"}, "stage": "browser", "partial_state": {"changes": changes_json(&completed)}, "data": {"extension_url": install::STORE_URL, "remove_extension_manually": remove}}),
+        );
+        return if ok { Ok(()) } else { Err(Failure::Printed) };
+    } else {
+        apply(&home, &app.host(), only, remove)?
+    };
     let mut wrote = false;
     for (name, change) in &changes {
         match change {

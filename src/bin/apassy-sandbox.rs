@@ -548,17 +548,35 @@ fn select_profile(candidates: &[PathBuf]) -> Result<PathBuf, String> {
     ))
 }
 
-fn print_command(profile: &Path, params: &[(&str, Option<&PathBuf>)], host: &[String]) {
-    print!("{SANDBOX_EXEC} -f {}", profile.display());
+fn printable_command(
+    profile: &Path,
+    params: &[(&str, Option<&PathBuf>)],
+    host: &[String],
+) -> String {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let mut words = vec![
+        "env".to_owned(),
+        "-u".to_owned(),
+        "APASSY_SESSION".to_owned(),
+        SANDBOX_EXEC.to_owned(),
+        "-f".to_owned(),
+        profile.display().to_string(),
+    ];
     for (key, path) in params {
         if let Some(path) = path {
-            print!(" -D {key}={}", path.display());
+            words.extend(["-D".to_owned(), format!("{key}={}", path.display())]);
         }
     }
-    for part in host {
-        print!(" {part}");
-    }
-    println!();
+    words.extend_from_slice(host);
+    words
+        .iter()
+        .map(|word| quote(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn print_command(profile: &Path, params: &[(&str, Option<&PathBuf>)], host: &[String]) {
+    println!("{}", printable_command(profile, params, host));
 }
 
 const HELP: &str = "\
@@ -596,6 +614,36 @@ Examples (turn off only the host's inner sandbox; keep its approval prompts):
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn printed_command_preserves_shell_words_and_removes_owner_session() {
+        let odd = "space 'quote $dollar; semicolon";
+        let profile = std::path::Path::new(odd);
+        let path = std::path::PathBuf::from(odd);
+        let command = super::printable_command(profile, &[("PATH", Some(&path))], &[odd.into()]);
+        let words = command
+            .strip_prefix("'env' '-u' 'APASSY_SESSION' ")
+            .unwrap();
+        for shell in ["/bin/bash"]
+            .into_iter()
+            .chain(cfg!(target_os = "macos").then_some("/bin/zsh"))
+        {
+            let output = std::process::Command::new(shell)
+                .args(["-c", &format!("printf '%s\\0' {words}")])
+                .output()
+                .unwrap();
+            let fields: Vec<_> = output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|part| !part.is_empty())
+                .collect();
+            assert_eq!(fields[2], odd.as_bytes());
+            assert_eq!(fields[4], format!("PATH={odd}").as_bytes());
+            assert_eq!(fields[5], odd.as_bytes());
+        }
+        assert!(command.starts_with("'env' '-u' 'APASSY_SESSION' "));
+        assert!(command.contains("'\\''"));
+    }
+
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {

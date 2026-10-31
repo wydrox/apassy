@@ -325,8 +325,11 @@ impl DesktopApp {
         match &request {
             OwnerRequest::OpenCliSession => ticket.after = After::Session,
             OwnerRequest::ExportDecisions => ticket.after = After::Export,
-            OwnerRequest::RegisterAgent { .. } => ticket.after = After::RegisterAgent,
-            OwnerRequest::RotateToken { agent_id, .. } => {
+            OwnerRequest::RegisterAgent { .. } | OwnerRequest::RegisterSetupAgent { .. } => {
+                ticket.after = After::RegisterAgent
+            }
+            OwnerRequest::RotateToken { agent_id, .. }
+            | OwnerRequest::ConnectAgent { agent_id, .. } => {
                 ticket.after = After::Token {
                     agent_id: *agent_id,
                 };
@@ -783,6 +786,22 @@ impl DesktopApp {
                 data(view.agent.name.clone(), Data::Agent(Box::new(view)))
             }
             Command::AgentAdd { name } => Ok(Step::Check(OwnerRequest::RegisterAgent { name })),
+            Command::AgentConnect { name } => {
+                let name = name.trim().to_owned();
+                let existing = self
+                    .owner_ui
+                    .session
+                    .agents()?
+                    .into_iter()
+                    .find(|agent| !agent.revoked && agent.name == name);
+                if existing.is_some() {
+                    return Err(invalid(
+                        "This agent already exists. Repair its managed wrappers or use --token-stdin with its existing token. Setup does not rotate existing credentials.",
+                    ));
+                }
+                Ok(Step::Check(OwnerRequest::RegisterSetupAgent { name }))
+            }
+
             Command::AgentRevoke { agent } => {
                 let agent = self.find_agent(&agent)?;
                 if agent.revoked {
@@ -1977,8 +1996,12 @@ impl DesktopApp {
             Err(e) => self.set_err(e.message),
         }
     }
-    pub(crate) fn complete_fresh_agent(&mut self, name: &str, proof: OwnerProof) {
-        match self.owner_ui.session.register_agent_checked(name, proof) {
+    pub(crate) fn complete_fresh_agent(&mut self, name: &str, show_all: bool, proof: OwnerProof) {
+        match self
+            .owner_ui
+            .session
+            .register_setup_agent_checked(name, show_all, proof)
+        {
             Ok((agent, token)) => {
                 let row = self.agent_row(agent);
                 self.set_ok(format!(

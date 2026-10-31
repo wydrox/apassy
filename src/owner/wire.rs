@@ -297,6 +297,10 @@ pub enum Command {
     AgentAdd {
         name: String,
     },
+    /// Setup connection with catalog consent for a new agent.
+    AgentConnect {
+        name: String,
+    },
     AgentRevoke {
         agent: String,
     },

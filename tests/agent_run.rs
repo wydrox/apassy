@@ -1578,7 +1578,8 @@ fn mcp_adapter_runs_with_masked_output() {
             "items": [fx.item_id],
             "command": ["sh", "-c", "echo key=$DEMO_API_KEY"],
             "cwd": fx.project.display().to_string(),
-            "purpose": "Show that the process gets the key."
+            "purpose": "Show that the process gets the key.",
+            "user_request": "Show that the process gets the key."
         }}
     });
     {

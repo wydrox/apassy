@@ -17,9 +17,9 @@ use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, Place};
 
 /// How long Claude Code waits for a tool, in milliseconds: more than the 5 minutes that
-/// a question waits for the owner (ADR 0025 §3e). Codex gets `tool_timeout_sec = 330`
+/// a question waits for the owner (ADR 0025 §3e). Codex gets `tool_timeout_sec = 660`
 /// from `apassy setup`.
-pub(super) const CLAUDE_TOOL_TIMEOUT: &str = "MCP_TOOL_TIMEOUT=330000";
+pub(super) const CLAUDE_TOOL_TIMEOUT: &str = "MCP_TOOL_TIMEOUT=660000";
 
 /// The hosts of "Connect an Agent".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,11 +299,26 @@ fn host_row(ui: &mut egui::Ui, host: ConnectHost, selected: bool) {
 
 /// The start of the host in a terminal, with the tool time-out of the 5-minute wait.
 pub(super) fn launch_command(host: Host) -> String {
+    let launcher = std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::canonicalize(exe).ok())
+        .and_then(|exe| exe.parent().map(|dir| dir.join("apassy-sandbox")))
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from("/Applications/Apassy.app/Contents/MacOS/apassy-sandbox")
+        });
+    launch_command_at(host, &launcher)
+}
+
+fn launch_command_at(host: Host, launcher: &std::path::Path) -> String {
+    let launcher = format!(
+        "'{}'",
+        launcher.display().to_string().replace('\'', "'\\''")
+    );
     match host {
         Host::Claude => format!(
-            "{CLAUDE_TOOL_TIMEOUT} apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
+            "{CLAUDE_TOOL_TIMEOUT} {launcher} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
         ),
-        Host::Codex => "apassy-sandbox -- codex -c sandbox_mode=danger-full-access".to_owned(),
+        Host::Codex => format!("{launcher} -- codex -c sandbox_mode=danger-full-access"),
     }
 }
 
@@ -328,16 +343,57 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     kit::note(
         ui,
         if setup == Host::Codex {
-            "Use /hooks to trust the Apassy hook, and /mcp to check the connection. A question waits up to 5 minutes for you; the setup gives Codex a tool time-out of 330 seconds."
+            "Use /hooks to trust the Apassy hook, and /mcp to check the connection. A question waits up to 5 minutes for you; the setup gives Codex a tool time-out of 660 seconds."
         } else {
-            "Use /mcp to check the connection. A question waits up to 5 minutes for you, so start Claude Code with a tool time-out of at least 330 seconds:"
+            "Use /mcp to check the connection. A question waits up to 5 minutes for you, so start Claude Code with a tool time-out of at least 660 seconds:"
         },
     );
-    kit::code_block(ui, &launch_command(setup), 1);
+    kit::code_block(ui, &launch_command(setup), 2);
+    kit::note(
+        ui,
+        "For owner CLI commands, install the links in Settings > Tools. In this terminal, add them to PATH:",
+    );
+    kit::code_block(ui, "export PATH=\"$HOME/.local/bin:$PATH\"", 1);
+    kit::note(
+        ui,
+        "For future zsh terminals, run the following once (use ~/.bashrc for Bash):",
+    );
+    kit::code_block(
+        ui,
+        "printf '%s\\n' 'export PATH=\"$HOME/.local/bin:$PATH\"' >> \"$HOME/.zshrc\"",
+        2,
+    );
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_commands_preserve_shell_words_in_bash_and_zsh() {
+        let path = std::path::Path::new("/tmp/App space 'quote $dollar;/apassy-sandbox");
+        for host in [Host::Claude, Host::Codex] {
+            let command = launch_command_at(host, path);
+            let words = command
+                .strip_prefix("MCP_TOOL_TIMEOUT=660000 ")
+                .unwrap_or(&command);
+            for shell in ["/bin/bash"]
+                .into_iter()
+                .chain(cfg!(target_os = "macos").then_some("/bin/zsh"))
+            {
+                let output = std::process::Command::new(shell)
+                    .args(["-c", &format!("printf '%s\\0' {words}")])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let fields: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
+                assert_eq!(fields[0], path.as_os_str().as_encoded_bytes());
+                assert_eq!(fields[1], b"--");
+                if host == Host::Claude {
+                    assert_eq!(fields[4], br#"{"sandbox":{"enabled":false}}"#);
+                }
+            }
+        }
+    }
+
     use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
     use super::*;
     use crate::broker::approvals::OwnerCheck;
@@ -345,8 +401,11 @@ mod tests {
     #[test]
     fn audit_hosts_have_names_setup_targets_and_a_guess_from_the_agent_name() {
         assert_eq!(
-            launch_command(Host::Codex),
-            "apassy-sandbox -- codex -c sandbox_mode=danger-full-access"
+            launch_command_at(
+                Host::Codex,
+                std::path::Path::new("/tmp/App space/apassy-sandbox")
+            ),
+            "'/tmp/App space/apassy-sandbox' -- codex -c sandbox_mode=danger-full-access"
         );
         assert_eq!(ConnectHost::Claude.setup(), Some(Host::Claude));
         assert_eq!(ConnectHost::Codex.setup(), Some(Host::Codex));
@@ -357,8 +416,11 @@ mod tests {
         assert_eq!(ConnectHost::guess("Claude Code"), ConnectHost::Claude);
         assert_eq!(ConnectHost::guess("CI on GitHub"), ConnectHost::Other);
         assert_eq!(
-            launch_command(Host::Claude),
-            "MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'"
+            launch_command_at(
+                Host::Claude,
+                std::path::Path::new("/tmp/App space/apassy-sandbox")
+            ),
+            "MCP_TOOL_TIMEOUT=660000 '/tmp/App space/apassy-sandbox' -- claude --settings '{\"sandbox\":{\"enabled\":false}}'"
         );
     }
 
