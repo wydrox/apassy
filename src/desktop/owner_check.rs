@@ -233,6 +233,9 @@ pub enum OwnerRequest {
     RegisterAgent {
         name: String,
     },
+    RegisterSetupAgent {
+        name: String,
+    },
     ChangeOwnerFrequency {
         old: crate::broker::approvals::OwnerFrequency,
         new: crate::broker::approvals::OwnerFrequency,
@@ -611,6 +614,9 @@ impl OwnerRequest {
             Self::BackupVault { path } => OwnerAction::BackupVault { path: path.clone() },
             Self::ExportDecisions => OwnerAction::ExportDecisions,
             Self::RegisterAgent { name } => OwnerAction::RegisterAgent { name: name.clone() },
+            Self::RegisterSetupAgent { name } => {
+                OwnerAction::RegisterSetupAgent { name: name.clone() }
+            }
             Self::ChangeOwnerFrequency { old, new } => OwnerAction::ChangeOwnerFrequency {
                 old: *old,
                 new: *new,
@@ -916,6 +922,7 @@ impl OwnerRequest {
         match self {
             Self::BackupVault { path } => format!("Write an encrypted vault backup to {}? The vault locks afterwards.",page_text(&path.display().to_string())),
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
+            Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
             Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
@@ -1723,7 +1730,8 @@ impl DesktopApp {
         match request {
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
             OwnerRequest::ExportDecisions => self.complete_fresh_export(proof),
-            OwnerRequest::RegisterAgent { name } => self.complete_fresh_agent(&name, proof),
+            OwnerRequest::RegisterAgent { name } => self.complete_fresh_agent(&name, false, proof),
+            OwnerRequest::RegisterSetupAgent { name } => self.complete_fresh_agent(&name, true, proof),
             OwnerRequest::ChangeOwnerFrequency { old, new } => self.save_owner_frequency(old, new, proof),
             OwnerRequest::RemovePasskey {
                 item_id,

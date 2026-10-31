@@ -1582,14 +1582,14 @@ fn launcher_passes_the_installed_and_the_build_app() {
     };
     let defaults = print(&[]);
     assert!(
-        defaults.contains(" -D APASSY_APP=/Applications/Apassy.app "),
+        defaults.contains(" '-D' 'APASSY_APP=/Applications/Apassy.app' "),
         "{defaults}"
     );
     // The launcher passes the owner home for the autostart denials.
-    assert!(defaults.contains(" -D APASSY_HOME="), "{defaults}");
+    assert!(defaults.contains(" '-D' 'APASSY_HOME="), "{defaults}");
     assert!(
         defaults.contains(&format!(
-            " -D APASSY_APP_BUILD={} ",
+            " '-D' 'APASSY_APP_BUILD={}' ",
             target.join("Apassy.app").display()
         )),
         "{defaults}"
@@ -1601,11 +1601,11 @@ fn launcher_passes_the_installed_and_the_build_app() {
         "/tmp/apassy-print-check/Build.app",
     ]);
     assert!(
-        chosen.contains(" -D APASSY_APP=/private/tmp/apassy-print-check/Installed.app "),
+        chosen.contains(" '-D' 'APASSY_APP=/private/tmp/apassy-print-check/Installed.app' "),
         "{chosen}"
     );
     assert!(
-        chosen.contains(" -D APASSY_APP_BUILD=/private/tmp/apassy-print-check/Build.app "),
+        chosen.contains(" '-D' 'APASSY_APP_BUILD=/private/tmp/apassy-print-check/Build.app' "),
         "{chosen}"
     );
 
@@ -1621,13 +1621,13 @@ fn launcher_passes_the_installed_and_the_build_app() {
     let with_home = String::from_utf8_lossy(&with_home.stdout).into_owned();
     assert!(
         with_home.contains(
-            " -D APASSY_CLOUD_DIR=/private/tmp/apassy-print-check/home/Library/Mobile Documents/com~apple~CloudDocs/Apassy "
+            " '-D' 'APASSY_CLOUD_DIR=/private/tmp/apassy-print-check/home/Library/Mobile Documents/com~apple~CloudDocs/Apassy' "
         ),
         "{with_home}"
     );
     let cloud = print(&["--cloud-dir", "/tmp/apassy-print-check/Cloud"]);
     assert!(
-        cloud.contains(" -D APASSY_CLOUD_DIR=/private/tmp/apassy-print-check/Cloud "),
+        cloud.contains(" '-D' 'APASSY_CLOUD_DIR=/private/tmp/apassy-print-check/Cloud' "),
         "{cloud}"
     );
 }
@@ -1677,7 +1677,10 @@ fn launcher_passes_each_listed_vault_outside_the_data_directory() {
     let (ok, out, err) = print_with_data_dir(&data);
     assert!(ok, "{err}");
     assert!(
-        out.contains(&format!(" -D APASSY_VAULT_FILE_2={} ", outside.display())),
+        out.contains(&format!(
+            " '-D' 'APASSY_VAULT_FILE_2={}' ",
+            outside.display()
+        )),
         "{out}"
     );
     assert!(!out.contains("APASSY_VAULT_FILE_3"), "{out}");
@@ -1717,7 +1720,7 @@ fn launcher_fails_closed_on_a_bad_vault_list() {
     write_vault_list(&data, &many[..15]);
     let (ok, out, err) = print_with_data_dir(&data);
     assert!(ok, "{err}");
-    assert!(out.contains(" -D APASSY_VAULT_FILE_16="), "{out}");
+    assert!(out.contains(" '-D' 'APASSY_VAULT_FILE_16="), "{out}");
 }
 
 /// ADR 0013: a listed vault outside the data directory is closed in the profile: its
@@ -1787,7 +1790,7 @@ fn launcher_passes_each_synced_file_outside_icloud() {
     assert!(ok, "{err}");
     assert!(
         out.contains(&format!(
-            " -D APASSY_SYNC_FILE_1={} ",
+            " '-D' 'APASSY_SYNC_FILE_1={}' ",
             dropbox.join("Work.apassy").display()
         )),
         "{out}"
