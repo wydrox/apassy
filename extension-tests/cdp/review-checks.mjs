@@ -95,5 +95,14 @@ export async function reviewChecks({ pop, p, w, check }) {
   assert(result.normal.inside && !result.normal.hidden);
   assert(result.narrow.hidden && result.occupied.hidden && result.populated.hidden);
   check("field icon stays inside or hides for narrow fields, site controls and typed passwords", result);
+  const otp = await w.eval(`chrome.scripting.executeScript({target:{tabId:${tab.id}},func:()=>{
+    const field=document.querySelector('input[type=password]'),saved=field.autocomplete;
+    field.autocomplete='one-time-code';
+    const eligible=self.apassyLoginTarget.eligible(field),capture=self.apassyLoginTarget.capture(document.querySelector('input'));
+    field.autocomplete=saved;
+    return {eligible,passwordFields:capture.passwordFields,newPasswordFields:capture.newPasswordFields};
+  }})`);
+  assert.deepEqual(otp[0].result, {eligible:false,passwordFields:0,newPasswordFields:0});
+  check("password-masked OTP is excluded from username-form capture", otp[0].result);
   await pop.send("Page.bringToFront");
 }

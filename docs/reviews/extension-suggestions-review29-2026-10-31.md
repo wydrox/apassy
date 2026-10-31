@@ -11,8 +11,9 @@ Reviewed [PR 29](https://github.com/wydrox/apassy/pull/29) starting at `972fb630
 | P2 | `extension/login-suggestions.js:446` | The document keyboard listener accepted page-generated ArrowDown/Escape and could focus/dismiss the closed-root menu. CDP regression verifies both are refused. | Keyboard and pointer navigation handlers reject untrusted events. Account activation retains its independent trusted-event check. |
 | P2 | `extension/popup.css:211` | Supplied popup screenshots and row geometry: the focus border excluded the details action and right padding was uneven. | Focus border and tint cover the full row, with 8px padding around its actions; Fill cannot shrink. |
 | P2 | `extension/login-suggestions.js:91` | Supplied Google screenshot and explicit `r.right + 4` placement. New light/dark captures show containment. | Icon sits inside the field with a 6px inset. Narrow/clipped/occupied fields and populated passwords hide it. Text measurement and hit testing avoid site content; input changes refresh visibility. |
+| P2 | `extension/login-target.js:64` | A new exact-node regression failed with one password target for a field marked `autocomplete=one-time-code`, despite direct eligibility refusing it. Helium also checks username-form capture. | Exclude password-masked OTP fields from the captured password list, so username fill cannot deliver a vault password into an OTP field. |
 | P2 | `extension/popup.js:227` | Three-account CDP regression: after filtering, arrow wrap targeted a hidden account and stalled. | Keyboard navigation includes visible rows only. |
-| P2 | `extension-tests/tests/passkey-bridge.spec.mjs:28`; `fixtures/login-journey/{target,worker}.unit.mjs` | Static browser-test review found expectations that all scripts disappear with passkeys off. Node execution found 14 failing login fixture checks caused by missing DOM/storage/permission APIs. | Passkey assertions select passkey registrations and also preserve the login script. Updated the synthetic DOM and worker APIs; all 26 login-journey Node tests pass. |
+| P2 | `extension-tests/tests/passkey-bridge.spec.mjs:28`; `fixtures/login-journey/{target,worker}.unit.mjs` | Static browser-test review found expectations that all scripts disappear with passkeys off. Node execution found 14 failing login fixture checks caused by missing DOM/storage/permission APIs. | Passkey assertions select passkey registrations and also preserve the login script. Updated the synthetic DOM and worker APIs; all 27 login-journey Node tests pass. |
 
 ## Checklist evidence
 
@@ -34,15 +35,15 @@ All Cargo commands used `CARGO_TARGET_DIR=/Users/rafalw/Dev/.target-review29 CAR
 | `cargo test --offline --locked --all-features --lib desktop::ui::browser_tests:: -- --test-threads=1` | 25 passed |
 | `cargo clippy --offline --locked --all-features --all-targets -- -D warnings` | Passed |
 | `cargo clippy --offline --locked --all-targets -- -D warnings` | Passed |
-| `node --test extension-tests/fixtures/login-journey/*.unit.mjs` | 26 passed |
-| `node extension-tests/cdp/suggest-smoke.mjs /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-extension/review` | 36 passed, Helium CDP 9371 |
+| `node --test extension-tests/fixtures/login-journey/*.unit.mjs` | 27 passed |
+| `node extension-tests/cdp/suggest-smoke.mjs /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-extension/review` | 37 passed, Helium CDP 9371 |
 | `cargo fmt --all -- --check`; changed JS syntax checks; extension source gate; `git diff --check` | Passed |
 
 The broader passkey Node suites could not load `@simplewebauthn/server` in this worktree. No package installation or Playwright execution was attempted to resolve that dependency. Login fixtures failed first, were repaired, and passed on rerun; the missing passkey dependency is a verification limit rather than a confirmed product failure.
 
 ## Evidence and limits
 
-Local artifacts are in `/Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-extension/review/`: 86 state PNGs (43 light/dark pairs), six contact sheets, `capture-manifest.json` with dimensions/SHA-256, `smoke-results.json`, and `cleanup.json`. The final scratch Helium PID was 37759, exited with code 0; its profile was deleted and port 9371 had no remaining listener. Only the harness's own browser was closed. Ports 9222/9223 were not used.
+Local artifacts are in `/Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-extension/review/`: 86 state PNGs (43 light/dark pairs), six contact sheets, `capture-manifest.json` with dimensions/SHA-256, `smoke-results.json`, and `cleanup.json`. The final scratch Helium PID was 48026, exited with code 0; its profile was deleted and port 9371 had no remaining listener. Only the harness's own browser was closed. Ports 9222/9223 were not used.
 
 The mock native host received zero fill/save/create/update requests. Trusted popup save and inline approval outcomes use nonsecret transport fixtures; other popup result variants are render fixtures. Public pages were loaded and focused only. Native Touch ID, the running owner app, authenticated sign-in, screen readers, store acceptance, and the unexecuted Playwright suite remain unverified. The owner's profile, vault, keychain and app were untouched.
 

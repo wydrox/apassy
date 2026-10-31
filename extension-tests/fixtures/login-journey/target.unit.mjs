@@ -95,6 +95,18 @@ test("username-first result says no password filled", () => {
   assert.equal(result.username, true); assert.equal(result.password, false); assert.equal(s.username.value, "step-one");
 });
 
+test("a password-masked OTP is excluded when capturing its username form", () => {
+  const s = setup(); s.password.autocomplete = "one-time-code";
+  assert.equal(s.api.eligible(s.password), false);
+  const target = s.api.capture(s.username);
+  assert.equal(target.passwordFields, 0);
+  assert.equal(target.newPasswordFields, 0);
+  const result = s.api.fill(target.token, s.location.origin, "step-one", "synthetic-secret");
+  assert.equal(result.username, true);
+  assert.equal(result.password, false);
+  assert.equal(s.password.value, "");
+});
+
 test("synchronous page replacement after username input cannot redirect password", () => {
   const s = setup(); const target = s.api.capture();
   let replacement;

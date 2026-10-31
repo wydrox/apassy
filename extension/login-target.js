@@ -61,7 +61,7 @@
     }
     const scope = group(field);
     const all = members(scope);
-    const passwords = all.filter((el) => el.type === "password");
+    const passwords = all.filter((el) => el.type === "password" && !tokens(el).includes("one-time-code"));
     const username = user(field) ? field : all.find((el) => user(el) && tokens(el).includes("username")) ||
       all.find((el) => user(el) && (el.type === "email" || words.test(signals(el)))) ||
       all.find(user) || null;
