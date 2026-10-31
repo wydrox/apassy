@@ -247,8 +247,8 @@ const LWW_TABLES: [LwwTable; 4] = [
     },
 ];
 
-/// A tombstone stays this long. A copy that is older than this can bring a deleted
-/// credential back.
+/// The historical retention horizon. Deletion knowledge now stays indefinitely;
+/// time alone cannot establish that an offline replica has seen a deletion.
 pub const TOMBSTONE_DAYS: i64 = 180;
 
 /// The alias of the other copy during a merge.
@@ -2004,11 +2004,8 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
         [],
     )
     .map_err(storage)?;
-    tx.execute(
-        "DELETE FROM sync_tombstone WHERE deleted_at < ?1",
-        [now_ms() - TOMBSTONE_DAYS * 86_400_000],
-    )
-    .map_err(storage)?;
+    // Wall-clock age cannot prove that offline replicas saw a deletion.
+    // Keep deletion knowledge until replica-aware compaction is available.
     merge_events(&tx)?;
     preserve_legacy_conflict_origins(&tx)?;
     set_applying(&tx, false)?;
@@ -3240,5 +3237,55 @@ mod schema16_tests {
             local.sync_content(&SyncScope::vault()).unwrap(),
             expected.sync_content(&SyncScope::vault()).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn audit_old_tombstone_still_blocks_a_stale_replica() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("local.db"), "synthetic-audit-pass").unwrap();
+        vault.unlock("synthetic-audit-pass").unwrap();
+        let id = vault
+            .add(crate::vault::ItemDraft {
+                title: "Synthetic".into(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![crate::vault::Field {
+                    name: "token".into(),
+                    value: crate::vault::SecretValue::new("synthetic-token".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        let stale = dir.path().join("stale.db");
+        vault.backup(&stale).unwrap();
+        vault.unlock("synthetic-audit-pass").unwrap();
+        let rev = vault.details(id).unwrap().summary.revision;
+        vault.delete(id, rev).unwrap();
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute("UPDATE sync_tombstone SET deleted_at = 1", [])
+            .unwrap();
+        let scope = SyncScope::vault();
+        // The first merge must preserve deletion knowledge, as must the next one.
+        for _ in 0..2 {
+            vault
+                .merge_from_with_passphrase(&stale, &scope, "synthetic-audit-pass")
+                .unwrap();
+            assert!(vault.search("").unwrap().is_empty());
+            let count: i64 = vault
+                .conn_ref()
+                .unwrap()
+                .query_row("SELECT count(*) FROM sync_tombstone", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
     }
 }

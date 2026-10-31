@@ -82,7 +82,7 @@ A sync of an unlocked vault:
 
 ## 6. How changes merge
 
-Each credential has a stable ID and a version: the time and the device of its last change, and a count of the changes of each device (a version vector). A delete leaves a tombstone with the same kind of version. A tombstone stays 180 days.
+Each credential has a stable ID and a version: the time and the device of its last change, and a count of the changes of each device (a version vector). A delete leaves a tombstone with the same kind of version. A tombstone stays indefinitely.
 
 | This Mac | The synced file | Result |
 | --- | --- | --- |
@@ -329,7 +329,7 @@ The tests use temporary folders. They do not test a sync service itself.
 - A sync service delivers a file later, sometimes minutes later. Until then another Mac sees the older file.
 - Two Macs can push at the same time; the sync service keeps one file (iCloud can keep the other as a duplicate). The change in the other file is not lost: that Mac still has it and pushes it again at its next sync.
 - A conflict picks the later change by the clock of each Mac. A Mac with a wrong clock can win a conflict that it should lose; the other version is still kept as a copy.
-- A tombstone stays 180 days. A Mac that was away longer can bring a deleted credential back.
+- A tombstone stays indefinitely. Time alone cannot prove that an offline replica has seen the deletion. Tombstones are retained until replica-aware compaction is designed. Existing files that already lost a tombstone cannot recover that deletion knowledge automatically.
 - The unit of merge is a credential with all its settings: a change of the variable on one Mac and of the declaration of the same credential on another is a conflict.
 - A person with the passphrase and the synced folder can write a valid file with any content. The other Macs merge it. The passphrase is the root key of the vault (ADR 0003).
 - Evicted files: Apassy detects a `.<name>.icloud` placeholder and a dataless file (macOS 14 and later). The tests cover the placeholder only.
