@@ -984,7 +984,10 @@ fn bouncer_status_counts_success_asks_and_failures_without_double_counting() {
     entry.decided_by = DecidedBy::Model;
     entry.asked = false;
     v.record_decision(&entry).unwrap();
-    assert_eq!(v.bouncer_counts(at).unwrap(), Default::default());
+    assert_eq!(
+        v.bouncer_counts(at, at + 86_400).unwrap(),
+        Default::default()
+    );
     entry.at = at;
     v.record_decision(&entry).unwrap();
     entry.decided_by = DecidedBy::Pattern;
@@ -1002,7 +1005,11 @@ fn bouncer_status_counts_success_asks_and_failures_without_double_counting() {
     v.record_decision(&entry).unwrap();
     entry.note = "No bouncer runs, so each run waits for you: not ready".into();
     v.record_decision(&entry).unwrap();
-    let counts = v.bouncer_counts(at).unwrap();
+    // Tomorrow's decisions do not belong to today's count either.
+    let mut tomorrow = entry.clone();
+    tomorrow.at = at + 86_400;
+    v.record_decision(&tomorrow).unwrap();
+    let counts = v.bouncer_counts(at, at + 86_400).unwrap();
     assert_eq!((counts.by_model, counts.asked, counts.failed), (1, 4, 3));
     let daily = v.ask_rate_by_day(at).unwrap()[0];
     assert_eq!(counts.by_model, u64::from(daily.by_model));

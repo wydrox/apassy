@@ -107,12 +107,15 @@ non-archived credentials with valid process bindings, `src/broker/run.rs` uses:
    Production allowances retain the exact project, certain action and host checks.
 2. Failed inference readiness, no model or Off asks. Remembered routes need readiness.
 3. Root, HOME or a parent of HOME is not a project and asks.
-4. Fitting remembered owner execution answers retain their action and host checks.
+4. A missing user request or declaration asks, also with a fitting execution answer.
+5. Fitting remembered owner execution answers retain their action and host checks.
    An existing answer that does not fit the run asks with the exact reason.
-5. A foreign-project declaration asks unless a fitting execution answer covers it.
-   An evaluation scope is never an exception. Missing user request/declaration asks.
-6. An active owner-taught pattern retains its existing execution semantics.
-7. Every remaining request reaches the model: first use, staging, unconfirmed
+6. Foreign hosts or projects ask unless an explicit fitting execution answer covers
+   them. Every credential must cover each detected host, even without a literal
+   secret-variable reference. Foreign database hosts still always ask. An evaluation
+   scope is never an exception.
+7. An active owner-taught pattern retains its existing execution semantics.
+8. Every remaining request reaches the model: first use, staging, unconfirmed
    production and default-source environment/risk included. No evaluation scope is
    required. Defaults always require at least 80% task match, even for safe commands
    and certain reads; calibration cannot lower this check. The sensitive declaration
@@ -120,7 +123,10 @@ non-archived credentials with valid process bindings, `src/broker/run.rs` uses:
 
 A model allow permits one run, after the authorization recheck. It creates no grant,
 remembered answer, evaluation scope, pattern approval or classification confirmation.
-A later run needs a fresh decision. A question waits at most 300 seconds. Allow once
+A later run needs a fresh decision. Agent text that spoofs model-state labels or
+answer fields asks before inference, including text inside command arguments. The
+bundled model server rejects any state that cannot fit in full for every question;
+truncated inputs never produce a decision. A question waits at most 300 seconds. Allow once
 approves that run only. Explicit project/production execution answers retain their
 existing immediate-execution semantics and do not become model evaluation scopes.
 
@@ -132,8 +138,8 @@ panel. The authenticated `ApproveAndEvaluate` machinery is retained, without a n
 UI offer. Relay and iPhone wire contracts do not change.
 
 Settings > Bouncer shows **Model ready** only after successful inference readiness,
-and **Model not ready** otherwise. **Today (UTC)** shows model allowances, owner
-questions, and failures from the existing local decision log. Failed includes model
+and **Model not ready** otherwise. **Today** shows model allowances, owner
+questions, and failures for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
 or readiness failure and unanswered/invalidated questions; it can overlap asked.
 A denial by the owner is not by itself a failure. Patterns and remembered answers
 are not counted as model allowances. The page refreshes every five seconds (faster

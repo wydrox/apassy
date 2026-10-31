@@ -27,12 +27,15 @@ The following still ask or refuse before inference, with their existing reasons:
   by a signal, confirmed by usage or set by the owner without a fitting allowance.
 - A model that is off, unavailable or has not passed inference readiness.
 - Root, HOME or a parent of HOME instead of a project.
+- Missing user request or declaration, including with a fitting execution answer.
 - An existing owner execution answer that does not cover this run.
 - A foreign-project declaration without a fitting owner execution answer, and a
   missing user request or declaration.
 
-Fitting explicit execution answers and owner-taught patterns retain their existing
-semantics. Evaluation scopes never waive the foreign-project check.
+Each credential must cover every detected destination host, even when the command
+does not name its variable. An explicit fitting owner execution answer can add
+non-database hosts. Fitting execution answers and owner-taught patterns otherwise
+retain their existing semantics. Evaluation scopes never waive the foreign-project check.
 
 The current model input has no structured declaration-source fields. The broker
 therefore treats default classifications more strictly: every such model decision
@@ -60,9 +63,10 @@ Connector operations keep their existing fixed-profile behavior.
 
 ## Evidence and visibility
 
-Settings > Bouncer shows inference readiness and today's UTC counts from the local
+Settings > Bouncer shows inference readiness and counts for the owner's local calendar day from the local
 decision log: allowed by the model, asked the owner, and failed. Failed means model
 or readiness failure, or an unanswered/invalidated question; it can overlap asked.
+Both UTC boundaries come from the system timezone, including DST transitions.
 Owner denials, patterns and remembered answers are not model successes.
 The view refreshes with the existing supervisor repaint timer.
 
@@ -78,3 +82,9 @@ not a broad or independent model-acceptance claim.
 The existing desktop toolkit forces light appearance. A dark tour can document
 that limit; it cannot establish dark-mode design acceptance without a separate
 theme implementation.
+
+Model input must fit in full for every question. The bundled server checks the
+actual token budget before inference and rejects requests that would hide the
+command through truncation. Agent text claiming model-state fields or answers is
+an analysis flag, including in command arguments. These are bounded defenses; a
+classifier is not a proof that arbitrary adversarial prose cannot affect scores.

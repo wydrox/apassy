@@ -638,9 +638,9 @@ impl Vault {
         Ok(days)
     }
 
-    /// Counts since a Unix timestamp, using the same successful-model and asked
-    /// definitions as `ask_rate_by_day`. No schema or request-text export is needed.
-    pub fn bouncer_counts(&self, since: u64) -> VaultResult<BouncerCounts> {
+    /// Counts in the half-open Unix timestamp interval of the owner's local day,
+    /// using the same model and asked definitions as `ask_rate_by_day`.
+    pub fn bouncer_counts(&self, since: u64, until: u64) -> VaultResult<BouncerCounts> {
         let counts = self
             .conn_ref()?
             .query_row(
@@ -649,8 +649,8 @@ impl Vault {
                 COALESCE(SUM(asked), 0),
                 COALESCE(SUM(decided_by = 'no_answer' OR
                     note LIKE 'Bouncer unavailable:%' OR note LIKE 'No bouncer runs,%'), 0)
-             FROM decision_log WHERE at >= ?1",
-                [to_sql_time(since)?],
+             FROM decision_log WHERE at >= ?1 AND at < ?2",
+                [to_sql_time(since)?, to_sql_time(until)?],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
