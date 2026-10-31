@@ -8,8 +8,14 @@ const URL = `${ORIGIN}/login`;
 const ok = (data) => ({ ok: true, code: "ok", message: "", data });
 function setup() {
   const bg = loadBackground({ permissions: [`${ORIGIN}/*`] });
+  const local = {};
+  bg.chrome.storage = { local: {
+    get: async () => structuredClone(local),
+    set: async (values) => Object.assign(local, structuredClone(values)),
+  } };
+  bg.chrome.permissions.getAll = async () => ({ origins: [...bg.granted] });
   bg.tabs.set(5, URL);
-  bg.registered.set("apassy-login-suggestions", { id: "apassy-login-suggestions", matches: [`${ORIGIN}/*`] });
+  bg.registered.set("apassy-login-suggestions", { id: "apassy-login-suggestions", matches: [`${ORIGIN}/*`], matchOriginAsFallback: true });
   let live = true;
   const calls = [];
   bg.chrome.scripting.executeScript = async (details) => {
@@ -103,7 +109,7 @@ test("explicit update sends exact selected identity and reads password only into
 test("session outcome excludes password, account labels and sensitive URL; expires on stale document", async () => {
   const { bg, api, target, stale } = setup();
   const storage = {};
-  bg.chrome.storage = { session: {
+  bg.chrome.storage = { ...bg.chrome.storage, session: {
     set: async (v) => Object.assign(storage, structuredClone(v)), get: async (key) => ({ [key]: storage[key] }), remove: async (key) => { delete storage[key]; },
   } };
   await api.rememberLoginResult({ ...target, url: `${URL}?reset=private-token` }, { ok: true, code: "ok", message: "Filled.", password: "NO" });

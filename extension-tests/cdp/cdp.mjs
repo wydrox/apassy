@@ -55,11 +55,11 @@ export async function connect(url) {
   };
 }
 export async function browser() {
-  const v = await (await fetch("http://127.0.0.1:9361/json/version")).json();
+  const v = await (await fetch("http://127.0.0.1:9371/json/version")).json();
   return connect(v.webSocketDebuggerUrl);
 }
 export async function targets() {
-  return await (await fetch("http://127.0.0.1:9361/json/list")).json();
+  return await (await fetch("http://127.0.0.1:9371/json/list")).json();
 }
 export async function worker() {
   let t = (await targets()).find(

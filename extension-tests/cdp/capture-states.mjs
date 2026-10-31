@@ -359,6 +359,14 @@ export async function captureStates({
     assert(geometry.visible, name + " menu visible");
     assert.deepEqual(geometry.overlap, []);
     check(name + " measured placement avoids actions", geometry);
+    const icon = await live.eval(`(() => {
+      const h=document.querySelector('[data-apassy-login-button]'),field=document.activeElement;
+      const r=field.getBoundingClientRect(),b=h.getBoundingClientRect();
+      const hidden=getComputedStyle(h).display==='none';
+      return {hidden,inside:b.left>=r.left&&b.right<=r.right&&b.top>=r.top&&b.bottom<=r.bottom};
+    })()`);
+    assert(icon.hidden || icon.inside, name + " field icon stays inside input");
+    check(name + " field icon is contained or hidden", icon);
     await closePage(live);
   }
 }

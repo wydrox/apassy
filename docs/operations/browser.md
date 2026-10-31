@@ -118,7 +118,7 @@ For a Playwright-free smoke and paired screenshots in an isolated Helium profile
 node extension-tests/cdp/suggest-smoke.mjs /absolute/path/to/evidence
 ```
 
-This uses CDP port 9361, a profile-local mock host and synthetic metadata only. It checks broad access, autofocus, labels, exclusions, empty reasons, frames, refusals and public-page geometry. It never opens the owner's profile or vault. Render-state screenshots are UI fixtures, not proof of native Touch ID or successful sign-in.
+This uses CDP port 9371, a profile-local mock host and synthetic metadata only. It checks broad access, autofocus, labels, exclusions, empty reasons, frames, refusals and public-page geometry. It never opens the owner's profile or vault. Render-state screenshots are UI fixtures, not proof of native Touch ID or successful sign-in.
 
 The Rust side has unit tests in `src/browser/`, the app tests in `src/desktop/ui/browser_tests.rs`, and the profile tests `profile_denies_the_browser_socket` and `profile_denies_native_messaging_host_manifests` in `tests/isolation/product_profile.rs`.
 

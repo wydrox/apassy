@@ -69,4 +69,4 @@ From `extension-tests/`, run `node --test fixtures/login-journey/*.unit.mjs fixt
 
 Unicode Website/page hosts canonicalize to punycode on both sides. The pinned public suffix list rejects public-suffix Website values, including private suffixes such as github.io. A Website matches only itself and its children (plus the existing www alias), with exact nondefault ports and HTTPS outside loopback. There is no sibling or eTLD+1 widening.
 
-Run `node extension-tests/cdp/suggest-smoke.mjs /absolute/evidence/path` for the isolated Helium CDP smoke on port 9361. This has no Playwright import or build step. Public sites are loaded and focused only; the mock-host screenshots do not qualify native owner checks. The post-submit save banner remains a follow-up.
+Run `node extension-tests/cdp/suggest-smoke.mjs /absolute/evidence/path` for the isolated Helium CDP smoke on port 9371. This has no Playwright import or build step. Public sites are loaded and focused only; the mock-host screenshots do not qualify native owner checks. The post-submit save banner remains a follow-up.

@@ -9,13 +9,14 @@ import { fileURLToPath } from "node:url";
 import http from "node:http";
 import net from "node:net";
 import { captureStates } from "./capture-states.mjs";
+import { reviewChecks } from "./review-checks.mjs";
 import { browser, worker, page, targets, delay } from "./cdp.mjs";
 // Refuse an occupied port before creating a profile or starting Helium.
 // Never attach this harness to an independently running browser.
 await new Promise((resolve, reject) => {
   const probe = net.createServer();
-  probe.once("error", () => reject(new Error("CDP port 9361 is occupied; refusing to attach to another browser.")));
-  probe.listen(9361, "127.0.0.1", () => probe.close(resolve));
+  probe.once("error", () => reject(new Error("CDP port 9371 is occupied; refusing to attach to another browser.")));
+  probe.listen(9371, "127.0.0.1", () => probe.close(resolve));
 });
 const repo = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -95,7 +96,7 @@ const helium = spawn(
   "/Applications/Helium.app/Contents/MacOS/Helium",
   [
     `--user-data-dir=${profile}`,
-    "--remote-debugging-port=9361",
+    "--remote-debugging-port=9371",
     `--load-extension=${path.join(repo, "extension")}`,
     "--enable-unsafe-extension-debugging",
     "--headless=new",
@@ -167,7 +168,7 @@ async function paired(p, name, popup = false) {
 }
 try {
   await wait(
-    async () => (await fetch("http://127.0.0.1:9361/json/version")).ok,
+    async () => (await fetch("http://127.0.0.1:9371/json/version")).ok,
     "Helium",
   );
   b = await browser();
@@ -267,6 +268,7 @@ try {
     0,
   );
   check("untrusted popup activation refused");
+  await reviewChecks({ pop, p, w, check });
   await paired(pop, "popup-matches", true);
   await pop.eval(
     "document.querySelector('input[type=search]').value='work';document.querySelector('input[type=search]').dispatchEvent(new Event('input'))",
@@ -433,4 +435,8 @@ try {
     maxRetries: 8,
     retryDelay: 100,
   });
+  fs.writeFileSync(path.join(out, "cleanup.json"), JSON.stringify({
+    heliumPid: helium.pid, exitCode: helium.exitCode, signalCode: helium.signalCode,
+    scratchProfileRemoved: !fs.existsSync(root), cdpPort: 9371,
+  }, null, 2));
 }

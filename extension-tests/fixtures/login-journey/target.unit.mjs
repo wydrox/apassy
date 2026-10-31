@@ -8,7 +8,16 @@ const source = fs.readFileSync(new URL("../../../extension/login-target.js", imp
 class Node {
   constructor(tag = "DIV") { this.tagName = tag; this.children = []; this.isConnected = true; }
   append(...els) { for (const el of els) { el.parent = this; el.parentElement = this.tagName === "DOCUMENT" || this.tagName === "SHADOWROOT" ? null : this; this.children.push(el); } }
-  querySelectorAll() { return this.children.flatMap((el) => [el, ...el.querySelectorAll()]); }
+  querySelectorAll(selector = "*") {
+    const all = this.children.flatMap((el) => [el, ...el.querySelectorAll()]);
+    return selector === "*" ? all : all.filter((el) => selector.split(",").some((part) => {
+      const match = part.trim().match(/^(button|input)(?:\[type=(\w+)\])?$/i);
+      return match && el.tagName === match[1].toUpperCase() && (!match[2] || el.type === match[2]);
+    }));
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  getAttribute(name) { return this[name] ?? null; }
+  hasAttribute(name) { return this[name] !== undefined; }
   closest() { return null; }
   getRootNode() { return this.parent ? this.parent.getRootNode() : this; }
 }
@@ -39,7 +48,8 @@ function setup({ two = false, shadow = false, firstOnly = false } = {}) {
     user2.form = pass2.form = form2; form2.append(user2, pass2); document.append(form2); other = { form: form2, username: user2, password: pass2 };
   }
   const location = { origin: "https://example.com", href: "https://example.com/login" };
-  const context = vm.createContext({ document, location, HTMLInputElement: Input, crypto: webcrypto, URL, Date, Event: class { constructor(type) { this.type = type; } } });
+  document.baseURI = location.href;
+  const context = vm.createContext({ document, location, origin: location.origin, HTMLInputElement: Input, crypto: webcrypto, URL, Date, Event: class { constructor(type) { this.type = type; } } });
   context.self = context; vm.runInContext(source, context);
   return { api: context.apassyLoginTarget, document, form, username, password, location, other };
 }
