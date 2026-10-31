@@ -213,6 +213,19 @@ input[type="search"] {
   gap: 4px;
   align-items: center;
   min-height: 58px;
+  padding: 2px 8px;
+  border-radius: 7px;
+}
+#logins li:hover,
+#logins li:focus-within {
+  background: var(--tint);
+}
+#logins li:has(:focus-visible) {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+#logins .details {
+  flex: 0 0 28px;
 }
 .login {
   border: 0;
@@ -227,7 +240,7 @@ input[type="search"] {
   padding: 8px 4px;
 }
 .login:focus-visible {
-  outline-offset: -2px;
+  outline: none;
 }
 .login:hover,
 .details:hover {
@@ -262,6 +275,7 @@ input[type="search"] {
 .fill-label {
   color: var(--blue);
   font-size: 12px;
+  flex-shrink: 0;
 }
 .count {
   color: var(--secondary);

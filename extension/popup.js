@@ -224,7 +224,7 @@ function renderList(message, isError) {
 
 function moveFocus(event) {
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-  const rows = [...main.querySelectorAll("button.login")];
+  const rows = [...main.querySelectorAll("#logins li:not([hidden]) button.login")];
   if (rows.length === 0) return;
   const at = rows.indexOf(document.activeElement);
   const step = event.key === "ArrowDown" ? 1 : -1;
@@ -425,10 +425,13 @@ function drawForm({ id, fields, hint, submit, message, isError, onSubmit }) {
     element("p", "hint", hint),
     buttons,
   );
-  form.addEventListener("submit", (event) => {
+  // requestSubmit() creates a trusted submit event even without a user gesture.
+  // Enter activates this button too; only its trusted click authorizes an action.
+  submit.addEventListener("click", (event) => {
     event.preventDefault();
     if (event.isTrusted && !submit.disabled) onSubmit(event);
   });
+  form.addEventListener("submit", (event) => event.preventDefault());
   onEscape = () => goBack();
   show(...(message ? [note(message, isError)] : []), form);
   return form;
@@ -682,7 +685,11 @@ function drawPasskeys(reply) {
   passkeysNote.classList.toggle("error", Boolean(reply && reply.ok === false));
 }
 
-passkeysBox.addEventListener("change", async () => {
+passkeysBox.addEventListener("click", async (event) => {
+  if (!event.isTrusted) {
+    event.preventDefault();
+    return;
+  }
   passkeysBox.disabled = true;
   if (passkeysBox.checked) {
     // The browser shows its prompt only for a click of the owner, so ask
@@ -750,8 +757,11 @@ async function grantSites(event) {
   }
 }
 document.getElementById("allow-sites").addEventListener("click", grantSites);
-suggestionsBox.addEventListener("change", async (event) => {
-  if (!event.isTrusted) return;
+suggestionsBox.addEventListener("click", async (event) => {
+  if (!event.isTrusted) {
+    event.preventDefault();
+    return;
+  }
   const on = suggestionsBox.checked;
   suggestionsBox.disabled = true;
   await send({ type: "login_access", on });
