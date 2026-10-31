@@ -632,6 +632,49 @@ mod tests {
         const PASSKEY_GET: &[u8] = br#"{"v":1,"cmd":"passkey_get","rid":"00000000-0000-4000-8000-000000000000","origin":"https://example.com","rp_id":"example.com","client_data_json":"e30=","allowed":[]}"#;
 
         #[test]
+        fn every_window_command_requires_the_host_caller_check_and_cannot_forge_its_marker() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("browser.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let checks = std::cell::Cell::new(0);
+            let refuse = || {
+                checks.set(checks.get() + 1);
+                Err(WireError::new("unsupported", "Synthetic caller refused."))
+            };
+            for cmd in [
+                "fill",
+                "save",
+                "create",
+                "update",
+                "fill_code",
+                "passkey_get",
+                "passkey_create",
+            ] {
+                for gesture in [false, true] {
+                    let packet = serde_json::to_vec(&serde_json::json!({
+                        "v": 1, "cmd": cmd, "trusted_gesture": gesture,
+                    }))
+                    .unwrap();
+                    let before = checks.get();
+                    let response: serde_json::Value =
+                        serde_json::from_slice(&answer(&packet, &socket, &refuse, None)).unwrap();
+                    assert_eq!(response["code"], "unsupported", "{cmd}");
+                    assert_eq!(checks.get(), before + 1, "{cmd}");
+                    assert!(listener.accept().is_err());
+                }
+                let forged = serde_json::to_vec(&serde_json::json!({
+                    "v": 1, "cmd": cmd, "trusted_gesture": true, "owner_window_host": 1,
+                }))
+                .unwrap();
+                let response: serde_json::Value =
+                    serde_json::from_slice(&answer(&forged, &socket, &refuse, None)).unwrap();
+                assert_eq!(response["code"], "bad_request", "{cmd}");
+                assert!(listener.accept().is_err());
+            }
+        }
+
+        #[test]
         fn a_guarded_command_reaches_the_app_only_after_the_caller_check() {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("browser.sock");

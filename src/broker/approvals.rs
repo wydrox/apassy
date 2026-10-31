@@ -707,9 +707,6 @@ impl ApprovalQueue {
         let Some(confirmed) = proof.action().run() else {
             return Err(ApprovalRefusal::NotAnApproval);
         };
-        if !proof.is_fresh() {
-            return Err(ApprovalRefusal::Stale);
-        }
         let answer = match proof.action() {
             OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
             OwnerAction::ApproveAndGrant { .. } => Answer::ApproveAndGrant,
@@ -719,6 +716,15 @@ impl ApprovalQueue {
         };
         let method = proof.method();
         let mut state = self.state();
+        // Waiting for the queue mutex must not preserve expired/revoked authority.
+        if !proof.is_fresh() {
+            return Err(ApprovalRefusal::Stale);
+        }
+        if let Some(question) = state.questions.get(&confirmed.id) {
+            proof
+                .check(proof.action(), &question.session)
+                .map_err(|_| ApprovalRefusal::Changed)?;
+        }
         match state.pending.iter().find(|run| run.id == confirmed.id) {
             None => Err(ApprovalRefusal::NotWaiting),
             Some(waiting) if waiting != confirmed => Err(ApprovalRefusal::Changed),
@@ -1383,7 +1389,12 @@ mod tests {
             .into_iter()
             .find(|run| run.id == id)
             .expect("the run waits");
-        OwnerProof::issue_for_test(OwnerAction::ApproveRun(run), [0; 32], Instant::now())
+        let epoch = queue
+            .state()
+            .questions
+            .get(&id)
+            .map_or([0; 32], |question| question.session);
+        OwnerProof::issue_for_test(OwnerAction::ApproveRun(run), epoch, Instant::now())
     }
 
     fn start_waiter(queue: &Arc<ApprovalQueue>) -> std::thread::JoinHandle<ApprovalOutcome> {
@@ -1845,6 +1856,30 @@ mod tests {
         let again =
             OwnerProof::issue_for_test(OwnerAction::ApproveRun(waiting), [0; 32], Instant::now());
         assert_eq!(queue.approve(again), Err(ApprovalRefusal::NotWaiting));
+    }
+
+    #[test]
+    fn allow_once_refuses_a_proof_from_another_vault_session() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let waiting = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                queue
+                    .wait_for_question(run(), 7, [17; 32], [0; 32], Duration::from_secs(5), || true)
+            })
+        };
+        let id = wait_until_pending(&queue);
+        let run = queue.pending()[0].clone();
+        let proof = OwnerProof::issue_for_test(
+            OwnerAction::ApproveRun(run.clone()),
+            [18; 32],
+            Instant::now(),
+        );
+        let result = queue.approve(proof);
+        // Always release the waiter, including when this regression fails.
+        queue.deny(id);
+        waiting.join().unwrap().unwrap();
+        assert_eq!(result, Err(ApprovalRefusal::Changed));
     }
 
     #[test]
