@@ -10,7 +10,8 @@
 //! checks of the signed Swift guard ([`caller`]).
 //!
 //! The module needs no feature, so the host builds without the vault. The public
-//! suffix list and SHA-256 of `webauthn::client_data` need the vault feature.
+//! suffix list is shared by site matching and WebAuthn; SHA-256 of
+//! `webauthn::client_data` needs the vault feature.
 
 pub mod caller;
 pub mod install;

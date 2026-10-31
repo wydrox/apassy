@@ -4,12 +4,19 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- **Browser extension:** suggest site-matched account metadata on all granted HTTPS sites and localhost by default, including existing broad passkey grants. One permission button, one global switch and per-site exclusions replace per-host activation. Compact account rows, site-local search, account details, approval context and paired light/dark styling keep settings behind a small link.
+
 ### Fixed
 
 - **Mac, bouncer decides by default:** first use, staging, unconfirmed production and default-source classifications reach the model without evaluation setup (ADR 0031). Defaults require 80% task match even for safe commands or reads; calibration cannot lower this check. Confirmed production, Always ask, foreign projects/DB hosts, missing context and unfit owner answers keep their vetoes. A model allow permits one run and remembers nothing.
 - **Mac, bouncer visibility:** Settings > Bouncer shows inference readiness and today's UTC counts for model decisions, owner questions and failures. Decisions hides the obsolete evaluation setup offer. Stored schema-20 scopes and compatibility APIs remain; routing no longer requires or reads them.
 - **Evaluation safety and coverage:** the scratch project matches fixture declarations. A non-executing broker evaluator replaces stale grant revocation and stops before credential delivery or process creation. Missing intended inference and unsafe allowances fail the harness. A frozen routing smoke set reports model calls and latency.
 - **Model diagnostics:** temperature warnings name each affected bucket and whether it affects the bouncer's yes/no questions. Model weights and calibration are unchanged.
+- **Browser suggestions:** query already-focused fields on injection, enablement and reload; recognize conservative label-only username fields while excluding search, OTP, newsletters and text-displayed passwords. Distinguish username filter misses from no site logins and missing Website guidance. Support same-origin blank/srcdoc frames, explain cross-origin refusals, and measure inline placement to avoid page actions. Fill and save triggers refuse untrusted events and retain app approval.
+- **Browser matching:** canonicalize IDNs on both sides and reject ICANN/private public-suffix Websites with the existing pinned PSL. Preserve exact ports, HTTPS and host/subdomain boundaries. Add IDNA redistribution notices and regression coverage.
+
 - **Model readiness:** a healthy HTTP endpoint alone no longer marks a failed warm-up ready. Readiness requires valid inference with the active model pin when configured; external mode never launches a process.
 - **Model deadlines:** each real inference attempt has an absolute 10-second deadline and at most one timeout retry (20 seconds by default). HTTP errors, invalid answers, and model-version mismatches ask the owner without retrying. Only inference repeats, never command execution.
 - **Automatic-use summaries:** both totals include allowed requests without an owner question from the model, patterns, and remembered execution answers. Denials and unanswered/manual requests do not count as successful automation.
