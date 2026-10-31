@@ -6,7 +6,7 @@
 mod relay;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -989,6 +989,7 @@ struct MockWorker {
     calls: Calls,
     answers: Arc<Mutex<HashMap<String, (u16, &'static str)>>>,
     hang: Arc<AtomicBool>,
+    status: Arc<AtomicU16>,
     stop: Arc<AtomicBool>,
 }
 
@@ -1000,6 +1001,8 @@ impl MockWorker {
         let answers: Arc<Mutex<HashMap<String, (u16, &'static str)>>> = Arc::default();
         let hang = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(AtomicU16::new(200));
+        let http_status = status.clone();
         let (seen, set, slow, done) = (calls.clone(), answers.clone(), hang.clone(), stop.clone());
         std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
@@ -1017,6 +1020,7 @@ impl MockWorker {
                 seen.lock().unwrap().push((secret, body.clone()));
                 let set = set.clone();
                 let slow = slow.load(Ordering::Relaxed);
+                let status = http_status.load(Ordering::Relaxed);
                 std::thread::spawn(move || {
                     if slow {
                         std::thread::sleep(Duration::from_secs(15));
@@ -1035,9 +1039,10 @@ impl MockWorker {
                             }
                         })
                         .collect();
-                    let _ = request.respond(tiny_http::Response::from_string(
-                        json!({"results": results}).to_string(),
-                    ));
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(json!({"results": results}).to_string())
+                            .with_status_code(status),
+                    );
                 });
             }
         });
@@ -1046,6 +1051,7 @@ impl MockWorker {
             calls,
             answers,
             hang,
+            status,
             stop,
         }
     }
@@ -1760,4 +1766,144 @@ fn the_request_time_of_a_question_call_is_taken_after_its_body() {
     );
     assert_eq!(status, 200, "{settled}");
     assert!(settled["result"]["settled_at"].as_u64().unwrap() >= headers_at + 2);
+}
+
+#[test]
+fn push_retries_worker_and_apns_transient_failures_with_backoff() {
+    for status in [429, 503] {
+        let worker = MockWorker::start();
+        worker.status.store(status, Ordering::Relaxed);
+        let push = worker.config();
+        let mut relay = start_with(
+            |config| config.push = Some(push),
+            UpstreamOptions::default(),
+        );
+        let mac = personal_team(&mut relay);
+        let phone = add_device(&relay, &mac, "iPhone");
+        let token = token_of('a');
+        assert_eq!(put_token(&relay, &phone, &token, "production").0, 200);
+        let began = Instant::now();
+        ask(&relay, &mac, &qid(70), "member");
+        assert_eq!(worker.calls(2).len(), 2, "HTTP {status} must retry");
+        assert!(
+            began.elapsed() >= Duration::from_secs(1),
+            "retry has backoff"
+        );
+        worker.status.store(200, Ordering::Relaxed);
+        worker
+            .answers
+            .lock()
+            .unwrap()
+            .insert(token.clone(), (status, "ServiceUnavailable"));
+        assert!(
+            worker.calls(3).len() >= 3,
+            "APNs transient answer is retried too"
+        );
+        worker.answers.lock().unwrap().clear();
+        assert!(worker.calls(4).len() >= 4);
+        let calls = worker.calls.lock().unwrap().len();
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(
+            worker.calls.lock().unwrap().len(),
+            calls,
+            "success stops retries"
+        );
+    }
+}
+
+#[test]
+fn a_slow_team_cannot_block_another_teams_push_and_timeout_is_retried() {
+    let worker = MockWorker::start();
+    let push = worker.config();
+    let mut relay = start_with(
+        |config| config.push = Some(push),
+        UpstreamOptions::default(),
+    );
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone A");
+    put_token(&relay, &phone, &token_of('a'), "production");
+    worker.hang.store(true, Ordering::Relaxed);
+    ask(&relay, &mac, &qid(71), "member");
+    assert_eq!(worker.calls(1).len(), 1);
+    ask(&relay, &mac, &qid(72), "member");
+    worker.hang.store(false, Ordering::Relaxed);
+    let other = personal_team(&mut relay);
+    let other_phone = add_device(&relay, &other, "iPhone B");
+    put_token(&relay, &other_phone, &token_of('b'), "production");
+    let began = Instant::now();
+    ask(&relay, &other, &qid(73), "member");
+    let calls = worker.calls(2);
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "another team bypasses slow sender"
+    );
+    assert_eq!(calls[1].1["tokens"], json!([token_of('b')]));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while worker
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, body)| body["tokens"] == json!([token_of('a')]))
+        .count()
+        < 3
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        worker
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, body)| body["tokens"] == json!([token_of('a')]))
+            .count(),
+        3,
+        "two questions plus retry of the timed-out first question"
+    );
+}
+
+#[test]
+fn push_retry_rechecks_tokens_expiry_and_restart_replays_open_questions() {
+    let worker = MockWorker::start();
+    worker.status.store(503, Ordering::Relaxed);
+    let push = worker.config();
+    let mut relay = start_with(
+        |config| config.push = Some(push),
+        UpstreamOptions::default(),
+    );
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    put_token(&relay, &phone, &token_of('a'), "production");
+    ask(&relay, &mac, &qid(74), "member");
+    assert_eq!(worker.calls(1).len(), 1);
+    relay.ok("DELETE", "/v1/push/token", &phone.token, None);
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(
+        worker.calls.lock().unwrap().len(),
+        1,
+        "removed token is not retried"
+    );
+    put_token(&relay, &phone, &token_of('a'), "production");
+    ask(&relay, &mac, &qid(75), "member");
+    assert_eq!(worker.calls(2).len(), 2);
+    relay.edit_vault_live(&format!(
+        "UPDATE question SET expires_at = {}",
+        now_unix() - 1
+    ));
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(
+        worker.calls.lock().unwrap().len(),
+        2,
+        "expired question is not retried"
+    );
+    ask(&relay, &mac, &qid(76), "member");
+    assert_eq!(worker.calls(3).len(), 3);
+    worker.status.store(200, Ordering::Relaxed);
+    let _relay = relay.restart();
+    assert!(
+        worker.calls(4).len() >= 4,
+        "unexpired open question survives relay restart"
+    );
 }

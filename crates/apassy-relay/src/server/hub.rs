@@ -512,7 +512,7 @@ impl Hub {
             relay_audit: self.directory.audit.clone(),
             cap_warning: Mutex::new((crate::server::audit::CapLevel::Ok, 0)),
             stop: self.stop.clone(),
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             team_limits: RwLock::new(team_limits),
             agent_requests: AtomicUsize::new(0),
             last_limit: Mutex::new(HashMap::new()),
@@ -521,6 +521,7 @@ impl Hub {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, core.clone());
+        crate::server::questions::recover_push(&core, crate::now_unix())?;
         Ok(core)
     }
 
