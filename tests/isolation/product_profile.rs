@@ -1558,11 +1558,20 @@ fn profile_protects_the_build_app_without_the_installed_app_parameter() {
 #[test]
 fn launcher_passes_the_installed_and_the_build_app() {
     // Defaults: the installed app, and `<target>/Apassy.app` next to the launcher.
-    let launcher = Path::new(env!("CARGO_BIN_EXE_apassy-sandbox"));
+    // Exercise the documented source-build layout even when Cargo itself uses
+    // a task-specific CARGO_TARGET_DIR with a different final directory name.
+    let fixture = TempDir::new().expect("launcher layout");
+    let copied = fixture.path().join("target/debug/apassy-sandbox");
+    std::fs::create_dir_all(copied.parent().unwrap()).expect("fixture target");
+    std::fs::copy(env!("CARGO_BIN_EXE_apassy-sandbox"), &copied).expect("copy launcher");
+    let launcher = copied.as_path();
+    let home = fixture.path().join("home");
+    std::fs::create_dir_all(&home).expect("scratch home");
     let target = std::fs::canonicalize(launcher.parent().and_then(Path::parent).expect("target"))
         .expect("canonical target");
     let print = |extra: &[&str]| {
         let output = Command::new(launcher)
+            .env("HOME", &home)
             .args(["--data-dir", "/tmp/apassy-print-check/d"])
             .args(extra)
             .args(["--print", "--", "/usr/bin/true"])

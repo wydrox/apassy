@@ -351,7 +351,12 @@ fn legacy_requests_and_literals_are_unchanged() {
     assert!(wire::is_guarded_command("passkey_get"));
     assert!(wire::is_guarded_command("passkey_create"));
     assert!(wire::is_guarded_command("fill_code"));
-    assert!(!wire::is_guarded_command("fill"));
+    for command in ["fill", "save", "create", "update"] {
+        assert!(
+            wire::is_guarded_command(command),
+            "secret commands require the signed caller guard"
+        );
+    }
 }
 
 #[test]
@@ -773,10 +778,11 @@ fn the_end_of_the_input_reaches_the_app_without_waiting() {
         (hang_up, started.elapsed())
     });
     let (mut browser, host_input) = UnixStream::pair().unwrap();
-    // A legacy fill also waits for the owner, and needs no caller check.
+    // Metadata uses the same host exchange/watch without bypassing signed
+    // caller checks for secret commands in this unsigned test process.
     write_frame(
         &mut browser,
-        br#"{"v":1,"cmd":"fill","url":"https://example.com/","item":7}"#,
+        br#"{"v":1,"cmd":"logins","url":"https://example.com/"}"#,
     )
     .unwrap();
     let host = {
@@ -789,7 +795,7 @@ fn the_end_of_the_input_reaches_the_app_without_waiting() {
         })
     };
     let line = line_seen.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(line.starts_with(br#"{"v":1,"cmd":"fill""#));
+    assert!(line.starts_with(br#"{"v":1,"cmd":"logins""#));
     thread::sleep(Duration::from_millis(200));
     drop(browser);
     let (hang_up, waited) = app.join().unwrap();
