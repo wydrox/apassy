@@ -573,15 +573,15 @@ fn long_titles_labels_notes_and_duplicate_labels_fit_the_limits() {
 }
 
 #[test]
-fn duplicates_are_marked_and_not_selected() {
+fn matching_names_do_not_change_account_selection() {
     let mut preview = preview();
     preview.mark_existing([
         ("  prod db ", CredentialKind::Database),
         ("GitHub", CredentialKind::ApiKey),
     ]);
     let db = find(&preview, "Prod DB");
-    assert!(db.duplicate);
-    assert!(!db.selected_by_default());
+    assert!(!db.duplicate);
+    assert!(db.selected_by_default());
     assert!(!find(&preview, "GitHub").duplicate);
     let selection = preview.default_selection();
     let selected: Vec<&str> = preview
@@ -594,7 +594,13 @@ fn duplicates_are_marked_and_not_selected() {
     // A database item that becomes a custom secret keeps the database default.
     assert_eq!(
         selected,
-        ["Stripe test key", "Cache", "Build box", "Deploy key"]
+        [
+            "Stripe test key",
+            "Prod DB",
+            "Cache",
+            "Build box",
+            "Deploy key"
+        ]
     );
 }
 

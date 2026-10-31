@@ -781,13 +781,13 @@ mod tests {
             "Engineering · API Credential → API key",
             "Engineering · Login → Login",
             "Engineering · SSH Key → SSH key",
-            "Already in the vault",
             "Apassy does not import Credit Card items",
-            "Import 2 credentials",
+            "Import 3 credentials",
         ] {
             assert!(text.contains(shown), "missing {shown}: {text}");
         }
-        assert_eq!(app.import.selected, [true, false, false, true, false]);
+        assert_eq!(app.import.selected, [true, false, true, true, false]);
+        assert!(!text.contains("Already in the vault"));
 
         // Select all takes each item that can be imported, and none clears the list.
         app.import.select_all(true);

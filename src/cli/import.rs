@@ -614,7 +614,7 @@ Empty,,,,,false,false,,\n";
             .iter()
             .map(|d| d.label.as_str())
             .collect();
-        assert_eq!(labels, ["Access key", "Region"]);
+        assert_eq!(labels, ["Website", "Access key", "Region"]);
         assert_eq!(entries[1].item.kind, Some(CredentialKind::Custom));
         assert_eq!(secret(&entries[1]), "1111 2222");
     }

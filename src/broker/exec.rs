@@ -24,7 +24,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Output bytes kept for each stream. The rest is read and dropped.
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
-/// Shorter secret values are not masked. They would damage ordinary output.
+/// Shorter values are masked only at token boundaries to preserve ordinary words.
 const MIN_MASK_BYTES: usize = 4;
 const POLL: Duration = Duration::from_millis(50);
 /// Time to collect output after the main process ends.
@@ -328,8 +328,8 @@ fn mask_output(raw: &[u8], secrets: &[&SecretEnv]) -> String {
     }
 }
 
-/// Replace each secret value with `[apassy:NAME]`. Longer values go first.
-/// Each intermediate text can still contain a later secret, so it is erased.
+/// Replace secrets with `[apassy:NAME]`, preferring the longest match at each position.
+/// Short secrets require token boundaries. Replacement labels are never scanned.
 pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
     let all: Vec<&SecretEnv> = secrets.iter().collect();
     mask_all(text, &all)
