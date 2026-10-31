@@ -34,6 +34,35 @@ const PASS: &str = "agent-run-pass-ok";
 const SECRET: &str = "FAKE-run-secret-5521-canary";
 const ENV_NAME: &str = "DEMO_API_KEY";
 
+#[test]
+fn review_mcp_oversized_input_returns_a_protocol_error_before_exiting() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_apassy-mcp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // No newline and no broker: the framing error must be answered locally.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&vec![b'x'; apassy::agent::wire::MAX_LINE_BYTES + 1])
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let reply: Value = serde_json::from_slice(&output.stdout).expect("JSON-RPC error on stdout");
+    assert_eq!(reply["jsonrpc"], "2.0");
+    assert_eq!(reply["id"], Value::Null);
+    assert_eq!(reply["error"]["code"], -32600);
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too large")
+    );
+}
+
 struct Fixture {
     dir: TempDir,
     vault: SharedVault,

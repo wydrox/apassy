@@ -300,8 +300,10 @@ fn host_row(ui: &mut egui::Ui, host: ConnectHost, selected: bool) {
 /// The start of the host in a terminal, with the tool time-out of the 5-minute wait.
 pub(super) fn launch_command(host: Host) -> String {
     match host {
-        Host::Claude => format!("{CLAUDE_TOOL_TIMEOUT} claude"),
-        Host::Codex => "codex".to_owned(),
+        Host::Claude => format!(
+            "{CLAUDE_TOOL_TIMEOUT} apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
+        ),
+        Host::Codex => "apassy-sandbox -- codex -c sandbox_mode=danger-full-access".to_owned(),
     }
 }
 
@@ -319,7 +321,7 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
     kit::note(
         ui,
         format!(
-            "Restart {}. Keep Apassy open and the vault unlocked.",
+            "Configuration saved. Start {} in the Apassy sandbox on macOS with the command below. Keep Apassy open and the vault unlocked. Connection and first use still need verification.",
             setup.name()
         ),
     );
@@ -331,9 +333,7 @@ pub(super) fn after_setup_notes(ui: &mut egui::Ui, host: ConnectHost) {
             "Use /mcp to check the connection. A question waits up to 5 minutes for you, so start Claude Code with a tool time-out of at least 330 seconds:"
         },
     );
-    if setup == Host::Claude {
-        kit::code_block(ui, &launch_command(setup), 1);
-    }
+    kit::code_block(ui, &launch_command(setup), 1);
 }
 
 #[cfg(test)]
@@ -343,7 +343,11 @@ mod tests {
     use crate::broker::approvals::OwnerCheck;
 
     #[test]
-    fn hosts_have_names_setup_targets_and_a_guess_from_the_agent_name() {
+    fn audit_hosts_have_names_setup_targets_and_a_guess_from_the_agent_name() {
+        assert_eq!(
+            launch_command(Host::Codex),
+            "apassy-sandbox -- codex -c sandbox_mode=danger-full-access"
+        );
         assert_eq!(ConnectHost::Claude.setup(), Some(Host::Claude));
         assert_eq!(ConnectHost::Codex.setup(), Some(Host::Codex));
         assert_eq!(ConnectHost::T3.setup(), Some(Host::Claude));
@@ -354,7 +358,7 @@ mod tests {
         assert_eq!(ConnectHost::guess("CI on GitHub"), ConnectHost::Other);
         assert_eq!(
             launch_command(Host::Claude),
-            "MCP_TOOL_TIMEOUT=330000 claude"
+            "MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'"
         );
     }
 

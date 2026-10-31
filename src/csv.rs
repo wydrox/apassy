@@ -61,11 +61,21 @@ impl std::error::Error for CsvError {}
 /// Split `text` into records. A byte-order mark at the start is skipped. Empty lines
 /// are skipped. Record numbers in errors start at 1 and count the header.
 pub fn parse(text: &str) -> Result<Vec<Record>, CsvError> {
+    Ok(parse_with_lines(text)?
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect())
+}
+
+/// Parse once, retaining the physical starting line of each record for CLI reports.
+pub fn parse_with_lines(text: &str) -> Result<Vec<(usize, Record)>, CsvError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let bytes = text.as_bytes();
     let mut records = Vec::new();
     let mut record: Record = Vec::new();
     let mut pos = 0;
+    let mut line = 1;
+    let mut start = 1;
     loop {
         let number = records.len() + 1;
         let (field, next) = if bytes.get(pos) == Some(&b'"') {
@@ -77,6 +87,13 @@ pub fn parse(text: &str) -> Result<Vec<Record>, CsvError> {
             return Err(CsvError::TooManyFields { record: number });
         }
         record.push(field);
+        line += bytes[pos..next]
+            .iter()
+            .enumerate()
+            .filter(|(index, byte)| {
+                **byte == b'\n' || (**byte == b'\r' && bytes.get(pos + index + 1) != Some(&b'\n'))
+            })
+            .count();
         pos = next;
         match bytes.get(pos) {
             Some(b',') => {
@@ -87,13 +104,15 @@ pub fn parse(text: &str) -> Result<Vec<Record>, CsvError> {
                     pos += 1;
                 }
                 pos += 1;
-                finish(&mut records, std::mem::take(&mut record))?;
+                finish(&mut records, start, std::mem::take(&mut record))?;
+                line += 1;
+                start = line;
                 if pos >= bytes.len() {
                     break;
                 }
             }
             None => {
-                finish(&mut records, std::mem::take(&mut record))?;
+                finish(&mut records, start, std::mem::take(&mut record))?;
                 break;
             }
             Some(_) => return Err(CsvError::TextAfterQuote { record: number }),
@@ -102,14 +121,14 @@ pub fn parse(text: &str) -> Result<Vec<Record>, CsvError> {
     Ok(records)
 }
 
-fn finish(records: &mut Vec<Record>, record: Record) -> Result<(), CsvError> {
+fn finish(records: &mut Vec<(usize, Record)>, line: usize, record: Record) -> Result<(), CsvError> {
     if record.len() == 1 && record[0].is_empty() {
         return Ok(());
     }
     if records.len() >= MAX_RECORDS {
         return Err(CsvError::TooManyRecords);
     }
-    records.push(record);
+    records.push((line, record));
     Ok(())
 }
 

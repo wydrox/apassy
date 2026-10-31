@@ -26,7 +26,7 @@ The export file is not encrypted. Anyone who can read it has your secrets. Secti
 
 Apassy is for the credentials that agents use. So the first selection has API credentials, SSH keys, databases, and servers. Logins, passwords, secure notes, other categories, and CSV rows are not selected. "Select all" and "Select none" change the whole list.
 
-An item with the same title (case is ignored) and the same kind as a credential in the vault is not selected. The preview marks it "Already in the vault".
+A matching title and kind do not prove that an account is already imported. The preview no longer marks these items as duplicates or changes their selection. Review repeat imports explicitly; the preview does not compare secret values.
 
 An imported credential has no environment variable and no declaration. Since 0.5.0 an agent needs no grant ([ADR 0025](../adr/0025-low-friction-access.md)): each connected agent sees the name, the kind, the folder, and the visible details of an imported credential in its catalog, as for any other credential, unless an exception hides it. An agent can name it in a run, and the bouncer decides. Without a declaration, each use asks you until you set one ([declarations](declarations.md)). To keep an item away from agents, archive it.
 
@@ -106,3 +106,10 @@ cargo test --locked --features desktop,vault --lib import
 | `cancel_back_and_lock_drop_the_parsed_export` | Cancel, Back, and each lock drop the preview. |
 | `a_failed_item_does_not_stop_the_import` | An item that the vault refuses is listed under "Problems". The next item goes in. |
 | `imported_items_can_be_edited_in_the_desktop_forms` | An edit in the item form keeps the fields, the hidden values, and the tags. |
+
+## CLI CSV fidelity
+
+The CLI preserves the complete Website cell as a visible Website detail, including
+schemes, ports, paths and multiple URI text. It preserves parsed password bytes,
+including trailing spaces and quoted CR/LF. A malformed quoted field rejects the
+whole file before any credential is added; the error names a row, never its values.
