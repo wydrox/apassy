@@ -26,6 +26,8 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Check RustSec advisories
         run: cargo audit --deny warnings
+      - name: Verify advisory gate rejects a vulnerable fixture
+        run: bash scripts/test-advisory-gate.sh
 
   rust:
     name: Rust
@@ -48,6 +50,8 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run Rust tests
         run: cargo test --locked --no-fail-fast
+      - name: Check transport resources in isolation
+        run: cargo test --locked --test server_http repeated_connection_bursts_release_threads_and_file_descriptors -- --ignored --exact --nocapture
       - name: Run end-to-end checks
         run: bash scripts/e2e.sh
 

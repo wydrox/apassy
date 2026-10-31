@@ -35,15 +35,18 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    and deploy the Worker with `npm run deploy`. Preserve routing, limits and secrets.
    Read back its deployment ID, both public download hashes, `SHA256SUMS`,
    `release.json`, installer and guide. A Worker deploy alone does not update relay.
-5. On the approved target, record the running image ID and service settings, check
-   free disk, run `apassy-relay admin backup`, and complete the isolated restore
-   drill in `deploy/vps/backup/`. The updated drill runs `snapshot-check` before
+5. On the approved target, record the running image ID and service settings and
+   check free disk. Transfer and load the verified candidate GitHub image archive
+   without restarting. Run `apassy-relay admin backup` on the current relay and
+   complete the isolated restore drill in `deploy/vps/backup/`, selecting that
+   candidate with `APASSY_RELAY_RESTORE_IMAGE=apassy-relay:sha-<full SHA>`.
+   The default is the running image; an older running image does not implement the
+   new validation command. The updated drill runs `snapshot-check` before
    startup: current and previous snapshot heads of every team, including suspended teams, must have
    its file, size and digest. Keep the master-key backup separately. A failed
    backup or restore check stops the rollout. Hidden `.partial` folders are failed
    attempts, never recovery points; inspect and remove them only after diagnosing.
-6. Transfer the verified GitHub image archive, load it on the target (no build),
-   confirm its image ID/OCI labels, select its immutable tag in the approved compose
+6. Confirm the loaded image ID/OCI labels, select its immutable tag in the approved compose
    configuration, then restart with the existing service/data settings. Read back
    `/healthz` HTTP 200, `ok\n`, `x-apassy-relay-version`, and
    `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
@@ -1076,16 +1079,20 @@ Each open team holds one SQLite connection for as long as the relay runs: one fi
 
 **Before you raise `APASSY_RELAY_CONNECT_TEAMS_MAX` above 100**, measure what one Connect team costs, on the devbox (never on the VPS, which is production):
 
-1. Start the devbox (`devbox up`) and copy the commit there (`git archive` or `rsync` to `dev@devbox:`); the paths below are on the devbox. Build the test in the build image of the `Dockerfile` (`rust:1.97.0-trixie`) without limits, then run it with the limits of production (a build does not fit in 512 MiB):
+1. Check the shared budget with `devbox status`. Start `devbox up x86` through
+   Apassy `apassy_run_with_secrets` using item `devbox tailscale auth key`.
+   Copy the reviewed checkout to `dev@devbox-x86:/home/dev/relay-review/` with
+   `rsync` (exclude `target/` and `.git/`). Remote Docker bind mounts refer to that
+   remote path. Build without the production memory limit, then measure with it:
 
    ```sh
    cache="-v apassy-cargo-registry:/usr/local/cargo/registry -v apassy-cargo-git:/usr/local/cargo/git"
-   docker run --rm $cache -v "$PWD":/src -w /src rust:1.97.0-trixie cargo test --release --test server_connect --no-run
-   docker run --rm $cache --cpus 2 --memory 512m --pids-limit 512 --ulimit nofile=65536 -v "$PWD":/src -w /src rust:1.97.0-trixie \
+   docker --context devbox-x86 run --rm $cache -v /home/dev/relay-review:/src -w /src rust:1.97.0-trixie cargo test --release --test server_connect --no-run
+   docker --context devbox-x86 run --rm $cache --cpus 2 --memory 512m --pids-limit 2048 --ulimit nofile=65536 -v /home/dev/relay-review:/src -w /src rust:1.97.0-trixie \
      sh -c 'APASSY_MEASURE_TEAMS=100 cargo test --release --test server_connect measure_connect_teams -- --ignored --nocapture'
    ```
 
-   It makes the teams on a relay in the test process, each with a signed-in device and a question, and prints the resident memory and open files per team, and the start time of the relay with them. Run it again with the room you want (for example 500), then `devbox down`.
+   It makes the teams on a relay in the test process, each with a signed-in device and a question, and prints the resident memory and open files per team, and the start time of the relay with them. Run it again with the room you want (for example 500), then `devbox down x86`.
 2. The room fits when the memory of all teams, plus the threads of the request, question, and feed lanes (two tasks per request, above), stays well under 512 MiB, the open files under 65536, and the start time under the 300 s start period. Write the numbers in this section with the date, then raise the room, or raise the container's limits first.
 
 Opening Connect teams only when they are first used, and closing idle ones, would remove this cost. It is not built: `Hub::team` is how every request, the sweep, `admin teams`, and the backup find a team, and an open on first use would let an unauthenticated sign-in call with a known team id start a key derivation. Lower the room, or run the sweep, if the start grows too long.
