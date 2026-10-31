@@ -75,6 +75,7 @@ pub use owner_auth::{
     ProofRefusal, action_words, grant_declarations, grant_has_production, remote_key,
     touch_id_detail, verify_remote_action, verify_remote_answer,
 };
+#[cfg(feature = "desktop")]
 pub(crate) use owner_auth::{LocalWindowSource, OwnerDeliveryFence};
 
 /// How often a waiting run checks that its vault session is still valid.

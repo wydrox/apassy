@@ -34,7 +34,7 @@
 pub(crate) mod base64;
 pub mod check;
 
-#[cfg(feature = "vault")]
+#[cfg(all(feature = "vault", feature = "desktop"))]
 pub(crate) mod owner_lifecycle;
 
 use std::fmt;
@@ -1133,7 +1133,7 @@ impl NativeHelper {
         )?)
     }
 
-    #[cfg(feature = "vault")]
+    #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn owner_policy_read(
         &self,
     ) -> Result<crate::broker::approvals::OwnerFrequency, NativeError> {
@@ -1145,7 +1145,7 @@ impl NativeHelper {
         crate::broker::approvals::OwnerFrequency::parse(str_field(&fields, "policy")?)
             .ok_or_else(|| NativeError::Protocol("unknown owner-check policy".into()))
     }
-    #[cfg(feature = "vault")]
+    #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn owner_policy_write(
         &self,
         policy: crate::broker::approvals::OwnerFrequency,
@@ -1158,6 +1158,7 @@ impl NativeHelper {
         }
         Ok(())
     }
+    #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn owner_session_active(&self) -> bool {
         self.call(
             &self.helper,
@@ -1866,7 +1867,7 @@ time.sleep(0.8)
     }
 }
 
-#[cfg(all(test, feature = "vault", unix))]
+#[cfg(all(test, feature = "vault", feature = "desktop", unix))]
 mod owner_policy_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

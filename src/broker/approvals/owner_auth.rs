@@ -979,6 +979,7 @@ impl OwnerProof {
     /// Read-only delivery fence, never an authorization proof. It cannot mint or
     /// consume an action; it only prevents sending an already computed result after
     /// expiry, lock, cancellation or a vault/session change.
+    #[cfg(feature = "desktop")]
     pub(crate) fn delivery_fence(&self, vault: SharedVault) -> OwnerDeliveryFence {
         OwnerDeliveryFence {
             vault,
@@ -1043,6 +1044,7 @@ impl OwnerGate {
         }
     }
 
+    #[cfg(feature = "desktop")]
     pub(crate) fn with_window(mut self, window: super::owner_window::OwnerWindow) -> Self {
         self.window = window;
         self
@@ -1050,6 +1052,7 @@ impl OwnerGate {
 
     /// Called only by the local controller after checking a live, signed browser or
     /// AutoFill ticket, or an explicit Allow once click. Never by remote/agent APIs.
+    #[cfg(feature = "desktop")]
     pub(crate) fn reuse_local(
         &self,
         action: OwnerAction,
@@ -1642,11 +1645,13 @@ mod evaluation_tests {
 
 /// Internal provenance, never deserialized from a socket request.
 #[derive(Clone, Copy)]
+#[cfg(feature = "desktop")]
 pub(crate) enum LocalWindowSource {
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
 }
+#[cfg(feature = "desktop")]
 impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
@@ -1674,6 +1679,7 @@ impl LocalWindowSource {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "desktop")]
 pub(crate) struct OwnerDeliveryFence {
     vault: SharedVault,
     epoch: [u8; 32],
@@ -1681,6 +1687,7 @@ pub(crate) struct OwnerDeliveryFence {
     window: Option<super::owner_window::WindowProof>,
     local_generation: Option<(super::owner_window::OwnerWindow, u64)>,
 }
+#[cfg(feature = "desktop")]
 impl OwnerDeliveryFence {
     pub(crate) fn valid(&self) -> bool {
         let vault = self.vault.lock().unwrap_or_else(PoisonError::into_inner);

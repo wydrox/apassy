@@ -91,6 +91,7 @@ impl WindowClock for Monotonic {
 struct Verification {
     epoch: [u8; 32],
     at: Duration,
+    #[cfg(any(feature = "desktop", test))]
     method: super::CheckMethod,
 }
 #[derive(Debug, Default)]
@@ -121,9 +122,11 @@ impl OwnerWindow {
             clock,
         }
     }
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn policy(&self) -> OwnerFrequency {
         self.state.lock().unwrap().policy
     }
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn configure(&self, policy: OwnerFrequency) {
         let mut s = self.state.lock().unwrap();
         s.generation = s
@@ -144,6 +147,7 @@ impl OwnerWindow {
         s.verified = None;
     }
     /// Start unlock atomically against a native check's original lifecycle fence.
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn begin_unlock(&self, expected: Option<u64>) -> Option<u64> {
         let mut s = self.state.lock().unwrap();
         let valid = expected.is_none_or(|g| g == s.generation);
@@ -158,6 +162,7 @@ impl OwnerWindow {
     pub(crate) fn generation(&self) -> u64 {
         self.state.lock().unwrap().generation
     }
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn observe(&self, active: bool) {
         let now = self.clock.now();
         let mut state = self.state.lock().unwrap();
@@ -188,10 +193,12 @@ impl OwnerWindow {
             s.verified = Some(Verification {
                 epoch,
                 at: self.clock.now(),
+                #[cfg(any(feature = "desktop", test))]
                 method,
             });
         }
     }
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn ticket(&self, epoch: [u8; 32]) -> Option<(WindowProof, super::CheckMethod)> {
         let s = self.state.lock().unwrap();
         let v = s.verified?;
