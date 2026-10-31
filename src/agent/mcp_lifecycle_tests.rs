@@ -562,3 +562,15 @@ fn cancelling_a_credential_request_dismisses_its_owner_inbox_entry() {
             .all(|r| r.state != crate::vault::agent_items::CredentialRequestState::Open)
     );
 }
+
+#[test]
+fn stdin_eof_drains_a_short_mutation_before_cancelling_remaining_waits() {
+    let fx = Fixture::new();
+    let mut host = fx.connect();
+    host.call(1, json!({"name":TOOL_GENERATE_CREDENTIAL, "arguments":{"name":"Synthetic EOF credential", "cwd":fx.dir.path().display().to_string()}}));
+    host.close();
+    let reply = host.reply(1);
+    assert_eq!(reply["isError"], false, "{reply}");
+    assert!(reply["structuredContent"]["result"]["item_id"].is_u64());
+    assert!(fx.broker.approvals().pending().is_empty());
+}

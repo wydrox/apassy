@@ -29,6 +29,7 @@ pub const TOOL_DESCRIBE_CREDENTIAL: &str = "apassy_describe_credential";
 /// A call that can wait for the owner (5 minutes) or for a command reads this long.
 const WAITING_CALL_TIMEOUT: Duration = Duration::from_secs(650);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Claude Code sets this variable for its stdio MCP servers to the session ID. The
@@ -90,6 +91,7 @@ fn serve(
 ) -> io::Result<()> {
     let output = Mutex::new(output);
     let active = Mutex::new(BTreeMap::<String, (Arc<AtomicBool>, bool)>::new());
+    let drained = std::sync::Condvar::new();
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
         let result = (|| {
@@ -166,6 +168,7 @@ fn serve(
                 }
                 let output = &output;
                 let active = &active;
+                let drained = &drained;
                 workers.push(scope.spawn(move || {
                     let token = params["_meta"]["progressToken"].clone();
                     let mut progress = 0_u64;
@@ -184,13 +187,24 @@ fn serve(
                         for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
                     }
                     active.lock().unwrap().remove(&key);
+                    drained.notify_all();
                 }));
             }
         })();
-        // EOF, framing failure, and stdout failure all withdraw waiting questions.
-        for (cancel, _) in active.lock().unwrap().values() {
+        // A pipe writer can close stdin while still reading a short call's result.
+        // Give those calls a bounded drain period. Framing/output errors cancel
+        // immediately; EOF still withdraws any question left after the grace.
+        let mut calls = active.lock().unwrap();
+        if result.is_ok() {
+            calls = drained
+                .wait_timeout_while(calls, SHUTDOWN_GRACE, |calls| !calls.is_empty())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        for (cancel, _) in calls.values() {
             cancel.store(true, Ordering::SeqCst);
         }
+        drop(calls);
         for worker in workers {
             let _ = worker.join();
         }
