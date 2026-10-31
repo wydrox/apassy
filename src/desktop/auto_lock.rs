@@ -86,11 +86,14 @@ impl IdleSource {
             .and_then(|v| Duration::try_from_secs_f64(v).ok())
             .map(|d| (d, Instant::now(), now));
         s.peak = s.peak.max(s.idle.map(|(d, _, _)| d));
+        // Keep inferred sleep sticky too: a fresh wake heartbeat may arrive
+        // before either the UI or a broker worker checks the old sample.
+        let session = session || suspended.is_some();
         if session {
             s.generation = s.generation.wrapping_add(1);
         }
         s.session |= session;
-        session || suspended.is_some()
+        session
     }
     fn take(&self) -> (Option<Duration>, bool, u64) {
         let mut s = self.0.lock().unwrap();
@@ -369,7 +372,9 @@ mod tests {
         // Model 901 seconds of sleep: the awake clock has not advanced.
         source.0.lock().unwrap().idle = Some((Duration::ZERO, Instant::now(), Duration::ZERO));
         source.record_at(Some(0.0), false, Duration::from_secs(901));
-        assert!(source.take().0.unwrap() >= Duration::from_secs(901));
+        let (idle, session, _) = source.take();
+        assert!(idle.unwrap() >= Duration::from_secs(901));
+        assert!(session);
     }
 
     #[test]
