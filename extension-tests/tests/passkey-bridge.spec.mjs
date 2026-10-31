@@ -117,6 +117,7 @@ test("a navigation during the owner check closes the host before it answers", as
 test("the popup shows the passkey switch and turns passkeys off", async ({ ph }) => {
   await turnOn(ph);
   const popup = await ph.openPopupPage();
+  await popup.locator("#settings-link").click();
   await expect(popup.locator("#passkeys-row")).toBeVisible();
   await expect(popup.locator("#passkeys")).toBeChecked();
   await popup.locator("#passkeys").click();
