@@ -772,7 +772,7 @@ pub enum RunStatus {
     Denied,
     /// No one decided in time (no host, or no answer). `code` is `approval_timeout`.
     TimedOut,
-    /// The session expired or was ended by a revocation.
+    /// The session expired/ended, or a restart discarded a pending run key.
     Ended,
 }
 
@@ -781,7 +781,7 @@ pub enum RunStatus {
 pub enum DecidedBy {
     /// An owner or manager denied the run (nobody approves on the relay any more).
     Approver,
-    /// A revocation invalidated the pending run.
+    /// A revocation or restart invalidated the pending run.
     Revocation,
     /// No decision in time.
     Timeout,

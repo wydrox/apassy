@@ -165,7 +165,7 @@ Optional variables:
 | `APASSY_RELAY_SESSION_TTL` | session lifetime, 60 to 3600 s | 900 |
 | `APASSY_RELAY_APPROVAL_TIMEOUT` | wait for the owner's host to decide a run, 30 to 86400 s | 600 |
 
-A restart ends every session. Runs that are still pending stay in the vault, but they lose their one-time keys: the host never sees them, and they time out.
+A restart ends every session and atomically ends pending runs with `run_interrupted`. Their one-time keys are discarded; the retry note asks the user to request a new run. Commands are never rerun automatically.
 
 A vault from the first alpha (it held plaintext values) is refused at start. There is no migration: start with a new data volume and add the items again.
 
