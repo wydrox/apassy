@@ -24,7 +24,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Output bytes kept for each stream. The rest is read and dropped.
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
-/// Shorter values are masked only at token boundaries to preserve ordinary words.
+/// Execution rejects shorter values; the standalone masker uses token boundaries.
 const MIN_MASK_BYTES: usize = 4;
 const POLL: Duration = Duration::from_millis(50);
 /// Time to collect output after the main process ends.
@@ -90,6 +90,7 @@ pub fn run(
 
 /// Run `command` with a network setup. `masks` are more values that the output
 /// must not show, for example the real values behind placeholders.
+/// Nonempty values shorter than four bytes are refused before spawning a process.
 pub fn run_with(
     command: &[String],
     cwd: &Path,
@@ -99,6 +100,16 @@ pub fn run_with(
     network: Network<'_>,
     timeout: Duration,
 ) -> io::Result<RunOutput> {
+    if secrets
+        .iter()
+        .chain(masks)
+        .any(|secret| !secret.value.is_empty() && secret.value.len() < MIN_MASK_BYTES)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A secret is shorter than four bytes, so its output cannot be safely masked. The command was not started.",
+        ));
+    }
     let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout)?;
     let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
     let masked_out = mask_output(&raw.stdout, &all);
@@ -367,6 +378,44 @@ fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_short_secret_runs_are_refused_before_any_process_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let command = [
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'prefix%ssuffix' \"$TOKEN\"; printf '%s' \"$TOKEN\" >&2; touch \"$1\""
+                .to_owned(),
+            "sh".to_owned(),
+            marker.to_str().unwrap().to_owned(),
+        ];
+        for value in ["a", "ab", "abc", "é", "€"] {
+            let result = run(
+                &command,
+                dir.path(),
+                None,
+                &[secret("TOKEN", value)],
+                Duration::from_secs(5),
+            );
+            assert!(result.is_err(), "short value was passed to a process");
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert!(!marker.exists(), "the process must never start");
+        }
+        // Real proxy values in the additional mask list need the same protection.
+        let result = run_with(
+            &command,
+            dir.path(),
+            None,
+            &[secret("TOKEN", "placeholder")],
+            &[secret("REAL", "ab")],
+            Network::default(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!marker.exists());
+    }
+
     #[test]
     fn review_short_masking_preserves_words_and_masks_delimited_values() {
         for value in ["a", "ab", "abc", "é", "€", "!"] {

@@ -76,9 +76,14 @@ The site publishes `latest.json` with the SHA-256 of the image and whether it is
 - No custom cipher or TLS implementation (ADR 0001). TLS is `rustls` with the system trust store.
 - Each design decision is an ADR in [docs/adr](docs/adr). The security reviews are in [docs/reviews](docs/reviews). The blind evaluations of the bouncer are in [docs/evaluation](docs/evaluation).
 
-Output masking replaces nonempty secrets of at least four bytes wherever they occur.
-For one-, two-, and three-byte secrets, it masks complete tokens or field values
-(with no adjacent Unicode letter, number, or underscore). This keeps short values
-from destroying ordinary words in command output. A short secret embedded in a
-larger token can still appear. Encoding or splitting values also evades literal
-masking; masking is not a confidentiality boundary for arbitrary command output.
+Agent command execution refuses nonempty secret values shorter than four bytes
+before starting a process, including real proxy values supplied as additional
+output masks. Literal redaction cannot distinguish a one-byte secret from the
+same byte in ordinary words. The error contains no secret value.
+
+For values of at least four bytes, output masking replaces exact occurrences.
+The standalone masking utility also masks short complete tokens or field values
+(with no adjacent Unicode letter, number, or underscore); it preserves embedded
+short values and is not sufficient to authorize their execution. Encoding or
+splitting values evades literal masking; masking is not a confidentiality boundary
+for arbitrary command output.

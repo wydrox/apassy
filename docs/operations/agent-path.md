@@ -253,4 +253,8 @@ Corrections: after each allowed run, Apassy compares the use log with the declar
 
 See section 10 of the [broker contract](../contracts/broker-v0.md). The real-secret gate stays BLOCKED.
 
+Agent command execution refuses nonempty secret values shorter than four bytes,
+including real values behind proxy placeholders, before starting the command.
+Whole-token masking cannot safely conceal those values when embedded in output.
+
 MCP stdio input is limited to 64 KiB while reading. An oversized frame sends a JSON-RPC error with code -32600 and a null request ID, then terminates the adapter, including when the sender never writes a newline. Restart the host connection after correcting the input.
