@@ -350,7 +350,17 @@ if grep -q -e payments -e alice -e STRIPE "$TMP/teams.json"; then fail "admin te
 ok "admin team-code, apassy-team create, two separate teams, the operator sees no content"
 
 step "The audit and host.log hold no secret"
-owner audit --json --limit 500 >"$TMP/audit.json"
+owner audit --json --limit 500 >"$TMP/audit-envelope.json"
+python3 - "$TMP/audit-envelope.json" "$TMP/audit.json" <<'PYJSON'
+import json, sys
+with open(sys.argv[1]) as source:
+    envelope = json.load(source)
+assert envelope["ok"] is True and envelope["exit_code"] == 0, envelope
+rows = envelope["result"]
+assert isinstance(rows, list) and rows, "the audit result must be a nonempty array"
+with open(sys.argv[2], "w") as output:
+    json.dump(rows, output, indent=2)
+PYJSON
 for action in run_pending run_denied run_released session_started session_ended grant_revoked proxy_request; do
 	grep -q "\"$action\"" "$TMP/audit.json" || fail "the audit has no $action"
 done
@@ -360,7 +370,7 @@ done
 for needle in "$STRIPE_CANARY" "$GITHUB_CANARY" "$PLACEHOLDER" "$AGENT_TOKEN" \
 	"$(cat "$TMP/owner_token")" "$(sed 's/.*#//' "$TMP/invite_link")" "$(cat "$TMP/team_code")" "$EDGE" \
 	apassy_ses_ $ITEM_KEYS; do
-	if grep -qF "$needle" "$TMP/audit.json" "$HOST_LOG"; then fail "the audit or host.log holds a secret"; fi
+	if grep -qF -- "$needle" "$TMP/audit.json" "$HOST_LOG"; then fail "the audit or host.log holds a secret"; fi
 done
 ok "$(grep -c '"action"' "$TMP/audit.json") audit rows and $(wc -l <"$HOST_LOG" | tr -d ' ') host.log lines, no value, placeholder, token, session key, or item key"
 
