@@ -89,7 +89,9 @@ function scenario() {
 }
 
 function log(request) {
-  fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(request) + "\n");
+  const safe = request && { ...request };
+  if (safe && Object.hasOwn(safe, "password")) safe.password = "[redacted]";
+  fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(safe) + "\n");
 }
 
 function write(message) {

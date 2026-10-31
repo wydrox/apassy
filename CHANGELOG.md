@@ -2,6 +2,16 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## [Unreleased]
+
+### Added
+
+- **Browser extension:** offer to save a typed login or update an existing account after a sign-in/sign-up submission and same-origin navigation or form transition. Username-first flows retain short-lived metadata. A trusted Save/Update click uses the existing app owner check; pending passwords stay only in memory for at most three minutes. Never for this site shares the toolbar's reversible hostname exclusion.
+
+### Fixed
+
+- **Inline login menu:** align directly below the field, or above when the menu would cover Submit and room permits. Clamp to the viewport and reposition on scrolling and resizing; never detach beside the form.
+
 ## [0.5.8] - 2026-10-31
 
 ### Added

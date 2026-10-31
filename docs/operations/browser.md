@@ -1,6 +1,6 @@
 # The browser extension
 
-Updated: 2026-10-31.
+Updated: 2026-11-01.
 Decision: [ADR 0021](../adr/0021-browser-extension.md). Wire: [browser-v1](../contracts/browser-v1.md). Code: `extension/` (the extension), `src/bin/apassy-browser-host.rs` and `src/browser/` (the host, the wire, the site match, the new passwords, and the install), `src/desktop/browser.rs` (the app side), `src/desktop/ui/browser_settings.rs` (Settings), `src/cli/browser.rs` (`apassy setup browser`).
 
 The Apassy extension fills a login on a website in Helium, Google Chrome, Chromium, Brave, Microsoft Edge, Arc, or Vivaldi. It also saves a login that you type on a page, and makes a new password for a sign-up. Each fill and each save asks for Touch ID or the passphrase in Apassy. Agents never get the password: it needs you, every time.
@@ -68,13 +68,36 @@ Each fill asks again. There is no setting that turns the check off.
 
 With broad HTTPS and localhost access, **Suggest logins on all sites** is on by default, including after an update from per-site suggestions. Existing passkey access is sufficient. Without access, click **Allow suggestions on all sites** once in the popup. Browser permission requests need a click. Settings contains the global switch, passkeys and **Not on this site**. The site exclusion is stored locally by hostname and can be undone there. Turning suggestions off does not revoke passkey access.
 
-Focus a username or password field, including on a username-first page, to see account titles and usernames. An already-focused field is queried on injection and reload. Labels, aria-label and placeholders can identify a username; search, OTP, hidden, read-only, newsletter-only and shown-as-text password fields are excluded. Press Option-Down (or Down on the field) to enter the chooser, use arrows and Return to choose, and Escape to dismiss and return to the field. The account list scrolls separately. The menu moves above or beside controls to avoid page actions. If space is insufficient, use the field button or toolbar.
+Focus a username or password field, including on a username-first page, to see account titles and usernames. An already-focused field is queried on injection and reload. Labels, aria-label and placeholders can identify a username; search, OTP, hidden, read-only, newsletter-only and shown-as-text password fields are excluded. Press Option-Down (or Down on the field) to enter the chooser, use arrows and Return to choose, and Escape to dismiss and return to the field. The account list scrolls separately. The menu aligns below the field and flips above when it would cover Submit and fits there. It stays within the viewport and follows scrolling/resizing; it never moves beside the form. If space is insufficient, use the field button or toolbar.
 
 Typing a username filters matching accounts. **No login matches this username** offers **Show all accounts**; **No logins for this site** means there are no site matches. If a saved login has no Website, add one in Apassy. An empty result does not prove that a Website is missing. Popup search filters only this site's returned metadata, not the vault. Account **Details** contains Update login and Fill code when available.
 
 No focus or unlock fills a field. Every fill needs a trusted account choice and the app's owner check. Same-origin frames, including `srcdoc` and `about:blank`, are document-bound. Cross-origin frames and form actions are refused with an own-tab instruction. A username-only fill does not automatically fill the next password step.
 
 ## 4. Save a login, or make a new password
+
+**After submitting.** With suggestions and site access enabled, typing a password
+and submitting a login/sign-up can show a top-right **Save this login in Apassy?**
+banner after a same-origin navigation or a form transition. A matching
+username instead shows **Update the password in Apassy?**. Username-first flows
+remember the previous step for up to three minutes in the same tab and origin.
+The banner detects submission; it does not prove that the website accepted it.
+Choose **Save** or **Update** to send the typed password through the app's existing
+owner check. ADR 0030's local Touch ID window applies. Focus and submission alone
+send only site/username metadata to the app, never the password.
+
+**Not now** discards the captured password. **Never for this site** also turns off
+suggestions for that hostname, sharing **Not on this site** in toolbar Settings.
+Choose **Suggest on this site again** there to restore both features. Apassy-filled
+passwords without editing, search/OTP forms and cross-origin actions produce no
+offer. New-password confirmations must match.
+
+Captured passwords exist only in content-script/worker memory, bound to tab and
+exact origin. Dismissal, save/update consumption, tab close, another origin,
+disabled site access or three minutes erases the references. A submission with no
+transition expires after 15 seconds. Browser/worker restart loses pending offers;
+there is no disk-backed recovery. No captured password is stored in extension
+storage or displayed by the banner.
 
 **Save this login.** Type the username and the password on the login page, but do not submit yet. Open the popup and click **Save this login**. Check the title and the username, and click **Save**. Apassy asks for Touch ID or the passphrase ("For https://example.com: save the login "Example" (rafal)"), then adds a login with the website of the page. The popup never sees the password.
 
@@ -120,7 +143,7 @@ The app checks the site when the popup opens, before the owner check, and again 
 ## 8. Limits
 
 - Cross-origin frames and form actions are not filled. Open the sign-in site in its own tab. Same-origin blank/srcdoc frames are supported.
-- Automatic post-submit save offers are not implemented. Use Save this login before submitting. Closed page shadow roots are not accessible.
+- Post-submit offers support the top frame on granted sites. Closed page shadow roots are not accessible. Offers require a same-origin document navigation, URL change or removal/hiding of the submitted form within 15 seconds; a site that keeps the same form visible can still use the toolbar's Save this login. Ambiguous or capped metadata results suppress an offer.
 - Metadata lists contain at most 50 accounts, with username filtering before that limit. Targets and nonsecret result messages expire after five minutes. Owner checks wait up to 180 seconds; native transport waits up to 240 seconds and the extension timeout is 250 seconds.
 - A process of your user outside the sandbox can ask for the titles and usernames of the logins of a site while the vault is unlocked. It gets no password without your Touch ID (ADR 0021, D1).
 
@@ -144,6 +167,20 @@ node extension-tests/cdp/suggest-smoke.mjs /absolute/path/to/evidence
 ```
 
 This uses CDP port 9371, a profile-local mock host and synthetic metadata only. It checks broad access, autofocus, labels, exclusions, empty reasons, frames, refusals and public-page geometry. It never opens the owner's profile or vault. Render-state screenshots are UI fixtures, not proof of native Touch ID or successful sign-in.
+
+For typed submission offers and placement (Helium/CDP only, port 9401):
+
+```sh
+node --test extension-tests/fixtures/login-journey/*.unit.mjs
+node extension-tests/cdp/save-offer-smoke.mjs /absolute/path/to/evidence
+```
+
+The second command creates and removes its own profile, registers the mock host
+only there, types synthetic fixture credentials, and captures light/dark pairs.
+GitHub, Google and Vercel checks only load and focus empty fields. Ports 9222 and
+9223 are not used. Mock requests redact password fields. The fixture round trips
+do not qualify native Touch ID or the owner's vault. CI runs the corresponding
+Playwright specifications; local smoke verification needs no Playwright.
 
 The Rust side has unit tests in `src/browser/`, the app tests in `src/desktop/ui/browser_tests.rs`, and the profile tests `profile_denies_the_browser_socket` and `profile_denies_native_messaging_host_manifests` in `tests/isolation/product_profile.rs`.
 
