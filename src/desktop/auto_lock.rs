@@ -117,6 +117,7 @@ pub(crate) struct AutoLock {
     task: Option<Task<Result<LockPolicy, String>>>,
     timer: Timer,
     start: Instant,
+    input_time: Option<u64>,
 }
 impl Default for AutoLock {
     fn default() -> Self {
@@ -127,10 +128,33 @@ impl Default for AutoLock {
             task: None,
             timer: Timer::default(),
             start: Instant::now(),
+            input_time: None,
         }
     }
 }
 impl AutoLock {
+    fn owner_input(&mut self, ctx: &egui::Context) -> bool {
+        let (time, input) = ctx.input(|i| {
+            (
+                i.time.to_bits(),
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                            | egui::Event::PointerMoved(_)
+                            | egui::Event::PointerButton { .. }
+                            | egui::Event::MouseWheel { .. }
+                            | egui::Event::Touch { .. }
+                    )
+                }),
+            )
+        });
+        // eframe run_logic preserves the last UI pass's input and time while
+        // hidden. Consume that pass once, so stale events cannot postpone lock.
+        self.input_time.replace(time) != Some(time) && input
+    }
     fn now(&self) -> Duration {
         #[cfg(target_os = "macos")]
         {
@@ -185,20 +209,7 @@ impl DesktopApp {
                 self.auto_lock.timer.owner_at = self.auto_lock.now();
             }
         }
-        let owner_input = ctx.input(|i| {
-            i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Key { .. }
-                        | egui::Event::Text(_)
-                        | egui::Event::Paste(_)
-                        | egui::Event::PointerMoved(_)
-                        | egui::Event::PointerButton { .. }
-                        | egui::Event::MouseWheel { .. }
-                        | egui::Event::Touch { .. }
-                )
-            })
-        });
+        let owner_input = self.auto_lock.owner_input(ctx);
         let (idle, session) = self.auto_lock.source.take();
         let unlocked = !self.owner_ui.session.is_locked();
         if self.auto_lock.timer.due(
@@ -221,6 +232,30 @@ impl DesktopApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auto_lock_hidden_logic_does_not_replay_owner_input() {
+        let ctx = egui::Context::default();
+        let mut lock = AutoLock::default();
+        let raw = egui::RawInput {
+            time: Some(1.0),
+            events: vec![egui::Event::Text("synthetic".into())],
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |_| assert!(lock.owner_input(&ctx)))
+            .drop_without_applying_deltas();
+        for _ in 0..3 {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |_| {
+                assert!(!lock.owner_input(&ctx))
+            });
+        }
+        let raw = egui::RawInput {
+            time: Some(2.0),
+            events: vec![egui::Event::Text("new".into())],
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |_| assert!(lock.owner_input(&ctx)))
+            .drop_without_applying_deltas();
+    }
     #[test]
     fn auto_lock_defaults_and_codes() {
         assert_eq!(LockPolicy::default(), LockPolicy::Never);
