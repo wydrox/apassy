@@ -138,16 +138,21 @@ impl OwnerWindow {
     }
     pub(crate) fn observe(&self, active: bool) {
         let now = self.clock.now();
-        let gap = self
-            .state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        let gap = state
             .healthy_at
             .is_some_and(|at| now.saturating_sub(at) >= Duration::from_secs(2));
-        if !active || gap {
-            self.invalidate();
+        // Revoke on loss/transition, not on every unavailable heartbeat: fresh
+        // authentication must remain possible when reuse cannot be observed.
+        // Explicit OS revocation events call invalidate independently.
+        if (!active && state.healthy_at.is_some()) || gap {
+            state.generation = state
+                .generation
+                .checked_add(1)
+                .expect("owner window generation exhausted");
+            state.verified = None;
         }
-        self.state.lock().unwrap().healthy_at = active.then_some(now);
+        state.healthy_at = active.then_some(now);
     }
     pub(crate) fn seed(&self, epoch: [u8; 32], method: super::CheckMethod, generation: u64) {
         let mut s = self.state.lock().unwrap();

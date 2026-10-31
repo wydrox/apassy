@@ -2459,3 +2459,29 @@ fn owner_window_browser_gesture_requires_new_host_marker() {
         "a direct socket cannot forge browser provenance"
     );
 }
+
+#[test]
+fn owner_window_unavailable_observer_keeps_fresh_checks_available() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let item = add_code_login(&mut app, ORIGIN, None, SEED);
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(crate::broker::approvals::OwnerFrequency::UntilLock);
+    window.observe(false);
+    let action = OwnerAction::Reveal { item_id: item };
+    let proof = app
+        .owner_gate()
+        .authorize(action.clone(), OwnerCheck::passphrase(PASS))
+        .unwrap();
+    window.observe(false);
+    window.observe(false);
+    let epoch = app.owner_ui.session.epoch().unwrap();
+    assert!(
+        proof.check(&action, &epoch).is_ok(),
+        "unavailable observation must not cancel every fresh check"
+    );
+    assert!(
+        window.ticket(epoch).is_none(),
+        "unobserved sessions can never reuse verification"
+    );
+}
