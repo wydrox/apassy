@@ -206,6 +206,9 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access_request_id: Option<u64>,
         items: Vec<u64>,
+        /// Item IDs whose current TOTP code enters the process, never the seed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        codes: Vec<u64>,
         command: Vec<String>,
         cwd: String,
         purpose: String,

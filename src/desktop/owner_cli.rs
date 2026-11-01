@@ -70,6 +70,12 @@ pub(crate) struct CliHost {
     /// The rows of the last batch binding, for its ticket.
     bound: Option<Vec<BindingRow>>,
     fresh_export: Option<String>,
+    fresh_code: Option<(
+        SecretText,
+        u64,
+        bool,
+        crate::broker::approvals::OwnerDeliveryFence,
+    )>,
     fresh_agent: Option<(AgentRow, SecretText)>,
 }
 
@@ -88,6 +94,7 @@ impl CliHost {
         self.issued = None;
         self.bound = None;
         self.fresh_export = None;
+        self.fresh_code = None;
         self.fresh_agent = None;
     }
 
@@ -116,6 +123,7 @@ pub(crate) struct CliTicket {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum After {
     Message,
+    Code,
     Export,
     RegisterAgent,
     Session,
@@ -239,6 +247,52 @@ pub(crate) fn bring_to_front(ctx: &egui::Context) {
 }
 
 impl DesktopApp {
+    pub(crate) fn complete_cli_code(
+        &mut self,
+        item: u64,
+        field: &str,
+        copy: bool,
+        proof: OwnerProof,
+    ) {
+        let fence = proof.delivery_fence(self.owner_ui.session.shared_vault());
+        let Some(epoch) = self.owner_ui.session.epoch() else {
+            self.set_err("The vault is locked.");
+            return;
+        };
+        let code = match self
+            .owner_ui
+            .session
+            .cli_code_at(item, field, copy, proof, now_unix())
+        {
+            Ok(code) => code,
+            Err(err) => {
+                self.set_err(err.message);
+                return;
+            }
+        };
+        let left = code.left;
+        if copy {
+            if !fence.valid() {
+                self.set_err("The owner check expired. Nothing was copied.");
+                return;
+            }
+            if let Err(err) = self
+                .owner
+                .clipboard
+                .copy(code.digits, left, epoch, Instant::now())
+            {
+                self.set_err(err.message());
+                return;
+            }
+            self.cli.fresh_code = Some((SecretText::new(String::new()), left, true, fence));
+            self.set_ok("The code is copied with its expiry.");
+        } else {
+            self.cli.fresh_code =
+                Some((SecretText::new(code.digits.to_string()), left, false, fence));
+            self.set_ok("The current one-time code is ready for the command line.");
+        }
+    }
+
     /// Start the owner socket. A failure shows in Settings, and the app keeps working.
     pub(crate) fn start_cli(&mut self, socket: &std::path::Path, ctx: &egui::Context) {
         let repaint = ctx.clone();
@@ -323,6 +377,10 @@ impl DesktopApp {
             return;
         }
         match &request {
+            OwnerRequest::CliCode { .. } => {
+                self.cli.fresh_code = None;
+                ticket.after = After::Code;
+            }
             OwnerRequest::OpenCliSession => ticket.after = After::Session,
             OwnerRequest::ExportDecisions => ticket.after = After::Export,
             OwnerRequest::RegisterAgent { .. } | OwnerRequest::RegisterSetupAgent { .. } => {
@@ -337,11 +395,21 @@ impl DesktopApp {
             // A batch binding has its refusals in the ticket already.
             _ => {}
         }
-        self.ask_owner(request, Some(ctx));
+        let is_code = matches!(request, OwnerRequest::CliCode { .. });
+        self.prepare_owner(request, Some(ctx), !is_code);
         if let Some(dialog) = self.owner.check.as_mut() {
             dialog.origin = Some(ticket);
         }
-        bring_to_front(ctx);
+        if is_code {
+            self.start_local_owner(
+                crate::broker::approvals::LocalWindowSource::CliCode,
+                true,
+                ctx,
+            );
+        }
+        if self.owner.check.is_some() {
+            bring_to_front(ctx);
+        }
     }
 
     /// Answer the command-line request of a finished owner check. `before` is the status
@@ -368,11 +436,26 @@ impl DesktopApp {
             return;
         }
         if failed {
+            self.cli.fresh_code = None;
             ticket.send(Response::error("refused", message));
             return;
         }
         let response = match after {
             After::Message => Response::ok(message, Data::None),
+            After::Code => match self.cli.fresh_code.take() {
+                Some((code, seconds_left, copied, fence)) if fence.valid() => Response::ok(
+                    message,
+                    Data::Code {
+                        code: (!copied).then_some(code),
+                        seconds_left,
+                        copied,
+                    },
+                ),
+                _ => Response::error(
+                    "refused",
+                    "The owner code check expired or the vault was locked.",
+                ),
+            },
             After::Export => match self.cli.fresh_export.take() {
                 Some(jsonl) => Response::ok(message, Data::Export { jsonl }),
                 None => Response::error("refused", message),
@@ -664,6 +747,15 @@ impl DesktopApp {
                 create_folder,
             } => self.cli_add(secret, folder.as_deref(), create_folder),
             Command::ItemList { query, archived } => self.cli_item_list(&query, archived),
+            Command::Code { item, copy } => {
+                let id = self.find_item(&item)?.id;
+                let field = self.owner_ui.session.cli_code_field(id)?;
+                Ok(Step::Check(OwnerRequest::CliCode {
+                    item_id: id,
+                    field,
+                    copy,
+                }))
+            }
             Command::ItemShow { item } => {
                 let id = self.find_item(&item)?.id;
                 let view = self.item_view(id)?;

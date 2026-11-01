@@ -2852,6 +2852,7 @@ fn mcp_cancellation_settles_the_iphone_relay_question() {
                 idempotency_key: Some("relay-cancel".into()),
                 action: Box::new(Action::Run {
                     access_request_id: None,
+                    codes: Default::default(),
                     items: vec![item],
                     command: vec![
                         "/bin/sh".into(),

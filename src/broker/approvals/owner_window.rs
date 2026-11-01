@@ -4,6 +4,13 @@ use std::time::Duration;
 #[cfg(not(target_os = "macos"))]
 use std::time::Instant;
 
+/// CLI code is the only owner CLI value action covered by this window.
+/// UI ShowCode and CopyCode deliberately remain outside this allowlist.
+#[cfg(feature = "desktop")]
+pub(crate) fn covers_cli_code(action: &super::OwnerAction) -> bool {
+    matches!(action, super::OwnerAction::CliCode { .. })
+}
+
 /// The six owner-approved choices. Unknown stored values fail closed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerFrequency {
@@ -375,5 +382,78 @@ mod tests {
             .try_into()
             .unwrap();
         assert!(before <= now && now <= after);
+    }
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn cli_code_window_is_exact_and_expires_with_injected_clock() {
+        use super::super::{LocalWindowSource, OwnerAction, OwnerGate, ProofRefusal};
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-window-pass")
+                .unwrap();
+        vault.unlock("synthetic-window-pass").unwrap();
+        let epoch = vault.epoch();
+        let shared = Arc::new(Mutex::new(Some(vault)));
+        let (w, clock) = fixture();
+        w.configure(OwnerFrequency::OneMinute);
+        w.seed(epoch, super::super::CheckMethod::Passphrase, w.generation());
+        let gate = OwnerGate::new(shared, None).with_window(w.clone());
+        let action = OwnerAction::CliCode {
+            item_id: 7,
+            field: "x_OTP".into(),
+            copy: false,
+        };
+        let proof = gate
+            .reuse_local(action.clone(), LocalWindowSource::CliCode)
+            .unwrap();
+        assert_eq!(proof.check(&action, &epoch), Ok(()));
+        for other in [
+            OwnerAction::CliCode {
+                item_id: 8,
+                field: "x_OTP".into(),
+                copy: false,
+            },
+            OwnerAction::CliCode {
+                item_id: 7,
+                field: "other".into(),
+                copy: false,
+            },
+            OwnerAction::CliCode {
+                item_id: 7,
+                field: "x_OTP".into(),
+                copy: true,
+            },
+        ] {
+            assert_eq!(proof.check(&other, &epoch), Err(ProofRefusal::WrongAction));
+        }
+        assert!(
+            gate.reuse_local(
+                OwnerAction::ShowCode {
+                    item_id: 7,
+                    field: "x_OTP".into()
+                },
+                LocalWindowSource::CliCode
+            )
+            .is_none()
+        );
+        assert!(
+            gate.reuse_local(
+                OwnerAction::CopyCode {
+                    item_id: 7,
+                    field: "x_OTP".into()
+                },
+                LocalWindowSource::CliCode
+            )
+            .is_none()
+        );
+        for time in 1..=60 {
+            clock.0.store(time, Ordering::SeqCst);
+            w.observe(true);
+        }
+        assert!(!proof.is_fresh());
+        assert!(
+            gate.reuse_local(action, LocalWindowSource::CliCode)
+                .is_none()
+        );
     }
 }

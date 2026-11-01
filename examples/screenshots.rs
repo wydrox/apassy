@@ -745,6 +745,7 @@ fn ask_in_background() {
     std::thread::spawn(move || {
         let action = apassy::agent::wire::Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![item],
             command: ["stripe", "payouts", "list", "--limit", "10"]
                 .map(str::to_owned)

@@ -70,6 +70,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
         let command = vec!["git".to_owned(), "status".into()];
         let request = RunRequest {
             access_request_id: None,
+            codes: Default::default(),
             items: &items,
             command: &command,
             cwd: cwd.to_str().unwrap(),
@@ -106,6 +107,19 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
         assert!(vault.answers_for_item(item.id).unwrap().is_empty());
         assert!(vault.patterns().unwrap().is_empty());
 
+        // A learned pattern never waives the code veto or reaches model routing.
+        checked.facts[0].includes_code = true;
+        let code_facts = RunFacts {
+            pattern: true,
+            ..facts
+        };
+        let mut forbidden_model =
+            Readiness::new(|| panic!("code veto must precede model readiness"));
+        assert!(
+            matches!(route(&checked, &code_facts, &known_nothing(1), &mut forbidden_model), Route::Ask(ref why) if why.contains("one-time code"))
+        );
+        checked.facts[0].includes_code = false;
+
         // Even crafted pre-existing execution metadata cannot fill in a missing
         // declaration. This veto precedes both remembered execution paths.
         checked.declarations[0] = None;
@@ -114,7 +128,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
             unfit: vec![None],
         };
         assert!(
-            matches!(route(&checked, &facts, &known, &mut ready), Route::Ask(ref reason) if reason.contains("no declaration"))
+            matches!(route(&checked, &code_facts, &known, &mut ready), Route::Ask(ref reason) if reason.contains("no declaration"))
         );
     }
 }

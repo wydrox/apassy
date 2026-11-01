@@ -1796,3 +1796,109 @@ fn raw_registration_proof_cannot_connect_the_full_catalog() {
     );
     assert!(app.owner_ui.session.agents().unwrap().is_empty());
 }
+
+#[test]
+fn cli_code_show_json_copy_and_owner_window_keep_values_out_of_status() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    use crate::desktop::clipboard::{CodeClipboard, memory::MemoryBoard};
+    let dir = TempDir::new().unwrap();
+    let (mut app, plain) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let token = login(&mut app, &ctx);
+    let missing = run(
+        &mut app,
+        &ctx,
+        &token,
+        Command::Code {
+            item: plain.to_string(),
+            copy: false,
+        },
+    );
+    assert_eq!(missing.code, "no_code");
+    assert!(missing.message.contains("no one-time password"));
+    let added = run(
+        &mut app,
+        &ctx,
+        &token,
+        Command::ItemAdd {
+            item: ItemInput {
+                name: Some("Synthetic CLI MFA".into()),
+                kind: Some(CredentialKind::Login),
+                secret: Some(SecretText::new(SECRET.into())),
+                details: vec![DetailInput {
+                    label: crate::otp::LABEL.into(),
+                    value: SecretText::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into()),
+                    hidden: true,
+                }],
+                ..Default::default()
+            },
+        },
+    );
+    let Data::Items { items } = added.data else {
+        panic!("missing item")
+    };
+    let item = items[0].id;
+    let answer = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::Code {
+            item: item.to_string(),
+            copy: false,
+        },
+    );
+    assert!(answer.try_recv().is_err());
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    let response = now(&answer);
+    assert!(response.ok);
+    let text = format!("{response:?}");
+    assert!(!text.contains("GEZDGNBV"));
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["data"]["type"], "code");
+    assert_eq!(json["data"]["copied"], false);
+    assert_eq!(json["data"]["code"].as_str().unwrap().len(), 6);
+    assert!((1..=30).contains(&json["data"]["seconds_left"].as_u64().unwrap()));
+    assert!(
+        !app.status_text
+            .contains(json["data"]["code"].as_str().unwrap())
+    );
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(OwnerFrequency::OneMinute);
+    window.observe(true);
+    window.seed(
+        app.owner_ui.session.epoch().unwrap(),
+        CheckMethod::Passphrase,
+        window.generation(),
+    );
+    let board = MemoryBoard::default();
+    app.owner.clipboard = CodeClipboard::with_board(Box::new(board.clone()));
+    let copied = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::Code {
+            item: item.to_string(),
+            copy: true,
+        },
+    );
+    let copied = now(&copied);
+    assert!(copied.ok);
+    assert!(app.owner.check.is_none());
+    let json = serde_json::to_value(&copied).unwrap();
+    assert_eq!(json["data"]["copied"], true);
+    assert!(json["data"].get("code").is_none());
+    assert_eq!(board.text().unwrap().len(), 6);
+    assert!(app.owner.clipboard.is_pending());
+    window.invalidate();
+    let fresh = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::Code {
+            item: item.to_string(),
+            copy: false,
+        },
+    );
+    assert!(fresh.try_recv().is_err());
+    assert!(app.owner.check.is_some());
+}

@@ -79,6 +79,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     let Action::Run {
+        codes,
         access_request_id,
         items,
         command,
@@ -94,6 +95,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
         ctx,
         &request.token,
         &super::run::RunRequest {
+            codes,
             access_request_id: *access_request_id,
             items,
             command,
@@ -148,6 +150,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             params,
         } => call(ctx, &request.token, *item_id, operation, params),
         Action::Run {
+            codes,
             access_request_id,
             items,
             command,
@@ -159,6 +162,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             ctx,
             &request.token,
             &super::run::RunRequest {
+                codes,
                 access_request_id: *access_request_id,
                 items,
                 command,
@@ -538,6 +542,12 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
                 "access": access,
                 "folder": entry.folder,
             });
+            let code = vault.code_field(entry.item_id).ok().flatten();
+            entry_json["has_code"] = json!(code.is_some());
+            if code.is_some() {
+                entry_json["code_env_name"] =
+                    json!(crate::vault::mfa::code_env_name(entry.item_id));
+            }
             // ADR 0024: the agent can use the item at once, so it needs the name now.
             if entry.can_use_in_process
                 && let Ok(Some(binding)) = vault.process_binding(entry.item_id)

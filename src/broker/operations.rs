@@ -480,7 +480,10 @@ fn fingerprint_bytes(action: &Action) -> Zeroizing<Vec<u8>> {
     let mut action = action.clone();
     match &mut action {
         // Credentials form a set; argv order and whitespace within values do not.
-        Action::Run { items, .. } => items.sort_unstable(),
+        Action::Run { items, codes, .. } => {
+            items.sort_unstable();
+            codes.sort_unstable();
+        }
         Action::GenerateCredential {
             length, alphabet, ..
         } => {
@@ -715,6 +718,7 @@ mod tests {
         );
         let run = |items, command| Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items,
             command,
             cwd: "/synthetic".into(),
@@ -788,6 +792,7 @@ mod tests {
                 idempotency_key: Some("synthetic-access-retry".into()),
                 action: Box::new(Action::Run {
                     access_request_id: Some(81),
+                    codes: Default::default(),
                     items: vec![7],
                     command: vec!["true".into()],
                     cwd: dir.path().display().to_string(),

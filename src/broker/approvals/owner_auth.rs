@@ -125,8 +125,13 @@ pub enum OwnerAction {
     Reveal {
         item_id: u64,
     },
-    /// Show the code of one one-time password (TOTP) of one item. `field` is the field of
-    /// the seed. The proof opens that field only: no password and no other secret value.
+    /// Owner CLI code, bound to the exact item, OTP field and show/copy action.
+    CliCode {
+        item_id: u64,
+        field: String,
+        copy: bool,
+    },
+    /// UI code reveal always requires a fresh check.
     ShowCode {
         item_id: u64,
         field: String,
@@ -416,6 +421,12 @@ impl OwnerAction {
                 "change how often Apassy asks for Touch ID".to_owned()
             }
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
+            Self::CliCode { copy, .. } => if *copy {
+                "copy a CLI one-time code"
+            } else {
+                "show a CLI one-time code"
+            }
+            .to_owned(),
             Self::ShowCode { .. } => "show a one-time code".to_owned(),
             Self::CopyCode { .. } => "copy a one-time code".to_owned(),
             Self::CopyField { .. } => "copy a secret field to the clipboard".to_owned(),
@@ -1676,6 +1687,7 @@ pub(crate) enum LocalWindowSource {
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
+    CliCode,
 }
 #[cfg(feature = "desktop")]
 impl LocalWindowSource {
@@ -1699,6 +1711,7 @@ impl LocalWindowSource {
                     | OwnerAction::FillSystemCode { .. }
                     | OwnerAction::SignPasskey { origin: None, .. }
             ),
+            Self::CliCode => super::owner_window::covers_cli_code(action),
             Self::AllowOnceClick => matches!(action, OwnerAction::ApproveRun(_)),
         }
     }

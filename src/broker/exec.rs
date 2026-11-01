@@ -124,6 +124,32 @@ pub(crate) fn run_with_spawn(
     timeout: Duration,
     spawn: impl FnOnce(&mut Command) -> io::Result<std::process::Child>,
 ) -> io::Result<RunOutput> {
+    run_with_codes_spawn(
+        command,
+        cwd,
+        path,
+        secrets,
+        masks,
+        &[],
+        network,
+        timeout,
+        spawn,
+    )
+}
+
+/// Parse seeds earlier, generate only at the spawn boundary. Codes never enter argv.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_codes_spawn(
+    command: &[String],
+    cwd: &Path,
+    path: Option<&str>,
+    secrets: &[SecretEnv],
+    masks: &[SecretEnv],
+    codes: &[(String, crate::otp::Totp)],
+    network: Network<'_>,
+    timeout: Duration,
+    spawn: impl FnOnce(&mut Command) -> io::Result<Child>,
+) -> io::Result<RunOutput> {
     if secrets
         .iter()
         .chain(masks)
@@ -134,8 +160,22 @@ pub(crate) fn run_with_spawn(
             "A secret is shorter than four bytes, so its output cannot be safely masked. The command was not started.",
         ));
     }
-    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, spawn)?;
-    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
+    let mut generated = Vec::new();
+    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, |cmd| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| io::Error::other("System clock is before the Unix epoch."))?;
+        for (name, totp) in codes {
+            let value = Zeroizing::new(totp.run_code_at(now.as_secs()).0);
+            cmd.env(name, value.as_str());
+            generated.push(SecretEnv {
+                name: name.clone(),
+                value,
+            });
+        }
+        spawn(cmd)
+    })?;
+    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).chain(&generated).collect();
     let masked_out = mask_output(&raw.stdout, &all);
     let masked_err = mask_output(&raw.stderr, &all);
     // The raw output can contain a secret. Only the masked text leaves.
@@ -701,5 +741,56 @@ mod tests {
             mask("abcdef abcd xy", &secrets),
             "[apassy:B] [apassy:A] [apassy:C]"
         );
+    }
+    #[test]
+    fn six_digit_masks_preserve_unrelated_numbers_and_redact_embedded_matches() {
+        let masks = [super::SecretEnv {
+            name: "OTP".into(),
+            value: zeroize::Zeroizing::new("123456".into()),
+        }];
+        assert_eq!(
+            super::mask(
+                "count=42 port=5432 code=123456 total=91234567 other=654321",
+                &masks
+            ),
+            "count=42 port=5432 code=[apassy:OTP] total=9[apassy:OTP]7 other=654321"
+        );
+    }
+
+    #[test]
+    fn generated_codes_reach_only_spawn_environment_and_masked_output() {
+        let otp = crate::otp::Totp::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s' \"$OTP\"; printf '%s' \"$OTP\" >&2".into(),
+        ];
+        let out = super::run_with_codes_spawn(
+            &command,
+            std::path::Path::new("/tmp"),
+            None,
+            &[],
+            &[],
+            &[("OTP".into(), otp)],
+            super::Network::default(),
+            std::time::Duration::from_secs(5),
+            |cmd| {
+                let code = cmd
+                    .get_envs()
+                    .find(|(n, _)| *n == "OTP")
+                    .unwrap()
+                    .1
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(code.len(), 6);
+                assert!(code.chars().all(|c| c.is_ascii_digit()));
+                assert!(!format!("{cmd:?}").contains("GEZDGNBV"));
+                cmd.spawn()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.stdout, "[apassy:OTP]");
+        assert_eq!(out.stderr, "[apassy:OTP]");
     }
 }

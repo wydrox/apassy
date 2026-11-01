@@ -984,6 +984,36 @@ impl OwnerSession {
         self.code_seeds.remove(&(id, field.to_owned()));
     }
 
+    pub(crate) fn cli_code_field(&self, id: u64) -> ModelResult<String> {
+        self.unlocked()?
+            .code_field(id)
+            .map_err(map_err)?
+            .ok_or_else(|| fail("no_code", "This item has no one-time password detail."))
+    }
+
+    pub(crate) fn cli_code_at(
+        &mut self,
+        id: u64,
+        field: &str,
+        copy: bool,
+        proof: OwnerProof,
+        unix: u64,
+    ) -> ModelResult<OtpCode> {
+        let action = OwnerAction::CliCode {
+            item_id: id,
+            field: field.to_owned(),
+            copy,
+        };
+        let mut vault = self.unlocked_for(proof, &action)?;
+        let totp = vault.totp(id, field).map_err(map_err)?;
+        vault.record_reveal(id).map_err(map_err)?;
+        let (digits, left) = totp.code_at(unix);
+        Ok(OtpCode {
+            digits: Zeroizing::new(digits),
+            left,
+        })
+    }
+
     /// The current code of one one-time password, for a copy. Needs a fresh owner check
     /// for [`OwnerAction::CopyCode`] of this item and this field. The seed stays in this
     /// call and is erased before it returns. The proof is used up, also on a failure.

@@ -311,3 +311,27 @@ Settings > Tools shows a short host status, Connect when absent, and Repair when
 `apassy doctor --live --json` retains the single-document report. Beyond static app/vault status, it creates a separate temporary vault with one harmless credential and agent, starts an isolated broker without a model or owner transcript roots, checks the real MCP adapter catalog round trip and submits a synthetic hook prompt. It removes the dummy credential and temporary vault. A private `/tmp/apassy-live-doctor-UID` directory holds a process lock; the next live run removes abandoned fixture directories after a crash while refusing concurrent runs. The empty control directory and lock remain; no credential or vault remains after normal cleanup. The fixture never loads owner items. Stages report results separately. Installed-host trust, native sandbox enforcement and secret-injected command execution remain unverified. Plain doctor stays read-only.
 
 Helpers accept offline `--help` and `--version` with exit 0; invalid arguments exit 2. Packs validation failures exit 1 and each input is limited to 1 MiB. Eval input is limited to 8 MiB of JSON Lines with valid declarations, command strings and uppercase environment names; it needs a loopback model endpoint. Eval input failures exit 2, failed evaluations exit 1. Hook runtime failures still exit 0 so prompts proceed. Sandbox retains its fail-closed error exit 2.
+
+## Current one-time codes
+
+`apassy code ITEM` prints `123456 (19 seconds left)` after the owner check. ITEM
+is an ID or exact name and must have exactly one OTP detail. No detail gives a
+clear `no_code` error; ambiguous or invalid settings are refused. A logged-in owner
+CLI session is required. The check follows Settings > Security > How often to ask
+for Touch ID (ADR 0030); app UI Show Code and Copy Code stay always fresh.
+
+`apassy code ITEM --copy` uses the app's concealed clipboard, clearing it at code
+expiry (within the existing clipboard limits), vault/session end or lock, unless
+another app replaced the content. It never prints the code.
+
+`--json` writes exactly one ordinary response envelope to stdout; owner-check
+instructions go to stderr. Success is `{ "ok": true, "code": "ok", "message":
+"...", "data": { "type": "code", "code": "123456", "seconds_left": 19,
+"copied": false } }`. With `--copy`, `copied` is true and `data.code` is omitted.
+Failures use the standard error envelope and nonzero exit status. These codes are
+intentional owner output; protect terminal history/redirected output accordingly.
+
+Agents use `codes: [ITEM_ID]` on `apassy_run_with_secrets`, never this owner command.
+The catalog's `has_code` and `code_env_name` describe availability without values.
+See [ADR 0034](../adr/0034-mfa-codes-cli-and-agents.md) for approval, timing and
+masking boundaries.

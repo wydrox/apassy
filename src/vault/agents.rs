@@ -1745,9 +1745,9 @@ pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Op
         .optional()
         .map_err(|_| err(VaultErrorKind::Storage))?;
     let binding = if let Some((env_name, field, hosts)) = stored {
-        // A passkey field never goes to a process, whatever old metadata says. An
-        // explicit binding to a one-time password setup key stays: the owner chose it.
-        if super::types::is_passkey_field(&field) {
+        // Passkeys and OTP seeds never go to agents, including old explicit bindings.
+        // ADR 0034 delivers only a generated code through its separate selector.
+        if super::types::is_passkey_field(&field) || !automatic_field_allowed(conn, item, &field)? {
             return Ok(None);
         }
         EnvBinding {

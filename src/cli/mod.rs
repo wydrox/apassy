@@ -184,6 +184,7 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
         "logout" => commands::logout(cli, args),
         "lock" => commands::simple(cli, args, Command::Lock),
         "unlock" | "show" | "open" => commands::simple(cli, args, Command::Show),
+        "code" => commands::code(cli, args),
         "add" => commands::add(cli, args),
         "item" | "items" | "credential" | "credentials" => commands::item(cli, args),
         "import" => commands::import(cli, args),
@@ -243,6 +244,7 @@ fn report(failure: Failure, json: bool) -> i32 {
 /// The help of one command group.
 fn help_for(topic: Option<&str>) -> Option<&'static str> {
     Some(match topic? {
+        "code" => commands::CODE_HELP,
         "add" => commands::ADD_HELP,
         "item" | "items" | "credential" | "credentials" => commands::ITEM_HELP,
         "import" => commands::IMPORT_HELP,
@@ -280,6 +282,7 @@ Credentials:
   add [--folder PATH]         Paste a secret, a KEY=value line, a .env file, a URL, or an
                               otpauth:// link. Apassy finds the rest: apassy add < .env
   item list|show|add|edit|delete|archive|unarchive|history
+  code ITEM [--copy]          Show the current one-time code and seconds left, or copy it.
   item env|declare|connector|review       Agent settings of a credential.
   import FILE                 Add credentials from a .env file, or a 1Password or Bitwarden CSV export.
 

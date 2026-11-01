@@ -248,6 +248,7 @@ fn run(fx: &Fixture, session: Option<&str>, agent_text: &str, command: &[&str]) 
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: command.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: fx.project.join("web").display().to_string(),
@@ -794,6 +795,7 @@ fn real_codex_session_sends_the_user_request() {
             &fx.token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![fx.item_id],
                 command: vec![
                     "sh".to_owned(),

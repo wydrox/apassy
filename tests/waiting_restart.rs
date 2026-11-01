@@ -101,6 +101,7 @@ fn send_run(setup: &Setup, socket: PathBuf) -> std::thread::JoinHandle<WireRespo
             &token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![item_id],
                 command: vec!["/bin/echo".to_owned(), "restart".to_owned()],
                 cwd,

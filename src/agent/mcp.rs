@@ -347,10 +347,11 @@ pub fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": "Item IDs from process_access, or from the catalog (access \"can_use\")." },
+                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 0, "description": "Item IDs from process_access, or from the catalog (access \"can_use\")." },
                     "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
                     "cwd": { "type": "string", "description": "Absolute working directory: the project folder. The bouncer uses the project." },
                     "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." },
+                    "codes": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 16, "description": "Item IDs whose current one-time codes enter code_env_name from the catalog. Owner approval required unless an explicit project answer covers codes. Never delivers a seed. items may be [] for codes only. Not compatible with access_request_id." },
                     "access_request_id": { "type": "integer", "minimum": 1, "description": "Consume this exact scoped access request once. Retries after admission are refused; query status." },
                     "user_request": { "type": "string", "description": "The user's own words from the conversation that led to this command. Quote them. Do not summarize or add words. The bouncer compares the command with this request, and the owner sees it." }
                 },
@@ -785,7 +786,13 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     if let Some(_extra) = object.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "items" | "command" | "cwd" | "purpose" | "user_request" | "access_request_id"
+            "items"
+                | "codes"
+                | "command"
+                | "cwd"
+                | "purpose"
+                | "user_request"
+                | "access_request_id"
         )
     }) {
         return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
@@ -801,6 +808,19 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
                 .ok_or_else(|| "Each item ID must be a positive integer.".to_owned())
         })
         .collect::<Result<Vec<u64>, String>>()?;
+    let codes = match object.get("codes") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or("codes must be an array of item IDs.")?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| "Each code item ID must be positive.".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let command = object
         .get("command")
         .and_then(Value::as_array)
@@ -819,7 +839,7 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
             .map(str::to_owned)
             .ok_or_else(|| format!("The {name} argument must be a string."))
     };
-    if items.is_empty() || command.is_empty() {
+    if (items.is_empty() && codes.is_empty()) || command.is_empty() {
         return Err("Give at least one item and a nonempty command argument list.".to_owned());
     }
     Ok(Action::Run {
@@ -832,6 +852,7 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
             })
             .transpose()?,
         items,
+        codes,
         command,
         cwd: text("cwd")?,
         purpose: text("purpose")?,
@@ -1216,7 +1237,8 @@ pub(crate) fn broker_error(code: &str) -> Value {
             code,
             "The authorization changed. Review the request with the owner.",
         ),
-        "invalid_request" | "bad_request" | "unknown_folder" | "env_name_taken" => (
+        "invalid_request" | "bad_request" | "unknown_folder" | "env_name_taken" | "no_code"
+        | "invalid_code" => (
             code,
             "The broker refused the request parameters. Check the tool schema and catalog.",
         ),
@@ -1890,5 +1912,15 @@ mod tests {
         // The error text of a refused save never repeats the value.
         let error = save_action(&json!({"value": canary, "extra": canary})).unwrap_err();
         assert!(!error.contains(canary), "{error}");
+    }
+    #[test]
+    fn code_only_run_has_explicit_typed_selection() {
+        let action = run_action(&json!({"items":[],"codes":[7],"command":["true"],"cwd":"/tmp","purpose":"Synthetic test","user_request":"Synthetic test"})).unwrap();
+        assert!(
+            matches!(action, Action::Run { items, codes, .. } if items.is_empty() && codes == vec![7])
+        );
+        for codes in [json!([0]), json!(["7"]), json!(null)] {
+            assert!(run_action(&json!({"items":[],"codes":codes,"command":["true"],"cwd":"/tmp","purpose":"Test","user_request":"Test"})).is_err());
+        }
     }
 }

@@ -1967,3 +1967,28 @@ mod tests {
         assert!(text.contains("added, PATH not bound"), "{text}");
     }
 }
+
+pub const CODE_HELP: &str = "apassy code ITEM [--copy] [--json]\n\nITEM is an ID or exact name with exactly one one-time password detail.\nShows the current code and seconds left. --copy uses the app's expiring clipboard\nand never prints the code. Uses the owner's Touch ID frequency window.\n";
+
+pub fn code(cli: &Cli, mut args: Args) -> Outcome {
+    let item = args.required("item ID or exact name")?;
+    let copy = args.flag(&["--copy"]);
+    args.finish()?;
+    expect_owner_check();
+    let response = cli.call(Command::Code { item, copy })?;
+    if cli.json {
+        print_json(&response);
+    } else if let Data::Code {
+        code,
+        seconds_left,
+        copied,
+    } = &response.data
+    {
+        if *copied {
+            println!("Copied. {seconds_left} seconds left.");
+        } else if let Some(code) = code {
+            println!("{} ({seconds_left} seconds left)", code.expose());
+        }
+    }
+    Ok(())
+}

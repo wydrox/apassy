@@ -1788,6 +1788,9 @@ fn rules_of(app: &DesktopApp, id: u64) -> Vec<Rule> {
 /// your answer on iPhone, Oct 10".
 fn answer_line(answer: &OwnerAnswer, now: u64) -> String {
     let mut parts = vec!["All agents".to_owned()];
+    if answer.includes_codes {
+        parts.push("includes one-time codes".to_owned());
+    }
     if answer.scope == AnswerScope::Production {
         parts.push("production".to_owned());
     }

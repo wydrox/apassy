@@ -190,6 +190,17 @@ impl Totp {
         (format!("{code:0width$}"), self.period - unix % self.period)
     }
 
+    /// Agent runs use the next period if at most five whole seconds remain.
+    /// `unix` is injected in tests. This does not change owner/UI code timing.
+    pub fn run_code_at(&self, unix: u64) -> (String, u64) {
+        let left = self.period - unix % self.period;
+        self.code_at(if left <= 5 {
+            unix.saturating_add(left)
+        } else {
+            unix
+        })
+    }
+
     /// The code now, and the seconds left in its period.
     pub fn code_now(&self) -> (String, u64) {
         let unix = std::time::SystemTime::now()
@@ -534,5 +545,20 @@ mod tests {
         let (code, left) = totp.code_now();
         assert_eq!(code.len(), 6);
         assert!((1..=30).contains(&left));
+    }
+    #[test]
+    fn run_boundary_uses_next_period_with_injected_clock() {
+        let otp = Totp::parse(SHA1_SEED).unwrap();
+        assert_eq!(otp.run_code_at(24), otp.code_at(24));
+        for unix in 25..30 {
+            assert_eq!(otp.run_code_at(unix), otp.code_at(30));
+        }
+        assert_eq!(otp.run_code_at(30), otp.code_at(30));
+        let custom = Totp::parse(&format!(
+            "otpauth://totp/Test?secret={SHA1_SEED}&period=60&digits=8"
+        ))
+        .unwrap();
+        assert_eq!(custom.run_code_at(54), custom.code_at(54));
+        assert_eq!(custom.run_code_at(59), custom.code_at(60));
     }
 }

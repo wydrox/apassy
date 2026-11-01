@@ -131,3 +131,26 @@ The standalone masking utility also masks short complete tokens or field values
 short values and is not sufficient to authorize their execution. Encoding or
 splitting values evades literal masking; masking is not a confidentiality boundary
 for arbitrary command output.
+
+### One-time codes (ADR 0034)
+
+`apassy code` intentionally releases a current code to the authenticated owner CLI,
+using an exact item/field/show-or-copy proof and the configured Touch ID window.
+`--copy` uses the app's concealed expiring clipboard and omits the value from its
+response. UI reveal/copy checks remain fresh. Owner terminal output is sensitive.
+
+Agent runs explicitly select `codes`; they never receive an OTP setup key, including
+through an old explicit seed binding. A code is a hard owner veto unless a remembered
+owner project/action answer explicitly includes codes for that item and destinations.
+Models and patterns cannot grant this authority. Existing Always ask, production,
+host, missing-context and session fences still apply. Old answers default to no code
+authority in schema 23. Answers are not synced; restore clears them.
+
+The broker generates codes only at spawn, choosing the next period when at most five
+whole seconds remain. Provider acceptance of a future-period code is not guaranteed.
+Literal code values are masked in original run output; matching substrings in other
+numbers are also redacted. Unrelated numbers survive. Encoding or fragmentation can
+bypass exact masking. Codes/seeds are absent from generated logs, model/relay cards,
+receipts and operation status, and no agent clipboard API exists. An owner-approved
+child still possesses the code and inherits the existing environment/descendant and
+same-user-process exposure limits.

@@ -202,6 +202,11 @@ pub enum Command {
     Lock,
     /// Bring the Apassy window to the front, for example to unlock. No session.
     Show,
+    /// Current TOTP code only. Authenticated CLI session and exact owner proof.
+    Code {
+        item: String,
+        copy: bool,
+    },
 
     /// Add the credentials of a pasted text (ADR 0025 §4): a secret, a `KEY=value` line,
     /// a `.env` file, a URL with credentials, or an `otpauth://` link. The app finds the
@@ -452,6 +457,12 @@ pub enum Data {
     #[default]
     None,
     Status(StatusView),
+    Code {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<SecretText>,
+        seconds_left: u64,
+        copied: bool,
+    },
     Session {
         token: SecretText,
         idle_minutes: u64,

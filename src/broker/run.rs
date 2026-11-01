@@ -134,6 +134,7 @@ const ANSWERED_ON_IPHONE: &str = "iPhone";
 pub struct RunRequest<'a> {
     pub access_request_id: Option<u64>,
     pub items: &'a [u64],
+    pub codes: &'a [u64],
     pub command: &'a [String],
     pub cwd: &'a str,
     pub purpose: &'a str,
@@ -144,6 +145,16 @@ pub struct RunRequest<'a> {
 }
 
 impl RunRequest<'_> {
+    fn all_items(&self) -> Vec<u64> {
+        let mut items = self.items.to_vec();
+        for item in self.codes {
+            if !items.contains(item) {
+                items.push(*item);
+            }
+        }
+        items
+    }
+
     /// The whole command, as the use log masks and then cuts it.
     fn command_text(&self) -> String {
         format!("run {}", self.command.join(" "))
@@ -154,7 +165,7 @@ impl RunRequest<'_> {
     /// agent can put a value in the command; the Activity never shows it, nor a part of
     /// it at the cut. Without the values, only "run" and the cut mark.
     fn label(&self, vault: &Vault) -> String {
-        match vault.command_mask(self.items) {
+        match vault.command_mask(&self.all_items()) {
             Ok(mask) => mask.summary(&self.command_text(), MAX_LABEL_BYTES),
             Err(_) => format!("run {CUT_MARK}"),
         }
@@ -162,9 +173,16 @@ impl RunRequest<'_> {
 
     fn validate(&self) -> Result<(), String> {
         let unique: BTreeSet<u64> = self.items.iter().copied().collect();
-        if self.items.is_empty() || self.items.len() > MAX_ITEMS || unique.len() != self.items.len()
+        let code_unique: BTreeSet<u64> = self.codes.iter().copied().collect();
+        if self.all_items().is_empty()
+            || self.all_items().len() > MAX_ITEMS
+            || unique.len() != self.items.len()
+            || code_unique.len() != self.codes.len()
         {
             return Err(format!("Name 1 to {MAX_ITEMS} different items."));
+        }
+        if !self.codes.is_empty() && self.access_request_id.is_some() {
+            return Err("Scoped access consent does not cover one-time codes. Submit a code run for owner approval.".to_owned());
         }
         if self.command.is_empty() || self.command.len() > MAX_ARGS {
             return Err(format!("The command must have 1 to {MAX_ARGS} arguments."));
@@ -253,6 +271,7 @@ impl Checked {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemFacts {
     name: String,
+    includes_code: bool,
     standing: Standing,
     /// "Always ask me" of the item.
     always_ask: bool,
@@ -279,6 +298,8 @@ impl ItemFacts {
 #[derive(Debug, PartialEq, Eq)]
 struct ItemAuthorization {
     binding: EnvBinding,
+    code_field: Option<String>,
+    includes_value: bool,
     revision: u64,
     declaration: Option<Declaration>,
     sources: DeclarationSources,
@@ -373,6 +394,9 @@ fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str)
         ));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
+        if facts.includes_code && !known.answer.get(index).copied().unwrap_or(false) {
+            why.push(format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name));
+        }
         if facts.production && !known.answer.get(index).copied().unwrap_or(false) {
             let mut text = format!(
                 "\"{}\" is a production credential: you approve each run, unless you allow production for {place}: {}.",
@@ -581,7 +605,9 @@ fn known_state(
             .ok()
             .flatten();
         let unfit = answer.as_ref().and_then(|answer| {
-            if (facts.production || facts.unconfirmed) && certain != Some(action) {
+            if facts.includes_code && !answer.includes_codes {
+                Some("the earlier answer does not include one-time codes")
+            } else if (facts.production || facts.unconfirmed) && certain != Some(action) {
                 Some("the rules are not certain of the kind of action")
             } else if !hosts_within(hosts, answer.hosts.iter().chain(&facts.known_hosts)) {
                 Some("the command goes to another host")
@@ -609,6 +635,7 @@ fn run_inner(
     request: &RunRequest<'_>,
     evaluation_only: bool,
 ) -> WireResponse {
+    let items = request.all_items();
     let (checked, label) = {
         let mut guard = lock(&ctx.vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
@@ -637,7 +664,7 @@ fn run_inner(
                         at: learning::now(),
                         agent_id: agent.id,
                         agent_name: &agent.name,
-                        items: request.items,
+                        items: &items,
                         user_request,
                         user_request_source: learning::agent_source(user_request),
                         command: request.command,
@@ -686,7 +713,7 @@ fn run_inner(
     let certain = classify_certain(request.command, &analysis);
     let hosts = run_hosts(request.command);
     let access_admission = if let Some(id) = request.access_request_id {
-        if evaluation_only || request.items.len() != 1 {
+        if evaluation_only || items.len() != 1 {
             return WireResponse::failure(
                 "access_once_unavailable",
                 "A referenced access request requires one credential and a live run.",
@@ -720,7 +747,7 @@ fn run_inner(
             id,
             &crate::vault::access_once::CheckedScope {
                 agent: checked.agent.id,
-                item: request.items[0],
+                item: items[0],
                 cwd,
                 project: &project.key,
                 action,
@@ -761,7 +788,7 @@ fn run_inner(
         project_dir: &checked.project_dir,
         cwd: &checked.cwd,
         cwd_rel: &checked.relative_dir,
-        items: request.items,
+        items: &items,
         declarations: &checked.declarations,
         instruction: "",
     };
@@ -783,14 +810,14 @@ fn run_inner(
             (
                 learning::lookup(vault, pattern.as_ref(), now),
                 shadow::models(vault, ctx.bouncer.as_ref()),
-                known_state(vault, request.items, &checked, action, certain, &hosts),
+                known_state(vault, &items, &checked, action, certain, &hosts),
             )
         })
         .unwrap_or_else(|| {
             (
                 learning::LearningState::default(),
                 shadow::Models::default(),
-                known_nothing(request.items.len()),
+                known_nothing(items.len()),
             )
         });
     let always_asks = checked.facts.iter().any(ItemFacts::asks_always);
@@ -923,8 +950,7 @@ fn run_inner(
     } else {
         (Vec::new(), None)
     };
-    let question_items: Vec<QuestionItem> = request
-        .items
+    let question_items: Vec<QuestionItem> = items
         .iter()
         .zip(&checked.facts)
         .map(|(item, facts)| QuestionItem {
@@ -983,7 +1009,7 @@ fn run_inner(
                     .start_wait(&NewActivity {
                         agent_id: Some(checked.agent.id),
                         agent_name: checked.agent.name.clone(),
-                        item_id: request.items.first().copied(),
+                        item_id: items.first().copied(),
                         operation: label.clone(),
                         decision: ActivityDecision::Deny,
                         reason: request.purpose.trim().to_owned(),
@@ -1012,7 +1038,7 @@ fn run_inner(
             remember,
             question: QuestionInfo {
                 id: 0,
-                item_ids: request.items.to_vec(),
+                item_ids: items.to_vec(),
                 project: checked.project.clone(),
                 action,
                 production: production_waiting,
@@ -1126,7 +1152,7 @@ fn run_inner(
             {
                 // One answer is one interaction: the owner check of an approval is
                 // not counted again (`OwnerGate`).
-                let _ = vault.record_interaction(InteractionKind::Question, &label, request.items);
+                let _ = vault.record_interaction(InteractionKind::Question, &label, &items);
             }
         }
         if let Some(call) = shadow_call.take() {
@@ -1312,7 +1338,7 @@ fn run_inner(
         // ADR 0025: "Allow ACTION in PROJECT" and "Allow production" are saved now, in
         // the session of the decision and after the second check.
         if let Some(choice) = &answer_choice {
-            let saved = save_answer(vault, &checked, request.items, choice, &answered_on, &hosts);
+            let saved = save_answer(vault, &checked, &items, choice, &answered_on, &hosts);
             if let Err(reason) = saved {
                 record(
                     vault,
@@ -1357,13 +1383,13 @@ fn run_inner(
             use_decided_by,
             &answered_on,
         );
-        super::corrections::consider_items(vault, request.items);
+        super::corrections::consider_items(vault, &items);
         if vault.is_locked() {
             return locked_response();
         }
-        match read_secrets(vault, request.items) {
+        match read_secrets(vault, request.items, request.codes) {
             Ok(secrets) => {
-                for item_id in request.items {
+                for item_id in &items {
                     let _ = vault.record_run(agent.id, *item_id);
                 }
                 secrets
@@ -1412,12 +1438,13 @@ fn run_inner(
         }
     };
     let network = proxy.as_ref().map(RunProxy::network);
-    let result = exec::run_with_spawn(
+    let result = exec::run_with_codes_spawn(
         request.command,
         &checked.cwd,
         request.path,
         &secrets.env,
         &secrets.masks,
+        &secrets.codes,
         network.map_or_else(Network::default, |network| Network {
             env: &network.env,
             sandbox_profile: network.sandbox_profile.as_deref(),
@@ -1598,7 +1625,7 @@ fn check(
     let mut provider_hosts = Vec::new();
     let mut authorization = Vec::new();
     let mut facts = Vec::new();
-    for item_id in request.items {
+    for item_id in &request.all_items() {
         // A hidden item and an unknown item give the same answer, so a refusal does
         // not tell which items exist.
         let details = match vault.details(*item_id) {
@@ -1624,9 +1651,32 @@ fn check(
         if vault.is_archived(*item_id).unwrap_or(true) {
             return Err(("item_archived", archived_reason(*item_id)));
         }
-        let binding = vault.process_binding(*item_id).map_err(|_| {
+        let includes_code = request.codes.contains(item_id);
+        let code_field = if includes_code {
+            Some(
+                vault
+                    .code_field(*item_id)
+                    .map_err(|_| {
+                        (
+                            "invalid_code",
+                            "The item must have exactly one readable one-time password detail."
+                                .to_owned(),
+                        )
+                    })?
+                    .ok_or((
+                        "no_code",
+                        format!("Item {item_id} has no one-time password detail."),
+                    ))?,
+            )
+        } else {
+            None
+        };
+        let code_name = crate::vault::mfa::code_env_name(*item_id);
+        let binding = if !request.items.contains(item_id) {
+            Some(EnvBinding { item_id: *item_id, env_name: code_name.clone(), field: code_field.clone().expect("code-only item"), delivery: EnvDelivery::Value })
+        } else { vault.process_binding(*item_id).map_err(|_| {
             ("broker_error", "The broker cannot read the process field.".to_owned())
-        })?.ok_or((
+        })? }.ok_or((
             "needs_field",
             format!("The owner must select one secret field for item {item_id} in Apassy before a process can use it."),
         ))?;
@@ -1640,6 +1690,15 @@ fn check(
                     binding.env_name
                 ),
             ));
+        }
+        if includes_code && request.items.contains(item_id) {
+            if !unique_env_names.insert(code_name.clone()) {
+                return Err((
+                    "duplicate_env_name",
+                    "A code variable conflicts with another process variable.".to_owned(),
+                ));
+            }
+            env_names.push(code_name);
         }
         let declaration = vault.declaration(*item_id).map_err(|_| {
             (
@@ -1670,6 +1729,8 @@ fn check(
             binding.clone(),
             ItemAuthorization {
                 binding,
+                code_field,
+                includes_value: request.items.contains(item_id),
                 revision: details.summary.revision,
                 declaration: declaration.clone(),
                 sources,
@@ -1691,7 +1752,12 @@ fn check(
         known_hosts.sort();
         known_hosts.dedup();
         facts.push(ItemFacts {
-            name: details.summary.title.clone(),
+            name: if includes_code {
+                format!("{} (includes one-time code)", details.summary.title)
+            } else {
+                details.summary.title.clone()
+            },
+            includes_code,
             standing,
             always_ask,
             weak_source: sources.environment == DeclarationSource::Default
@@ -1832,7 +1898,29 @@ fn save_answer(
             if !choice.production {
                 continue;
             }
-            vault.allow_production(*item, &project, choice.action, on, &covered)
+            if facts.includes_code {
+                vault.store_answer(
+                    *item,
+                    &project,
+                    choice.action,
+                    AnswerScope::Production,
+                    on,
+                    &covered,
+                    true,
+                )
+            } else {
+                vault.allow_production(*item, &project, choice.action, on, &covered)
+            }
+        } else if facts.includes_code {
+            vault.store_answer(
+                *item,
+                &project,
+                choice.action,
+                AnswerScope::Project,
+                on,
+                &covered,
+                true,
+            )
         } else {
             vault.remember_answer(*item, &project, choice.action, on, &covered)
         };
@@ -1941,12 +2029,12 @@ fn store_uses(
     // The whole command, masked with the values of every item of the request, and only
     // then cut: a value of one item never shows in the row of another, and a value at
     // the cut never leaves a part (relay-feed-v1 section 7.2).
-    let Ok(mask) = vault.command_mask(request.items) else {
+    let Ok(mask) = vault.command_mask(&request.all_items()) else {
         return;
     };
     let command_summary = mask.summary(&request.command_text(), MAX_COMMAND_SUMMARY_BYTES);
     drop(mask);
-    for item_id in request.items {
+    for item_id in &request.all_items() {
         // Only an item that exists gets a row.
         if vault.details(*item_id).is_err() {
             continue;
@@ -2004,14 +2092,28 @@ struct RunSecrets {
     env: Vec<SecretEnv>,
     masks: Vec<SecretEnv>,
     proxied: Vec<ProxySecret>,
+    codes: Vec<(String, crate::otp::Totp)>,
 }
 
-fn read_secrets(vault: &Vault, items: &[u64]) -> Result<RunSecrets, String> {
+fn read_secrets(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecrets, String> {
     let mut secrets = RunSecrets {
         env: Vec::new(),
         masks: Vec::new(),
         proxied: Vec::new(),
+        codes: Vec::new(),
     };
+    for item in codes {
+        let field = vault
+            .code_field(*item)
+            .map_err(|_| "The one-time password detail is ambiguous.".to_owned())?
+            .ok_or("This item has no one-time password detail.")?;
+        let totp = vault
+            .totp(*item, &field)
+            .map_err(|_| "The one-time password setting is invalid.".to_owned())?;
+        secrets
+            .codes
+            .push((crate::vault::mfa::code_env_name(*item), totp));
+    }
     for item_id in items {
         let binding = vault
             .process_binding(*item_id)
@@ -2091,12 +2193,13 @@ fn record(
     reason: &str,
 ) {
     // The history of each item of the run shows the entry (schema 10).
-    let extra_items = request.items.get(1..).unwrap_or_default();
+    let items = request.all_items();
+    let extra_items = items.get(1..).unwrap_or_default();
     let _ = vault.record_activity_for_items(
         &NewActivity {
             agent_id: Some(agent.id),
             agent_name: agent.name.clone(),
-            item_id: request.items.first().copied(),
+            item_id: items.first().copied(),
             operation: label.to_owned(),
             decision,
             reason: format!("{reason} Purpose: {}", request.purpose.trim()),

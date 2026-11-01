@@ -221,7 +221,7 @@ mod tests {
         conn.pragma_update(None, "key", pass).unwrap();
         conn.execute_batch(super::super::access_once::DOWNGRADE_TO_21_SQL)
             .unwrap();
-        conn.execute_batch("DROP TABLE relay_connect_pending; UPDATE vault_meta SET schema_version=20; PRAGMA user_version=20;").unwrap();
+        conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; DROP TABLE relay_connect_pending; UPDATE vault_meta SET schema_version=20; PRAGMA user_version=20;").unwrap();
         conn.close().unwrap();
         vault.unlock(pass).unwrap();
         assert!(vault.pending_connect().unwrap().is_none());

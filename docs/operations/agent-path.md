@@ -282,3 +282,32 @@ including real values behind proxy placeholders, before starting the command.
 Whole-token masking cannot safely conceal those values when embedded in output.
 
 MCP stdio input is limited to 64 KiB while reading. An oversized frame sends a JSON-RPC error with code -32600 and a null request ID, then terminates the adapter, including when the sender never writes a newline. Restart the host connection after correcting the input.
+
+## One-time codes in runs (ADR 0034)
+
+The catalog includes `has_code` and `code_env_name` (for example
+`APASSY_ITEM_17_OTP`). Request codes explicitly with `codes: [17]`; `items` still
+selects ordinary credentials and may be `[]` for codes only. Select both to inject
+both a publishing token and its code. Use the catalog variable, for example
+`["/bin/sh", "-c", "npm publish --otp=$APASSY_ITEM_17_OTP"]`. No seed is returned
+or injected, including from an older explicit seed binding. There is no clipboard
+path for agents. Multiple OTP settings on one item are refused as ambiguous.
+
+Every code run asks the owner unless an explicit Allow in project answer includes
+codes for that item, project, action and destinations. Older password-only answers,
+patterns and an allowing model never cover codes. Allow once covers one run. Other
+hard rules still ask. The approval card names code use; no value is in the card.
+Schema 23 remembers the code scope separately from password-only authority.
+
+The broker generates immediately before process spawn. At most five whole seconds
+remaining selects the next period's code without sleeping; providers rejecting
+future codes may require waiting until the boundary. Owner CLI/UI retain the
+current code. Check operation status and external outcome before retrying a lost
+publishing call; a code does not make a mutation idempotent. Scoped
+`access_request_id` is incompatible with code selection.
+
+Exact literal digits are masked from stdout/stderr, even inside a longer number.
+Unrelated numeric output remains. Coincidental matches can redact useful numeric
+output; encoded/transformed/fragmented values remain outside the guarantee. Codes
+never enter receipts/status or generated approval, model, activity or decision
+metadata. The approved process has the value and may misuse it, as with passwords.
