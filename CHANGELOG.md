@@ -8,6 +8,13 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - **MCP:** bounded concurrent calls with a reserved catalog/status slot, cancellation that withdraws pending questions, and 15-second progress. Broker operation receipts support reconnect recovery and optional idempotency keys without blind mutation replay. Receipts retain metadata only for 15 minutes after completion; executing commands are not undone by cancellation.
 
+- Transactional staged host-file repair, connection identity metadata, and Settings host health with owner-checked reconnect.
+- Opt-in isolated synthetic broker/MCP/hook diagnostic through `doctor --live`.
+
+### Fixed
+
+- Preserve existing catalog restrictions during reconnect; align helper help/version/usage handling and bound fixture inputs.
+
 ## [0.5.8] - 2026-10-31
 
 ### Added

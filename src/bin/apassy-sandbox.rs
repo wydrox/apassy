@@ -89,27 +89,33 @@ const CLOUD_DIR_IN_HOME: [&str; 4] = [
     "Apassy",
 ];
 
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("apassy-sandbox: the Seatbelt launcher runs only on macOS.");
-    std::process::exit(2);
-}
-
-#[cfg(target_os = "macos")]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    match run(&args) {
-        Ok(()) => {}
-        Err(message) => {
-            eprintln!("apassy-sandbox: {message}");
-            std::process::exit(2);
-        }
+    if args == ["--version"] {
+        println!("apassy-sandbox {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args == ["--help"] || args == ["-h"] {
+        print!("{HELP}");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let result = run(&args);
+    #[cfg(not(target_os = "macos"))]
+    let result: Result<(), String> = Err("the Seatbelt launcher runs only on macOS".into());
+    if let Err(message) = result {
+        eprintln!("apassy-sandbox: {message}");
+        std::process::exit(2);
     }
 }
 
 /// Parse the arguments, resolve the paths, and exec `sandbox-exec`. On success
 /// this call does not return, because it replaces the process image.
 fn run(args: &[String]) -> Result<(), String> {
+    if args == ["--version"] {
+        println!("apassy-sandbox {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let parsed = parse(args)?;
     if parsed.help {
         print!("{HELP}");

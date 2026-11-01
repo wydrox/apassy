@@ -10,7 +10,7 @@ use super::{Cli, Failure, Outcome, print_json};
 use crate::owner::wire::{Command, Data, SESSION_ENV, VaultState};
 
 pub const HELP: &str = "\
-apassy doctor [--json]
+apassy doctor [--json] [--live]
 
 Checks the Apassy window, the vault, the broker, the command-line session, the programs
 next to apassy, the data directory, and the agent hosts (Claude Code and Codex). Each
@@ -54,7 +54,8 @@ impl Report {
     }
 }
 
-pub fn run(cli: &Cli, args: Args) -> Outcome {
+pub fn run(cli: &Cli, mut args: Args) -> Outcome {
+    let live = args.flag(&["--live"]);
     args.finish()?;
     let mut report = Report(Vec::new());
     let home = std::env::var_os("HOME")
@@ -356,6 +357,9 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
         );
     }
 
+    if live {
+        live_checks(&mut report);
+    }
     let failed = report.0.iter().any(|check| check.level == Level::Problem);
     if cli.json {
         print_json(
@@ -512,5 +516,254 @@ mod tests {
                 .unwrap()
                 .contains("synthetic-secret")
         );
+    }
+}
+
+/// A process lock protects the dedicated fixture namespace. A killed doctor releases
+/// the lock; its next run removes only fixture directories in this private root.
+#[cfg(feature = "vault")]
+struct FixtureLock(std::fs::File);
+
+#[cfg(feature = "vault")]
+impl Drop for FixtureLock {
+    fn drop(&mut self) {
+        // Release explicitly: a concurrent fork can temporarily inherit the open
+        // file description even after our File closes.
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(feature = "vault")]
+fn live_fixture_root() -> std::io::Result<(std::path::PathBuf, FixtureLock)> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata(
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or(())
+            .map_err(|_| std::io::Error::other("home unavailable"))?,
+    )?
+    .uid();
+    let root = std::path::PathBuf::from(format!("/tmp/apassy-live-doctor-{uid}"));
+    let lock = clean_live_fixture_root(&root, uid)?;
+    Ok((root, lock))
+}
+
+#[cfg(feature = "vault")]
+fn clean_live_fixture_root(root: &Path, uid: u32) -> std::io::Result<FixtureLock> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(root)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::other("unsafe fixture directory"));
+    }
+    let lock_path = root.join("lock");
+    if std::fs::symlink_metadata(&lock_path)
+        .is_ok_and(|m| !m.is_file() || m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::other("unsafe fixture lock"));
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)?;
+    lock.try_lock()
+        .map_err(|_| std::io::Error::other("another doctor is running"))?;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("fixture-")
+            && entry.file_type()?.is_dir()
+        {
+            std::fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(FixtureLock(lock))
+}
+
+/// The diagnostic fixture is a separate vault and broker; it has no owner items,
+/// owner session, model endpoint, transcript roots or inherited agent token.
+#[cfg(feature = "vault")]
+fn live_checks(report: &mut Report) {
+    use crate::agent::{client, mcp, wire::Action};
+    use crate::contracts::CredentialKind;
+    use crate::vault::{Field, ItemDraft, SecretValue, Vault};
+    use std::sync::{Arc, Mutex};
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let (root, _lock) = live_fixture_root()?;
+        let temp = tempfile::Builder::new()
+            .prefix("fixture-")
+            .tempdir_in(root)?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let mut vault = Vault::create(&temp.path().join("fixture.db"), "synthetic-doctor-pass")?;
+        vault.unlock("synthetic-doctor-pass")?;
+        let (agent, token) = vault.register_agent("Synthetic doctor")?;
+        let item = vault.add(ItemDraft {
+            title: "doctor-synthetic-fixture".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![Field {
+                name: "token".into(),
+                value: SecretValue::new("harmless-doctor-value".into()),
+                secret: true,
+            }],
+        })?;
+        vault.set_agent_sees_all(agent.id, true)?;
+        let shared = Arc::new(Mutex::new(Some(vault)));
+        let socket = temp.path().join("broker.sock");
+        let mut options = crate::broker::server::BrokerOptions::with_tls(
+            crate::broker::http::TlsClient::platform()?,
+        );
+        options.transcript_roots.clear();
+        let mut broker = crate::broker::server::start_with(shared.clone(), &socket, options)?;
+        let response = client::send(&socket, token.expose(), Action::ListAccess)?;
+        report.add(
+            if response.ok {
+                Level::Ok
+            } else {
+                Level::Problem
+            },
+            "Live broker",
+            "isolated synthetic catalog request",
+            None,
+        );
+        let config = mcp::AdapterConfig {
+            socket: socket.clone(),
+            token: Some(token.expose().into()),
+            host_session: None,
+        };
+        let handshake = mcp::handle_message(
+            &config,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        );
+        report.add(
+            if handshake.is_some_and(|v| v.get("result").is_some()) {
+                Level::Ok
+            } else {
+                Level::Problem
+            },
+            "Live MCP handshake",
+            "real adapter, isolated broker",
+            None,
+        );
+        let list = mcp::handle_message(
+            &config,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"apassy_list_access","arguments":{}}}"#,
+        );
+        let passed = list.is_some_and(|v| {
+            v.to_string().contains("doctor-synthetic-fixture")
+                && !v.to_string().contains("harmless-doctor-value")
+        });
+        report.add(
+            if passed { Level::Ok } else { Level::Problem },
+            "Live MCP fixture",
+            "synthetic credential catalog round trip; no stored owner items",
+            None,
+        );
+        let hook = crate::agent::hook::HookInput {
+            host: "claude-code",
+            session_id: Some("doctor-synthetic-session".into()),
+            cwd: temp.path().display().to_string(),
+            prompt: "Synthetic diagnostic prompt".into(),
+            transcript_path: None,
+            truncated: false,
+        };
+        let hook_ok = crate::agent::hook::submit(&socket, token.expose(), hook).is_ok();
+        report.add(
+            if hook_ok { Level::Ok } else { Level::Problem },
+            "Live hook",
+            "synthetic prompt acknowledged by isolated broker; host trust unverified",
+            None,
+        );
+        broker.stop();
+        let mut guard = shared
+            .lock()
+            .map_err(|_| std::io::Error::other("fixture lock failed"))?;
+        guard
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("fixture vault unavailable"))?
+            .delete(item.id, item.revision)?;
+        drop(guard);
+        report.add(
+            Level::Ok,
+            "Live cleanup",
+            "isolated fixture removed; temporary vault deleted on return",
+            None,
+        );
+        Ok(())
+    })();
+    if result.is_err() {
+        report.add(
+            Level::Problem,
+            "Live fixture",
+            "isolated fixture could not complete; no owner items accessed",
+            None,
+        );
+    }
+    report.add(
+        Level::Unverified,
+        "Live sandbox",
+        "enforcement requires a native sandboxed host test",
+        None,
+    );
+}
+#[cfg(not(feature = "vault"))]
+fn live_checks(report: &mut Report) {
+    report.add(
+        Level::Problem,
+        "Live fixture",
+        "this build needs the vault feature",
+        None,
+    );
+}
+
+#[cfg(all(test, feature = "vault"))]
+mod live_tests {
+    use super::*;
+    #[test]
+    fn abandoned_fixture_cleanup_respects_lock_and_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private");
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(dir.path()).unwrap().uid();
+        let lock = clean_live_fixture_root(&root, uid).unwrap();
+        let abandoned = root.join("fixture-abandoned");
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join("fixture.db"), "synthetic").unwrap();
+        std::fs::write(root.join("unrelated"), "keep").unwrap();
+        assert!(clean_live_fixture_root(&root, uid).is_err());
+        assert!(abandoned.exists());
+        drop(lock); // Also released by the OS after a crash.
+        let _lock = clean_live_fixture_root(&root, uid).unwrap();
+        assert!(!abandoned.exists());
+        assert_eq!(std::fs::read(root.join("unrelated")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn isolated_live_fixture_reports_broker_mcp_hook_and_cleanup() {
+        let mut report = Report(vec![]);
+        live_checks(&mut report);
+        for name in [
+            "Live broker",
+            "Live MCP handshake",
+            "Live MCP fixture",
+            "Live hook",
+            "Live cleanup",
+        ] {
+            assert!(
+                report
+                    .0
+                    .iter()
+                    .any(|c| c.name == name && c.level == Level::Ok),
+                "missing stage {name}"
+            );
+        }
+        let text = serde_json::to_string(&report.0).unwrap();
+        assert!(!text.contains("harmless-doctor-value"));
+        assert!(!text.contains("apassy_agt_"));
     }
 }
