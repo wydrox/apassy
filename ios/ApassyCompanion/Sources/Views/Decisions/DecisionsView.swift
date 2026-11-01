@@ -4,6 +4,7 @@ import SwiftUI
 
 /// Source-qualified navigation in Requests.
 enum DecisionRoute: Hashable {
+    case access(String, history: Bool)
     /// A question through the relay, by its vault-qualified request identity.
     case question(String)
     case history(String)
@@ -12,6 +13,7 @@ enum DecisionRoute: Hashable {
 
     func hash(into hasher: inout Hasher) {
         switch self {
+        case .access(let identity, let history): hasher.combine("access-\(identity)-\(history)")
         case .question(let qid): hasher.combine("question-\(qid)")
         case .history(let id): hasher.combine("history-\(id)")
         case .run(let sourceID, let run): hasher.combine("run-\(sourceID)-\(run.id)-\(run.digest)")
@@ -84,6 +86,8 @@ struct DecisionsView: View {
             .toolbar { toolbar }
             .navigationDestination(for: DecisionRoute.self) { route in
                 switch route {
+                case .access(let identity, let history):
+                    if let questions { AccessRequestDetailView(model: questions.access, identity: identity, history: history).id(identity) }
                 case .question(let identity):
                     if let questions { QuestionDetailView(model: questions, requestIdentity: identity).id(identity) }
                 case .history(let id):
@@ -176,11 +180,27 @@ struct DecisionsView: View {
     private func list(now: Date) -> some View {
         let waiting = waitingRows(now: now)
         let access = accessRows
+        let relayAccess = questions?.access.requests ?? []
         let hasUnavailableVaults = questions?.contexts.contains { $0.error != nil } ?? false
         return RequestsList {
-            if waiting.isEmpty && access.isEmpty && (questions?.lockedVaults.isEmpty ?? true) && !hasUnavailableVaults {
+            if waiting.isEmpty && access.isEmpty && relayAccess.isEmpty && (questions?.lockedVaults.isEmpty ?? true) && !hasUnavailableVaults {
                 emptyWaiting
                     .listRowBackground(Color.clear)
+            }
+            if !relayAccess.isEmpty {
+                Section("Access requests") {
+                    ForEach(relayAccess) { request in
+                        NavigationLink(value: DecisionRoute.access(request.id, history: false)) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(request.card.item.name).font(.headline)
+                                Text("\(request.card.agent.name) (id \(request.card.agent.id)) · \(request.card.asker.name)")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                                if let receipt = request.receipt { Text("Answered on \(receipt.device_name ?? request.card.asker.name)") }
+                            }
+                        }
+                        .accessibilityIdentifier("access.request.\(request.card.request_id)")
+                    }
+                }
             }
             Section {
                 ForEach(waiting) { decision in

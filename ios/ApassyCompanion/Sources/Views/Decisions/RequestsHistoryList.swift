@@ -27,11 +27,24 @@ struct RequestsHistoryList: View {
 
     var body: some View {
         RequestsList {
+            if !model.access.history.isEmpty {
+                Section("Access consent history") {
+                    ForEach(model.access.history.filter { row in (filter == .all || (filter == .allowed && row.receipt?.outcome == "allowed_once") || (filter == .denied && row.receipt?.outcome == "denied")) && (query.isEmpty || [row.card.item.name,row.card.agent.name,row.card.asker.name].joined(separator:" ").localizedStandardContains(query)) }) { row in
+                        NavigationLink(value: DecisionRoute.access(row.id, history: true)) {
+                            VStack(alignment: .leading) {
+                                Text(row.card.item.name)
+                                Text(row.receipt.map { "Answered on \($0.device_name ?? row.card.asker.name)" } ?? "Not confirmed")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
             if model.historyLoading && model.history.isEmpty {
                 ProgressView("Loading history…")
                     .frame(maxWidth: .infinity)
                     .listRowBackground(Color.clear)
-            } else if entries.isEmpty && model.historyError == nil
+            } else if entries.isEmpty && model.access.history.isEmpty && model.historyError == nil
                 && model.historyVaults.allSatisfy({ $0.availability == .available }) {
                 ContentUnavailableView {
                     Label(query.isEmpty && filter == .all ? "No history yet" : "No matching requests", systemImage: "clock")

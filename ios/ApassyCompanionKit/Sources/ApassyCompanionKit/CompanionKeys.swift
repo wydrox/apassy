@@ -21,6 +21,13 @@ public protocol CompanionKeys: Sendable {
     /// Sign a message with the approval key. The owner sees `reason` in the Face ID prompt.
     /// The signature is DER.
     func signApproval(_ message: Data, reason: String) async throws -> Data
+    func signAccessApproval(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data
+}
+
+public extension CompanionKeys {
+    func signAccessApproval(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data {
+        throw CompanionKeyError.noSecureEnclave
+    }
 }
 
 /// A key operation failed. Each message is for the owner.
