@@ -519,7 +519,7 @@ fn bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available() {
     host.call(5, json!({"name":TOOL_LIST_ACCESS}));
     assert_eq!(host.reply(5)["isError"], false);
     host.send(json!({"jsonrpc":"2.0", "id":6, "method":"tools/list"}));
-    assert_eq!(host.reply(6)["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(host.reply(6)["tools"].as_array().unwrap().len(), 12);
     host.call(1, json!({"name":TOOL_LIST_ACCESS}));
     assert_eq!(host.next()["error"]["code"], -32600);
     barrier.wait();

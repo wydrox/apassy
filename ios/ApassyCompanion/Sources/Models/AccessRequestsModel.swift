@@ -22,7 +22,7 @@ final class AccessRequestsModel {
     self.signers = signers
   }
   func refresh() async {
-    let current = generation
+    var current = generation
     do {
       let snapshot = try await service.accessRequestsList()
       guard current == generation else { return }
@@ -34,11 +34,12 @@ final class AccessRequestsModel {
         !updated.contains(where: { $0.id == busy && $0.state == "open" && $0.receipt == nil })
       {
         cancel(clear: false)
+        current = generation
       }
       requests = updated
-      if let saved = try? await service.accessRequestsHistory(), current == generation {
-        history = saved.requests
-      }
+      let saved = try? await service.accessRequestsHistory()
+      guard current == generation else { return }
+      if let saved { history = saved.requests }
       unavailable = nil
       for row in updated where row.receipt != nil { messages[row.id] = nil }
     } catch {
@@ -60,7 +61,7 @@ final class AccessRequestsModel {
     }
   }
   func canAllow(_ request: RelayAccessRequest) -> Bool {
-    guard request.card.valid_answers.contains(.allow_once),
+    guard unavailable == nil, request.card.valid_answers.contains(.allow_once),
       let key = request.answer_key.flatMap(Base64URL.decode),
       let signer = signers.signer(team: request.card.team_id, registered: key)
     else { return false }

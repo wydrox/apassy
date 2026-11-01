@@ -219,6 +219,8 @@ mod tests {
         vault.lock().unwrap();
         let conn = rusqlite::Connection::open(&file).unwrap();
         conn.pragma_update(None, "key", pass).unwrap();
+        conn.execute_batch(super::super::access_once::DOWNGRADE_TO_21_SQL)
+            .unwrap();
         conn.execute_batch("DROP TABLE relay_connect_pending; UPDATE vault_meta SET schema_version=20; PRAGMA user_version=20;").unwrap();
         conn.close().unwrap();
         vault.unlock(pass).unwrap();
@@ -228,7 +230,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, super::super::types::SCHEMA_VERSION);
         let count: i64 = vault
             .conn_ref()
             .unwrap()

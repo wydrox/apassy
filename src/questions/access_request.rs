@@ -723,7 +723,7 @@ mod tests {
         .unwrap();
         let question_key = crate::vault::QuestionKey::from_bytes(std::array::from_fn(|i| i as u8));
         for (name, plaintext) in [
-            ("card", WIRE.as_ref()),
+            ("card", WIRE),
             (
                 "deny",
                 include_bytes!("../../tests/fixtures/access-request-v1/deny.json").as_slice(),

@@ -293,64 +293,81 @@ fn two_iphones_and_local_denial_share_one_arbiter() {
 }
 
 #[test]
-fn replaced_answer_key_invalidates_an_open_requests_prepared_remote_proof() {
+fn changed_answer_key_mapping_or_revocation_invalidates_a_prepared_remote_proof() {
     use apassy::questions::access_request as access;
-    let w = world(true);
-    let phone = w.iphone();
-    w.with_a(|v| {
-        v.set_env_binding(w.items[1], "API_TOKEN", "token").unwrap();
-        v.set_agent_sees_all(w.agent, true).unwrap();
-        let a = v
-            .list_agents()
-            .unwrap()
-            .into_iter()
-            .find(|a| a.id == w.agent)
-            .unwrap();
-        let id = apassy::broker::access_once::create(
-            v,
-            &a,
-            w.items[1],
-            "Synthetic rotation",
-            w._root.path().to_str(),
-            &access::Scope {
-                action: access::Action::Read,
-                hosts: vec!["api.example.test".into()],
-            },
-        )
-        .result
-        .unwrap()["request_id"]
-            .as_u64()
-            .unwrap();
-        let r = v.scoped_access_request(id).unwrap();
-        let mut answer =
-            access::Answer::prepare(&r.card, &phone.uuid, access::Choice::AllowOnce, now())
+    for mutation in 0..3 {
+        let w = world(true);
+        let phone = w.iphone();
+        w.with_a(|v| {
+            v.set_env_binding(w.items[1], "API_TOKEN", "token").unwrap();
+            v.set_agent_sees_all(w.agent, true).unwrap();
+            let a = v
+                .list_agents()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == w.agent)
                 .unwrap();
-        answer.signature = encode_b64u(
-            &answer_key()
-                .sign(&answer.message(&r.card).unwrap())
-                .unwrap(),
-        );
-        let proof = apassy::broker::access_once::RemoteAccessAnswer::verify(
-            v,
-            id,
-            answer,
-            phone.client.device_id().unwrap(),
-        )
-        .unwrap();
-        let old = v.trusted_device(&phone.uuid).unwrap().unwrap();
-        let new = DeviceKey::generate().unwrap();
-        v.register_trusted_device(
-            &old.uuid,
-            &old.name,
-            old.kind,
-            &old.sign_key,
-            Some(new.public_key()),
-        )
-        .unwrap();
-        assert!(proof.commit(v).is_err());
-        assert_eq!(v.access_status(w.agent, id).unwrap().permit, "unavailable");
-        assert!(v.scoped_access_request(id).unwrap().receipt.is_none());
-    });
+            let id = apassy::broker::access_once::create(
+                v,
+                &a,
+                w.items[1],
+                "Synthetic rotation",
+                w._root.path().to_str(),
+                &access::Scope {
+                    action: access::Action::Read,
+                    hosts: vec!["api.example.test".into()],
+                },
+            )
+            .result
+            .unwrap()["request_id"]
+                .as_u64()
+                .unwrap();
+            let r = v.scoped_access_request(id).unwrap();
+            let mut answer =
+                access::Answer::prepare(&r.card, &phone.uuid, access::Choice::AllowOnce, now())
+                    .unwrap();
+            answer.signature = encode_b64u(
+                &answer_key()
+                    .sign(&answer.message(&r.card).unwrap())
+                    .unwrap(),
+            );
+            let proof = apassy::broker::access_once::RemoteAccessAnswer::verify(
+                v,
+                id,
+                answer,
+                phone.client.device_id().unwrap(),
+            )
+            .unwrap();
+            let old = v.trusted_device(&phone.uuid).unwrap().unwrap();
+            match mutation {
+                0 => {
+                    let new = DeviceKey::generate().unwrap();
+                    v.register_trusted_device(
+                        &old.uuid,
+                        &old.name,
+                        old.kind,
+                        &old.sign_key,
+                        Some(new.public_key()),
+                    )
+                    .unwrap();
+                }
+                1 => {
+                    v.set_trusted_device_relay_id(
+                        &old.uuid,
+                        &w.team,
+                        old.relay_devices[&w.team] + 1000,
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    v.remove_trusted_device_and_rotate(&old.uuid).unwrap();
+                }
+            }
+            assert!(proof.commit(v).is_err());
+            assert_eq!(v.access_status(w.agent, id).unwrap().permit, "unavailable");
+            assert!(v.scoped_access_request(id).unwrap().receipt.is_none());
+        });
+    }
 }
 
 type SharedVault = Arc<Mutex<Option<Vault>>>;

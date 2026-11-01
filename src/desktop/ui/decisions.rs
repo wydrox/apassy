@@ -3059,45 +3059,6 @@ pub(super) fn apply_suggestion(
     }
 }
 
-#[cfg(test)]
-mod answered_tests {
-    use super::*;
-    use crate::questions::{QuestionsView, RemoteAnswered};
-    use crate::vault::TrustedDeviceKind;
-
-    #[test]
-    fn a_remote_answer_shows_answered_on_its_device_for_ten_minutes() {
-        let answered = |run_id, device: &str, at| RemoteAnswered {
-            run_id,
-            agent: "claude-code".to_owned(),
-            device_name: device.to_owned(),
-            device_kind: TrustedDeviceKind::Iphone,
-            kind: "approve_once".to_owned(),
-            at,
-        };
-        let view = QuestionsView {
-            answered: vec![
-                answered(1, "Old iPhone", 1_000),
-                answered(2, "Test iPhone", 2_000),
-                answered(3, "Mac\u{202E}mini", 2_100),
-            ],
-            ..QuestionsView::default()
-        };
-        assert_eq!(
-            answered_lines(&view, 2_200),
-            [
-                "claude-code: Answered on Mac?mini",
-                "claude-code: Answered on Test iPhone"
-            ]
-        );
-        assert!(answered_lines(&view, 2_100 + ANSWERED_SHOWN_FOR + 1).is_empty());
-        assert_eq!(
-            answered(2, "Test iPhone", 0).line(),
-            "Answered on Test iPhone"
-        );
-    }
-}
-
 fn access_detail(
     app: &mut DesktopApp,
     ui: &mut egui::Ui,
@@ -3110,11 +3071,21 @@ fn access_detail(
     });
     columns::detail_body(ui, ("access-request", r.id), |ui| {
         ui.ctx().request_repaint_after(Duration::from_secs(1));
-        let export_note = app
-            .owner
-            .questions
-            .as_ref()
-            .and_then(|q| q.view().access_local_only.get(&r.id).cloned());
+        let export_note = app.owner.questions.as_ref().and_then(|q| {
+            let view = q.view();
+            view.access_local_only
+                .get(&r.id)
+                .cloned()
+                .or_else(|| {
+                    view.problem.map(|p| {
+                        format!("Review on this Mac. Remote publication is unavailable: {p}")
+                    })
+                })
+                .or_else(|| {
+                    (!view.on)
+                        .then(|| "Review on this Mac. The relay connection is not ready.".into())
+                })
+        });
         if let Some(note) = export_note {
             ui.label(note);
         }
@@ -3171,7 +3142,15 @@ fn access_detail(
             crate::questions::access_request::display_text(&c.cwd)
         ));
         ui.strong("Requested scope; checked against Mac policy");
-        ui.label(format!("Action: {:?}", c.action));
+        ui.label(format!(
+            "Action: {}",
+            c.action.map_or("Incomplete", |a| match a {
+                crate::questions::access_request::Action::Read => "Read",
+                crate::questions::access_request::Action::Change => "Change",
+                crate::questions::access_request::Action::Deploy => "Deploy",
+                crate::questions::access_request::Action::Delete => "Delete",
+            })
+        ));
         for host in &c.hosts {
             ui.label(host);
         }
@@ -3186,7 +3165,7 @@ fn access_detail(
         ui.label(
             "Allows one scoped use attempt. The bouncer still checks the command and may ask you.",
         );
-        ui.label("One attempt can make multiple network calls. No durable grant or remembered answer is saved.");
+        ui.label("One attempt can make multiple network calls. No durable grant, remembered answer, production allowance or evaluation permission is saved.");
         if let Some(reason) = &c.local_review_reason {
             ui.label(format!("Review access on {}: {}", c.asker.name, reason));
         }
@@ -3248,4 +3227,43 @@ fn access_detail(
             );
         }
     });
+}
+
+#[cfg(test)]
+mod answered_tests {
+    use super::*;
+    use crate::questions::{QuestionsView, RemoteAnswered};
+    use crate::vault::TrustedDeviceKind;
+
+    #[test]
+    fn a_remote_answer_shows_answered_on_its_device_for_ten_minutes() {
+        let answered = |run_id, device: &str, at| RemoteAnswered {
+            run_id,
+            agent: "claude-code".to_owned(),
+            device_name: device.to_owned(),
+            device_kind: TrustedDeviceKind::Iphone,
+            kind: "approve_once".to_owned(),
+            at,
+        };
+        let view = QuestionsView {
+            answered: vec![
+                answered(1, "Old iPhone", 1_000),
+                answered(2, "Test iPhone", 2_000),
+                answered(3, "Mac\u{202E}mini", 2_100),
+            ],
+            ..QuestionsView::default()
+        };
+        assert_eq!(
+            answered_lines(&view, 2_200),
+            [
+                "claude-code: Answered on Mac?mini",
+                "claude-code: Answered on Test iPhone"
+            ]
+        );
+        assert!(answered_lines(&view, 2_100 + ANSWERED_SHOWN_FOR + 1).is_empty());
+        assert_eq!(
+            answered(2, "Test iPhone", 0).line(),
+            "Answered on Test iPhone"
+        );
+    }
 }

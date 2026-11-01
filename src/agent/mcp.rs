@@ -1145,6 +1145,19 @@ fn tool_result(response: WireResponse) -> Value {
 /// recognized codes and fixed messages cross the MCP diagnostic boundary.
 pub(crate) fn broker_error(code: &str) -> Value {
     let (code, message) = match code {
+        "access_once_unavailable" => (
+            code,
+            "This scoped use is unavailable or consumed. Query apassy_access_request_status; never repeat an admitted use.",
+        ),
+        "access_request_waiting" => (
+            code,
+            "Another scope is active for this agent. Query its access status or review on the Mac.",
+        ),
+        "access_request_rate_limited" => (
+            code,
+            "The conservative Mac-local access-request budget is exhausted. Review on the Mac.",
+        ),
+        "not_found" => (code, "This request is unavailable to this agent."),
         "cancelled" => (code, "The operation was cancelled before execution."),
         "unknown_outcome" | "cancellation_requested" => (
             code,
@@ -1543,6 +1556,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scoped_access_refusals_are_typed_and_status_tools_never_get_cached() {
+        for code in [
+            "access_once_unavailable",
+            "access_request_waiting",
+            "access_request_rate_limited",
+        ] {
+            assert_eq!(broker_error(code)["structuredContent"]["code"], code);
+        }
+        for name in [TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL] {
+            let tools = tool_list();
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            assert!(
+                tool["inputSchema"]["properties"]
+                    .get("idempotency_key")
+                    .is_none()
+            );
+        }
+        assert!(!Action::AccessRequestStatus { request_id: 81 }.trackable());
+        assert!(!Action::CancelAccessRequest { request_id: 81 }.trackable());
+    }
     #[test]
     fn initialize_and_tools_list() {
         let reply = handle_message(

@@ -10,6 +10,9 @@ use super::types::err;
 use super::{Vault, VaultErrorKind, VaultResult, to_sql_id};
 use crate::questions::access_request::{self as wire, Card, Choice, Receipt, VerifiedCard};
 
+#[cfg(test)]
+pub(super) const DOWNGRADE_TO_21_SQL: &str = "DROP TABLE IF EXISTS access_request_v1; DROP TABLE IF EXISTS access_request_creation; DROP TABLE IF EXISTS access_request_clock;";
+
 pub(super) const COLUMNS: [&str; 3] = [
     "SELECT id, epoch, card, digest, cancelled, receipt, envelope, check_method, answer_key_fingerprint, answer_mapping FROM access_request_v1 LIMIT 0",
     "SELECT id, agent_id, at FROM access_request_creation LIMIT 0",
@@ -1205,5 +1208,63 @@ mod tests {
             assert_eq!(reply.ok, index < 10, "{reply:?}");
         }
         assert_eq!(v.scoped_access_requests().unwrap().len(), 10);
+    }
+    #[test]
+    fn changed_revision_binding_policy_visibility_and_project_never_release_a_value() {
+        for mutation in 0..7 {
+            let (d, mut v, agent, item, id) = fixture();
+            allow(&mut v, id);
+            let operation = consume(&mut v, id, agent, item).unwrap();
+            match mutation {
+                0 => {
+                    v.conn_mut()
+                        .unwrap()
+                        .execute(
+                            "UPDATE item SET revision=revision+1 WHERE id=?1",
+                            [to_sql_id(item).unwrap()],
+                        )
+                        .unwrap();
+                }
+                1 => {
+                    v.conn_mut()
+                        .unwrap()
+                        .execute(
+                            "UPDATE env_binding SET env_name='OTHER_TOKEN' WHERE item_id=?1",
+                            [to_sql_id(item).unwrap()],
+                        )
+                        .unwrap();
+                }
+                2 => {
+                    v.set_always_ask(item, true).unwrap();
+                }
+                3 => {
+                    v.set_agent_sees_all(agent, false).unwrap();
+                }
+                4 => {
+                    std::fs::create_dir(d.path().join(".git")).unwrap();
+                }
+                5 => {
+                    v.change_passphrase("synthetic-access-test", "new-synthetic-access-test")
+                        .unwrap();
+                }
+                _ => {
+                    let backup = d.path().join("backup.apassy");
+                    v.backup(&backup).unwrap();
+                    let mut restored = Vault::restore(
+                        &backup,
+                        &d.path().join("restored.apassy"),
+                        "synthetic-access-test",
+                    )
+                    .unwrap();
+                    restored.unlock("synthetic-access-test").unwrap();
+                    v = restored;
+                }
+            }
+            assert!(
+                !v.access_admission_live(id, &operation),
+                "mutation {mutation}"
+            );
+            assert!(consume(&mut v, id, agent, item).is_err());
+        }
     }
 }

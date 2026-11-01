@@ -187,6 +187,7 @@ final class RequestsUITests: XCTestCase {
     func testAccessExpiryAndAccessibilitySizeDisableControls() {
         let app=launch(["-ApassyPreviewDecisions","access-expiry","-UIPreferredContentSizeCategoryName","UICTContentSizeCategoryAccessibilityXXXL","-AppleInterfaceStyle","Dark"])
         accessDetail(app);accessActions(app)
+        XCTAssertTrue(app.staticTexts["Access expired"].exists)
         XCTAssertFalse(app.buttons["access.deny"].isEnabled)
         XCTAssertFalse(app.buttons["access.allow-once"].isEnabled)
         attach(app,"iphone-access-expired-accessibility-dark")

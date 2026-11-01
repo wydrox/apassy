@@ -308,6 +308,14 @@ impl Operations {
             })
             .or_else(|| records.get_key_value(id));
         if let Some((known_id, _)) = known {
+            let known_id = known_id.clone();
+            let record = records.get_mut(&known_id).expect("known operation");
+            if record.scope != scope {
+                return WireResponse::failure(
+                    "operation_conflict",
+                    "The operation ID is already used.",
+                );
+            }
             // ADR 0033 deliberately has no execution idempotency. A caller uses
             // status after an uncertain admission, never a repeated use call.
             if matches!(
@@ -323,14 +331,6 @@ impl Operations {
                 );
                 response.operation_id = Some(known_id.clone());
                 return response;
-            }
-            let known_id = known_id.clone();
-            let record = records.get_mut(&known_id).expect("known operation");
-            if record.scope != scope {
-                return WireResponse::failure(
-                    "operation_conflict",
-                    "The operation ID is already used.",
-                );
             }
             if record.fingerprint != fingerprint && record.fingerprint != [0; 32] {
                 let mut response = WireResponse::failure(
@@ -570,6 +570,7 @@ mod tests {
             .unwrap();
         let mut refusal = request.clone();
         refusal.action = Action::RequestAccess {
+            scope: None,
             item_id: 0,
             reason: "Synthetic refusal".into(),
             cwd: None,
@@ -760,7 +761,9 @@ mod tests {
                 action: Action::OperationStatus {
                     operation_id: "abcd1234abcd1234abcd1234abcd1234".into(),
                 },
-                ..request
+                v: request.v,
+                token: request.token.clone(),
+                host_session: request.host_session.clone(),
             },
         );
         assert!(status.ok);

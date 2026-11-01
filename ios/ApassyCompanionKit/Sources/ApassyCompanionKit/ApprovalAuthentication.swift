@@ -12,10 +12,8 @@ public final class ApprovalAuthentication: @unchecked Sendable {
   }
   public var isCancelled: Bool { lock.withLock { ended } }
   public func cancel() {
-    lock.withLock {
-      ended = true
-      context.invalidate()
-    }
+    lock.withLock { ended = true }
+    context.invalidate()
   }
   public static var faceIDAvailable: Bool {
     let context = LAContext()

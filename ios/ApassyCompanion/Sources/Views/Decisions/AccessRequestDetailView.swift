@@ -66,11 +66,15 @@ struct AccessRequestDetailView: View {
           "One attempt can make multiple network calls. No durable grant, remembered answer, production allowance or evaluation permission is saved."
         )
         .font(.footnote).foregroundStyle(.secondary)
+        if let reason = model.unavailable { Text(reason) }
         if let reason = c.local_review_reason {
           Text("Review access on \(escaped(c.asker.name)): \(escaped(reason))")
         }
         if !history, !model.canAllow(r), c.valid_answers.contains(.allow_once) {
           Text("Allow once needs Face ID and the registered answer key. Deny or review on the Mac.")
+        }
+        if r.receipt == nil && date.timeIntervalSince1970 >= Double(c.expires_at) {
+          Text("Access expired")
         }
         if let receipt = r.receipt {
           if let device = receipt.device_name {

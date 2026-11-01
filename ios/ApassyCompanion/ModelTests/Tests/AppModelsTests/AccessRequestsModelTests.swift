@@ -72,6 +72,7 @@ struct AccessRequestsModelTests {
     let posts = await service.accessPosts()
     #expect(posts.count == 1 && posts[0].signature == nil && posts[0].choice == .deny)
     #expect(model.requests.first?.receipt?.outcome == "denied")
+    #expect(model.history.first?.receipt?.outcome == "denied")
   }
   @Test func eachAllowNeedsItsOwnFreshSignerInvocation() async throws {
     let (service, signer, model, row) = await fixture()
@@ -164,6 +165,16 @@ struct AccessRequestsModelTests {
     signer.state.withLock { $0.held = false }
     await task.value
     #expect(await service.accessPosts().isEmpty)
+  }
+
+  @Test func unavailableTransportKeepsFactsReadOnlyAndOffersMacReview() async throws {
+    let (service, signer, model, row) = await fixture()
+    try await service.lock()
+    await model.refresh()
+    #expect(model.unavailable != nil)
+    #expect(!model.canAllow(row) && !model.actionable(row))
+    await model.answer(row, choice: .allow_once)
+    #expect(signer.count == 0)
   }
 
 }
