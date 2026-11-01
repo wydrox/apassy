@@ -11,6 +11,7 @@ import PackageDescription
 let package = Package(
     name: "ApassyCompanionModelTests",
     platforms: [
+        .iOS("26.0"),
         .macOS(.v15)
     ],
     dependencies: [

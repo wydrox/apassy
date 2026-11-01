@@ -44,7 +44,7 @@ ring = { version = "=0.17.14", optional = true, default-features = false, featur
 # Passkeys (schema 17): the CBOR of the attestation object and the COSE public key.
 ciborium = { version = "=0.2.2", optional = true, default-features = false, features = ["std"] }
 # WebAuthn RP validation includes ICANN and private public suffixes.
-p256 = { version = "=0.13.2", optional = true, default-features = false, features = ["ecdh", "pkcs8", "std"] }
+p256 = { version = "=0.14.0", optional = true, default-features = false, features = ["ecdh", "pkcs8", "std"] }
 psl = "=2.1.238"
 # Browser Website and page hosts use the same UTS #46 canonicalization.
 idna = "=1.1.0"

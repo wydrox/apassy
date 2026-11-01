@@ -501,7 +501,7 @@ actor SpyVaultService: VaultService {
 /// cannot be removed at the end of a run, because the system writes its file after the last
 /// test, so the next run cleans up once, before its first suite.
 private let removedOldSuites: Void = {
-    let folder = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Preferences")
+    let folder = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appending(path: "Library/Preferences")
     let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
     for name in names where name.hasPrefix("apassy-tests-") && name.hasSuffix(".plist") {
         try? FileManager.default.removeItem(at: folder.appending(path: name))
