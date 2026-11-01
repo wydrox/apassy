@@ -1305,6 +1305,10 @@ async function deliverPasskey(session, answer) {
   if (!expect) return;
   const reply = await checkPasskeyAnswer(expect, answer);
   if (reply.kind !== "result") {
+    if (answer && answer.ok === false && answer.code === "unsupported" && answer.message &&
+        !session.done && session.open && await tabStillOn(session.peer)) {
+      await showFailure(messageOf(answer));
+    }
     endPasskey(session, reply);
     return;
   }

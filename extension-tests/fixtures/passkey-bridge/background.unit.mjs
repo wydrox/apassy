@@ -742,3 +742,25 @@ test("the passkey internals are pure helpers", () => {
   assert.equal(cleanText("x".repeat(200), 64).length, 64);
   assert.equal(cleanText("😀".repeat(100), 64), "😀".repeat(64));
 });
+
+const UNSAFE_BROWSER_MESSAGE = "This browser was started with remote debugging or a test extension, so other programs can control it. Apassy doesn't fill passkeys or codes there. Quit the browser and open it normally.";
+
+for (const op of ["get", "create"]) {
+  test(`unsafe browser ${op}: display the host message and retain fallback`, async () => {
+    const bg = setup();
+    const port = await request(bg, { op, options: op === "get" ? getOptions() : createOptions() });
+    bg.natives[0].port.postMessage({ ok: false, code: "unsupported", message: UNSAFE_BROWSER_MESSAGE, data: { type: "none" } });
+    await flush();
+    assert.deepEqual(port.received, [{ kind: "fallback" }]);
+    assert.equal(bg.badge.text, "!");
+    assert.equal(bg.badge.title, `Apassy: ${UNSAFE_BROWSER_MESSAGE}`);
+  });
+}
+
+test("unsafe browser code: preserve the actionable message for the popup", async () => {
+  const bg = setup();
+  loginHost(bg, { fill_code: { ok: false, code: "unsupported", message: UNSAFE_BROWSER_MESSAGE, data: { type: "none" } } });
+  const reply = await bg.handle({ type: "fill_code", tabId: 5, url: `${ORIGIN}/login`, item: 1 });
+  assert.equal(reply.ok, false);
+  assert.equal(reply.message, UNSAFE_BROWSER_MESSAGE);
+});
