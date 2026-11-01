@@ -1449,6 +1449,51 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             g.tone_row(problem, Tone::Critical.text());
         }
     });
+    let mut repair = None;
+    rows::section(
+        ui,
+        Some("Agent host health"),
+        Some(
+            "Configuration is inspected locally. A first request and hook trust still need verification.",
+        ),
+        |g| {
+            for host in [
+                super::agent_setup::Host::Claude,
+                super::agent_setup::Host::Codex,
+            ] {
+                let home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default();
+                let health = super::agent_onboarding::host_health(&home, host);
+                g.line_note(
+                    host.name(),
+                    None,
+                    Some(kit::text(&health.status, Font::Callout).color(kit::SECONDARY)),
+                    |ui| {
+                        if let Some(action) = health.action
+                            && kit::small_button(ui, action, Style::Bordered).clicked()
+                        {
+                            repair = Some((host, action == "Repair…"));
+                        }
+                    },
+                );
+                g.row(|ui| {
+                    ui.push_id(host.id(), |ui| {
+                        ui.collapsing("Details", |ui| {
+                            kit::note(ui, &health.details);
+                        });
+                    });
+                });
+            }
+        },
+    );
+    if let Some((host, broken)) = repair {
+        if broken {
+            super::agent_onboarding::repair_host(app, ui.ctx(), host);
+        } else {
+            super::agent_onboarding::reconnect(app, ui.ctx(), host.name());
+        }
+    }
     if install {
         match super::cli_tools::install() {
             Ok(()) => app.set_ok(
