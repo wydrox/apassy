@@ -1288,7 +1288,11 @@ that code now directs callers to fresh-challenge recovery. A deleted or suspende
 team gets the same 409 as an unavailable key, without a team id. Recovery never
 creates/resumes a team or clears a tombstone, and bypasses creation quotas. A team
 DB that failed to open needs operator repair/restart, then recovery works. Challenges
-are memory-only, capped at 1000, and must be requested again after restart. Clients
+are memory-only, capped at 1000 outstanding and 1000 issued per minute globally,
+and must be requested again after restart. The Worker applies AUTH_LIMITER to the
+challenge route; it does not spend the one-per-minute creation allowance on a
+challenge. Recovery POSTs retain the Connect edge limits and count against the
+team's request rate. Honor `Retry-After` (the next minute for recovery throttles). Clients
 0.5.7/0.5.8 retain their existing request/response shapes; fresh recovery is additive
 and needs a future app integration. The explicit operator rollback flag
 `--free-connect-key` retains its separately authorized destructive meaning.
@@ -1300,9 +1304,11 @@ network/timeouts, HTTP 429/5xx, missing/malformed 200 results, and APNs transien
 results retry only the remaining targets with exponential 1..60-second backoff
 plus 0..2-second team jitter. Backoff releases the sender. Attempts stop at the
 question TTL; each request is bounded by 10 seconds. Final bad-token results mark
-the token failed and do not retry. Each attempt rechecks the open question, current
+the token failed and do not retry. Worker APNs calls and error-body reads abort
+after eight seconds (before the relay retry deadline), with error bodies capped
+at 4 KiB. Each attempt rechecks the unanswered open question, current
 route, live asker/member/recipient, current token and team suspension. Restart
-replays up to the newest 256 open/unexpired questions per active team through the
+replays up to the newest 256 unanswered open/unexpired questions per active team through the
 same admission bounds. This is best-effort replay, not an exactly-once outbox:
 queue overflow can drop intent and restart may repeat a previously successful
 notification (the constant APNs collapse id coalesces it). No schema change.
@@ -1320,13 +1326,18 @@ must select monitoring/alerts separately. Use `admin teams` for detailed file us
 
 **Reclamation (F09).** `admin connect-sweep` now defaults to dry-run. `--apply`
 is required to mutate; `--dry-run` remains explicit and cannot accompany `--apply`.
-Defaults: suspend after 30 days without a live device sign-in (creation time if
-never signed in), then delete only sweep-suspended teams after another 30 days.
+Each run attempts at most ten suspensions/deletions together, including failures;
+`action_limit` and `capped` report the bound. More candidates wait for a later run.
+Defaults: suspend after 30 days without a live device sign-in or authenticated use
+(creation time if never used), then delete only sweep-suspended teams after another 30 days.
 Limits must still equal the Connect preset; operator/upgraded/synced/operator-held
 teams are excluded. Failed actions are listed and make the CLI exit 1. Suspensions
 still hold a capacity seat; deletion frees it and preserves the key tombstone.
 
-Before automatic deletion, the full team DB, including every append-only audit
+Eligibility is rechecked with directory and team activity locked before suspension.
+Before deletion the relay waits for outstanding requests and push jobs, then
+refuses a team with recent activity or any sync head. Before automatic deletion,
+the full team DB, including every append-only audit
 row, is snapshotted to immutable `DATA/audit-archive/<team>-<time>.db`, encrypted
 with the relay master key (folder 0700, file 0600), synced and read-verified. Archive
 failure prevents deletion. Neither the directory audit nor archived team audits

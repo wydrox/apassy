@@ -18,6 +18,10 @@ export const TOKEN_LIFETIME_SECS = 50 * 60;
 export const APNS_PAYLOAD =
   '{"aps":{"alert":{"title":"Apassy","body":"A question is waiting"},"sound":"default","interruption-level":"time-sensitive"}}';
 
+/** Finish before the relay's ten-second request deadline, including error bodies. */
+export const APNS_TIMEOUT_MS = 8_000;
+const MAX_APNS_ERROR_BODY = 4096;
+
 const APNS_PRODUCTION = "https://api.push.apple.com/3/device/";
 const APNS_SANDBOX = "https://api.sandbox.push.apple.com/3/device/";
 
@@ -167,7 +171,7 @@ function parsePush(raw: string): PushRequest | undefined {
 }
 
 /** The body as text, or undefined when it is larger than MAX_PUSH_BODY bytes. */
-async function readBody(request: Request): Promise<string | undefined> {
+async function readBody(request: Request | Response, maxBytes = MAX_PUSH_BODY): Promise<string | undefined> {
   if (!request.body) return "";
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -176,7 +180,7 @@ async function readBody(request: Request): Promise<string | undefined> {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_PUSH_BODY) {
+    if (size > maxBytes) {
       await reader.cancel().catch(() => undefined);
       return undefined;
     }
@@ -205,10 +209,12 @@ async function sendOne(
   token: string,
 ): Promise<PushResult> {
   const base = push.environment === "production" ? APNS_PRODUCTION : APNS_SANDBOX;
-  let response: Response;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), APNS_TIMEOUT_MS);
   try {
-    response = await deps.fetch(base + token, {
+    const response = await deps.fetch(base + token, {
       method: "POST",
+      signal: controller.signal,
       headers: {
         authorization: `bearer ${jwt}`,
         "apns-topic": topic,
@@ -220,21 +226,25 @@ async function sendOne(
       },
       body: APNS_PAYLOAD,
     });
+    if (response.status === 200) {
+      await response.body?.cancel().catch(() => undefined);
+      return { token, status: 200 };
+    }
+    let reason = "Unknown";
+    const raw = await readBody(response, MAX_APNS_ERROR_BODY);
+    try {
+      const body: unknown = raw === undefined ? undefined : JSON.parse(raw);
+      if (typeof body === "object" && body !== null && "reason" in body &&
+          typeof body.reason === "string" && /^[A-Za-z]{1,64}$/.test(body.reason)) reason = body.reason;
+    } catch {
+      // An empty or non-JSON body keeps the reason Unknown.
+    }
+    return { token, status: response.status, reason };
   } catch {
     return { token, status: 0, reason: "Unreachable" };
+  } finally {
+    clearTimeout(timer);
   }
-  if (response.status === 200) {
-    await response.body?.cancel().catch(() => undefined);
-    return { token, status: 200 };
-  }
-  let reason = "Unknown";
-  try {
-    const body = (await response.json()) as { reason?: unknown } | null;
-    if (typeof body?.reason === "string" && /^[A-Za-z]{1,64}$/.test(body.reason)) reason = body.reason;
-  } catch {
-    // An empty or non-JSON body keeps the reason Unknown.
-  }
-  return { token, status: response.status, reason };
 }
 
 /** Handles every request whose path starts with `/internal/`. */

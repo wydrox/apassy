@@ -1372,7 +1372,13 @@ The answer is `TeamCreated` with `kind`:
 
 There is no secret in it: the device signs in (section 23.3) with its key and the `team_id`. `POST /v1/teams` is unchanged: its answer has no `kind`.
 
-**A lost answer.** A call whose answer does not arrive may have made the team. The same key then gets 409, and the relay never tells which team a key made. The app makes a new device key and calls again; the first team stays with one device and no sign-in, and the sweep of 26.5 removes it.
+**A lost answer.** Save the original private key before sending. The old creation
+proof still gets 409; recover with a fresh `POST /v1/connect/challenge` nonce and
+`connect_recovery_message` signature as specified in section 28 and OPERATIONS 22.
+Recovery returns only the original active identifiers; it never creates/resumes a
+team, changes names, clears the key tombstone or issues an access token. Then use
+the existing device sign-in challenge/token flow. A 404 challenge route means an
+older server: keep the pending key for operator recovery, do not rotate it blindly.
 
 **Enumeration.** No route lists, reads, or names Connect teams (`GET /v1/connect` and `GET /v1/teams` are 405). The only answer that depends on stored state before the team exists is the 409 for a key that made a team, which is the same for every such key and names no team; with the proof of key, only the holder of the private key can get it. A team id of a Connect team behaves as any team id (section 22: public, 401 for an unknown or suspended team).
 
