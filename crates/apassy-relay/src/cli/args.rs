@@ -440,8 +440,9 @@ Compatibility (legacy relays only)
   Existing device recovery: device link --resume or device enroll to check saved enrollment
 
 Finite commands take --json before the child delimiter: one success/error envelope on stdout,
-progress on stderr. Lists and mutations use the same envelope. One-time secrets appear once.
-For run --json, child output goes to stderr and its exit code is preserved.
+progress on stderr. Lists and mutations use the same envelope. Commands that issue one-time
+secrets (invite, agent create, device add) require plain mode and reject --json.
+For run --json, child output is suppressed and its exit code is preserved.
 MCP and foreground host use streaming protocols and cannot be wrapped with --json.
 Member commands take --team ID.
 Environment: APASSY_RELAY_URL, APASSY_TEAM, APASSY_TEAM_TOKEN, APASSY_TOKEN, APASSY_EDGE_SECRET.

@@ -310,7 +310,7 @@ fn me_works_with_an_agent_token_and_json_prints_the_result() {
     );
 }
 
-const ME: &str = r#"{"ok":true,"result":{"team":"Test Team","kind":"member","member_id":1,"member_name":"olga","role":"owner"}}"#;
+const ME: &str = r#"{"ok":true,"result":{"team_id":"t_abcdefgh23","team":"Test Team","kind":"member","member_id":1,"member_name":"olga","role":"owner"}}"#;
 
 /// A relay that answers `GET /v1/me` and takes every item.
 fn item_mock(item_answer: fn() -> Answer) -> Mock {

@@ -115,6 +115,17 @@ pub fn main(args: Vec<String>) -> i32 {
                     _ => false,
                 }
             }
+            fn issues_secret(command: &args::Command) -> bool {
+                match command {
+                    args::Command::Selected { command, .. } => issues_secret(command),
+                    args::Command::Invite { .. } | args::Command::AgentCreate { .. }
+                        | args::Command::DeviceAdd => true,
+                    _ => false,
+                }
+            }
+            if json && issues_secret(&command) {
+                return Err(CliError::usage("This command issues a one-time secret and cannot use --json. Run it without --json and save stdout privately."));
+            }
             if json && streaming(&command) {
                 return Err(CliError::usage("--json wraps finite commands. MCP and foreground host use their own streaming protocols."));
             }
@@ -126,12 +137,13 @@ pub fn main(args: Vec<String>) -> i32 {
         Err(error) => error.code,
     };
     if json {
-        let envelope = match result {
+        let mut envelope = match result {
             Ok(_) => serde_json::json!({"ok":true,"result":output::finish(),"exit_code":code}),
             Err(error) => serde_json::json!({"ok":false,"exit_code":code,"error":{
                 "code":error.kind,"message":error.message,"status":error.status,
                 "retryable":error.retryable,"retry_after":error.retry_after}}),
         };
+        output::redact(&mut envelope);
         std::println!("{envelope}");
     } else if let Err(error) = result {
         eprintln!("apassy-team: {}", error.message);

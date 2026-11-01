@@ -494,22 +494,31 @@ fn migrate_legacy_service() -> Result<(), CliError> {
                 )?,
             )
         {
+            let _ = bootout(&domain, &label(&team));
             let _ = command("/bin/launchctl", &["bootstrap", &domain, path_text(&path)?]);
             return Err(error);
         }
     } else {
-        require_success(
-            "systemctl disable legacy",
-            command("systemctl", &["--user", "disable", "--now", UNIT])?,
-        )?;
-        require_success(
-            "systemctl daemon-reload",
-            command("systemctl", &["--user", "daemon-reload"])?,
-        )?;
-        if let Err(error) = require_success(
-            "systemctl enable migrated",
-            command("systemctl", &["--user", "enable", "--now", &unit(&team)])?,
-        ) {
+        let activate = (|| {
+            require_success(
+                "systemctl disable legacy",
+                command("systemctl", &["--user", "disable", "--now", UNIT])?,
+            )?;
+            require_success(
+                "systemctl daemon-reload",
+                command("systemctl", &["--user", "daemon-reload"])?,
+            )?;
+            require_success(
+                "systemctl enable migrated",
+                command("systemctl", &["--user", "enable", "--now", &unit(&team)])?,
+            )
+        })();
+        if let Err(error) = activate {
+            // enable --now can enable a unit and still fail to start it. Stop its
+            // restart loop before restoring the retained legacy service. Also
+            // restore the legacy service when daemon-reload fails after disable.
+            let _ = command("systemctl", &["--user", "disable", "--now", &unit(&team)]);
+            let _ = command("systemctl", &["--user", "daemon-reload"]);
             let _ = command("systemctl", &["--user", "enable", "--now", UNIT]);
             return Err(error);
         }
@@ -764,8 +773,10 @@ pub fn status(selected: Option<&str>) -> Result<i32, CliError> {
             require_success("systemctl show", output)?;
         }
     }
-    recent_log(&settings::settings_dir()?.join("host.log"))?;
-    recent_log(&service_log(&team)?)?;
+    if !crate::cli::output::enabled() {
+        recent_log(&settings::settings_dir()?.join("host.log"))?;
+        recent_log(&service_log(&team)?)?;
+    }
     crate::cli::output::result(
         &serde_json::json!({"team_id":team,"service":name,"service_file":path,"installed":installed,"state":state,"cli_version":env!("CARGO_PKG_VERSION")}),
     )?;

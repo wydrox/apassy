@@ -50,3 +50,12 @@ test('successful update bounds downloads and explains per-team host restart',asy
   assert.match(output.stderr,/host status/);
   assert.match(readFileSync(f.marker,'utf8'),/--connect-timeout 10 --max-time 120/);
 });
+
+test('a checksum mismatch never executes or replaces the downloaded binary', async t => {
+  const f = fixture(t);
+  const executed = join(f.dir, 'executed');
+  writeFileSync(join(f.dir, 'dl', 'apassy-team-darwin-arm64'), `#!/bin/sh\ntouch '${executed}'\necho apassy-team 0.5.8\n`);
+  await assert.rejects(f.run(), /SHA-256 check failed/);
+  assert.equal(existsSync(executed), false);
+  assert.equal(readFileSync(f.installed, 'utf8'), 'old-binary');
+});

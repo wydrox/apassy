@@ -47,35 +47,20 @@ fn json_keeps_relay_code_status_and_retry_metadata() {
 }
 
 #[test]
-fn json_emits_one_time_secrets_once_and_never_on_stderr() {
-    for (args, field, secret) in [
-        (
-            vec!["invite", "--json"],
-            "url",
-            "apassy_inv_synthetic_json_once",
-        ),
-        (
-            vec!["--json", "agent", "create", "ci"],
-            "token",
-            "apassy_agt_synthetic_json_once",
-        ),
-        (
-            vec!["device", "add", "--json"],
-            "code",
-            "apassy_lnk_synthetic_json_once",
-        ),
+fn json_rejects_one_time_secret_creation_before_the_request() {
+    for args in [
+        vec!["invite", "--json"],
+        vec!["--json", "agent", "create", "ci"],
+        vec!["device", "add", "--json"],
+        vec!["--team", "t_abcdefgh23", "device", "add", "--json"],
     ] {
-        let mock = Mock::start(move |_, _| ok(json!({"id":3,"secret":secret,"expires_at":100})));
+        let mock = Mock::start(|_, _| panic!("JSON mode must not issue a one-time secret"));
         let output = Cli::new().member(&mock.url).run(&args, None);
-        assert_eq!(code(&output), 0, "{}", text(&output.stderr));
-        assert!(
-            document(&output)["result"][field]
-                .as_str()
-                .unwrap()
-                .ends_with(secret)
-        );
-        assert_eq!(text(&output.stdout).matches(secret).count(), 1);
-        assert!(!text(&output.stderr).contains(secret));
+        assert_eq!(code(&output), 2);
+        assert_eq!(document(&output)["error"]["code"], "usage");
+        assert!(mock.requests().is_empty());
+        assert!(!text(&output.stdout).contains("apassy_"));
+        assert!(output.stderr.is_empty());
     }
 }
 
@@ -93,14 +78,15 @@ fn json_run_keeps_child_exit_and_delimiter_arguments() {
             "--",
             "/bin/sh",
             "-c",
-            "printf child-output; exit 7",
+            "printf child-secret-output; printf child-secret-error >&2; exit 7",
             "--json",
         ],
         None,
     );
     assert_eq!(code(&output), 7);
     assert_eq!(document(&output)["result"]["child_exit_code"], 7);
-    assert!(text(&output.stderr).contains("child-output"));
+    assert!(!text(&output.stdout).contains("child-secret"));
+    assert!(!text(&output.stderr).contains("child-secret"));
 }
 
 #[test]
@@ -135,4 +121,23 @@ fn json_decision_output_never_serializes_a_session_environment() {
     assert_eq!(document(&output)["result"]["run_id"], 5);
     assert!(!text(&output.stdout).contains(CANARY));
     assert!(!text(&output.stderr).contains(CANARY));
+}
+
+#[test]
+fn json_redacts_reflected_credentials_in_metadata_and_errors() {
+    for refused in [false, true] {
+        let mock = Mock::start(move |_, _| {
+            if refused {
+                err(403, "refused", MEMBER_TOKEN)
+            } else {
+                ok(
+                    json!({"team":"T","kind":"member","member_id":1,"member_name":MEMBER_TOKEN,"role":"owner"}),
+                )
+            }
+        });
+        let output = Cli::new().member(&mock.url).run(&["--json", "me"], None);
+        assert!(!text(&output.stdout).contains(MEMBER_TOKEN));
+        assert!(!text(&output.stderr).contains(MEMBER_TOKEN));
+        assert!(text(&output.stdout).contains("[apassy:token]"));
+    }
 }

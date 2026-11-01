@@ -769,6 +769,7 @@ pub fn append_log(store: &KeyStore, request: &HostRequestView, decision: Decisio
 
 /// Everything the host needs.
 pub struct HostContext<'a> {
+    pub team_id: &'a crate::ids::TeamId,
     pub client: &'a Client,
     pub store: &'a KeyStore,
     pub options: HostOptions,
@@ -785,6 +786,13 @@ fn send_release(
     local: &[&KeyEntry],
     reason: &str,
 ) -> Result<(), CliError> {
+    if local.iter().any(|entry| {
+        entry.team_id.as_ref() != Some(ctx.team_id) || entry.relay_url != ctx.client.base()
+    }) {
+        return Err(CliError::usage(
+            "The item key does not belong to this host's team.",
+        ));
+    }
     let run_key: [u8; hostkeys::KEY_BYTES] = hostkeys::decode_array(&request.run_key)
         .map_err(|_| CliError::relay("The relay sent a run key that is not valid."))?;
     let mut texts = Vec::with_capacity(local.len());
@@ -857,7 +865,7 @@ pub fn handle_request(
     if now >= request.expires_at {
         return Decision::Expired;
     }
-    let entries = match ctx.store.load() {
+    let entries = match ctx.store.load_for_team(ctx.team_id) {
         Ok(entries) => entries,
         Err(error) => {
             eprintln!("apassy-team host: {}", error.message);
@@ -1015,6 +1023,22 @@ pub fn check_owner(settings: &Settings) -> Result<(Client, MeView), CliError> {
             "This device is not the key holder. Copy keys.json and move the key-holder flag before you start host.",
         ));
     }
+    let expected = settings.team_id.clone().or_else(|| {
+        settings
+            .member_token
+            .as_ref()
+            .and_then(|token| crate::secret::parse_token(token.expose()))
+            .and_then(|token| token.team)
+    });
+    if me.team_id.is_none()
+        || expected
+            .as_ref()
+            .is_some_and(|id| Some(id) != me.team_id.as_ref())
+    {
+        return Err(CliError::usage(
+            "The relay owner identity does not match the selected stable team id.",
+        ));
+    }
     Ok((client, me))
 }
 
@@ -1034,7 +1058,7 @@ pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i3
     };
     let (client, me) = check_owner(settings)?;
     let count = store
-        .load()?
+        .load_for_team(me.team_id.as_ref().expect("check_owner requires a team id"))?
         .iter()
         .filter(|entry| entry.relay_url == client.base())
         .count();
@@ -1056,6 +1080,7 @@ pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i3
         }
     );
     let ctx = HostContext {
+        team_id: me.team_id.as_ref().expect("check_owner requires a team id"),
         client: &client,
         store: &store,
         options,
@@ -1084,6 +1109,7 @@ mod tests {
         KeyEntry {
             relay_url: RELAY.to_string(),
             team: "Test Team".to_string(),
+            team_id: crate::ids::TeamId::parse("t_abcdefgh23"),
             uid: format!("{n:02x}").repeat(16),
             item_id: Some(n),
             name: format!("Item {n}"),

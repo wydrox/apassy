@@ -1732,12 +1732,19 @@ queue/TTL limits, private readiness, archive retention and rollout/rollback.
 - Per-team process locks allow several teams in one config directory. New hosts
   share a compatibility fence against old single-host binaries and retain exclusive
   locks for their own team. An old running host must stop before new hosts start.
+  Keys also carry an optional stable `team_id` in keys.json version 1; hosts release
+  only entries explicitly bound to their authenticated team. Names and UIDs never
+  determine ownership. Old unbound entries are retained and fail closed until the
+  owner verifies and binds them (ONBOARDING, legacy key ownership).
 - Every finite CLI command accepts global `--json` before the child's delimiter.
   One stdout document contains `ok`, `exit_code`, and `result` or `error` with stable
   `code`, `message`, optional `status`/`retry_after` and `retryable`. Lists now share
-  the envelope with mutations/errors; progress is stderr. One-time secrets are
-  explicit result fields only. No session environment is emitted. Child exit codes
-  are preserved; JSON mode redirects child output to stderr. Streaming host/MCP
+  the envelope with mutations/errors; progress is stderr. Commands issuing one-time
+  secrets (invite, agent create, device add) reject JSON mode before any request;
+  use plain output saved privately. Recognized credentials reflected in metadata
+  or errors are redacted. No session environment is emitted. Child exit codes are
+  preserved; JSON mode suppresses child stdout/stderr because either can contain
+  the credential environment. Streaming host/MCP
   reject wrapping. Help leads with device create/join/recovery; expired legacy
   token setup and refused approve are in Compatibility.
 - Installer platform pairs match published artifacts exactly (Darwin arm64/Linux
@@ -1750,5 +1757,7 @@ patch. Deployment and service installation/restart remain explicit owner actions
 Before rolling back the CLI, uninstall/stop per-team services using the new CLI;
 older binaries use one global lock and cannot run concurrently per team. Reinstall
 one selected legacy host if needed. Saved settings/device keys and keys.json retain
-their existing formats. Installer hashes continue to detect corruption, not an
+their existing format versions; the key ownership field is additive. Old CLIs
+ignore it and can drop it when rewriting keys.json, so stop old writers before
+restarting a new host. Installer hashes continue to detect corruption, not an
 independent compromise of the download origin.

@@ -183,7 +183,9 @@ fn spawn(
         command.current_dir(dir);
     }
     if crate::cli::output::enabled() {
-        command.stdout(Stdio::from(std::io::stderr()));
+        // A child can print its credential environment. Structured mode reports
+        // only its exit status, never arbitrary child output on either channel.
+        command.stdout(Stdio::null()).stderr(Stdio::null());
     }
     let status = command.status().map_err(|e| {
         let code = match e.kind() {

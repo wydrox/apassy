@@ -129,6 +129,7 @@ fn untrusted_text_is_one_argument_and_the_script_is_fixed() {
     r.agent = hostile.into();
     r.member = hostile.into();
     let entry = KeyEntry {
+        team_id: apassy_relay::ids::TeamId::parse("t_abcdefgh23"),
         relay_url: "https://relay.example.test".into(),
         team: "test".into(),
         uid: "00".repeat(16),

@@ -45,9 +45,11 @@ pub fn result(value: &impl Serialize) -> Result<(), CliError> {
     }
     Ok(())
 }
-pub fn secret(field: &str, secret: &str) -> Result<(), CliError> {
+pub fn secret(_field: &str, secret: &str) -> Result<(), CliError> {
     if enabled() {
-        result(&serde_json::json!({field:secret}))
+        Err(CliError::usage(
+            "One-time secrets cannot be printed in --json mode.",
+        ))
     } else {
         std::println!("{secret}");
         Ok(())
@@ -61,4 +63,15 @@ pub fn finish() -> Value {
             .take()
             .unwrap_or_else(|| serde_json::json!({}))
     })
+}
+
+/// Last serialization boundary: even reflected metadata/errors cannot echo a
+/// recognized Apassy credential. Secret-issuing commands are rejected earlier.
+pub fn redact(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = crate::server::audit::mask_tokens(text),
+        Value::Array(values) => values.iter_mut().for_each(redact),
+        Value::Object(values) => values.values_mut().for_each(redact),
+        _ => {}
+    }
 }

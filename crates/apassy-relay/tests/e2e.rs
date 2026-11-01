@@ -250,6 +250,7 @@ impl Host {
             relay.owner_token.clone(),
         );
         let store = KeyStore::at(config.join("apassy-team"));
+        let team = relay.team_id.clone();
         let mut answers: VecDeque<Answer> = answers.into();
         let thread = std::thread::spawn(move || {
             let client = Client::new(
@@ -259,6 +260,7 @@ impl Host {
             );
             let rules = RuleSet::builtin().expect("rules");
             let ctx = HostContext {
+                team_id: &team,
                 client: &client,
                 store: &store,
                 options: HostOptions::default(),

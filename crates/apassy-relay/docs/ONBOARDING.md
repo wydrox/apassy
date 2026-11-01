@@ -436,14 +436,14 @@ errors return `{"ok":false,"error":{"code":"...","message":"...","status":null,
 "retryable":false,"retry_after":null},"exit_code":2}`. HTTP refusals retain their
 code/status and numeric Retry-After seconds when supplied; unknown values are null.
 Progress goes to stderr. Lists now use this envelope too: use `.result` instead of
-reading an old bare array/object. Mutations return their ids/state. Invite URLs,
-agent tokens and device-link codes occur once under `result.url`, `result.token`
-or `result.code`, never on stderr. Keep those outputs private as before.
+reading an old bare array/object. Mutations return their ids/state. Commands that
+issue invite URLs, agent tokens or device-link codes reject `--json` before any
+request. Run them in plain mode and save stdout privately.
 
 Exit codes remain 0 success, 2 usage/local setup, 3 denied/timed out, and 4 relay or
 transport failure. For `run --json`, `result.child_exit_code` and the process exit
-code preserve the child's code (including 128 + signal); child stdout/stderr both
-go to stderr so stdout remains one document. Child flags after `--` are untouched.
+code preserve the child's code (including 128 + signal); child stdout/stderr are
+suppressed because either may contain credentials. Child flags after `--` are untouched.
 MCP and foreground `host` use streaming protocols and reject the JSON wrapper.
 For example: `apassy-team --json --team TEAM_ID device list` and
 `apassy-team --json collection create Secrets`.
@@ -456,3 +456,26 @@ After checksum verification, staged `--version` must execute and identify
 binary in place. Successful updates print restart/status commands for detected
 per-team services and guidance for legacy/foreground hosts. No service restarts
 without the user's explicit `host install` invocation.
+
+### Legacy key ownership after a multi-team host update
+
+New items save a stable `team_id` next to their key in keys.json (format version 1).
+A host reads only keys explicitly bound to its authenticated team. Team names can
+repeat and an item UID can be reused in another team; neither proves ownership.
+Existing entries without `team_id` remain intact but are not eligible for release.
+
+Before updating a host with existing keys, stop all old and new host processes and
+make a private backup of keys.json. Verify each entry's original team against your
+provisioning records and saved team IDs (`apassy-team team list`); then use a local
+JSON editor to add `"team_id":"t_..."` to each verified entry. Keep mode 0600.
+Leave unverified entries unbound. Do not bulk-bind keys by name, UID or the current
+team selection. Start each team's host and verify a synthetic run. For rollback,
+stop the per-team services first and restore the private key-file backup before
+starting the single legacy host. Old CLIs can read the additional field, but a
+rewrite by an old CLI drops it; do not run old key-file writers alongside new hosts.
+
+JSON output never emits newly issued credentials: `invite`, `agent create`, and
+`device add` reject `--json` before issuing a secret. Run those commands in plain
+mode and save stdout privately. `run --json` reports the child exit code and
+suppresses both child output streams, which may contain credentials. Use plain
+`run` for interactive child output. Service JSON status omits arbitrary log text.

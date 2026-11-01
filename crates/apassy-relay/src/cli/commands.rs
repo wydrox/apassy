@@ -712,6 +712,7 @@ fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
     drop(value);
 
     let entry = KeyEntry {
+        team_id: Some(me.team_id.clone().ok_or_else(|| CliError::usage("The relay did not return a stable team id. Update the relay before adding item keys."))?),
         relay_url: client.base().to_owned(),
         team: me.team.clone(),
         uid: uid.clone(),
