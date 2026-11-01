@@ -60,9 +60,18 @@
         press = null;
         if (!event.isTrusted || !activated || !visible() || busy || Date.now() >= offer.until) return;
         busy = true;
-        if (name !== "accept") removeBanner();
+        if (name === "dismiss") removeBanner();
+        else if (name === "never") { root.querySelectorAll("button").forEach((button) => { button.disabled = true; }); status.textContent = "Turning off login offers for this site…"; }
         else { root.querySelectorAll("button").forEach((button) => { button.disabled = true; }); status.textContent = "Check Touch ID on your Mac. Approve in Apassy, or use your vault passphrase if asked."; }
         const reply = await send({ type: "login_save_action", id: offer.id, action: name, trustedGesture: true });
+        if (name === "never" && banner === visibleBanner) {
+          if (reply.ok) removeBanner();
+          else {
+            status.textContent = reply.message || "Could not confirm that login offers are off. Check Apassy toolbar settings.";
+            actions.replaceChildren(action("Close", "dismiss"));
+            busy = false;
+          }
+        }
         if (name === "accept" && banner === visibleBanner) {
           status.textContent = reply.message || "Check this login in Apassy before trying again.";
           actions.replaceChildren(action("Close", "dismiss"));
