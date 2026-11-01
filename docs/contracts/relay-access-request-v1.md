@@ -212,3 +212,34 @@ The relay sees ciphertext and existing outer metadata only; it can deny service,
 Before implementation merge, freeze synthetic vectors for exact card/body bytes, card digest/signature, answer bytes/signatures for both choices, signed settle and unchanged outer AAD/ciphertexts in Rust and ApassyCore tests. Include one field-change negative per identity/scope/display/header field (including vault id and host provenance), wrong-key choices, duplicate JSON keys, no mapping/revoked device, late signature, `now-55/now-56/now+5/now+6` and exact expiry boundaries, old-client dispatch and cross-run/feed replay. Include two-iPhone/duplicate/reordered answers, answer-versus-cancel/use races, lost POST responses at the three-attempt limit, consumed or crash-lost permits with delayed valid settles, exact-host versus subdomain/port/redirect substitution, and independent cross-Mac quotas with generic time-sensitive push routing. The example above is not a vector and no interoperability test has run in this docs change.
 
 The `policy_digest` serializer and added agent input/status/error types must be pinned during the first implementation unit before consumers are split. Existing questions vectors must continue to pass unchanged. Real Face ID freshness and no passcode fallback require physical-device acceptance; simulator/software signatures cannot establish either property.
+
+## 9. Implementation encoding and agent operations
+
+The policy serializer is `apassy-access-policy-v1\0`, then F(epoch), F(canonical cwd),
+F(project key). Each query below contributes F(its exact SQL text), then rows in the
+stated order: byte 1 per row, followed by typed columns, and byte 0 after the last
+row. NULL is byte 0; INTEGER is byte 1 plus signed i64 big endian; TEXT is byte 2
+plus F(exact UTF-8); BLOB is byte 3 plus F(bytes). REAL fails closed. SHA-256 covers
+the complete stream. This encoding is local to the asking Mac; no token or key
+material is exported. The executable, fixed query list is
+`Vault::access_policy_digest` in `src/vault/access_once.rs`.
+
+The fixed column groups, in order, are: actual vault id; authenticated agent token,
+issue generation, revocation and visibility; token lifetime; item UUID/revision;
+process variable, field and delivery host policy; declaration project/environment/
+risk/scope/reversibility/provider; all declaration sources; Always ask; plain host;
+archive and restore-review markers; all agent exceptions; process and connector
+grants contributing to the agent's visibility; all trusted device identities,
+kinds, team mappings, signing/answer keys and deletion markers; memberships and
+question key. Agent exception/grant rows sort by item and kind/operation; trusted
+rows sort by UUID, memberships by team. A change invalidates consent; labels never
+supply identity. No Debug formatting is part of this encoding.
+
+Agent tools are `apassy_access_request_status` and `apassy_cancel_access_request`,
+both taking only a positive `request_id`. Their wire actions are
+`access_request_status` and `cancel_access_request`. They authenticate before
+lookup, never create a request, and return the same missing result for another
+agent's id. `access_request_waiting`, `access_request_rate_limited` and
+`access_once_unavailable` distinguish active scope, creation budget and exhausted
+admission. Run `access_request_id` is optional; once admission burns it, an equal
+command cannot join a waiting operation. Status is the non-executing retry.

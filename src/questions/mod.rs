@@ -25,6 +25,7 @@
 //! they are.
 
 pub mod answer;
+pub mod access_request;
 pub mod client;
 pub mod device_link;
 pub mod envelope;
