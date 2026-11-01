@@ -308,6 +308,9 @@ pub(super) fn authenticate(
     token: &str,
     action: &str,
 ) -> Result<AgentSummary, WireResponse> {
+    if !super::operations::session_matches(vault.epoch()) {
+        return Err(locked_response());
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());

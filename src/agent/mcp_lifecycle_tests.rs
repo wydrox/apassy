@@ -574,3 +574,401 @@ fn stdin_eof_drains_a_short_mutation_before_cancelling_remaining_waits() {
     assert!(reply["structuredContent"]["result"]["item_id"].is_u64());
     assert!(fx.broker.approvals().pending().is_empty());
 }
+
+#[test]
+fn a_cancelled_retry_id_cannot_replace_an_existing_key_binding() {
+    let fx = Fixture::new();
+    let action = Action::GenerateCredential {
+        name: "Synthetic original receipt".into(),
+        length: None,
+        alphabet: None,
+        cwd: Some(fx.dir.path().display().to_string()),
+        folder: None,
+    };
+    let original = "ffffffffffffffffffffffffffffffff";
+    let retry = "00000000000000000000000000000001";
+    let send = |action| client::send(fx.broker.socket_path(), &fx.token, action).unwrap();
+    let tracked = |id: &str| Action::Tracked {
+        operation_id: id.into(),
+        idempotency_key: Some("original-key".into()),
+        action: Box::new(action.clone()),
+    };
+    assert!(send(tracked(original)).ok);
+    assert!(
+        send(Action::CancelOperation {
+            operation_id: retry.into()
+        })
+        .ok
+    );
+    let response = send(tracked(retry));
+    assert_eq!(response.operation_id.as_deref(), Some(original));
+    assert_eq!(response.result.unwrap()["outcome"]["ok"], true);
+    assert_eq!(
+        send(tracked("00000000000000000000000000000002"))
+            .operation_id
+            .as_deref(),
+        Some(original)
+    );
+}
+
+#[test]
+fn one_agent_cannot_fill_the_receipt_table_with_cancellation_tombstones() {
+    let fx = Fixture::new();
+    for n in 0..256 {
+        let response = client::send(
+            fx.broker.socket_path(),
+            &fx.token,
+            Action::CancelOperation {
+                operation_id: format!("{n:032x}"),
+            },
+        )
+        .unwrap();
+        if !response.ok {
+            break;
+        }
+    }
+    let other_token = fx
+        .vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .register_agent("Other synthetic agent")
+        .unwrap()
+        .1;
+    let response = client::send(
+        fx.broker.socket_path(),
+        other_token.expose(),
+        Action::Tracked {
+            operation_id: "ffffffffffffffffffffffffffffffff".into(),
+            idempotency_key: None,
+            action: Box::new(Action::GenerateCredential {
+                name: "Other agent remains usable".into(),
+                length: None,
+                alphabet: None,
+                cwd: Some(fx.dir.path().display().to_string()),
+                folder: None,
+            }),
+        },
+    )
+    .unwrap();
+    assert!(response.ok, "{response:?}");
+}
+
+#[test]
+fn per_agent_active_limit_leaves_capacity_for_another_agent() {
+    let fx = Fixture::new();
+    let mut workers = Vec::new();
+    for n in 1..=3 {
+        let socket = fx.broker.socket_path().to_owned();
+        let token = fx.token.clone();
+        let action = Action::Tracked {
+            operation_id: format!("{n:032x}"),
+            idempotency_key: None,
+            action: Box::new(Action::AskOwnerForCredential {
+                name: "Synthetic shared owner request".into(),
+                purpose: "Test admission".into(),
+                where_to_get: None,
+                cwd: Some(fx.dir.path().display().to_string()),
+                folder: None,
+            }),
+        };
+        workers.push(std::thread::spawn(move || {
+            client::send(&socket, &token, action).unwrap()
+        }));
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = client::send(
+                fx.broker.socket_path(),
+                &fx.token,
+                Action::OperationStatus {
+                    operation_id: format!("{n:032x}"),
+                },
+            )
+            .unwrap();
+            if response
+                .result
+                .is_some_and(|r| r["state"] == "waiting_for_owner")
+            {
+                break;
+            }
+            assert!(Instant::now() < end);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let response = client::send(
+        fx.broker.socket_path(),
+        &fx.token,
+        Action::Tracked {
+            operation_id: "ffffffffffffffffffffffffffffffff".into(),
+            idempotency_key: None,
+            action: Box::new(Action::GenerateCredential {
+                name: "Must be refused while three calls wait".into(),
+                length: None,
+                alphabet: None,
+                cwd: Some(fx.dir.path().display().to_string()),
+                folder: None,
+            }),
+        },
+    )
+    .unwrap();
+    let other_token = fx
+        .vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .register_agent("Other active agent")
+        .unwrap()
+        .1;
+    let other = client::send(
+        fx.broker.socket_path(),
+        other_token.expose(),
+        Action::Tracked {
+            operation_id: "dddddddddddddddddddddddddddddddd".into(),
+            idempotency_key: None,
+            action: Box::new(Action::GenerateCredential {
+                name: "Other agent works during waits".into(),
+                length: None,
+                alphabet: None,
+                cwd: Some(fx.dir.path().display().to_string()),
+                folder: None,
+            }),
+        },
+    )
+    .unwrap();
+    // Clean up even on the unfixed implementation.
+    for n in 1..=3 {
+        client::send(
+            fx.broker.socket_path(),
+            &fx.token,
+            Action::CancelOperation {
+                operation_id: format!("{n:032x}"),
+            },
+        )
+        .unwrap();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(response.error.map(|e| e.code).as_deref(), Some("busy"));
+    assert!(other.ok, "{other:?}");
+    let other_token = fx
+        .vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .register_agent("Other synthetic agent")
+        .unwrap()
+        .1;
+    assert!(
+        client::send(
+            fx.broker.socket_path(),
+            other_token.expose(),
+            Action::CancelOperation {
+                operation_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into()
+            }
+        )
+        .unwrap()
+        .ok
+    );
+}
+
+#[test]
+fn simultaneous_identical_keys_execute_one_command_and_keys_are_agent_scoped() {
+    let fx = Fixture::new();
+    let mut params = fx.run("printf x >> once.txt");
+    params["arguments"]
+        .as_object_mut()
+        .unwrap()
+        .remove("idempotency_key");
+    let action = run_action(&params["arguments"]).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut workers = Vec::new();
+    for n in 1..=2 {
+        let barrier = Arc::clone(&barrier);
+        let socket = fx.broker.socket_path().to_owned();
+        let token = fx.token.clone();
+        let action = action.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            client::send(
+                &socket,
+                &token,
+                Action::Tracked {
+                    operation_id: format!("{n:032x}"),
+                    idempotency_key: Some("racing-key".into()),
+                    action: Box::new(action),
+                },
+            )
+            .unwrap()
+        }));
+    }
+    barrier.wait();
+    fx.pending();
+    fx.approve();
+    let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+    assert!(results.iter().all(|r| r.ok));
+    assert_eq!(results[0].operation_id, results[1].operation_id);
+    fx.completed(results[0].operation_id.as_deref().unwrap());
+    assert_eq!(std::fs::read(fx.dir.path().join("once.txt")).unwrap(), b"x");
+    let other_token = fx
+        .vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .register_agent("Other synthetic agent")
+        .unwrap()
+        .1;
+    let other = client::send(
+        fx.broker.socket_path(),
+        other_token.expose(),
+        Action::Tracked {
+            operation_id: "ffffffffffffffffffffffffffffffff".into(),
+            idempotency_key: Some("racing-key".into()),
+            action: Box::new(Action::GenerateCredential {
+                name: "Independent same key".into(),
+                length: None,
+                alphabet: None,
+                cwd: Some(fx.dir.path().display().to_string()),
+                folder: None,
+            }),
+        },
+    )
+    .unwrap();
+    assert!(other.ok);
+    assert_ne!(other.operation_id, results[0].operation_id);
+}
+
+#[test]
+fn vault_lock_ends_owner_wait_and_previous_session_receipts_are_unavailable() {
+    let fx = Fixture::new();
+    let mut host = fx.connect();
+    host.call(1, fx.run("printf forbidden > after-lock.txt"));
+    let id = host.operation();
+    fx.pending();
+    fx.vault.lock().unwrap().as_mut().unwrap().lock().unwrap();
+    assert_eq!(host.reply(1)["structuredContent"]["code"], "cancelled");
+    assert!(fx.broker.approvals().pending().is_empty());
+    fx.vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .unlock(PASS)
+        .unwrap();
+    let response = client::send(
+        fx.broker.socket_path(),
+        &fx.token,
+        Action::OperationStatus { operation_id: id },
+    )
+    .unwrap();
+    assert_eq!(response.error.unwrap().code, "operation_not_found");
+    assert!(!fx.dir.path().join("after-lock.txt").exists());
+}
+
+#[test]
+fn hosts_without_optional_notifications_and_legacy_brokers_fail_safely() {
+    let fx = Fixture::new();
+    let mut host = fx.connect();
+    host.call(1, json!({"name": TOOL_GENERATE_CREDENTIAL, "arguments": {"name":"No optional notifications", "cwd": fx.dir.path().display().to_string()}}));
+    assert_eq!(host.reply(1)["isError"], false);
+    assert!(
+        host.seen
+            .iter()
+            .all(|m| m["method"] != "notifications/progress")
+    );
+    // Legacy binaries send untracked v0 requests and receive no new wire fields.
+    let legacy = client::send(fx.broker.socket_path(), &fx.token, Action::ListAccess).unwrap();
+    assert!(legacy.ok);
+    assert!(
+        serde_json::to_value(legacy)
+            .unwrap()
+            .get("operation_id")
+            .is_none()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("legacy.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let fake = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        io::BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["action"]["kind"],
+            "tracked"
+        );
+        stream.write_all(b"{\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"legacy parser refused\"}}\n").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "adapter must never replay an untracked mutation"
+        );
+    });
+    let config = AdapterConfig {
+        socket,
+        token: Some("synthetic-legacy-token".into()),
+        host_session: None,
+    };
+    assert_eq!(
+        call_tool(
+            &config,
+            &json!({"name":TOOL_GENERATE_CREDENTIAL,"arguments":{"name":"Refused by old broker"}})
+        )["isError"],
+        true
+    );
+    fake.join().unwrap();
+}
+
+#[test]
+fn replacing_the_vault_does_not_expose_receipts_to_the_same_numeric_agent_id() {
+    let fx = Fixture::new();
+    let mut host = fx.connect();
+    host.call(1, json!({"name":TOOL_GENERATE_CREDENTIAL, "arguments":{"name":"First vault receipt", "cwd":fx.dir.path().display().to_string()}}));
+    let reply = host.reply(1);
+    let id = reply["structuredContent"]["operation_id"].as_str().unwrap();
+    let mut other = Vault::create(&fx.dir.path().join("other.db"), PASS).unwrap();
+    other.unlock(PASS).unwrap();
+    let (agent, token) = other.register_agent("Same ID in another vault").unwrap();
+    assert_eq!(agent.id, fx.agent);
+    *fx.vault.lock().unwrap() = Some(other);
+    let response = client::send(
+        fx.broker.socket_path(),
+        token.expose(),
+        Action::OperationStatus {
+            operation_id: id.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(response.error.unwrap().code, "operation_not_found");
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn auto_lock_access_fence_ends_an_inflight_owner_wait() {
+    let fx = Fixture::new();
+    let expired = Arc::new(AtomicBool::new(false));
+    let fence = Arc::clone(&expired);
+    fx.vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .set_access_expiry(Some(Arc::new(move || fence.load(Ordering::SeqCst))));
+    let mut host = fx.connect();
+    host.call(1, fx.run("printf forbidden > after-expiry.txt"));
+    host.operation();
+    fx.pending();
+    expired.store(true, Ordering::SeqCst);
+    assert_eq!(
+        host.reply(1)["structuredContent"]["code"],
+        "approval_invalidated"
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
+    assert!(!fx.dir.path().join("after-expiry.txt").exists());
+}

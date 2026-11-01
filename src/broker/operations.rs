@@ -15,11 +15,14 @@ use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
 const RETENTION: Duration = Duration::from_secs(15 * 60);
 const MAX_RECORDS: usize = 256;
 const MAX_ACTIVE: usize = 8;
+const MAX_AGENT_ACTIVE: usize = 3;
+const MAX_AGENT_RECORDS: usize = 64;
 
 type Scope = ([u8; 32], u64);
 
 #[derive(Debug, Default)]
 struct State {
+    invalidated: bool,
     cancelled: bool,
     effect_started: bool,
     waiting: bool,
@@ -29,6 +32,7 @@ struct State {
 
 #[derive(Debug, Default)]
 pub(super) struct Control {
+    epoch: [u8; 32],
     state: Mutex<State>,
     changed: Condvar,
 }
@@ -52,12 +56,16 @@ pub(super) fn start_effect() -> bool {
             return true;
         };
         let mut state = lock(&control.state);
-        if state.cancelled && !state.effect_started {
+        if state.invalidated || (state.cancelled && !state.effect_started) {
             return false;
         }
         state.effect_started = true;
         true
     })
+}
+
+pub(super) fn session_matches(epoch: [u8; 32]) -> bool {
+    CURRENT.with(|current| current.borrow().as_ref().is_none_or(|c| c.epoch == epoch))
 }
 
 pub(super) fn observed_effect() {
@@ -109,7 +117,8 @@ struct Record {
 }
 
 pub(super) struct Operations {
-    records: Mutex<BTreeMap<String, Record>>,
+    records: Arc<Mutex<BTreeMap<String, Record>>>,
+    session: Arc<Mutex<Option<[u8; 32]>>>,
     // Keyed digests avoid retaining keys or secret-bearing arguments, including
     // dictionary-testable plain hashes of saved passwords.
     digest_key: hmac::Key,
@@ -120,7 +129,8 @@ impl Operations {
         let mut key = Zeroizing::new([0; 32]);
         getrandom::fill(key.as_mut()).map_err(std::io::Error::other)?;
         Ok(Self {
-            records: Mutex::new(BTreeMap::new()),
+            records: Arc::new(Mutex::new(BTreeMap::new())),
+            session: Arc::new(Mutex::new(None)),
             digest_key: hmac::Key::new(hmac::HMAC_SHA256, key.as_ref()),
         })
     }
@@ -153,6 +163,21 @@ impl Operations {
                 Ok(agent) => agent,
                 Err(response) => return response,
             };
+            let new_session = *lock(&self.session) != Some(vault.epoch());
+            if new_session {
+                clear_records(&self.records);
+                *lock(&self.session) = Some(vault.epoch());
+                let records = Arc::downgrade(&self.records);
+                let session = Arc::downgrade(&self.session);
+                vault.on_session_end(move || {
+                    if let Some(session) = session.upgrade() {
+                        *lock(&session) = None;
+                    }
+                    if let Some(records) = records.upgrade() {
+                        clear_records(&records);
+                    }
+                });
+            }
             (vault.epoch(), agent.id)
         };
         let (id, key, action) = match &request.action {
@@ -181,6 +206,10 @@ impl Operations {
             );
         }
         let mut records = lock(&self.records);
+        // A lock can occur after authentication but before table admission.
+        if *lock(&self.session) != Some(scope.0) {
+            return decide::locked_response();
+        }
         records.retain(|_, r| {
             lock(&r.control.state)
                 .finished
@@ -210,10 +239,14 @@ impl Operations {
             }
             if matches!(request.action, Action::CancelOperation { .. })
                 && records.len() < MAX_RECORDS
+                && records.values().filter(|r| r.scope == scope).count() < MAX_AGENT_RECORDS
                 && !records.contains_key(id)
             {
                 // Cancellation can arrive before the original socket is accepted.
-                let control = Arc::new(Control::default());
+                let control = Arc::new(Control {
+                    epoch: scope.0,
+                    ..Control::default()
+                });
                 let mut state = lock(&control.state);
                 state.cancelled = true;
                 state.finished = Some(Instant::now());
@@ -237,16 +270,18 @@ impl Operations {
             );
         }
         let action = action.expect("tracked action");
-        let bytes = Zeroizing::new(serde_json::to_vec(action).expect("serializable action"));
+        let bytes = fingerprint_bytes(action);
         let fingerprint = self.digest(&bytes);
         let key = key.map(|k| self.digest(k.as_bytes()));
-        let known = records.get_key_value(id).or_else(|| {
-            key.and_then(|k| {
+        // A pre-submission cancellation tombstone for a retry ID must never
+        // replace a key's original binding.
+        let known = key
+            .and_then(|k| {
                 records
                     .iter()
                     .find(|(_, r)| r.scope == scope && r.key == Some(k))
             })
-        });
+            .or_else(|| records.get_key_value(id));
         if let Some((known_id, _)) = known {
             let known_id = known_id.clone();
             let record = records.get_mut(&known_id).expect("known operation");
@@ -274,13 +309,25 @@ impl Operations {
             .values()
             .filter(|r| lock(&r.control.state).finished.is_none())
             .count();
-        if records.len() >= MAX_RECORDS || active >= MAX_ACTIVE {
+        let own_records = records.values().filter(|r| r.scope == scope).count();
+        let own_active = records
+            .values()
+            .filter(|r| r.scope == scope && lock(&r.control.state).finished.is_none())
+            .count();
+        if records.len() >= MAX_RECORDS
+            || active >= MAX_ACTIVE
+            || own_records >= MAX_AGENT_RECORDS
+            || own_active >= MAX_AGENT_ACTIVE
+        {
             return WireResponse::failure(
                 "busy",
                 "The operation table is full. No operation was started.",
             );
         }
-        let control = Arc::new(Control::default());
+        let control = Arc::new(Control {
+            epoch: scope.0,
+            ..Control::default()
+        });
         records.insert(
             id.clone(),
             Record {
@@ -319,13 +366,50 @@ impl Operations {
         if state.cancelled && !state.effect_started {
             response = cancelled_response();
         }
-        state.outcome = Some(summary(&response));
+        if !state.invalidated {
+            state.outcome = Some(summary(&response));
+        }
         state.finished = Some(Instant::now());
         state.waiting = false;
         control.changed.notify_all();
         response.operation_id = Some(id.clone());
         response
     }
+}
+
+fn clear_records(records: &Mutex<BTreeMap<String, Record>>) {
+    let mut records = lock(records);
+    for record in records.values() {
+        let mut state = lock(&record.control.state);
+        state.cancelled = true;
+        state.invalidated = true;
+        state.outcome = None;
+        record.control.changed.notify_all();
+    }
+    records.clear();
+}
+
+fn fingerprint_bytes(action: &Action) -> Zeroizing<Vec<u8>> {
+    let mut action = action.clone();
+    match &mut action {
+        // Credentials form a set; argv order and whitespace within values do not.
+        Action::Run { items, .. } => items.sort_unstable(),
+        Action::GenerateCredential {
+            length, alphabet, ..
+        } => {
+            *length = Some(length.unwrap_or(32));
+            *alphabet = Some(alphabet.take().unwrap_or_else(|| "alnum".into()));
+        }
+        Action::UpdateCredential {
+            generate: Some(spec),
+            ..
+        } => {
+            spec.length = Some(spec.length.unwrap_or(32));
+            spec.alphabet = Some(spec.alphabet.take().unwrap_or_else(|| "alnum".into()));
+        }
+        _ => {}
+    }
+    Zeroizing::new(serde_json::to_vec(&action).expect("serializable action"))
 }
 
 fn receipt(id: &str, state: &State) -> WireResponse {
@@ -372,6 +456,108 @@ fn summary(response: &WireResponse) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_lock_erases_receipts_and_late_workers_cannot_restore_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("vault.db"), "synthetic-review-pass")
+                .unwrap();
+        vault.unlock("synthetic-review-pass").unwrap();
+        let (_, token) = vault.register_agent("Synthetic reviewer").unwrap();
+        let ctx = BrokerContext {
+            vault: Arc::new(Mutex::new(Some(vault))),
+            tls: super::super::http::TlsClient::platform().unwrap(),
+            approvals: Arc::new(super::super::approvals::ApprovalQueue::new()),
+            approval_timeout: Duration::from_secs(2),
+            run_timeout: Duration::from_secs(2),
+            bouncer: None,
+            model_gate: None,
+            prompts: Arc::new(super::super::prompts::PromptStore::new(vec![])),
+        };
+        let operations = Operations::new().unwrap();
+        let request = WireRequest {
+            v: WIRE_VERSION,
+            token: token.expose().into(),
+            host_session: None,
+            action: Action::Tracked {
+                operation_id: "00000000000000000000000000000001".into(),
+                idempotency_key: Some("synthetic-key".into()),
+                action: Box::new(Action::GenerateCredential {
+                    name: "Synthetic receipt".into(),
+                    length: None,
+                    alphabet: None,
+                    cwd: Some(dir.path().display().to_string()),
+                    folder: None,
+                }),
+            },
+        };
+        assert!(operations.handle(&ctx, &request).ok);
+        let control = Arc::clone(&lock(&operations.records).values().next().unwrap().control);
+        assert!(lock(&control.state).outcome.is_some());
+        ctx.vault.lock().unwrap().as_mut().unwrap().lock().unwrap();
+        assert!(lock(&operations.records).is_empty());
+        assert!(lock(&control.state).outcome.is_none());
+        assert!(lock(&control.state).invalidated);
+        ctx.vault
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .unlock("synthetic-review-pass")
+            .unwrap();
+        CURRENT.with(|current| *current.borrow_mut() = Some(control));
+        // A delayed worker from the old session cannot authenticate in the new one.
+        assert!(!decide::handle(&ctx, &request).ok);
+        let mut vault = ctx.vault.lock().unwrap();
+        assert!(
+            decide::authenticate(
+                vault.as_mut().unwrap(),
+                token.expose(),
+                "generate_credential"
+            )
+            .is_err()
+        );
+        assert!(!start_effect());
+        CURRENT.with(|current| *current.borrow_mut() = None);
+    }
+
+    #[test]
+    fn fingerprints_canonicalize_json_maps_and_credential_sets_but_preserve_command_text() {
+        let a: Action = serde_json::from_str(
+            r#"{"kind":"call","item_id":1,"operation":"read","params":{"a":"one","b":"two"}}"#,
+        )
+        .unwrap();
+        let b: Action = serde_json::from_str(r#"{ "params": {"b":"two", "a":"one"}, "operation":"read", "item_id":1, "kind":"call" }"#).unwrap();
+        assert_eq!(*fingerprint_bytes(&a), *fingerprint_bytes(&b));
+        let generate = |length, alphabet| Action::GenerateCredential {
+            name: "Synthetic defaults".into(),
+            length,
+            alphabet,
+            cwd: None,
+            folder: None,
+        };
+        assert_eq!(
+            *fingerprint_bytes(&generate(None, None)),
+            *fingerprint_bytes(&generate(Some(32), Some("alnum".into())))
+        );
+        let run = |items, command| Action::Run {
+            items,
+            command,
+            cwd: "/synthetic".into(),
+            purpose: "Test".into(),
+            path: None,
+            user_request: None,
+        };
+        assert_eq!(
+            *fingerprint_bytes(&run(vec![1, 2], vec!["true".into()])),
+            *fingerprint_bytes(&run(vec![2, 1], vec!["true".into()]))
+        );
+        assert_ne!(
+            *fingerprint_bytes(&run(vec![1], vec!["echo".into(), "a b".into()])),
+            *fingerprint_bytes(&run(vec![1], vec!["echo".into(), "a  b".into()]))
+        );
+    }
 
     #[test]
     fn retained_outcomes_exclude_output_arguments_names_and_raw_errors() {
