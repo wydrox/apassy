@@ -33,6 +33,19 @@ use crate::server::store::{Store, db, to_i, to_u};
 use crate::server::{Core, admin, auth, connect};
 use crate::session::{LiveSession, ProxyEvent, SessionSource};
 
+fn sweep_idle(conn: &rusqlite::Connection, created_at: u64, before: u64) -> RelayResult<bool> {
+    let (last, heads): (Option<i64>, i64) = conn
+        .query_row(
+            "SELECT (SELECT max(coalesce(d.last_seen_at, d.created_at)) FROM device d \
+         JOIN member m ON m.id = d.member_id WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL), \
+         (SELECT count(*) FROM sync_head)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(db)?;
+    Ok(heads == 0 && last.map_or(created_at, to_u) <= before)
+}
+
 /// A team that was just made, with its owner.
 pub struct NewTeam {
     pub id: TeamId,
@@ -272,11 +285,15 @@ pub const CONNECT_OWNER: &str = "owner";
 
 /// The longest `idle_days` and `delete_days` of `connect-sweep`.
 pub const MAX_SWEEP_DAYS: u64 = 3650;
+/// Suspensions and deletions together, including failed attempts, in one sweep.
+pub const MAX_SWEEP_ACTIONS: usize = 10;
 
 /// What `admin connect-sweep` did, or would do (`dry_run`).
 #[derive(Debug, Serialize)]
 pub struct SweepReport {
     pub dry_run: bool,
+    pub action_limit: usize,
+    pub capped: bool,
     /// Idle Connect teams suspended with the reason `idle`.
     pub suspended: Vec<TeamId>,
     /// Connect teams deleted after their idle suspension.
@@ -345,6 +362,7 @@ pub struct Hub {
     /// The Connect teams of each client prefix today, in memory only (section 26).
     connect_prefixes: connect::PrefixLimiter,
     connect_recovery: Mutex<HashMap<String, ([u8; 32], u64)>>,
+    connect_recovery_rate: connect::RequestRate,
     /// The long polls that Connect teams hold, all of them together.
     connect_polls: Arc<AtomicUsize>,
     /// The feed long polls that Connect teams hold, all of them together.
@@ -384,6 +402,7 @@ impl Hub {
             push,
             connect_prefixes: connect::PrefixLimiter::default(),
             connect_recovery: Mutex::new(HashMap::new()),
+            connect_recovery_rate: connect::RequestRate::default(),
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
         });
@@ -652,6 +671,11 @@ impl Hub {
     pub fn connect_challenge(&self, public_key: &str, now: u64) -> RelayResult<serde_json::Value> {
         let public = crate::device::decode_public_key(public_key)
             .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
+        // Count issued challenges too: consuming a nonce must not let a flood churn
+        // through the bounded table indefinitely. Independent of key existence.
+        self.connect_recovery_rate
+            .take(1000, now)
+            .map_err(|_| connect::requests_limited())?;
         let mut challenges = self
             .connect_recovery
             .lock()
@@ -732,6 +756,7 @@ impl Hub {
                 ).optional().map_err(db)?;
                 let id = id.and_then(|id| TeamId::parse(&id)).ok_or_else(directory::connect_key_used)?;
                 let core = self.team(&id).ok_or_else(|| RelayError::internal("The team database is unavailable. Contact the relay operator."))?;
+                core.take_request(now).map_err(|(error, _)| error)?;
                 let (member, device) = core.store.with(|conn| {
                     conn.query_row(
                         "SELECT d.member_id, d.id FROM device d JOIN member m ON m.id = d.member_id \
@@ -939,27 +964,7 @@ impl Hub {
                 "Suspend the team first. Only a suspended team can be deleted.",
             ));
         }
-        // Requests that started before the suspension hold the team's state, and with
-        // it the open file. Wait a moment for them to end.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let busy = self
-                .draining
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(id)
-                .is_some_and(|weak| weak.strong_count() > 0);
-            if !busy {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                return Err(RelayError::new(
-                    codes::CONFLICT,
-                    "Requests of this team still run. Try again in a moment.",
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        self.wait_for_drained(id)?;
         let freed = self.directory.remove(id, free_connect_key, now)?;
         self.draining
             .lock()
@@ -971,6 +976,30 @@ impl Hub {
             *legacy = None;
         }
         Ok(freed)
+    }
+
+    /// Freeze every possible writer before archiving or deleting a suspended team.
+    fn wait_for_drained(&self, id: &TeamId) -> RelayResult<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let busy = self
+                .draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(id)
+                .is_some_and(|weak| weak.strong_count() > 0);
+            if !busy && !self.push.has_team_jobs(id) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "Requests of this team still run. Try again in a moment.",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Ok(())
     }
 
     /// Private operator readiness. No corresponding public HTTP endpoint exists.
@@ -1015,8 +1044,9 @@ impl Hub {
     /// Preserve the complete append-only team audit before automatic reclamation.
     /// The immutable encrypted snapshot uses the relay master key, so deleting the
     /// directory's team key cannot make the history unreadable. Archives are never pruned.
-    fn archive_swept_team(&self, row: &TeamRow, now: u64) -> RelayResult<()> {
+    fn archive_swept_team(&self, row: &TeamRow, idle_before: u64, now: u64) -> RelayResult<()> {
         use std::os::unix::fs::DirBuilderExt;
+        self.wait_for_drained(&row.id)?;
         let directory = self.config.data_dir.join("audit-archive");
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -1025,6 +1055,12 @@ impl Hub {
             .map_err(|_| RelayError::internal("The audit archive folder cannot be created."))?;
         let archive = directory.join(format!("{}-{now}.db", row.id));
         let store = Store::open_read_only(&self.config.team_path(&row.id), &row.file_key)?;
+        if !store.with(|conn| sweep_idle(conn, row.created_at, idle_before))? {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "The team has recent activity or a sync head; it was not deleted.",
+            ));
+        }
         store.with(|conn| Store::snapshot_on(conn, &archive, &self.config.master_key))?;
         // Verify readability and the audit count with the archive key before deletion.
         let archived = Store::open_read_only(&archive, &self.config.master_key)?;
@@ -1118,6 +1154,49 @@ impl Hub {
         Ok(infos)
     }
 
+    /// Recheck directory limits and device activity with both stores locked, then
+    /// close admission before releasing the activity lock. A fresh sign-in/use wins.
+    fn suspend_idle(&self, id: &TeamId, before: u64, dry_run: bool, now: u64) -> RelayResult<bool> {
+        let Some(core) = self.team(id) else {
+            return Ok(false);
+        };
+        let changed = self.directory.store.tx(|tx| {
+            let Some(row) = directory::team_by_id(tx, id)? else { return Ok(false); };
+            if row.state != TeamState::Active || row.kind != TeamKind::Connect
+                || row.limits != TeamLimits::connect() { return Ok(false); }
+            core.store.with(|conn| {
+                if !sweep_idle(conn, row.created_at, before)? { return Ok(false); }
+                if !dry_run {
+                    tx.execute("UPDATE team SET state = 'suspended', suspended_at = ?2, suspend_reason = 'idle' WHERE id = ?1",
+                        params![id.as_str(), to_i(now)]).map_err(db)?;
+                    self.directory.audit.write_on(tx, now, OPERATOR_ACTOR, "team_suspended", None,
+                        &json!({"team_id": id, "reason": directory::IDLE_REASON}))?;
+                    core.close();
+                }
+                Ok(true)
+            })
+        })?;
+        if changed && !dry_run {
+            self.teams
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(id);
+            let _ = core.audit.write(
+                &core.store,
+                now,
+                OPERATOR_ACTOR,
+                "team_suspended",
+                None,
+                &json!({"reason": directory::IDLE_REASON}),
+            );
+            self.draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id.clone(), Arc::downgrade(&core));
+        }
+        Ok(changed)
+    }
+
     /// `admin connect-sweep` (docs/SPEC.md section 26.5): suspends each active Connect
     /// team whose newest sign-in of any live device (or, without one, the newest device's
     /// creation) is `idle_days` old, with the reason `idle`, however many devices it has;
@@ -1145,11 +1224,19 @@ impl Hub {
         let delete_before = now.saturating_sub(delete_days.saturating_mul(86_400));
         let mut report = SweepReport {
             dry_run,
+            action_limit: MAX_SWEEP_ACTIONS,
+            capped: false,
             suspended: Vec::new(),
             deleted: Vec::new(),
             failed: Vec::new(),
         };
         for row in self.directory.teams()? {
+            if report.suspended.len() + report.deleted.len() + report.failed.len()
+                >= MAX_SWEEP_ACTIONS
+            {
+                report.capped = true;
+                break;
+            }
             // A plan's team (lifted limits) is the operator's, not the sweep's.
             if row.kind != TeamKind::Connect || row.limits != TeamLimits::connect() {
                 continue;
@@ -1164,40 +1251,19 @@ impl Hub {
                     (if dry_run {
                         Ok(())
                     } else {
-                        self.archive_swept_team(&row, now)
+                        self.archive_swept_team(&row, idle_before, now)
                             .and_then(|()| self.delete(&row.id, false, now).map(drop))
                     })
                     .map(|()| report.deleted.push(row.id.clone()))
                 }
-                TeamState::Active => {
-                    // A team that did not open is the operator's to look at.
-                    let Some(core) = self.team(&row.id) else {
-                        continue;
-                    };
-                    let idle = core.store.with(|conn| {
-                        let (last, heads): (Option<i64>, i64) = conn
-                            .query_row(
-                                "SELECT (SELECT max(coalesce(d.last_seen_at, d.created_at)) \
-                                 FROM device d JOIN member m ON m.id = d.member_id \
-                                 WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL), \
-                                 (SELECT count(*) FROM sync_head)",
-                                [],
-                                |r| Ok((r.get(0)?, r.get(1)?)),
-                            )
-                            .map_err(db)?;
-                        Ok(heads == 0 && last.map_or(row.created_at, to_u) <= idle_before)
-                    });
-                    match idle {
-                        Ok(false) => continue,
-                        Ok(true) => (if dry_run {
-                            Ok(())
-                        } else {
-                            self.suspend_with(&row.id, Some(directory::IDLE_REASON), now)
-                        })
-                        .map(|()| report.suspended.push(row.id.clone())),
-                        Err(error) => Err(error),
+                TeamState::Active => match self.suspend_idle(&row.id, idle_before, dry_run, now) {
+                    Ok(false) => continue,
+                    Ok(true) => {
+                        report.suspended.push(row.id.clone());
+                        Ok(())
                     }
-                }
+                    Err(error) => Err(error),
+                },
             };
             if let Err(error) = done {
                 report

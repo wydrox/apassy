@@ -45,6 +45,7 @@ const MAX_ANSWER_BYTES: u64 = 256 * 1024;
 /// Seconds between two `push_failed` rows of one device, and two `push_dropped` rows
 /// of one team.
 const ROW_INTERVAL_SECS: u64 = 10;
+const MAX_THROTTLES: usize = 4096;
 
 /// One push token of the routing set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +234,15 @@ impl Push {
         self.topic.as_deref()
     }
 
+    pub fn has_team_jobs(&self, team: &TeamId) -> bool {
+        self.queue
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held
+            .contains_key(team)
+    }
+
     pub fn status(&self) -> serde_json::Value {
         let queue = self.queue.0.lock().unwrap_or_else(PoisonError::into_inner);
         json!({"enabled": self.topic.is_some(), "held": queue.ids.len(),
@@ -275,9 +285,11 @@ impl Push {
                 .last_dropped
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            last.retain(|_, at| now < at.saturating_add(ROW_INTERVAL_SECS));
             if last
                 .get(&core.team)
                 .is_none_or(|at| now >= at.saturating_add(ROW_INTERVAL_SECS))
+                && last.len() < MAX_THROTTLES
             {
                 last.insert(core.team.clone(), now);
                 drop(last);
@@ -377,6 +389,7 @@ fn current_targets(job: &Job, now: u64) -> Vec<PushTarget> {
                  JOIN device d ON d.id = ?1 JOIN member m ON m.id = d.member_id \
                  JOIN push_token p ON p.device_id = d.id \
                  WHERE q.qid = ?2 AND q.state = 'open' AND q.expires_at > ?3 \
+                 AND NOT EXISTS (SELECT 1 FROM question_answer a WHERE a.qid = q.qid) \
                  AND asker.revoked_at IS NULL AND am.revoked_at IS NULL \
                  AND d.revoked_at IS NULL AND m.revoked_at IS NULL AND d.id <> q.device_id \
                  AND (m.id = q.member_id OR (q.to_approvers = 1 AND m.role IN ('owner','manager'))) \
@@ -524,11 +537,15 @@ fn send_job(
 
 /// True at most once per ten seconds for one device of one team (device 0: the team).
 fn throttle(last: &mut HashMap<(TeamId, u64), u64>, team: &TeamId, device: u64, now: u64) -> bool {
+    last.retain(|_, at| now < at.saturating_add(ROW_INTERVAL_SECS));
     let key = (team.clone(), device);
     if last
         .get(&key)
         .is_some_and(|at| now < at.saturating_add(ROW_INTERVAL_SECS))
     {
+        return false;
+    }
+    if last.len() >= MAX_THROTTLES {
         return false;
     }
     last.insert(key, now);
@@ -646,6 +663,18 @@ mod tests {
         let before = budget.all;
         budget.release(&TeamId::parse("t_bcdefgh234").unwrap());
         assert_eq!(budget.all, before);
+    }
+
+    #[test]
+    fn push_failure_throttles_do_not_retain_unbounded_device_history() {
+        let team = TeamId::parse("t_7k2m5q4x3c").unwrap();
+        let mut last = HashMap::new();
+        for device in 0..MAX_THROTTLES as u64 + 50 {
+            throttle(&mut last, &team, device, 100);
+        }
+        assert_eq!(last.len(), MAX_THROTTLES);
+        assert!(throttle(&mut last, &team, 99999, 110));
+        assert_eq!(last.len(), 1);
     }
 
     #[test]

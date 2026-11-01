@@ -906,15 +906,21 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             mac.as_deref(),
         );
         let result = dispatch_edge(hub, endpoint, &body, prefix, now);
+        let recovery = endpoint == Endpoint::ConnectChallenge
+            || (endpoint == Endpoint::Connect
+                && serde_json::from_slice::<api::ConnectCreate>(&body)
+                    .is_ok_and(|request| request.recovery_nonce.is_some()));
         match result {
             Ok(result) => respond_ok(request, result),
             // The caps of Connect teams last longer than a busy moment: the daily caps an
             // hour, the count of a client prefix until the next UTC day.
             Err(error)
-                if endpoint == Endpoint::Connect
+                if (endpoint == Endpoint::Connect || recovery)
                     && (error.code == codes::BUSY || error.code == codes::RATE_LIMITED) =>
             {
-                let wait = if error.code == codes::BUSY {
+                let wait = if recovery {
+                    (60 - now % 60).to_string()
+                } else if error.code == codes::BUSY {
                     CONNECT_RETRY_AFTER.to_string()
                 } else {
                     connect::until_tomorrow(now).to_string()

@@ -4,6 +4,7 @@ import { beforeEach, before, describe, it } from "node:test";
 
 import {
   APNS_PAYLOAD,
+  APNS_TIMEOUT_MS,
   MAX_PUSH_BODY,
   PUSH_HEADER,
   TOKEN_LIFETIME_SECS,
@@ -255,6 +256,45 @@ describe("provider token", () => {
 });
 
 describe("results", () => {
+  for (const stalledBody of [false, true]) {
+    it(`bounds a stalled APNs ${stalledBody ? "error body" : "request"} before relay retry`, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let begin!: () => void;
+      const started = new Promise<void>((resolve) => { begin = resolve; });
+      const { deps } = mock(({ init }) => {
+        assert.ok(init.signal);
+        if (stalledBody) {
+          return new Response(new ReadableStream({
+            start(controller) {
+              init.signal!.addEventListener("abort", () => controller.error(new Error("aborted")), { once: true });
+              begin();
+            },
+          }), { status: 503 });
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          begin();
+        });
+      });
+      const pending = handleInternal(push(body({ tokens: [TOKEN_A] })), env(), deps);
+      await started;
+      t.mock.timers.tick(APNS_TIMEOUT_MS);
+      const response = await pending;
+      assert.deepEqual(await response.json(), { results: [{ token: TOKEN_A, status: 0, reason: "Unreachable" }] });
+    });
+  }
+
+  it("bounds an APNs error body", async () => {
+    let cancelled = false;
+    const { deps } = mock(() => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(4097)); },
+      cancel() { cancelled = true; },
+    }), { status: 503 }));
+    const response = await handleInternal(push(body({ tokens: [TOKEN_A] })), env(), deps);
+    assert.equal(cancelled, true);
+    assert.deepEqual(await response.json(), { results: [{ token: TOKEN_A, status: 503, reason: "Unknown" }] });
+  });
+
   it("reports the status and reason of a refused token", async () => {
     const { deps } = mock(({ url }) =>
       url.endsWith(TOKEN_A)

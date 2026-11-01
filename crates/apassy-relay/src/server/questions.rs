@@ -950,7 +950,9 @@ pub fn recover_push(core: &Core, now: u64) -> RelayResult<()> {
         let mut statement = conn
             .prepare(
                 "SELECT qid, device_id, member_id, to_approvers, expires_at FROM question \
-             WHERE state = 'open' AND expires_at > ?1 ORDER BY created_at DESC LIMIT 256",
+             WHERE state = 'open' AND expires_at > ?1 \
+             AND NOT EXISTS (SELECT 1 FROM question_answer a WHERE a.qid = question.qid) \
+             ORDER BY created_at DESC LIMIT 256",
             )
             .map_err(db)?;
         let rows = statement

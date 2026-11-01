@@ -211,6 +211,7 @@ function limiterFor(method: string, path: string, env: Env): CreateLimiter | und
       return env.CREATE_LIMITER;
     case "/v1/auth/challenge":
     case "/v1/auth/token":
+    case "/v1/connect/challenge":
       return env.AUTH_LIMITER;
     default:
       return undefined;

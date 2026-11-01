@@ -1907,3 +1907,38 @@ fn push_retry_rechecks_tokens_expiry_and_restart_replays_open_questions() {
         "unexpired open question survives relay restart"
     );
 }
+
+#[test]
+fn answered_unsettled_and_expired_questions_are_not_replayed_after_restart() {
+    let worker = MockWorker::start();
+    let push = worker.config();
+    let mut relay = start_with(
+        |config| config.push = Some(push),
+        UpstreamOptions::default(),
+    );
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    put_token(&relay, &phone, &token_of('a'), "production");
+    ask(&relay, &mac, &qid(80), "member");
+    assert_eq!(worker.calls(1).len(), 1);
+    relay.ok(
+        "POST",
+        &format!("/v1/questions/{}/answers", qid(80)),
+        &phone.token,
+        Some(&sealed(ANSWER_NONCE, &encode_b64(&[5; 30]))),
+    );
+    ask(&relay, &mac, &qid(81), "member");
+    assert_eq!(worker.calls(2).len(), 2);
+    relay.edit_vault_live(&format!(
+        "UPDATE question SET expires_at = {} WHERE qid = '{}'",
+        now_unix() - 1,
+        qid(81)
+    ));
+    let relay = relay.restart();
+    // Recovery is synchronous during startup. No eligible jobs can enter the queue.
+    assert_eq!(
+        relay.operator(Command::Readiness).unwrap()["push"]["held"],
+        0
+    );
+    assert_eq!(worker.calls.lock().unwrap().len(), 2);
+}
