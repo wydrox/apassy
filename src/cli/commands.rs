@@ -1839,6 +1839,38 @@ pub fn vault(cli: &Cli, mut args: Args) -> Outcome {
     }
 }
 
+pub const CODE_HELP: &str = "apassy code ITEM [--copy] [--json]\n\nITEM is an ID or exact name with exactly one one-time password detail.\nShows the current code and seconds left. --copy uses the app's expiring clipboard\nand never prints the code. Uses the owner's Touch ID frequency window.\n";
+
+pub fn code(cli: &Cli, mut args: Args) -> Outcome {
+    let item = args.required("item ID or exact name")?;
+    let copy = args.flag(&["--copy"]);
+    args.finish()?;
+    expect_owner_check();
+    let response = cli.call(Command::Code { item, copy })?;
+    if cli.json {
+        print_json(&response);
+    } else if let Some(text) = code_text(&response.data) {
+        println!("{}", text.as_str());
+    }
+    Ok(())
+}
+
+fn code_text(data: &Data) -> Option<zeroize::Zeroizing<String>> {
+    let Data::Code {
+        code,
+        seconds_left,
+        copied,
+    } = data
+    else {
+        return None;
+    };
+    Some(zeroize::Zeroizing::new(if *copied {
+        format!("Copied. {seconds_left} seconds left.")
+    } else {
+        format!("{} ({seconds_left} seconds left)", code.as_ref()?.expose())
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1968,27 +2000,29 @@ mod tests {
     }
 }
 
-pub const CODE_HELP: &str = "apassy code ITEM [--copy] [--json]\n\nITEM is an ID or exact name with exactly one one-time password detail.\nShows the current code and seconds left. --copy uses the app's expiring clipboard\nand never prints the code. Uses the owner's Touch ID frequency window.\n";
-
-pub fn code(cli: &Cli, mut args: Args) -> Outcome {
-    let item = args.required("item ID or exact name")?;
-    let copy = args.flag(&["--copy"]);
-    args.finish()?;
-    expect_owner_check();
-    let response = cli.call(Command::Code { item, copy })?;
-    if cli.json {
-        print_json(&response);
-    } else if let Data::Code {
-        code,
-        seconds_left,
-        copied,
-    } = &response.data
-    {
-        if *copied {
-            println!("Copied. {seconds_left} seconds left.");
-        } else if let Some(code) = code {
-            println!("{} ({seconds_left} seconds left)", code.expose());
-        }
+#[cfg(test)]
+mod code_output_tests {
+    use super::*;
+    #[test]
+    fn text_show_and_copy_have_the_documented_value_boundary() {
+        let shown = Data::Code {
+            code: Some(SecretText::new("123456".into())),
+            seconds_left: 19,
+            copied: false,
+        };
+        assert_eq!(
+            code_text(&shown).unwrap().as_str(),
+            "123456 (19 seconds left)"
+        );
+        let copied = Data::Code {
+            code: None,
+            seconds_left: 19,
+            copied: true,
+        };
+        assert_eq!(
+            code_text(&copied).unwrap().as_str(),
+            "Copied. 19 seconds left."
+        );
+        assert!(!serde_json::to_string(&copied).unwrap().contains("123456"));
     }
-    Ok(())
 }

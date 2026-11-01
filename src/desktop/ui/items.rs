@@ -1789,7 +1789,14 @@ fn rules_of(app: &DesktopApp, id: u64) -> Vec<Rule> {
 fn answer_line(answer: &OwnerAnswer, now: u64) -> String {
     let mut parts = vec!["All agents".to_owned()];
     if answer.includes_codes {
-        parts.push("includes one-time codes".to_owned());
+        parts.push(
+            if answer.includes_values {
+                "includes one-time codes"
+            } else {
+                "one-time codes only"
+            }
+            .to_owned(),
+        );
     }
     if answer.scope == AnswerScope::Production {
         parts.push("production".to_owned());

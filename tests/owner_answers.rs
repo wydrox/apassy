@@ -1496,3 +1496,48 @@ fn mfa_injection_masks_output_and_excludes_values_from_cards_logs_and_receipts()
             .all(|body| !body.contains(MFA_SEED))
     );
 }
+
+#[test]
+fn mfa_code_only_project_answer_never_grants_the_password_and_always_ask_still_wins() {
+    let fx = mfa_fixture();
+    let handle = mfa_later(&fx, mfa_action(&fx, false, &["true"], &fx.project));
+    let run = waiting(&fx);
+    owner(&fx, in_project(run)).unwrap();
+    assert!(handle.join().unwrap().ok);
+    let answer = with_vault(&fx, |v| v.answers_for_item(fx.item_id))
+        .unwrap()
+        .remove(0);
+    assert!(answer.includes_codes);
+    assert!(!answer.includes_values);
+    let normal = run_later(&fx, &fx.project, "true");
+    let run = waiting(&fx);
+    assert!(run.risk.contains("stored secret"));
+    fx.broker.approvals().deny(run.id);
+    assert_eq!(code(&normal.join().unwrap()), "approval_denied");
+    with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).unwrap();
+    let handle = mfa_later(&fx, mfa_action(&fx, false, &["true"], &fx.project));
+    let run = waiting(&fx);
+    assert!(run.risk.contains("always ask"));
+    fx.broker.approvals().deny(run.id);
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+}
+
+#[test]
+fn mfa_missing_code_is_a_clear_refusal_without_a_question() {
+    let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
+    let response = client::send(
+        &fx.socket,
+        &fx.token,
+        mfa_action(&fx, false, &["true"], &fx.project),
+    )
+    .unwrap();
+    assert_eq!(code(&response), "no_code");
+    assert!(
+        response
+            .error
+            .unwrap()
+            .message
+            .contains("no one-time password")
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
+}

@@ -1275,7 +1275,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         &[]
     };
     let v23: &[&str] = if version >= 23 {
-        &["SELECT includes_codes FROM owner_answer LIMIT 0"]
+        &["SELECT includes_codes, includes_values FROM owner_answer LIMIT 0"]
     } else {
         &[]
     };

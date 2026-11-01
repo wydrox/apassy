@@ -594,7 +594,7 @@ fn known_state(
         return known_nothing(items.len());
     };
     let mut known = Known::default();
-    for (item, facts) in items.iter().zip(&checked.facts) {
+    for (index, (item, facts)) in items.iter().zip(&checked.facts).enumerate() {
         let scope = if facts.production {
             AnswerScope::Production
         } else {
@@ -605,7 +605,9 @@ fn known_state(
             .ok()
             .flatten();
         let unfit = answer.as_ref().and_then(|answer| {
-            if facts.includes_code && !answer.includes_codes {
+            if checked.authorization[index].includes_value && !answer.includes_values {
+                Some("the earlier answer covers codes only, not the stored secret")
+            } else if facts.includes_code && !answer.includes_codes {
                 Some("the earlier answer does not include one-time codes")
             } else if (facts.production || facts.unconfirmed) && certain != Some(action) {
                 Some("the rules are not certain of the kind of action")
@@ -1891,7 +1893,7 @@ fn save_answer(
         answered_on
     };
     let mut saved = 0;
-    for (item, facts) in items.iter().zip(&checked.facts) {
+    for (index, (item, facts)) in items.iter().zip(&checked.facts).enumerate() {
         let mut covered = hosts.to_vec();
         covered.extend(facts.known_hosts.iter().cloned());
         let result = if facts.production {
@@ -1907,6 +1909,7 @@ fn save_answer(
                     on,
                     &covered,
                     true,
+                    checked.authorization[index].includes_value,
                 )
             } else {
                 vault.allow_production(*item, &project, choice.action, on, &covered)
@@ -1920,6 +1923,7 @@ fn save_answer(
                 on,
                 &covered,
                 true,
+                checked.authorization[index].includes_value,
             )
         } else {
             vault.remember_answer(*item, &project, choice.action, on, &covered)

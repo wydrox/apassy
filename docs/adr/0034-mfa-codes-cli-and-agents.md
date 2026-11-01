@@ -59,7 +59,9 @@ An explicit Allow in project answer (or its production counterpart) saves
 `includes_codes` for each affected item, project, action and destination scope.
 The normal hard rules still apply, including Always ask even after that answer.
 
-Schema 23 adds `owner_answer.includes_codes` with default false. All pre-existing
+Schema 23 adds `owner_answer.includes_codes` with default false and
+`includes_values` with default true. A code-only answer never authorizes the stored
+password or token; selecting both explicitly covers both. All pre-existing
 answers remain password-only. A code-covering answer replaces its destination
 scope with the destinations shown in that question. A subsequent password-only
 answer replaces and clears code coverage; merging password-only destination

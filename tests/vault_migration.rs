@@ -2370,7 +2370,7 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
-    conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; DROP TABLE access_request_v1; DROP TABLE access_request_creation; DROP TABLE access_request_clock; DROP TABLE relay_connect_pending; DROP TABLE bouncer_scope")
+    conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values; DROP TABLE access_request_v1; DROP TABLE access_request_creation; DROP TABLE access_request_clock; DROP TABLE relay_connect_pending; DROP TABLE bouncer_scope")
         .unwrap();
     conn.execute_batch(SCHEMA19_ONLY).expect("drop schema 19");
     conn.execute_batch(V16_SQL).expect("frozen relay_device");

@@ -134,7 +134,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
 }
 
 #[test]
-fn code_protocol_refuses_downgraded_request_before_vault_or_execution() {
+fn code_protocol_version_is_distinct_and_survives_tracking() {
     use crate::agent::wire::{Action, CODE_WIRE_VERSION, WIRE_VERSION};
     let action = Action::Run {
         access_request_id: None,

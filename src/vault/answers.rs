@@ -83,6 +83,7 @@ pub struct OwnerAnswer {
     /// The destination hosts that the answer covers, lowercase, sorted.
     pub hosts: Vec<String>,
     pub includes_codes: bool,
+    pub includes_values: bool,
 }
 
 /// A host in the form that answers store and compare: lowercase, without a port and a
@@ -155,6 +156,7 @@ impl Vault {
             answered_on,
             hosts,
             false,
+            true,
         )
     }
 
@@ -178,6 +180,7 @@ impl Vault {
             answered_on,
             hosts,
             false,
+            true,
         )
     }
 
@@ -191,6 +194,7 @@ impl Vault {
         answered_on: &str,
         hosts: &[String],
         includes_codes: bool,
+        includes_values: bool,
     ) -> VaultResult<u64> {
         let item = to_sql_id(item_id)?;
         let key = checked(&project.key, MAX_PROJECT_KEY_BYTES)?;
@@ -229,11 +233,11 @@ impl Vault {
         tx.execute(
             "INSERT INTO owner_answer
                  (item_id, project_key, project_label, action_kind, scope, created_at, answered_on,
-                  hosts, includes_codes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  hosts, includes_codes, includes_values)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(item_id, project_key, action_kind, scope)
              DO UPDATE SET project_label = excluded.project_label, hosts = excluded.hosts,
-                 includes_codes = excluded.includes_codes",
+                 includes_codes = excluded.includes_codes, includes_values = excluded.includes_values",
             rusqlite::params![
                 item,
                 key.as_str(),
@@ -244,6 +248,7 @@ impl Vault {
                 on.as_str(),
                 all,
                 includes_codes,
+                includes_values,
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -273,7 +278,7 @@ impl Vault {
             .conn_ref()?
             .query_row(
                 "SELECT id, item_id, project_key, project_label, action_kind, scope,
-                     created_at, answered_on, hosts, includes_codes
+                     created_at, answered_on, hosts, includes_codes, includes_values
                  FROM owner_answer
                  WHERE item_id = ?1 AND project_key = ?2 AND action_kind = ?3 AND scope = ?4",
                 (item, project_key, action.as_str(), scope.as_str()),
@@ -291,7 +296,7 @@ impl Vault {
         let mut stmt = conn
             .prepare(
                 "SELECT id, item_id, project_key, project_label, action_kind, scope,
-                     created_at, answered_on, hosts, includes_codes
+                     created_at, answered_on, hosts, includes_codes, includes_values
                  FROM owner_answer WHERE item_id = ?1 ORDER BY id DESC",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -330,6 +335,7 @@ type AnswerRow = (
     String,
     String,
     bool,
+    bool,
 );
 
 fn parse_hosts(text: &str) -> VaultResult<Vec<String>> {
@@ -348,11 +354,12 @@ fn answer_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerRow> {
         row.get(7)?,
         row.get(8)?,
         row.get(9)?,
+        row.get(10)?,
     ))
 }
 
 fn parse_answer(row: AnswerRow) -> VaultResult<OwnerAnswer> {
-    let (id, item, key, label, action, scope, at, on, hosts, includes_codes) = row;
+    let (id, item, key, label, action, scope, at, on, hosts, includes_codes, includes_values) = row;
     Ok(OwnerAnswer {
         id: to_public_id(id)?,
         item_id: to_public_id(item)?,
@@ -363,7 +370,14 @@ fn parse_answer(row: AnswerRow) -> VaultResult<OwnerAnswer> {
         answered_on: on,
         hosts: parse_hosts(&hosts)?,
         includes_codes,
+        includes_values,
     })
+}
+
+/// Schema 23: old password answers never authorize a code.
+pub(super) fn add_code_schema(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
+    tx.execute_batch("ALTER TABLE owner_answer ADD COLUMN includes_codes INTEGER NOT NULL DEFAULT 0 CHECK (includes_codes IN (0,1)); ALTER TABLE owner_answer ADD COLUMN includes_values INTEGER NOT NULL DEFAULT 1 CHECK (includes_values IN (0,1)); UPDATE vault_meta SET schema_version = 23 WHERE id = 1; PRAGMA user_version = 23;")
+        .map_err(|_| err(VaultErrorKind::Storage))
 }
 
 #[cfg(test)]
@@ -470,12 +484,6 @@ mod tests {
     }
 }
 
-/// Schema 23: old password answers never authorize a code.
-pub(super) fn add_code_schema(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
-    tx.execute_batch("ALTER TABLE owner_answer ADD COLUMN includes_codes INTEGER NOT NULL DEFAULT 0 CHECK (includes_codes IN (0,1)); UPDATE vault_meta SET schema_version = 23 WHERE id = 1; PRAGMA user_version = 23;")
-        .map_err(|_| err(VaultErrorKind::Storage))
-}
-
 #[cfg(test)]
 mod code_scope_tests {
     use super::*;
@@ -517,7 +525,7 @@ mod code_scope_tests {
         v.lock().unwrap();
         let conn = rusqlite::Connection::open(&file).unwrap();
         conn.pragma_update(None, "key", pass).unwrap();
-        conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; UPDATE vault_meta SET schema_version=22; PRAGMA user_version=22;").unwrap();
+        conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values; UPDATE vault_meta SET schema_version=22; PRAGMA user_version=22;").unwrap();
         conn.close().unwrap();
         v.unlock(pass).unwrap();
         let answer = v
@@ -533,6 +541,7 @@ mod code_scope_tests {
             "test",
             &["code.example".into()],
             true,
+            false,
         )
         .unwrap();
         let answer = v
@@ -540,6 +549,7 @@ mod code_scope_tests {
             .unwrap()
             .unwrap();
         assert!(answer.includes_codes);
+        assert!(!answer.includes_values);
         assert_eq!(answer.hosts, vec!["code.example"]);
         v.remember_answer(
             item,
