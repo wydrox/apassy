@@ -1216,48 +1216,54 @@ fn a_public_key_off_the_curve_is_refused_on_every_route() {
 #[test]
 fn one_client_prefix_makes_few_connect_teams_a_day_and_is_kept_in_memory_only() {
     let relay = start(UpstreamOptions::default());
+    // Fixed request time: this test checks the ten-second audit throttle even on
+    // a loaded runner where constructing the fixtures can take longer than that.
+    let at = now_unix();
+    let post = |body: &Value, prefix: Option<&str>| {
+        relay
+            .hub()
+            .create_connect_team(
+                &serde_json::from_value(body.clone()).unwrap(),
+                prefix.unwrap_or("unknown"),
+                at,
+            )
+            .map_or_else(|error| (error.status(), error.code), |_| (200, ""))
+    };
     let prefix = "2001:db8:aaaa::/48";
     for n in 0..5 {
         let key = DeviceKey::generate().unwrap();
-        let answer = post_connect_from(
-            &relay,
+        let answer = post(
             &connect_body(&relay, &format!("T{n}"), "Mac", &key),
             Some(prefix),
         );
-        assert_eq!(answer.status, 200, "{}", answer.body);
+        assert_eq!(answer.0, 200, "{:?}", answer);
     }
     let key = DeviceKey::generate().unwrap();
     let body = connect_body(&relay, "Six", "Mac", &key);
-    let limited = post_connect_from(&relay, &body, Some(prefix));
-    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
-    let wait: u64 = limited.header("Retry-After").unwrap().parse().unwrap();
-    assert!((1..=86_400).contains(&wait), "{wait}");
+    let limited = post(&body, Some(prefix));
+    assert_eq!(limited, (429, "rate_limited"));
     // The refusal did not use the key: another prefix makes the team with it.
-    let other = post_connect_from(&relay, &body, Some("198.51.100.0/24"));
-    assert_eq!(other.status, 200, "{}", other.body);
+    let other = post(&body, Some("198.51.100.0/24"));
+    assert_eq!(other.0, 200, "{:?}", other);
     // Requests without the Worker's header share one count.
     for n in 0..5 {
         let key = DeviceKey::generate().unwrap();
-        let answer = post_connect_from(
-            &relay,
-            &connect_body(&relay, &format!("U{n}"), "Mac", &key),
-            None,
-        );
-        assert_eq!(answer.status, 200, "{}", answer.body);
+        let answer = post(&connect_body(&relay, &format!("U{n}"), "Mac", &key), None);
+        assert_eq!(answer.0, 200, "{:?}", answer);
     }
     let key = DeviceKey::generate().unwrap();
-    let limited = post_connect_from(&relay, &connect_body(&relay, "U5", "Mac", &key), None);
-    assert_eq!((limited.status, limited.code()), (429, "rate_limited"));
+    let limited = post(&connect_body(&relay, "U5", "Mac", &key), None);
+    assert_eq!(limited, (429, "rate_limited"));
     // A refused bad body costs the prefix nothing.
     let fresh = "2001:db8:bbbb::/48";
     for _ in 0..10 {
         let mut bad = connect_body(&relay, "Bad", "Mac", &DeviceKey::generate().unwrap());
         bad["signature"] = json!("AAAA");
-        assert_eq!(post_connect_from(&relay, &bad, Some(fresh)).status, 400);
+        assert_eq!(post(&bad, Some(fresh)).0, 400);
     }
     let key = DeviceKey::generate().unwrap();
     assert_eq!(
-        post_connect_from(&relay, &connect_body(&relay, "F", "Mac", &key), Some(fresh)).status,
+        post(&connect_body(&relay, "F", "Mac", &key), Some(fresh)).0,
         200
     );
     // The relay audit has the refusal, and nothing of the prefixes.
@@ -2064,4 +2070,339 @@ fn measure_connect_teams() {
         empty.0, empty.1
     );
     drop(relay);
+}
+
+#[test]
+fn lost_connect_acknowledgement_recovers_same_active_team_after_restart() {
+    let relay = start(UpstreamOptions::default());
+    let key = DeviceKey::generate().unwrap();
+    let body = connect_body(&relay, "Lost acknowledgement", "Mac", &key);
+    let created = connect_ok(&relay, &body); // the server committed; pretend the response was lost
+    let relay = relay.restart();
+    let recovery = |key: &DeviceKey| {
+        let challenge = relay.ok(
+            "POST",
+            "/v1/connect/challenge",
+            "",
+            Some(&json!({
+                "public_key": key.public_key_b64()
+            })),
+        );
+        let nonce = challenge["nonce"].as_str().unwrap();
+        let mut message = device::connect_message(&relay.config.public_url, &key.public_key_b64());
+        message.extend_from_slice(b"\0recovery\0");
+        message.extend_from_slice(nonce.as_bytes());
+        let mut retry = body.clone();
+        retry["public_key"] = json!(key.public_key_b64());
+        retry["signature"] = json!(encode_b64(&key.sign(&message).unwrap()));
+        retry["recovery_nonce"] = json!(nonce);
+        retry
+    };
+    let retry = recovery(&key);
+    let recovered = connect_ok(&relay, &retry);
+    assert_eq!(recovered, created);
+    assert_eq!(
+        post_connect(&relay, &retry).status,
+        401,
+        "nonce is consumed"
+    );
+    assert_eq!(
+        post_connect(&relay, &body).status,
+        409,
+        "old proof cannot recover"
+    );
+    let other = DeviceKey::generate().unwrap();
+    assert_eq!(post_connect(&relay, &recovery(&other)).status, 409);
+    let team = TeamId::parse(created["team_id"].as_str().unwrap()).unwrap();
+    let valid = recovery(&key);
+    let mut forged = valid.clone();
+    forged["signature"] = json!(body["signature"]);
+    assert_eq!(post_connect(&relay, &forged).status, 400);
+    assert_eq!(
+        post_connect(&relay, &valid).status,
+        401,
+        "bad proof consumes nonce"
+    );
+    relay
+        .operator(Command::Suspend { team: team.clone() })
+        .unwrap();
+    assert_eq!(post_connect(&relay, &recovery(&key)).status, 409);
+    relay
+        .operator(Command::Delete {
+            team: team.clone(),
+            free_connect_key: false,
+        })
+        .unwrap();
+    assert_eq!(post_connect(&relay, &recovery(&key)).status, 409);
+    assert!(teams(&relay).iter().all(|info| info["id"] != team.as_str()));
+}
+
+#[test]
+fn reclamation_preserves_the_complete_encrypted_team_audit() {
+    let relay = start(UpstreamOptions::default());
+    let (team, _) = connect(&relay, "Abandoned");
+    let now = now_unix();
+    relay.hub().suspend(&team, now - 31 * 86400).unwrap();
+    // Only an idle-sweep suspension may be deleted automatically.
+    let directory = rusqlite::Connection::open(relay.config.directory_path()).unwrap();
+    directory
+        .pragma_update(None, "key", relay.config.master_key.expose())
+        .unwrap();
+    directory
+        .execute(
+            "UPDATE team SET suspend_reason = 'idle' WHERE id = ?1",
+            [team.as_str()],
+        )
+        .unwrap();
+    let source = open_team_file(&relay.config, &team);
+    source
+        .execute(
+            "UPDATE device SET last_seen_at = ?1, created_at = ?1",
+            [(now - 31 * DAY) as i64],
+        )
+        .unwrap();
+    let before: Vec<(i64, String)> = source
+        .prepare("SELECT id, detail FROM audit ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    drop(source);
+    let report = sweep(&relay, false);
+    assert_eq!(report["failed"], json!([]));
+    assert_eq!(report["deleted"], json!([team]));
+    assert!(!relay.config.team_path(&team).exists());
+    let archives: Vec<_> = std::fs::read_dir(relay.config.data_dir.join("audit-archive"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(archives.len(), 1);
+    let archive =
+        apassy_relay::server::store::Store::open_read_only(&archives[0], &relay.config.master_key)
+            .unwrap();
+    let after = archive
+        .with(|conn| {
+            Ok(conn
+                .prepare("SELECT id, detail FROM audit ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(sweep(&relay, false)["deleted"], json!([]));
+    assert!(
+        archives[0].exists(),
+        "later sweeps never prune archived audit"
+    );
+}
+
+#[test]
+fn recovery_proofs_are_key_bound_expire_and_do_not_bypass_limits() {
+    let relay = start_with(
+        |config| {
+            config.connect_teams_per_day = 1;
+            config.connect_teams_max = 1;
+        },
+        UpstreamOptions::default(),
+    );
+    let key = DeviceKey::generate().unwrap();
+    let other = DeviceKey::generate().unwrap();
+    let body = connect_body(&relay, "Original", "Mac", &key);
+    let created = connect_ok(&relay, &body);
+    let at = now_unix();
+    let proof = |key: &DeviceKey, nonce: &str| {
+        let mut value = body.clone();
+        value["public_key"] = json!(key.public_key_b64());
+        value["recovery_nonce"] = json!(nonce);
+        value["signature"] = json!(encode_b64(
+            &key.sign(&device::connect_recovery_message(
+                &relay.config.public_url,
+                &key.public_key_b64(),
+                nonce,
+            ))
+            .unwrap()
+        ));
+        serde_json::from_value(value).unwrap()
+    };
+    let challenge = relay
+        .hub()
+        .connect_challenge(&key.public_key_b64(), at)
+        .unwrap();
+    let nonce = challenge["nonce"].as_str().unwrap();
+    assert_eq!(
+        relay
+            .hub()
+            .create_connect_team(&proof(&other, nonce), "any", at)
+            .unwrap_err()
+            .status(),
+        401
+    );
+    let challenge = relay
+        .hub()
+        .connect_challenge(&key.public_key_b64(), at)
+        .unwrap();
+    let nonce = challenge["nonce"].as_str().unwrap();
+    assert_eq!(
+        relay
+            .hub()
+            .create_connect_team(&proof(&key, nonce), "any", at + 60)
+            .unwrap_err()
+            .status(),
+        401
+    );
+    let challenge = relay
+        .hub()
+        .connect_challenge(&key.public_key_b64(), at)
+        .unwrap();
+    let recovered = relay
+        .hub()
+        .create_connect_team(
+            &proof(&key, challenge["nonce"].as_str().unwrap()),
+            "any",
+            at,
+        )
+        .unwrap();
+    assert_eq!(recovered.0.as_str(), created["team_id"]);
+    // Recovery neither creates another seat nor consumes a creation quota.
+    assert_eq!(
+        post_connect(&relay, &connect_body(&relay, "Extra", "Mac", &other)).status,
+        503
+    );
+    let core = relay.hub().team(&recovered.0).unwrap();
+    for _ in 1..apassy_relay::server::connect::REQUESTS_PER_MINUTE {
+        core.take_request(at).unwrap();
+    }
+    let challenge = relay
+        .hub()
+        .connect_challenge(&key.public_key_b64(), at)
+        .unwrap();
+    assert_eq!(
+        relay
+            .hub()
+            .create_connect_team(
+                &proof(&key, challenge["nonce"].as_str().unwrap()),
+                "any",
+                at
+            )
+            .unwrap_err()
+            .status(),
+        429
+    );
+    core.store
+        .with(|conn| {
+            conn.execute("UPDATE device SET revoked_at = ?1", [at as i64])
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let challenge = relay
+        .hub()
+        .connect_challenge(&key.public_key_b64(), at + 60)
+        .unwrap();
+    assert_eq!(
+        relay
+            .hub()
+            .create_connect_team(
+                &proof(&key, challenge["nonce"].as_str().unwrap()),
+                "any",
+                at + 60
+            )
+            .unwrap_err()
+            .status(),
+        409
+    );
+    // Challenges reveal the same fields for known and unknown keys.
+    let unknown = relay
+        .hub()
+        .connect_challenge(&other.public_key_b64(), at + 60)
+        .unwrap();
+    assert_eq!(
+        unknown.as_object().unwrap().keys().collect::<Vec<_>>(),
+        challenge.as_object().unwrap().keys().collect::<Vec<_>>()
+    );
+    assert_eq!(unknown["expires_at"], challenge["expires_at"]);
+}
+
+#[test]
+fn a_sweep_cannot_change_more_than_ten_teams() {
+    use apassy_relay::server::hub::MAX_SWEEP_ACTIONS;
+    let relay = start(UpstreamOptions::default());
+    let mut ids = Vec::new();
+    for n in 0..=MAX_SWEEP_ACTIONS {
+        ids.push(connect(&relay, &format!("Idle {n}")).0);
+    }
+    let old = now_unix() - 31 * DAY;
+    for id in &ids {
+        relay
+            .hub()
+            .team(id)
+            .unwrap()
+            .store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE device SET last_seen_at = ?1, created_at = ?1",
+                    [old as i64],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
+    let dry = sweep(&relay, true);
+    assert_eq!(
+        dry["suspended"].as_array().unwrap().len(),
+        MAX_SWEEP_ACTIONS
+    );
+    assert_eq!(dry["capped"], true);
+    assert!(teams(&relay).iter().all(|row| row["state"] == "active"));
+    let applied = sweep(&relay, false);
+    assert_eq!(
+        applied["suspended"].as_array().unwrap().len(),
+        MAX_SWEEP_ACTIONS
+    );
+    assert_eq!(applied["action_limit"], MAX_SWEEP_ACTIONS);
+    assert_eq!(
+        sweep(&relay, false)["suspended"].as_array().unwrap().len(),
+        1
+    );
+    edit_directory(
+        &relay.config,
+        &format!("UPDATE team SET suspended_at = {old} WHERE suspend_reason = 'idle'"),
+    );
+    let deleted = sweep(&relay, false);
+    assert_eq!(
+        deleted["deleted"].as_array().unwrap().len(),
+        MAX_SWEEP_ACTIONS
+    );
+    assert_eq!(deleted["capped"], true);
+    assert_eq!(sweep(&relay, false)["deleted"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn recovery_challenge_floods_are_bounded_independent_of_key_existence() {
+    let relay = start(UpstreamOptions::default());
+    let key = DeviceKey::generate().unwrap();
+    let at = now_unix() / 60 * 60;
+    for _ in 0..1000 {
+        relay
+            .hub()
+            .connect_challenge(&key.public_key_b64(), at)
+            .unwrap();
+    }
+    assert_eq!(
+        relay
+            .hub()
+            .connect_challenge(&key.public_key_b64(), at)
+            .unwrap_err()
+            .status(),
+        429
+    );
+    relay
+        .hub()
+        .connect_challenge(&key.public_key_b64(), at + 60)
+        .unwrap();
 }

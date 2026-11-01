@@ -562,7 +562,8 @@ pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> R
     })?;
     let (seq, targets) = outcome.inspect_err(|error| refused(core, now, device, error))?;
     core.notify.notify();
-    core.push.trigger(core, targets, request.expires_at, now);
+    core.push
+        .trigger(core, new.qid.as_str(), targets, request.expires_at, now);
     Ok(json!({
         "qid": new.qid.as_str(),
         "seq": seq,
@@ -937,6 +938,47 @@ pub fn settle(
         core.notify.notify();
     }
     Ok(json!({"qid": qid.as_str(), "state": "settled", "settled_at": settled_at}))
+}
+
+/// Best-effort restart replay from existing open questions: no schema/outbox change.
+/// APNs' constant collapse id coalesces duplicates after a restart.
+pub fn recover_push(core: &Core, now: u64) -> RelayResult<()> {
+    if core.push.topic().is_none() {
+        return Ok(());
+    }
+    let pending = core.store.with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT qid, device_id, member_id, to_approvers, expires_at FROM question \
+             WHERE state = 'open' AND expires_at > ?1 \
+             AND NOT EXISTS (SELECT 1 FROM question_answer a WHERE a.qid = question.qid) \
+             ORDER BY created_at DESC LIMIT 256",
+            )
+            .map_err(db)?;
+        let rows = statement
+            .query_map([to_i(now)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    DeviceId(to_u(row.get(1)?)),
+                    MemberId(to_u(row.get(2)?)),
+                    row.get::<_, bool>(3)?,
+                    to_u(row.get(4)?),
+                ))
+            })
+            .map_err(db)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db)?;
+        let mut pending = Vec::new();
+        for (qid, device, member, approvers, expiry) in rows {
+            let routing = routing_set(conn, device, member, approvers)?;
+            pending.push((qid, expiry, push_targets(conn, &routing)?));
+        }
+        Ok(pending)
+    })?;
+    for (qid, expiry, targets) in pending {
+        core.push.trigger(core, &qid, targets, expiry, now);
+    }
+    Ok(())
 }
 
 /// `PUT /v1/push/token`: one token per device, replaced on each call; clears a failed

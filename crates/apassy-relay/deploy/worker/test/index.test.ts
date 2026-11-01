@@ -975,6 +975,18 @@ describe("connect rate limit", () => {
     }
   });
 
+  it("rate limits Connect challenges without consuming the one-per-minute creation guard", async () => {
+    const used: string[] = [];
+    const response = await call("/v1/connect/challenge", { method: "POST", body: "{}" }, {
+      AUTH_LIMITER: { async limit({ key }: { key: string }) { used.push(key); return { success: false }; } },
+      CONNECT_LIMITER: { async limit() { throw new Error("creation guard must not be used"); } },
+    });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "60");
+    assert.deepEqual(used, ["unknown"]);
+    assert.equal(seen.length, 0);
+  });
+
   it("does not use CONNECT_LIMITER for other methods or paths", async () => {
     for (const [method, path, other] of [
       ["GET", "/v1/connect", ""],

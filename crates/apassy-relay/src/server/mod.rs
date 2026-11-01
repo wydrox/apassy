@@ -153,7 +153,7 @@ pub struct Core {
     pub(crate) cap_warning: Mutex<(audit::CapLevel, u64)>,
     stop: Arc<AtomicBool>,
     /// Set when the team is suspended or the relay stops.
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
 }
 
 impl Core {

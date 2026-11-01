@@ -308,6 +308,17 @@ pub struct ConnectCreate {
     /// The proof that the caller holds the key: base64url of an ECDSA P-256 SHA-256
     /// signature (ASN.1 DER) of `device::connect_message(origin, public_key)`.
     pub signature: String,
+    /// A fresh nonce from `POST /v1/connect/challenge`. With it, `signature` signs
+    /// `device::connect_recovery_message`; only an existing active team is returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_nonce: Option<String>,
+}
+
+/// An existence-independent recovery challenge; no team id is required or returned.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectChallenge {
+    pub public_key: String,
 }
 
 /// `POST /v1/join` (no bearer; edge secret only). Read side. Since section 23 a join

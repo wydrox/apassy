@@ -1372,7 +1372,13 @@ The answer is `TeamCreated` with `kind`:
 
 There is no secret in it: the device signs in (section 23.3) with its key and the `team_id`. `POST /v1/teams` is unchanged: its answer has no `kind`.
 
-**A lost answer.** A call whose answer does not arrive may have made the team. The same key then gets 409, and the relay never tells which team a key made. The app makes a new device key and calls again; the first team stays with one device and no sign-in, and the sweep of 26.5 removes it.
+**A lost answer.** Save the original private key before sending. The old creation
+proof still gets 409; recover with a fresh `POST /v1/connect/challenge` nonce and
+`connect_recovery_message` signature as specified in section 28 and OPERATIONS 22.
+Recovery returns only the original active identifiers; it never creates/resumes a
+team, changes names, clears the key tombstone or issues an access token. Then use
+the existing device sign-in challenge/token flow. A 404 challenge route means an
+older server: keep the pending key for operator recovery, do not rotate it blindly.
 
 **Enumeration.** No route lists, reads, or names Connect teams (`GET /v1/connect` and `GET /v1/teams` are 405). The only answer that depends on stored state before the team exists is the 409 for a key that made a team, which is the same for every such key and names no team; with the proof of key, only the holder of the private key can get it. A team id of a Connect team behaves as any team id (section 22: public, 401 for an unknown or suspended team).
 
@@ -1688,3 +1694,27 @@ The way back to the schema 5 image (docs/OPERATIONS.md 21.3) copies each `teams/
 - **A team made after the migration** has no copy and is version 6: the old image cannot open it. A Connect team's `connect_key` stays in `relay.db` (26.2), so its device would get 409 `connect_key_used` at its next `POST /v1/connect`. `admin delete ID --free-connect-key` with the new image still up deletes such a team and frees its key (27.10).
 
 So the operator turns new Connect teams off and runs `apassy-relay rollback-check` before anything is stopped, and again as the gate with the relay stopped, right before the copy, which copies only the teams with a copy that the gate listed. A feed limit stored in `relay.db` (`feed_limits_stored`) is set back to the preset with the new image, never by restoring `relay.db` from a backup (that drops the teams made since, and the old image's start removes their files as orphans). When it names any revocation or change, the operator fixes forward (a new image from the schema 6 branch with the fix) rather than rolling back. When a rollback is the only way, the operator suspends each named Connect team with the new image still up (the suspension is in `relay.db`, which the rollback keeps), and the owner of each named operator team re-applies each named change right after the old image starts, before the team's devices are told the relay is back. The command reads the files without the relay, so it also runs when the new image cannot serve, as long as its binary starts.
+
+
+## 28. Audit reliability addendum (F06–F09)
+
+This supersedes the permanent-retry-refusal, shared FIFO/one-shot push and manual
+sweep behavior in sections 25–26. See OPERATIONS section 22 for exact wire messages,
+queue/TTL limits, private readiness, archive retention and rollout/rollback.
+
+- Connect creation stays compatible. A fresh, one-use 60-second challenge at
+  `POST /v1/connect/challenge` enables recovery of the same active team at
+  `POST /v1/connect` with optional `recovery_nonce` and a domain-separated signature.
+  Old creation proof replays remain 409; suspended/deleted/revoked identities cannot
+  recover or revive. No schema change (6/1003).
+- Push is bounded per question/team with round-robin fairness, four senders,
+  transient retries/backoff inside TTL, live identity/token checks and bounded
+  open-question replay after restart. Final bad tokens stop; overflow/restart
+  replay remains best effort, with possible collapse-id-coalesced duplicates.
+- Public health is liveness only. Private `admin readiness` checks active team
+  readability and caps, returns only to the filesystem-authorized operator and
+  exits nonzero on an unavailable active team.
+- `admin connect-sweep` defaults to dry-run; `--apply` enables the existing 30-day
+  idle suspension plus 30-day deletion policy. Packaged systemd units default to
+  dry-run and are not installed automatically. Automatic deletion first preserves
+  an immutable master-key-encrypted DB snapshot including all append-only audit.
