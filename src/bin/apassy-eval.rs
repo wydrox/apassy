@@ -156,18 +156,35 @@ impl Proxy {
 }
 
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "tests/evals/bouncer-default-v1.jsonl".to_owned());
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--help"] || args == ["-h"] {
+        println!(
+            "Usage: apassy-eval [FIXTURE.jsonl]\nRequires a live Laya model (APASSY_EVAL_MODEL); synthetic vault only, no commands execute.\nAPASSY_EVAL_DUMP selects optional JSONL output. Exit: 0 pass, 1 evaluation failure, 2 usage/input.\n--help  --version"
+        );
+        return;
+    }
+    if args == ["--version"] {
+        println!("apassy-eval {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.len() > 1 || args.first().is_some_and(|a| a.starts_with('-')) {
+        eprintln!("Usage: apassy-eval [FIXTURE.jsonl]");
+        std::process::exit(2);
+    }
+    let path = args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("tests/evals/bouncer-default-v1.jsonl");
     let model_url =
         std::env::var("APASSY_EVAL_MODEL").unwrap_or_else(|_| "http://127.0.0.1:18771".to_owned());
-
-    let text = std::fs::read_to_string(&path).expect("read the held-out set");
-    let cases: Vec<Value> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect("case json"))
-        .collect();
+    if parse_destination(&model_url).is_err() || BouncerClient::new(&model_url).is_err() {
+        eprintln!("apassy-eval: APASSY_EVAL_MODEL must be a valid loopback model URL");
+        std::process::exit(2);
+    }
+    let cases = load_cases(path).unwrap_or_else(|message| {
+        eprintln!("apassy-eval: {message}");
+        std::process::exit(2)
+    });
     eprintln!("loaded {} cases from {path}", cases.len());
     if cases.is_empty() {
         eprintln!("ERROR: empty evaluation set");
@@ -175,8 +192,14 @@ fn main() {
     }
 
     // A throwaway vault in a temp directory. Synthetic secrets only.
-    let tmp = std::env::temp_dir().join(format!("apassy-eval-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).expect("tmp");
+    let temp = tempfile::Builder::new()
+        .prefix("apassy-eval-")
+        .tempdir()
+        .unwrap_or_else(|_| {
+            eprintln!("apassy-eval: cannot create temporary directory");
+            std::process::exit(1)
+        });
+    let tmp = temp.path();
     let project = tmp.join("projects");
     std::fs::create_dir_all(&project).expect("project");
     let project = std::fs::canonicalize(&project).expect("canonical project");
@@ -284,7 +307,6 @@ fn main() {
         write_dump(&dump, &cases, &runs);
     }
     let failed = runs.iter().any(|run| !gate(&cases, run).passes());
-    let _ = std::fs::remove_dir_all(&tmp);
     if cases.is_empty() || failed {
         eprintln!("FAIL: unsafe allowance, harness error, or missing intended model inference");
         std::process::exit(1);
@@ -367,7 +389,10 @@ fn write_dump(path: &str, cases: &[Value], runs: &[RunResult]) {
             out.push('\n');
         }
     }
-    std::fs::write(path, out).expect("write the dump");
+    if std::fs::write(path, out).is_err() {
+        eprintln!("apassy-eval: cannot write dump");
+        std::process::exit(1);
+    }
     eprintln!("dump: {path}");
 }
 
@@ -816,4 +841,61 @@ fn print_latency(name: &str, values: &mut [f64]) {
         pct(0.95),
         values[values.len() - 1]
     );
+}
+
+fn load_cases(path: &str) -> Result<Vec<Value>, String> {
+    let file = std::fs::File::open(path).map_err(|_| "cannot open fixture")?;
+    let mut text = String::new();
+    file.take(8 * 1024 * 1024 + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| "cannot read fixture")?;
+    if text.len() > 8 * 1024 * 1024 {
+        return Err("fixture exceeds 8 MiB".into());
+    }
+    let mut cases = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let v: Value = serde_json::from_str(line).map_err(|_| "invalid fixture JSON")?;
+        if !v["command"].is_string()
+            || !v["env_names"].as_array().is_some_and(|a| {
+                a.iter().all(|x| {
+                    x.as_str().is_some_and(|s| {
+                        apassy::vault::checked_env_name(&s.to_ascii_uppercase()).is_ok()
+                    })
+                })
+            })
+        {
+            return Err("fixture requires command and uppercase env_names".into());
+        }
+        let d = &v["declaration"];
+        if Environment::parse(d["environment"].as_str().unwrap_or("staging")).is_err()
+            || RiskLevel::parse(d["risk"].as_str().unwrap_or("medium")).is_err()
+            || Scope::parse(d["scope"].as_str().unwrap_or("read-write")).is_err()
+            || Reversibility::parse(d["reversibility"].as_str().unwrap_or("reversible")).is_err()
+        {
+            return Err("invalid declaration".into());
+        }
+        cases.push(v);
+    }
+    Ok(cases)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn invalid_fixture_is_a_bounded_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        for text in [
+            "not JSON",
+            "{}",
+            r#"{"command":"true","env_names":[false]}"#,
+            r#"{"command":"true","env_names":[],"declaration":{"risk":"invalid"}}"#,
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(load_cases(path.to_str().unwrap()).is_err());
+        }
+        std::fs::write(&path, vec![b'x'; 8 * 1024 * 1024 + 1]).unwrap();
+        assert!(load_cases(path.to_str().unwrap()).is_err());
+    }
 }

@@ -40,6 +40,10 @@ const MAX_LOCAL_PACK_BYTES: u64 = 1024 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--version"] {
+        println!("apassy-packs {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let mut args = args.iter();
     match args.next().map(String::as_str) {
         Some("validate") => {}
@@ -49,7 +53,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!("{USAGE}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(2);
         }
     }
     let mut local = false;
@@ -63,14 +67,14 @@ fn main() -> ExitCode {
             }
             other if other.starts_with('-') => {
                 eprintln!("unknown option `{other}`\n{USAGE}");
-                return ExitCode::FAILURE;
+                return ExitCode::from(2);
             }
             _ => files.push(arg.clone()),
         }
     }
     if files.is_empty() {
         eprintln!("{USAGE}");
-        return ExitCode::FAILURE;
+        return ExitCode::from(2);
     }
     let mut failed = 0usize;
     for file in &files {
@@ -100,6 +104,9 @@ fn check(path: &Path, local: bool) -> Result<String, String> {
     let size = std::fs::metadata(path)
         .map_err(|error| format!("cannot read: {error}"))?
         .len();
+    if size > MAX_LOCAL_PACK_BYTES {
+        return Err("pack exceeds the 1 MiB input limit".into());
+    }
     let text = std::fs::read_to_string(path).map_err(|error| format!("cannot read: {error}"))?;
     let value: Value =
         serde_json::from_str(&text).map_err(|error| format!("not valid JSON: {error}"))?;
