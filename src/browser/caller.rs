@@ -23,6 +23,8 @@
 //! Every failure refuses the request: a missing or unsigned guard, a guard that does
 //! not answer `ok` within the time limit, a source build. Debug builds may name another
 //! guard with [`GUARD_ENV`]; release builds have no override.
+//! Only status 2 with `unsafe-switch\n` names a refusal category. The process
+//! that set the switch already knows it; this reveals nothing about the vault.
 
 use std::io::Read;
 use std::os::fd::OwnedFd;
@@ -83,8 +85,7 @@ pub fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
     run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy)))
 }
 
-/// The error of every failed check. It names no reason: the reason stays with the
-/// guard.
+/// Generic refusal: only the unsafe-switch category is disclosed separately.
 fn refused() -> WireError {
     WireError::new(
         "unsupported",
@@ -112,8 +113,16 @@ fn run_guard(check: Check, stdin: Stdio) -> Result<(), WireError> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| refused())?;
-    match finish(child, GUARD_TIMEOUT) {
-        Some((true, output)) if output == GUARD_OK => Ok(()),
+    parse_answer(finish(child, GUARD_TIMEOUT))
+}
+
+fn parse_answer(answer: Option<(Option<i32>, Vec<u8>)>) -> Result<(), WireError> {
+    match answer {
+        Some((Some(0), output)) if output == GUARD_OK => Ok(()),
+        Some((Some(2), output)) if output == b"unsafe-switch\n" => Err(WireError::new(
+            "unsupported",
+            "This browser was started with remote debugging or a test extension, so other programs can control it. Apassy doesn't fill passkeys or codes there. Quit the browser and open it normally.",
+        )),
         _ => Err(refused()),
     }
 }
@@ -174,14 +183,14 @@ fn verify_guard(path: &Path) -> Result<(), WireError> {
         .spawn()
         .map_err(|_| refused())?;
     match finish(child, CODESIGN_TIMEOUT) {
-        Some((true, _)) => Ok(()),
+        Some((Some(0), _)) => Ok(()),
         _ => Err(refused()),
     }
 }
 
-/// Wait for `child` until `timeout`. Returns its success and at most 64 bytes of its
+/// Wait for `child` until `timeout`. Returns its exit code and at most 64 bytes of its
 /// standard output, or `None` when it did not exit in time (it is then killed).
-fn finish(mut child: Child, timeout: Duration) -> Option<(bool, Vec<u8>)> {
+fn finish(mut child: Child, timeout: Duration) -> Option<(Option<i32>, Vec<u8>)> {
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -199,12 +208,35 @@ fn finish(mut child: Child, timeout: Duration) -> Option<(bool, Vec<u8>)> {
         // The child exited, so the pipe ends; a larger answer is not `ok`.
         stdout.take(64).read_to_end(&mut output).ok()?;
     }
-    Some((status.success(), output))
+    Some((status.code(), output))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers_disclose_only_the_exact_unsafe_switch_category() {
+        assert!(parse_answer(Some((Some(0), b"ok\n".to_vec()))).is_ok());
+        let unsafe_error = parse_answer(Some((Some(2), b"unsafe-switch\n".to_vec()))).unwrap_err();
+        assert_eq!(unsafe_error.code, "unsupported");
+        assert!(unsafe_error.message.contains("Quit the browser and open it normally."));
+        for answer in [
+            None, // timeout
+            Some((Some(1), vec![])),
+            Some((Some(0), vec![])),
+            Some((Some(2), b"garbage\n".to_vec())),
+            Some((Some(1), b"unsafe-switch\n".to_vec())),
+            Some((Some(0), b"unsafe-switch\n".to_vec())),
+            Some((Some(2), b"unsafe-switch".to_vec())),
+            Some((Some(2), b"ok\n".to_vec())),
+            Some((None, b"unsafe-switch\n".to_vec())),
+        ] {
+            let error = parse_answer(answer).unwrap_err();
+            assert_eq!(error.code, refused().code);
+            assert_eq!(error.message, refused().message);
+        }
+    }
 
     #[test]
     fn the_guard_is_in_the_bundle_of_the_program() {
@@ -251,8 +283,8 @@ mod tests {
                 .unwrap();
             finish(child, Duration::from_secs(5))
         };
-        assert_eq!(run("echo ok"), Some((true, b"ok\n".to_vec())));
-        assert_eq!(run("echo ok; exit 1"), Some((false, b"ok\n".to_vec())));
+        assert_eq!(run("echo ok"), Some((Some(0), b"ok\n".to_vec())));
+        assert_eq!(run("echo ok; exit 1"), Some((Some(1), b"ok\n".to_vec())));
         let slow = Instant::now();
         let child = Command::new("/bin/sleep")
             .arg("30")
