@@ -18,6 +18,7 @@ pub mod finetune;
 pub mod http;
 pub mod learning;
 pub mod model_server;
+mod operations;
 pub mod packs;
 pub mod patterns;
 pub mod profile;

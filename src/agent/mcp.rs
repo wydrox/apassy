@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -25,7 +27,9 @@ pub const TOOL_ASK_OWNER_FOR_CREDENTIAL: &str = "apassy_ask_owner_for_credential
 pub const TOOL_UPDATE_CREDENTIAL: &str = "apassy_update_credential";
 pub const TOOL_DESCRIBE_CREDENTIAL: &str = "apassy_describe_credential";
 /// A call that can wait for the owner (5 minutes) or for a command reads this long.
-const WAITING_CALL_TIMEOUT: Duration = Duration::from_secs(600);
+const WAITING_CALL_TIMEOUT: Duration = Duration::from_secs(650);
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Claude Code sets this variable for its stdio MCP servers to the session ID. The
@@ -66,39 +70,149 @@ impl AdapterConfig {
 
 /// Serve MCP over stdin and stdout until stdin closes.
 pub fn run_stdio(config: &AdapterConfig) -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
-    let mut line = String::new();
-    let mut input = stdin.lock();
-    loop {
-        line.clear();
-        let read = match read_frame(&mut input, &mut line) {
-            Ok(read) => read,
-            Err(err) => {
-                if err.kind() == io::ErrorKind::InvalidData {
-                    let reply = rpc_error(&Value::Null, -32600, &err.to_string());
-                    serde_json::to_writer(&mut stdout, &reply).map_err(io::Error::other)?;
-                    stdout.write_all(b"\n")?;
-                    stdout.flush()?;
+    serve(config, io::stdin().lock(), io::stdout(), PROGRESS_INTERVAL)
+}
+
+fn write_message(output: &Mutex<impl Write>, message: &Value) -> io::Result<()> {
+    // One buffer per frame avoids flooding a Unix stream's send queue with
+    // serde's tiny writes while EOF waits for the remaining workers to drain.
+    let mut frame = zeroize::Zeroizing::new(serde_json::to_vec(message).map_err(io::Error::other)?);
+    frame.push(b'\n');
+    let mut writer = output
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    writer.write_all(&frame)?;
+    writer.flush()
+}
+
+// Three mutating calls plus a reserved read slot. No unbounded input queue.
+fn serve(
+    config: &AdapterConfig,
+    mut input: impl BufRead,
+    output: impl Write + Send,
+    cadence: Duration,
+) -> io::Result<()> {
+    let output = Mutex::new(output);
+    let active = Mutex::new(BTreeMap::<String, (Arc<AtomicBool>, bool)>::new());
+    let drained = std::sync::Condvar::new();
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        let result = (|| {
+            let mut line = String::new();
+            loop {
+                workers
+                    .retain(|worker: &std::thread::ScopedJoinHandle<'_, ()>| !worker.is_finished());
+                line.clear();
+                let read = match read_frame(&mut input, &mut line) {
+                    Ok(read) => read,
+                    Err(err) => {
+                        if err.kind() == io::ErrorKind::InvalidData {
+                            write_message(
+                                &output,
+                                &rpc_error(&Value::Null, -32600, &err.to_string()),
+                            )?;
+                        }
+                        return Err(err);
+                    }
+                };
+                if read == 0 {
+                    return Ok(());
                 }
-                // Do not drain an unbounded stream or interpret its remainder as
-                // another frame. The peer gets an error before the adapter exits.
-                return Err(err);
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let message: Value = match serde_json::from_str(&line) {
+                    Ok(message) => message,
+                    Err(_) => {
+                        write_message(
+                            &output,
+                            &rpc_error(&Value::Null, -32700, "The message is not JSON."),
+                        )?;
+                        continue;
+                    }
+                };
+                if message["method"] == "notifications/cancelled" && message.get("id").is_none() {
+                    let key = message["params"]["requestId"].to_string();
+                    if let Some((cancel, _)) = active.lock().unwrap().get(&key) {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                    continue;
+                }
+                if message["method"] != "tools/call" || message.get("id").is_none() {
+                    if let Some(reply) = handle_message(config, &line) {
+                        write_message(&output, &reply)?;
+                    }
+                    continue;
+                }
+                let id = message["id"].clone();
+                let key = id.to_string();
+                let params = message["params"].clone();
+                let read_only = params["name"] == TOOL_LIST_ACCESS;
+                let cancel = Arc::new(AtomicBool::new(false));
+                {
+                    let mut calls = active.lock().unwrap();
+                    if calls.contains_key(&key) {
+                        write_message(
+                            &output,
+                            &rpc_error(&id, -32600, "A request with this ID is already active."),
+                        )?;
+                        continue;
+                    }
+                    if calls.len() >= 4
+                        || (!read_only && calls.values().filter(|(_, read)| !read).count() >= 3)
+                    {
+                        write_message(
+                            &output,
+                            &json!({"jsonrpc":"2.0", "id":id, "result":tool_error("busy", "The MCP dispatcher is full. No operation was submitted.")}),
+                        )?;
+                        continue;
+                    }
+                    calls.insert(key.clone(), (Arc::clone(&cancel), read_only));
+                }
+                let output = &output;
+                let active = &active;
+                let drained = &drained;
+                workers.push(scope.spawn(move || {
+                    let token = params["_meta"]["progressToken"].clone();
+                    let mut progress = 0_u64;
+                    let result = call_tool_control(config, &params, &cancel, cadence, |operation_id| {
+                        if token.is_string() || token.is_number() {
+                            if write_message(output, &json!({"jsonrpc":"2.0", "method":"notifications/progress", "params":{
+                                "progressToken":token, "progress":progress, "operation_id":operation_id,
+                                "message":format!("Operation {operation_id}; waiting for the broker, owner, or bouncer.")
+                            }})).is_err() {
+                                for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
+                            }
+                            progress += 1;
+                        }
+                    });
+                    if write_message(output, &json!({"jsonrpc":"2.0", "id":id, "result":result})).is_err() {
+                        for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
+                    }
+                    active.lock().unwrap().remove(&key);
+                    drained.notify_all();
+                }));
             }
-        };
-        if read == 0 {
-            return Ok(());
+        })();
+        // A pipe writer can close stdin while still reading a short call's result.
+        // Give those calls a bounded drain period. Framing/output errors cancel
+        // immediately; EOF still withdraws any question left after the grace.
+        let mut calls = active.lock().unwrap();
+        if result.is_ok() {
+            calls = drained
+                .wait_timeout_while(calls, SHUTDOWN_GRACE, |calls| !calls.is_empty())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
         }
-        if line.trim().is_empty() {
-            continue;
+        for (cancel, _) in calls.values() {
+            cancel.store(true, Ordering::SeqCst);
         }
-        let reply = handle_message(config, &line);
-        if let Some(reply) = reply {
-            serde_json::to_writer(&mut stdout, &reply).map_err(io::Error::other)?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
+        drop(calls);
+        for worker in workers {
+            let _ = worker.join();
         }
-    }
+        result
+    })
 }
 
 fn read_frame(input: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
@@ -160,7 +274,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: inspect activity and the external target with the owner before retrying a mutating call. Repeating a call is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention. Repeating a call without that key is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -181,7 +295,7 @@ fn extract_schema() -> Value {
 }
 
 pub fn tool_list() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": TOOL_LIST_ACCESS,
             "title": "List the credentials you can use",
@@ -214,7 +328,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_RUN_WITH_SECRETS,
             "title": "Run a command with secrets in its environment",
-            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: inspect activity and the external target with the owner before retrying a mutating call. Repeating a call is not guaranteed safe. The command is an argument list, not a shell string.",
+            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention. Repeating a call without that key is not guaranteed safe. The command is an argument list, not a shell string.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -356,20 +470,77 @@ pub fn tool_list() -> Value {
                 "additionalProperties": false
             }
         }
-    ])
+    ]);
+    for tool in tools.as_array_mut().expect("tools") {
+        if tool["name"] == TOOL_LIST_ACCESS {
+            tool["inputSchema"]["properties"]["operation_id"] = json!({"type":"string", "pattern":"^[0-9a-fA-F]{32}$", "description":"Retrieve the retained outcome of this operation after a reconnect. Returns metadata only, without command output."});
+            let description = tool["description"].as_str().unwrap().to_owned();
+            tool["description"] = json!(format!(
+                "{description} With operation_id, retrieve that operation's status instead of the catalog."
+            ));
+        } else {
+            tool["inputSchema"]["properties"]["idempotency_key"] = json!({"type":"string", "minLength":1, "maxLength":128, "description":"Choose a unique key before a mutation. Reuse it only with identical arguments to retrieve the first operation without executing again. Keys expire 15 minutes after completion; never blindly replay after expiry or a broker restart."});
+            let description = tool["description"].as_str().unwrap().to_owned();
+            tool["description"] = json!(format!(
+                "{description} Supply idempotency_key before running. On reconnect use apassy_list_access with operation_id from progress or the error. A repeated identical key returns the original operation receipt (metadata only); different arguments are refused. Cancellation after execution starts cannot undo it."
+            ));
+        }
+    }
+    tools
 }
 
 fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
+    call_tool_control(
+        config,
+        params,
+        &AtomicBool::new(false),
+        Duration::from_secs(15),
+        |_| {},
+    )
+}
+
+fn call_tool_control(
+    config: &AdapterConfig,
+    params: &Value,
+    cancelled: &AtomicBool,
+    cadence: Duration,
+    mut progress: impl FnMut(&str),
+) -> Value {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let arguments = params
+    let mut arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
+    let key = arguments
+        .as_object_mut()
+        .and_then(|o| o.remove("idempotency_key"));
+    let key = match key {
+        None => None,
+        Some(Value::String(key))
+            if !key.is_empty() && key.len() <= 128 && name != TOOL_LIST_ACCESS =>
+        {
+            Some(key)
+        }
+        _ => {
+            return tool_error(
+                "invalid_arguments",
+                "The idempotency_key must be a nonempty string of at most 128 bytes on a mutating tool.",
+            );
+        }
+    };
     let action = match name {
-        TOOL_LIST_ACCESS => arguments_object(&arguments, &[]).map(|_| Action::ListAccess),
+        TOOL_LIST_ACCESS => arguments_object(&arguments, &["operation_id"]).and_then(|o| {
+            match optional_text(o, "operation_id")? {
+                Some(operation_id) if valid_operation_id(&operation_id) => {
+                    Ok(Action::OperationStatus { operation_id })
+                }
+                Some(_) => Err("The operation_id must be 32 hexadecimal characters.".to_owned()),
+                None => Ok(Action::ListAccess),
+            }
+        }),
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
@@ -391,14 +562,138 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
             "The adapter has no agent token. Set APASSY_AGENT_TOKEN in the MCP server configuration.",
         );
     };
+    let operation_id = if action.trackable() {
+        match new_operation_id() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                return tool_error(
+                    "broker_error",
+                    "The adapter could not allocate an operation ID. Nothing was submitted.",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let action = match &operation_id {
+        Some(id) => Action::Tracked {
+            operation_id: id.clone(),
+            idempotency_key: key,
+            action: Box::new(action),
+        },
+        None => action,
+    };
     let options = client::SendOptions {
         host_session: config.host_session.as_deref(),
-        timeout: action.waits().then_some(WAITING_CALL_TIMEOUT),
+        timeout: operation_id.as_ref().map(|_| WAITING_CALL_TIMEOUT),
     };
-    match client::send_with(&config.socket, token, action, options) {
-        Ok(response) => tool_result(response),
-        Err(error) => transport_error(&error),
+    let mut last_progress = Instant::now();
+    if let Some(id) = &operation_id {
+        progress(id);
     }
+    let response = client::send_observed(&config.socket, token, action, options, || {
+        if last_progress.elapsed() >= cadence {
+            if let Some(id) = &operation_id {
+                progress(id);
+            }
+            last_progress = Instant::now();
+        }
+        cancelled.load(Ordering::SeqCst)
+    });
+    let result = match response {
+        Ok(mut response) => {
+            if response.operation_id.is_none() {
+                response.operation_id = operation_id.clone();
+            }
+            return tool_result(response);
+        }
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            if let Some(id) = &operation_id {
+                let cancel = client::send_with(
+                    &config.socket,
+                    token,
+                    Action::CancelOperation {
+                        operation_id: id.clone(),
+                    },
+                    client::SendOptions {
+                        timeout: Some(Duration::from_secs(5)),
+                        host_session: config.host_session.as_deref(),
+                    },
+                );
+                match cancel {
+                    Ok(response)
+                        if response.result.as_ref().is_some_and(|v| {
+                            v["may_have_run"] == false
+                                && v["cancellation_requested"] == true
+                                && v["state"] != "waiting_for_owner"
+                        }) =>
+                    {
+                        tool_error(
+                            "cancelled",
+                            "Cancellation was accepted before execution; any pending question is withdrawn.",
+                        )
+                    }
+                    _ => tool_error(
+                        "cancellation_requested",
+                        "Cancellation was requested. The command or mutation may already have run; retrieve its operation status.",
+                    ),
+                }
+            } else {
+                tool_error("cancelled", "The read was cancelled.")
+            }
+        }
+        Err(error) => {
+            // A failed response must not leave an owner question attached to a
+            // finished adapter worker. Cancellation is best effort; keep the
+            // unknown-outcome diagnostic and receipt ID even if it succeeds.
+            if let Some(id) = &operation_id
+                && !matches!(
+                    error.kind(),
+                    io::ErrorKind::InvalidInput
+                        | io::ErrorKind::NotFound
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::PermissionDenied
+                )
+            {
+                let _ = client::send_with(
+                    &config.socket,
+                    token,
+                    Action::CancelOperation {
+                        operation_id: id.clone(),
+                    },
+                    client::SendOptions {
+                        host_session: config.host_session.as_deref(),
+                        timeout: Some(Duration::from_secs(5)),
+                    },
+                );
+            }
+            transport_error(&error)
+        }
+    };
+    attach_operation(result, operation_id.as_deref())
+}
+
+fn valid_operation_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn new_operation_id() -> io::Result<String> {
+    let mut bytes = [0; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn attach_operation(mut result: Value, operation_id: Option<&str>) -> Value {
+    if let Some(id) = operation_id.filter(|id| valid_operation_id(id)) {
+        result["structuredContent"]["operation_id"] = json!(id);
+        if result["isError"] == true {
+            result["structuredContent"]["next_step"] = json!(format!(
+                "Retrieve metadata with apassy_list_access({{\"operation_id\":\"{id}\"}}). If unavailable, verify activity and the external target with the owner before retrying. Never blindly replay a mutation."
+            ));
+        }
+        result["content"].as_array_mut().unwrap().push(json!({"type":"text", "text":format!("Operation {id}. Retrieve metadata with apassy_list_access({{\"operation_id\":\"{id}\"}}). Retention: 15 minutes after completion, in this broker and vault session. Never blindly replay an unknown or expired operation.")}));
+    }
+    result
 }
 
 fn call_action(arguments: &Value) -> Result<Action, String> {
@@ -791,7 +1086,8 @@ fn describe_action(arguments: &Value) -> Result<Action, String> {
 }
 
 fn tool_result(response: WireResponse) -> Value {
-    if response.ok {
+    let operation_id = response.operation_id.clone();
+    let result = if response.ok {
         let result = response.result.unwrap_or(Value::Null);
         let text = serde_json::to_string_pretty(&result).unwrap_or_default();
         json!({
@@ -806,13 +1102,27 @@ fn tool_result(response: WireResponse) -> Value {
                 .as_ref()
                 .map_or("broker_error", |error| &error.code),
         )
-    }
+    };
+    attach_operation(result, operation_id.as_deref())
 }
 
 /// Broker messages can contain request names, paths, or command text. Only
 /// recognized codes and fixed messages cross the MCP diagnostic boundary.
-fn broker_error(code: &str) -> Value {
+pub(crate) fn broker_error(code: &str) -> Value {
     let (code, message) = match code {
+        "cancelled" => (code, "The operation was cancelled before execution."),
+        "unknown_outcome" | "cancellation_requested" => (
+            code,
+            "The operation may already have run; retrieve its status before retrying.",
+        ),
+        "operation_not_found" => (
+            code,
+            "No retained operation was found. It may have expired, or the broker or vault session restarted. Verify the external target before retrying.",
+        ),
+        "operation_conflict" | "idempotency_conflict" => (
+            code,
+            "The key or operation ID was used with different arguments. Nothing was replayed.",
+        ),
         "token_expired" => (code, "The Apassy agent token expired."),
         "unauthenticated" => (
             code,
@@ -926,6 +1236,10 @@ fn tool_error(code: &str, message: &str) -> Value {
         "isError": true,
     })
 }
+
+#[cfg(all(test, feature = "vault"))]
+#[path = "mcp_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

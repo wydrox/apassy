@@ -1,9 +1,9 @@
 //! Unix socket client for the local broker.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::wire::{
     Action, MAX_LINE_BYTES, MAX_RESPONSE_BYTES, WIRE_VERSION, WireRequest, WireResponse,
@@ -47,20 +47,32 @@ pub fn send_with(
     action: Action,
     options: SendOptions<'_>,
 ) -> io::Result<WireResponse> {
-    let timeout = options
-        .timeout
-        .unwrap_or(if matches!(action, Action::Run { .. }) {
+    send_observed(socket, token, action, options, || false)
+}
+
+/// Poll cancellation/progress while preserving partial response bytes. A cancelled
+/// transport never implies that the broker undid an operation.
+pub(crate) fn send_observed(
+    socket: &Path,
+    token: &str,
+    action: Action,
+    options: SendOptions<'_>,
+    mut observe: impl FnMut() -> bool,
+) -> io::Result<WireResponse> {
+    let timeout = options.timeout.unwrap_or(
+        if action.waits() || matches!(action, Action::Tracked { .. }) {
             RUN_TIMEOUT
         } else {
             IO_TIMEOUT
-        });
+        },
+    );
     let request = WireRequest {
         v: WIRE_VERSION,
         token: token.to_owned(),
         host_session: options.host_session.map(str::to_owned),
         action,
     };
-    let mut line = serde_json::to_vec(&request).map_err(io::Error::other)?;
+    let mut line = zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(io::Error::other)?);
     line.push(b'\n');
     if line.len() > MAX_LINE_BYTES {
         return Err(io::Error::new(
@@ -68,24 +80,62 @@ pub fn send_with(
             "the request is too large",
         ));
     }
+    if observe() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Request cancelled.",
+        ));
+    }
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(timeout))?;
+    stream.set_read_timeout(Some(timeout.min(Duration::from_millis(100))))?;
     stream.set_write_timeout(Some(timeout.min(IO_TIMEOUT)))?;
     stream.write_all(&line)?;
     stream.flush()?;
-    let mut reader = BufReader::new(stream.take(MAX_RESPONSE_BYTES as u64));
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-    if !response.ends_with('\n') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the broker response is incomplete or too large",
-        ));
+    let deadline = Instant::now() + timeout;
+    let mut response = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        if observe() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Request cancelled.",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Broker response timed out.",
+            ));
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Incomplete broker response.",
+                ));
+            }
+            Ok(n) => {
+                response.extend_from_slice(&chunk[..n]);
+                if response.len() > MAX_RESPONSE_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Broker response too large.",
+                    ));
+                }
+                if response.contains(&b'\n') {
+                    return serde_json::from_slice(&response).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Invalid broker response.")
+                    });
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(e) => return Err(e),
+        }
     }
-    serde_json::from_str(&response).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the broker response is not valid",
-        )
-    })
 }

@@ -1035,6 +1035,9 @@ fn run_capture(
     cwd: &Path,
     path: Option<&str>,
 ) -> Result<Zeroizing<String>, WireResponse> {
+    if !super::operations::start_effect() {
+        return Err(super::operations::cancelled_response());
+    }
     let mut argv = Vec::with_capacity(command.len());
     argv.push(program.display().to_string());
     argv.extend(command.iter().skip(1).cloned());
@@ -1524,6 +1527,9 @@ fn store(
     tool: OriginTool,
     approved: bool,
 ) -> WireResponse {
+    if !super::operations::start_effect() {
+        return super::operations::cancelled_response();
+    }
     let agent = &caller.agent;
     if tool != OriginTool::Generate
         && let Some(secret) = found.secret()
@@ -1951,8 +1957,30 @@ pub(super) fn ask_owner(
     if created {
         ctx.approvals.notify_owner();
     }
+    let _waiting = super::operations::waiting();
     let deadline = Instant::now() + ctx.approval_timeout;
     loop {
+        if super::operations::cancelled() {
+            let mut guard = lock(&ctx.vault);
+            if let Some(vault) = guard
+                .as_mut()
+                .filter(|v| !v.is_locked() && v.epoch() == caller.epoch)
+            {
+                if let Ok(known) = vault.credential_request(request_id)
+                    && known.state == CredentialRequestState::Saved
+                    && let Some(item_id) = known.item_id
+                {
+                    super::operations::observed_effect();
+                    return WireResponse::success(item_answer(vault, item_id, true, NOTE_CREATED));
+                }
+                let _ = vault.settle_credential_request(
+                    request_id,
+                    crate::vault::agent_items::RequestOutcome::Dismissed,
+                );
+            }
+            ctx.approvals.notify_owner();
+            return super::operations::cancelled_response();
+        }
         {
             let guard = lock(&ctx.vault);
             let Some(vault) = guard
@@ -1966,6 +1994,7 @@ pub(super) fn ask_owner(
                     (CredentialRequestState::Saved, Some(item_id))
                         if vault.details(item_id).is_ok() =>
                     {
+                        super::operations::observed_effect();
                         return WireResponse::success(item_answer(
                             vault,
                             item_id,
@@ -2071,6 +2100,9 @@ pub(super) fn update(
     }
     // The previous value stays for a restore by the owner, and the declaration becomes
     // the stricter of the old one and the detected one (ADR 0025 §5), in one transaction.
+    if !super::operations::start_effect() {
+        return super::operations::cancelled_response();
+    }
     if let Err(err) = vault.replace_own_item_value(caller.agent.id, item_id, &obtained.value) {
         let response = match err.kind() {
             VaultErrorKind::NotFound => not_owner(),

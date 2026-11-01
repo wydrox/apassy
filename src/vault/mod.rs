@@ -194,6 +194,7 @@ pub struct Vault {
     conn: Option<Connection>,
     epoch: [u8; 32],
     delivery: std::sync::Arc<std::sync::RwLock<bool>>,
+    session_cleanup: Vec<Box<dyn FnOnce() + Send + Sync>>,
     #[cfg(feature = "desktop")]
     access_expiry: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 }
@@ -278,6 +279,7 @@ impl Vault {
             conn: None,
             epoch,
             delivery: Default::default(),
+            session_cleanup: Vec::new(),
             #[cfg(feature = "desktop")]
             access_expiry: None,
         })
@@ -292,6 +294,7 @@ impl Vault {
             conn: None,
             epoch: fresh_epoch()?,
             delivery: Default::default(),
+            session_cleanup: Vec::new(),
             #[cfg(feature = "desktop")]
             access_expiry: None,
         })
@@ -351,11 +354,19 @@ impl Vault {
         self.access_expiry = expiry;
     }
 
-    fn end_delivery(&self) {
+    /// Register memory-only session state to erase on lock, rekey, or drop.
+    pub(crate) fn on_session_end(&mut self, cleanup: impl FnOnce() + Send + Sync + 'static) {
+        self.session_cleanup.push(Box::new(cleanup));
+    }
+
+    fn end_delivery(&mut self) {
         *self
             .delivery
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        for cleanup in self.session_cleanup.drain(..) {
+            cleanup();
+        }
     }
 
     pub(crate) fn delivery_fence(&self) -> DeliveryFence {
@@ -576,6 +587,7 @@ impl Vault {
             conn: None,
             epoch: fresh_epoch()?,
             delivery: Default::default(),
+            session_cleanup: Vec::new(),
             #[cfg(feature = "desktop")]
             access_expiry: None,
         })

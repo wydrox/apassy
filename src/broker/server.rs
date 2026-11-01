@@ -18,7 +18,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::SharedVault;
 use super::approvals::ApprovalQueue;
 use super::bouncer::BouncerClient;
-use super::decide::{self, BrokerContext};
+use super::decide::BrokerContext;
 use super::http::TlsClient;
 use super::model_server::{ModelGate, ModelServer};
 use super::prompts::{self, PromptStore};
@@ -172,6 +172,7 @@ pub fn start_with(
         model_gate: options.model_gate,
         prompts: Arc::new(PromptStore::new(options.transcript_roots)),
     };
+    let operations = Arc::new(super::operations::Operations::new()?);
     prepare_directory(socket)?;
     remove_stale_socket(socket)?;
     let listener = UnixListener::bind(socket)?;
@@ -182,7 +183,7 @@ pub fn start_with(
     let thread_stop = Arc::clone(&stop);
     let thread = thread::Builder::new()
         .name("apassy-broker".to_owned())
-        .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &active))?;
+        .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &active, &operations))?;
     Ok(BrokerHandle {
         socket: socket.to_path_buf(),
         approvals,
@@ -247,6 +248,7 @@ fn accept_loop(
     ctx: &BrokerContext,
     stop: &Arc<AtomicBool>,
     active: &Arc<AtomicUsize>,
+    operations: &Arc<super::operations::Operations>,
 ) {
     while !stop.load(Ordering::SeqCst) {
         let stream = match listener.accept() {
@@ -273,12 +275,13 @@ fn accept_loop(
             continue;
         }
         let ctx = ctx.clone();
+        let operations = Arc::clone(operations);
         let slot = Arc::clone(active);
         let conn_stop = Arc::clone(stop);
         let spawned = thread::Builder::new()
             .name("apassy-broker-conn".to_owned())
             .spawn(move || {
-                let _ = serve_connection(stream, &ctx, &conn_stop);
+                let _ = serve_connection(stream, &ctx, &conn_stop, &operations);
                 slot.fetch_sub(1, Ordering::SeqCst);
             });
         if spawned.is_err() {
@@ -288,7 +291,12 @@ fn accept_loop(
     }
 }
 
-fn serve_connection(stream: UnixStream, ctx: &BrokerContext, stop: &AtomicBool) -> io::Result<()> {
+fn serve_connection(
+    stream: UnixStream,
+    ctx: &BrokerContext,
+    stop: &AtomicBool,
+    operations: &super::operations::Operations,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
@@ -319,7 +327,7 @@ fn serve_connection(stream: UnixStream, ctx: &BrokerContext, stop: &AtomicBool) 
             return Ok(());
         }
         let response = match serde_json::from_slice::<WireRequest>(&line) {
-            Ok(request) => decide::handle(ctx, &request),
+            Ok(request) => operations.handle(ctx, &request),
             Err(_) => WireResponse::failure(
                 "bad_request",
                 "The request is not valid wire version 0 JSON.",
