@@ -2,6 +2,17 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## [Unreleased]
+
+### Added
+
+- Transactional staged host-file repair, connection identity metadata, and Settings host health with owner-checked reconnect.
+- Opt-in isolated synthetic broker/MCP/hook diagnostic through `doctor --live`.
+
+### Fixed
+
+- Preserve existing catalog restrictions during reconnect; align helper help/version/usage handling and bound fixture inputs.
+
 ## [0.5.8] - 2026-10-31
 
 ### Added
