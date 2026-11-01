@@ -4,6 +4,17 @@ import Foundation
 // Questions through the relay over the core (contract ios-core-v1 section 5.10). The core refuses
 // these calls in the AutoFill extension.
 extension CoreVaultService {
+    public func accessRequestsHistory() async throws -> AccessRequestsSnapshot { try await call("access_requests_history") }
+    public func accessRequestsList() async throws -> AccessRequestsSnapshot { try await call("access_requests_list") }
+    public func accessRequestPrepare(_ request: RelayAccessRequest, choice: AccessChoice) async throws -> PreparedAccessAnswer {
+        try await call("access_request_prepare", ["vault_id":request.vault_id,"qid":request.card.qid,"digest":request.digest,"kind":choice.rawValue])
+    }
+    public func accessRequestAnswer(_ request: RelayAccessRequest, choice: AccessChoice, prepared: PreparedAccessAnswer, signature: Data?) async throws -> SentAccessAnswer {
+        var input:[String:Any] = ["vault_id":request.vault_id,"qid":request.card.qid,"digest":request.digest,"kind":choice.rawValue,"time":prepared.time]
+        if let signature { input["signature"] = Base64URL.encode(signature) }
+        return try await call("access_request_answer", input)
+    }
+    public func accessRequestCancelPrepared() async { try? await call("access_request_cancel_prepared") }
     public func requestHistory() async throws -> RequestHistorySnapshot {
         try await call("request_history")
     }

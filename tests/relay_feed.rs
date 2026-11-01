@@ -1884,6 +1884,7 @@ fn refused_run(world: &World, socket: &std::path::Path, items: &[u64], script: &
         socket,
         &world.token,
         Action::Run {
+            access_request_id: None,
             items: items.to_vec(),
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: world._root.path().display().to_string(),

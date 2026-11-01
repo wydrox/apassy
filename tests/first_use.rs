@@ -132,6 +132,7 @@ fn send_run(socket: &Path, token: &str, item: u64, cwd: &Path, script: &str) -> 
         socket,
         token,
         Action::Run {
+            access_request_id: None,
             items: vec![item],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
@@ -207,6 +208,7 @@ fn custom_run(
         &fx.socket,
         &fx.token,
         Action::Run {
+            access_request_id: None,
             items: vec![fx.item_id],
             command: command.iter().map(|s| (*s).to_owned()).collect(),
             cwd: fx.project.display().to_string(),

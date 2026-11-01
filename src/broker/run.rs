@@ -132,6 +132,7 @@ const ANSWERED_ON_IPHONE: &str = "iPhone";
 /// A run request from the wire. Borrowed from the parsed request.
 #[derive(Debug)]
 pub struct RunRequest<'a> {
+    pub access_request_id: Option<u64>,
     pub items: &'a [u64],
     pub command: &'a [String],
     pub cwd: &'a str,
@@ -684,6 +685,54 @@ fn run_inner(
     let action = classify(request.command, &analysis);
     let certain = classify_certain(request.command, &analysis);
     let hosts = run_hosts(request.command);
+    let access_admission = if let Some(id) = request.access_request_id {
+        if evaluation_only || request.items.len() != 1 {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "A referenced access request requires one credential and a live run.",
+            );
+        }
+        let Some(exact) = super::access_once::exact_run_hosts(request.command) else {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "This command's complete exact destination ports cannot be established. Review on this Mac.",
+            );
+        };
+        let Some(action) =
+            certain.and_then(|a| serde_json::from_value(serde_json::json!(a.as_str())).ok())
+        else {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "This command's action is not certain.",
+            );
+        };
+        let Some(cwd) = checked.cwd.to_str() else {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "The folder has no lossless identity.",
+            );
+        };
+        let Some(project) = checked.project.as_ref() else {
+            return WireResponse::failure("access_once_unavailable", "This folder has no project.");
+        };
+        match super::access_once::Admission::consume(
+            &ctx.vault,
+            id,
+            &crate::vault::access_once::CheckedScope {
+                agent: checked.agent.id,
+                item: request.items[0],
+                cwd,
+                project: &project.key,
+                action,
+                hosts: &exact,
+            },
+        ) {
+            Ok(ticket) => Some(ticket),
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
     let command_binding = super::evaluation_binding::command_binding(
         request.command,
         &checked.cwd,
@@ -943,9 +992,11 @@ fn run_inner(
             });
         // The wait ends when the vault session of the first check ends.
         let same_session = || {
-            lock(&ctx.vault)
-                .as_ref()
-                .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
+            lock(&ctx.vault).as_ref().is_some_and(|vault| {
+                !vault.is_locked()
+                    && vault.epoch() == checked.epoch
+                    && access_admission.as_ref().is_none_or(|a| a.live_in(vault))
+            })
         };
         let pending = PendingRun {
             id: 0,
@@ -975,9 +1026,14 @@ fn run_inner(
             pending,
             checked.agent.id,
             checked.epoch,
-            baseline_of(&(checked.rechecked(), &command_binding)),
+            access_admission.as_ref().map_or_else(
+                || baseline_of(&(checked.rechecked(), &command_binding)),
+                |a| baseline_of(&(checked.rechecked(), &command_binding, a.identity())),
+            ),
             None, // ADR 0031: no per-credential evaluation setup.
-            ctx.approval_timeout,
+            access_admission.as_ref().map_or(ctx.approval_timeout, |a| {
+                ctx.approval_timeout.min(a.remaining())
+            }),
             same_session,
         );
         // The wait record goes. False when a lock or a quit already gave the run its
@@ -994,6 +1050,12 @@ fn run_inner(
                 })
         };
         drop(wait);
+        if access_admission.as_ref().is_some_and(|a| !a.live()) {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "The admitted access request expired or was revoked. Nothing ran.",
+            );
+        }
         let Settled {
             outcome,
             method: checked_with,
@@ -1004,6 +1066,12 @@ fn run_inner(
         } = match settled {
             Ok(settled) => settled,
             Err(refusal) => {
+                if access_admission.is_some() {
+                    return WireResponse::failure(
+                        "access_once_unavailable",
+                        "This admission could not wait for execution approval. Its allowance was consumed; query status.",
+                    );
+                }
                 let text = match refusal {
                     QuestionRefusal::Busy => QUESTION_WAITING,
                     QuestionRefusal::Superseded => QUESTION_SUPERSEDED,
@@ -1144,6 +1212,12 @@ fn run_inner(
             Ok(agent) => agent,
             Err(response) => return response,
         };
+        if access_admission.as_ref().is_some_and(|a| !a.live_in(vault)) {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "The admitted access request expired or was revoked. Nothing ran.",
+            );
+        }
         // A decision belongs to one vault session. After a lock and an unlock, the
         // agent must send the request again.
         if vault.epoch() != checked.epoch {
@@ -1317,7 +1391,11 @@ fn run_inner(
             other_hosts: OtherHosts::Tunnel,
             enforce: true,
         };
-        match RunProxy::start(std::mem::take(&mut secrets.proxied), options) {
+        match RunProxy::start_with_access(
+            std::mem::take(&mut secrets.proxied),
+            options,
+            access_admission.clone(),
+        ) {
             Ok(proxy) => Some(proxy),
             Err(_) => {
                 let reason = "The run proxy did not start. The command did not run.";
@@ -1345,7 +1423,20 @@ fn run_inner(
             sandbox_profile: network.sandbox_profile.as_deref(),
         }),
         ctx.run_timeout,
-        |cmd| spawn_in_session(&ctx.vault, checked.epoch, cmd),
+        |cmd| {
+            if let Some(a) = &access_admission {
+                let guard = lock(&ctx.vault);
+                let Some(vault) = guard.as_ref().filter(|v| a.live_in(v)) else {
+                    return Err(std::io::Error::other("access consent expired or revoked"));
+                };
+                vault
+                    .delivery_fence()
+                    .deliver(|| cmd.spawn())
+                    .unwrap_or_else(|| Err(std::io::Error::other("vault locked")))
+            } else {
+                spawn_in_session(&ctx.vault, checked.epoch, cmd)
+            }
+        },
     );
     let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();

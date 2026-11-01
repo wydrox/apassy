@@ -132,6 +132,7 @@ fn send_run(socket: &Path, token: &str, item: u64, cwd: &Path, script: &str) -> 
         socket,
         token,
         Action::Run {
+            access_request_id: None,
             items: vec![item],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
@@ -260,6 +261,7 @@ fn never_hides_the_item_and_a_run_gets_not_granted() {
         &fx.socket,
         &fx.token,
         Action::RequestAccess {
+            scope: None,
             item_id: fx.item_id,
             reason: "Use the synthetic key.".into(),
             cwd: None,

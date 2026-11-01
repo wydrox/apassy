@@ -13,6 +13,7 @@
 //! arbitrary SQLite clients.
 
 mod access;
+pub mod access_once;
 mod add;
 pub mod agent_items;
 mod agents;
@@ -194,6 +195,7 @@ pub struct Vault {
     conn: Option<Connection>,
     epoch: [u8; 32],
     delivery: std::sync::Arc<std::sync::RwLock<bool>>,
+    access_once: access_once::Runtime,
     session_cleanup: Vec<Box<dyn FnOnce() + Send + Sync>>,
     #[cfg(feature = "desktop")]
     access_expiry: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -279,6 +281,7 @@ impl Vault {
             conn: None,
             epoch,
             delivery: Default::default(),
+            access_once: Default::default(),
             session_cleanup: Vec::new(),
             #[cfg(feature = "desktop")]
             access_expiry: None,
@@ -294,6 +297,7 @@ impl Vault {
             conn: None,
             epoch: fresh_epoch()?,
             delivery: Default::default(),
+            access_once: Default::default(),
             session_cleanup: Vec::new(),
             #[cfg(feature = "desktop")]
             access_expiry: None,
@@ -316,6 +320,7 @@ impl Vault {
 
     pub fn lock(&mut self) -> VaultResult<()> {
         self.end_delivery();
+        self.access_once = Default::default();
         #[cfg(feature = "desktop")]
         {
             self.access_expiry = None;
@@ -587,6 +592,7 @@ impl Vault {
             conn: None,
             epoch: fresh_epoch()?,
             delivery: Default::default(),
+            access_once: Default::default(),
             session_cleanup: Vec::new(),
             #[cfg(feature = "desktop")]
             access_expiry: None,
@@ -1100,6 +1106,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | FOLDER_SCHEMA_VERSION
         | TRUSTED_DEVICE_SCHEMA_VERSION
         | 20
+        | 21
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1260,6 +1267,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v22: &[&str] = if version >= 22 {
+        &access_once::COLUMNS
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1281,6 +1293,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v19)
         .chain(v20)
         .chain(v21)
+        .chain(v22)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1376,7 +1389,12 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < 20 {
         schema20::add_schema_v20(&tx)?;
     }
-    connect::add_schema(&tx)?;
+    if from < 21 {
+        connect::add_schema(&tx)?;
+    }
+    if from < 22 {
+        access_once::add_schema(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1433,6 +1451,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema19::add_schema_v19(&tx)?;
     schema20::add_schema_v20(&tx)?;
     connect::add_schema(&tx)?;
+    access_once::add_schema(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

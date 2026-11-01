@@ -712,7 +712,10 @@ fn set_file_owner_only(file: &Path) {
 /// production Stripe key in `acme-billing`. It runs on its own thread and ends with the
 /// answer, the timeout, or the app.
 fn ask_in_background() {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = std::env::var_os("APASSY_TOUR_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+    else {
         return;
     };
     let (Ok(token), Ok(item)) = (
@@ -741,6 +744,7 @@ fn ask_in_background() {
     let project = std::fs::canonicalize(&project).unwrap_or(project);
     std::thread::spawn(move || {
         let action = apassy::agent::wire::Action::Run {
+            access_request_id: None,
             items: vec![item],
             command: ["stripe", "payouts", "list", "--limit", "10"]
                 .map(str::to_owned)
@@ -783,6 +787,7 @@ enum Step {
     Embed(bool),
     /// Send the run that waits for the owner ([`ask_in_background`]).
     Ask,
+    Access,
     ConnectPhone,
     Quit,
 }
@@ -1110,6 +1115,7 @@ fn parse_steps(text: &str) -> Vec<Step> {
             Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
             Some("ask") => steps.push(Ask),
             Some("connect-phone") => steps.push(ConnectPhone),
+            Some("access") => steps.push(Access),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
             Some("restore") => steps.push(Minimize(false)),
@@ -1304,6 +1310,39 @@ impl Tour {
             }
             Step::Embed(on) => ctx.set_embed_viewports(on),
             Step::Ask => ask_in_background(),
+            Step::Access => {
+                let home = PathBuf::from(
+                    std::env::var_os("APASSY_TOUR_HOME").expect("isolated tour home"),
+                );
+                let token = std::fs::read_to_string(home.join(TOKEN_FILE)).unwrap();
+                let item = std::fs::read_to_string(home.join(ASK_ITEM_FILE))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                let project = home.join("code/acme-billing");
+                std::fs::create_dir_all(&project).unwrap();
+                std::thread::spawn(move || {
+                    let action = apassy::agent::wire::Action::RequestAccess {
+                        item_id: item,
+                        reason: "Read synthetic payout status. This text is supplied by the agent."
+                            .into(),
+                        cwd: Some(project.display().to_string()),
+                        scope: Some(apassy::agent::wire::AccessScope {
+                            action: apassy::agent::wire::AccessAction::Read,
+                            hosts: vec!["api.stripe.com".into()],
+                        }),
+                    };
+                    eprintln!(
+                        "synthetic access: {:?}",
+                        apassy::agent::client::send(
+                            &apassy::agent::client::default_socket_path(),
+                            token.trim(),
+                            action
+                        )
+                    );
+                });
+            }
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
         self.next_at = Instant::now() + Duration::from_secs_f64(pause);

@@ -70,6 +70,9 @@ pub enum RequestState {
     Open,
     Granted,
     Denied,
+    AllowedOnce,
+    Expired,
+    Invalidated,
 }
 
 impl RequestState {
@@ -78,6 +81,9 @@ impl RequestState {
             Self::Open => "open",
             Self::Granted => "granted",
             Self::Denied => "denied",
+            Self::AllowedOnce => "allowed_once",
+            Self::Expired => "expired",
+            Self::Invalidated => "invalidated",
         }
     }
 
@@ -86,6 +92,9 @@ impl RequestState {
             "open" => Ok(Self::Open),
             "granted" => Ok(Self::Granted),
             "denied" => Ok(Self::Denied),
+            "allowed_once" => Ok(Self::AllowedOnce),
+            "expired" => Ok(Self::Expired),
+            "invalidated" => Ok(Self::Invalidated),
             _ => Err(err(VaultErrorKind::Storage)),
         }
     }
@@ -162,12 +171,20 @@ impl Vault {
             // An agent that cannot see the items cannot keep asking for them.
             tx.execute(
                 "UPDATE access_request SET state = 'denied', decided_at = ?1
-                 WHERE agent_id = ?2 AND state = 'open'",
+                 WHERE agent_id = ?2 AND state = 'open'
+                   AND id NOT IN (SELECT id FROM access_request_v1)",
                 (to_sql_time(now_unix())?, agent),
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         }
-        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
+        // Scoped cards need an invalidation receipt through their arbiter,
+        // rather than the legacy unsigned denial above. Accepted consent stays
+        // immutable; its mutation-generation fence revokes any remaining use.
+        if !on {
+            self.expire_scoped_access_requests()?;
+        }
+        Ok(())
     }
 
     /// Each item that is not archived, by name, with its plain fields. No secret field,
@@ -443,6 +460,15 @@ impl Vault {
 
     /// Deny an open request. It only takes nothing away, so it needs no owner check.
     pub fn deny_access_request(&mut self, request_id: u64) -> VaultResult<()> {
+        if self.scoped_access_request(request_id).is_ok() {
+            return crate::broker::access_once::local_answer(
+                self,
+                request_id,
+                crate::questions::access_request::Choice::Deny,
+                None,
+            )
+            .map_err(|_| err(VaultErrorKind::Conflict));
+        }
         let id = to_sql_id(request_id)?;
         let at = to_sql_time(now_unix())?;
         let conn = self.conn_mut()?;

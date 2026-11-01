@@ -4,12 +4,21 @@ import Foundation
 /// Signs the answers that give authority with the answer key, after Face ID for each answer
 /// (contract relay-questions-v1, section 5.3).
 protocol AnswerSigner: Sendable {
+    var canSignAccess: Bool { get }
+    func signAccess(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data
     /// The public key (X9.63).
     func publicKey() throws -> Data
     /// A signature (DER). The owner sees `reason` in the Face ID prompt.
     func sign(_ message: Data, reason: String) async throws -> Data
     /// A new key, after a new Face ID enrollment made the old one unusable.
     func renew() throws -> Data
+}
+
+extension AnswerSigner {
+    var canSignAccess: Bool { false }
+    func signAccess(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data {
+        throw CompanionKeyError.biometryUnavailable
+    }
 }
 
 /// The answer keys of this iPhone: one per questions team, so that a new key for one vault (after
@@ -90,6 +99,7 @@ struct TeamAnswerSigners: AnswerSigners {
         if let registered {
             if own?.approvalPublicKey == registered { return ownService }
             if shared?.approvalPublicKey == registered { return Self.sharedService }
+            return nil
         }
         if own != nil { return ownService }
         return shared == nil ? nil : Self.sharedService
@@ -102,6 +112,22 @@ private struct KeyAnswerSigner: AnswerSigner {
     let service: String
     let renewService: String
     let store: any AnswerKeyStore
+    var canSignAccess: Bool {
+        #if targetEnvironment(simulator)
+        true // Explicit Simulator software keys are fixture evidence only.
+        #else
+        ApprovalAuthentication.faceIDAvailable
+        #endif
+    }
+    func signAccess(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data {
+        #if targetEnvironment(simulator)
+        try await Task.sleep(for:.seconds(5))
+        guard !authentication.isCancelled else { throw CompanionKeyError.cancelled }
+        return try await keys().signApproval(message,reason:reason)
+        #else
+        try await keys().signAccessApproval(message, reason: reason, authentication: authentication)
+        #endif
+    }
 
     func publicKey() throws -> Data { try keys().approvalPublicKey }
 

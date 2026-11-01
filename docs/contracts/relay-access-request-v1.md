@@ -1,6 +1,6 @@
 # Relay access-request contract v1
 
-Date: 2026-11-01. Status: proposed; no implementation claimed.
+Date: 2026-11-01. Status: implemented for review; physical device and notification acceptance pending. Synthetic vectors include exact signed card/answer/settle bytes and unchanged outer AAD/ciphertexts.
 Decision: [ADR 0033](../adr/0033-iphone-access-requests.md).
 
 This is a new **inner protocol** over the unchanged [relay questions v1](relay-questions-v1.md) carrier. It is not an extension of the run `Card`, run digest v2, feed `grant_request`, or the durable grant API. MUST/MUST NOT below are implementation requirements.
@@ -37,7 +37,7 @@ The source is a new versioned local request record, not a synthetic pending run.
 
 New MCP input extends `request_access` with optional `scope: {"action":"read|change|deploy|delete","hosts":["api.example.test"]}`; existing `cwd` must be present to produce an allowing card. The current parser rejects extra fields, so `mcp.rs`, tool schemas, `wire.rs`, broker and tests must change together. New callers MUST NOT send scope until supported by the installed tool schema. No separate feature probing may create a request. Run input gains optional `access_request_id` solely to consume a permit with the current authenticated agent; it is not an authorization token. A referenced v1 operation contains exactly this one credential.
 
-Also provide agent-authenticated, non-creating status and cancellation operations for an exact `request_id` (tool names/DTOs frozen in unit A). Cancellation takes the same arbiter as answers and use: an open request becomes `invalidated`; an allowed request keeps its terminal answer but loses its available permit or pending admission fence. Cancellation cannot recall an already released credential. Repeats are idempotent, do not spend creation budget and reveal no other agent's requests. A disconnected MCP call or lost response is not cancellation: these requests are asynchronous. If the agent abandons its task it must cancel; otherwise the unused allowance can remain until the original deadline. Neither a late answer nor a retried use may undo cancellation.
+Also provide agent-authenticated, non-creating status and cancellation operations for an exact `request_id` (tool names/DTOs frozen in unit A). Cancellation takes the same arbiter as answers and use: an open request becomes `invalidated`; an allowed request keeps its terminal answer but loses its available permit or pending admission fence. Cancellation cannot recall an already released credential. Repeats are idempotent, do not spend creation budget and reveal no other agent's requests. Explicit cancellation of a retained scoped-request operation withdraws its exact card or pending allowance, including cancellation racing creation. A disconnected MCP call or lost response is not cancellation: these requests are asynchronous. If the agent abandons its task it must cancel; otherwise the unused allowance can remain until the original deadline. Neither a late answer nor a retried use may undo cancellation.
 
 Legacy calls without scope retain their asynchronous note behavior and cannot create a permit. Existing legacy notes are not automatically broadcast or expired on upgrade. Explicit Mac dispatch assigns a new qid and fixed 300-second deny-only incarnation. An incomplete new scoped request may be dispatched deny-only; it never silently chooses a project, action or host wildcard. A new scoped request has a fixed 300-second lifetime from creation.
 
@@ -194,6 +194,7 @@ Best-effort settle retries resend the identical envelope (the relay's idempotent
 | Per local vault on each asking Mac | Ten open access requests; twenty new incarnations per rolling hour. Not a shared cross-Mac quota |
 | Coalescing | Same agent/item UUID/revision/policy/canonical cwd/project/action/hosts returns the existing id/qid unchanged, retains first reason, sends no new push. A different scope while active is `access_request_waiting`; do not replace/relabel a card |
 | Notification | One logical publication per incarnation (bounded card-POST retries use the same qid/body), and one new dispatch per agent per 30 seconds on this Mac. During cooldown refuse remote dispatch rather than delay beyond its deadline. Relay/APNs delivery may retry, duplicate, collapse or drop |
+| Local remote-publication reservation | At most one unsettled access-card publication per asking Mac; reserve in encrypted local state before POST, including uncertain responses and vault/worker restarts. Nine of the device's ten relay slots remain for eight concurrent broker operations and one Connect handoff. Other access requests retain local review and their original expiry |
 | Relay | Shared existing limits: 20 open/team, 10/asking device, 15/member; 300 questions/team/hour, configured shares/byte budget; three answers/device/question, twenty total; existing long-poll limits |
 | Ciphertext caps | Card 32784; answer 8208; settle 1040 bytes; include wrapper/signature overhead before sending |
 
@@ -212,3 +213,38 @@ The relay sees ciphertext and existing outer metadata only; it can deny service,
 Before implementation merge, freeze synthetic vectors for exact card/body bytes, card digest/signature, answer bytes/signatures for both choices, signed settle and unchanged outer AAD/ciphertexts in Rust and ApassyCore tests. Include one field-change negative per identity/scope/display/header field (including vault id and host provenance), wrong-key choices, duplicate JSON keys, no mapping/revoked device, late signature, `now-55/now-56/now+5/now+6` and exact expiry boundaries, old-client dispatch and cross-run/feed replay. Include two-iPhone/duplicate/reordered answers, answer-versus-cancel/use races, lost POST responses at the three-attempt limit, consumed or crash-lost permits with delayed valid settles, exact-host versus subdomain/port/redirect substitution, and independent cross-Mac quotas with generic time-sensitive push routing. The example above is not a vector and no interoperability test has run in this docs change.
 
 The `policy_digest` serializer and added agent input/status/error types must be pinned during the first implementation unit before consumers are split. Existing questions vectors must continue to pass unchanged. Real Face ID freshness and no passcode fallback require physical-device acceptance; simulator/software signatures cannot establish either property.
+
+## 9. Implementation encoding and agent operations
+
+The local policy serializer is `apassy-access-policy-v2\0`, then F(epoch), F(canonical cwd),
+F(project key), U64(global mutation generation), U64(agent mutation generation),
+U64(item mutation generation). Connection-local TEMP triggers increment these
+generations on authorization-table writes, including a change later reverted to
+its old value. They roll back with failed transactions; a new connection has a
+new epoch and no permits. These counters are not synced or exported. Each query below contributes F(its exact SQL text), then rows in the
+stated order: byte 1 per row, followed by typed columns, and byte 0 after the last
+row. NULL is byte 0; INTEGER is byte 1 plus signed i64 big endian; TEXT is byte 2
+plus F(exact UTF-8); BLOB is byte 3 plus F(bytes). REAL fails closed. SHA-256 covers
+the complete stream. This encoding is local to the asking Mac; no token or key
+material is exported. The executable, fixed query list is
+`Vault::access_policy_digest` in `src/vault/access_once.rs`.
+
+The fixed column groups, in order, are: actual vault id; authenticated agent token,
+issue generation, revocation and visibility; token lifetime; item UUID/revision;
+process variable, field and delivery host policy; declaration project/environment/
+risk/scope/reversibility/provider; all declaration sources; Always ask; plain host;
+archive and restore-review markers; all agent exceptions; process and connector
+grants contributing to the agent's visibility; all trusted device identities,
+kinds, team mappings, signing/answer keys and deletion markers; memberships and
+question key. Agent exception/grant rows sort by item and kind/operation; trusted
+rows sort by UUID, memberships by team. A change invalidates consent; labels never
+supply identity. No Debug formatting is part of this encoding.
+
+Agent tools are `apassy_access_request_status` and `apassy_cancel_access_request`,
+both taking only a positive `request_id`. Their wire actions are
+`access_request_status` and `cancel_access_request`. They authenticate before
+lookup, never create a request, and return the same missing result for another
+agent's id. `access_request_waiting`, `access_request_rate_limited` and
+`access_once_unavailable` distinguish active scope, creation budget and exhausted
+admission. Run `access_request_id` is optional; once admission burns it, an equal
+command cannot join a waiting operation. Status is the non-executing retry.

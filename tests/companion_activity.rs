@@ -153,6 +153,7 @@ impl Setup {
                 &self.socket,
                 &self.token,
                 Action::Run {
+                    access_request_id: None,
                     items: vec![self.item_id],
                     command: vec!["echo".to_owned(), "ok".to_owned()],
                     cwd: self.project.display().to_string(),

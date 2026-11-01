@@ -1152,6 +1152,17 @@ impl Vault {
         place: &GrantPlace,
         mode: ExecMode,
     ) -> VaultResult<()> {
+        self.set_exec_grants_for_request(agent_id, item_ids, place, mode, None)
+    }
+
+    pub(crate) fn set_exec_grants_for_request(
+        &mut self,
+        agent_id: u64,
+        item_ids: &[u64],
+        place: &GrantPlace,
+        mode: ExecMode,
+        request: Option<u64>,
+    ) -> VaultResult<()> {
         let unique: std::collections::BTreeSet<u64> = item_ids.iter().copied().collect();
         if item_ids.is_empty() || item_ids.len() > MAX_GRANT_ITEMS || unique.len() != item_ids.len()
         {
@@ -1173,10 +1184,35 @@ impl Vault {
             GrantPlace::AnyFolder => (String::new(), 1i64),
         };
         let at = to_sql_time(now_unix())?;
+        self.expire_scoped_access_requests()?;
+        let scoped: Vec<_> = self
+            .scoped_access_requests()?
+            .into_iter()
+            .filter(|r| {
+                r.state == "open"
+                    && r.card.card.agent.id == agent_id.to_string()
+                    && r.card
+                        .card
+                        .item
+                        .local_id
+                        .parse::<u64>()
+                        .is_ok_and(|id| item_ids.contains(&id))
+            })
+            .collect();
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        if let Some(id) = request {
+            if item_ids.len() != 1 {
+                return Err(err(VaultErrorKind::InvalidInput));
+            }
+            let open:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM access_request WHERE id=?1 AND agent_id=?2 AND item_id=?3 AND state='open')",
+                (to_sql_id(id)?,agent,items[0]),|r|r.get(0)).map_err(|_|err(VaultErrorKind::Storage))?;
+            if !open {
+                return Err(err(VaultErrorKind::Conflict));
+            }
+        }
         require_active_agent(&tx, agent)?;
         // ADR 0025: the mode of a grant approves nothing, so the history does not name it.
         let detail = format!(
@@ -1205,6 +1241,33 @@ impl Vault {
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
             history::record(&tx, item, ItemEventKind::AccessGiven, &detail)?;
+        }
+        for r in scoped {
+            use crate::questions::access_request::{DeviceKind, Outcome, Receipt, ReceiptChoice};
+            let c = &r.card.card;
+            let receipt = Receipt {
+                vault_id: c.vault_id.clone(),
+                team_id: c.team_id.clone(),
+                qid: c.qid.clone(),
+                request_id: c.request_id.clone(),
+                asker: c.asker.device.clone(),
+                digest: r.card.digest.clone(),
+                outcome: Outcome::GrantedOnMac,
+                answered_by: Some(c.asker.device.clone()),
+                device_name: Some(c.asker.name.clone()),
+                device_kind: Some(DeviceKind::Mac),
+                kind: Some(ReceiptChoice::GrantOnMac),
+                at: now_unix(),
+                expires_at: c.expires_at,
+            };
+            tx.execute(
+                "UPDATE access_request_v1 SET receipt=?2,check_method='fresh_local_grant' WHERE id=?1",
+                (
+                    to_sql_id(r.id)?,
+                    serde_json::to_vec(&receipt).map_err(|_| err(VaultErrorKind::Storage))?,
+                ),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
         }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }

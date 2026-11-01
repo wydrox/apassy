@@ -176,6 +176,7 @@ fn send(fx: &Fixture, items: &[u64], argv: &[&str]) -> WireResponse {
         &fx.socket,
         &fx.token,
         Action::Run {
+            access_request_id: None,
             items: items.to_vec(),
             command: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: fx.project.display().to_string(),
@@ -199,6 +200,7 @@ fn asks(fx: &Fixture, items: &[u64], argv: &[&str]) -> PendingRun {
             &socket,
             &token,
             Action::Run {
+                access_request_id: None,
                 items,
                 command,
                 cwd: project.display().to_string(),

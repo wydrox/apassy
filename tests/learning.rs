@@ -148,6 +148,7 @@ fn send(
         &fx.socket,
         token,
         Action::Run {
+            access_request_id: None,
             items,
             command: command.to_vec(),
             cwd: fx.project.display().to_string(),

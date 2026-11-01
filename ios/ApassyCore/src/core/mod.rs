@@ -74,6 +74,8 @@ struct ConfigWire {
     #[serde(default)]
     request_history_required: bool,
     #[serde(default)]
+    request_guard_storage_ready: Option<bool>,
+    #[serde(default)]
     device_name: Option<String>,
     #[serde(default)]
     role: Option<Role>,
@@ -82,6 +84,7 @@ struct ConfigWire {
 /// The vault core of one process.
 pub struct Core {
     paths: Paths,
+    request_guard_storage_ready: bool,
     request_history_enabled: bool,
     request_history_required: bool,
     history_key_provider: Option<Arc<dyn HistoryKeyProvider>>,
@@ -258,6 +261,9 @@ impl Core {
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
+            request_guard_storage_ready: config
+                .request_guard_storage_ready
+                .unwrap_or(config.request_history_enabled),
             request_history_enabled: config.request_history_enabled,
             request_history_required: config.request_history_required,
             history_key_provider: provider,
@@ -572,6 +578,14 @@ impl Core {
             "folders" | "folder_create" | "folder_rename" | "folder_move" | "folder_delete"
             | "item_folder_set" | "detect" | "add_pasted" | "item_options_set" => {
                 self.organize_call(&op, request)
+            }
+            "access_requests_list"
+            | "access_requests_history"
+            | "access_request_prepare"
+            | "access_request_answer"
+            | "access_request_cancel_prepared" => {
+                self.require_app()?;
+                self.access_call(&op, request)
             }
             // 5.10 Questions through the relay: the app only.
             "questions_list"

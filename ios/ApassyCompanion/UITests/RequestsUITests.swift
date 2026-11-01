@@ -135,6 +135,64 @@ final class RequestsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Allow Stripe live once"].exists)
     }
 
+    private func accessDetail(_ app: XCUIApplication) {
+        let row=app.buttons.matching(NSPredicate(format:"label CONTAINS %@", "Synthetic API key")).firstMatch
+        for _ in 0..<10 where !row.isHittable { app.swipeUp() }
+        XCTAssertTrue(row.waitForExistence(timeout:10));row.tap()
+        XCTAssertTrue(app.navigationBars["Access request"].waitForExistence(timeout:5))
+    }
+    private func accessActions(_ app: XCUIApplication) {
+        for _ in 0..<12 where !app.buttons["access.deny"].isHittable { app.swipeUp() }
+        XCTAssertTrue(app.buttons["access.deny"].isHittable)
+    }
+    func testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly() {
+        let app=launch(["-ApassyPreviewDecisions","access"])
+        accessDetail(app)
+        XCTAssertTrue(app.staticTexts["Mac-verified fields"].exists)
+        attach(app,"iphone-access-card")
+        for _ in 0..<5 where !app.staticTexts["api.example.test:8443"].isHittable {app.swipeUp()}
+        XCTAssertTrue(app.staticTexts["api.example.test:8443"].exists)
+        XCTAssertTrue(app.staticTexts["xn--bcher-kva.example"].exists)
+        accessActions(app)
+        XCTAssertGreaterThanOrEqual(app.buttons["access.deny"].frame.height,44)
+        XCTAssertTrue(app.buttons["access.allow-once"].exists)
+        XCTAssertFalse(app.buttons["Always allow"].exists)
+        app.buttons["access.deny"].tap()
+        let answered=app.staticTexts["Answered on Synthetic iPhone"]
+        XCTAssertTrue(answered.waitForExistence(timeout:10))
+        XCTAssertFalse(app.buttons["access.allow-once"].exists)
+        attach(app,"iphone-access-denied")
+        app.navigationBars.buttons.firstMatch.tap()
+        app.segmentedControls.buttons["History"].tap()
+        let saved=app.buttons.matching(NSPredicate(format:"label CONTAINS %@","Synthetic API key")).firstMatch
+        XCTAssertTrue(saved.waitForExistence(timeout:5));saved.tap()
+        XCTAssertTrue(app.navigationBars["Access consent history"].waitForExistence(timeout:5))
+        XCTAssertFalse(app.buttons["access.allow-once"].exists)
+        XCTAssertFalse(app.buttons["access.deny"].exists)
+        attach(app,"iphone-access-history")
+    }
+    func testAccessFaceIDStateCancellationAndFreshRetry() {
+        let app=launch(["-ApassyPreviewDecisions","access"])
+        accessDetail(app);accessActions(app)
+        app.buttons["access.allow-once"].tap()
+        let cancel=app.buttons["Cancel Face ID"]
+        XCTAssertTrue(cancel.waitForExistence(timeout:5))
+        attach(app,"iphone-face-id-fixture-pending")
+        cancel.tap()
+        XCTAssertTrue(app.staticTexts["The check was cancelled. Nothing was sent."].waitForExistence(timeout:5))
+        app.buttons["access.allow-once"].tap()
+        XCTAssertTrue(app.staticTexts["Answered on Synthetic iPhone"].waitForExistence(timeout:15))
+        attach(app,"iphone-access-allowed-once")
+    }
+    func testAccessExpiryAndAccessibilitySizeDisableControls() {
+        let app=launch(["-ApassyPreviewDecisions","access-expiry","-UIPreferredContentSizeCategoryName","UICTContentSizeCategoryAccessibilityXXXL","-AppleInterfaceStyle","Dark"])
+        accessDetail(app);accessActions(app)
+        XCTAssertTrue(app.staticTexts["Access expired"].exists)
+        XCTAssertFalse(app.buttons["access.deny"].isEnabled)
+        XCTAssertFalse(app.buttons["access.allow-once"].isEnabled)
+        attach(app,"iphone-access-expired-accessibility-dark")
+    }
+
     private func attach(_ app: XCUIApplication, _ name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name

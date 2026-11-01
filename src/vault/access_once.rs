@@ -1,0 +1,1507 @@
+//! Local-only lifecycle and durable receipts. Permit authority is deliberately memory-only.
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use super::types::err;
+use super::{Vault, VaultErrorKind, VaultResult, to_sql_id};
+use crate::questions::access_request::{self as wire, Card, Choice, Receipt, VerifiedCard};
+
+#[cfg(test)]
+pub(super) const DOWNGRADE_TO_21_SQL: &str = "DROP TABLE IF EXISTS access_request_v1; DROP TABLE IF EXISTS access_request_creation; DROP TABLE IF EXISTS access_request_clock;";
+
+pub(super) const COLUMNS: [&str; 3] = [
+    "SELECT id, epoch, card, digest, cancelled, receipt, envelope, check_method, answer_key_fingerprint, answer_mapping FROM access_request_v1 LIMIT 0",
+    "SELECT id, agent_id, at FROM access_request_creation LIMIT 0",
+    "SELECT id, high_water FROM access_request_clock LIMIT 0",
+];
+pub(super) fn add_schema(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
+    tx.execute_batch(
+        "ALTER TABLE access_request RENAME TO access_request_old;
+         DROP INDEX access_request_state;
+         CREATE TABLE access_request (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER NOT NULL,
+             item_id INTEGER NOT NULL, reason TEXT NOT NULL, cwd TEXT NOT NULL,
+             created_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN
+             ('open','granted','denied','allowed_once','expired','invalidated')), decided_at INTEGER);
+         INSERT INTO access_request SELECT * FROM access_request_old;
+         DROP TABLE access_request_old;
+         CREATE INDEX access_request_state ON access_request(state,id);
+         CREATE TABLE access_request_v1 (
+             id INTEGER PRIMARY KEY, epoch BLOB NOT NULL, card BLOB NOT NULL,
+             digest TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0,
+             receipt BLOB, envelope BLOB, check_method TEXT, answer_key_fingerprint TEXT, answer_mapping TEXT);
+         CREATE TABLE access_request_creation (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER NOT NULL, at INTEGER NOT NULL);
+         CREATE INDEX access_creation_agent ON access_request_creation(agent_id,at);
+         CREATE TABLE access_request_clock (id INTEGER PRIMARY KEY CHECK(id=1), high_water INTEGER NOT NULL);
+         UPDATE vault_meta SET schema_version=22 WHERE id=1; PRAGMA user_version=22;",
+    ).map_err(|_| err(VaultErrorKind::Storage))
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Runtime {
+    /// None after restart/lock: never reconstructed from a receipt.
+    permits: BTreeMap<u64, Permit>,
+    deadlines: BTreeMap<u64, Duration>,
+}
+#[derive(Debug)]
+struct Permit {
+    consumed: bool,
+    cancelled: bool,
+    operation: [u8; 32],
+}
+
+pub(crate) fn monotonic() -> Duration {
+    rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
+        .try_into()
+        .unwrap_or(Duration::MAX)
+}
+pub fn now() -> u64 {
+    super::agents::now_unix()
+}
+fn storage<E>(_: E) -> super::VaultError {
+    err(VaultErrorKind::Storage)
+}
+
+/// Connection-local mutation counters prevent an authorization ABA: restoring
+/// earlier values must not restore an earlier signed consent. TEMP triggers also
+/// cover transactional merge paths without relying on each setter remembering a
+/// callback. Their updates roll back with the policy transaction. A new
+/// connection has a new vault epoch and no permit authority.
+fn policy_generations(conn: &rusqlite::Connection, agent: u64, item: u64) -> VaultResult<[u64; 3]> {
+    let installed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='access_policy_generation')",
+        [], |r|r.get(0)).map_err(storage)?;
+    if !installed {
+        let mut sql = String::from(
+            "SAVEPOINT access_policy_generation_install;
+            CREATE TEMP TABLE access_policy_generation (
+            entity TEXT NOT NULL, entity_id INTEGER NOT NULL, generation INTEGER NOT NULL,
+            PRIMARY KEY(entity,entity_id));",
+        );
+        for (table, entity, id) in [
+            ("agent", "agent", "id"),
+            ("agent_exception", "agent", "agent_id"),
+            ("exec_grant", "agent", "agent_id"),
+            ("grant_rule", "agent", "agent_id"),
+            ("item", "item", "id"),
+            ("env_binding", "item", "item_id"),
+            ("declaration", "item", "item_id"),
+            ("declaration_source", "item", "item_id"),
+            ("item_policy", "item", "item_id"),
+            ("item_field", "item", "item_id"),
+            ("item_archive", "item", "item_id"),
+            ("restore_review", "item", "item_id"),
+            ("trusted_device", "global", ""),
+            ("relay_membership", "global", ""),
+            ("vault_secret", "global", ""),
+        ] {
+            for (event, rows) in [
+                ("INSERT", &["NEW"][..]),
+                ("UPDATE", &["OLD", "NEW"][..]),
+                ("DELETE", &["OLD"][..]),
+            ] {
+                sql.push_str(&format!("CREATE TEMP TRIGGER access_policy_{table}_{event} AFTER {event} ON main.{table} BEGIN "));
+                for row in rows {
+                    let identity = if id.is_empty() {
+                        "0".into()
+                    } else {
+                        format!("{row}.{id}")
+                    };
+                    sql.push_str(&format!(
+                        "INSERT INTO access_policy_generation(entity,entity_id,generation)
+                        VALUES('{entity}',{identity},1) ON CONFLICT(entity,entity_id)
+                        DO UPDATE SET generation=generation+1;"
+                    ));
+                }
+                sql.push_str(" END;");
+            }
+        }
+        // Ordinary metadata writes do not revoke authority; these exact vault
+        // policy columns do. Inserts/deletes occur only at initialization/restore,
+        // which already create a different epoch.
+        for (table, column) in [
+            ("vault_meta", "token_lifetime_days"),
+            ("sync_meta", "vault_id"),
+        ] {
+            sql.push_str(&format!("CREATE TEMP TRIGGER access_policy_{table}_UPDATE AFTER UPDATE OF {column} ON main.{table}
+                WHEN OLD.{column} IS NOT NEW.{column} BEGIN
+                INSERT INTO access_policy_generation(entity,entity_id,generation) VALUES('global',0,1)
+                ON CONFLICT(entity,entity_id) DO UPDATE SET generation=generation+1; END;"));
+        }
+        sql.push_str(" RELEASE access_policy_generation_install;");
+        if let Err(error) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK TO access_policy_generation_install; RELEASE access_policy_generation_install;");
+            return Err(storage(error));
+        }
+    }
+    let mut values = [0; 3];
+    for (index, (entity, id)) in [("global", 0), ("agent", agent), ("item", item)]
+        .into_iter()
+        .enumerate()
+    {
+        let value: i64 = conn
+            .query_row(
+                "SELECT generation FROM access_policy_generation WHERE entity=?1 AND entity_id=?2",
+                params![entity, i64::try_from(id).map_err(storage)?],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?
+            .unwrap_or(0);
+        values[index] = u64::try_from(value).map_err(storage)?;
+    }
+    Ok(values)
+}
+
+#[derive(Debug, Clone)]
+pub struct AccessRecord {
+    pub id: u64,
+    pub epoch: [u8; 32],
+    pub card: VerifiedCard,
+    pub state: String,
+    pub cancelled: bool,
+    pub receipt: Option<Receipt>,
+    pub envelope: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessStatus {
+    pub request_id: u64,
+    pub state: String,
+    pub expires_at: u64,
+    pub permit: String,
+}
+
+/// Complete facts from the broker's checked run, never reason-text inference.
+pub(crate) struct CheckedScope<'a> {
+    pub agent: u64,
+    pub item: u64,
+    pub cwd: &'a str,
+    pub project: &'a str,
+    pub action: wire::Action,
+    pub hosts: &'a [String],
+}
+
+fn terminal_receipt(r: &AccessRecord, outcome: wire::Outcome) -> Receipt {
+    let c = &r.card.card;
+    Receipt {
+        vault_id: c.vault_id.clone(),
+        team_id: c.team_id.clone(),
+        qid: c.qid.clone(),
+        request_id: c.request_id.clone(),
+        asker: c.asker.device.clone(),
+        digest: r.card.digest.clone(),
+        outcome,
+        answered_by: None,
+        device_name: None,
+        device_kind: None,
+        kind: None,
+        at: now(),
+        expires_at: c.expires_at,
+    }
+}
+
+impl Vault {
+    /// Versioned, typed field encoding over an explicit list of authorization columns.
+    /// See the contract's policy serializer appendix. Tokens enter only the local hash.
+    pub fn access_policy_digest(
+        &self,
+        agent: u64,
+        item: u64,
+        cwd: &str,
+        project: &str,
+    ) -> VaultResult<String> {
+        let conn = self.conn_ref()?;
+        let generations = policy_generations(conn, agent, item)?;
+        let mut out = Zeroizing::new(b"apassy-access-policy-v2\0".to_vec());
+        let field = |out: &mut Vec<u8>, bytes: &[u8]| -> VaultResult<()> {
+            out.extend(u32::try_from(bytes.len()).map_err(storage)?.to_be_bytes());
+            out.extend(bytes);
+            Ok(())
+        };
+        for bytes in [self.epoch.as_slice(), cwd.as_bytes(), project.as_bytes()] {
+            field(&mut out, bytes)?;
+        }
+        for generation in generations {
+            out.extend(generation.to_be_bytes());
+        }
+        // Fixed order, column order and SQL storage types; no SELECT *, Debug or secret fields.
+        for (sql, args) in [
+            ("SELECT vault_id FROM sync_meta WHERE id=1", vec![]),
+            (
+                "SELECT token,token_issued_at,revoked_at,see_all FROM agent WHERE id=?1",
+                vec![agent],
+            ),
+            (
+                "SELECT token_lifetime_days FROM vault_meta WHERE id=1",
+                vec![],
+            ),
+            ("SELECT uuid,revision FROM item WHERE id=?1", vec![item]),
+            (
+                "SELECT env_name,field,placeholder_hosts FROM env_binding WHERE item_id=?1",
+                vec![item],
+            ),
+            (
+                "SELECT project,environment,risk,scope,reversibility,provider FROM declaration WHERE item_id=?1",
+                vec![item],
+            ),
+            (
+                "SELECT environment,risk,scope,reversibility FROM declaration_source WHERE item_id=?1",
+                vec![item],
+            ),
+            (
+                "SELECT always_ask FROM item_policy WHERE item_id=?1",
+                vec![item],
+            ),
+            (
+                "SELECT value FROM item_field WHERE item_id=?1 AND name='host' AND secret=0",
+                vec![item],
+            ),
+            (
+                "SELECT item_id FROM item_archive WHERE item_id=?1",
+                vec![item],
+            ),
+            (
+                "SELECT item_id FROM restore_review WHERE item_id=?1",
+                vec![item],
+            ),
+            (
+                "SELECT item_id,kind FROM agent_exception WHERE agent_id=?1 ORDER BY item_id,kind",
+                vec![agent],
+            ),
+            (
+                "SELECT item_id,project_dir,mode,any_folder FROM exec_grant WHERE agent_id=?1 ORDER BY item_id",
+                vec![agent],
+            ),
+            (
+                "SELECT item_id,operation FROM grant_rule WHERE agent_id=?1 ORDER BY item_id,operation",
+                vec![agent],
+            ),
+            (
+                "SELECT uuid,kind,relay_devices,sign_key,answer_key,deleted_at FROM trusted_device ORDER BY uuid",
+                vec![],
+            ),
+            (
+                "SELECT team_id,relay_url,device_id,public_key,purposes FROM relay_membership ORDER BY team_id",
+                vec![],
+            ),
+            (
+                "SELECT value FROM vault_secret WHERE name='question-key-v1'",
+                vec![],
+            ),
+        ] {
+            field(&mut out, sql.as_bytes())?;
+            let args: Vec<i64> = args
+                .into_iter()
+                .map(to_sql_id)
+                .collect::<VaultResult<_>>()?;
+            let mut stmt = conn.prepare(sql).map_err(storage)?;
+            let count = stmt.column_count();
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(args))
+                .map_err(storage)?;
+            while let Some(row) = rows.next().map_err(storage)? {
+                out.push(1);
+                for i in 0..count {
+                    use rusqlite::types::ValueRef;
+                    match row.get_ref(i).map_err(storage)? {
+                        ValueRef::Null => out.push(0),
+                        ValueRef::Integer(n) => {
+                            out.push(1);
+                            out.extend(n.to_be_bytes());
+                        }
+                        ValueRef::Text(b) => {
+                            out.push(2);
+                            field(&mut out, b)?;
+                        }
+                        ValueRef::Blob(b) => {
+                            out.push(3);
+                            field(&mut out, b)?;
+                        }
+                        ValueRef::Real(_) => return Err(err(VaultErrorKind::Storage)),
+                    }
+                }
+            }
+            out.push(0);
+        }
+        Ok(crate::sync::sha256_hex(&out))
+    }
+
+    pub fn scoped_access_requests(&self) -> VaultResult<Vec<AccessRecord>> {
+        self.query_scoped_access(None)
+    }
+    fn query_scoped_access(&self, id: Option<u64>) -> VaultResult<Vec<AccessRecord>> {
+        let mut stmt = self.conn_ref()?.prepare(
+            "SELECT v.id,v.epoch,v.card,v.digest,CASE WHEN r.state='granted' THEN 'granted_on_mac' ELSE r.state END,v.cancelled,v.receipt,v.envelope
+             FROM access_request_v1 v JOIN access_request r ON r.id=v.id WHERE (?1 IS NULL OR v.id=?1) ORDER BY v.id DESC LIMIT 100"
+        ).map_err(storage)?;
+        let rows = stmt
+            .query_map([id.map(to_sql_id).transpose()?], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, bool>(5)?,
+                    r.get::<_, Option<Vec<u8>>>(6)?,
+                    r.get::<_, Option<Vec<u8>>>(7)?,
+                ))
+            })
+            .map_err(storage)?;
+        rows.map(|r| {
+            let (id, epoch, body, digest, state, cancelled, receipt, envelope) =
+                r.map_err(storage)?;
+            let id = u64::try_from(id).map_err(storage)?;
+            let card: Card = serde_json::from_slice(&body).map_err(storage)?;
+            card.validate().map_err(storage)?;
+            Ok(AccessRecord {
+                id,
+                epoch: epoch.try_into().map_err(storage)?,
+                card: VerifiedCard { card, body, digest },
+                state,
+                cancelled,
+                receipt: receipt
+                    .map(|b| serde_json::from_slice(&b).map_err(storage))
+                    .transpose()?,
+                envelope,
+            })
+        })
+        .collect()
+    }
+    pub fn scoped_access_request(&self, id: u64) -> VaultResult<AccessRecord> {
+        // Bounded inventory is enough for the live set; terminal lookup uses its exact id.
+        self.query_scoped_access(Some(id))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| err(VaultErrorKind::NotFound))
+    }
+
+    /// Called under the shared vault mutex, including budget reservation. The supplied
+    /// card is constructed from broker/vault facts, with request_id filled transactionally.
+    pub fn create_scoped_access_request(&mut self, mut card: Card) -> VaultResult<(u64, bool)> {
+        let agent: u64 = card.agent.id.parse().map_err(storage)?;
+        let item: u64 = card.item.local_id.parse().map_err(storage)?;
+        if !self.agent_view(agent)?.visible(item) || self.is_archived(item)? {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        self.expire_scoped_access_requests()?;
+        for old in self.scoped_access_requests()? {
+            let c = &old.card.card;
+            if c.agent.id == card.agent.id
+                && (old.state == "open" || self.access_status(agent, old.id)?.permit == "available")
+            {
+                if c.item == card.item
+                    && c.policy_digest == card.policy_digest
+                    && c.cwd == card.cwd
+                    && c.project == card.project
+                    && c.action == card.action
+                    && c.hosts == card.hosts
+                {
+                    return Ok((old.id, false));
+                }
+                return Err(err(VaultErrorKind::Busy));
+            }
+        }
+        let epoch = self.epoch;
+        let at = card.created_at;
+        let tx = self
+            .conn_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let high: i64 = tx
+            .query_row(
+                "SELECT high_water FROM access_request_clock WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?
+            .unwrap_or(0);
+        if i64::try_from(at).map_err(storage)? < high {
+            return Err(err(VaultErrorKind::Expired));
+        }
+        let (count,last): (i64,i64) = tx.query_row(
+            "SELECT COUNT(*),COALESCE(MAX(at),0) FROM access_request_creation WHERE agent_id=?1 AND at>?2",
+            params![to_sql_id(agent)?,super::agents::to_sql_time(at.saturating_sub(3600))?],|r|Ok((r.get(0)?,r.get(1)?))).map_err(storage)?;
+        let total: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM access_request_creation WHERE at>?1",
+                [super::agents::to_sql_time(at.saturating_sub(3600))?],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        let open: i64 = tx.query_row("SELECT COUNT(*) FROM access_request_v1 v JOIN access_request r ON v.id=r.id WHERE r.state='open'",
+            [],|r|r.get(0)).map_err(storage)?;
+        if count >= 5
+            || total >= 20
+            || open >= 10
+            || (last != 0 && at.saturating_sub(u64::try_from(last).map_err(storage)?) < 30)
+        {
+            return Err(err(VaultErrorKind::Busy));
+        }
+        tx.execute("INSERT INTO access_request(agent_id,item_id,reason,cwd,created_at,state) VALUES(?1,?2,?3,?4,?5,'open')",
+            params![to_sql_id(agent)?,to_sql_id(item)?,card.reason,card.cwd,super::agents::to_sql_time(at)?]).map_err(storage)?;
+        let id = u64::try_from(tx.last_insert_rowid()).map_err(storage)?;
+        card.request_id = id.to_string();
+        card.validate()
+            .map_err(|_| err(VaultErrorKind::InvalidInput))?;
+        let body = serde_json::to_vec(&card).map_err(storage)?;
+        let digest = wire::hex(&wire::body_digest("card", &body).map_err(storage)?);
+        tx.execute(
+            "INSERT INTO access_request_v1(id,epoch,card,digest) VALUES(?1,?2,?3,?4)",
+            params![to_sql_id(id)?, epoch.as_slice(), body, digest],
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "INSERT INTO access_request_creation(agent_id,at) VALUES(?1,?2)",
+            params![to_sql_id(agent)?, super::agents::to_sql_time(at)?],
+        )
+        .map_err(storage)?;
+        tx.execute("INSERT INTO access_request_clock(id,high_water) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET high_water=excluded.high_water",
+            [super::agents::to_sql_time(at)?]).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        self.access_once
+            .deadlines
+            .insert(id, monotonic().saturating_add(Duration::from_secs(300)));
+        Ok((id, true))
+    }
+
+    pub fn access_record_live(&self, record: &AccessRecord) -> bool {
+        let c = &record.card.card;
+        !self.is_locked()
+            && (!c.valid_answers.contains(&Choice::AllowOnce) || {
+                let canonical = std::fs::canonicalize(&c.cwd).ok();
+                canonical.as_deref().and_then(std::path::Path::to_str) == Some(c.cwd.as_str())
+                    && canonical
+                        .as_deref()
+                        .and_then(|p| {
+                            crate::broker::project::project_of(
+                                p,
+                                std::env::var_os("HOME")
+                                    .as_deref()
+                                    .map(std::path::Path::new),
+                            )
+                        })
+                        .is_some_and(|p| {
+                            c.project.as_ref().is_some_and(|old| old.key == p.key)
+                                && std::fs::canonicalize(&p.key)
+                                    .ok()
+                                    .as_deref()
+                                    .and_then(std::path::Path::to_str)
+                                    == Some(p.key.as_str())
+                        })
+            })
+            && self.list_agents().is_ok_and(|agents| {
+                agents.iter().any(|a| {
+                    a.id.to_string() == c.agent.id && !a.revoked && !a.token_expired_at(now())
+                })
+            })
+            && record.epoch == self.epoch
+            && !record.cancelled
+            && now() < c.expires_at
+            && now() >= c.created_at
+            && self
+                .access_once
+                .deadlines
+                .get(&record.id)
+                .is_some_and(|d| monotonic() < *d)
+            && self
+                .access_once
+                .deadlines
+                .get(&record.id)
+                .is_some_and(|deadline| {
+                    let elapsed = monotonic()
+                        .saturating_sub(deadline.saturating_sub(Duration::from_secs(300)))
+                        .as_secs();
+                    now().abs_diff(c.created_at.saturating_add(elapsed)) <= 2
+                })
+            && self
+                .access_policy_digest(
+                    c.agent.id.parse().unwrap_or(0),
+                    c.item.local_id.parse().unwrap_or(0),
+                    &c.cwd,
+                    c.project.as_ref().map_or("", |p| p.key.as_str()),
+                )
+                .is_ok_and(|d| d == c.policy_digest)
+    }
+
+    pub fn access_status(&self, agent: u64, id: u64) -> VaultResult<AccessStatus> {
+        let r = self.scoped_access_request(id)?;
+        if r.card.card.agent.id != agent.to_string() {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        let live = self.access_record_live(&r);
+        let state = if r.state == "open" && !live {
+            if now() >= r.card.card.expires_at {
+                "expired"
+            } else {
+                "invalidated"
+            }
+        } else {
+            &r.state
+        };
+        let permit = match self.access_once.permits.get(&id) {
+            Some(p) if p.consumed => "consumed",
+            Some(p) if live && !p.cancelled => "available",
+            _ => "unavailable",
+        };
+        Ok(AccessStatus {
+            request_id: id,
+            state: state.into(),
+            expires_at: r.card.card.expires_at,
+            permit: permit.into(),
+        })
+    }
+    pub fn cancel_scoped_access_request(&mut self, agent: u64, id: u64) -> VaultResult<()> {
+        let r = self.scoped_access_request(id)?;
+        if r.card.card.agent.id != agent.to_string() {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        let receipt = terminal_receipt(&r, wire::Outcome::Invalidated);
+        let tx = self
+            .conn_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        tx.execute(
+            "UPDATE access_request_v1 SET cancelled=1 WHERE id=?1",
+            [to_sql_id(id)?],
+        )
+        .map_err(storage)?;
+        if tx.execute("UPDATE access_request SET state='invalidated',decided_at=?2 WHERE id=?1 AND state='open'",params![to_sql_id(id)?,super::agents::to_sql_time(now())?]).map_err(storage)?==1 {
+            tx.execute("UPDATE access_request_v1 SET receipt=?2,check_method='cancelled' WHERE id=?1",params![to_sql_id(id)?,serde_json::to_vec(&receipt).map_err(storage)?]).map_err(storage)?;
+        }
+        tx.commit().map_err(storage)?;
+        if let Some(p) = self.access_once.permits.get_mut(&id) {
+            p.cancelled = true;
+        }
+        Ok(())
+    }
+    pub fn expire_scoped_access_requests(&mut self) -> VaultResult<()> {
+        for r in self.scoped_access_requests()? {
+            if r.state == "open" && !self.access_record_live(&r) {
+                let expired = now() >= r.card.card.expires_at;
+                let state = if expired { "expired" } else { "invalidated" };
+                let receipt = terminal_receipt(
+                    &r,
+                    if expired {
+                        wire::Outcome::Expired
+                    } else {
+                        wire::Outcome::Invalidated
+                    },
+                );
+                let tx = self
+                    .conn_mut()?
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(storage)?;
+                if tx.execute("UPDATE access_request SET state=?2,decided_at=?3 WHERE id=?1 AND state='open'",params![to_sql_id(r.id)?,state,super::agents::to_sql_time(now())?]).map_err(storage)?==1 {
+                    tx.execute("UPDATE access_request_v1 SET receipt=?2,check_method=?3 WHERE id=?1",params![to_sql_id(r.id)?,serde_json::to_vec(&receipt).map_err(storage)?,state]).map_err(storage)?;
+                }
+                tx.commit().map_err(storage)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A fresh typed owner proof or a verified signed denial must have been checked by
+    /// the caller under this same vault lock. CAS and receipt precede permit installation.
+    pub(crate) fn commit_access_answer(
+        &mut self,
+        id: u64,
+        choice: Choice,
+        receipt: Receipt,
+        remote: Option<(String, String)>,
+    ) -> VaultResult<()> {
+        let r = self.scoped_access_request(id)?;
+        if r.state != "open" {
+            return Err(err(VaultErrorKind::Conflict));
+        }
+        if !self.access_record_live(&r) || !r.card.card.valid_answers.contains(&choice) {
+            return Err(err(VaultErrorKind::Expired));
+        }
+        let state = if choice == Choice::Deny {
+            "denied"
+        } else {
+            "allowed_once"
+        };
+        let operation = super::fresh_epoch()?;
+        let tx = self
+            .conn_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        if tx
+            .execute(
+                "UPDATE access_request SET state=?2,decided_at=?3 WHERE id=?1 AND state='open'",
+                params![to_sql_id(id)?, state, super::agents::to_sql_time(now())?],
+            )
+            .map_err(storage)?
+            != 1
+        {
+            return Err(err(VaultErrorKind::Conflict));
+        }
+        tx.execute(
+            "UPDATE access_request_v1 SET receipt=?2,check_method=?3,answer_key_fingerprint=?4,answer_mapping=?5 WHERE id=?1",
+            params![
+                to_sql_id(id)?,
+                serde_json::to_vec(&receipt).map_err(storage)?,
+                if remote.is_some() {if choice==Choice::Deny{"remote_sign_key"}else{"remote_face_id_answer_key"}}else{"local"},
+                remote.as_ref().map(|r|r.0.as_str()), remote.as_ref().map(|r|r.1.as_str())
+            ],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        if choice == Choice::AllowOnce {
+            self.access_once.permits.insert(
+                id,
+                Permit {
+                    consumed: false,
+                    cancelled: false,
+                    operation,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn consume_access_once(
+        &mut self,
+        id: u64,
+        scope: &CheckedScope<'_>,
+    ) -> VaultResult<[u8; 32]> {
+        let CheckedScope {
+            agent,
+            item,
+            cwd,
+            project,
+            action,
+            hosts,
+        } = *scope;
+        let r = self.scoped_access_request(id)?;
+        let c = &r.card.card;
+        if r.state != "allowed_once"
+            || !self.access_record_live(&r)
+            || c.agent.id != agent.to_string()
+            || c.item.local_id != item.to_string()
+            || c.cwd != cwd
+            || c.project.as_ref().map(|p| p.key.as_str()) != Some(project)
+            || c.action != Some(action)
+            || c.hosts != hosts
+        {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        let p = self
+            .access_once
+            .permits
+            .get_mut(&id)
+            .ok_or_else(|| err(VaultErrorKind::NotFound))?;
+        if p.consumed || p.cancelled {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        p.consumed = true;
+        Ok(p.operation)
+    }
+    pub(crate) fn access_admission_live(&self, id: u64, operation: &[u8; 32]) -> bool {
+        self.access_once
+            .permits
+            .get(&id)
+            .is_some_and(|p| p.consumed && !p.cancelled && &p.operation == operation)
+            && self
+                .scoped_access_request(id)
+                .is_ok_and(|r| self.access_record_live(&r))
+    }
+    pub(crate) fn access_admission_remaining(&self, id: u64, operation: &[u8; 32]) -> Duration {
+        if !self.access_admission_live(id, operation) {
+            return Duration::ZERO;
+        }
+        let wall = self
+            .scoped_access_request(id)
+            .map_or(0, |r| r.card.card.expires_at.saturating_sub(now()));
+        self.access_once
+            .deadlines
+            .get(&id)
+            .map_or(Duration::ZERO, |d| {
+                d.saturating_sub(monotonic()).min(Duration::from_secs(wall))
+            })
+    }
+    pub fn keep_access_envelope(&mut self, id: u64, envelope: &[u8]) -> VaultResult<()> {
+        let record = self.scoped_access_request(id)?;
+        if let Some(saved) = &record.envelope {
+            return if saved == envelope {
+                Ok(())
+            } else {
+                Err(err(VaultErrorKind::Conflict))
+            };
+        }
+        if record.state != "open" || !self.access_record_live(&record) {
+            return Err(err(VaultErrorKind::Expired));
+        }
+        // A relay slot can outlive this vault session. Keep its reservation in
+        // encrypted local state until confirmed settlement or original expiry.
+        // Agent revocation may remove the legacy parent row. Its relay lease
+        // still exists, so read reservations independently of that join. At most
+        // twenty creations/hour can have an unexpired five-minute lease.
+        let mut stmt = self.conn_ref()?.prepare(
+            "SELECT card FROM access_request_v1 WHERE envelope IS NOT NULL ORDER BY id DESC LIMIT 100").map_err(storage)?;
+        let cards = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(storage)?;
+        for card in cards {
+            let card: Card = serde_json::from_slice(&card.map_err(storage)?).map_err(storage)?;
+            if card.expires_at > now() {
+                return Err(err(VaultErrorKind::Busy));
+            }
+        }
+        drop(stmt);
+        self.conn_mut()?
+            .execute(
+                "UPDATE access_request_v1 SET envelope=?2 WHERE id=?1 AND envelope IS NULL",
+                params![to_sql_id(id)?, envelope],
+            )
+            .map_err(storage)?;
+        Ok(())
+    }
+    pub(crate) fn release_access_envelope(&mut self, id: u64) -> VaultResult<()> {
+        self.conn_mut()?.execute(
+            "UPDATE access_request_v1 SET envelope=NULL WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM access_request WHERE id=?1 AND state='open')",
+            [to_sql_id(id)?]).map_err(storage)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::broker::access_once;
+    use crate::broker::approvals::{OwnerAction, OwnerProof};
+    use crate::contracts::CredentialKind;
+    use crate::vault::{Field, ItemDraft, SecretValue};
+    fn fixture() -> (tempfile::TempDir, Vault, u64, u64, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            Vault::create(&dir.path().join("synthetic.db"), "synthetic-access-test").unwrap();
+        v.unlock("synthetic-access-test").unwrap();
+        let item = v
+            .add(ItemDraft {
+                title: "Synthetic API".into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("SYNTHETIC-NOT-A-LIVE-KEY-0033".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        v.set_env_binding(item, "API_TOKEN", "token").unwrap();
+        let (a, _) = v.register_agent("Synthetic agent").unwrap();
+        v.set_agent_sees_all(a.id, true).unwrap();
+        let response = access_once::create(
+            &mut v,
+            &a,
+            item,
+            "Read synthetic state.",
+            dir.path().to_str(),
+            &wire::Scope {
+                action: wire::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        let id = response.result.unwrap()["request_id"].as_u64().unwrap();
+        (dir, v, a.id, item, id)
+    }
+    fn allow(v: &mut Vault, id: u64) {
+        let r = v.scoped_access_request(id).unwrap();
+        let proof = OwnerProof::issue_for_test(
+            OwnerAction::AllowAccessOnce {
+                request_id: id,
+                digest: r.card.digest.clone(),
+            },
+            v.epoch(),
+            std::time::Instant::now(),
+        );
+        access_once::local_answer(v, id, Choice::AllowOnce, Some(proof)).unwrap();
+    }
+    fn consume(v: &mut Vault, id: u64, agent: u64, item: u64) -> VaultResult<[u8; 32]> {
+        let c = v.scoped_access_request(id)?.card.card;
+        v.consume_access_once(
+            id,
+            &CheckedScope {
+                agent,
+                item,
+                cwd: &c.cwd,
+                project: &c.project.unwrap().key,
+                action: wire::Action::Read,
+                hosts: &c.hosts,
+            },
+        )
+    }
+    #[test]
+    fn first_answer_and_one_consumer_win_without_durable_authority() {
+        let (_d, mut v, agent, item, id) = fixture();
+        assert!(access_once::local_answer(&mut v, id, Choice::AllowOnce, None).is_err());
+        allow(&mut v, id);
+        assert!(v.deny_access_request(id).is_err());
+        assert!(
+            v.set_exec_grants_for_request(
+                agent,
+                &[item],
+                &super::super::GrantPlace::AnyFolder,
+                super::super::ExecMode::Bouncer,
+                Some(id)
+            )
+            .is_err()
+        );
+        let operation = consume(&mut v, id, agent, item).unwrap();
+        assert!(v.access_admission_live(id, &operation));
+        assert!(consume(&mut v, id, agent, item).is_err());
+        for table in [
+            "exec_grant",
+            "owner_answer",
+            "remembered_pattern",
+            "bouncer_scope",
+            "agent_exception",
+        ] {
+            let n: i64 = v
+                .conn_ref()
+                .unwrap()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+        v.cancel_scoped_access_request(agent, id).unwrap();
+        assert!(!v.access_admission_live(id, &operation));
+        assert_eq!(v.access_status(agent, id).unwrap().state, "allowed_once");
+    }
+    #[test]
+    fn denial_cancellation_and_other_agents_cannot_create_or_authorize() {
+        let (_d, mut v, agent, item, id) = fixture();
+        assert!(v.access_status(agent + 1, id).is_err());
+        assert!(v.cancel_scoped_access_request(agent + 1, id).is_err());
+        access_once::local_answer(&mut v, id, Choice::Deny, None).unwrap();
+        assert_eq!(v.access_status(agent, id).unwrap().state, "denied");
+        assert!(consume(&mut v, id, agent, item).is_err());
+        v.cancel_scoped_access_request(agent, id).unwrap();
+        assert_eq!(v.access_status(agent, id).unwrap().state, "denied");
+        assert!(v.access_status(agent, id + 1).is_err());
+        assert!(v.cancel_scoped_access_request(agent, id + 1).is_err());
+        assert_eq!(v.scoped_access_requests().unwrap().len(), 1);
+    }
+    #[test]
+    fn scope_mutations_and_key_or_policy_rotation_fence_admission() {
+        let (_d, mut v, agent, item, id) = fixture();
+        allow(&mut v, id);
+        let c = v.scoped_access_request(id).unwrap().card.card;
+        for (a, i, cwd, project, action, hosts) in [
+            (
+                agent + 1,
+                item,
+                c.cwd.clone(),
+                c.project.as_ref().unwrap().key.clone(),
+                wire::Action::Read,
+                c.hosts.clone(),
+            ),
+            (
+                agent,
+                item + 1,
+                c.cwd.clone(),
+                c.project.as_ref().unwrap().key.clone(),
+                wire::Action::Read,
+                c.hosts.clone(),
+            ),
+            (
+                agent,
+                item,
+                format!("{}/other", c.cwd),
+                c.project.as_ref().unwrap().key.clone(),
+                wire::Action::Read,
+                c.hosts.clone(),
+            ),
+            (
+                agent,
+                item,
+                c.cwd.clone(),
+                "other".into(),
+                wire::Action::Read,
+                c.hosts.clone(),
+            ),
+            (
+                agent,
+                item,
+                c.cwd.clone(),
+                c.project.as_ref().unwrap().key.clone(),
+                wire::Action::Delete,
+                c.hosts.clone(),
+            ),
+            (
+                agent,
+                item,
+                c.cwd.clone(),
+                c.project.as_ref().unwrap().key.clone(),
+                wire::Action::Read,
+                vec!["evil.api.example.test".into()],
+            ),
+            (
+                agent,
+                item,
+                c.cwd.clone(),
+                c.project.as_ref().unwrap().key.clone(),
+                wire::Action::Read,
+                vec!["api.example.test:8443".into()],
+            ),
+        ] {
+            assert!(
+                v.consume_access_once(
+                    id,
+                    &CheckedScope {
+                        agent: a,
+                        item: i,
+                        cwd: &cwd,
+                        project: &project,
+                        action,
+                        hosts: &hosts
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(v.access_status(agent, id).unwrap().permit, "available");
+        }
+        let op = consume(&mut v, id, agent, item).unwrap();
+        v.rotate_agent_token(agent).unwrap();
+        assert!(!v.access_admission_live(id, &op));
+    }
+    #[test]
+    fn reverting_a_policy_change_never_revives_access_consent() {
+        for admitted in [false, true] {
+            for visibility in [false, true] {
+                let (_dir, mut v, agent, item, id) = fixture();
+                allow(&mut v, id);
+                let operation = admitted.then(|| consume(&mut v, id, agent, item).unwrap());
+                if visibility {
+                    v.set_agent_sees_all(agent, false).unwrap();
+                    v.set_agent_sees_all(agent, true).unwrap();
+                } else {
+                    v.set_always_ask(item, true).unwrap();
+                    v.set_always_ask(item, false).unwrap();
+                }
+                assert!(!v.access_record_live(&v.scoped_access_request(id).unwrap()));
+                if let Some(operation) = operation {
+                    assert!(!v.access_admission_live(id, &operation));
+                } else {
+                    assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+                    assert!(consume(&mut v, id, agent, item).is_err());
+                }
+            }
+        }
+    }
+    #[test]
+    fn rolled_back_policy_writes_do_not_change_the_authorization_generation() {
+        let (_dir, mut v, _, item, id) = fixture();
+        allow(&mut v, id);
+        v.conn_ref()
+            .unwrap()
+            .execute_batch(&format!(
+                "SAVEPOINT synthetic_failed_policy;
+            INSERT INTO item_policy(item_id,always_ask) VALUES({item},1);
+            ROLLBACK TO synthetic_failed_policy; RELEASE synthetic_failed_policy;"
+            ))
+            .unwrap();
+        assert!(v.access_record_live(&v.scoped_access_request(id).unwrap()));
+    }
+    #[test]
+    fn visibility_restriction_records_invalidation_but_keeps_accepted_consent_history() {
+        for accepted in [false, true] {
+            let (_dir, mut v, agent, _, id) = fixture();
+            if accepted {
+                allow(&mut v, id);
+            }
+            v.set_agent_sees_all(agent, false).unwrap();
+            let record = v.scoped_access_request(id).unwrap();
+            assert_eq!(
+                record.state,
+                if accepted {
+                    "allowed_once"
+                } else {
+                    "invalidated"
+                }
+            );
+            assert_eq!(
+                record.receipt.unwrap().outcome,
+                if accepted {
+                    wire::Outcome::AllowedOnce
+                } else {
+                    wire::Outcome::Invalidated
+                }
+            );
+            assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+        }
+    }
+    #[test]
+    fn restart_loses_permits_but_keeps_receipts_and_creation_budget() {
+        let (dir, mut v, agent, item, id) = fixture();
+        allow(&mut v, id);
+        let receipt = v.scoped_access_request(id).unwrap().receipt;
+        let path = v.path().to_path_buf();
+        v.lock().unwrap();
+        drop(v);
+        let mut v = Vault::open(&path).unwrap();
+        v.unlock("synthetic-access-test").unwrap();
+        assert_eq!(v.scoped_access_request(id).unwrap().receipt, receipt);
+        assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+        assert!(consume(&mut v, id, agent, item).is_err());
+        let n: i64 = v
+            .conn_ref()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM access_request_creation", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(dir.path().exists());
+    }
+    #[test]
+    fn coalescing_and_cancel_do_not_refund_cooldown() {
+        let (dir, mut v, agent, item, id) = fixture();
+        let a = v
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == agent)
+            .unwrap();
+        let scope = wire::Scope {
+            action: wire::Action::Read,
+            hosts: vec!["api.example.test".into()],
+        };
+        let duplicate = access_once::create(
+            &mut v,
+            &a,
+            item,
+            "A changed reason",
+            dir.path().to_str(),
+            &scope,
+        );
+        assert!(duplicate.ok);
+        assert_eq!(duplicate.result.unwrap()["request_id"], id);
+        assert_eq!(
+            v.scoped_access_request(id).unwrap().card.card.reason,
+            "Read synthetic state."
+        );
+        v.cancel_scoped_access_request(agent, id).unwrap();
+        assert!(!access_once::create(&mut v, &a, item, "Again", dir.path().to_str(), &scope).ok);
+    }
+    #[test]
+    fn remote_publication_reservation_survives_a_vault_restart() {
+        let (dir, mut v, old_agent, item, id) = fixture();
+        v.keep_access_envelope(id, b"synthetic encrypted envelope")
+            .unwrap();
+        v.lock().unwrap();
+        v.unlock("synthetic-access-test").unwrap();
+        let (agent, _) = v.register_agent("Synthetic second publisher").unwrap();
+        v.set_agent_sees_all(agent.id, true).unwrap();
+        let result = access_once::create(
+            &mut v,
+            &agent,
+            item,
+            "New session",
+            dir.path().to_str(),
+            &wire::Scope {
+                action: wire::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            },
+        );
+        assert!(result.ok, "{result:?}");
+        let next = result.result.unwrap()["request_id"].as_u64().unwrap();
+        assert_eq!(
+            v.keep_access_envelope(next, b"synthetic second envelope")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::Busy
+        );
+        assert_eq!(v.scoped_access_request(id).unwrap().state, "invalidated");
+        v.revoke_agent(old_agent).unwrap();
+        assert!(v.scoped_access_request(id).is_err());
+        assert_eq!(
+            v.keep_access_envelope(next, b"synthetic second envelope")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::Busy
+        );
+        // Represents confirmed relay settlement of the old, invalidated card.
+        v.release_access_envelope(id).unwrap();
+        v.keep_access_envelope(next, b"synthetic second envelope")
+            .unwrap();
+    }
+    #[test]
+    fn exact_ports_and_unknown_destination_forms_fail_closed() {
+        let args = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            access_once::exact_run_hosts(&args("curl https://api.example.test:8443/status")),
+            Some(vec!["api.example.test:8443".into()])
+        );
+        assert!(access_once::exact_run_hosts(&args("curl --connect-to api.example.test:443:evil.example.test:443 https://api.example.test")).is_none());
+        assert!(
+            access_once::exact_run_hosts(&args("psql --host api.example.test --port 5433"))
+                .is_none()
+        );
+    }
+    #[test]
+    fn concurrent_consumers_have_exactly_one_winner_and_expiry_fences_the_winner() {
+        let (_d, mut v, agent, item, id) = fixture();
+        allow(&mut v, id);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(v));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let shared = shared.clone();
+                std::thread::spawn(move || consume(&mut shared.lock().unwrap(), id, agent, item))
+            })
+            .collect();
+        let winners: Vec<_> = tasks
+            .into_iter()
+            .filter_map(|t| t.join().unwrap().ok())
+            .collect();
+        assert_eq!(winners.len(), 1);
+        let mut v = shared.lock().unwrap();
+        v.access_once.deadlines.insert(id, Duration::ZERO);
+        assert!(!v.access_admission_live(id, &winners[0]));
+        assert!(consume(&mut v, id, agent, item).is_err());
+    }
+    #[test]
+    fn failed_receipt_commit_installs_no_permit_and_durable_grant_wins_only_once() {
+        let (_d, mut v, agent, item, id) = fixture();
+        v.conn_mut().unwrap().execute_batch("CREATE TEMP TRIGGER fail_receipt BEFORE UPDATE OF receipt ON access_request_v1 BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        let r = v.scoped_access_request(id).unwrap();
+        let proof = OwnerProof::issue_for_test(
+            OwnerAction::AllowAccessOnce {
+                request_id: id,
+                digest: r.card.digest,
+            },
+            v.epoch(),
+            std::time::Instant::now(),
+        );
+        assert!(access_once::local_answer(&mut v, id, Choice::AllowOnce, Some(proof)).is_err());
+        assert_eq!(v.access_status(agent, id).unwrap().state, "open");
+        assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+        v.conn_mut()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_receipt")
+            .unwrap();
+        v.set_exec_grants_for_request(
+            agent,
+            &[item],
+            &super::super::GrantPlace::AnyFolder,
+            super::super::ExecMode::Bouncer,
+            Some(id),
+        )
+        .unwrap();
+        assert_eq!(v.access_status(agent, id).unwrap().state, "granted_on_mac");
+        assert!(v.deny_access_request(id).is_err());
+        assert!(consume(&mut v, id, agent, item).is_err());
+        assert!(v.scoped_access_request(id).unwrap().receipt.is_some());
+        // A separate, freshly authorized Mac action may still change its durable grant.
+        v.set_exec_grants(
+            agent,
+            &[item],
+            &super::super::GrantPlace::AnyFolder,
+            super::super::ExecMode::Bouncer,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn quota_clock_and_failed_dispatch_cannot_refund_creation() {
+        for (count, total) in [(5, 5), (1, 20)] {
+            let (d, mut v, agent, item, id) = fixture();
+            v.cancel_scoped_access_request(agent, id).unwrap();
+            let at = now();
+            let conn = v.conn_mut().unwrap();
+            conn.execute(
+                "UPDATE access_request_creation SET at=?1",
+                [i64::try_from(at - 31).unwrap()],
+            )
+            .unwrap();
+            for _ in 1..count {
+                conn.execute(
+                    "INSERT INTO access_request_creation(agent_id,at)VALUES(?1,?2)",
+                    params![to_sql_id(agent).unwrap(), i64::try_from(at - 31).unwrap()],
+                )
+                .unwrap();
+            }
+            for _ in count..total {
+                conn.execute(
+                    "INSERT INTO access_request_creation(agent_id,at)VALUES(?1,?2)",
+                    params![
+                        to_sql_id(agent + 1).unwrap(),
+                        i64::try_from(at - 31).unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+            let a = v
+                .list_agents()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == agent)
+                .unwrap();
+            let scope = wire::Scope {
+                action: wire::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            };
+            assert!(!access_once::create(&mut v, &a, item, "spam", d.path().to_str(), &scope).ok);
+            v.conn_mut()
+                .unwrap()
+                .execute("DELETE FROM access_request_creation", [])
+                .unwrap();
+            v.conn_mut()
+                .unwrap()
+                .execute(
+                    "UPDATE access_request_clock SET high_water=?1",
+                    [i64::try_from(at + 300).unwrap()],
+                )
+                .unwrap();
+            assert!(
+                !access_once::create(
+                    &mut v,
+                    &a,
+                    item,
+                    "clock rollback",
+                    d.path().to_str(),
+                    &scope
+                )
+                .ok
+            );
+        }
+        // Another Mac/local vault has its own conservative budget.
+        let (_d, v, agent, _, id) = fixture();
+        assert_eq!(v.access_status(agent, id).unwrap().state, "open");
+    }
+    #[test]
+    fn legacy_notes_are_not_broadcast_and_explicit_dispatch_is_deny_only() {
+        let (d, mut v, agent, item, id) = fixture();
+        v.cancel_scoped_access_request(agent, id).unwrap();
+        v.conn_mut()
+            .unwrap()
+            .execute(
+                "UPDATE access_request_creation SET at=?1",
+                [i64::try_from(now() - 31).unwrap()],
+            )
+            .unwrap();
+        let (old, _) = v
+            .request_access(
+                agent,
+                item,
+                "Original legacy text",
+                d.path().to_str().unwrap(),
+            )
+            .unwrap();
+        assert!(v.scoped_access_request(old).is_err());
+        let reply = access_once::dispatch_legacy(&mut v, old);
+        assert!(reply.ok, "{reply:?}");
+        let new = reply.result.unwrap()["request_id"].as_u64().unwrap();
+        assert_ne!(old, new);
+        let card = v.scoped_access_request(new).unwrap().card.card;
+        assert_eq!(card.scope_source, wire::ScopeSource::LegacyIncomplete);
+        assert_eq!(card.valid_answers, vec![Choice::Deny]);
+        assert_eq!(
+            v.access_requests(true, 100)
+                .unwrap()
+                .iter()
+                .find(|r| r.id == old)
+                .unwrap()
+                .reason,
+            "Original legacy text"
+        );
+    }
+    #[test]
+    fn local_allow_deny_and_durable_grant_race_has_one_atomic_winner() {
+        let (_d, v, agent, item, id) = fixture();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(v));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let tasks: Vec<_> = (0..3)
+            .map(|choice| {
+                let shared = shared.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut v = shared.lock().unwrap();
+                    if choice == 0 {
+                        let r = v.scoped_access_request(id).unwrap();
+                        let proof = OwnerProof::issue_for_test(
+                            OwnerAction::AllowAccessOnce {
+                                request_id: id,
+                                digest: r.card.digest,
+                            },
+                            v.epoch(),
+                            std::time::Instant::now(),
+                        );
+                        access_once::local_answer(&mut v, id, Choice::AllowOnce, Some(proof))
+                            .is_ok()
+                    } else if choice == 1 {
+                        v.deny_access_request(id).is_ok()
+                    } else {
+                        v.set_exec_grants_for_request(
+                            agent,
+                            &[item],
+                            &super::super::GrantPlace::AnyFolder,
+                            super::super::ExecMode::Bouncer,
+                            Some(id),
+                        )
+                        .is_ok()
+                    }
+                })
+            })
+            .collect();
+        assert_eq!(
+            tasks
+                .into_iter()
+                .map(|t| usize::from(t.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+        let v = shared.lock().unwrap();
+        let state = v.access_status(agent, id).unwrap().state;
+        let grants: i64 = v
+            .conn_ref()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM exec_grant", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(grants, if state == "granted_on_mac" { 1 } else { 0 });
+    }
+    #[test]
+    fn exact_proxy_handoff_rechecks_ports_deadline_and_rotated_question_key() {
+        let (_d, mut v, agent, item, id) = fixture();
+        allow(&mut v, id);
+        let c = v.scoped_access_request(id).unwrap().card.card;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(v)));
+        let admission = access_once::Admission::consume(
+            &shared,
+            id,
+            &CheckedScope {
+                agent,
+                item,
+                cwd: &c.cwd,
+                project: &c.project.unwrap().key,
+                action: wire::Action::Read,
+                hosts: &c.hosts,
+            },
+        )
+        .unwrap();
+        let mut released = 0;
+        assert!(
+            admission
+                .deliver("evil.api.example.test", 443, || released += 1)
+                .is_none()
+        );
+        assert!(
+            admission
+                .deliver("api.example.test", 8443, || released += 1)
+                .is_none()
+        );
+        assert!(
+            admission
+                .deliver("api.example.test", 443, || released += 1)
+                .is_some()
+        );
+        assert_eq!(released, 1);
+        shared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .rotate_question_key()
+            .unwrap();
+        assert!(
+            admission
+                .deliver("api.example.test", 443, || released += 1)
+                .is_none()
+        );
+        assert_eq!(released, 1);
+    }
+    #[test]
+    fn ten_open_requests_is_a_mac_local_limit() {
+        let (d, mut v, _, item, _) = fixture();
+        for index in 1..=10 {
+            let (a, _) = v
+                .register_agent(&format!("Synthetic agent {index}"))
+                .unwrap();
+            v.set_agent_sees_all(a.id, true).unwrap();
+            let reply = access_once::create(
+                &mut v,
+                &a,
+                item,
+                "Open",
+                d.path().to_str(),
+                &wire::Scope {
+                    action: wire::Action::Read,
+                    hosts: vec!["api.example.test".into()],
+                },
+            );
+            assert_eq!(reply.ok, index < 10, "{reply:?}");
+        }
+        assert_eq!(v.scoped_access_requests().unwrap().len(), 10);
+    }
+    #[test]
+    fn changed_revision_binding_policy_visibility_and_project_never_release_a_value() {
+        for mutation in 0..7 {
+            let (d, mut v, agent, item, id) = fixture();
+            allow(&mut v, id);
+            let operation = consume(&mut v, id, agent, item).unwrap();
+            match mutation {
+                0 => {
+                    v.conn_mut()
+                        .unwrap()
+                        .execute(
+                            "UPDATE item SET revision=revision+1 WHERE id=?1",
+                            [to_sql_id(item).unwrap()],
+                        )
+                        .unwrap();
+                }
+                1 => {
+                    v.conn_mut()
+                        .unwrap()
+                        .execute(
+                            "UPDATE env_binding SET env_name='OTHER_TOKEN' WHERE item_id=?1",
+                            [to_sql_id(item).unwrap()],
+                        )
+                        .unwrap();
+                }
+                2 => {
+                    v.set_always_ask(item, true).unwrap();
+                }
+                3 => {
+                    v.set_agent_sees_all(agent, false).unwrap();
+                }
+                4 => {
+                    std::fs::create_dir(d.path().join(".git")).unwrap();
+                }
+                5 => {
+                    v.change_passphrase("synthetic-access-test", "new-synthetic-access-test")
+                        .unwrap();
+                }
+                _ => {
+                    let backup = d.path().join("backup.apassy");
+                    v.backup(&backup).unwrap();
+                    let mut restored = Vault::restore(
+                        &backup,
+                        &d.path().join("restored.apassy"),
+                        "synthetic-access-test",
+                    )
+                    .unwrap();
+                    restored.unlock("synthetic-access-test").unwrap();
+                    v = restored;
+                }
+            }
+            assert!(
+                !v.access_admission_live(id, &operation),
+                "mutation {mutation}"
+            );
+            assert!(consume(&mut v, id, agent, item).is_err());
+        }
+    }
+}

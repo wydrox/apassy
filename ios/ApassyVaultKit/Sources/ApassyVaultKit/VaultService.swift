@@ -67,6 +67,10 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case feedRate = "feed_rate"
         /// The service has no such call (an older core; app side, not the core).
         case unsupported
+        case accessUnavailable = "access_unavailable"
+        case historyStorageUnavailable = "history_storage_unavailable"
+        case historyKeyMissing = "history_key_missing"
+        case historyFull = "history_full"
     }
 
     public var code: Code
@@ -171,6 +175,11 @@ public protocol VaultService: Sendable {
     func requestHistory() async throws -> RequestHistorySnapshot
     func clearRequestHistory(vaultID: String) async throws
     func questionsList() async throws -> QuestionsList
+    func accessRequestsList() async throws -> AccessRequestsSnapshot
+    func accessRequestsHistory() async throws -> AccessRequestsSnapshot
+    func accessRequestPrepare(_ request: RelayAccessRequest, choice: AccessChoice) async throws -> PreparedAccessAnswer
+    func accessRequestAnswer(_ request: RelayAccessRequest, choice: AccessChoice, prepared: PreparedAccessAnswer, signature: Data?) async throws -> SentAccessAnswer
+    func accessRequestCancelPrepared() async
     /// Make the questions context of `vaultID` without selecting it (a vault that is not open
     /// after `resume`, or after the app started): the core opens the vault, reads what its
     /// questions need, and closes it again. Returns the status of its questions team
@@ -248,6 +257,11 @@ public protocol VaultService: Sendable {
 }
 
 public extension VaultService {
+    func accessRequestsHistory() async throws -> AccessRequestsSnapshot { throw VaultError(.notAllowed, "Update Apassy to view access history.") }
+    func accessRequestsList() async throws -> AccessRequestsSnapshot { throw VaultError(.notAllowed, "Update Apassy to answer access requests.") }
+    func accessRequestPrepare(_ request: RelayAccessRequest, choice: AccessChoice) async throws -> PreparedAccessAnswer { throw VaultError(.notAllowed, "Review access on the Mac.") }
+    func accessRequestAnswer(_ request: RelayAccessRequest, choice: AccessChoice, prepared: PreparedAccessAnswer, signature: Data?) async throws -> SentAccessAnswer { throw VaultError(.notAllowed, "Review access on the Mac.") }
+    func accessRequestCancelPrepared() async {}
     func requestHistory() async throws -> RequestHistorySnapshot {
         throw VaultError(.notAllowed, "Update Apassy to view saved request history.")
     }

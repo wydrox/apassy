@@ -36,6 +36,8 @@
 //!
 //! The relay calls run without the vault mutex. A lock ends them ([`Core::close`]).
 
+#[path = "access_requests.rs"]
+mod access_requests;
 pub(super) mod envelope;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,6 +88,7 @@ const SYNC_FIRST: &str = "Sync this vault to read this question.";
 /// The questions of this process: a context for each vault unlocked in this session.
 #[derive(Default)]
 pub struct State {
+    access_prepared: BTreeMap<(String, String), access_requests::PreparedAccess>,
     /// By vault ID.
     pub(super) contexts: BTreeMap<String, Context>,
     /// A join of a notifications-only team that waits for the Mac.
@@ -762,6 +765,7 @@ fn question_key(vault: &Vault) -> CoreResult<Option<(String, Zeroizing<Vec<u8>>)
 /// What a check of the cards needs from the vault, read under the vault mutex and kept
 /// in the context of the vault.
 pub(super) struct Keys {
+    vault_identity: String,
     pub(super) team_id: String,
     /// The device number of this iPhone in the questions team.
     pub(super) device_id: u64,
@@ -941,6 +945,7 @@ fn read_keys(vault: &Vault) -> CoreResult<Option<(RelayMembership, Keys)>> {
         return Ok(None);
     };
     let keys = Keys {
+        vault_identity: vault.sync_identity()?.vault_id,
         own: own_device(vault, &membership.public_key)?,
         removed: vault.trusted_key_removed(&membership.public_key)?,
         devices: vault.trusted_devices()?,
@@ -1151,6 +1156,7 @@ impl Core {
                         "Wait for the pending request to finish before clearing this vault's history.",
                     ));
                 }
+                self.clear_access_history(&vault_id)?;
                 super::request_history::remove(&self.paths.data_dir, &vault_id)?;
                 context.history_error = false;
                 Ok(ok(&Empty {}))
@@ -1271,6 +1277,7 @@ impl Core {
     pub(super) fn questions_drop_all(&self) -> Ended {
         let mut state = guard(&self.questions);
         state.drops += 1;
+        state.access_prepared.clear();
         let leftovers = std::mem::take(&mut state.leftovers);
         let members = std::mem::take(&mut state.contexts)
             .into_values()
@@ -1295,6 +1302,7 @@ impl Core {
     /// Another vault is selected or opens: the contexts stay, a join that waits is given
     /// up (it is of the selected vault).
     pub(super) fn questions_switch(&self) -> Ended {
+        guard(&self.questions).access_prepared.clear();
         Ended {
             members: Vec::new(),
             waits: Vec::new(),
@@ -2743,6 +2751,7 @@ mod tests {
         .unwrap();
         let vault_id = "11111111111111111111111111111111";
         let keys = |byte| Keys {
+            vault_identity: "d070dc14-a3ac-42c2-95aa-cc85d6d58900".into(),
             team_id: "t_7k2m5q4x3c".into(),
             device_id: 1,
             key: Some((format!("key-{byte}"), Zeroizing::new(vec![byte; 32]))),

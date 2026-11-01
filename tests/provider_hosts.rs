@@ -117,6 +117,7 @@ fn run(fx: &Fixture, script: &str) -> WireResponse {
         &fx.socket,
         &fx.token,
         Action::Run {
+            access_request_id: None,
             items: vec![fx.item_id],
             command: vec!["sh".into(), "-c".into(), script.into()],
             cwd: fx.project.display().to_string(),

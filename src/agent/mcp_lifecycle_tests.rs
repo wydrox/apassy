@@ -219,6 +219,135 @@ impl Drop for Host {
 }
 
 #[test]
+fn scoped_access_operation_cancellation_withdraws_the_card() {
+    let fx = Fixture::new();
+    let mut host = fx.connect();
+    host.call(
+        1,
+        json!({"name":TOOL_REQUEST_ACCESS,"arguments":{
+            "item_id":fx.item,"reason":"Read synthetic status",
+            "cwd":fx.dir.path().display().to_string(),
+            "scope":{"action":"read","hosts":["api.example.test"]}
+        }}),
+    );
+    let response = host.reply(1);
+    assert_eq!(response["isError"], false, "{response}");
+    let id = response["structuredContent"]["result"]["request_id"]
+        .as_u64()
+        .unwrap();
+    let operation = response["structuredContent"]["operation_id"]
+        .as_str()
+        .unwrap();
+    // A completed asynchronous call survives disconnect; explicit cancellation
+    // of its retained operation must still withdraw the card and any allowance.
+    host.close();
+    assert_eq!(
+        fx.vault
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .access_status(fx.agent, id)
+            .unwrap()
+            .state,
+        "open"
+    );
+    let cancelled = client::send(
+        fx.broker.socket_path(),
+        &fx.token,
+        Action::CancelOperation {
+            operation_id: operation.into(),
+        },
+    )
+    .unwrap();
+    assert!(cancelled.ok, "{cancelled:?}");
+    let guard = fx.vault.lock().unwrap();
+    let vault = guard.as_ref().unwrap();
+    let record = vault.scoped_access_request(id).unwrap();
+    assert_eq!(record.state, "invalidated");
+    assert!(record.cancelled);
+    assert_eq!(
+        record.receipt.unwrap().outcome,
+        crate::questions::access_request::Outcome::Invalidated
+    );
+    assert_eq!(
+        vault.access_status(fx.agent, id).unwrap().permit,
+        "unavailable"
+    );
+}
+
+#[test]
+fn scoped_access_distinguishes_explicit_mcp_cancellation_from_a_lost_response() {
+    use crate::agent::wire::WireRequest;
+    use std::os::unix::net::UnixListener;
+    for explicit in [false, true] {
+        let fx = Fixture::new();
+        let socket = fx.dir.path().join("adapter-proxy.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let broker = fx.broker.socket_path().to_owned();
+        let token = fx.token.clone();
+        let (created, received) = std::sync::mpsc::channel();
+        let proxy = std::thread::spawn(move || {
+            let (original, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            io::BufReader::new(&original).read_line(&mut line).unwrap();
+            let request: WireRequest = serde_json::from_str(&line).unwrap();
+            let response = client::send(&broker, &token, request.action.clone()).unwrap();
+            assert!(response.ok);
+            created
+                .send(response.result.unwrap()["request_id"].as_u64().unwrap())
+                .unwrap();
+            // Keep the original response pending for explicit cancellation, or
+            // drop it to model a lost response after the request committed.
+            let original = explicit.then_some(original);
+            listener.set_nonblocking(true).unwrap();
+            let deadline =
+                Instant::now() + Duration::from_millis(if explicit { 2000 } else { 300 });
+            while Instant::now() < deadline {
+                if let Ok((mut cancellation, _)) = listener.accept() {
+                    let mut line = String::new();
+                    io::BufReader::new(&cancellation)
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: WireRequest = serde_json::from_str(&line).unwrap();
+                    assert!(matches!(request.action, Action::CancelOperation { .. }));
+                    let response = client::send(&broker, &token, request.action.clone()).unwrap();
+                    serde_json::to_writer(&mut cancellation, &response).unwrap();
+                    cancellation.write_all(b"\n").unwrap();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(original);
+            false
+        });
+        let mut host = Host::new(AdapterConfig {
+            socket,
+            token: Some(fx.token.clone()),
+            host_session: None,
+        });
+        host.call(
+            1,
+            json!({"name":TOOL_REQUEST_ACCESS,"arguments":{
+                "item_id":fx.item,"reason":"Synthetic abandoned request",
+                "cwd":fx.dir.path().display().to_string(),
+                "scope":{"action":"read","hosts":["api.example.test"]}
+            }}),
+        );
+        let id = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        if explicit {
+            host.cancel(1);
+        }
+        assert_eq!(host.reply(1)["isError"], true);
+        assert_eq!(proxy.join().unwrap(), explicit);
+        let guard = fx.vault.lock().unwrap();
+        let record = guard.as_ref().unwrap().scoped_access_request(id).unwrap();
+        assert_eq!(record.cancelled, explicit);
+        assert_eq!(record.state, if explicit { "invalidated" } else { "open" });
+    }
+}
+
+#[test]
 fn read_completes_while_run_waits_and_cancellation_withdraws_question() {
     let fx = Fixture::new();
     let mut host = fx.connect();
@@ -519,7 +648,7 @@ fn bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available() {
     host.call(5, json!({"name":TOOL_LIST_ACCESS}));
     assert_eq!(host.reply(5)["isError"], false);
     host.send(json!({"jsonrpc":"2.0", "id":6, "method":"tools/list"}));
-    assert_eq!(host.reply(6)["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(host.reply(6)["tools"].as_array().unwrap().len(), 12);
     host.call(1, json!({"name":TOOL_LIST_ACCESS}));
     assert_eq!(host.next()["error"]["code"], -32600);
     barrier.wait();

@@ -19,6 +19,8 @@ use super::wire::{Action, AgentSecret, Extract, GenerateSpec, MAX_LINE_BYTES, Wi
 pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
+pub const TOOL_ACCESS_STATUS: &str = "apassy_access_request_status";
+pub const TOOL_ACCESS_CANCEL: &str = "apassy_cancel_access_request";
 pub const TOOL_REQUEST_ACCESS: &str = "apassy_request_access";
 pub const TOOL_CAPTURE_CREDENTIAL: &str = "apassy_capture_credential";
 pub const TOOL_GENERATE_CREDENTIAL: &str = "apassy_generate_credential";
@@ -85,7 +87,15 @@ fn write_message(output: &Mutex<impl Write>, message: &Value) -> io::Result<()> 
     writer.flush()
 }
 
-// Three mutating calls plus a reserved read slot. No unbounded input queue.
+#[derive(Default)]
+struct CallCancellation {
+    stopped: AtomicBool,
+    // EOF/output failure stops waiting, but only an explicit MCP cancellation
+    // abandons an asynchronous scoped access request.
+    explicit: AtomicBool,
+}
+
+// Three mutating calls plus a reserved read/control slot. No unbounded input queue.
 fn serve(
     config: &AdapterConfig,
     mut input: impl BufRead,
@@ -93,7 +103,7 @@ fn serve(
     cadence: Duration,
 ) -> io::Result<()> {
     let output = Mutex::new(output);
-    let active = Mutex::new(BTreeMap::<String, (Arc<AtomicBool>, bool)>::new());
+    let active = Mutex::new(BTreeMap::<String, (Arc<CallCancellation>, bool)>::new());
     let drained = std::sync::Condvar::new();
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
@@ -134,7 +144,8 @@ fn serve(
                 if message["method"] == "notifications/cancelled" && message.get("id").is_none() {
                     let key = message["params"]["requestId"].to_string();
                     if let Some((cancel, _)) = active.lock().unwrap().get(&key) {
-                        cancel.store(true, Ordering::SeqCst);
+                        cancel.explicit.store(true, Ordering::SeqCst);
+                        cancel.stopped.store(true, Ordering::SeqCst);
                     }
                     continue;
                 }
@@ -147,8 +158,10 @@ fn serve(
                 let id = message["id"].clone();
                 let key = id.to_string();
                 let params = message["params"].clone();
-                let read_only = params["name"] == TOOL_LIST_ACCESS;
-                let cancel = Arc::new(AtomicBool::new(false));
+                let read_only = [TOOL_LIST_ACCESS, TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL]
+                    .iter()
+                    .any(|name| params["name"] == *name);
+                let cancel = Arc::new(CallCancellation::default());
                 {
                     let mut calls = active.lock().unwrap();
                     if calls.contains_key(&key) {
@@ -181,13 +194,13 @@ fn serve(
                                 "progressToken":token, "progress":progress, "operation_id":operation_id,
                                 "message":format!("Operation {operation_id}; waiting for the broker, owner, or bouncer.")
                             }})).is_err() {
-                                for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
+                                for (cancel, _) in active.lock().unwrap().values() { cancel.stopped.store(true, Ordering::SeqCst); }
                             }
                             progress += 1;
                         }
                     });
                     if write_message(output, &json!({"jsonrpc":"2.0", "id":id, "result":result})).is_err() {
-                        for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
+                        for (cancel, _) in active.lock().unwrap().values() { cancel.stopped.store(true, Ordering::SeqCst); }
                     }
                     active.lock().unwrap().remove(&key);
                     drained.notify_all();
@@ -205,7 +218,7 @@ fn serve(
                 .0;
         }
         for (cancel, _) in calls.values() {
-            cancel.store(true, Ordering::SeqCst);
+            cancel.stopped.store(true, Ordering::SeqCst);
         }
         drop(calls);
         for worker in workers {
@@ -274,7 +287,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention. Repeating a call without that key is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -296,6 +309,8 @@ fn extract_schema() -> Value {
 
 pub fn tool_list() -> Value {
     let mut tools = json!([
+        {"name": TOOL_ACCESS_STATUS,"title":"Check scoped access consent","description":"Read this agent's exact request status without creating anything. A receipt never proves execution succeeded.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
+        {"name": TOOL_ACCESS_CANCEL,"title":"Cancel scoped access consent","description":"Cancel an abandoned request or its unused/pending allowance. Does not recall released values. Never creates a request.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
         {
             "name": TOOL_LIST_ACCESS,
             "title": "List the credentials you can use",
@@ -328,7 +343,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_RUN_WITH_SECRETS,
             "title": "Run a command with secrets in its environment",
-            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention. Repeating a call without that key is not guaranteed safe. The command is an argument list, not a shell string.",
+            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. The command is an argument list, not a shell string.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -336,6 +351,7 @@ pub fn tool_list() -> Value {
                     "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
                     "cwd": { "type": "string", "description": "Absolute working directory: the project folder. The bouncer uses the project." },
                     "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." },
+                    "access_request_id": { "type": "integer", "minimum": 1, "description": "Consume this exact scoped access request once. Retries after admission are refused; query status." },
                     "user_request": { "type": "string", "description": "The user's own words from the conversation that led to this command. Quote them. Do not summarize or add words. The bouncer compares the command with this request, and the owner sees it." }
                 },
                 "required": ["items", "command", "cwd", "purpose", "user_request"],
@@ -345,11 +361,12 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_REQUEST_ACCESS,
             "title": "Tell the owner why you need a credential",
-            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. This legacy tool gives no permission and creates no Decisions question. Its owner inbox is CLI-only (apassy request list). It requires a visible catalog item ID and only records a note to the owner about one catalog credential and returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
+            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. Without scope this legacy tool records a note. With scope it requests one asynchronous access consent, expiring in 300 seconds; the bouncer still checks the eventual command. Scoped requests appear in Mac Decisions and iPhone Requests. Query apassy_access_request_status; then explicitly reference one matching run. Without scope the original local note remains available through apassy request list. It returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "item_id": { "type": "integer", "minimum": 1, "description": "Item ID from the catalog." },
+                    "scope": { "type": "object", "properties": { "action": { "enum": ["read","change","deploy","delete"] }, "hosts": { "type": "array", "items": {"type":"string"}, "maxItems":16 } }, "required":["action","hosts"], "additionalProperties":false },
                     "reason": { "type": "string", "description": "Why you need this credential, with the user's own words when you have them. The owner reads it. At most 500 characters." },
                     "cwd": { "type": "string", "description": "The absolute working directory where you want to use it. Optional." }
                 },
@@ -478,11 +495,11 @@ pub fn tool_list() -> Value {
             tool["description"] = json!(format!(
                 "{description} With operation_id, retrieve that operation's status instead of the catalog."
             ));
-        } else {
+        } else if tool["name"] != TOOL_ACCESS_STATUS && tool["name"] != TOOL_ACCESS_CANCEL {
             tool["inputSchema"]["properties"]["idempotency_key"] = json!({"type":"string", "minLength":1, "maxLength":128, "description":"Choose a unique key before a mutation. Reuse it only with identical arguments to retrieve the first operation without executing again. Keys expire 15 minutes after completion; never blindly replay after expiry or a broker restart."});
             let description = tool["description"].as_str().unwrap().to_owned();
             tool["description"] = json!(format!(
-                "{description} Supply idempotency_key before running. On reconnect use apassy_list_access with operation_id from progress or the error. A repeated identical key returns the original operation receipt (metadata only); different arguments are refused. Cancellation after execution starts cannot undo it."
+                "{description} Supply idempotency_key before running. On reconnect use apassy_list_access with operation_id from progress or the error. A repeated identical key returns the original operation receipt (metadata only); different arguments are refused. Cancellation after execution starts cannot undo it. A run with access_request_id is single use: repeated submission is refused even with this key; query status instead."
             ));
         }
     }
@@ -493,7 +510,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
     call_tool_control(
         config,
         params,
-        &AtomicBool::new(false),
+        &CallCancellation::default(),
         Duration::from_secs(15),
         |_| {},
     )
@@ -502,7 +519,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
 fn call_tool_control(
     config: &AdapterConfig,
     params: &Value,
-    cancelled: &AtomicBool,
+    cancelled: &CallCancellation,
     cadence: Duration,
     mut progress: impl FnMut(&str),
 ) -> Value {
@@ -520,7 +537,9 @@ fn call_tool_control(
     let key = match key {
         None => None,
         Some(Value::String(key))
-            if !key.is_empty() && key.len() <= 128 && name != TOOL_LIST_ACCESS =>
+            if !key.is_empty()
+                && key.len() <= 128
+                && ![TOOL_LIST_ACCESS, TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL].contains(&name) =>
         {
             Some(key)
         }
@@ -544,6 +563,19 @@ fn call_tool_control(
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
+        TOOL_ACCESS_STATUS | TOOL_ACCESS_CANCEL => (|| {
+            let o = arguments_object(&arguments, &["request_id"])?;
+            let request_id = o
+                .get("request_id")
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0)
+                .ok_or_else(|| "Use a positive request_id.".to_owned())?;
+            Ok(if name == TOOL_ACCESS_STATUS {
+                Action::AccessRequestStatus { request_id }
+            } else {
+                Action::CancelAccessRequest { request_id }
+            })
+        })(),
         TOOL_CAPTURE_CREDENTIAL => capture_action(&arguments),
         TOOL_GENERATE_CREDENTIAL => generate_action(&arguments),
         TOOL_SAVE_CREDENTIAL => save_action(&arguments),
@@ -562,6 +594,7 @@ fn call_tool_control(
             "The adapter has no agent token. Set APASSY_AGENT_TOKEN in the MCP server configuration.",
         );
     };
+    let asynchronous_access = matches!(action, Action::RequestAccess { scope: Some(_), .. });
     let operation_id = if action.trackable() {
         match new_operation_id() {
             Ok(id) => Some(id),
@@ -598,7 +631,7 @@ fn call_tool_control(
             }
             last_progress = Instant::now();
         }
-        cancelled.load(Ordering::SeqCst)
+        cancelled.stopped.load(Ordering::SeqCst)
     });
     let result = match response {
         Ok(mut response) => {
@@ -608,6 +641,15 @@ fn call_tool_control(
             return tool_result(response);
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            if asynchronous_access && !cancelled.explicit.load(Ordering::SeqCst) {
+                return attach_operation(
+                    tool_error(
+                        "unknown_outcome",
+                        "The asynchronous access request may have been created. Retrieve operation status, then query or explicitly cancel its request ID.",
+                    ),
+                    operation_id.as_deref(),
+                );
+            }
             if let Some(id) = &operation_id {
                 let cancel = client::send_with(
                     &config.socket,
@@ -647,6 +689,7 @@ fn call_tool_control(
             // finished adapter worker. Cancellation is best effort; keep the
             // unknown-outcome diagnostic and receipt ID even if it succeeds.
             if let Some(id) = &operation_id
+                && !asynchronous_access
                 && !matches!(
                     error.kind(),
                     io::ErrorKind::InvalidInput
@@ -742,7 +785,7 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     if let Some(_extra) = object.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "items" | "command" | "cwd" | "purpose" | "user_request"
+            "items" | "command" | "cwd" | "purpose" | "user_request" | "access_request_id"
         )
     }) {
         return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
@@ -780,6 +823,14 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
         return Err("Give at least one item and a nonempty command argument list.".to_owned());
     }
     Ok(Action::Run {
+        access_request_id: object
+            .get("access_request_id")
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| "Use a positive access_request_id.".to_owned())
+            })
+            .transpose()?,
         items,
         command,
         cwd: text("cwd")?,
@@ -796,7 +847,7 @@ fn request_action(arguments: &Value) -> Result<Action, String> {
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
     if let Some(_extra) = object
         .keys()
-        .find(|key| !matches!(key.as_str(), "item_id" | "reason" | "cwd"))
+        .find(|key| !matches!(key.as_str(), "item_id" | "reason" | "cwd" | "scope"))
     {
         return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
     }
@@ -820,6 +871,12 @@ fn request_action(arguments: &Value) -> Result<Action, String> {
         ),
     };
     Ok(Action::RequestAccess {
+        scope: object
+            .get("scope")
+            .map(|v| {
+                serde_json::from_value(v.clone()).map_err(|_| "Use the scope schema.".to_owned())
+            })
+            .transpose()?,
         item_id,
         reason,
         cwd,
@@ -1110,6 +1167,19 @@ fn tool_result(response: WireResponse) -> Value {
 /// recognized codes and fixed messages cross the MCP diagnostic boundary.
 pub(crate) fn broker_error(code: &str) -> Value {
     let (code, message) = match code {
+        "access_once_unavailable" => (
+            code,
+            "This scoped use is unavailable or consumed. Query apassy_access_request_status; never repeat an admitted use.",
+        ),
+        "access_request_waiting" => (
+            code,
+            "Another scope is active for this agent. Query its access status or review on the Mac.",
+        ),
+        "access_request_rate_limited" => (
+            code,
+            "The conservative Mac-local access-request budget is exhausted. Review on the Mac.",
+        ),
+        "not_found" => (code, "This request is unavailable to this agent."),
         "cancelled" => (code, "The operation was cancelled before execution."),
         "unknown_outcome" | "cancellation_requested" => (
             code,
@@ -1509,6 +1579,32 @@ mod tests {
     }
 
     #[test]
+    fn scoped_access_refusals_are_typed_and_status_tools_never_get_cached() {
+        for code in [
+            "access_once_unavailable",
+            "access_request_waiting",
+            "access_request_rate_limited",
+        ] {
+            assert_eq!(broker_error(code)["structuredContent"]["code"], code);
+        }
+        for name in [TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL] {
+            let tools = tool_list();
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            assert!(
+                tool["inputSchema"]["properties"]
+                    .get("idempotency_key")
+                    .is_none()
+            );
+        }
+        assert!(!Action::AccessRequestStatus { request_id: 81 }.trackable());
+        assert!(!Action::CancelAccessRequest { request_id: 81 }.trackable());
+    }
+    #[test]
     fn initialize_and_tools_list() {
         let reply = handle_message(
             &config(),
@@ -1521,7 +1617,16 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(10));
+        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(12));
+        for name in [TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL] {
+            assert!(
+                reply["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == name)
+            );
+        }
         assert!(
             handle_message(
                 &config(),
@@ -1662,6 +1767,7 @@ mod tests {
         assert_eq!(
             action,
             Action::RequestAccess {
+                scope: None,
                 item_id: 7,
                 reason: "The user asked to deploy.".to_owned(),
                 cwd: Some("/Users/me/Dev/app".to_owned()),

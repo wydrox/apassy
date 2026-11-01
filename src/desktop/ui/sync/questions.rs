@@ -912,6 +912,17 @@ impl DesktopApp {
     /// vault gets a new question key, and the relay revokes the device on a thread of
     /// its own when this Mac is in the team.
     pub(crate) fn questions_remove_device(&mut self, uuid: &str) {
+        self.questions_remove_device_checked(uuid, None);
+    }
+    pub(crate) fn questions_remove_older_device(
+        &mut self,
+        uuid: &str,
+        team: &str,
+        proof: OwnerProof,
+    ) {
+        self.questions_remove_device_checked(uuid, Some((team.to_owned(), proof)));
+    }
+    fn questions_remove_device_checked(&mut self, uuid: &str, check: Option<(String, OwnerProof)>) {
         let found = self.owner_ui.session.with_vault(|vault| {
             if vault.is_locked() {
                 return Err(SyncError::Vault(VaultErrorKind::Locked));
@@ -920,6 +931,22 @@ impl DesktopApp {
                 .trusted_device(uuid)?
                 .ok_or(SyncError::Vault(VaultErrorKind::NotFound))?;
             let membership = questions_membership(vault)?;
+            if let Some((team, proof)) = check {
+                proof
+                    .check(
+                        &OwnerAction::RemoveOlderIphone {
+                            device: device.clone(),
+                            team: team.clone(),
+                        },
+                        &vault.epoch(),
+                    )
+                    .map_err(|_| SyncError::Vault(VaultErrorKind::Conflict))?;
+                if device.kind != TrustedDeviceKind::Iphone
+                    || membership.as_ref().is_none_or(|m| m.team_id != team)
+                {
+                    return Err(SyncError::Vault(VaultErrorKind::Conflict));
+                }
+            }
             if membership
                 .as_ref()
                 .is_some_and(|membership| device.sign_key == membership.public_key)

@@ -5,6 +5,7 @@
 //! only the permitted output fields to the agent. Manual grants are temporary.
 //! They are not the rule engine from P3.
 
+pub mod access_once;
 pub mod action_kind;
 pub mod agent_items;
 pub mod approvals;

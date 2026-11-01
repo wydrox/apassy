@@ -143,6 +143,7 @@ fn ask(fx: &Fixture, item_id: u64, reason: &str) -> WireResponse {
     send(
         fx,
         Action::RequestAccess {
+            scope: None,
             item_id,
             reason: reason.to_owned(),
             cwd: Some("/tmp".to_owned()),

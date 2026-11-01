@@ -214,6 +214,7 @@ final class QuestionsModel {
     private(set) var status = QuestionsStatus.off
     /// The questions of every vault in the list.
     private(set) var questions: [RemoteQuestion] = []
+    let access: AccessRequestsModel
     /// The vaults whose questions the core keeps; empty with an older core (the selected vault).
     private(set) var vaults: [QuestionsVault] = []
     private var scopedDeliveries: [String: Delivery] = [:]
@@ -311,6 +312,7 @@ final class QuestionsModel {
     ) {
         self.service = service
         self.signers = signers
+        self.access = AccessRequestsModel(service:service,signers:signers)
         self.push = push
         self.deviceName = deviceName
         self.onDeviceName = onDeviceName
@@ -404,7 +406,10 @@ final class QuestionsModel {
                 scopedDeliveries[question.requestIdentity] = nil
                 sentAt[question.requestIdentity] = nil
             }
-            questions = list.questions.map { question in
+            await access.refresh()
+            guard generation == openGeneration, request == listGeneration else { return }
+            let accessIDs = Set(access.requests.map { "\($0.vault_id):\($0.card.qid)" })
+            questions = list.questions.filter { !accessIDs.contains("\($0.vaultID ?? ""):\($0.qid)") }.map { question in
                 var current = question
                 if current.settle == nil, case .sent(let answer) = scopedDeliveries[current.requestIdentity] {
                     current.answered = answer
@@ -871,6 +876,7 @@ final class QuestionsModel {
         historyLoading = false
         do {
             try await service.clearRequestHistory(vaultID: vaultID)
+            await access.refresh()
             guard generation == openGeneration else { return }
             await refreshHistory()
         } catch {
@@ -977,6 +983,7 @@ final class QuestionsModel {
     /// The vault locked (or the core answered `locked`): no question shows, and every other vault
     /// with questions is locked.
     private func showLocked() {
+        access.cancel()
         openGeneration += 1
         historyGeneration += 1
         historyVaults = []
@@ -1017,6 +1024,7 @@ final class QuestionsModel {
     /// the owner asked for, reads the passphrases of the others too; else they wait in one row
     /// "Unlock with Face ID" (`unlockFaceIDTapped`).
     func vaultDidOpen(reads: (any PassphraseReads)? = nil) {
+        access.cancel()
         openGeneration += 1
         let generation = openGeneration
         reopenTask?.cancel()
@@ -1046,6 +1054,7 @@ final class QuestionsModel {
 
     /// The vault locks: the core drops the questions of every vault, and so does the list.
     func vaultDidLock() {
+        access.cancel()
         openGeneration += 1
         reopenTask?.cancel()
         reopenTask = nil
@@ -1057,6 +1066,7 @@ final class QuestionsModel {
     /// The app leaves the screen: work on the other vaults stops, and the passphrase sheet closes
     /// (its field is cleared).
     func vaultWillLeave() {
+        access.cancel()
         openGeneration += 1
         historyGeneration += 1
         historyVaults = []

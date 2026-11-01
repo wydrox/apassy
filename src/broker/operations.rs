@@ -28,6 +28,8 @@ struct State {
     waiting: bool,
     outcome: Option<Value>,
     finished: Option<Instant>,
+    // An asynchronous scoped request can outlive this operation's response.
+    access_request: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +84,29 @@ pub(super) fn cancelled() -> bool {
             let state = lock(&c.state);
             state.cancelled && !state.invalidated
         })
+    })
+}
+
+/// Bind while holding the vault arbiter. Cancellation before binding is applied
+/// here; cancellation after binding uses the same exact agent/request target.
+pub(super) fn bind_access_request(
+    vault: &mut crate::vault::Vault,
+    agent: u64,
+    id: u64,
+) -> crate::vault::VaultResult<bool> {
+    CURRENT.with(|current| {
+        let current = current.borrow();
+        let Some(control) = current.as_ref() else {
+            return Ok(false);
+        };
+        let mut state = lock(&control.state);
+        state.access_request = Some(id);
+        let cancelled = state.cancelled || state.invalidated;
+        drop(state);
+        if cancelled {
+            vault.cancel_scoped_access_request(agent, id)?;
+        }
+        Ok(cancelled)
     })
 }
 
@@ -246,7 +271,7 @@ impl Operations {
                 drop(records);
                 let mut state = lock(&control.state);
                 if matches!(request.action, Action::CancelOperation { .. })
-                    && state.outcome.is_none()
+                    && (state.outcome.is_none() || state.access_request.is_some())
                 {
                     state.cancelled = true;
                     // Wait only for withdrawal of a pending question. Inference may
@@ -260,7 +285,28 @@ impl Operations {
                             .0;
                     }
                 }
-                return receipt(id, &state);
+                let access = matches!(request.action, Action::CancelOperation { .. })
+                    .then_some(state.access_request)
+                    .flatten();
+                // Never take the vault while holding control.state: creation
+                // binds its request under the opposite lock order.
+                drop(state);
+                if let Some(access) = access {
+                    let mut guard = decide::lock(&ctx.vault);
+                    let Some(vault) = guard
+                        .as_mut()
+                        .filter(|v| !v.is_locked() && v.epoch() == scope.0)
+                    else {
+                        return decide::locked_response();
+                    };
+                    if vault.cancel_scoped_access_request(scope.1, access).is_err() {
+                        return WireResponse::failure(
+                            "access_once_unavailable",
+                            "The scoped request could not be withdrawn. Check its status on the Mac.",
+                        );
+                    }
+                }
+                return receipt(id, &lock(&control.state));
             }
             if matches!(request.action, Action::CancelOperation { .. })
                 && records.len() < MAX_RECORDS
@@ -315,6 +361,22 @@ impl Operations {
                     "operation_conflict",
                     "The operation ID is already used.",
                 );
+            }
+            // ADR 0033 deliberately has no execution idempotency. A caller uses
+            // status after an uncertain admission, never a repeated use call.
+            if matches!(
+                action,
+                Action::Run {
+                    access_request_id: Some(_),
+                    ..
+                }
+            ) {
+                let mut response = WireResponse::failure(
+                    "access_once_unavailable",
+                    "This referenced use was already submitted. Query access/operation status; do not repeat it.",
+                );
+                response.operation_id = Some(known_id.clone());
+                return response;
             }
             if record.fingerprint != fingerprint && record.fingerprint != [0; 32] {
                 let mut response = WireResponse::failure(
@@ -554,6 +616,7 @@ mod tests {
             .unwrap();
         let mut refusal = request.clone();
         refusal.action = Action::RequestAccess {
+            scope: None,
             item_id: 0,
             reason: "Synthetic refusal".into(),
             cwd: None,
@@ -651,6 +714,7 @@ mod tests {
             *fingerprint_bytes(&generate(Some(32), Some("alnum".into())))
         );
         let run = |items, command| Action::Run {
+            access_request_id: None,
             items,
             command,
             cwd: "/synthetic".into(),
@@ -695,5 +759,60 @@ mod tests {
             a.digest(b"synthetic password"),
             b.digest(b"synthetic password")
         );
+    }
+    #[test]
+    fn a_referenced_use_never_returns_an_idempotency_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            crate::vault::Vault::create(&dir.path().join("vault.db"), "synthetic-access-retry")
+                .unwrap();
+        v.unlock("synthetic-access-retry").unwrap();
+        let (_, token) = v.register_agent("Synthetic retry").unwrap();
+        let ctx = BrokerContext {
+            vault: Arc::new(Mutex::new(Some(v))),
+            tls: super::super::http::TlsClient::platform().unwrap(),
+            approvals: Arc::new(super::super::approvals::ApprovalQueue::new()),
+            approval_timeout: Duration::from_secs(1),
+            run_timeout: Duration::from_secs(1),
+            bouncer: None,
+            model_gate: None,
+            prompts: Arc::new(super::super::prompts::PromptStore::new(vec![])),
+        };
+        let operations = Operations::new().unwrap();
+        let request = WireRequest {
+            v: WIRE_VERSION,
+            token: token.expose().into(),
+            host_session: None,
+            action: Action::Tracked {
+                operation_id: "abcd1234abcd1234abcd1234abcd1234".into(),
+                idempotency_key: Some("synthetic-access-retry".into()),
+                action: Box::new(Action::Run {
+                    access_request_id: Some(81),
+                    items: vec![7],
+                    command: vec!["true".into()],
+                    cwd: dir.path().display().to_string(),
+                    purpose: "Synthetic refusal".into(),
+                    path: None,
+                    user_request: Some("Synthetic test".into()),
+                }),
+            },
+        };
+        let _ = operations.handle(&ctx, &request);
+        let retried = operations.handle(&ctx, &request);
+        assert_eq!(retried.error.unwrap().code, "access_once_unavailable");
+        assert!(retried.result.is_none());
+        let status = operations.handle(
+            &ctx,
+            &WireRequest {
+                action: Action::OperationStatus {
+                    operation_id: "abcd1234abcd1234abcd1234abcd1234".into(),
+                },
+                v: request.v,
+                token: request.token.clone(),
+                host_session: request.host_session.clone(),
+            },
+        );
+        assert!(status.ok);
+        assert!(status.result.is_some());
     }
 }

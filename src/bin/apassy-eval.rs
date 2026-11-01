@@ -481,6 +481,7 @@ fn score_run(
             token: token.to_owned(),
             host_session: None,
             action: Action::Run {
+                access_request_id: None,
                 items: item_ids.clone(),
                 command,
                 cwd: cwd.display().to_string(),

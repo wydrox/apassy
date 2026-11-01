@@ -263,6 +263,7 @@ struct Running {
 
 /// "Add a device…" while its sheet is open.
 struct AddMac {
+    older: Vec<(crate::vault::TrustedDevice, String)>,
     /// The vault (list ID).
     id: String,
     /// The link code. It works once, for 10 minutes.
@@ -286,6 +287,7 @@ struct AddMac {
 impl AddMac {
     fn new(id: &str, error: Option<String>, via: Option<QuestionsClient>) -> Self {
         Self {
+            older: Vec::new(),
             id: id.to_owned(),
             code: None,
             qr: None,
@@ -2317,6 +2319,7 @@ impl DesktopApp {
         if !self.relay_open(id) {
             return Some(Err(SyncError::Vault(VaultErrorKind::Locked)));
         }
+        let mut older = Vec::new();
         let written = self.owner_ui.session.with_vault(|vault| {
             let team = match via_team {
                 Some(team) => team,
@@ -2329,8 +2332,15 @@ impl DesktopApp {
                 &link.device_name,
                 &link.public_key,
             )?;
+            let (name, _) = split_link_device_name(&link.device_name);
+            older = older_iphones(vault.trusted_devices()?, &link.public_key, &name, &team);
             Ok(())
         });
+        if matches!(&written, Some(Ok(())))
+            && let Some(add) = self.sync.relay.add.as_mut().filter(|a| a.id == id)
+        {
+            add.older = older;
+        }
         self.wake_questions();
         Some(written.unwrap_or(Err(SyncError::Vault(VaultErrorKind::Locked))))
     }
@@ -3308,6 +3318,7 @@ pub(super) fn add_mac_sheet(
     let links = add.links.clone();
     let error = add.error.clone();
     let added = add.added.clone();
+    let older = add.older.first().cloned();
     // A removed Mac cannot add one: its link works no more, and a new call fails at once.
     let removed = !iphone && app.relay_removed(&entry.id);
     let link = link.filter(|_| added.is_none() && !removed);
@@ -3329,6 +3340,8 @@ pub(super) fn add_mac_sheet(
     let mut confirm = None;
     let mut refuse = None;
     let mut done = false;
+    let mut remove_older = false;
+    let mut keep_older = false;
     let response = kit::sheet(ctx, "sync-relay-add-mac", 520.0, |ui| {
         kit::sheet_title(ui, &title, added.is_none().then_some(intro));
         if let Some(link) = &link {
@@ -3355,6 +3368,21 @@ pub(super) fn add_mac_sheet(
         if let Some(added) = &added {
             // After a confirmation: the result and Done, nothing else.
             kit::tone_note(ui, added, Tone::Good);
+            if let Some((device, _)) = &older {
+                kit::paragraph(
+                    ui,
+                    format!(
+                        "An older iPhone '{}' is still paired. Remove it?",
+                        device.name
+                    ),
+                    Font::Body,
+                    kit::LABEL,
+                );
+                ui.horizontal(|ui| {
+                    remove_older = kit::button(ui, "Remove", Style::Bordered).clicked();
+                    keep_older = kit::button(ui, "Keep", Style::Bordered).clicked();
+                });
+            }
             kit::sheet_buttons(
                 ui,
                 |_| {},
@@ -3450,7 +3478,16 @@ pub(super) fn add_mac_sheet(
             },
         );
     });
-    if new_link && iphone {
+    if remove_older || keep_older {
+        if let Some(add) = app.sync.relay.add.as_mut()
+            && !add.older.is_empty()
+        {
+            add.older.remove(0);
+        }
+        if remove_older && let Some((device, team)) = older {
+            app.ask_owner(OwnerRequest::RemoveOlderIphone { device, team }, Some(ctx));
+        }
+    } else if new_link && iphone {
         app.relay_add_iphone_start(&entry.id);
     } else if new_link {
         app.relay_add_mac_start(&entry.id);
@@ -3465,6 +3502,23 @@ pub(super) fn add_mac_sheet(
         super::cancel_sheet(app, ctx);
     }
     response.escape
+}
+
+fn older_iphones(
+    devices: Vec<crate::vault::TrustedDevice>,
+    new_key: &[u8],
+    name: &str,
+    team: &str,
+) -> Vec<(crate::vault::TrustedDevice, String)> {
+    devices
+        .into_iter()
+        .filter(|d| {
+            d.kind == crate::vault::TrustedDeviceKind::Iphone
+                && d.sign_key != new_key
+                && (d.name == name || d.relay_devices.contains_key(team))
+        })
+        .map(|d| (d, team.to_owned()))
+        .collect()
 }
 
 /// "Devices…": the Macs of the relay team, and "Remove" for each other Mac.
@@ -3865,4 +3919,52 @@ pub(super) fn use_copy_sheet(
         super::cancel_sheet(app, ctx);
     }
     response.escape
+}
+
+#[cfg(test)]
+mod access_repair_tests {
+    use super::*;
+    #[test]
+    fn re_pair_offers_same_name_or_any_iphone_in_team_without_removing_them() {
+        use crate::vault::{TrustedDevice, TrustedDeviceKind};
+        let make = |id: &str, name: &str, kind, team: &str, key: u8| TrustedDevice {
+            uuid: id.into(),
+            name: name.into(),
+            kind,
+            relay_devices: std::collections::BTreeMap::from([(team.into(), 1)]),
+            sign_key: vec![key],
+            answer_key: None,
+            created_at: 1,
+            updated_at: 1,
+            updated_by: "synthetic".into(),
+        };
+        let rows = vec![
+            make("old", "iPhone", TrustedDeviceKind::Iphone, "other", 1),
+            make(
+                "other",
+                "Different name",
+                TrustedDeviceKind::Iphone,
+                "team",
+                2,
+            ),
+            make(
+                "keep",
+                "Other phone",
+                TrustedDeviceKind::Iphone,
+                "elsewhere",
+                3,
+            ),
+            make("mac", "iPhone", TrustedDeviceKind::Mac, "team", 4),
+            make("new", "iPhone", TrustedDeviceKind::Iphone, "team", 5),
+        ];
+        let selected = older_iphones(rows.clone(), &[5], "iPhone", "team");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|r| r.0.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old", "other"]
+        );
+        assert_eq!(rows.len(), 5);
+    }
 }

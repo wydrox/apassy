@@ -1583,9 +1583,18 @@ impl OwnerSession {
             .unlocked()?
             .open_request_target(request_id)
             .map_err(|_| fail("not_found", "The request is not open any more."))?;
-        self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
-            .set_exec_grants(agent_id, &[item_id], &place, mode)
-            .map_err(map_exec_grant_err)
+        self.unlocked_for(
+            proof,
+            &OwnerAction::GrantAccessRequest {
+                request_id,
+                agent_id,
+                item_id,
+                place: place.clone(),
+                mode,
+            },
+        )?
+        .set_exec_grants_for_request(agent_id, &[item_id], &place, mode, Some(request_id))
+        .map_err(map_exec_grant_err)
     }
 
     pub fn declaration(&self, item_id: u64) -> ModelResult<Option<Declaration>> {

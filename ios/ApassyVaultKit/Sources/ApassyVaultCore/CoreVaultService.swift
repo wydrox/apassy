@@ -81,6 +81,7 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         }
         let config: [String: Any] = [
             "request_history_enabled": historyEnabled,
+            "request_guard_storage_ready": historyEnabled,
             "request_history_required": role == .app,
             "data_dir": dataDirectory.path(percentEncoded: false),
             "device_name": deviceName,

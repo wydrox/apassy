@@ -101,6 +101,10 @@ import SwiftUI
                     // The rows of this iPhone hold the answer key of each team (software keys in
                     // the Simulator), as after a confirmed connection.
                     let signers = root?.answerSigners
+                    if mode == "access" || mode == "access-expiry" {
+                        await service.setAccessRequests([PreviewVaultService.sampleAccessRequest(
+                            answerKey:try? signers?.joinKey(team:"t_7k2m5q4x3c"),expiresIn:mode == "access-expiry" ? 5 : 300)])
+                    }
                     await service.setQuestionsReportVaultScope(true)
                     await service.setQuestions(
                         enabled: true, questions: DecisionsPreview.questions(),

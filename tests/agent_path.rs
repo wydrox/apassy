@@ -736,7 +736,7 @@ fn mcp_adapter_process_round_trip() {
     }));
     assert_eq!(init["result"]["serverInfo"]["name"], "apassy");
     let tools = mcp.request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-    assert_eq!(tools["result"]["tools"].as_array().map(Vec::len), Some(10));
+    assert_eq!(tools["result"]["tools"].as_array().map(Vec::len), Some(12));
 
     let reply = mcp.request(&json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",

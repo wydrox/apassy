@@ -167,6 +167,7 @@ pub(super) struct Setup {
     pub(super) core: Core,
     pub(super) relay: QuestionsRelay,
     pub(super) history_keys: Arc<SyntheticHistoryKeys>,
+    pub(super) mac_key: DeviceKey,
 }
 
 pub(super) fn setup() -> Setup {
@@ -233,6 +234,7 @@ pub(super) fn setup_with_history(history: bool) -> Setup {
         core: phone,
         relay,
         history_keys,
+        mac_key,
     }
 }
 

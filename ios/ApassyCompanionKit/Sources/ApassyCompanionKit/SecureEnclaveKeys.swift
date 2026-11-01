@@ -133,6 +133,28 @@
             }
         }
 
+        public func signAccessApproval(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data {
+            defer { authentication.cancel() }
+            try authentication.requireFaceID(reason: reason)
+            let blob = approvalBlob
+            let service = service
+            return try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        guard !authentication.isCancelled else { throw CompanionKeyError.cancelled }
+                        let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: authentication.context)
+                        let signature = try key.signature(for: message).derRepresentation
+                        guard !authentication.isCancelled else { throw CompanionKeyError.cancelled }
+                        continuation.resume(returning: signature)
+                    } catch {
+                        let stored = try? KeychainItems.load(service: service, account: Self.enrollmentAccount)
+                        continuation.resume(throwing: CompanionKeyError.classifyAuthFailure(
+                            CompanionKeyError.map(error), enrolledState: stored, currentState: Self.enrollmentState()))
+                    }
+                }
+            }
+        }
+
         /// The state of the biometric enrollment now, or nil when it cannot be read.
         private static func enrollmentState() -> Data? {
             let context = LAContext()

@@ -24,6 +24,8 @@
 //! The local card and the local-network companion (companion-v1, digest v1) stay as
 //! they are.
 
+pub mod access_request;
+mod access_worker;
 pub mod answer;
 pub mod client;
 pub mod device_link;
