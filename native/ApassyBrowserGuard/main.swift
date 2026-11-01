@@ -4,7 +4,9 @@
 // The crate forbids unsafe Rust, so the audit token and code signing checks run
 // here. The guard is Apassy.app/Contents/MacOS/apassy-browser-guard. It answers
 // one check and exits: "ok" on standard output and status 0, or status 1 with no
-// output. It reads no request and has no development override. The test build
+// output. Only an unsafe switch answers "unsafe-switch\n" with status 2.
+// The process that set the switch already knows it; this reveals nothing about
+// the vault. It reads no request and has no development override. The test build
 // adds self-test modes (APASSY_BROWSER_GUARD_SELFTEST) that never answer "ok".
 //
 // The browser gives the native messaging host the origin of the extension as an
@@ -88,6 +90,7 @@ let knownBrowsers = [
 
 struct Refused: Error {
     let reason: String
+    var unsafeSwitch: Bool = false
 }
 
 /// A process that passed a check.
@@ -177,11 +180,11 @@ func checkBrowser(_ browser: pid_t) throws -> Checked {
 /// again after the arguments, so the arguments belong to the checked process.
 func checkArguments(of pid: pid_t, token: audit_token_t) throws {
     let arguments = try processArguments(of: pid)
-    if let name = unsafeSwitch(in: arguments) {
-        throw Refused(reason: "the browser runs with --\(name)")
-    }
     guard let again = auditToken(of: pid), same(again, token) else {
         throw Refused(reason: "the browser changed during the check")
+    }
+    if let name = unsafeSwitch(in: arguments) {
+        throw Refused(reason: "the browser runs with --\(name)", unsafeSwitch: true)
     }
 }
 
@@ -531,7 +534,7 @@ func runGuard() -> Int32 {
     #endif
     guard arguments.count == 2 else {
         FileHandle.standardError.write(Data("apassy-browser-guard: usage: apassy-browser-guard browser-parent|socket-peer\n".utf8))
-        return 2
+        return 1
     }
     do {
         let own = try ownApp()
@@ -544,6 +547,10 @@ func runGuard() -> Int32 {
             throw Refused(reason: "unknown check")
         }
     } catch let refused as Refused {
+        if refused.unsafeSwitch {
+            FileHandle.standardOutput.write(Data("unsafe-switch\n".utf8))
+            return 2
+        }
         FileHandle.standardError.write(Data("apassy-browser-guard: refused: \(refused.reason)\n".utf8))
         return 1
     } catch {

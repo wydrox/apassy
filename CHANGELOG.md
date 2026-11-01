@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- **Browser extension:** Explain passkey and code refusals when the browser was started with remote debugging or a test extension.
+
 ## [0.5.10] - 2026-11-01
 
 ### Added
