@@ -129,7 +129,7 @@ fn guard_survives_restart_and_history_opt_out() {
         assert_eq!(fails(&s.core, send.clone()), "relay_unreachable");
     }
     call(&s.core, json!({"op":"lock"}));
-    s.core=apassy_core::Core::new_with_history_key_provider(&json!({"data_dir":s.data,"device_name":"Test iPhone","role":"app","request_history_enabled":false}).to_string(),s.history_keys.clone()).unwrap();
+    s.core=apassy_core::Core::new_with_history_key_provider(&json!({"data_dir":s.data,"device_name":"Test iPhone","role":"app","request_history_enabled":false,"request_guard_storage_ready":true}).to_string(),s.history_keys.clone()).unwrap();
     call(&s.core, json!({"op":"unlock","passphrase":PASS}));
     assert_eq!(
         call(&s.core, json!({"op":"access_requests_history"}))["requests"],

@@ -164,11 +164,16 @@ impl Core {
         self.save_access_guards(vault, &guards, key.as_slice())
     }
     fn access_guard_path(&self, vault: &str) -> CoreResult<(std::path::PathBuf, String)> {
-        if !super::super::config::valid_id(vault) {
+        if !self.request_guard_storage_ready || !super::super::config::valid_id(vault) {
             return Err(unavailable());
         }
         let name = format!("access-guards-v1-{vault}.json");
-        Ok((self.paths.data_dir.join(&name), name))
+        let directory = self.paths.data_dir.join("request-history");
+        let metadata = std::fs::symlink_metadata(&directory).map_err(|_| guard_unavailable())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(guard_unavailable());
+        }
+        Ok((directory.join(&name), name))
     }
     fn access_guards(&self, vault: &str) -> CoreResult<(Guards, Zeroizing<[u8; 32]>)> {
         let (path, _) = self.access_guard_path(vault)?;
@@ -225,7 +230,7 @@ impl Core {
         Ok((guards, key))
     }
     fn save_access_guards(&self, vault: &str, g: &Guards, key: &[u8]) -> CoreResult<()> {
-        let (_, name) = self.access_guard_path(vault)?;
+        let (path, name) = self.access_guard_path(vault)?;
         let plain = Zeroizing::new(serde_json::to_vec(g).map_err(|_| guard_unavailable())?);
         if plain.len() > 1_500_000 {
             return Err(guard_unavailable());
@@ -241,7 +246,8 @@ impl Core {
             ciphertext: encode_b64u(&ciphertext),
         })
         .map_err(|_| guard_unavailable())?;
-        write_private(&self.paths.data_dir, &name, &bytes).map_err(|_| guard_unavailable())
+        write_private(path.parent().ok_or_else(guard_unavailable)?, &name, &bytes)
+            .map_err(|_| guard_unavailable())
     }
     fn access_open(
         &self,
@@ -463,7 +469,7 @@ impl Core {
                 let (mut guards, key) = self.access_guards(&using.vault_id)?;
                 guards
                     .entries
-                    .retain(|_, g| g.expires_at > now() || g.receipt.is_some());
+                    .retain(|_, g| g.expires_at.saturating_add(30 * 86400) > now());
                 if guards.entries.len() >= 1000 && !guards.entries.contains_key(&input.qid) {
                     return Err(guard_unavailable());
                 }

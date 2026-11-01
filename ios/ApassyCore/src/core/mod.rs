@@ -74,6 +74,8 @@ struct ConfigWire {
     #[serde(default)]
     request_history_required: bool,
     #[serde(default)]
+    request_guard_storage_ready: Option<bool>,
+    #[serde(default)]
     device_name: Option<String>,
     #[serde(default)]
     role: Option<Role>,
@@ -82,6 +84,7 @@ struct ConfigWire {
 /// The vault core of one process.
 pub struct Core {
     paths: Paths,
+    request_guard_storage_ready: bool,
     request_history_enabled: bool,
     request_history_required: bool,
     history_key_provider: Option<Arc<dyn HistoryKeyProvider>>,
@@ -258,6 +261,9 @@ impl Core {
         let list = PhoneList::load(&paths.data_dir)?;
         let questions = questions::State::load(&paths.data_dir);
         let core = Self {
+            request_guard_storage_ready: config
+                .request_guard_storage_ready
+                .unwrap_or(config.request_history_enabled),
             request_history_enabled: config.request_history_enabled,
             request_history_required: config.request_history_required,
             history_key_provider: provider,
