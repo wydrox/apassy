@@ -220,7 +220,9 @@ mod tests {
         assert!(parse_answer(Some((Some(0), b"ok\n".to_vec()))).is_ok());
         let unsafe_error = parse_answer(Some((Some(2), b"unsafe-switch\n".to_vec()))).unwrap_err();
         assert_eq!(unsafe_error.code, "unsupported");
-        assert!(unsafe_error.message.contains("Quit the browser and open it normally."));
+        assert!(unsafe_error
+            .message
+            .contains("Quit the browser and open it normally."));
         for answer in [
             None, // timeout
             Some((Some(1), vec![])),
