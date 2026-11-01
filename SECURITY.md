@@ -54,7 +54,7 @@ choices can reuse a fresh local verification for browser and macOS AutoFill
 password/code actions, passkey sign-ins (UP/UV set), and an explicit Allow once
 click for each agent request. A window never answers an agent request itself.
 Browser fills from trusted extension gestures need no Apassy sheet in a window.
-Reveal/copy/OTP display, exports/backups/restores, production/project and durable
+App UI reveal/copy/OTP display, exports/backups/restores, production/project and durable
 grants, bouncer evaluation permission, relaxations, tokens/agent connect,
 devices/pairing, passkey create/remove and changing the setting remain fresh.
 Remote/iPhone answers never use or start the Mac window. No iPhone behavior changes.

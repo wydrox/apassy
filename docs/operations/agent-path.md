@@ -298,6 +298,8 @@ codes for that item, project, action and destinations. Older password-only answe
 patterns and an allowing model never cover codes. Allow once covers one run. Other
 hard rules still ask. The approval card names code use; no value is in the card.
 Schema 23 remembers the code scope separately from password-only authority.
+Code-bearing wire requests use version 1 so older brokers refuse them; ordinary
+requests retain version 0. Upgrade the app and adapter together.
 
 The broker generates immediately before process spawn. At most five whole seconds
 remaining selects the next period's code without sleeping; providers rejecting

@@ -42,7 +42,7 @@ use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::model_server::ModelGate;
 use super::profile::{self, OperationSpec};
 use super::prompts::PromptStore;
-use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse, codes};
+use crate::agent::wire::{Action, WireRequest, WireResponse, codes};
 use crate::vault::answers::normal_host;
 use crate::vault::exceptions::Standing;
 use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
@@ -75,7 +75,7 @@ pub struct BrokerContext {
 /// Opt-in local evaluation: the same run policy and authorization recheck, without
 /// credential delivery or execution. There is deliberately no agent wire action for this.
 pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
-    if request.v != WIRE_VERSION {
+    if request.v != request.action.wire_version() {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     let Action::Run {
@@ -111,7 +111,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
 /// Handle one request from an agent. The response never contains a secret value.
 pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
     let vault = &ctx.vault;
-    if request.v != WIRE_VERSION {
+    if request.v != request.action.wire_version() {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     match &request.action {

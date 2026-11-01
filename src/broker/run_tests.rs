@@ -132,3 +132,27 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
         );
     }
 }
+
+#[test]
+fn code_protocol_refuses_downgraded_request_before_vault_or_execution() {
+    use crate::agent::wire::{Action, CODE_WIRE_VERSION, WIRE_VERSION};
+    let action = Action::Run {
+        access_request_id: None,
+        items: vec![1],
+        codes: vec![1],
+        command: vec!["true".into()],
+        cwd: "/tmp".into(),
+        purpose: "Synthetic".into(),
+        path: None,
+        user_request: None,
+    };
+    assert_eq!(action.wire_version(), CODE_WIRE_VERSION);
+    assert_ne!(action.wire_version(), WIRE_VERSION);
+    let tracked = Action::Tracked {
+        operation_id: "a".repeat(32),
+        idempotency_key: None,
+        action: Box::new(action),
+    };
+    assert_eq!(tracked.wire_version(), CODE_WIRE_VERSION);
+    assert_eq!(Action::ListAccess.wire_version(), WIRE_VERSION);
+}

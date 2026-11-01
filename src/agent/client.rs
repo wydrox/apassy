@@ -5,9 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::wire::{
-    Action, MAX_LINE_BYTES, MAX_RESPONSE_BYTES, WIRE_VERSION, WireRequest, WireResponse,
-};
+use super::wire::{Action, MAX_LINE_BYTES, MAX_RESPONSE_BYTES, WireRequest, WireResponse};
 
 /// Environment variable that overrides the broker socket path.
 pub const SOCKET_ENV: &str = "APASSY_BROKER_SOCKET";
@@ -67,7 +65,7 @@ pub(crate) fn send_observed(
         },
     );
     let request = WireRequest {
-        v: WIRE_VERSION,
+        v: action.wire_version(),
         token: token.to_owned(),
         host_session: options.host_session.map(str::to_owned),
         action,

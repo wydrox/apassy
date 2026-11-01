@@ -30,7 +30,9 @@ or an owner-window token.
 `code_env_name: "APASSY_ITEM_<ID>_OTP"` to each visible catalog item. No value or
 seed is returned. `apassy_run_with_secrets` accepts optional `codes: [ID, ...]`.
 `items` continues to select ordinary secrets and may be `[]` for a code-only run.
-An item may appear in both lists. There are at most 16 distinct items; duplicate
+An item may appear in both lists. Code-bearing wire requests (including tracked
+envelopes) use protocol version 1; ordinary requests retain version 0. Older brokers
+refuse version 1 before execution instead of ignoring code selection. There are at most 16 distinct items; duplicate
 selectors or colliding environment names are refused. Scoped `access_request_id`
 consent does not authorize codes; code runs use the explicit owner question.
 

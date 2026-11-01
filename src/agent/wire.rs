@@ -26,6 +26,9 @@ pub struct AccessScope {
 }
 
 pub const WIRE_VERSION: u32 = 0;
+/// Code-bearing requests require a new version: older brokers must reject them,
+/// rather than silently ignoring a selector and running without code approval.
+pub const CODE_WIRE_VERSION: u32 = 1;
 /// Largest request line in bytes, including the newline.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// Largest response line in bytes. A run response carries masked process output.
@@ -343,6 +346,14 @@ pub enum Action {
 }
 
 impl Action {
+    pub fn wire_version(&self) -> u32 {
+        match self {
+            Self::Run { codes, .. } if !codes.is_empty() => CODE_WIRE_VERSION,
+            Self::Tracked { action, .. } => action.wire_version(),
+            _ => WIRE_VERSION,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::Tracked { .. } => "tracked",

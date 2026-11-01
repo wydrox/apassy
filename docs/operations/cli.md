@@ -4,7 +4,7 @@ Date: 2026-10-03. Decision: [ADR 0017](../adr/0017-owner-command-line.md). Wire:
 
 The `apassy` program opens the window when it runs without arguments. With a command, it talks to the running window. Every change uses the same checks as the window: approvals, new tokens, connector operations, and agent settings ask for Touch ID or the passphrase in the window, for each change.
 
-The command line never shows a secret value, and never takes one as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
+The command line can show a current one-time code with `apassy code`; it never shows stored passwords or OTP seeds, and never takes a secret as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
 
 ## Fresh checks for backup, export and tokens (2026-10-31)
 

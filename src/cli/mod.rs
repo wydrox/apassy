@@ -2,7 +2,8 @@
 //!
 //! `apassy` without arguments opens the window. With a command, it talks to the running
 //! app over the owner socket ([`crate::owner`]). The app does each change with the same
-//! checks as its views. The command line never prints a secret value of an item, and
+//! checks as its views. Only `code` prints a current TOTP code; stored secret values
+//! never print, and
 //! never takes a secret as a program argument.
 
 pub mod args;
@@ -309,7 +310,7 @@ Options:
   -h, --help                  Help. apassy help COMMAND [SUBCOMMAND] for one command.
   -V, --version               The version.
 
-The command line never shows a secret value, and never takes one as an argument: it
+Only code shows a current one-time code. Stored secrets never print or go in arguments; it
 asks on the terminal with the echo off, or reads stdin or a file. Grants, approvals,
 new tokens, and agent settings ask for Touch ID or the passphrase in the window for each
 change, as the window does.

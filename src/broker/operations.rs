@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::decide::{self, BrokerContext};
-use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
+#[cfg(test)]
+use crate::agent::wire::WIRE_VERSION;
+use crate::agent::wire::{Action, WireRequest, WireResponse};
 
 const RETENTION: Duration = Duration::from_secs(15 * 60);
 const MAX_RECORDS: usize = 256;
@@ -168,7 +170,7 @@ impl Operations {
     }
 
     pub(super) fn handle(&self, ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
-        if request.v != WIRE_VERSION {
+        if request.v != request.action.wire_version() {
             return decide::handle(ctx, request);
         }
         if request.action.trackable() {

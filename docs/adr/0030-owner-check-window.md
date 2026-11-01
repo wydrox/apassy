@@ -39,7 +39,7 @@ window. There is no Apassy confirmation sheet or additional click. Multiple
 passkey accounts still require selecting the exact account. No passkey is selected
 by the window. The system's own AutoFill chooser and prompts remain OS-controlled.
 
-Always fresh: vault unlock; reveal/show/copy/large type, including OTP; secret
+Always fresh: vault unlock; app UI reveal/show/copy/large type, including OTP; secret
 export, backup and restore; Allow production, Allow in project and all durable
 grants; Allow once and let the bouncer evaluate; rule and environment relaxations;
 agent connect and token issue/rotate; devices and pairing; remote/iPhone answers;
