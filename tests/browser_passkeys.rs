@@ -1058,7 +1058,10 @@ fn parse_verdict(guard: &Path, buffer: &[u8]) -> String {
     let output = child.wait_with_output().unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
     assert_ne!(text, "ok\n", "self-tests must never authorize a request");
-    assert_ne!(text, "unsafe-switch\n", "self-tests keep their own protocol");
+    assert_ne!(
+        text, "unsafe-switch\n",
+        "self-tests keep their own protocol"
+    );
     assert_ne!(output.status.code(), Some(2));
     assert_eq!(output.status.success(), text == "allowed\n", "{text}");
     text
