@@ -944,7 +944,7 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit() 
     // A later schema and a wrong passphrase make no vault on the phone.
     let (future, _) = f.paths();
     f.mac.write_sync_copy(&future, "Newer Mac").unwrap();
-    set_schema(&future, 21);
+    set_schema(&future, apassy::vault::SCHEMA_VERSION + 1);
     let import = |input: &Path, passphrase: &str| json!({"op":"icloud_import", "name":"Personal", "passphrase":passphrase, "input_path":input});
     assert_eq!(fails(&f.phone, import(&future, PASS)), "unsupported_schema");
     let (input, _) = old_snapshot(&mut f);
