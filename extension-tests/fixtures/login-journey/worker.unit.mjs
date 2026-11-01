@@ -15,7 +15,8 @@ function setup() {
   } };
   bg.chrome.permissions.getAll = async () => ({ origins: [...bg.granted] });
   bg.tabs.set(5, URL);
-  bg.registered.set("apassy-login-suggestions", { id: "apassy-login-suggestions", matches: [`${ORIGIN}/*`], matchOriginAsFallback: true });
+  bg.registered.set("apassy-login-suggestions", { id: "apassy-login-suggestions", matches: [`${ORIGIN}/*`], matchOriginAsFallback: true,
+    js: ["login-target.js", "login-suggestions.js", "login-save.js"] });
   let live = true;
   const calls = [];
   bg.chrome.scripting.executeScript = async (details) => {

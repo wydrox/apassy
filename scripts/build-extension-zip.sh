@@ -62,7 +62,7 @@ python3 -I - "$OUT" "$VERSION" <<'PY'
 import json, sys, zipfile
 required = {
     "README.md", "manifest.json", "background.js", "fill.js",
-    "login-worker.js", "login-target.js", "login-suggestions.js",
+    "login-worker.js", "login-target.js", "login-suggestions.js", "login-save.js", "login-save-worker.js",
     "passkey-page.js", "passkey-bridge.js", "popup.html", "popup.js", "popup.css",
     "icons/16.png", "icons/32.png", "icons/48.png", "icons/128.png",
 }

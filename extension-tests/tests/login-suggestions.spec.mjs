@@ -18,6 +18,27 @@ async function choose(page, frame = page) {
   await page.keyboard.press("Enter");
 }
 
+test("menu aligns to the field, flips over Submit and follows scroll/resize", async ({ h }) => {
+  const page = await setup(h);
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await page.addStyleTag({ content: "body{margin:320px 200px;min-height:1500px}#username,#password{box-sizing:border-box;width:320px;height:40px;margin:8px 0}" });
+  await page.focus("#password");
+  await expect(page.locator(selector)).toHaveAttribute("data-state", "list");
+  const checkGeometry = async () => {
+    const field = await page.locator("#password").boundingBox();
+    const menu = await page.locator(selector).boundingBox();
+    expect(menu.x).toBeCloseTo(field.x, 0);
+    expect(menu.width).toBeGreaterThanOrEqual(field.width);
+    expect(menu.y + menu.height).toBeLessThanOrEqual(field.y);
+  };
+  await checkGeometry();
+  await page.evaluate(() => window.scrollTo(0, 40));
+  await expect.poll(async () => (await page.locator(selector).boundingBox()).y).toBeLessThan(320);
+  await checkGeometry();
+  await page.setViewportSize({ width: 800, height: 850 });
+  await checkGeometry();
+});
+
 test("focus retrieves metadata only, keyboard choice fills after explicit native request", async ({ h }) => {
   const page = await setup(h);
   await page.setViewportSize({ width: 320, height: 640 });

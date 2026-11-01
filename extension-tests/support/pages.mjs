@@ -1,6 +1,7 @@
 // Test pages, served on 127.0.0.1 and localhost (two origins of one server).
 
 import http from "node:http";
+import { savePage } from "../fixtures/login-journey/save-pages.mjs";
 
 const page = (title, body) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>${title}</title>
@@ -182,7 +183,7 @@ function handle(request, response, accounts) {
     return;
   }
   const { pathname } = new URL(request.url, "http://127.0.0.1");
-  const template = PAGES[pathname];
+  const template = pathname.startsWith("/offer/") ? savePage(pathname) : PAGES[pathname];
   const body = template && template.replace("127.0.0.1:PORT", `127.0.0.1:${request.headers.host.split(":").pop()}`);
   response.setHeader("content-type", "text/html; charset=utf-8");
   response.setHeader("cache-control", "no-store");
