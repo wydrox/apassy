@@ -18,6 +18,7 @@
 // Like the app, it answers bad_request to a missing or an unknown field.
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 const EXTENSION_ORIGIN = "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/";
@@ -89,7 +90,16 @@ function scenario() {
 }
 
 function log(request) {
-  fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(request) + "\n");
+  const safe = request && { ...request };
+  if (safe && Object.hasOwn(safe, "password")) {
+    // Hash the exact UTF-8 bytes received, before validation or trimming. Tests
+    // can prove equality without exposing passwords in assertion diagnostics.
+    if (typeof safe.password === "string") {
+      safe.password_sha256 = createHash("sha256").update(safe.password, "utf8").digest("hex");
+    }
+    safe.password = "[redacted]";
+  }
+  fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(safe) + "\n");
 }
 
 function write(message) {

@@ -39,11 +39,11 @@ async function writeLoginScripts() {
   const matches = prefs.enabled ? granted.filter((m) => /^https:\/\//.test(m) || m === "http://localhost/*") : [];
   const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: [LOGIN_SCRIPT] });
   const excludeMatches = prefs.excluded.flatMap((host) => [ `https://${host}/*`, ...(host === "localhost" ? ["http://localhost/*"] : []) ]);
-  const spec = { id: LOGIN_SCRIPT, matches, excludeMatches, js: ["login-target.js", "login-suggestions.js"],
+  const spec = { id: LOGIN_SCRIPT, matches, excludeMatches, js: ["login-target.js", "login-suggestions.js", "login-save.js"],
     runAt: "document_idle", allFrames: true, matchOriginAsFallback: true, persistAcrossSessions: true };
   const old = scripts[0];
-  if (old && JSON.stringify([old.matches, old.excludeMatches || [], old.matchOriginAsFallback]) ===
-      JSON.stringify([matches, excludeMatches, true])) return;
+  if (old && JSON.stringify([old.matches, old.excludeMatches || [], old.matchOriginAsFallback, old.js]) ===
+      JSON.stringify([matches, excludeMatches, true, spec.js])) return;
   if (old) await chrome.scripting.unregisterContentScripts({ ids: [LOGIN_SCRIPT] });
   if (matches.length) await chrome.scripting.registerContentScripts([spec]);
   for (const tab of await chrome.tabs.query({})) {
@@ -53,13 +53,14 @@ async function writeLoginScripts() {
         await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: spec.js });
       } else {
         await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true },
-          func: () => self.apassyStopLoginSuggestions?.() });
+          func: () => { self.apassyStopLoginSuggestions?.(); self.apassyLoginSave?.stop(); } });
       }
     } catch (_) { /* Browser may refuse a frame or a tab that just navigated. */ }
   }
 }
 async function loginAccessChange(_url, on) {
   loginFeatureGeneration++; loginOffers.clear();
+  self.apassyClearSaveOffers?.();
   await chrome.storage.local.set({ loginSuggestionsEnabled: on });
   await reconcileLoginScripts();
   return { ok: true, on };
@@ -67,6 +68,7 @@ async function loginAccessChange(_url, on) {
 async function loginSiteChange(url, on) {
   if (!loginMatch(url)) return failure("unsupported_page");
   loginFeatureGeneration++; loginOffers.clear();
+  self.apassyClearSaveOffers?.();
   const prefs = await loginPreferences();
   const excluded = new Set(prefs.excluded);
   const host = new URL(url).hostname;
@@ -228,7 +230,12 @@ async function handleLoginField(message, sender) {
 chrome.permissions.onAdded.addListener(() => { reconcileLoginScripts().catch(() => {}); });
 chrome.permissions.onRemoved.addListener(() => {
   loginFeatureGeneration++; loginOffers.clear();
-  reconcileLoginScripts().catch(() => {});
+  self.apassyClearSaveOffers?.();
+  // No host grant is needed to stop content scripts already injected in a tab.
+  chrome.tabs.query({}).then(async (tabs) => {
+    await Promise.allSettled(tabs.map((tab) => chrome.tabs.sendMessage(tab.id, { type: "login_features_stop" })));
+    await reconcileLoginScripts();
+  }).catch(() => {});
 });
 // Runs when the worker starts, including the first start after an extension update.
 reconcileLoginScripts().catch(() => {});

@@ -26,7 +26,51 @@ Focus, including an already-focused field after injection or reload, requests on
 
 Same-origin `srcdoc` and `about:blank` frames use origin fallback only when browser sender origin equals the top-level origin, with the exact document and form token revalidated. Cross-origin frames and form actions explain refusal. The popup and closed-shadow inline chooser each have one trusted-event owner-action gate; every fill/save/update/create still goes through the app's owner gate. ADR 0030 above defines when that gate can reuse a recent local check.
 
-The popup uses account rows, site-local metadata search and a separate settings route. Inline placement measures the panel and avoids visible page actions, flips or moves beside the form, and collapses when no safe space exists. Dismissing an approval panel does not cancel the app request. A post-submit save banner is deferred: it needs a reviewed capture lifecycle and must not infer successful sign-in or persist plaintext credentials.
+The popup uses account rows, site-local metadata search and a separate settings route. Dismissing an approval panel does not cancel the app request.
+
+## Implementation notes — post-submit offers, 2026-11-01
+
+A trusted submit-control click or Enter followed by submit can capture a password
+only after trusted input in that password field. Apassy filling clears that input
+marker. Cross-origin form actions, OTP/search forms, ambiguous password pairs and
+mismatching confirmations are refused. Marked new-password fields take precedence
+on password-change forms. A navigation to another document in the same tab/origin,
+or a same-document URL change/form removal/hiding after submission, makes an offer
+eligible. This detects a submission and transition, not proof of authentication.
+
+The top-frame isolated content script passes the typed value directly to a worker
+Map. Each entry is bound to the tab, exact origin and source document; it is
+discarded on dismissal, consumption, tab close, origin change, access revocation,
+or an absolute three-minute deadline. A submission without a transition expires
+after 15 seconds. Worker suspension/restart loses the offer safely. No credential
+uses local/sync/session storage, logging, page attributes or the banner DOM.
+Username-first metadata has a separate three-minute tab/origin bound. JavaScript
+references are cleared; this is not a claim of guaranteed heap zeroization.
+
+Existing metadata-only `suggestions` uses the app's case-insensitive duplicate
+identity, then preserves the exact stored username for the update gate. Multiple
+matches or a full prefix result suppress the offer instead of guessing. The extension never requests stored passwords to compare
+them. Only a trusted banner Save/Update click sends the captured password through
+the existing `save`/`update` app paths and their owner gate (including ADR 0030).
+Protocol negotiation contains metadata only and stays inside the capture deadline.
+An uncertain response offers no automatic retry.
+
+The closed-shadow top-right banner uses a private top-layer popover with
+visibility tracking and a stable trusted pointer/key activation before an action.
+Host opacity, occlusion and page focus cannot authorize a hidden action.
+Permission-removal messages stop existing scripts even after host injection
+authority is lost, and revocation also clears credentials awaiting browser API
+validation. Ungranted navigation URLs are treated as revocation.
+The banner follows study 06 of the extension redesign.
+**Never for this site** shares `loginSuggestionsExcluded` with **Not on this site**:
+one reversible hostname choice disables both passive features, avoiding two hidden
+and conflicting preference lists. Toolbar settings restores them together.
+
+The inline menu stays vertically anchored to its field, left-aligned where the
+viewport permits, at least the field width within viewport bounds. Its preferred
+width is 280–420px (wide fields retain their width). It flips above when it would
+cover Submit and fits there, otherwise uses the larger available vertical space
+and scrolls. It never relocates beside the form; scroll and resize recompute it.
 
 ## Context
 

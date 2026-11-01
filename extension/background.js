@@ -1329,8 +1329,13 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 importScripts("login-worker.js");
+importScripts("login-save-worker.js");
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && ["login_save_capture", "login_save_ready", "login_save_offer", "login_save_action", "login_save_cancel"].includes(message.type)) {
+    handleLoginSave(message, sender).then(sendResponse, () => sendResponse(localError("host_failed")));
+    return true;
+  }
   if (message && ["login_suggestions", "login_fill", "login_show"].includes(message.type)) {
     handleLoginField(message, sender).then(sendResponse, () => sendResponse(localError("host_failed")));
     return true;

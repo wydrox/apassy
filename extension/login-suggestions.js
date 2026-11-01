@@ -58,6 +58,9 @@
     launcher?.remove();
     launcher = null;
   };
+  chrome.runtime.onMessage.addListener((message, sender) => {
+    if (message?.type === "login_features_stop" && sender.id === chrome.runtime.id && !sender.tab) self.apassyStopLoginSuggestions();
+  });
   const css = `:host{all:initial;position:fixed;z-index:2147483647;color-scheme:light dark;font:13px/1.45 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:light-dark(#1d1d1f,#f5f5f7)}:host([hidden]){display:none!important}*{box-sizing:border-box}section{width:min(328px,calc(100vw - 16px));max-height:min(440px,70vh);display:flex;flex-direction:column;border:1px solid #85858e;border-radius:12px;background:light-dark(#fff,#242426);box-shadow:0 4px 20px #0003;overflow:hidden}header,footer{display:flex;align-items:center;gap:8px;padding:10px 12px;flex-shrink:0}header{border-bottom:1px solid light-dark(#e1e1e5,#424246);font-weight:600}header small{margin-left:auto;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}img{width:20px;height:20px}small,.hint,footer{color:light-dark(#63636b,#b5b5bd);font-size:12px}.body{padding:8px 12px;overflow:auto;min-height:0}.compact .body{display:none}.accounts{overflow:auto;min-height:0;padding:4px 8px}.account{display:flex;align-items:center;gap:10px;width:100%;min-height:58px;text-align:left}.mark{width:30px;height:30px;border-radius:8px;background:light-dark(#f0f0f2,#363639);display:grid;place-items:center;flex-shrink:0}.identity{flex:1;min-width:0}.identity strong,.identity small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fill{color:light-dark(#0066d6,#80b8ff)}button{font:inherit;color:inherit;border:0;border-radius:7px;background:transparent;cursor:pointer;padding:7px 8px}button:hover{background:light-dark(#edf3ff,#303c50)}button:focus-visible{outline:2px solid light-dark(#0066d6,#80b8ff);outline-offset:-2px}button:disabled{opacity:.6;cursor:default}footer{border-top:1px solid light-dark(#e1e1e5,#424246);justify-content:space-between;background:light-dark(#f6f6f7,#19191b)}footer button{font-size:12px;padding:3px}.primary{background:light-dark(#0066d6,#80b8ff);color:light-dark(#fff,#10233a)}h3{font-size:17px;line-height:1.25;margin:6px 0}p{margin:6px 0 10px}.context{border-radius:8px;padding:10px;background:light-dark(#f6f6f7,#19191b);margin:10px 0;overflow-wrap:anywhere}.context small{display:block}.tools{display:flex;gap:8px;flex-wrap:wrap}.launcher{width:24px;height:24px;padding:2px;background:light-dark(#fff,#242426);border:1px solid #85858e;border-radius:6px;display:grid;place-items:center}@media(forced-colors:active){section,.launcher{border:1px solid CanvasText}button:focus-visible{outline:2px solid Highlight}}`;
   function shadowHost(attribute) {
     const el = node("div");
@@ -148,61 +151,23 @@
     if (launcher) fieldButton();
     const section = root?.querySelector("section");
     if (!section) return;
-    const box = focused.getBoundingClientRect(),
-      avoid = obstacles();
+    const box = focused.getBoundingClientRect();
+    const preferredWidth = Math.max(280, Math.min(420, box.width));
+    const width = Math.min(Math.max(box.width, preferredWidth), innerWidth - 16);
+    section.style.width = `${width}px`;
     section.style.maxHeight = `${Math.min(440, innerHeight - 16)}px`;
-    const width = section.getBoundingClientRect().width,
-      natural = section.getBoundingClientRect().height;
-    const xs = [
-      ...new Set([
-        box.left,
-        box.right + 8,
-        box.left - width - 8,
-        8,
-        innerWidth - width - 8,
-      ]),
-    ].map((x) => Math.max(8, Math.min(x, innerWidth - width - 8)));
-    // Measure the actual panel. Flip, move beside the form, or shorten the list before covering an action.
-    for (const height of [
-      ...new Set([natural, Math.min(natural, 180), Math.min(natural, 150)]),
-    ]) {
-      const ys = [
-        box.bottom + 6,
-        box.top - height - 6,
-        8,
-        innerHeight - height - 8,
-      ];
-      const candidates = xs.flatMap((x) =>
-        ys.map((y) => ({
-          x,
-          y,
-          score: Math.hypot(x - box.left, y - box.bottom),
-        })),
-      );
-      candidates.sort((a, b) => a.score - b.score);
-      for (const { x, y } of candidates) {
-        const rect = { left: x, right: x + width, top: y, bottom: y + height };
-        if (
-          y < 8 ||
-          rect.bottom > innerHeight - 8 ||
-          overlaps(rect, box) ||
-          avoid.some((r) => overlaps(rect, r))
-        )
-          continue;
-        section.classList.toggle(
-          "compact",
-          height < 180 && Boolean(section.querySelector(".accounts")),
-        );
-        section.style.maxHeight = `${height}px`;
-        host.style.left = `${x}px`;
-        host.style.top = `${y}px`;
-        host.style.visibility = "visible";
-        return;
-      }
-    }
-    // No safe space: leave the field affordance/toolbar available instead of covering page actions.
-    host.style.visibility = "hidden";
+    const submits = [...(focused.form || focused.getRootNode()).querySelectorAll(
+      'button:not([type="reset"]), input[type="submit"], input[type="button"], [role="button"]',
+    )].map((el) => el.getBoundingClientRect()).filter((r) => r.width && r.height);
+    const placement = api.placement(box, { width, height: section.getBoundingClientRect().height },
+      { width: innerWidth, height: innerHeight }, submits);
+    if (!placement) { host.style.visibility = "hidden"; return; }
+    section.style.maxHeight = `${placement.height}px`;
+    host.style.left = `${placement.left}px`;
+    host.style.top = `${placement.top}px`;
+    host.style.visibility = "visible";
   }
+
   function context(login) {
     const el = node("div", "", "context");
     el.append(

@@ -80,7 +80,7 @@ class ExtensionPackageTests(unittest.TestCase):
                 del self.manifest[field]
 
     def test_missing_login_helpers_are_rejected(self):
-        for name in ("login-worker.js", "login-target.js", "login-suggestions.js"):
+        for name in ("login-worker.js", "login-target.js", "login-suggestions.js", "login-save.js", "login-save-worker.js"):
             with self.subTest(name=name):
                 path = self.root / "extension" / name
                 original = path.read_bytes()

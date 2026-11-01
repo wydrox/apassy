@@ -120,6 +120,7 @@
       el.focus();
       if (!valid(token)) return false;
       setter.call(el, value);
+      self.apassyLoginSave?.filled(el);
       el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
       el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       return true;
@@ -134,5 +135,66 @@
     result.reason = result.ok ? "" : "target";
     return result;
   }
-  self.apassyLoginTarget = Object.freeze({ capture, read, fill, eligible, active });
+  function submissionAllowed(scope, submitter) {
+    if (!scope || /search|one-time|\botp\b|verification|newsletter|subscribe/i.test([scope.id, scope.getAttribute("role"), scope.getAttribute("aria-label")].join(" "))) return null;
+    if (scope.tagName === "FORM") {
+      if (submitter?.form && submitter.form !== scope) return false;
+      const action = submitter?.hasAttribute("formaction") ? submitter.formAction : scope.action;
+      const target = submitter?.hasAttribute("formtarget") ? submitter.formTarget : scope.target || document.querySelector("base[target]")?.target;
+      if (new URL(action, document.baseURI).origin !== self.origin || (target && target.toLowerCase() !== "_self")) return false;
+    }
+    return true;
+  }
+  function submission(scope, typed, submitter) {
+    if (!submissionAllowed(scope, submitter)) return null;
+    const all = members(scope);
+    if (all.some((el) => el.type === "search" || negative.test(signals(el)))) return null;
+    const username = all.find((el) => user(el) && eligible(el) && tokens(el).includes("username")) || all.find((el) => user(el) && eligible(el));
+    const passwords = all.filter((el) => el.type === "password" && eligible(el));
+    if (!passwords.length) return username?.value.trim() ? { username: username.value.trim(), password: "" } : null;
+    const marked = passwords.filter((el) => tokens(el).includes("new-password"));
+    const choices = marked.length ? marked : passwords;
+    const source = choices[0];
+    // Prefer a marked new password in change forms; refuse ambiguous old/new pairs.
+    if (!source || !typed(source) || !source.value || (!marked.length && choices.length > 1 &&
+        choices.slice(1).some((el) => !/confirm|repeat|again|verify/i.test(signals(el))))) return null;
+    const confirmations = passwords.filter((el) => el !== source && !tokens(el).includes("current-password"));
+    if (confirmations.some((el) => el.value !== source.value)) return null;
+    return { username: username?.value.trim() || "", password: source.value };
+  }
+  function placement(field, panel, viewport, submits = []) {
+    const gap = 6, margin = 8;
+    if (field.bottom < margin || field.top > viewport.height - margin || viewport.width <= margin * 2) return null;
+    const width = Math.min(panel.width, viewport.width - margin * 2);
+    const left = Math.max(margin, Math.min(field.left, viewport.width - width - margin));
+    const below = Math.max(0, viewport.height - margin - field.bottom - gap);
+    const above = Math.max(0, field.top - gap - margin);
+    const coversSubmit = submits.some((r) => r.left < left + width && r.right > left &&
+      r.top < field.bottom + gap + panel.height && r.bottom > field.bottom + gap);
+    const flip = (coversSubmit && above >= panel.height) || (below < panel.height && above > below);
+    const height = Math.min(panel.height, flip ? above : below);
+    if (height < 80) return null;
+    return { left, top: flip ? field.top - gap - height : field.bottom + gap, height, width };
+  }
+  function typedTracker({ now = () => Date.now(), schedule = setTimeout, cancel = clearTimeout } = {}) {
+    const records = new Map();
+    function clear(field) {
+      const record = records.get(field);
+      if (record) { record.value = ""; cancel(record.timer); records.delete(field); }
+    }
+    return Object.freeze({
+      input(field, trusted) {
+        if (!trusted || field.type !== "password" || !eligible(field)) return;
+        clear(field);
+        if (records.size >= 32) clear(records.keys().next().value);
+        const record = { value: field.value, until: now() + 180000 };
+        record.timer = schedule(() => clear(field), 180000);
+        records.set(field, record);
+      },
+      has(field) { const r = records.get(field); return Boolean(r && r.until > now() && r.value === field.value); },
+      clear,
+      clearAll() { for (const field of records.keys()) clear(field); },
+    });
+  }
+  self.apassyLoginTarget = Object.freeze({ capture, read, fill, eligible, active, submission, submissionAllowed, group, placement, typedTracker });
 })();
