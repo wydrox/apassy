@@ -602,7 +602,9 @@ pub fn verify_receipt(bytes: &[u8], key: &[u8], card: &VerifiedCard) -> Result<R
         return Err(Error::Identity);
     }
     let terminal = match r.outcome {
-        Outcome::AllowedOnce => r.kind == Some(ReceiptChoice::AllowOnce),
+        Outcome::AllowedOnce => {
+            r.kind == Some(ReceiptChoice::AllowOnce) && c.valid_answers.contains(&Choice::AllowOnce)
+        }
         Outcome::Denied => r.kind == Some(ReceiptChoice::Deny),
         Outcome::GrantedOnMac => {
             r.kind == Some(ReceiptChoice::GrantOnMac) && r.device_kind == Some(DeviceKind::Mac)
@@ -702,6 +704,65 @@ mod tests {
                     )
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn independent_signed_settle_and_unchanged_outer_carrier_vectors() {
+        let (card, key) = vector();
+        let receipt = verify_receipt(
+            include_bytes!("../../tests/fixtures/access-request-v1/settle.json"),
+            &key,
+            &card,
+        )
+        .unwrap();
+        assert_eq!(receipt.outcome, Outcome::AllowedOnce);
+        let carrier: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/access-request-v1/carrier.json"
+        ))
+        .unwrap();
+        let question_key = crate::vault::QuestionKey::from_bytes(std::array::from_fn(|i| i as u8));
+        for (name, plaintext) in [
+            ("card", WIRE.as_ref()),
+            (
+                "deny",
+                include_bytes!("../../tests/fixtures/access-request-v1/deny.json").as_slice(),
+            ),
+            (
+                "allow_once",
+                include_bytes!("../../tests/fixtures/access-request-v1/allow_once.json").as_slice(),
+            ),
+            (
+                "settle",
+                include_bytes!("../../tests/fixtures/access-request-v1/settle.json").as_slice(),
+            ),
+        ] {
+            let row = &carrier[name];
+            let sealed = super::super::envelope::Sealed {
+                key_id: row["key_id"].as_str().unwrap().into(),
+                nonce: row["nonce"].as_str().unwrap().into(),
+                ciphertext: row["ciphertext"].as_str().unwrap().into(),
+            };
+            let c = &card.card;
+            let aad = match name {
+                "card" => super::super::envelope::card_aad(
+                    &c.team_id,
+                    &c.qid,
+                    &c.key_id,
+                    "member",
+                    c.expires_at,
+                ),
+                "settle" => super::super::envelope::settle_aad(&c.team_id, &c.qid, &c.key_id),
+                _ => super::super::envelope::answer_aad(&c.team_id, &c.qid, &c.key_id, 3),
+            };
+            assert_eq!(hex(&aad), row["aad_hex"].as_str().unwrap());
+            assert_eq!(
+                sealed.open(&question_key, &aad).unwrap().as_slice(),
+                plaintext
+            );
+            let mut wrong = aad.clone();
+            wrong.push(0);
+            assert!(sealed.open(&question_key, &wrong).is_none());
         }
     }
     #[test]

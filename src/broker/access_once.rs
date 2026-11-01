@@ -34,6 +34,18 @@ pub fn create(
     cwd: Option<&str>,
     scope: &wire::Scope,
 ) -> WireResponse {
+    create_with_source(vault, agent, item, reason, cwd, scope, false)
+}
+
+fn create_with_source(
+    vault: &mut Vault,
+    agent: &AgentSummary,
+    item: u64,
+    reason: &str,
+    cwd: Option<&str>,
+    scope: &wire::Scope,
+    legacy: bool,
+) -> WireResponse {
     let result = (|| {
         let details = vault.details(item).map_err(|e| e.kind())?;
         if !vault
@@ -104,7 +116,7 @@ pub fn create(
             .map_err(|e| e.kind())?
             .flatten();
         let key = vault.question_key().map_err(|e| e.kind())?;
-        let complete = project.is_some() && !cwd.is_empty() && !hosts.is_empty();
+        let complete = !legacy && project.is_some() && !cwd.is_empty() && !hosts.is_empty();
         let created_at = crate::vault::access_once::now();
         let ids: Vec<_> = vault
             .item_uuids()
@@ -157,7 +169,7 @@ pub fn create(
             item:wire::Item{local_id:item.to_string(),uuid,revision:details.summary.revision.to_string(),name:short(&details.summary.title,128),
                 environment,delivery:if matches!(binding.delivery,EnvDelivery::Value){wire::Delivery::RealValue}else{wire::Delivery::Placeholder},
                 binding_name:binding.env_name},
-            project,cwd:cwd.into(),action:Some(scope.action),hosts,scope_source:wire::ScopeSource::AgentRequestedMacChecked,
+            project,cwd:cwd.into(),action:Some(scope.action),hosts,scope_source:if legacy{wire::ScopeSource::LegacyIncomplete}else{wire::ScopeSource::AgentRequestedMacChecked},
             reason:short(&reason,500),policy_digest,created_at,expires_at:created_at+300,
             valid_answers:if complete{vec![Choice::Deny,Choice::AllowOnce]}else{vec![Choice::Deny]},
             local_review_reason:(!complete).then(||"This request does not specify a lossless canonical project, folder and destination hosts.".into()),
@@ -170,10 +182,27 @@ pub fn create(
         Ok((id, new)) => WireResponse::success(
             serde_json::json!({"request_id":id,"new":new,"state":"open","note":"Access consent only. The bouncer still checks each command. Query status, then explicitly attach access_request_id to one matching one-item run. Cancel if abandoning this request."}),
         ),
-        Err(VaultErrorKind::Busy) => WireResponse::failure(
-            "access_request_waiting",
-            "Another scope is active, or this Mac's conservative request budget is exhausted. Review on this Mac.",
-        ),
+        Err(VaultErrorKind::Busy) => {
+            let waiting = vault
+                .scoped_access_requests()
+                .unwrap_or_default()
+                .iter()
+                .any(|r| {
+                    r.card.card.agent.id == agent.id.to_string()
+                        && (r.state == "open"
+                            || vault
+                                .access_status(agent.id, r.id)
+                                .is_ok_and(|s| s.permit == "available"))
+                });
+            WireResponse::failure(
+                if waiting {
+                    "access_request_waiting"
+                } else {
+                    "access_request_rate_limited"
+                },
+                "Review on this Mac. Another scope is active or the conservative local request budget is exhausted.",
+            )
+        }
         Err(_) => WireResponse::failure(
             "not_visible",
             "This credential or scope is unavailable to this agent. Review on this Mac.",
@@ -209,6 +238,10 @@ impl RemoteAccessAnswer {
             .ok_or(wire::Error::Identity)?;
         if device.kind != crate::vault::TrustedDeviceKind::Iphone
             || device.relay_devices.get(&r.card.card.team_id) != Some(&stamped)
+        {
+            return Err(wire::Error::Identity);
+        }
+        if answer.kind == Choice::AllowOnce && device.answer_key.as_ref() == Some(&device.sign_key)
         {
             return Err(wire::Error::Identity);
         }
@@ -252,7 +285,23 @@ impl RemoteAccessAnswer {
             DeviceKind::Iphone,
         );
         vault
-            .commit_access_answer(self.id, self.answer.kind, receipt)
+            .commit_access_answer(
+                self.id,
+                self.answer.kind,
+                receipt,
+                Some((
+                    crate::sync::sha256_hex(if self.answer.kind == Choice::Deny {
+                        &self.device.sign_key
+                    } else {
+                        self.device
+                            .answer_key
+                            .as_deref()
+                            .ok_or(wire::Error::Identity)?
+                    }),
+                    serde_json::to_string(&self.device.relay_devices)
+                        .map_err(|_| wire::Error::Identity)?,
+                )),
+            )
             .map_err(|_| wire::Error::Expired)
     }
 }
@@ -317,7 +366,7 @@ pub fn local_answer(
         DeviceKind::Mac,
     );
     vault
-        .commit_access_answer(id, choice, receipt)
+        .commit_access_answer(id, choice, receipt, None)
         .map_err(|_| "The request was answered, expired or changed.".into())
 }
 
@@ -330,28 +379,24 @@ pub(crate) struct Admission {
     pub hosts: Vec<String>,
 }
 impl Admission {
-    pub fn consume(
+    pub(crate) fn identity(&self) -> &[u8; 32] {
+        &self.operation
+    }
+    pub(crate) fn consume(
         shared: &super::SharedVault,
         id: u64,
-        agent: u64,
-        item: u64,
-        cwd: &str,
-        project: &str,
-        action: wire::Action,
-        hosts: &[String],
+        scope: &crate::vault::access_once::CheckedScope<'_>,
     ) -> Result<Self, WireResponse> {
         let mut guard = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let v = guard.as_mut().ok_or_else(fail)?;
-        let operation = v
-            .consume_access_once(id, agent, item, cwd, project, action, hosts)
-            .map_err(|_| fail())?;
+        let operation = v.consume_access_once(id, scope).map_err(|_| fail())?;
         Ok(Self {
             vault: Arc::downgrade(shared),
             id,
             operation,
-            hosts: hosts.into(),
+            hosts: scope.hosts.into(),
         })
     }
     pub fn live_in(&self, vault: &Vault) -> bool {
@@ -373,6 +418,29 @@ impl Admission {
         };
         self.hosts.contains(&exact) && self.live()
     }
+    /// Hold the arbiter lock through the actual secret-header handoff. DNS/TLS
+    /// connection setup happens first, so its wait cannot extend this allowance.
+    pub(crate) fn deliver<T>(
+        &self,
+        host: &str,
+        port: u16,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let exact = if port == 443 {
+            host.to_owned()
+        } else {
+            format!("{host}:{port}")
+        };
+        if !self.hosts.contains(&exact) {
+            return None;
+        }
+        let shared = self.vault.upgrade()?;
+        let guard = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let vault = guard.as_ref().filter(|v| self.live_in(v))?;
+        vault.delivery_fence().deliver(action)
+    }
     pub fn remaining(&self) -> std::time::Duration {
         self.vault
             .upgrade()
@@ -380,16 +448,9 @@ impl Admission {
                 v.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_ref()
-                    .and_then(|v| v.scoped_access_request(self.id).ok())
+                    .map(|v| v.access_admission_remaining(self.id, &self.operation))
             })
-            .map_or(std::time::Duration::ZERO, |r| {
-                std::time::Duration::from_secs(
-                    r.card
-                        .card
-                        .expires_at
-                        .saturating_sub(crate::vault::access_once::now()),
-                )
-            })
+            .unwrap_or(std::time::Duration::ZERO)
     }
 }
 
@@ -457,4 +518,37 @@ pub(crate) fn exact_run_hosts(command: &[String]) -> Option<Vec<String>> {
     detected.sort();
     detected.dedup();
     (names == detected).then_some(exact)
+}
+
+/// Explicitly dispatch an old note as a new, fixed-expiry Deny-only incarnation.
+/// The original note and its time stay unchanged; migration never calls this.
+pub fn dispatch_legacy(vault: &mut Vault, id: u64) -> WireResponse {
+    let Some(note) = vault
+        .access_requests(true, 1000)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.id == id && vault.scoped_access_request(id).is_err())
+    else {
+        return fail();
+    };
+    let Some(agent) = vault
+        .list_agents()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a.id == note.agent_id)
+    else {
+        return fail();
+    };
+    create_with_source(
+        vault,
+        &agent,
+        note.item_id,
+        &note.reason,
+        Some(&note.cwd),
+        &wire::Scope {
+            action: wire::Action::Read,
+            hosts: vec![],
+        },
+        true,
+    )
 }

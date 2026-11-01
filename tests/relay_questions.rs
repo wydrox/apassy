@@ -62,52 +62,295 @@ const ANSWER_PUBLIC: &str =
 #[test]
 fn access_cards_and_both_signed_choices_use_the_unchanged_fake_carrier() {
     use apassy::questions::access_request as access;
-    for choice in [access::Choice::Deny,access::Choice::AllowOnce] {
-        let w=world(true);
-        let phone=w.iphone();
-        let id=w.with_a(|v|{
-            v.set_env_binding(w.items[1],"API_TOKEN","token").unwrap();
-            v.set_agent_sees_all(w.agent,true).unwrap();
-            let agent=v.list_agents().unwrap().into_iter().find(|a|a.id==w.agent).unwrap();
-            let response=apassy::broker::access_once::create(v,&agent,w.items[1],"Read synthetic status.",w._root.path().to_str(),
-                &access::Scope{action:access::Action::Read,hosts:vec!["api.example.test".into()]});
-            assert!(response.ok,"{response:?}");
+    for choice in [access::Choice::Deny, access::Choice::AllowOnce] {
+        let w = world(true);
+        let phone = w.iphone();
+        let id = w.with_a(|v| {
+            v.set_env_binding(w.items[1], "API_TOKEN", "token").unwrap();
+            v.set_agent_sees_all(w.agent, true).unwrap();
+            let agent = v
+                .list_agents()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == w.agent)
+                .unwrap();
+            let response = apassy::broker::access_once::create(
+                v,
+                &agent,
+                w.items[1],
+                "Read synthetic status.",
+                w._root.path().to_str(),
+                &access::Scope {
+                    action: access::Action::Read,
+                    hosts: vec!["api.example.test".into()],
+                },
+            );
+            assert!(response.ok, "{response:?}");
             response.result.unwrap()["request_id"].as_u64().unwrap()
         });
-        let request=w.with_a(|v|v.scoped_access_request(id).unwrap());
-        let start=Instant::now();
-        let record=loop {
-            if let Some(r)=phone.client.list(0,Duration::ZERO).unwrap().questions.into_iter().find(|r|r.qid==request.card.card.qid) {break r}
-            assert!(start.elapsed()<Duration::from_secs(15));
+        let request = w.with_a(|v| v.scoped_access_request(id).unwrap());
+        let start = Instant::now();
+        let record = loop {
+            if let Some(r) = phone
+                .client
+                .list(0, Duration::ZERO)
+                .unwrap()
+                .questions
+                .into_iter()
+                .find(|r| r.qid == request.card.card.qid)
+            {
+                break r;
+            }
+            assert!(start.elapsed() < Duration::from_secs(15));
             std::thread::sleep(Duration::from_millis(20));
         };
-        let c=&request.card.card;
-        let mac=phone.devices.iter().find(|d|d.uuid==c.asker.device).unwrap();
-        let plaintext=record.card().open(&phone.keys[0],&card_aad(&w.team,&record.qid,&record.key_id,"member",record.expires_at)).unwrap();
-        let verified=access::verify_card(&plaintext,&mac.sign_key,&access::Context{
-            vault_id:&c.vault_id,team_id:&w.team,qid:&record.qid,key_id:&record.key_id,asker:&mac.uuid,
-            relay_device_id:record.from_device_id,expires_at:record.expires_at},now()).unwrap();
-        let mut answer=access::Answer::prepare(&verified,&phone.uuid,choice,now()).unwrap();
-        let message=answer.message(&verified).unwrap();
-        answer.signature=encode_b64u(&if choice==access::Choice::Deny {phone.client.sign(&message).unwrap()}else{answer_key().sign(&message).unwrap()});
-        let bytes=serde_json::to_vec(&answer).unwrap();
-        let sealed=Sealed::new(&phone.keys[0],&answer_aad(&w.team,&record.qid,&record.key_id,phone.client.device_id().unwrap()),&bytes).unwrap();
-        phone.client.post_answer(&record.qid,&sealed).unwrap();
+        let c = &request.card.card;
+        let mac = phone
+            .devices
+            .iter()
+            .find(|d| d.uuid == c.asker.device)
+            .unwrap();
+        let plaintext = record
+            .card()
+            .open(
+                &phone.keys[0],
+                &card_aad(
+                    &w.team,
+                    &record.qid,
+                    &record.key_id,
+                    "member",
+                    record.expires_at,
+                ),
+            )
+            .unwrap();
+        let verified = access::verify_card(
+            &plaintext,
+            &mac.sign_key,
+            &access::Context {
+                vault_id: &c.vault_id,
+                team_id: &w.team,
+                qid: &record.qid,
+                key_id: &record.key_id,
+                asker: &mac.uuid,
+                relay_device_id: record.from_device_id,
+                expires_at: record.expires_at,
+            },
+            now(),
+        )
+        .unwrap();
+        let mut answer = access::Answer::prepare(&verified, &phone.uuid, choice, now()).unwrap();
+        let message = answer.message(&verified).unwrap();
+        answer.signature = encode_b64u(&if choice == access::Choice::Deny {
+            phone.client.sign(&message).unwrap()
+        } else {
+            answer_key().sign(&message).unwrap()
+        });
+        let bytes = serde_json::to_vec(&answer).unwrap();
+        let sealed = Sealed::new(
+            &phone.keys[0],
+            &answer_aad(
+                &w.team,
+                &record.qid,
+                &record.key_id,
+                phone.client.device_id().unwrap(),
+            ),
+            &bytes,
+        )
+        .unwrap();
+        phone.client.post_answer(&record.qid, &sealed).unwrap();
         // Appended duplicate copies can never install another permit.
-        let _=phone.client.post_answer(&record.qid,&sealed);
-        let start=Instant::now();
-        let receipt=loop {
-            let state=w.with_a(|v|v.scoped_access_request(id).unwrap());
-            if let Some(receipt)=state.receipt {break receipt}
-            assert!(start.elapsed()<Duration::from_secs(15));
+        let _ = phone.client.post_answer(&record.qid, &sealed);
+        let start = Instant::now();
+        let receipt = loop {
+            let state = w.with_a(|v| v.scoped_access_request(id).unwrap());
+            if let Some(receipt) = state.receipt {
+                break receipt;
+            }
+            assert!(start.elapsed() < Duration::from_secs(15));
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert_eq!(receipt.outcome,if choice==access::Choice::Deny{access::Outcome::Denied}else{access::Outcome::AllowedOnce});
-        assert_eq!(receipt.answered_by.as_deref(),Some(phone.uuid.as_str()));
-        assert_eq!(w.with_a(|v|v.access_status(w.agent,id).unwrap().permit),if choice==access::Choice::Deny{"unavailable"}else{"available"});
-        assert!(w.with_a(|v|v.exec_grants_for_agent(w.agent).unwrap()).is_empty());
-        assert!(w.with_a(|v|v.deny_access_request(id)).is_err());
+        assert_eq!(
+            receipt.outcome,
+            if choice == access::Choice::Deny {
+                access::Outcome::Denied
+            } else {
+                access::Outcome::AllowedOnce
+            }
+        );
+        assert_eq!(receipt.answered_by.as_deref(), Some(phone.uuid.as_str()));
+        assert_eq!(
+            w.with_a(|v| v.access_status(w.agent, id).unwrap().permit),
+            if choice == access::Choice::Deny {
+                "unavailable"
+            } else {
+                "available"
+            }
+        );
+        assert!(
+            w.with_a(|v| v.exec_grants_for_agent(w.agent).unwrap())
+                .is_empty()
+        );
+        assert!(w.with_a(|v| v.deny_access_request(id)).is_err());
     }
+}
+
+#[test]
+fn two_iphones_and_local_denial_share_one_arbiter() {
+    use apassy::questions::access_request as access;
+    let w = world(true);
+    let first = w.iphone();
+    let second = w.iphone_named(
+        "7f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+        "Second synthetic iPhone",
+    );
+    let id = w.with_a(|v| {
+        v.set_env_binding(w.items[1], "API_TOKEN", "token").unwrap();
+        v.set_agent_sees_all(w.agent, true).unwrap();
+        let a = v
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == w.agent)
+            .unwrap();
+        apassy::broker::access_once::create(
+            v,
+            &a,
+            w.items[1],
+            "Synthetic race",
+            w._root.path().to_str(),
+            &access::Scope {
+                action: access::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            },
+        )
+        .result
+        .unwrap()["request_id"]
+            .as_u64()
+            .unwrap()
+    });
+    let proofs = w.with_a(|v| {
+        let card = v.scoped_access_request(id).unwrap().card;
+        [
+            (&first, access::Choice::AllowOnce),
+            (&second, access::Choice::Deny),
+        ]
+        .into_iter()
+        .map(|(phone, choice)| {
+            let mut answer = access::Answer::prepare(&card, &phone.uuid, choice, now()).unwrap();
+            let bytes = answer.message(&card).unwrap();
+            answer.signature = encode_b64u(&if choice == access::Choice::AllowOnce {
+                answer_key().sign(&bytes).unwrap()
+            } else {
+                phone.client.sign(&bytes).unwrap()
+            });
+            apassy::broker::access_once::RemoteAccessAnswer::verify(
+                v,
+                id,
+                answer,
+                phone.client.device_id().unwrap(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>()
+    });
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut tasks = Vec::new();
+    for proof in proofs {
+        let shared = w.shared_a.clone();
+        let barrier = barrier.clone();
+        tasks.push(std::thread::spawn(move || {
+            barrier.wait();
+            proof
+                .commit(shared.lock().unwrap().as_mut().unwrap())
+                .is_ok()
+        }));
+    }
+    let shared = w.shared_a.clone();
+    let wait = barrier.clone();
+    tasks.push(std::thread::spawn(move || {
+        wait.wait();
+        shared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .deny_access_request(id)
+            .is_ok()
+    }));
+    assert_eq!(
+        tasks
+            .into_iter()
+            .map(|t| usize::from(t.join().unwrap()))
+            .sum::<usize>(),
+        1
+    );
+    let r = w.with_a(|v| v.scoped_access_request(id).unwrap());
+    assert!(r.receipt.is_some());
+    assert!(
+        w.with_a(|v| v.exec_grants_for_agent(w.agent).unwrap())
+            .is_empty()
+    );
+}
+
+#[test]
+fn replaced_answer_key_invalidates_an_open_requests_prepared_remote_proof() {
+    use apassy::questions::access_request as access;
+    let w = world(true);
+    let phone = w.iphone();
+    w.with_a(|v| {
+        v.set_env_binding(w.items[1], "API_TOKEN", "token").unwrap();
+        v.set_agent_sees_all(w.agent, true).unwrap();
+        let a = v
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == w.agent)
+            .unwrap();
+        let id = apassy::broker::access_once::create(
+            v,
+            &a,
+            w.items[1],
+            "Synthetic rotation",
+            w._root.path().to_str(),
+            &access::Scope {
+                action: access::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            },
+        )
+        .result
+        .unwrap()["request_id"]
+            .as_u64()
+            .unwrap();
+        let r = v.scoped_access_request(id).unwrap();
+        let mut answer =
+            access::Answer::prepare(&r.card, &phone.uuid, access::Choice::AllowOnce, now())
+                .unwrap();
+        answer.signature = encode_b64u(
+            &answer_key()
+                .sign(&answer.message(&r.card).unwrap())
+                .unwrap(),
+        );
+        let proof = apassy::broker::access_once::RemoteAccessAnswer::verify(
+            v,
+            id,
+            answer,
+            phone.client.device_id().unwrap(),
+        )
+        .unwrap();
+        let old = v.trusted_device(&phone.uuid).unwrap().unwrap();
+        let new = DeviceKey::generate().unwrap();
+        v.register_trusted_device(
+            &old.uuid,
+            &old.name,
+            old.kind,
+            &old.sign_key,
+            Some(new.public_key()),
+        )
+        .unwrap();
+        assert!(proof.commit(v).is_err());
+        assert_eq!(v.access_status(w.agent, id).unwrap().permit, "unavailable");
+        assert!(v.scoped_access_request(id).unwrap().receipt.is_none());
+    });
 }
 
 type SharedVault = Arc<Mutex<Option<Vault>>>;

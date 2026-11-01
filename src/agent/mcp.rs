@@ -1240,7 +1240,16 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(10));
+        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(12));
+        for name in [TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL] {
+            assert!(
+                reply["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == name)
+            );
+        }
         assert!(
             handle_message(
                 &config(),

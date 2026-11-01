@@ -1,6 +1,6 @@
 # Relay access-request contract v1
 
-Date: 2026-11-01. Status: proposed; no implementation claimed.
+Date: 2026-11-01. Status: implemented for review; physical device and notification acceptance pending. Synthetic vectors include exact signed card/answer/settle bytes and unchanged outer AAD/ciphertexts.
 Decision: [ADR 0033](../adr/0033-iphone-access-requests.md).
 
 This is a new **inner protocol** over the unchanged [relay questions v1](relay-questions-v1.md) carrier. It is not an extension of the run `Card`, run digest v2, feed `grant_request`, or the durable grant API. MUST/MUST NOT below are implementation requirements.

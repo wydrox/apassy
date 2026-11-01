@@ -186,6 +186,8 @@ pub struct QuestionsView {
     pub posted: BTreeMap<u64, String>,
     /// The waiting runs that stay on this Mac, with the reason.
     pub local_only: BTreeMap<u64, String>,
+    /// Access cards use a distinct id namespace from run questions.
+    pub access_local_only: BTreeMap<u64, String>,
     /// The latest answers through the relay that took effect, oldest first.
     pub answered: Vec<RemoteAnswered>,
     /// The latest answers that did not count, oldest first.

@@ -23,6 +23,7 @@ mod support {
 }
 
 mod access_model;
+mod access_requests;
 mod action_kind;
 mod add_detected;
 mod agent_items;

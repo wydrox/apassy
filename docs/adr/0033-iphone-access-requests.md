@@ -1,7 +1,7 @@
 # ADR 0033 — Answer access requests from the iPhone
 
 Date: 2026-11-01.
-Status: owner decision accepted; protocol and implementation design proposed for review. No implementation in this change.
+Status: implemented for review, based on Connect onboarding #41 at `8e61e04`. Synthetic Rust/Core/Swift and Simulator acceptance is recorded with this implementation. Physical Face ID/Secure Enclave and notification acceptance remains pending; no release or deployment is authorized.
 
 The owner decided: the iPhone can **Deny**, or **Allow once** after fresh Face ID. Durable access grants stay Mac-only. Local Mac answers remain available.
 
@@ -35,7 +35,7 @@ An important historical limit: since ADR 0025 and [ADR 0031](0031-bouncer-decide
 - ADR 0020 originally allowed phone denial of access requests, not granting. ADR 0024 allowed first-use **run** approval once on the phone. ADR 0025 expanded run-question answers; none implemented remote access-request consent.
 - ADR 0028, read in `/Users/rafalw/Dev/apassy/docs/adr/0028-retire-wifi-companion.md`, proposes retirement and explicitly leaves access-request transport missing. It is absent from the pinned main tree. This ADR resolves its stage-2 deny/allow-once choice only; it does not accept or implement Wi-Fi retirement.
 - [ADR 0030](0030-owner-check-window.md) keeps remote answers fresh and outside the local verification window.
-- Connect onboarding is being built concurrently on `feat/connect-onboarding`, with ADR 0032. Its worktree has uncommitted `src/relay/{connect,pairing}.rs` and `src/vault/connect.rs`, but no ADR 0032 file at inspection. `prepare_connect/create_connect` stage a stable questions-only membership; `PairingChannel` and `adopt_question_handoff` hand the question key and trusted rows to the confirmed iPhone without uploading an iCloud vault snapshot. This design consumes that result and preserves its separate handoff dispatch. These are observed work-in-progress interfaces, not a claim of completion. Implementation lands after Connect and reconciles its final interfaces.
+- Connect onboarding merged as #41 before implementation; see [ADR 0032](0032-connect-onboarding.md). The following paragraph records the original design inspection: onboarding was being built on `feat/connect-onboarding`. Its worktree has uncommitted `src/relay/{connect,pairing}.rs` and `src/vault/connect.rs`, but no ADR 0032 file at inspection. `prepare_connect/create_connect` stage a stable questions-only membership; `PairingChannel` and `adopt_question_handoff` hand the question key and trusted rows to the confirmed iPhone without uploading an iCloud vault snapshot. This design consumes that result and preserves its separate handoff dispatch. These are observed work-in-progress interfaces, not a claim of completion. Implementation lands after Connect and reconciles its final interfaces.
 
 ## Decision
 

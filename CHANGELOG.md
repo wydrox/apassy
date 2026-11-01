@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+- Answer scoped access requests in iPhone Requests: Deny without Face ID, or Allow once with a fresh registered Face ID answer key. Signed cards and historical receipts bind exact scope; the asking Mac burns one expiring attempt before the normal bouncer. Durable grants remain Mac-only (ADR 0033).
+- After pairing another iPhone, offer to remove an older paired iPhone with a fresh Mac owner check; never remove it automatically.
+
+
 ### Added
 
 - Free and Personal vaults can connect an iPhone for approvals and push without an account or operator code. Connect saves its key before contacting the relay, reuses it after failures, and confirms each iPhone with safety words.

@@ -1184,13 +1184,21 @@ impl Vault {
             GrantPlace::AnyFolder => (String::new(), 1i64),
         };
         let at = to_sql_time(now_unix())?;
-        let scoped = request.and_then(|id| self.scoped_access_request(id).ok());
-        if scoped
-            .as_ref()
-            .is_some_and(|r| !self.access_record_live(r) || r.state != "open")
-        {
-            return Err(err(VaultErrorKind::Conflict));
-        }
+        self.expire_scoped_access_requests()?;
+        let scoped: Vec<_> = self
+            .scoped_access_requests()?
+            .into_iter()
+            .filter(|r| {
+                r.state == "open"
+                    && r.card.card.agent.id == agent_id.to_string()
+                    && r.card
+                        .card
+                        .item
+                        .local_id
+                        .parse::<u64>()
+                        .is_ok_and(|id| item_ids.contains(&id))
+            })
+            .collect();
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1234,7 +1242,7 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
             history::record(&tx, item, ItemEventKind::AccessGiven, &detail)?;
         }
-        if let Some(r) = scoped {
+        for r in scoped {
             use crate::questions::access_request::{DeviceKind, Outcome, Receipt, ReceiptChoice};
             let c = &r.card.card;
             let receipt = Receipt {
@@ -1253,7 +1261,7 @@ impl Vault {
                 expires_at: c.expires_at,
             };
             tx.execute(
-                "UPDATE access_request_v1 SET receipt=?2 WHERE id=?1",
+                "UPDATE access_request_v1 SET receipt=?2,check_method='fresh_local_grant' WHERE id=?1",
                 (
                     to_sql_id(r.id)?,
                     serde_json::to_vec(&receipt).map_err(|_| err(VaultErrorKind::Storage))?,

@@ -999,7 +999,22 @@ fn serve_requests(shared: &Arc<Shared>, client: &mut Conn<ClientSide>, host: &st
             let Some((upstream, _)) = service.as_mut() else {
                 return;
             };
-            let sent = upstream.inner.write_all(&swapped.head).is_ok();
+            let sent = if let Some(access) = &shared.access {
+                match access.deliver(host, port, || {
+                    upstream
+                        .inner
+                        .write_all(&swapped.head)
+                        .and_then(|()| upstream.inner.flush())
+                }) {
+                    Some(result) => result.is_ok(),
+                    None => {
+                        refuse(client,403,"Forbidden","The scoped access consent expired or was revoked before delivery. No value was sent.".into());
+                        return;
+                    }
+                }
+            } else {
+                upstream.inner.write_all(&swapped.head).is_ok()
+            };
             if sent {
                 let mut scanner = Scanner::new(&placeholders);
                 match copy_request_body(client, &mut upstream.inner, body, &mut scanner) {

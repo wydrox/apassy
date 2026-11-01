@@ -561,7 +561,26 @@ fn request_access(
         Err(response) => return response,
     };
     if let Some(scope) = scope {
-        return super::access_once::create(vault, &agent, item_id, reason, cwd, scope);
+        let response = super::access_once::create(vault, &agent, item_id, reason, cwd, scope);
+        let _ = vault.record_activity(&NewActivity {
+            agent_id: Some(agent.id),
+            agent_name: agent.name.clone(),
+            item_id: Some(item_id),
+            operation: "request scoped access".into(),
+            decision: if response.ok {
+                ActivityDecision::Allow
+            } else {
+                ActivityDecision::Deny
+            },
+            reason:
+                "Scoped access consent requested; no execution or durable grant was authorized."
+                    .into(),
+        });
+        drop(guard);
+        if response.ok && response.result.as_ref().is_some_and(|v| v["new"] == true) {
+            ctx.approvals.notify_owner();
+        }
+        return response;
     }
     let result = vault.request_access(agent.id, item_id, reason, cwd.unwrap_or_default());
     let (decision, answer) = match result {

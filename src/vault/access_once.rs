@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::types::err;
 use super::{Vault, VaultErrorKind, VaultResult, to_sql_id};
 use crate::questions::access_request::{self as wire, Card, Choice, Receipt, VerifiedCard};
 
 pub(super) const COLUMNS: [&str; 3] = [
-    "SELECT id, epoch, card, digest, cancelled, receipt, envelope FROM access_request_v1 LIMIT 0",
+    "SELECT id, epoch, card, digest, cancelled, receipt, envelope, check_method, answer_key_fingerprint, answer_mapping FROM access_request_v1 LIMIT 0",
     "SELECT id, agent_id, at FROM access_request_creation LIMIT 0",
     "SELECT id, high_water FROM access_request_clock LIMIT 0",
 ];
@@ -29,7 +30,7 @@ pub(super) fn add_schema(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
          CREATE TABLE access_request_v1 (
              id INTEGER PRIMARY KEY, epoch BLOB NOT NULL, card BLOB NOT NULL,
              digest TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0,
-             receipt BLOB, envelope BLOB);
+             receipt BLOB, envelope BLOB, check_method TEXT, answer_key_fingerprint TEXT, answer_mapping TEXT);
          CREATE TABLE access_request_creation (
              id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER NOT NULL, at INTEGER NOT NULL);
          CREATE INDEX access_creation_agent ON access_request_creation(agent_id,at);
@@ -83,6 +84,35 @@ pub struct AccessStatus {
     pub permit: String,
 }
 
+/// Complete facts from the broker's checked run, never reason-text inference.
+pub(crate) struct CheckedScope<'a> {
+    pub agent: u64,
+    pub item: u64,
+    pub cwd: &'a str,
+    pub project: &'a str,
+    pub action: wire::Action,
+    pub hosts: &'a [String],
+}
+
+fn terminal_receipt(r: &AccessRecord, outcome: wire::Outcome) -> Receipt {
+    let c = &r.card.card;
+    Receipt {
+        vault_id: c.vault_id.clone(),
+        team_id: c.team_id.clone(),
+        qid: c.qid.clone(),
+        request_id: c.request_id.clone(),
+        asker: c.asker.device.clone(),
+        digest: r.card.digest.clone(),
+        outcome,
+        answered_by: None,
+        device_name: None,
+        device_kind: None,
+        kind: None,
+        at: now(),
+        expires_at: c.expires_at,
+    }
+}
+
 impl Vault {
     /// Versioned, typed field encoding over an explicit list of authorization columns.
     /// See the contract's policy serializer appendix. Tokens enter only the local hash.
@@ -94,7 +124,7 @@ impl Vault {
         project: &str,
     ) -> VaultResult<String> {
         let conn = self.conn_ref()?;
-        let mut out = b"apassy-access-policy-v1\0".to_vec();
+        let mut out = Zeroizing::new(b"apassy-access-policy-v1\0".to_vec());
         let field = |out: &mut Vec<u8>, bytes: &[u8]| -> VaultResult<()> {
             out.extend(u32::try_from(bytes.len()).map_err(storage)?.to_be_bytes());
             out.extend(bytes);
@@ -210,7 +240,7 @@ impl Vault {
     }
     fn query_scoped_access(&self, id: Option<u64>) -> VaultResult<Vec<AccessRecord>> {
         let mut stmt = self.conn_ref()?.prepare(
-            "SELECT v.id,v.epoch,v.card,v.digest,r.state,v.cancelled,v.receipt,v.envelope
+            "SELECT v.id,v.epoch,v.card,v.digest,CASE WHEN r.state='granted' THEN 'granted_on_mac' ELSE r.state END,v.cancelled,v.receipt,v.envelope
              FROM access_request_v1 v JOIN access_request r ON r.id=v.id WHERE (?1 IS NULL OR v.id=?1) ORDER BY v.id DESC LIMIT 100"
         ).map_err(storage)?;
         let rows = stmt
@@ -325,9 +355,6 @@ impl Vault {
         card.validate()
             .map_err(|_| err(VaultErrorKind::InvalidInput))?;
         let body = serde_json::to_vec(&card).map_err(storage)?;
-        if body.len() > 20000 {
-            return Err(err(VaultErrorKind::InvalidInput));
-        }
         let digest = wire::hex(&wire::body_digest("card", &body).map_err(storage)?);
         tx.execute(
             "INSERT INTO access_request_v1(id,epoch,card,digest) VALUES(?1,?2,?3,?4)",
@@ -351,6 +378,33 @@ impl Vault {
     pub fn access_record_live(&self, record: &AccessRecord) -> bool {
         let c = &record.card.card;
         !self.is_locked()
+            && (!c.valid_answers.contains(&Choice::AllowOnce) || {
+                let canonical = std::fs::canonicalize(&c.cwd).ok();
+                canonical.as_deref().and_then(std::path::Path::to_str) == Some(c.cwd.as_str())
+                    && canonical
+                        .as_deref()
+                        .and_then(|p| {
+                            crate::broker::project::project_of(
+                                p,
+                                std::env::var_os("HOME")
+                                    .as_deref()
+                                    .map(std::path::Path::new),
+                            )
+                        })
+                        .is_some_and(|p| {
+                            c.project.as_ref().is_some_and(|old| old.key == p.key)
+                                && std::fs::canonicalize(&p.key)
+                                    .ok()
+                                    .as_deref()
+                                    .and_then(std::path::Path::to_str)
+                                    == Some(p.key.as_str())
+                        })
+            })
+            && self.list_agents().is_ok_and(|agents| {
+                agents.iter().any(|a| {
+                    a.id.to_string() == c.agent.id && !a.revoked && !a.token_expired_at(now())
+                })
+            })
             && record.epoch == self.epoch
             && !record.cancelled
             && now() < c.expires_at
@@ -412,29 +466,46 @@ impl Vault {
         if r.card.card.agent.id != agent.to_string() {
             return Err(err(VaultErrorKind::NotFound));
         }
-        self.conn_mut()?
-            .execute(
-                "UPDATE access_request_v1 SET cancelled=1 WHERE id=?1",
-                [to_sql_id(id)?],
-            )
+        let receipt = terminal_receipt(&r, wire::Outcome::Invalidated);
+        let tx = self
+            .conn_mut()?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
+        tx.execute(
+            "UPDATE access_request_v1 SET cancelled=1 WHERE id=?1",
+            [to_sql_id(id)?],
+        )
+        .map_err(storage)?;
+        if tx.execute("UPDATE access_request SET state='invalidated',decided_at=?2 WHERE id=?1 AND state='open'",params![to_sql_id(id)?,super::agents::to_sql_time(now())?]).map_err(storage)?==1 {
+            tx.execute("UPDATE access_request_v1 SET receipt=?2,check_method='cancelled' WHERE id=?1",params![to_sql_id(id)?,serde_json::to_vec(&receipt).map_err(storage)?]).map_err(storage)?;
+        }
+        tx.commit().map_err(storage)?;
         if let Some(p) = self.access_once.permits.get_mut(&id) {
             p.cancelled = true;
         }
-        self.conn_mut()?.execute("UPDATE access_request SET state='invalidated',decided_at=?2 WHERE id=?1 AND state='open'",
-            params![to_sql_id(id)?,super::agents::to_sql_time(now())?]).map_err(storage)?;
         Ok(())
     }
     pub fn expire_scoped_access_requests(&mut self) -> VaultResult<()> {
         for r in self.scoped_access_requests()? {
             if r.state == "open" && !self.access_record_live(&r) {
-                let state = if now() >= r.card.card.expires_at {
-                    "expired"
-                } else {
-                    "invalidated"
-                };
-                self.conn_mut()?.execute("UPDATE access_request SET state=?2,decided_at=?3 WHERE id=?1 AND state='open'",
-                    params![to_sql_id(r.id)?,state,super::agents::to_sql_time(now())?]).map_err(storage)?;
+                let expired = now() >= r.card.card.expires_at;
+                let state = if expired { "expired" } else { "invalidated" };
+                let receipt = terminal_receipt(
+                    &r,
+                    if expired {
+                        wire::Outcome::Expired
+                    } else {
+                        wire::Outcome::Invalidated
+                    },
+                );
+                let tx = self
+                    .conn_mut()?
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(storage)?;
+                if tx.execute("UPDATE access_request SET state=?2,decided_at=?3 WHERE id=?1 AND state='open'",params![to_sql_id(r.id)?,state,super::agents::to_sql_time(now())?]).map_err(storage)?==1 {
+                    tx.execute("UPDATE access_request_v1 SET receipt=?2,check_method=?3 WHERE id=?1",params![to_sql_id(r.id)?,serde_json::to_vec(&receipt).map_err(storage)?,state]).map_err(storage)?;
+                }
+                tx.commit().map_err(storage)?;
             }
         }
         Ok(())
@@ -447,6 +518,7 @@ impl Vault {
         id: u64,
         choice: Choice,
         receipt: Receipt,
+        remote: Option<(String, String)>,
     ) -> VaultResult<()> {
         let r = self.scoped_access_request(id)?;
         if r.state != "open" {
@@ -476,10 +548,12 @@ impl Vault {
             return Err(err(VaultErrorKind::Conflict));
         }
         tx.execute(
-            "UPDATE access_request_v1 SET receipt=?2 WHERE id=?1",
+            "UPDATE access_request_v1 SET receipt=?2,check_method=?3,answer_key_fingerprint=?4,answer_mapping=?5 WHERE id=?1",
             params![
                 to_sql_id(id)?,
-                serde_json::to_vec(&receipt).map_err(storage)?
+                serde_json::to_vec(&receipt).map_err(storage)?,
+                if remote.is_some() {if choice==Choice::Deny{"remote_sign_key"}else{"remote_face_id_answer_key"}}else{"local"},
+                remote.as_ref().map(|r|r.0.as_str()), remote.as_ref().map(|r|r.1.as_str())
             ],
         )
         .map_err(storage)?;
@@ -500,13 +574,16 @@ impl Vault {
     pub(crate) fn consume_access_once(
         &mut self,
         id: u64,
-        agent: u64,
-        item: u64,
-        cwd: &str,
-        project: &str,
-        action: wire::Action,
-        hosts: &[String],
+        scope: &CheckedScope<'_>,
     ) -> VaultResult<[u8; 32]> {
+        let CheckedScope {
+            agent,
+            item,
+            cwd,
+            project,
+            action,
+            hosts,
+        } = *scope;
         let r = self.scoped_access_request(id)?;
         let c = &r.card.card;
         if r.state != "allowed_once"
@@ -539,6 +616,20 @@ impl Vault {
             && self
                 .scoped_access_request(id)
                 .is_ok_and(|r| self.access_record_live(&r))
+    }
+    pub(crate) fn access_admission_remaining(&self, id: u64, operation: &[u8; 32]) -> Duration {
+        if !self.access_admission_live(id, operation) {
+            return Duration::ZERO;
+        }
+        let wall = self
+            .scoped_access_request(id)
+            .map_or(0, |r| r.card.card.expires_at.saturating_sub(now()));
+        self.access_once
+            .deadlines
+            .get(&id)
+            .map_or(Duration::ZERO, |d| {
+                d.saturating_sub(monotonic()).min(Duration::from_secs(wall))
+            })
     }
     pub fn keep_access_envelope(&mut self, id: u64, envelope: &[u8]) -> VaultResult<()> {
         self.conn_mut()?
@@ -611,12 +702,14 @@ mod tests {
         let c = v.scoped_access_request(id)?.card.card;
         v.consume_access_once(
             id,
-            agent,
-            item,
-            &c.cwd,
-            &c.project.unwrap().key,
-            wire::Action::Read,
-            &c.hosts,
+            &CheckedScope {
+                agent,
+                item,
+                cwd: &c.cwd,
+                project: &c.project.unwrap().key,
+                action: wire::Action::Read,
+                hosts: &c.hosts,
+            },
         )
     }
     #[test]
@@ -734,8 +827,18 @@ mod tests {
             ),
         ] {
             assert!(
-                v.consume_access_once(id, a, i, &cwd, &project, action, &hosts)
-                    .is_err()
+                v.consume_access_once(
+                    id,
+                    &CheckedScope {
+                        agent: a,
+                        item: i,
+                        cwd: &cwd,
+                        project: &project,
+                        action,
+                        hosts: &hosts
+                    }
+                )
+                .is_err()
             );
             assert_eq!(v.access_status(agent, id).unwrap().permit, "available");
         }
@@ -808,5 +911,299 @@ mod tests {
             access_once::exact_run_hosts(&args("psql --host api.example.test --port 5433"))
                 .is_none()
         );
+    }
+    #[test]
+    fn concurrent_consumers_have_exactly_one_winner_and_expiry_fences_the_winner() {
+        let (_d, mut v, agent, item, id) = fixture();
+        allow(&mut v, id);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(v));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let shared = shared.clone();
+                std::thread::spawn(move || consume(&mut shared.lock().unwrap(), id, agent, item))
+            })
+            .collect();
+        let winners: Vec<_> = tasks
+            .into_iter()
+            .filter_map(|t| t.join().unwrap().ok())
+            .collect();
+        assert_eq!(winners.len(), 1);
+        let mut v = shared.lock().unwrap();
+        v.access_once.deadlines.insert(id, Duration::ZERO);
+        assert!(!v.access_admission_live(id, &winners[0]));
+        assert!(consume(&mut v, id, agent, item).is_err());
+    }
+    #[test]
+    fn failed_receipt_commit_installs_no_permit_and_durable_grant_wins_only_once() {
+        let (_d, mut v, agent, item, id) = fixture();
+        v.conn_mut().unwrap().execute_batch("CREATE TEMP TRIGGER fail_receipt BEFORE UPDATE OF receipt ON access_request_v1 BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+        let r = v.scoped_access_request(id).unwrap();
+        let proof = OwnerProof::issue_for_test(
+            OwnerAction::AllowAccessOnce {
+                request_id: id,
+                digest: r.card.digest,
+            },
+            v.epoch(),
+            std::time::Instant::now(),
+        );
+        assert!(access_once::local_answer(&mut v, id, Choice::AllowOnce, Some(proof)).is_err());
+        assert_eq!(v.access_status(agent, id).unwrap().state, "open");
+        assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+        v.conn_mut()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_receipt")
+            .unwrap();
+        v.set_exec_grants_for_request(
+            agent,
+            &[item],
+            &super::super::GrantPlace::AnyFolder,
+            super::super::ExecMode::Bouncer,
+            Some(id),
+        )
+        .unwrap();
+        assert_eq!(v.access_status(agent, id).unwrap().state, "granted_on_mac");
+        assert!(v.deny_access_request(id).is_err());
+        assert!(consume(&mut v, id, agent, item).is_err());
+        assert!(v.scoped_access_request(id).unwrap().receipt.is_some());
+        // A separate, freshly authorized Mac action may still change its durable grant.
+        v.set_exec_grants(
+            agent,
+            &[item],
+            &super::super::GrantPlace::AnyFolder,
+            super::super::ExecMode::Bouncer,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn quota_clock_and_failed_dispatch_cannot_refund_creation() {
+        for (count, total) in [(5, 5), (1, 20)] {
+            let (d, mut v, agent, item, id) = fixture();
+            v.cancel_scoped_access_request(agent, id).unwrap();
+            let at = now();
+            let conn = v.conn_mut().unwrap();
+            conn.execute(
+                "UPDATE access_request_creation SET at=?1",
+                [i64::try_from(at - 31).unwrap()],
+            )
+            .unwrap();
+            for _ in 1..count {
+                conn.execute(
+                    "INSERT INTO access_request_creation(agent_id,at)VALUES(?1,?2)",
+                    params![to_sql_id(agent).unwrap(), i64::try_from(at - 31).unwrap()],
+                )
+                .unwrap();
+            }
+            for _ in count..total {
+                conn.execute(
+                    "INSERT INTO access_request_creation(agent_id,at)VALUES(?1,?2)",
+                    params![
+                        to_sql_id(agent + 1).unwrap(),
+                        i64::try_from(at - 31).unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+            let a = v
+                .list_agents()
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == agent)
+                .unwrap();
+            let scope = wire::Scope {
+                action: wire::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            };
+            assert!(!access_once::create(&mut v, &a, item, "spam", d.path().to_str(), &scope).ok);
+            v.conn_mut()
+                .unwrap()
+                .execute("DELETE FROM access_request_creation", [])
+                .unwrap();
+            v.conn_mut()
+                .unwrap()
+                .execute(
+                    "UPDATE access_request_clock SET high_water=?1",
+                    [i64::try_from(at + 300).unwrap()],
+                )
+                .unwrap();
+            assert!(
+                !access_once::create(
+                    &mut v,
+                    &a,
+                    item,
+                    "clock rollback",
+                    d.path().to_str(),
+                    &scope
+                )
+                .ok
+            );
+        }
+        // Another Mac/local vault has its own conservative budget.
+        let (_d, v, agent, _, id) = fixture();
+        assert_eq!(v.access_status(agent, id).unwrap().state, "open");
+    }
+    #[test]
+    fn legacy_notes_are_not_broadcast_and_explicit_dispatch_is_deny_only() {
+        let (d, mut v, agent, item, id) = fixture();
+        v.cancel_scoped_access_request(agent, id).unwrap();
+        v.conn_mut()
+            .unwrap()
+            .execute(
+                "UPDATE access_request_creation SET at=?1",
+                [i64::try_from(now() - 31).unwrap()],
+            )
+            .unwrap();
+        let (old, _) = v
+            .request_access(
+                agent,
+                item,
+                "Original legacy text",
+                d.path().to_str().unwrap(),
+            )
+            .unwrap();
+        assert!(v.scoped_access_request(old).is_err());
+        let reply = access_once::dispatch_legacy(&mut v, old);
+        assert!(reply.ok, "{reply:?}");
+        let new = reply.result.unwrap()["request_id"].as_u64().unwrap();
+        assert_ne!(old, new);
+        let card = v.scoped_access_request(new).unwrap().card.card;
+        assert_eq!(card.scope_source, wire::ScopeSource::LegacyIncomplete);
+        assert_eq!(card.valid_answers, vec![Choice::Deny]);
+        assert_eq!(
+            v.access_requests(true, 100)
+                .unwrap()
+                .iter()
+                .find(|r| r.id == old)
+                .unwrap()
+                .reason,
+            "Original legacy text"
+        );
+    }
+    #[test]
+    fn local_allow_deny_and_durable_grant_race_has_one_atomic_winner() {
+        let (_d, v, agent, item, id) = fixture();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(v));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let tasks: Vec<_> = (0..3)
+            .map(|choice| {
+                let shared = shared.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut v = shared.lock().unwrap();
+                    if choice == 0 {
+                        let r = v.scoped_access_request(id).unwrap();
+                        let proof = OwnerProof::issue_for_test(
+                            OwnerAction::AllowAccessOnce {
+                                request_id: id,
+                                digest: r.card.digest,
+                            },
+                            v.epoch(),
+                            std::time::Instant::now(),
+                        );
+                        access_once::local_answer(&mut v, id, Choice::AllowOnce, Some(proof))
+                            .is_ok()
+                    } else if choice == 1 {
+                        v.deny_access_request(id).is_ok()
+                    } else {
+                        v.set_exec_grants_for_request(
+                            agent,
+                            &[item],
+                            &super::super::GrantPlace::AnyFolder,
+                            super::super::ExecMode::Bouncer,
+                            Some(id),
+                        )
+                        .is_ok()
+                    }
+                })
+            })
+            .collect();
+        assert_eq!(
+            tasks
+                .into_iter()
+                .map(|t| usize::from(t.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+        let v = shared.lock().unwrap();
+        let state = v.access_status(agent, id).unwrap().state;
+        let grants: i64 = v
+            .conn_ref()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM exec_grant", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(grants, if state == "granted_on_mac" { 1 } else { 0 });
+    }
+    #[test]
+    fn exact_proxy_handoff_rechecks_ports_deadline_and_rotated_question_key() {
+        let (_d, mut v, agent, item, id) = fixture();
+        allow(&mut v, id);
+        let c = v.scoped_access_request(id).unwrap().card.card;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(v)));
+        let admission = access_once::Admission::consume(
+            &shared,
+            id,
+            &CheckedScope {
+                agent,
+                item,
+                cwd: &c.cwd,
+                project: &c.project.unwrap().key,
+                action: wire::Action::Read,
+                hosts: &c.hosts,
+            },
+        )
+        .unwrap();
+        let mut released = 0;
+        assert!(
+            admission
+                .deliver("evil.api.example.test", 443, || released += 1)
+                .is_none()
+        );
+        assert!(
+            admission
+                .deliver("api.example.test", 8443, || released += 1)
+                .is_none()
+        );
+        assert!(
+            admission
+                .deliver("api.example.test", 443, || released += 1)
+                .is_some()
+        );
+        assert_eq!(released, 1);
+        shared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .rotate_question_key()
+            .unwrap();
+        assert!(
+            admission
+                .deliver("api.example.test", 443, || released += 1)
+                .is_none()
+        );
+        assert_eq!(released, 1);
+    }
+    #[test]
+    fn ten_open_requests_is_a_mac_local_limit() {
+        let (d, mut v, _, item, _) = fixture();
+        for index in 1..=10 {
+            let (a, _) = v
+                .register_agent(&format!("Synthetic agent {index}"))
+                .unwrap();
+            v.set_agent_sees_all(a.id, true).unwrap();
+            let reply = access_once::create(
+                &mut v,
+                &a,
+                item,
+                "Open",
+                d.path().to_str(),
+                &wire::Scope {
+                    action: wire::Action::Read,
+                    hosts: vec!["api.example.test".into()],
+                },
+            );
+            assert_eq!(reply.ok, index < 10, "{reply:?}");
+        }
+        assert_eq!(v.scoped_access_requests().unwrap().len(), 10);
     }
 }

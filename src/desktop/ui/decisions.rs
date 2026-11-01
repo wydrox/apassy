@@ -93,6 +93,7 @@ const NOTHING_FOUND: &str = "Apassy found no credential in the text. Paste the s
 /// One decision of the list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Key {
+    LegacyAccess(u64),
     Access(u64),
     /// A waiting question, by run ID.
     Run(u64),
@@ -202,6 +203,7 @@ impl EvaluationDraft {
 
 /// What waits for the owner, in the order of the list.
 pub(super) struct Open {
+    legacy_access: Vec<crate::vault::AccessRequest>,
     pub(super) access: Vec<crate::vault::access_once::AccessRecord>,
     pub(super) waiting: Vec<Waiting>,
     /// The questions of other Macs, after the questions of this Mac.
@@ -221,6 +223,7 @@ impl Open {
                     .map(|remote| Key::Remote(remote.question.id)),
             )
             .chain(self.access.iter().map(|r| Key::Access(r.id)))
+            .chain(self.legacy_access.iter().map(|r| Key::LegacyAccess(r.id)))
             .chain(self.requests.iter().map(|request| Key::Request(request.id)))
             .chain(
                 self.suggestions
@@ -776,13 +779,35 @@ pub(super) fn remote_waiting(app: &DesktopApp) -> Vec<RemoteWaiting> {
 /// questions (also those of other Macs) and the open credential requests. Suggestions
 /// do not count.
 pub(super) fn badge_count(app: &DesktopApp, pending: &[PendingRun]) -> usize {
-    pending.len() + remote_waiting(app).len() + open_requests(app)
+    let access = app
+        .owner_ui
+        .session
+        .with_vault(|v| {
+            v.scoped_access_requests()
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|r| r.state == "open" && v.access_record_live(r))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    pending.len() + remote_waiting(app).len() + open_requests(app) + access
 }
 
 /// Everything that waits for the owner, in the order of the list.
 pub(super) fn open(app: &DesktopApp, pending: &[PendingRun]) -> Open {
     let session = &app.owner_ui.session;
     Open {
+        legacy_access: session
+            .with_vault(|v| {
+                v.access_requests(true, 1000)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| v.scoped_access_request(r.id).is_err())
+                    .collect()
+            })
+            .unwrap_or_default(),
         access: session
             .with_vault(|v| v.scoped_access_requests().unwrap_or_default())
             .unwrap_or_default(),
@@ -1011,6 +1036,18 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
             }),
         })
         .collect();
+    let legacy_access: Vec<ListRow> = open
+        .legacy_access
+        .into_iter()
+        .map(|r| ListRow {
+            key: Key::LegacyAccess(r.id),
+            mark: Mark::Agent(r.agent_name.clone()),
+            title: r.item_name,
+            subtitle: format!("{} · Mac review", r.agent_name),
+            production: false,
+            left: None,
+        })
+        .collect();
     let requests: Vec<ListRow> = open
         .requests
         .into_iter()
@@ -1038,6 +1075,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
     for (title, rows) in [
         ("Waiting", waiting),
         ("Access requests", access),
+        ("Legacy access notes", legacy_access),
         ("Requests", requests),
         ("Suggestions", suggestions),
     ] {
@@ -1272,6 +1310,42 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
         return;
     }
     match app.ui.decisions.selected {
+        Some(Key::LegacyAccess(id)) => {
+            if let Some(note) = open.legacy_access.into_iter().find(|r| r.id == id) {
+                columns::detail_toolbar(ui, |ui| {
+                    ui.heading("Legacy access note");
+                });
+                columns::detail_body(ui, ("legacy-access", id), |ui| {
+                    ui.heading(format!("{} asks for {}", note.agent_name, note.item_name));
+                    ui.label(format!(
+                        "Original note: {}",
+                        crate::vault::format_utc(note.created_at)
+                    ));
+                    ui.strong("The agent says");
+                    ui.label(crate::questions::access_request::display_text(&note.reason));
+                    ui.label("This old note has no complete scope. It cannot allow access from an iPhone.");
+                    if ui.button("Send a new Deny-only card to iPhone").clicked() {
+                        let response = app
+                            .owner_ui
+                            .session
+                            .with_vault(|v| crate::broker::access_once::dispatch_legacy(v, id));
+                        match response {
+                            Some(r) if r.ok => {
+                                if let Some(id) =
+                                    r.result.as_ref().and_then(|r| r["request_id"].as_u64())
+                                {
+                                    app.ui.decisions.selected = Some(Key::Access(id));
+                                }
+                            }
+                            _ => {
+                                app.set_err("The note could not be dispatched. Review on this Mac.")
+                            }
+                        }
+                    }
+                });
+                return;
+            }
+        }
         Some(Key::Access(id)) => {
             if let Some(r) = open.access.into_iter().find(|r| r.id == id) {
                 return access_detail(app, ui, &r);
@@ -3035,6 +3109,20 @@ fn access_detail(
         ui.heading("Access request");
     });
     columns::detail_body(ui, ("access-request", r.id), |ui| {
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        let export_note = app
+            .owner
+            .questions
+            .as_ref()
+            .and_then(|q| q.view().access_local_only.get(&r.id).cloned());
+        if let Some(note) = export_note {
+            ui.label(note);
+        }
+        if c.team_id == "local" {
+            ui.label(
+                "Review on this Mac. Connect an iPhone before creating a request to send there.",
+            );
+        }
         ui.heading(format!(
             "{} (id {}) asks for {}",
             c.agent.name, c.agent.id, c.item.name
@@ -3046,6 +3134,9 @@ fn access_detail(
             c.agent.id, c.item.local_id, c.item.uuid, c.item.revision
         ));
         ui.label(format!("Mac {} · Vault {}", c.asker.device, c.vault_id));
+        if c.agent.host.is_none() {
+            ui.label("Agent host: unknown");
+        }
         if let Some(host) = &c.agent.host {
             ui.label(format!(
                 "{}: {}",
@@ -3105,10 +3196,11 @@ fn access_detail(
             .with_vault(|v| v.access_status(c.agent.id.parse().unwrap_or(0), r.id).ok())
             .flatten();
         if let Some(receipt) = &r.receipt {
-            ui.strong(format!(
-                "Answered on {}",
-                receipt.device_name.as_deref().unwrap_or("this Mac")
-            ));
+            if let Some(device) = &receipt.device_name {
+                ui.strong(format!("Answered on {device}"));
+            } else {
+                ui.strong("Access request ended without an answer");
+            }
             ui.label(format!(
                 "{:?} · Consent history; live permit: {}",
                 receipt.outcome,

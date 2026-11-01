@@ -24,11 +24,13 @@ pub(super) fn run(shared: &Shared) {
         let active = lock(&shared.state).active.clone();
         let Some(active) = active else {
             attempts.clear();
+            lock(&shared.view).access_local_only.clear();
             shared.sleep(Duration::from_millis(250));
             continue;
         };
         if epoch != Some(active.epoch) {
             attempts.clear();
+            lock(&shared.view).access_local_only.clear();
             epoch = Some(active.epoch);
         }
         let records = {
@@ -78,7 +80,7 @@ pub(super) fn run(shared: &Shared) {
                     )
                 })();
                 let Some(sealed) = sealed else {
-                    lock(&shared.view).local_only.insert(r.id,"Review this access request on this Mac. It could not be sent to your other devices.".into());
+                    lock(&shared.view).access_local_only.insert(r.id,"Review this access request on this Mac. It could not be sent to your other devices.".into());
                     continue;
                 };
                 attempts.insert(
@@ -105,10 +107,13 @@ pub(super) fn run(shared: &Shared) {
                     .post_question(&c.qid, "member", c.expires_at, &a.card);
                 a.tries += 1;
                 match result {
-                    Ok(_) => a.posted = true,
+                    Ok(_) => {
+                        a.posted = true;
+                        lock(&shared.view).access_local_only.remove(&r.id);
+                    }
                     Err(e) if e.status() == Some(409) => a.posted = true,
                     Err(e) => {
-                        lock(&shared.view).local_only.insert(r.id,format!("Review this access request on this Mac. Remote publication failed: {e:?}"));
+                        lock(&shared.view).access_local_only.insert(r.id,format!("Review this access request on this Mac. Remote publication failed: {e:?}"));
                         if !e.can_pass() {
                             a.next = Instant::now() + Duration::from_secs(300);
                             continue;
@@ -121,39 +126,41 @@ pub(super) fn run(shared: &Shared) {
                     }
                 }
             }
-            if a.posted && r.state == "open" && remaining > 0 {
-                if let Ok(list) = active.client.answers(&c.qid, a.after, Duration::ZERO) {
-                    for answer in list.answers {
-                        a.after = a.after.max(answer.id);
-                        if answer.key_id != c.key_id || answer.sealed().ciphertext_len() > 8208 {
-                            continue;
-                        }
-                        let opened = answer.sealed().open(
-                            &key,
-                            &answer_aad(&c.team_id, &c.qid, &c.key_id, answer.device_id),
-                        );
-                        let parsed = opened.and_then(|b| Answer::parse(&b).ok());
-                        let Some(parsed) = parsed else { continue };
-                        let mut guard = lock(&shared.vault);
-                        let Some(v) = Shared::vault_of(&mut guard, &active) else {
-                            break;
-                        };
-                        let result = crate::broker::access_once::RemoteAccessAnswer::verify(
-                            v,
-                            r.id,
-                            parsed,
-                            answer.device_id,
-                        )
-                        .and_then(|proof| proof.commit(v));
-                        if result.is_ok() {
-                            shared.changed();
-                            break;
-                        }
-                        let _=v.record_activity(&crate::vault::NewActivity{agent_id:c.agent.id.parse().ok(),
+            if a.posted
+                && r.state == "open"
+                && remaining > 0
+                && let Ok(list) = active.client.answers(&c.qid, a.after, Duration::ZERO)
+            {
+                for answer in list.answers {
+                    a.after = a.after.max(answer.id);
+                    if answer.key_id != c.key_id || answer.sealed().ciphertext_len() > 8208 {
+                        continue;
+                    }
+                    let opened = answer.sealed().open(
+                        &key,
+                        &answer_aad(&c.team_id, &c.qid, &c.key_id, answer.device_id),
+                    );
+                    let parsed = opened.and_then(|b| Answer::parse(&b).ok());
+                    let Some(parsed) = parsed else { continue };
+                    let mut guard = lock(&shared.vault);
+                    let Some(v) = Shared::vault_of(&mut guard, &active) else {
+                        break;
+                    };
+                    let result = crate::broker::access_once::RemoteAccessAnswer::verify(
+                        v,
+                        r.id,
+                        parsed,
+                        answer.device_id,
+                    )
+                    .and_then(|proof| proof.commit(v));
+                    if result.is_ok() {
+                        shared.changed();
+                        break;
+                    }
+                    let _=v.record_activity(&crate::vault::NewActivity{agent_id:c.agent.id.parse().ok(),
                             agent_name:c.agent.name.clone(),item_id:c.item.local_id.parse().ok(),
                             operation:"answer access request".into(),decision:crate::vault::ActivityDecision::Deny,
                             reason:"An access answer was refused: stale, changed, unauthenticated or already answered.".into()});
-                    }
                 }
             }
             let receipt = {
@@ -168,10 +175,7 @@ pub(super) fn run(shared: &Shared) {
                 && let Some(mut receipt) = receipt
             {
                 if a.settle.is_none() {
-                    loop {
-                        let Ok(bytes) = serde_json::to_vec(&receipt) else {
-                            break;
-                        };
+                    while let Ok(bytes) = serde_json::to_vec(&receipt) {
                         if bytes.len() <= 512 {
                             a.settle = (|| {
                                 let sig = active

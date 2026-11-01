@@ -718,12 +718,14 @@ fn run_inner(
         match super::access_once::Admission::consume(
             &ctx.vault,
             id,
-            checked.agent.id,
-            request.items[0],
-            cwd,
-            &project.key,
-            action,
-            &exact,
+            &crate::vault::access_once::CheckedScope {
+                agent: checked.agent.id,
+                item: request.items[0],
+                cwd,
+                project: &project.key,
+                action,
+                hosts: &exact,
+            },
         ) {
             Ok(ticket) => Some(ticket),
             Err(e) => return e,
@@ -990,9 +992,11 @@ fn run_inner(
             });
         // The wait ends when the vault session of the first check ends.
         let same_session = || {
-            lock(&ctx.vault)
-                .as_ref()
-                .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
+            lock(&ctx.vault).as_ref().is_some_and(|vault| {
+                !vault.is_locked()
+                    && vault.epoch() == checked.epoch
+                    && access_admission.as_ref().is_none_or(|a| a.live_in(vault))
+            })
         };
         let pending = PendingRun {
             id: 0,
@@ -1022,7 +1026,10 @@ fn run_inner(
             pending,
             checked.agent.id,
             checked.epoch,
-            baseline_of(&(checked.rechecked(), &command_binding)),
+            access_admission.as_ref().map_or_else(
+                || baseline_of(&(checked.rechecked(), &command_binding)),
+                |a| baseline_of(&(checked.rechecked(), &command_binding, a.identity())),
+            ),
             None, // ADR 0031: no per-credential evaluation setup.
             access_admission.as_ref().map_or(ctx.approval_timeout, |a| {
                 ctx.approval_timeout.min(a.remaining())
@@ -1043,6 +1050,12 @@ fn run_inner(
                 })
         };
         drop(wait);
+        if access_admission.as_ref().is_some_and(|a| !a.live()) {
+            return WireResponse::failure(
+                "access_once_unavailable",
+                "The admitted access request expired or was revoked. Nothing ran.",
+            );
+        }
         let Settled {
             outcome,
             method: checked_with,
@@ -1053,6 +1066,12 @@ fn run_inner(
         } = match settled {
             Ok(settled) => settled,
             Err(refusal) => {
+                if access_admission.is_some() {
+                    return WireResponse::failure(
+                        "access_once_unavailable",
+                        "This admission could not wait for execution approval. Its allowance was consumed; query status.",
+                    );
+                }
                 let text = match refusal {
                     QuestionRefusal::Busy => QUESTION_WAITING,
                     QuestionRefusal::Superseded => QUESTION_SUPERSEDED,

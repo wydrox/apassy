@@ -1,6 +1,6 @@
 # Implementation plan — iPhone access requests (ADR 0033)
 
-Date: 2026-11-01. Status: proposed; this change contains documentation only.
+Date: 2026-11-01. Status: implementation in review. A-C are separate protocol/lifecycle/transport commits; D adds typed Core calls and durable submission guards; E adds fresh cancellable signing and native Requests; F adds synthetic integration/UI evidence. Physical-device acceptance below remains pending.
 Decision: [ADR 0033](../adr/0033-iphone-access-requests.md).
 Wire: [relay-access-request-v1](../contracts/relay-access-request-v1.md).
 
@@ -113,3 +113,15 @@ No relay release is a prerequisite for the disclosed no-relay-change option: exi
 Done means: Connect trust works; card facts and exact scope are Mac-authenticated; phone Deny/Face-ID Allow once work; first committed answer and one admission hold under races/replay; no durable authority/window change occurs; bouncer/hard checks remain; local Mac and compatibility fallbacks work; Rust, Core, Swift model, UI and physical-device evidence are recorded with their boundaries. It does not mean ADR 0028's Wi-Fi retirement is accepted or complete, another Mac can remotely answer these cards, production is deployed, or a run executed merely because access consent was granted.
 
 Open implementation review items are Connect's final interface reconciliation, the owner's acceptance of the disclosed notification/quota policy before rollout, and initial spam-budget measurement, with the recommendations in ADR 0033. None leaves Deny, Face ID, one-use, expiry, arbitration or durable-grant semantics undecided.
+
+## Implementation evidence and limits
+
+The implementation is based on merged Connect #41 (`8e61e04`), schema 22. No relay source or carrier fields change. The owner accepted inherited time-sensitive pushes and conservative per-Mac quotas (one active/unconsumed scope per agent, 30-second creation cooldown, five/hour/agent, twenty/hour/Mac-local-vault, ten open). Run publication has priority; Connect retains its reserved handoff dispatch. iPhone submissions reserve one of three attempts durably before POST, even with history off. A receipt is historical consent only.
+
+`tests/fixtures/access-request-v1/` contains independent byte/signature vectors. Root protocol/lifecycle tests, `tests/access_requests.rs`, `tests/relay_questions.rs`, `ios/ApassyCore/tests/access_requests.rs`, `AccessRequestsModelTests` and Simulator Requests UI tests cover their respective boundaries. See the implementation PR and review evidence for actual commands/results; this list alone is not a passing-check claim. Native screenshots use a synthetic scratch vault/fake relay; iPhone UI screenshots use in-memory fixtures and a simulated signing wait, not an OS Face ID match. Evidence destination: `/Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0033/`.
+
+Exact run destinations currently require explicit HTTP(S) authorities and reject ambiguous destination flags, proxy overrides, IP literals and unparsed forms. Such runs remain available through ordinary Mac review without an access-request reference. This is fail-closed scope recognition, not broader networking confinement for real-value delivery. Generic vault labels are accompanied by the authenticated vault UUID; display names never select authority.
+
+The #41 follow-up offers Remove/Keep after pairing when another iPhone has the same display name or is in the questions team. Keep is inert; Remove uses the existing revoke path after a fresh owner proof bound to the exact trusted row and questions team. No auto-revocation or answer-key renewal is introduced.
+
+Physical acceptance still requires the isolated signed Mac/iPhone procedure in F: fresh Secure Enclave Face ID every time, no passcode/Touch ID fallback, direct signing failure without a match, enrollment invalidation/reconnect, native prompt cancellation, APNs routing and offline/two-phone device races. No TestFlight upload, production relay use or owner-vault evidence is included.
