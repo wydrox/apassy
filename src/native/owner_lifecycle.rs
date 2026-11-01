@@ -98,6 +98,7 @@ impl Drop for OwnerLifecycle {
 
 fn apply_event(bytes: &[u8], sequence: &mut u64, observed: &OwnerWindow) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        tracing::info!(event = "observer_failure", "owner window revoked");
         observed.observe(false);
         return false;
     };
@@ -106,11 +107,20 @@ fn apply_event(bytes: &[u8], sequence: &mut u64, observed: &OwnerWindow) -> bool
         || v["active"].as_bool().is_none()
         || v["revoke"].as_bool().is_none()
     {
+        tracing::info!(event = "observer_failure", "owner window revoked");
         observed.observe(false);
         return false;
     }
     *sequence += 1;
     if v["revoke"].as_bool() == Some(true) {
+        // Only known enum-like event kinds enter diagnostics; never log helper data.
+        let event = match v["event"].as_str() {
+            Some("screen_locked") => "screen_locked",
+            Some("system_sleep") => "system_sleep",
+            Some("session_resigned") => "session_resigned",
+            _ => "lifecycle_revocation",
+        };
+        tracing::info!(event, "owner window revoked");
         observed.invalidate();
     }
     observed.observe(v["active"].as_bool() == Some(true));
@@ -163,5 +173,39 @@ mod tests {
             &window
         ));
         assert!(window.ticket([1; 32]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod display_sleep_tests {
+    use super::*;
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    #[test]
+    fn display_sleep_preserves_but_lock_snapshot_and_events_revoke() {
+        for policy in OwnerFrequency::ALL {
+            if policy == OwnerFrequency::EveryTime {
+                continue;
+            }
+            for (event, active, revoke) in [
+                ("screen_locked", true, true),
+                ("system_sleep", true, true),
+                ("session_resigned", true, true),
+                ("heartbeat", false, false), // IOConsoleLocked while display stays asleep
+            ] {
+                let w = OwnerWindow::default();
+                w.configure(policy);
+                w.observe(true);
+                w.seed([1; 32], CheckMethod::TouchId, w.generation());
+                let (proof, _) = w.ticket([1; 32]).unwrap();
+                let mut seq = 0;
+                assert!(apply_event(br#"{"ok":true,"sequence":1,"active":true,"revoke":false,"event":"display_sleep"}"#, &mut seq, &w));
+                assert!(proof.valid());
+                let bytes = serde_json::to_vec(&serde_json::json!({"ok": true, "sequence": 2, "active": active, "revoke": revoke, "event": event})).unwrap();
+                assert!(apply_event(&bytes, &mut seq, &w));
+                assert!(!proof.valid());
+                w.observe(true);
+                assert!(w.ticket([1; 32]).is_none());
+            }
+        }
     }
 }

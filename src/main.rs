@@ -5,7 +5,10 @@
 
 use rustix::process::{Resource, Rlimit, setrlimit};
 
+mod owner_diagnostics;
+
 fn main() -> eframe::Result {
+    owner_diagnostics::install();
     // Key-memory review F6: a core file would contain the vault memory. The hard
     // limit is 0 too, so a parent shell or a later call cannot raise it.
     if disable_core_dumps().is_err() {

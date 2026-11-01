@@ -241,6 +241,11 @@ pub enum OwnerAction {
     },
     /// Approve one waiting run, exactly as the owner saw it.
     ApproveRun(PendingRun),
+    /// Development clicked locally for this exact pending question and item.
+    QuestionDevelopment {
+        run_id: u64,
+        item_id: u64,
+    },
     /// Approve one waiting run and remember a narrow pattern for later runs (ADR 0010).
     ApproveAndRemember(PendingRun),
     /// Approve this run once and authorize future model evaluation in this exact
@@ -517,6 +522,7 @@ impl OwnerAction {
                 "let an agent see all credentials without values".to_owned()
             }
             Self::ChangeRule { .. } => "change an agent rule".to_owned(),
+            Self::QuestionDevelopment { .. } => "mark a question item as development".to_owned(),
             Self::ChangeItemRules { .. } => "change the agent settings of an item".to_owned(),
             Self::RotateToken { .. } => "give an agent a new token".to_owned(),
             Self::ConnectAgent {
@@ -1097,6 +1103,7 @@ impl OwnerGate {
         source: LocalWindowSource,
     ) -> Option<OwnerProof> {
         if !source.permits(&action) {
+            tracing::info!(reason = "source_action", "owner window reuse refused");
             return None;
         }
         // Current OS state is checked outside the vault mutex, in addition to the
@@ -1106,6 +1113,7 @@ impl OwnerGate {
             .as_ref()
             .is_some_and(|h| !h.owner_session_active())
         {
+            tracing::info!(reason = "session_inactive", "owner window reuse refused");
             self.window.observe(false);
             return None;
         }
@@ -1616,6 +1624,49 @@ pub fn verify_remote_action(
 mod evaluation_tests {
     use super::*;
 
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn question_development_source_and_proof_are_exact() {
+        let action = OwnerAction::QuestionDevelopment {
+            run_id: 11,
+            item_id: 7,
+        };
+        assert!(LocalWindowSource::DevelopmentClick.permits(&action));
+        for source in [
+            LocalWindowSource::AllowOnceClick,
+            LocalWindowSource::BrowserGesture,
+            LocalWindowSource::AutoFill,
+        ] {
+            assert!(!source.permits(&action));
+        }
+        assert!(
+            !LocalWindowSource::DevelopmentClick
+                .permits(&OwnerAction::ChangeItemRules { item_id: 7 })
+        );
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        let proof = OwnerProof::issue_for_test(action.clone(), [1; 32], Instant::now());
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        for other in [
+            OwnerAction::QuestionDevelopment {
+                run_id: 12,
+                item_id: 7,
+            },
+            OwnerAction::QuestionDevelopment {
+                run_id: 11,
+                item_id: 8,
+            },
+            OwnerAction::ChangeItemRules { item_id: 7 },
+        ] {
+            assert_eq!(
+                proof.check(&other, &[1; 32]),
+                Err(ProofRefusal::WrongAction)
+            );
+        }
+    }
+
     #[test]
     fn remote_and_companion_choices_cannot_authorize_evaluation() {
         let run = PendingRun {
@@ -1662,6 +1713,37 @@ mod evaluation_tests {
             gate.check_companion(&action, "synthetic-device", 0, &[], [0; 32]),
             Err(OwnerAuthError::CompanionUnsupported)
         );
+        #[cfg(feature = "desktop")]
+        for sensitive in [
+            action.clone(),
+            OwnerAction::ApproveInProject {
+                run: run.clone(),
+                project: Project {
+                    key: "synthetic".into(),
+                    label: "Synthetic".into(),
+                    root: "/tmp/synthetic".into(),
+                },
+                action: ActionKind::Read,
+            },
+            OwnerAction::AllowProduction {
+                run: run.clone(),
+                project: Project {
+                    key: "synthetic".into(),
+                    label: "Synthetic".into(),
+                    root: "/tmp/synthetic".into(),
+                },
+                action: ActionKind::Read,
+            },
+        ] {
+            for source in [
+                LocalWindowSource::AllowOnceClick,
+                LocalWindowSource::DevelopmentClick,
+                LocalWindowSource::BrowserGesture,
+                LocalWindowSource::AutoFill,
+            ] {
+                assert!(!source.permits(&sensitive));
+            }
+        }
         let once = OwnerAction::ApproveRun(run);
         assert!(matches!(
             remote_choice(&once, None),
@@ -1688,6 +1770,7 @@ pub(crate) enum LocalWindowSource {
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
+    DevelopmentClick,
 }
 #[cfg(feature = "desktop")]
 impl LocalWindowSource {
@@ -1712,6 +1795,7 @@ impl LocalWindowSource {
                     | OwnerAction::SignPasskey { origin: None, .. }
             ),
             Self::AllowOnceClick => matches!(action, OwnerAction::ApproveRun(_)),
+            Self::DevelopmentClick => matches!(action, OwnerAction::QuestionDevelopment { .. }),
         }
     }
 }

@@ -214,15 +214,16 @@ impl OwnerSession {
     }
 
     /// Correct the environment of a credential from a question with `proof` for its
-    /// agent settings (`OwnerAction::ChangeItemRules`). Toward development the bouncer is
+    /// exact question and item (`OwnerAction::QuestionDevelopment`). Toward development the bouncer is
     /// less careful, so the owner check comes first.
     pub fn correct_environment(
         &mut self,
+        run_id: u64,
         item_id: u64,
         environment: Environment,
         proof: OwnerProof,
     ) -> ModelResult<()> {
-        self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?
+        self.unlocked_for(proof, &OwnerAction::QuestionDevelopment { run_id, item_id })?
             .set_declaration_environment(item_id, environment)
             .map_err(map_err)
     }

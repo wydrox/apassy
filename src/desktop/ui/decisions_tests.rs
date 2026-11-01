@@ -2117,3 +2117,205 @@ fn owner_window_allow_once_requires_each_click_and_skips_only_touch_id() {
     waiter.join().unwrap().unwrap();
     app.close_owner_check(None);
 }
+
+#[test]
+fn owner_window_development_requires_a_live_exact_question_click() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    let dir = TempDir::new().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let mut unknown = item(item_id, "Synthetic key");
+    unknown.unconfirmed = true;
+    let (waiter, pending) = ask(
+        &app,
+        &queue,
+        1,
+        run(
+            "Synthetic",
+            question(vec![unknown], &[AnswerKind::CorrectEnvironment]),
+        ),
+    );
+    let window = app.owner_ui.session.owner_window.clone();
+    window.configure(OwnerFrequency::UntilLock);
+    window.observe(true);
+    window.seed(
+        app.owner_ui.session.epoch().unwrap(),
+        CheckMethod::Passphrase,
+        window.generation(),
+    );
+    let ctx = egui::Context::default();
+    decisions::apply(
+        &mut app,
+        &ctx,
+        &pending,
+        Answer::Development {
+            item_id: item_id + 1,
+            name: "Synthetic".into(),
+        },
+    );
+    assert!(app.owner.check.is_none());
+    decisions::apply(
+        &mut app,
+        &ctx,
+        &pending,
+        Answer::Development {
+            item_id,
+            name: "Synthetic".into(),
+        },
+    );
+    assert!(
+        app.owner.check.is_none(),
+        "valid window completes Development without a check"
+    );
+    assert_eq!(
+        app.owner_ui
+            .session
+            .declaration(item_id)
+            .unwrap()
+            .unwrap()
+            .environment,
+        crate::vault::Environment::Development
+    );
+    assert!(
+        queue.pending().iter().any(|r| r.id == pending.id),
+        "classification does not approve the run"
+    );
+    queue.deny(pending.id);
+    waiter.join().unwrap().unwrap();
+    decisions::apply(
+        &mut app,
+        &ctx,
+        &pending,
+        Answer::Development {
+            item_id,
+            name: "Synthetic".into(),
+        },
+    );
+    assert!(app.owner.check.is_none(), "stale click has no authority");
+}
+
+#[test]
+fn fresh_biometry_probe_recovers_and_ignores_old_dialogs() {
+    use crate::desktop::owner_check::{NativeState, OwnerRequest};
+    use crate::native::{Biometry, HelperErrorCode, NativeHelper};
+    let dir = TempDir::new().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    app.prepare_owner(OwnerRequest::Reveal { item_id }, Some(&ctx), false);
+    let identity = app.owner.check.as_ref().unwrap().identity;
+    app.finish_biometry_probe(
+        identity,
+        NativeState {
+            biometry: Some(Biometry::Unavailable(HelperErrorCode::NotAvailable)),
+            problem: None,
+        },
+        &ctx,
+    );
+    assert!(!app.owner.touch_id_ready());
+    // A missing synthetic helper cannot touch a real helper, vault or keychain.
+    app.owner.helper = Some(NativeHelper::with_paths(
+        dir.path().join("missing"),
+        dir.path().join("missing"),
+    ));
+    app.finish_biometry_probe(
+        identity + 1,
+        NativeState {
+            biometry: Some(Biometry::Available),
+            problem: None,
+        },
+        &ctx,
+    );
+    assert!(!app.owner.touch_id_ready(), "stale result is ignored");
+    app.finish_biometry_probe(
+        identity,
+        NativeState {
+            biometry: Some(Biometry::Available),
+            problem: None,
+        },
+        &ctx,
+    );
+    assert!(
+        app.owner.touch_id_ready(),
+        "next fresh probe replaces startup failure"
+    );
+    assert!(
+        app.owner.check.as_ref().unwrap().running.is_some(),
+        "Touch ID starts automatically"
+    );
+    app.close_owner_check(None);
+}
+
+#[test]
+fn durable_and_evaluation_answers_still_ask_inside_window() {
+    use crate::broker::approvals::{CheckMethod, OwnerFrequency};
+    for answer in [
+        Answer::InProject(ActionKind::Read),
+        Answer::Production(ActionKind::Read),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, item_id) = unlocked_app_with_item(&dir);
+        let queue = queue_of(&mut app, &dir);
+        let (waiter, pending) = ask(
+            &app,
+            &queue,
+            1,
+            run(
+                "Synthetic",
+                question(
+                    vec![item(item_id, "Synthetic")],
+                    &[
+                        AnswerKind::InProject(ActionKind::Read),
+                        AnswerKind::Production(ActionKind::Read),
+                    ],
+                ),
+            ),
+        );
+        let w = app.owner_ui.session.owner_window.clone();
+        w.configure(OwnerFrequency::UntilLock);
+        w.observe(true);
+        w.seed(
+            app.owner_ui.session.epoch().unwrap(),
+            CheckMethod::Passphrase,
+            w.generation(),
+        );
+        decisions::apply(&mut app, &egui::Context::default(), &pending, answer);
+        assert!(app.owner.check.is_some());
+        assert!(queue.pending().iter().any(|r| r.id == pending.id));
+        app.close_owner_check(None);
+        queue.deny(pending.id);
+        waiter.join().unwrap().unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let offer = evaluation_offer(item_id);
+    let (waiter, pending) = ask_with_evaluation(
+        &app,
+        &queue,
+        1,
+        run("Synthetic", question(vec![item(item_id, "Synthetic")], &[])),
+        Some(offer.clone()),
+    );
+    let w = app.owner_ui.session.owner_window.clone();
+    w.configure(OwnerFrequency::UntilLock);
+    w.observe(true);
+    w.seed(
+        app.owner_ui.session.epoch().unwrap(),
+        CheckMethod::Passphrase,
+        w.generation(),
+    );
+    decisions::apply(
+        &mut app,
+        &egui::Context::default(),
+        &pending,
+        Answer::Evaluate {
+            confirmations: offer.items.iter().map(|i| i.confirmation.clone()).collect(),
+            offer,
+        },
+    );
+    assert!(app.owner.check.is_some());
+    assert!(queue.pending().iter().any(|r| r.id == pending.id));
+    app.close_owner_check(None);
+    queue.deny(pending.id);
+    waiter.join().unwrap().unwrap();
+}

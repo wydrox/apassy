@@ -133,6 +133,7 @@ impl OwnerWindow {
             .generation
             .checked_add(1)
             .expect("owner window generation exhausted");
+        tracing::info!(generation = s.generation, "owner window generation changed");
         s.verified = None;
         s.policy = policy;
     }
@@ -144,6 +145,7 @@ impl OwnerWindow {
             .generation
             .checked_add(1)
             .expect("owner window generation exhausted");
+        tracing::info!(generation = s.generation, "owner window generation changed");
         s.verified = None;
     }
     /// Start unlock atomically against a native check's original lifecycle fence.
@@ -155,6 +157,7 @@ impl OwnerWindow {
             .generation
             .checked_add(1)
             .expect("owner window generation exhausted");
+        tracing::info!(generation = s.generation, "owner window generation changed");
         s.verified = None;
         valid.then_some(s.generation)
     }
@@ -177,19 +180,35 @@ impl OwnerWindow {
                 .generation
                 .checked_add(1)
                 .expect("owner window generation exhausted");
+            tracing::info!(
+                generation = state.generation,
+                reason = if gap {
+                    "heartbeat_gap"
+                } else {
+                    "session_inactive"
+                },
+                "owner window revoked"
+            );
             state.verified = None;
         }
         state.healthy_at = active.then_some(now);
     }
     pub(crate) fn seed(&self, epoch: [u8; 32], method: super::CheckMethod, generation: u64) {
         let mut s = self.state.lock().unwrap();
-        if s.generation == generation
-            && healthy(&s, self.clock.now())
-            && matches!(
-                method,
-                super::CheckMethod::TouchId | super::CheckMethod::Passphrase
-            )
-        {
+        let reason = if s.generation != generation {
+            "generation_changed"
+        } else if !healthy(&s, self.clock.now()) {
+            "observer_unhealthy"
+        } else if !matches!(
+            method,
+            super::CheckMethod::TouchId | super::CheckMethod::Passphrase
+        ) {
+            "nonlocal_check"
+        } else {
+            "seeded"
+        };
+        tracing::info!(reason, generation = s.generation, "owner window seed");
+        if reason == "seeded" {
             s.verified = Some(Verification {
                 epoch,
                 at: self.clock.now(),
@@ -198,11 +217,30 @@ impl OwnerWindow {
             });
         }
     }
+
     #[cfg(any(feature = "desktop", test))]
     pub(crate) fn ticket(&self, epoch: [u8; 32]) -> Option<(WindowProof, super::CheckMethod)> {
         let s = self.state.lock().unwrap();
-        let v = s.verified?;
         let now = self.clock.now();
+        let age_ms = s
+            .healthy_at
+            .map(|at| now.saturating_sub(at).as_millis() as u64);
+        let reason = match s.verified {
+            None => "no_verification",
+            Some(v) if v.epoch != epoch => "vault_epoch",
+            _ if s.policy == OwnerFrequency::EveryTime => "every_time",
+            _ if !healthy(&s, now) => "observer_unhealthy",
+            Some(v)
+                if s.policy
+                    .duration()
+                    .is_some_and(|d| now.saturating_sub(v.at) >= d) =>
+            {
+                "expired"
+            }
+            _ => "granted",
+        };
+        tracing::info!(reason, heartbeat_age_ms = age_ms, "owner window reuse");
+        let v = s.verified?;
         if v.epoch != epoch
             || s.policy == OwnerFrequency::EveryTime
             || !healthy(&s, now)
@@ -266,6 +304,32 @@ mod tests {
         let w = OwnerWindow::with_clock(c.clone());
         w.observe(true);
         (w, c)
+    }
+    #[test]
+    fn heartbeat_exact_boundary_and_recovery_fence_old_proofs() {
+        #[derive(Debug, Default)]
+        struct Millis(AtomicU64);
+        impl WindowClock for Millis {
+            fn now(&self) -> Duration {
+                Duration::from_millis(self.0.load(Ordering::SeqCst))
+            }
+        }
+        let clock = Arc::new(Millis::default());
+        let w = OwnerWindow::with_clock(clock.clone());
+        w.configure(OwnerFrequency::UntilLock);
+        w.observe(true);
+        w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
+        let (proof, _) = w.ticket([1; 32]).unwrap();
+        clock.0.store(1999, Ordering::SeqCst);
+        assert!(proof.valid());
+        assert!(w.ticket([1; 32]).is_some());
+        clock.0.store(2000, Ordering::SeqCst);
+        assert!(!proof.valid());
+        assert!(w.ticket([1; 32]).is_none());
+        w.observe(true);
+        w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
+        assert!(w.ticket([1; 32]).is_some());
+        assert!(!proof.valid());
     }
     #[test]
     fn owner_session_default_is_every_time() {
