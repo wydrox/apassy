@@ -4,7 +4,8 @@
 //! new connection and reads one [`Response`]. Item and agent references are text: an
 //! ID, or the exact name without regard to case.
 //!
-//! A response never has a secret value of an item. It has a token only when the owner
+//! Only `Code` returns a generated one-time code after a fresh owner check; stored
+//! item secrets and seeds never return. A response has a token only when the owner
 //! just made one: a command-line session after the owner check, or an agent token
 //! after a registration or a rotation.
 
@@ -202,6 +203,11 @@ pub enum Command {
     Lock,
     /// Bring the Apassy window to the front, for example to unlock. No session.
     Show,
+    /// Current TOTP code only. Authenticated CLI session and exact owner proof.
+    Code {
+        item: String,
+        copy: bool,
+    },
 
     /// Add the credentials of a pasted text (ADR 0025 §4): a secret, a `KEY=value` line,
     /// a `.env` file, a URL with credentials, or an `otpauth://` link. The app finds the
@@ -452,6 +458,12 @@ pub enum Data {
     #[default]
     None,
     Status(StatusView),
+    Code {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<SecretText>,
+        seconds_left: u64,
+        copied: bool,
+    },
     Session {
         token: SecretText,
         idle_minutes: u64,

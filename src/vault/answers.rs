@@ -16,7 +16,9 @@
 //! Each answer keeps the destination hosts of the runs that the owner saw (`hosts`, a
 //! JSON array): the hosts of the command and the known hosts of the item then. A later
 //! run with a host outside them and outside the known hosts of the item asks the owner
-//! again (`broker::run`). The same answer again adds the hosts of its run.
+//! again (`broker::run`). Password-only answers add hosts only to password authority.
+//! Schema 23 records code and stored-value coverage separately. A code-bearing answer
+//! replaces destination history; a password-only answer clears code authority.
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
@@ -82,6 +84,8 @@ pub struct OwnerAnswer {
     pub answered_on: String,
     /// The destination hosts that the answer covers, lowercase, sorted.
     pub hosts: Vec<String>,
+    pub includes_codes: bool,
+    pub includes_values: bool,
 }
 
 /// A host in the form that answers store and compare: lowercase, without a port and a
@@ -153,6 +157,8 @@ impl Vault {
             AnswerScope::Project,
             answered_on,
             hosts,
+            false,
+            true,
         )
     }
 
@@ -175,10 +181,13 @@ impl Vault {
             AnswerScope::Production,
             answered_on,
             hosts,
+            false,
+            true,
         )
     }
 
-    fn store_answer(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_answer(
         &mut self,
         item_id: u64,
         project: &ProjectRef,
@@ -186,6 +195,8 @@ impl Vault {
         scope: AnswerScope,
         answered_on: &str,
         hosts: &[String],
+        includes_codes: bool,
+        includes_values: bool,
     ) -> VaultResult<u64> {
         let item = to_sql_id(item_id)?;
         let key = checked(&project.key, MAX_PROJECT_KEY_BYTES)?;
@@ -198,30 +209,37 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_item(&tx, item)?;
         // The same answer again adds the hosts of its run.
-        let known: Option<String> = tx
+        let known: Option<(String, bool)> = tx
             .query_row(
-                "SELECT hosts FROM owner_answer
+                "SELECT hosts, includes_codes FROM owner_answer
                  WHERE item_id = ?1 AND project_key = ?2 AND action_kind = ?3 AND scope = ?4",
                 (item, key.as_str(), action.as_str(), scope.as_str()),
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        let mut all = known
-            .as_deref()
-            .map(parse_hosts)
-            .transpose()?
-            .unwrap_or_default();
+        // Crossing into or out of code coverage replaces destinations. Otherwise a
+        // password-only answer could silently expand where an earlier code may go.
+        let mut all = if !includes_codes && known.as_ref().is_none_or(|(_, codes)| !*codes) {
+            known
+                .as_ref()
+                .map(|(hosts, _)| parse_hosts(hosts))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         all.extend(hosts.iter().cloned());
         let all =
             serde_json::to_string(&normal_hosts(&all)).map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
             "INSERT INTO owner_answer
                  (item_id, project_key, project_label, action_kind, scope, created_at, answered_on,
-                  hosts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  hosts, includes_codes, includes_values)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(item_id, project_key, action_kind, scope)
-             DO UPDATE SET project_label = excluded.project_label, hosts = excluded.hosts",
+             DO UPDATE SET project_label = excluded.project_label, hosts = excluded.hosts,
+                 includes_codes = excluded.includes_codes, includes_values = excluded.includes_values",
             rusqlite::params![
                 item,
                 key.as_str(),
@@ -231,6 +249,8 @@ impl Vault {
                 at,
                 on.as_str(),
                 all,
+                includes_codes,
+                includes_values,
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -260,7 +280,7 @@ impl Vault {
             .conn_ref()?
             .query_row(
                 "SELECT id, item_id, project_key, project_label, action_kind, scope,
-                     created_at, answered_on, hosts
+                     created_at, answered_on, hosts, includes_codes, includes_values
                  FROM owner_answer
                  WHERE item_id = ?1 AND project_key = ?2 AND action_kind = ?3 AND scope = ?4",
                 (item, project_key, action.as_str(), scope.as_str()),
@@ -278,7 +298,7 @@ impl Vault {
         let mut stmt = conn
             .prepare(
                 "SELECT id, item_id, project_key, project_label, action_kind, scope,
-                     created_at, answered_on, hosts
+                     created_at, answered_on, hosts, includes_codes, includes_values
                  FROM owner_answer WHERE item_id = ?1 ORDER BY id DESC",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -316,6 +336,8 @@ type AnswerRow = (
     i64,
     String,
     String,
+    bool,
+    bool,
 );
 
 fn parse_hosts(text: &str) -> VaultResult<Vec<String>> {
@@ -333,11 +355,13 @@ fn answer_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
     ))
 }
 
 fn parse_answer(row: AnswerRow) -> VaultResult<OwnerAnswer> {
-    let (id, item, key, label, action, scope, at, on, hosts) = row;
+    let (id, item, key, label, action, scope, at, on, hosts, includes_codes, includes_values) = row;
     Ok(OwnerAnswer {
         id: to_public_id(id)?,
         item_id: to_public_id(item)?,
@@ -347,7 +371,15 @@ fn parse_answer(row: AnswerRow) -> VaultResult<OwnerAnswer> {
         created_at: from_sql_time(at)?,
         answered_on: on,
         hosts: parse_hosts(&hosts)?,
+        includes_codes,
+        includes_values,
     })
+}
+
+/// Schema 23: old password answers never authorize a code.
+pub(super) fn add_code_schema(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
+    tx.execute_batch("ALTER TABLE owner_answer ADD COLUMN includes_codes INTEGER NOT NULL DEFAULT 0 CHECK (includes_codes IN (0,1)); ALTER TABLE owner_answer ADD COLUMN includes_values INTEGER NOT NULL DEFAULT 1 CHECK (includes_values IN (0,1)); UPDATE vault_meta SET schema_version = 23 WHERE id = 1; PRAGMA user_version = 23;")
+        .map_err(|_| err(VaultErrorKind::Storage))
 }
 
 #[cfg(test)]
@@ -451,5 +483,89 @@ mod tests {
                 .kind(),
             VaultErrorKind::InvalidInput
         );
+    }
+}
+
+#[cfg(test)]
+mod code_scope_tests {
+    use super::*;
+    use crate::contracts::CredentialKind;
+    use crate::vault::{Field, ItemDraft, SecretValue};
+    #[test]
+    fn schema22_answer_migrates_without_code_authority_and_password_hosts_cannot_expand_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("synthetic.db");
+        let pass = "synthetic-mfa-schema";
+        let mut v = Vault::create(&file, pass).unwrap();
+        v.unlock(pass).unwrap();
+        let item = v
+            .add(ItemDraft {
+                title: "Synthetic".into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("synthetic-password".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        let project = ProjectRef {
+            key: "/synthetic/.git".into(),
+            label: "Synthetic".into(),
+        };
+        v.remember_answer(
+            item,
+            &project,
+            ActionKind::Change,
+            "test",
+            &["password.example".into()],
+        )
+        .unwrap();
+        v.lock().unwrap();
+        let conn = rusqlite::Connection::open(&file).unwrap();
+        conn.pragma_update(None, "key", pass).unwrap();
+        conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values; UPDATE vault_meta SET schema_version=22; PRAGMA user_version=22;").unwrap();
+        conn.close().unwrap();
+        v.unlock(pass).unwrap();
+        let answer = v
+            .answer_for(item, &project.key, ActionKind::Change, AnswerScope::Project)
+            .unwrap()
+            .unwrap();
+        assert!(!answer.includes_codes);
+        v.store_answer(
+            item,
+            &project,
+            ActionKind::Change,
+            AnswerScope::Project,
+            "test",
+            &["code.example".into()],
+            true,
+            false,
+        )
+        .unwrap();
+        let answer = v
+            .answer_for(item, &project.key, ActionKind::Change, AnswerScope::Project)
+            .unwrap()
+            .unwrap();
+        assert!(answer.includes_codes);
+        assert!(!answer.includes_values);
+        assert_eq!(answer.hosts, vec!["code.example"]);
+        v.remember_answer(
+            item,
+            &project,
+            ActionKind::Change,
+            "test",
+            &["new-password.example".into()],
+        )
+        .unwrap();
+        let answer = v
+            .answer_for(item, &project.key, ActionKind::Change, AnswerScope::Project)
+            .unwrap()
+            .unwrap();
+        assert!(!answer.includes_codes);
+        assert_eq!(answer.hosts, vec!["new-password.example"]);
     }
 }

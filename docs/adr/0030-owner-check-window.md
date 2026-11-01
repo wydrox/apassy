@@ -38,7 +38,7 @@ window. There is no Apassy confirmation sheet or additional click. Multiple
 passkey accounts still require selecting the exact account. No passkey is selected
 by the window. The system's own AutoFill chooser and prompts remain OS-controlled.
 
-Always fresh: vault unlock; reveal/show/copy/large type, including OTP; secret
+Always fresh: vault unlock; CLI code; app UI reveal/show/copy/large type, including OTP; secret
 export, backup and restore; Allow production, Allow in project and all durable
 grants; Allow once and let the bouncer evaluate; rule and environment relaxations;
 agent connect and token issue/rotate; devices and pairing; remote/iPhone answers;
@@ -114,3 +114,14 @@ Keychain round trips, physical Touch ID counts and real lock/sleep/user-switch
 acceptance require an isolated signed app and synthetic vault; they are not claimed
 from unit tests or the screenshot tour. The existing egui kit is light-only; dark
 system appearance captures do not claim that this PR implements a dark theme.
+
+## Amendment — 2026-11-01: CLI code
+
+[ADR 0034](0034-mfa-codes-cli-and-agents.md) initially proposed CLI code reuse.
+Security review found that the owner socket's bearer session can be inherited by
+an unsandboxed agent and supplies no verified interactive-owner provenance.
+CLI code therefore stays always fresh until a verified owner transport exists.
+A new proof still binds item, OTP field, show/copy and vault epoch, with the
+revocation fence. UI Show Code and Copy Code remain always fresh. Agent code use
+requires an explicit owner decision; the window never answers an agent question
+automatically.

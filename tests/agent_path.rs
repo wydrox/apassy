@@ -352,6 +352,35 @@ fn a_connector_use_with_a_running_bouncer_starts_without_the_model() {
 }
 
 #[test]
+fn a_connector_never_sends_a_totp_setup_uri_even_with_a_grant_and_bouncer() {
+    // No service is needed: refuse before connecting, even when the connector
+    // has an existing token grant and would otherwise run automatically.
+    let fx = build_fixture(
+        "http://127.0.0.1:9",
+        options(TlsClient::platform().expect("TLS")),
+        None,
+    );
+    let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    with_vault(&fx, |vault| {
+        let revision = vault.details(fx.item_id).unwrap().summary.revision;
+        let mut draft = api_item();
+        draft.fields[0].value = SecretValue::new(format!(
+            "otpauth://totp/Synthetic?secret={seed}&issuer=Synthetic"
+        ));
+        vault.update(fx.item_id, revision, draft).unwrap();
+        assert!(vault.process_binding(fx.item_id).unwrap().is_none());
+    });
+    let response = call(&fx, &fx.token, OP_SUMMARY, summary_params("synthetic"));
+    assert_eq!(error_code(&response), "setup_key_refused");
+    assert!(fx.broker.approvals().pending().is_empty());
+    let evidence = with_vault(&fx, |vault| {
+        format!("{response:?} {:?}", vault.recent_activity(10).unwrap())
+    });
+    assert!(!evidence.contains(seed));
+    assert!(!evidence.contains("otpauth://"));
+}
+
+#[test]
 fn refusals_are_specific_and_recorded() {
     let fx = fixture();
     let no_grant = call(

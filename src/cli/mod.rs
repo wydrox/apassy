@@ -2,7 +2,8 @@
 //!
 //! `apassy` without arguments opens the window. With a command, it talks to the running
 //! app over the owner socket ([`crate::owner`]). The app does each change with the same
-//! checks as its views. The command line never prints a secret value of an item, and
+//! checks as its views. Only `code` prints a current TOTP code; stored secret values
+//! never print, and
 //! never takes a secret as a program argument.
 
 pub mod args;
@@ -184,6 +185,7 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
         "logout" => commands::logout(cli, args),
         "lock" => commands::simple(cli, args, Command::Lock),
         "unlock" | "show" | "open" => commands::simple(cli, args, Command::Show),
+        "code" => commands::code(cli, args),
         "add" => commands::add(cli, args),
         "item" | "items" | "credential" | "credentials" => commands::item(cli, args),
         "import" => commands::import(cli, args),
@@ -243,6 +245,7 @@ fn report(failure: Failure, json: bool) -> i32 {
 /// The help of one command group.
 fn help_for(topic: Option<&str>) -> Option<&'static str> {
     Some(match topic? {
+        "code" => commands::CODE_HELP,
         "add" => commands::ADD_HELP,
         "item" | "items" | "credential" | "credentials" => commands::ITEM_HELP,
         "import" => commands::IMPORT_HELP,
@@ -280,6 +283,7 @@ Credentials:
   add [--folder PATH]         Paste a secret, a KEY=value line, a .env file, a URL, or an
                               otpauth:// link. Apassy finds the rest: apassy add < .env
   item list|show|add|edit|delete|archive|unarchive|history
+  code ITEM [--copy]          Show the current one-time code and seconds left, or copy it.
   item env|declare|connector|review       Agent settings of a credential.
   import FILE                 Add credentials from a .env file, or a 1Password or Bitwarden CSV export.
 
@@ -306,7 +310,7 @@ Options:
   -h, --help                  Help. apassy help COMMAND [SUBCOMMAND] for one command.
   -V, --version               The version.
 
-The command line never shows a secret value, and never takes one as an argument: it
+Only code shows a current one-time code. Stored secrets never print or go in arguments; it
 asks on the terminal with the echo off, or reads stdin or a file. Grants, approvals,
 new tokens, and agent settings ask for Touch ID or the passphrase in the window for each
 change, as the window does.

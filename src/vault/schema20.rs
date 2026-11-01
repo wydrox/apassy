@@ -112,6 +112,7 @@ pub(super) fn downgrade_sql() -> String {
         .into_iter()
         .map(|name| format!("DROP TRIGGER bouncer_scope_{name};\n"))
         .collect::<String>();
+    sql.push_str("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values;");
     sql.push_str(super::access_once::DOWNGRADE_TO_21_SQL);
     sql.push_str("DROP TABLE IF EXISTS relay_connect_pending; DROP TABLE bouncer_scope; UPDATE vault_meta SET schema_version = 19 WHERE id = 1; PRAGMA user_version = 19;");
     sql

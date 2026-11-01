@@ -149,6 +149,7 @@ fn send(
         token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items,
             command: command.to_vec(),
             cwd: fx.project.display().to_string(),

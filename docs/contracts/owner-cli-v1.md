@@ -39,9 +39,9 @@ Item and agent references are text: an ID, or the exact name without regard to c
 { "ok": true, "code": "ok", "message": "CLI key is added with ID 7.", "data": { "type": "items", "items": [ … ] } }
 ```
 
-`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `session`, `items`, `item`, `events`, `agents`, `agent`, `token`, `lifetime`, `requests`, `runs`, `patterns`, `activity`, `export`, `bindings`, `added`.
+`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `code`, `session`, `items`, `item`, `events`, `agents`, `agent`, `token`, `lifetime`, `requests`, `runs`, `patterns`, `activity`, `export`, `bindings`, `added`.
 
-Only two types hold a token: `session` (after `login`) and `token` (after `agent_add` and `agent_rotate`). No type holds a secret value of an item. `item` names the secret fields and the hidden details, without values.
+Only two types hold a token: `session` (after `login`) and `token` (after `agent_add` and `agent_rotate`). `code` holds a generated current TOTP code after a fresh exact owner check, with `seconds_left` and `copied: false`; `copy: true` omits the code and returns `copied: true`. No type holds a stored secret or OTP seed. `item` names the secret fields and the hidden details, without values. CLI code cannot reuse the Touch ID window because a bearer session does not prove interactive-owner provenance (ADR 0034).
 
 ## 4. Commands
 
@@ -54,6 +54,7 @@ S: needs a session. C: asks for the owner check in the window, then answers.
 | `logout` | | S | | Ends the session of the request. |
 | `lock` | | | | Ends every session. |
 | `show` | | | | Brings the window to the front. |
+| `code` | `item`, `copy` | S | C | Exactly one OTP setting. Fresh local check for every request, including inside an owner window. Copy uses the app's expiring clipboard and returns no value. |
 | `add` | `secret`, `folder`, `create_folder` | S | | ADR 0025 §4. `secret` is the pasted text: a secret, a `KEY=value` line, a `.env` file, a URL with credentials, or an `otpauth://` link. The app detects each credential and adds all of them in one transaction (all or none), each with its variable, declaration, declaration sources, provider, and folder. A title that exists gets ` 2`, ` 3`, …; a variable of another item becomes the automatic name. A known provider gets a placeholder for its hosts when the value allows one. `folder` is a path such as `Work/Acme` (exact names, else without regard to case); a missing folder is `not_found` unless `create_folder` is true. No owner check: a new credential moves no authority. `invalid_input` when the text has no credential. `data.items` (type `added`) has one row for each: `id`, `name`, `kind`, `variable`, `environment`, `folder` (`Work / Acme`, empty at the top level), and `summary` (`Anthropic API key · ANTHROPIC_API_KEY · production`). `apassy add` uses it. |
 | `item_list` | `query`, `archived` | S | | |
 | `item_show` | `item` | S | | Plain fields, secret field names, details (hidden ones without a value), variable, declaration (stored or suggested), connector, review state, times. |
@@ -105,6 +106,7 @@ The folder of a grant is checked before the owner check: it must be an existing 
 | `bad_request` | The line is not valid JSON of this wire, or it is too long. |
 | `bad_version` | `v` is not 1. |
 | `session_required` | No session, or the session ended. |
+| `no_code` | The selected item has no OTP setting. Multiple or invalid settings are refused. |
 | `busy` | Another owner check is open, or too many connections. |
 | `cancelled` | The owner closed the owner check, or a check from the window replaced it. Nothing changed. |
 | `owner_check_failed` | Touch ID failed and the owner did not use the passphrase. Nothing changed. |

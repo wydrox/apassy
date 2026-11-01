@@ -37,7 +37,7 @@ use std::time::Duration;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 use serde::Serialize;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use self::http1::{
     BodyLen, BodyStop, Conn, Replacer, RequestHead, Scanner, copy_request_body, copy_response_body,
@@ -210,6 +210,18 @@ pub struct ProxyEvent {
 }
 
 impl ProxyEvent {
+    /// Codes may appear in any free text. Erase it before retaining an event for
+    /// a code-bearing run; only outcome/count metadata is needed for that run.
+    fn erase_details(&mut self) {
+        self.host.zeroize();
+        for slot in [&mut self.method, &mut self.path, &mut self.reason] {
+            if let Some(mut text) = slot.take() {
+                text.zeroize();
+            }
+        }
+        self.secrets.zeroize();
+    }
+
     fn new(host: &str, port: u16, outcome: ProxyOutcome) -> Self {
         Self {
             host: host.to_owned(),
@@ -262,6 +274,7 @@ pub struct RunNetwork {
 
 struct Shared {
     access: Option<super::access_once::Admission>,
+    omit_event_details: bool,
     secrets: Vec<ProxySecret>,
     ca: ca::RunCa,
     tls: TlsClient,
@@ -290,7 +303,10 @@ impl Drop for Tracked<'_> {
 }
 
 impl Shared {
-    fn record(&self, event: ProxyEvent) {
+    fn record(&self, mut event: ProxyEvent) {
+        if self.omit_event_details {
+            event.erase_details();
+        }
         if let Ok(mut events) = self.events.lock()
             && events.len() < MAX_EVENTS
         {
@@ -378,12 +394,13 @@ pub struct RunProxy {
 
 impl RunProxy {
     pub fn start(secrets: Vec<ProxySecret>, options: ProxyOptions) -> io::Result<Self> {
-        Self::start_with_access(secrets, options, None)
+        Self::start_with_access(secrets, options, None, false)
     }
     pub(crate) fn start_with_access(
         secrets: Vec<ProxySecret>,
         options: ProxyOptions,
         access: Option<super::access_once::Admission>,
+        omit_event_details: bool,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let addr = listener.local_addr()?;
@@ -403,6 +420,7 @@ impl RunProxy {
         let network = network_for(ca.cert_pem(), &proxy_url, addr.port(), options.enforce)?;
         let shared = Arc::new(Shared {
             access,
+            omit_event_details,
             secrets,
             ca,
             tls: options.tls,
@@ -1134,6 +1152,24 @@ fn serve_requests(shared: &Arc<Shared>, client: &mut Conn<ClientSide>, host: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_run_events_erase_free_text_before_retention() {
+        let mut event = ProxyEvent {
+            host: "123456.example.invalid".into(),
+            port: 443,
+            method: Some("123456".into()),
+            path: Some("/confirm/123456".into()),
+            status: Some(200),
+            outcome: ProxyOutcome::Passed,
+            secrets: vec!["123456".into()],
+            reason: Some("synthetic 123456".into()),
+        };
+        event.erase_details();
+        assert!(!serde_json::to_string(&event).unwrap().contains("123456"));
+        assert_eq!(event.outcome, ProxyOutcome::Passed);
+        assert_eq!(event.status, Some(200));
+    }
 
     #[test]
     fn host_rules_cover_subdomains_on_their_port() {

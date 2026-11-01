@@ -141,6 +141,7 @@ fn send_run_for(fx: &Fixture, item_id: u64, cwd: PathBuf) -> std::thread::JoinHa
             &token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![item_id],
                 command: vec![
                     "/bin/sh".into(),

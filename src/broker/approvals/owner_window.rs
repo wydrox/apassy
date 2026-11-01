@@ -376,4 +376,84 @@ mod tests {
             .unwrap();
         assert!(before <= now && now <= after);
     }
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn cli_code_never_reuses_a_window_and_fresh_proofs_are_exact() {
+        use super::super::{LocalWindowSource, OwnerAction, OwnerCheck, OwnerGate, ProofRefusal};
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-window-pass")
+                .unwrap();
+        vault.unlock("synthetic-window-pass").unwrap();
+        let epoch = vault.epoch();
+        let shared = Arc::new(Mutex::new(Some(vault)));
+        let (w, clock) = fixture();
+        w.configure(OwnerFrequency::OneMinute);
+        w.seed(epoch, super::super::CheckMethod::Passphrase, w.generation());
+        let gate = OwnerGate::new(shared, None).with_window(w.clone());
+        let action = OwnerAction::CliCode {
+            item_id: 7,
+            field: "x_OTP".into(),
+            copy: false,
+        };
+        for source in [
+            LocalWindowSource::BrowserGesture,
+            LocalWindowSource::AutoFill,
+            LocalWindowSource::AllowOnceClick,
+        ] {
+            assert!(gate.reuse_local(action.clone(), source).is_none());
+        }
+        let proof = gate
+            .authorize(
+                action.clone(),
+                OwnerCheck::passphrase("synthetic-window-pass"),
+            )
+            .unwrap();
+        assert_eq!(proof.check(&action, &epoch), Ok(()));
+        for other in [
+            OwnerAction::CliCode {
+                item_id: 8,
+                field: "x_OTP".into(),
+                copy: false,
+            },
+            OwnerAction::CliCode {
+                item_id: 7,
+                field: "other".into(),
+                copy: false,
+            },
+            OwnerAction::CliCode {
+                item_id: 7,
+                field: "x_OTP".into(),
+                copy: true,
+            },
+        ] {
+            assert_eq!(proof.check(&other, &epoch), Err(ProofRefusal::WrongAction));
+        }
+        assert!(
+            gate.reuse_local(
+                OwnerAction::ShowCode {
+                    item_id: 7,
+                    field: "x_OTP".into()
+                },
+                LocalWindowSource::BrowserGesture
+            )
+            .is_none()
+        );
+        assert!(
+            gate.reuse_local(
+                OwnerAction::CopyCode {
+                    item_id: 7,
+                    field: "x_OTP".into()
+                },
+                LocalWindowSource::AutoFill
+            )
+            .is_none()
+        );
+        for time in 1..=60 {
+            clock.0.store(time, Ordering::SeqCst);
+            w.observe(true);
+        }
+        w.invalidate();
+        assert!(!proof.is_fresh());
+    }
 }

@@ -148,6 +148,7 @@ fn send_run(
         token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![item_id],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
@@ -365,6 +366,7 @@ fn duplicate_runtime_variable_names_stop_the_run_before_secret_use() {
             &fx.token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![fx.item_id, second],
                 command: vec![
                     "/bin/sh".into(),
@@ -1185,6 +1187,7 @@ fn startup_is_locked() {
     let _broker = broker::start_with(Arc::clone(&slot), &socket, options).expect("broker");
     let run_request = || Action::Run {
         access_request_id: None,
+        codes: Default::default(),
         items: vec![item_id],
         command: vec!["true".into()],
         cwd: dir.path().display().to_string(),
@@ -1303,6 +1306,7 @@ fn restart_ends_waiting_runs_and_old_approvals() {
         let (socket, token) = (fx.socket.clone(), fx.token.clone());
         let action = Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: vec![
                 "/bin/sh".into(),
@@ -1394,6 +1398,7 @@ fn grants_and_bindings_are_checked() {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id, fx.item_id],
             command: vec!["true".into()],
             cwd: fx.project.display().to_string(),
@@ -1521,6 +1526,7 @@ fn restore_needs_owner_review_before_runs() {
             &token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![fx.item_id],
                 command: vec!["echo".into(), "ok".into()],
                 cwd: fx.project.display().to_string(),
@@ -1643,6 +1649,7 @@ fn archived_items_do_not_run_and_a_run_shows_for_each_item() {
             &fx.token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![fx.item_id, second],
                 command: vec!["true".into()],
                 cwd: fx.project.display().to_string(),

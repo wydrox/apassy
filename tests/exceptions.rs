@@ -133,6 +133,7 @@ fn send_run(socket: &Path, token: &str, item: u64, cwd: &Path, script: &str) -> 
         token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![item],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),

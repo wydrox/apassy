@@ -4,6 +4,9 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+- Owner CLI `apassy code ITEM` shows the current one-time code and expiry; `--copy` uses the app clipboard. Every request requires a fresh owner check because a bearer CLI session can be inherited by an unsandboxed agent; window reuse is deferred until owner provenance can be verified.
+- Agent runs can explicitly inject one-time codes, generated at spawn and masked in output. Codes always need owner approval unless an explicit project answer includes them; old password answers do not. Vault schema 23 records that scope.
+
 - Answer scoped access requests in iPhone Requests: Deny without Face ID, or Allow once with a fresh registered Face ID answer key. Signed cards and historical receipts bind exact scope; the asking Mac burns one expiring attempt before the normal bouncer. Durable grants remain Mac-only (ADR 0033).
 - After pairing another iPhone, offer to remove an older paired iPhone with a fresh Mac owner check; never remove it automatically.
 

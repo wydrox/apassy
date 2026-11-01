@@ -54,7 +54,7 @@ choices can reuse a fresh local verification for browser and macOS AutoFill
 password/code actions, passkey sign-ins (UP/UV set), and an explicit Allow once
 click for each agent request. A window never answers an agent request itself.
 Browser fills from trusted extension gestures need no Apassy sheet in a window.
-Reveal/copy/OTP display, exports/backups/restores, production/project and durable
+App UI reveal/copy/OTP display, exports/backups/restores, production/project and durable
 grants, bouncer evaluation permission, relaxations, tokens/agent connect,
 devices/pairing, passkey create/remove and changing the setting remain fresh.
 Remote/iPhone answers never use or start the Mac window. No iPhone behavior changes.
@@ -131,3 +131,32 @@ The standalone masking utility also masks short complete tokens or field values
 short values and is not sufficient to authorize their execution. Encoding or
 splitting values evades literal masking; masking is not a confidentiality boundary
 for arbitrary command output.
+
+### One-time codes (ADR 0034)
+
+`apassy code` intentionally releases a current code to the authenticated owner CLI,
+using an exact item/field/show-or-copy proof and a fresh local check for every
+request. The owner socket authenticates a bearer session, not an interactive owner;
+an unsandboxed same-user agent can inherit that token. CLI code window reuse is
+deferred until owner provenance can be verified.
+`--copy` uses the app's concealed expiring clipboard and omits the value from its
+response. UI reveal/copy checks remain fresh. Owner terminal output is sensitive.
+
+Agent runs explicitly select `codes`; they never receive an OTP setup key, including
+through an old explicit seed binding or a connector token containing a setup URI.
+A code is a hard owner veto unless a remembered
+owner project/action answer explicitly includes codes for that item and destinations.
+Models and patterns cannot grant this authority. Existing Always ask, production,
+host, missing-context and session fences still apply. Old answers default to no code
+authority in schema 23. Answers are not synced; restore clears them.
+
+The broker generates codes only at spawn, choosing the next period when at most five
+whole seconds remain. Provider acceptance of a future-period code is not guaranteed.
+Literal code values are masked in original run output; matching substrings in other
+numbers and prefixes at an output truncation boundary are also redacted. Code runs
+omit per-request proxy metadata so a path or hostname cannot echo a code to the
+agent. Unrelated numbers survive. Encoding or fragmentation can
+bypass exact masking. Codes/seeds are absent from generated logs, model/relay cards,
+receipts and operation status, and no agent clipboard API exists. An owner-approved
+child still possesses the code and inherits the existing environment/descendant and
+same-user-process exposure limits.

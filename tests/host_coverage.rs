@@ -177,6 +177,7 @@ fn send(fx: &Fixture, items: &[u64], argv: &[&str]) -> WireResponse {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: items.to_vec(),
             command: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: fx.project.display().to_string(),
@@ -201,6 +202,7 @@ fn asks(fx: &Fixture, items: &[u64], argv: &[&str]) -> PendingRun {
             &token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items,
                 command,
                 cwd: project.display().to_string(),

@@ -124,6 +124,39 @@ pub(crate) fn run_with_spawn(
     timeout: Duration,
     spawn: impl FnOnce(&mut Command) -> io::Result<std::process::Child>,
 ) -> io::Result<RunOutput> {
+    run_with_codes_spawn(
+        command,
+        cwd,
+        path,
+        secrets,
+        masks,
+        &[],
+        network,
+        timeout,
+        |cmd, prepare| {
+            prepare(cmd)?;
+            spawn(cmd)
+        },
+    )
+}
+
+/// Parse seeds earlier; the session-fenced caller invokes `prepare` only after
+/// acquiring its delivery guard, immediately before spawn. Codes never enter argv.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_codes_spawn(
+    command: &[String],
+    cwd: &Path,
+    path: Option<&str>,
+    secrets: &[SecretEnv],
+    masks: &[SecretEnv],
+    codes: &[(String, crate::otp::Totp)],
+    network: Network<'_>,
+    timeout: Duration,
+    spawn: impl FnOnce(
+        &mut Command,
+        &mut dyn FnMut(&mut Command) -> io::Result<()>,
+    ) -> io::Result<Child>,
+) -> io::Result<RunOutput> {
     if secrets
         .iter()
         .chain(masks)
@@ -134,10 +167,30 @@ pub(crate) fn run_with_spawn(
             "A secret is shorter than four bytes, so its output cannot be safely masked. The command was not started.",
         ));
     }
-    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, spawn)?;
-    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
-    let masked_out = mask_output(&raw.stdout, &all);
-    let masked_err = mask_output(&raw.stderr, &all);
+    let mut generated = Vec::new();
+    let mut prepare = |cmd: &mut Command| -> io::Result<()> {
+        if codes.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| io::Error::other("System clock is before the Unix epoch."))?;
+        for (name, totp) in codes {
+            let value = Zeroizing::new(totp.run_code_at(now.as_secs()).0);
+            cmd.env(name, value.as_str());
+            generated.push(SecretEnv {
+                name: name.clone(),
+                value,
+            });
+        }
+        Ok(())
+    };
+    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, |cmd| {
+        spawn(cmd, &mut prepare)
+    })?;
+    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).chain(&generated).collect();
+    let masked_out = mask_output(&raw.stdout, &all, raw.stdout_cut);
+    let masked_err = mask_output(&raw.stderr, &all, raw.stderr_cut);
     // The raw output can contain a secret. Only the masked text leaves.
     raw.stdout.zeroize();
     raw.stderr.zeroize();
@@ -208,6 +261,8 @@ struct Raw {
     stderr: Vec<u8>,
     /// The standard output was longer than [`MAX_OUTPUT_BYTES`].
     stdout_cut: bool,
+    /// The standard error was longer than [`MAX_OUTPUT_BYTES`].
+    stderr_cut: bool,
     /// A stream was longer than [`MAX_OUTPUT_BYTES`].
     truncated: bool,
     timed_out: bool,
@@ -303,6 +358,7 @@ fn spawn_collect(
         stdout: out,
         stderr: err,
         stdout_cut: out_cut,
+        stderr_cut: err_cut,
         truncated: out_cut || err_cut,
         timed_out,
     })
@@ -361,11 +417,11 @@ fn stop_group(child: &mut Child) {
 }
 
 /// Mask raw output. A lossy UTF-8 copy can contain a secret, so it is erased.
-fn mask_output(raw: &[u8], secrets: &[&SecretEnv]) -> String {
+fn mask_output(raw: &[u8], secrets: &[&SecretEnv], truncated: bool) -> String {
     match String::from_utf8_lossy(raw) {
-        Cow::Borrowed(text) => mask_all(text, secrets),
+        Cow::Borrowed(text) => mask_all(text, secrets, truncated),
         Cow::Owned(mut text) => {
-            let masked = mask_all(&text, secrets);
+            let masked = mask_all(&text, secrets, truncated);
             text.zeroize();
             masked
         }
@@ -376,10 +432,10 @@ fn mask_output(raw: &[u8], secrets: &[&SecretEnv]) -> String {
 /// Short secrets require token boundaries. Replacement labels are never scanned.
 pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
     let all: Vec<&SecretEnv> = secrets.iter().collect();
-    mask_all(text, &all)
+    mask_all(text, &all, false)
 }
 
-fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
+fn mask_all(text: &str, secrets: &[&SecretEnv], truncated: bool) -> String {
     let mut ordered: Vec<&SecretEnv> = secrets
         .iter()
         .copied()
@@ -392,14 +448,19 @@ fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
     while pos < text.len() {
         let matched = ordered.iter().find(|secret| {
             let value = secret.value.as_str();
-            text[pos..].starts_with(value)
-                && (value.len() >= MIN_MASK_BYTES
-                    || (!text[..pos].chars().next_back().is_some_and(word)
-                        && !text[pos + value.len()..].chars().next().is_some_and(word)))
+            // Collection may cut a complete printed code at the output limit.
+            // Redact any remaining prefix at that cut too; otherwise up to all
+            // but one of its digits could escape the ordinary literal matcher.
+            let clipped = truncated && value.starts_with(&text[pos..]);
+            clipped
+                || text[pos..].starts_with(value)
+                    && (value.len() >= MIN_MASK_BYTES
+                        || (!text[..pos].chars().next_back().is_some_and(word)
+                            && !text[pos + value.len()..].chars().next().is_some_and(word)))
         });
         if let Some(secret) = matched {
             out.push_str(&format!("[apassy:{}]", secret.name));
-            pos += secret.value.len();
+            pos += secret.value.len().min(text.len() - pos);
         } else {
             let c = text[pos..].chars().next().expect("character boundary");
             out.push(c);
@@ -442,7 +503,7 @@ mod tests {
                 // Pause at the actual delivery seam, after Command contains the
                 // prepared environment. Model a lock winning the vault mutex.
                 shared.lock().unwrap().as_mut().unwrap().lock().unwrap();
-                crate::broker::run::spawn_in_session(&shared, epoch, cmd)
+                crate::broker::run::spawn_in_session(&shared, epoch, cmd, &mut |_| Ok(()))
             },
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
@@ -700,6 +761,129 @@ mod tests {
         assert_eq!(
             mask("abcdef abcd xy", &secrets),
             "[apassy:B] [apassy:A] [apassy:C]"
+        );
+    }
+    #[test]
+    fn six_digit_masks_preserve_unrelated_numbers_and_redact_embedded_matches() {
+        let masks = [super::SecretEnv {
+            name: "OTP".into(),
+            value: zeroize::Zeroizing::new("123456".into()),
+        }];
+        assert_eq!(
+            super::mask(
+                "count=42 port=5432 code=123456 total=91234567 other=654321",
+                &masks
+            ),
+            "count=42 port=5432 code=[apassy:OTP] total=9[apassy:OTP]7 other=654321"
+        );
+    }
+
+    #[test]
+    fn generated_codes_reach_only_spawn_environment_and_masked_output() {
+        let otp = crate::otp::Totp::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s' \"$OTP\"; printf '%s' \"$OTP\" >&2".into(),
+        ];
+        let out = super::run_with_codes_spawn(
+            &command,
+            std::path::Path::new("/tmp"),
+            None,
+            &[],
+            &[],
+            &[("OTP".into(), otp)],
+            super::Network::default(),
+            std::time::Duration::from_secs(5),
+            |cmd, prepare| {
+                assert!(cmd.get_envs().all(|(name, _)| name != "OTP"));
+                prepare(cmd)?;
+                let code = cmd
+                    .get_envs()
+                    .find(|(n, _)| *n == "OTP")
+                    .unwrap()
+                    .1
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(code.len(), 6);
+                assert!(code.chars().all(|c| c.is_ascii_digit()));
+                assert!(!format!("{cmd:?}").contains("GEZDGNBV"));
+                cmd.spawn()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.stdout, "[apassy:OTP]");
+        assert_eq!(out.stderr, "[apassy:OTP]");
+    }
+    #[test]
+    fn revoked_session_refuses_before_generating_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-code-fence")
+                .unwrap();
+        vault.unlock("synthetic-code-fence").unwrap();
+        let epoch = vault.epoch();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(vault)));
+        let prepared = std::cell::Cell::new(false);
+        let otp = crate::otp::Totp::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let result = super::run_with_codes_spawn(
+            &["true".into()],
+            dir.path(),
+            None,
+            &[],
+            &[],
+            &[("OTP".into(), otp)],
+            super::Network::default(),
+            std::time::Duration::from_secs(5),
+            |cmd, prepare| {
+                shared.lock().unwrap().as_mut().unwrap().lock().unwrap();
+                crate::broker::run::spawn_in_session(&shared, epoch, cmd, &mut |cmd| {
+                    prepared.set(true);
+                    prepare(cmd)
+                })
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            !prepared.get(),
+            "no code may be generated outside the live delivery guard"
+        );
+    }
+
+    #[test]
+    fn generated_code_prefixes_at_both_output_limits_are_masked() {
+        let otp = crate::otp::Totp::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let out_pad = MAX_OUTPUT_BYTES - 2;
+        let err_pad = MAX_OUTPUT_BYTES - 5;
+        let script = format!(
+            "printf '%{out_pad}s' '' | tr ' ' x; printf '%s' \"$OTP\"; printf '%{err_pad}s' '' | tr ' ' x >&2; printf '%s' \"$OTP\" >&2"
+        );
+        let out = run_with_codes_spawn(
+            &["/bin/sh".into(), "-c".into(), script],
+            Path::new("/tmp"),
+            None,
+            &[],
+            &[],
+            &[("OTP".into(), otp)],
+            Network::default(),
+            Duration::from_secs(5),
+            |cmd, prepare| {
+                prepare(cmd)?;
+                cmd.spawn()
+            },
+        )
+        .unwrap();
+        assert!(out.truncated);
+        assert_eq!(out.stdout, format!("{}[apassy:OTP]", "x".repeat(out_pad)));
+        assert_eq!(out.stderr, format!("{}[apassy:OTP]", "x".repeat(err_pad)));
+        let masks = [SecretEnv {
+            name: "OTP".into(),
+            value: Zeroizing::new("123456".into()),
+        }];
+        assert_eq!(
+            mask("untruncated count=12345", &masks),
+            "untruncated count=12345"
         );
     }
 }

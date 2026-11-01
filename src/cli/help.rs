@@ -3,7 +3,7 @@
 use super::args::{Args, Usage, usage};
 use super::{HELP, commands, help_for, setup};
 
-pub(super) const TOPICS: &str = "status, login, logout, lock, unlock, add, item, import, agent, setup, grant, request, runs, pattern, activity, decisions, vault, backup, doctor, completions, version";
+pub(super) const TOPICS: &str = "status, login, logout, lock, unlock, code, add, item, import, agent, setup, grant, request, runs, pattern, activity, decisions, vault, backup, doctor, completions, version";
 
 fn group(name: &str) -> &str {
     match name {

@@ -4,7 +4,7 @@ Date: 2026-10-03. Decision: [ADR 0017](../adr/0017-owner-command-line.md). Wire:
 
 The `apassy` program opens the window when it runs without arguments. With a command, it talks to the running window. Every change uses the same checks as the window: approvals, new tokens, connector operations, and agent settings ask for Touch ID or the passphrase in the window, for each change.
 
-The command line never shows a secret value, and never takes one as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
+The command line can show a current one-time code with `apassy code`; it never shows stored passwords or OTP seeds, and never takes a secret as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
 
 ## Fresh checks for backup, export and tokens (2026-10-31)
 
@@ -268,7 +268,7 @@ apassy --json item list | jq -r '.data.items[] | select(.variable == null) | .na
 
 ## JSON output contract
 
-For doctor, setup (Claude, Codex, and browser), logout, and decisions export, `--json` writes exactly one JSON document to stdout. Progress and human instructions belong on stderr. Parse the whole document, then inspect `ok` and the exit status. These results share `ok`, `code`, `stage`, and `partial_state`; command data is in `data`, or `checks` for doctor. A `message` may explain the result. Failures before command work starts use the standard `ok`, `code`, `message`, `data` error envelope with `stage: "request"` and empty `partial_state`. Partial browser changes are reported and are not rolled back.
+For doctor, setup (Claude, Codex, and browser), logout, code, and decisions export, `--json` writes exactly one JSON document to stdout. Progress and human instructions belong on stderr. Parse the whole document, then inspect `ok` and the exit status. These results share `ok`, `code`, `stage`, and `partial_state`; command data is in `data`, or `checks` for doctor. A `message` may explain the result. Failures before command work starts use the standard `ok`, `code`, `message`, `data` error envelope with `stage: "request"` and empty `partial_state`. Partial browser changes are reported and are not rolled back.
 
 Claude/Codex setup returns `data.type: "setup"` and `data.connection_verified: false`. Its top-level `stage` is the last marker reached (or `preflight` before any marker). `partial_state.stages` lists the ordered markers reached; `partial_state.partial` means a failed setup made confirmed changes, and `partial_state.changes_unknown` means a connection request lost its response and may have created an agent. Check both flags before recovery. Without `--write`, a successful preview has `stage: "preview"` and neither flag set. Setup usage errors exit 2, a missing app during connection exits 3, and other failures exit 1.
 
@@ -311,3 +311,30 @@ Settings > Tools shows a short host status, Connect when absent, and Repair when
 `apassy doctor --live --json` retains the single-document report. Beyond static app/vault status, it creates a separate temporary vault with one harmless credential and agent, starts an isolated broker without a model or owner transcript roots, checks the real MCP adapter catalog round trip and submits a synthetic hook prompt. It removes the dummy credential and temporary vault. A private `/tmp/apassy-live-doctor-UID` directory holds a process lock; the next live run removes abandoned fixture directories after a crash while refusing concurrent runs. The empty control directory and lock remain; no credential or vault remains after normal cleanup. The fixture never loads owner items. Stages report results separately. Installed-host trust, native sandbox enforcement and secret-injected command execution remain unverified. Plain doctor stays read-only.
 
 Helpers accept offline `--help` and `--version` with exit 0; invalid arguments exit 2. Packs validation failures exit 1 and each input is limited to 1 MiB. Eval input is limited to 8 MiB of JSON Lines with valid declarations, command strings and uppercase environment names; it needs a loopback model endpoint. Eval input failures exit 2, failed evaluations exit 1. Hook runtime failures still exit 0 so prompts proceed. Sandbox retains its fail-closed error exit 2.
+
+## Current one-time codes
+
+`apassy code ITEM` prints `123456 (19 seconds left)` after the owner check. ITEM
+is an ID or exact name and must have exactly one OTP detail. No detail gives a
+clear `no_code` error; ambiguous or invalid settings are refused. A logged-in owner
+CLI session is required. Every request needs a fresh local owner check, even inside
+the Touch ID frequency window: the bearer session can be inherited by an
+unsandboxed agent and does not prove an interactive owner. Window reuse is deferred
+until that provenance can be verified (ADR 0034). App UI Show Code and Copy Code
+also stay always fresh.
+
+`apassy code ITEM --copy` uses the app's concealed clipboard, clearing it at code
+expiry (within the existing clipboard limits), vault/session end or lock, unless
+another app replaced the content. It never prints the code.
+
+`--json` writes exactly one ordinary response envelope to stdout; owner-check
+instructions go to stderr. Success is `{ "ok": true, "code": "ok", "message":
+"...", "data": { "type": "code", "code": "123456", "seconds_left": 19,
+"copied": false }, "stage": "complete", "partial_state": {} }`. With `--copy`, `copied` is true and `data.code` is omitted.
+Failures use the standard error envelope and nonzero exit status. These codes are
+intentional owner output; protect terminal history/redirected output accordingly.
+
+Agents use `codes: [ITEM_ID]` on `apassy_run_with_secrets`, never this owner command.
+The catalog's `has_code` and `code_env_name` describe availability without values.
+See [ADR 0034](../adr/0034-mfa-codes-cli-and-agents.md) for approval, timing and
+masking boundaries.

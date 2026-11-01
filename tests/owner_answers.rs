@@ -154,6 +154,7 @@ fn send_run(socket: &Path, token: &str, item: u64, cwd: &Path, script: &str) -> 
         token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![item],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
@@ -608,6 +609,7 @@ fn send_argv(fx: &Fixture, items: &[u64], argv: &[&str]) -> WireResponse {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: items.to_vec(),
             command: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: fx.project.display().to_string(),
@@ -640,6 +642,7 @@ fn argv_later_at(
             &token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items,
                 command,
                 cwd: project.display().to_string(),
@@ -1293,4 +1296,285 @@ fn production_always_ask_and_hard_flags_never_offer_evaluation_permission() {
         0,
         "hard rules veto the model even after explicit permission"
     );
+}
+
+const MFA_SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+fn mfa_fixture() -> Fixture {
+    let mut declared = declaration(Environment::Development, RiskLevel::Low);
+    // A foreign declaration forces an owner question for password-only use too,
+    // even with a fake model that always returns allow.
+    declared.project = "other-project".into();
+    let mut fx = fixture_with_model(
+        Some(declared.clone()),
+        true,
+        Duration::from_secs(10),
+        None,
+        common::fake_bouncer(&[]),
+    );
+    let original = fx.item_id;
+    fx.item_id = with_vault(&fx, |v| {
+        v.clear_env_binding(original).unwrap();
+        let item = v
+            .add(ItemDraft {
+                title: "Synthetic MFA login".into(),
+                kind: CredentialKind::Login,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![
+                    Field {
+                        name: "username".into(),
+                        value: SecretValue::new("synthetic-user".into()),
+                        secret: false,
+                    },
+                    Field {
+                        name: "password".into(),
+                        value: SecretValue::new(SECRET.into()),
+                        secret: true,
+                    },
+                    Field {
+                        name: format!(
+                            "x_{}",
+                            apassy::otp::LABEL
+                                .bytes()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                        ),
+                        value: SecretValue::new(MFA_SEED.into()),
+                        secret: true,
+                    },
+                ],
+            })
+            .unwrap()
+            .id;
+        v.set_env_binding(item, ENV_NAME, "password").unwrap();
+        v.save_declaration(item, &declared, None, None).unwrap();
+        item
+    });
+    fx
+}
+
+fn mfa_action(fx: &Fixture, normal: bool, command: &[&str], cwd: &Path) -> Action {
+    Action::Run {
+        access_request_id: None,
+        items: if normal { vec![fx.item_id] } else { vec![] },
+        codes: vec![fx.item_id],
+        command: command.iter().map(|s| (*s).into()).collect(),
+        cwd: cwd.display().to_string(),
+        purpose: "Check the synthetic project.".into(),
+        path: Some("/usr/bin:/bin".into()),
+        user_request: Some("Check the synthetic project.".into()),
+    }
+}
+
+fn mfa_password_action(fx: &Fixture) -> Action {
+    let mut action = mfa_action(fx, true, &["true"], &fx.project);
+    if let Action::Run { codes, .. } = &mut action {
+        codes.clear();
+    }
+    action
+}
+
+fn mfa_later(fx: &Fixture, action: Action) -> std::thread::JoinHandle<WireResponse> {
+    let socket = fx.socket.clone();
+    let token = fx.token.clone();
+    std::thread::spawn(move || client::send(&socket, &token, action).unwrap())
+}
+
+#[test]
+fn mfa_old_password_answers_and_model_allow_never_cover_codes_but_explicit_project_does() {
+    let fx = mfa_fixture();
+    let handle = mfa_later(&fx, mfa_password_action(&fx));
+    let run = waiting(&fx);
+    owner(&fx, in_project(run)).unwrap();
+    assert!(handle.join().unwrap().ok);
+    let old = with_vault(&fx, |v| v.answers_for_item(fx.item_id)).unwrap();
+    assert!(!old[0].includes_codes);
+    let calls = model_calls(&fx);
+    // A remembered password answer and an allowing model still cannot grant a code.
+    for _ in 0..2 {
+        let handle = mfa_later(&fx, mfa_action(&fx, true, &["true"], &fx.project));
+        let run = waiting(&fx);
+        assert!(
+            run.question.items[0]
+                .name
+                .contains("includes one-time code")
+        );
+        assert!(run.risk.starts_with("This run includes one-time codes."));
+        assert!(
+            run.remember.is_none(),
+            "code approvals cannot teach legacy password patterns"
+        );
+        owner(&fx, OwnerAction::ApproveRun(run)).unwrap();
+        assert!(handle.join().unwrap().ok);
+        assert_eq!(model_calls(&fx), calls);
+        assert!(!with_vault(&fx, |v| v.answers_for_item(fx.item_id)).unwrap()[0].includes_codes);
+    }
+    let handle = mfa_later(&fx, mfa_action(&fx, true, &["true"], &fx.project));
+    let run = waiting(&fx);
+    assert!(
+        run.question
+            .valid_answers
+            .contains(&AnswerKind::InProject(run.question.action))
+    );
+    owner(&fx, in_project(run)).unwrap();
+    assert!(handle.join().unwrap().ok);
+    assert!(with_vault(&fx, |v| v.answers_for_item(fx.item_id)).unwrap()[0].includes_codes);
+    let next = client::send(
+        &fx.socket,
+        &fx.token,
+        mfa_action(&fx, false, &["true"], &fx.project),
+    )
+    .unwrap();
+    assert_eq!(decided_by(&next), "Remembered answer");
+    assert_eq!(model_calls(&fx), calls);
+    let other = other_project(&fx);
+    let handle = mfa_later(&fx, mfa_action(&fx, false, &["true"], &other));
+    let run = waiting(&fx);
+    fx.broker.approvals().deny(run.id);
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+    let handle = mfa_later(
+        &fx,
+        mfa_action(&fx, false, &["rm", "synthetic-never-run"], &fx.project),
+    );
+    let run = waiting(&fx);
+    fx.broker.approvals().deny(run.id);
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+}
+
+#[test]
+fn mfa_injection_masks_output_and_excludes_values_from_cards_logs_and_receipts() {
+    let fx = mfa_fixture();
+    let catalog = client::send(&fx.socket, &fx.token, Action::ListAccess)
+        .unwrap()
+        .result
+        .unwrap();
+    let row = catalog["catalog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["item_id"] == fx.item_id)
+        .unwrap();
+    assert_eq!(row["has_code"], true);
+    assert_eq!(
+        row["code_env_name"],
+        apassy::vault::mfa::code_env_name(fx.item_id)
+    );
+    assert!(!catalog.to_string().contains(MFA_SEED));
+    let env = apassy::vault::mfa::code_env_name(fx.item_id);
+    let script = format!(
+        "printf 'code=%s password=%s count=42 port=5432\\n' \"${env}\" \"${ENV_NAME}\"; printf '%s' \"${env}\" >&2"
+    );
+    let operation = "abcd1234abcd1234abcd1234abcd1234";
+    let action = Action::Tracked {
+        operation_id: operation.into(),
+        idempotency_key: Some("synthetic-mfa".into()),
+        action: Box::new(mfa_action(
+            &fx,
+            true,
+            &["/bin/sh", "-c", &script],
+            &fx.project,
+        )),
+    };
+    let handle = mfa_later(&fx, action);
+    let run = waiting(&fx);
+    let card = format!("{run:?}");
+    assert!(!card.contains(MFA_SEED));
+    let status = client::send(
+        &fx.socket,
+        &fx.token,
+        Action::OperationStatus {
+            operation_id: operation.into(),
+        },
+    )
+    .unwrap();
+    assert!(!serde_json::to_string(&status).unwrap().contains(MFA_SEED));
+    owner(&fx, OwnerAction::ApproveRun(run)).unwrap();
+    let response = handle.join().unwrap();
+    assert!(response.ok, "{response:?}");
+    let result = response.result.unwrap();
+    assert_eq!(
+        result["stdout"],
+        format!("code=[apassy:{env}] password=[apassy:{ENV_NAME}] count=42 port=5432\n")
+    );
+    assert_eq!(result["stderr"], format!("[apassy:{env}]"));
+    let status = client::send(
+        &fx.socket,
+        &fx.token,
+        Action::OperationStatus {
+            operation_id: operation.into(),
+        },
+    )
+    .unwrap();
+    let receipt = serde_json::to_string(&status).unwrap();
+    for forbidden in [MFA_SEED, SECRET, "stdout", "stderr", "code=", env.as_str()] {
+        assert!(!receipt.contains(forbidden), "{receipt}");
+    }
+    let logs = with_vault(&fx, |v| {
+        format!(
+            "{:?}\n{:?}\n{}",
+            v.recent_activity(50).unwrap(),
+            v.item_uses(fx.item_id, 50).unwrap(),
+            v.export_decisions_jsonl().unwrap()
+        )
+    });
+    assert!(!logs.contains(MFA_SEED));
+    assert!(!logs.contains(SECRET));
+    assert!(
+        !logs.contains("code=[apassy:"),
+        "output must never enter logs"
+    );
+    assert!(
+        fx.bouncer
+            .bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|body| !body.contains(MFA_SEED))
+    );
+}
+
+#[test]
+fn mfa_code_only_project_answer_never_grants_the_password_and_always_ask_still_wins() {
+    let fx = mfa_fixture();
+    let handle = mfa_later(&fx, mfa_action(&fx, false, &["true"], &fx.project));
+    let run = waiting(&fx);
+    owner(&fx, in_project(run)).unwrap();
+    assert!(handle.join().unwrap().ok);
+    let answer = with_vault(&fx, |v| v.answers_for_item(fx.item_id))
+        .unwrap()
+        .remove(0);
+    assert!(answer.includes_codes);
+    assert!(!answer.includes_values);
+    let normal = mfa_later(&fx, mfa_password_action(&fx));
+    let run = waiting(&fx);
+    assert!(run.risk.contains("stored secret"));
+    fx.broker.approvals().deny(run.id);
+    assert_eq!(code(&normal.join().unwrap()), "approval_denied");
+    with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).unwrap();
+    let handle = mfa_later(&fx, mfa_action(&fx, false, &["true"], &fx.project));
+    let run = waiting(&fx);
+    assert!(run.risk.contains("always ask"));
+    fx.broker.approvals().deny(run.id);
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+}
+
+#[test]
+fn mfa_missing_code_is_a_clear_refusal_without_a_question() {
+    let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
+    let response = client::send(
+        &fx.socket,
+        &fx.token,
+        mfa_action(&fx, false, &["true"], &fx.project),
+    )
+    .unwrap();
+    assert_eq!(code(&response), "no_code");
+    assert!(
+        response
+            .error
+            .unwrap()
+            .message
+            .contains("no one-time password")
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
 }

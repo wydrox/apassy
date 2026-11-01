@@ -42,7 +42,7 @@ use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::model_server::ModelGate;
 use super::profile::{self, OperationSpec};
 use super::prompts::PromptStore;
-use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse, codes};
+use crate::agent::wire::{Action, WireRequest, WireResponse, codes};
 use crate::vault::answers::normal_host;
 use crate::vault::exceptions::Standing;
 use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
@@ -75,10 +75,11 @@ pub struct BrokerContext {
 /// Opt-in local evaluation: the same run policy and authorization recheck, without
 /// credential delivery or execution. There is deliberately no agent wire action for this.
 pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
-    if request.v != WIRE_VERSION {
+    if request.v != request.action.wire_version() {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     let Action::Run {
+        codes,
         access_request_id,
         items,
         command,
@@ -94,6 +95,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
         ctx,
         &request.token,
         &super::run::RunRequest {
+            codes,
             access_request_id: *access_request_id,
             items,
             command,
@@ -109,7 +111,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
 /// Handle one request from an agent. The response never contains a secret value.
 pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
     let vault = &ctx.vault;
-    if request.v != WIRE_VERSION {
+    if request.v != request.action.wire_version() {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     match &request.action {
@@ -148,6 +150,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             params,
         } => call(ctx, &request.token, *item_id, operation, params),
         Action::Run {
+            codes,
             access_request_id,
             items,
             command,
@@ -159,6 +162,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             ctx,
             &request.token,
             &super::run::RunRequest {
+                codes,
                 access_request_id: *access_request_id,
                 items,
                 command,
@@ -538,6 +542,12 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
                 "access": access,
                 "folder": entry.folder,
             });
+            let code = vault.code_field(entry.item_id).ok().flatten();
+            entry_json["has_code"] = json!(code.is_some());
+            if code.is_some() {
+                entry_json["code_env_name"] =
+                    json!(crate::vault::mfa::code_env_name(entry.item_id));
+            }
             // ADR 0024: the agent can use the item at once, so it needs the name now.
             if entry.can_use_in_process
                 && let Ok(Some(binding)) = vault.process_binding(entry.item_id)
@@ -1221,6 +1231,16 @@ fn read_call_secret(
             "The item has no value for the connector.",
         ));
     };
+    // Connectors do not resolve process bindings. Apply the same no-seed boundary
+    // here, including an old token field whose value is a TOTP setup URI. Otherwise
+    // a destination could receive the seed and return only its extracted key.
+    if crate::vault::is_setup_key_field(checked.secret_field, secret.expose()) {
+        return Err(deny(
+            vault,
+            "setup_key_refused",
+            "One-time password setup keys cannot be used by agent connectors.",
+        ));
+    }
     Ok(Prepared {
         agent: checked.agent.clone(),
         destination,

@@ -159,18 +159,18 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
     "moved",
 ];
 
-/// The previous schema. Schema 21 adds only local Connect staging, so older copies
-/// preserve their existing synced semantics and migrate without a pending key.
-pub(super) const UPGRADABLE_SCHEMA: i64 = 21;
+/// The previous schema. Schemas 20 through 23 add only local authority/state;
+/// older copies preserve synced semantics and acquire no code authority.
+pub(super) const UPGRADABLE_SCHEMA: i64 = 22;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
 pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERSION;
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
-// Schemas 20 and 21 add local state only; future synced schemas require another merge step.
+// Schemas 20 through 23 add local state only; future synced schemas require another merge step.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 5);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 6);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades.

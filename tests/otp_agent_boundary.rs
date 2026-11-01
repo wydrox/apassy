@@ -232,6 +232,7 @@ fn a_run_gets_the_password_variable_and_no_setup_key() {
         &fx,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.login],
             command: vec![
                 "/bin/sh".into(),

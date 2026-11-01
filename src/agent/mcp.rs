@@ -287,7 +287,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. has_code and code_env_name describe one-time codes; explicitly select codes in runs, including code-only runs with items: []. Code use requires owner approval unless a remembered project answer explicitly includes codes. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -314,7 +314,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_LIST_ACCESS,
             "title": "List the credentials you can use",
-            "description": "List the credentials of the vault without values: the catalog has each item_id, name, folder, and env_name. You need no grant: a credential with access \"can_use\" goes into apassy_run_with_secrets, and the bouncer decides each use (it can ask the owner). \"needs_field\": the owner must pick one secret field first. Named operations are for apassy_use_credential. Never has secret values.",
+            "description": "List the credentials of the vault without values: the catalog has each item_id, name, folder, and env_name. You need no grant: a credential with access \"can_use\" goes into apassy_run_with_secrets, and the bouncer decides each use (it can ask the owner). \"needs_field\": the owner must pick one secret field first. has_code and code_env_name permit explicit code selection in runs even when access is needs_field; codes require owner approval unless a project answer explicitly covers them. Named operations are for apassy_use_credential. Never has secret values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -343,14 +343,15 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_RUN_WITH_SECRETS,
             "title": "Run a command with secrets in its environment",
-            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. The command is an argument list, not a shell string.",
+            "description": "Run one command with catalog credentials in its environment, under the env_name of each item from apassy_list_access. Optional codes selects current one-time codes under code_env_name; items may be [] for codes only. A code requires owner approval unless an explicit project answer includes codes; models and password-only answers cannot approve codes. Supplied literal secret values are masked as [apassy:NAME]. Transformed, fragmented, or unrelated secrets may remain: return only needed non-secret fields. Check exit_code and timed_out even when isError is false. env_holds \"a placeholder\": the real value goes only into HTTPS requests to its hosts (Authorization or API key header, or key parameter), never into a body or a file; network.requests lists them. No grant is needed: the bouncer decides each run, and when it asks the owner this call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. The command is an argument list, not a shell string.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": "Item IDs from process_access, or from the catalog (access \"can_use\")." },
+                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 0, "description": "Item IDs from process_access, or from the catalog (access \"can_use\"). Use [] for codes only." },
                     "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
                     "cwd": { "type": "string", "description": "Absolute working directory: the project folder. The bouncer uses the project." },
                     "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." },
+                    "codes": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 16, "description": "Item IDs whose current one-time codes enter code_env_name from the catalog. Owner approval required unless an explicit project answer covers codes. Never delivers a seed. items may be [] for codes only. Not compatible with access_request_id." },
                     "access_request_id": { "type": "integer", "minimum": 1, "description": "Consume this exact scoped access request once. Retries after admission are refused; query status." },
                     "user_request": { "type": "string", "description": "The user's own words from the conversation that led to this command. Quote them. Do not summarize or add words. The bouncer compares the command with this request, and the owner sees it." }
                 },
@@ -785,7 +786,13 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     if let Some(_extra) = object.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "items" | "command" | "cwd" | "purpose" | "user_request" | "access_request_id"
+            "items"
+                | "codes"
+                | "command"
+                | "cwd"
+                | "purpose"
+                | "user_request"
+                | "access_request_id"
         )
     }) {
         return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
@@ -801,6 +808,19 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
                 .ok_or_else(|| "Each item ID must be a positive integer.".to_owned())
         })
         .collect::<Result<Vec<u64>, String>>()?;
+    let codes = match object.get("codes") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or("codes must be an array of item IDs.")?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| "Each code item ID must be positive.".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let command = object
         .get("command")
         .and_then(Value::as_array)
@@ -819,7 +839,7 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
             .map(str::to_owned)
             .ok_or_else(|| format!("The {name} argument must be a string."))
     };
-    if items.is_empty() || command.is_empty() {
+    if (items.is_empty() && codes.is_empty()) || command.is_empty() {
         return Err("Give at least one item and a nonempty command argument list.".to_owned());
     }
     Ok(Action::Run {
@@ -832,6 +852,7 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
             })
             .transpose()?,
         items,
+        codes,
         command,
         cwd: text("cwd")?,
         purpose: text("purpose")?,
@@ -1215,6 +1236,14 @@ pub(crate) fn broker_error(code: &str) -> Value {
         "approval_invalidated" | "authorization_changed" => (
             code,
             "The authorization changed. Review the request with the owner.",
+        ),
+        "no_code" => (
+            code,
+            "The selected item has no one-time password detail. Check has_code in the catalog.",
+        ),
+        "invalid_code" => (
+            code,
+            "The item must have one unambiguous supported one-time password setting. Ask the owner to review it.",
         ),
         "invalid_request" | "bad_request" | "unknown_folder" | "env_name_taken" => (
             code,
@@ -1890,5 +1919,15 @@ mod tests {
         // The error text of a refused save never repeats the value.
         let error = save_action(&json!({"value": canary, "extra": canary})).unwrap_err();
         assert!(!error.contains(canary), "{error}");
+    }
+    #[test]
+    fn code_only_run_has_explicit_typed_selection() {
+        let action = run_action(&json!({"items":[],"codes":[7],"command":["true"],"cwd":"/tmp","purpose":"Synthetic test","user_request":"Synthetic test"})).unwrap();
+        assert!(
+            matches!(action, Action::Run { items, codes, .. } if items.is_empty() && codes == vec![7])
+        );
+        for codes in [json!([0]), json!(["7"]), json!(null)] {
+            assert!(run_action(&json!({"items":[],"codes":codes,"command":["true"],"cwd":"/tmp","purpose":"Test","user_request":"Test"})).is_err());
+        }
     }
 }

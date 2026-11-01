@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::decide::{self, BrokerContext};
-use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
+#[cfg(test)]
+use crate::agent::wire::WIRE_VERSION;
+use crate::agent::wire::{Action, WireRequest, WireResponse};
 
 const RETENTION: Duration = Duration::from_secs(15 * 60);
 const MAX_RECORDS: usize = 256;
@@ -168,7 +170,7 @@ impl Operations {
     }
 
     pub(super) fn handle(&self, ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
-        if request.v != WIRE_VERSION {
+        if request.v != request.action.wire_version() {
             return decide::handle(ctx, request);
         }
         if request.action.trackable() {
@@ -480,7 +482,10 @@ fn fingerprint_bytes(action: &Action) -> Zeroizing<Vec<u8>> {
     let mut action = action.clone();
     match &mut action {
         // Credentials form a set; argv order and whitespace within values do not.
-        Action::Run { items, .. } => items.sort_unstable(),
+        Action::Run { items, codes, .. } => {
+            items.sort_unstable();
+            codes.sort_unstable();
+        }
         Action::GenerateCredential {
             length, alphabet, ..
         } => {
@@ -715,6 +720,7 @@ mod tests {
         );
         let run = |items, command| Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items,
             command,
             cwd: "/synthetic".into(),
@@ -788,6 +794,7 @@ mod tests {
                 idempotency_key: Some("synthetic-access-retry".into()),
                 action: Box::new(Action::Run {
                     access_request_id: Some(81),
+                    codes: Default::default(),
                     items: vec![7],
                     command: vec!["true".into()],
                     cwd: dir.path().display().to_string(),

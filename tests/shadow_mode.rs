@@ -250,6 +250,7 @@ fn run(fx: &Fixture, script: &str) -> WireResponse {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             cwd: fx.project.display().to_string(),
@@ -820,6 +821,7 @@ fn shadow_session_on_synthetic_requests() {
             token.expose(),
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![item.id],
                 command: command_line_to_argv(line),
                 cwd: project.display().to_string(),

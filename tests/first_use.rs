@@ -133,6 +133,7 @@ fn send_run(socket: &Path, token: &str, item: u64, cwd: &Path, script: &str) -> 
         token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![item],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
@@ -209,6 +210,7 @@ fn custom_run(
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: command.iter().map(|s| (*s).to_owned()).collect(),
             cwd: fx.project.display().to_string(),
@@ -904,7 +906,7 @@ fn the_catalog_names_the_variable_and_the_folder_of_each_usable_credential() {
     assert!(!data.to_string().contains(SECRET));
 }
 
-/// OTP setup keys require an explicit owner-selected field before any use.
+/// OTP setup keys never enter ordinary item runs; codes use the separate selector.
 #[test]
 fn otp_only_items_are_needs_field_in_the_broker_catalog_and_cannot_be_used() {
     for (kind, name, value) in [

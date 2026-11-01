@@ -29,6 +29,7 @@ mod history;
 mod learning;
 mod library;
 mod merge;
+pub mod mfa;
 pub mod overview;
 pub mod passkey;
 mod policy;
@@ -1107,6 +1108,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | TRUSTED_DEVICE_SCHEMA_VERSION
         | 20
         | 21
+        | 22
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1272,6 +1274,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v23: &[&str] = if version >= 23 {
+        &["SELECT includes_codes, includes_values FROM owner_answer LIMIT 0"]
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1294,6 +1301,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v20)
         .chain(v21)
         .chain(v22)
+        .chain(v23)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1395,6 +1403,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < 22 {
         access_once::add_schema(&tx)?;
     }
+    if from < 23 {
+        answers::add_code_schema(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1452,6 +1463,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema20::add_schema_v20(&tx)?;
     connect::add_schema(&tx)?;
     access_once::add_schema(&tx)?;
+    answers::add_code_schema(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

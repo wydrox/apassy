@@ -1097,8 +1097,9 @@ impl Vault {
         }))
     }
 
-    /// Resolve process delivery without reading secret values. A stored binding
-    /// takes precedence. Otherwise a supported secret field gets an automatic name.
+    /// Resolve process metadata without returning values. A usable stored binding
+    /// takes precedence; OTP seeds and passkeys are excluded even when selected.
+    /// Otherwise a supported ordinary secret gets an automatic name.
     pub fn process_binding(&self, item_id: u64) -> VaultResult<Option<EnvBinding>> {
         process_binding_in(self.conn_ref()?, to_sql_id(item_id)?)
     }
@@ -1716,8 +1717,8 @@ pub(super) fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultRe
 }
 
 /// Shared metadata resolver for reads and grant/request transactions. SQL tests
-/// whether a secret has a value. Only an automatic choice reads a value, and only to
-/// recognize the setup key of a one-time password; that copy is erased on drop.
+/// whether a secret has a value. Candidate values are inspected only to recognize
+/// OTP setup links, including legacy explicit choices; each copy erases on drop.
 pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Option<EnvBinding>> {
     let kind: Option<String> = conn
         .query_row(
@@ -1745,9 +1746,9 @@ pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Op
         .optional()
         .map_err(|_| err(VaultErrorKind::Storage))?;
     let binding = if let Some((env_name, field, hosts)) = stored {
-        // A passkey field never goes to a process, whatever old metadata says. An
-        // explicit binding to a one-time password setup key stays: the owner chose it.
-        if super::types::is_passkey_field(&field) {
+        // Passkeys and OTP seeds never go to agents, including old explicit bindings.
+        // ADR 0034 delivers only a generated code through its separate selector.
+        if super::types::is_passkey_field(&field) || !automatic_field_allowed(conn, item, &field)? {
             return Ok(None);
         }
         EnvBinding {
@@ -1814,8 +1815,8 @@ pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Op
 }
 
 /// Whether Apassy may choose this field by itself. A passkey field or the setup key of
-/// a one-time password (the rule of the vault access model) needs an explicit owner
-/// binding. The value is read only when the name alone does not decide, and it is
+/// a one-time password (the rule of the vault access model) is never delivered,
+/// even with an explicit binding. The value is read only when the name alone does not decide, and it is
 /// erased on drop.
 fn automatic_field_allowed(conn: &Connection, item: i64, name: &str) -> VaultResult<bool> {
     if super::types::is_passkey_field(name) {

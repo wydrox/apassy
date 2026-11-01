@@ -73,6 +73,7 @@ impl Fixture {
     fn run(&self) -> WireRequest {
         self.request(Action::Run {
             access_request_id: Some(self.id),
+            codes: Default::default(),
             items: vec![self.item],
             command: vec![
                 "stripe".into(),

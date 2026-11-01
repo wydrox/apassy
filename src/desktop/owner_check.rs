@@ -253,6 +253,11 @@ pub enum OwnerRequest {
     },
     /// Show the code of one one-time password. `field` is the field of its seed. Only
     /// that field is read: the password and the other secret values stay hidden.
+    CliCode {
+        item_id: u64,
+        field: String,
+        copy: bool,
+    },
     ShowCode {
         item_id: u64,
         field: String,
@@ -711,6 +716,15 @@ impl OwnerRequest {
                 target: target.clone(),
             },
             Self::Reveal { item_id } => OwnerAction::Reveal { item_id: *item_id },
+            Self::CliCode {
+                item_id,
+                field,
+                copy,
+            } => OwnerAction::CliCode {
+                item_id: *item_id,
+                field: field.clone(),
+                copy: *copy,
+            },
             Self::ShowCode { item_id, field } => OwnerAction::ShowCode {
                 item_id: *item_id,
                 field: field.clone(),
@@ -955,6 +969,7 @@ impl OwnerRequest {
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
             Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
+            Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line. A fresh owner check is required because a command-line session can be inherited by an agent.", if *copy { "Copy" } else { "Show" }),
             Self::ShowCode { field, .. } => format!(
                 "Show the code of \"{}\" for 30 seconds. The other secret values stay hidden.",
                 super::owner_store::field_label(field)
@@ -1263,7 +1278,7 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
-            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can never show a secret value. Grants, approvals, and new tokens still ask you here.".to_owned(),
+            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can show a current one-time code with apassy code after a fresh owner check for each request. Grants, approvals, and new tokens still ask you here.".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "Bind 1 credential to the environment variable below. Programs get the real value.".to_owned(),
                 count => format!(
@@ -1794,6 +1809,7 @@ impl DesktopApp {
                 Ok(details) => self.set_ok(details.reveal_warning()),
                 Err(err) => self.set_err(err.message),
             },
+            OwnerRequest::CliCode { item_id, field, copy } => self.complete_cli_code(item_id, &field, copy, proof),
             OwnerRequest::ShowCode { item_id, field } => {
                 match session.reveal_one_code_seed(item_id, &field, proof) {
                     Ok(()) => self.set_ok(

@@ -482,6 +482,7 @@ fn score_run(
             host_session: None,
             action: Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: item_ids.clone(),
                 command,
                 cwd: cwd.display().to_string(),

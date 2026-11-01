@@ -10,7 +10,7 @@
 //! - `login` asks for the owner check in the app (Touch ID or the passphrase). Then the
 //!   app gives a session token. The session ends after 30 idle minutes, after 12 hours,
 //!   at a lock, and when the app quits.
-//! - An action that needs an owner check in the app (a reveal is never offered) asks
+//! - An action that needs an owner check in the app (stored-secret reveal is never offered) asks
 //!   for the same check here, in the app window, for each action.
 
 pub mod client;

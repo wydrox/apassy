@@ -153,6 +153,7 @@ fn run(fx: &Fixture, command: &[&str], purpose: &str) -> WireResponse {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: command.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: fx.project.display().to_string(),
@@ -186,6 +187,7 @@ fn run_in(fx: &Fixture, cwd: &std::path::Path, command: &[&str]) -> WireResponse
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: command.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: cwd.display().to_string(),
@@ -221,6 +223,7 @@ fn run_later(fx: &Fixture, command: &[&str]) -> std::thread::JoinHandle<WireResp
             &token,
             Action::Run {
                 access_request_id: None,
+                codes: Default::default(),
                 items: vec![item],
                 command,
                 cwd,
@@ -394,6 +397,7 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: vec!["echo".to_owned(), "x".to_owned()],
             cwd: fx.project.display().to_string(),
@@ -484,6 +488,7 @@ fn risky_or_unavailable_bouncer_waits_for_the_owner() {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![other],
             command: vec!["echo".to_owned(), "x".to_owned()],
             cwd: fx.project.display().to_string(),
@@ -705,6 +710,7 @@ fn production_declaration_always_waits_for_the_owner() {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![second, fx.item_id],
             command: vec!["echo".to_owned(), "hi".to_owned()],
             cwd: fx.project.display().to_string(),
@@ -902,6 +908,7 @@ fn an_injection_phrase_in_the_user_request_asks_the_owner() {
         &fx.token,
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![fx.item_id],
             command: vec!["echo".to_owned(), "hi".to_owned()],
             cwd: fx.project.display().to_string(),

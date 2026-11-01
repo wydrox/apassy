@@ -26,7 +26,7 @@ fn automatic_process_binding_does_not_choose_an_otp_setup_key() {
         );
         assert!(
             vault.process_binding(item).unwrap().is_none(),
-            "An OTP setup key requires an explicit owner-approved field binding"
+            "OTP seeds never enter a process; generated codes have a separate selector"
         );
     }
 }
@@ -88,8 +88,8 @@ fn builtin_default_field_with_a_totp_uri_is_not_chosen() {
             .set_env_binding(item, &format!("FIXTURE_TOTP_URI_{index}"), name)
             .unwrap();
         assert!(
-            vault.process_binding(item).unwrap().is_some(),
-            "{name} explicit"
+            vault.process_binding(item).unwrap().is_none(),
+            "{name}: legacy explicit bindings cannot deliver a seed"
         );
     }
 }
@@ -179,7 +179,7 @@ fn a_passkey_field_never_goes_to_a_process() {
 }
 
 #[test]
-fn an_explicit_otp_field_binding_remains_available() {
+fn an_explicit_otp_seed_binding_is_retained_but_not_delivered_to_agents() {
     let (_dir, mut vault) = fixture();
     let name = "x_4f6e652d74696d652070617373776f7264";
     let item = add(
@@ -190,13 +190,15 @@ fn an_explicit_otp_field_binding_remains_available() {
     vault
         .set_env_binding(item, "FIXTURE_OTP_SETUP", name)
         .unwrap();
-    let binding = vault.process_binding(item).unwrap().unwrap();
+    let binding = vault.env_binding(item).unwrap().unwrap();
     assert_eq!(binding.field, name);
     assert_eq!(binding.env_name, "FIXTURE_OTP_SETUP");
+    assert!(vault.process_binding(item).unwrap().is_none());
+    assert_eq!(vault.code_field(item).unwrap().as_deref(), Some(name));
 }
 
 #[test]
-fn an_otp_only_item_needs_a_field_in_the_catalog_and_for_access_requests() {
+fn an_otp_only_item_never_grants_seed_access_even_after_explicit_binding() {
     let (_dir, mut vault) = fixture();
     let name = "x_4f6e652d74696d652070617373776f7264";
     let otp = add(
@@ -254,7 +256,7 @@ fn an_otp_only_item_needs_a_field_in_the_catalog_and_for_access_requests() {
             .iter()
             .any(|entry| entry.0 == otp)
     );
-    // The owner can still choose the field. Then the item is usable like any other.
+    // Legacy metadata can still name the seed; ADR 0034 never delivers it.
     vault.set_env_binding(otp, "", name).unwrap();
     let entry = vault
         .catalog()
@@ -262,14 +264,23 @@ fn an_otp_only_item_needs_a_field_in_the_catalog_and_for_access_requests() {
         .into_iter()
         .find(|entry| entry.item_id == otp)
         .unwrap();
-    assert!(entry.can_use_in_process);
-    vault
-        .request_access(agent.id, otp, "Use the test service", "/tmp")
-        .unwrap();
-    vault
-        .set_exec_grant(agent.id, otp, "/tmp", ExecMode::Ask)
-        .unwrap();
-    // Clearing the explicit choice returns the item to "needs a field".
+    assert!(!entry.can_use_in_process);
+    assert_eq!(vault.code_field(otp).unwrap().as_deref(), Some(name));
+    assert_eq!(
+        vault
+            .request_access(agent.id, otp, "Use the test service", "/tmp")
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    assert_eq!(
+        vault
+            .set_exec_grant(agent.id, otp, "/tmp", ExecMode::Ask)
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    // Clearing the legacy choice still cannot expose the seed.
     vault.clear_env_binding(otp).unwrap();
     assert!(vault.process_binding(otp).unwrap().is_none());
 }

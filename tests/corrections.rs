@@ -329,6 +329,7 @@ fn an_allowed_run_proposes_a_correction() {
         token.expose(),
         Action::Run {
             access_request_id: None,
+            codes: Default::default(),
             items: vec![item],
             command: vec![
                 "/bin/sh".into(),
