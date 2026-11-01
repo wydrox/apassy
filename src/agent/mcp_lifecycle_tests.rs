@@ -138,6 +138,9 @@ impl Host {
     fn new(config: AdapterConfig) -> Self {
         let (input, server_input) = UnixStream::pair().unwrap();
         let (output, server_output) = UnixStream::pair().unwrap();
+        server_output
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         output
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -296,7 +299,12 @@ fn progress_repeats_without_arguments_and_eof_withdraws_question() {
     }
     assert!(values.windows(2).all(|v| v[0] < v[1]));
     assert!(started.elapsed() >= Duration::from_millis(50));
+    let closing = Instant::now();
     host.close();
+    assert!(
+        closing.elapsed() < Duration::from_secs(3),
+        "EOF shutdown stalled on progress output"
+    );
     assert!(fx.broker.approvals().pending().is_empty());
     assert_eq!(fx.completed(&id)["outcome"]["code"], "cancelled");
 }

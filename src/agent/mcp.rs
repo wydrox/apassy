@@ -74,11 +74,14 @@ pub fn run_stdio(config: &AdapterConfig) -> io::Result<()> {
 }
 
 fn write_message(output: &Mutex<impl Write>, message: &Value) -> io::Result<()> {
+    // One buffer per frame avoids flooding a Unix stream's send queue with
+    // serde's tiny writes while EOF waits for the remaining workers to drain.
+    let mut frame = zeroize::Zeroizing::new(serde_json::to_vec(message).map_err(io::Error::other)?);
+    frame.push(b'\n');
     let mut writer = output
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    serde_json::to_writer(&mut *writer, message).map_err(io::Error::other)?;
-    writer.write_all(b"\n")?;
+    writer.write_all(&frame)?;
     writer.flush()
 }
 
