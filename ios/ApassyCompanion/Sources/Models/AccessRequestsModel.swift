@@ -15,6 +15,7 @@ final class AccessRequestsModel {
   @ObservationIgnored private var authentication: ApprovalAuthentication?
   @ObservationIgnored private var generation = 0
   @ObservationIgnored private var sent: Set<String> = []
+  @ObservationIgnored private var submitted: Set<String> = []
   @ObservationIgnored private var sentDates: [String: Date] = [:]
 
   init(service: any VaultService, signers: any AnswerSigners) {
@@ -52,7 +53,11 @@ final class AccessRequestsModel {
     generation += 1
     authentication?.cancel()
     authentication = nil
-    if let busy { messages[busy] = "The check was cancelled. Nothing was sent." }
+    if let busy {
+      messages[busy] = submitted.contains(busy)
+        ? "An answer may have been sent. Not confirmed; check on the Mac."
+        : "The check was cancelled. Nothing was sent."
+    }
     busy = nil
     if clear {
       requests = []
@@ -115,6 +120,20 @@ final class AccessRequestsModel {
       else { return }
       let started = ContinuousClock.now
       let wall = Date.now
+      // End the OS prompt at the original deadline even if the signer has not
+      // returned. Checking the time only after signing leaves an expired prompt live.
+      let signingRemainder = min(50, Double(prepared.retry_before) - wall.timeIntervalSince1970,
+        Double(request.card.expires_at) - wall.timeIntervalSince1970)
+      guard signingRemainder > 0 else {
+        throw VaultError(.expired, "The answer expired. Review on the Mac.")
+      }
+      let expiry = Task { [weak self] in
+        do { try await Task.sleep(for: .seconds(signingRemainder)) } catch { return }
+        guard let self, current == self.generation else { return }
+        self.cancel(clear: false)
+        self.messages[request.id] = "The signing attempt expired. Review on the Mac."
+      }
+      defer { expiry.cancel() }
       let signature: Data?
       if choice == .allow_once {
         guard let key = request.answer_key.flatMap(Base64URL.decode),
@@ -122,14 +141,19 @@ final class AccessRequestsModel {
           try signer.publicKey() == key
         else { throw CompanionKeyError.biometryChanged }
         messages[request.id] = "Face ID — allow one scoped use attempt"
-        signature = try await signer.signAccess(
-          bytes,
-          reason:
-            "allow one scoped use attempt by \(ApprovalPrompt.shortName(request.card.agent.name))",
-          authentication: auth)
+        signature = try await withTaskCancellationHandler {
+          try await signer.signAccess(
+            bytes,
+            reason:
+              "allow one scoped use attempt by \(ApprovalPrompt.shortName(request.card.agent.name))",
+            authentication: auth)
+        } onCancel: {
+          auth.cancel()
+        }
       } else {
         signature = nil
       }
+      expiry.cancel()
       // Cancelled/background/switched/expired/changed-card results can never POST.
       guard current == generation, !Task.isCancelled,
         requests.contains(where: { $0.id == request.id && $0.state == "open" && $0.receipt == nil })
@@ -146,6 +170,7 @@ final class AccessRequestsModel {
           Date.now.timeIntervalSince1970 < Double(request.card.expires_at)
         else { throw VaultError(.notAllowed, "The answer expired. Review on the Mac.") }
         do {
+          submitted.insert(request.id)
           let result = try await service.accessRequestAnswer(
             request, choice: choice, prepared: prepared, signature: signature)
           guard current == generation, result.sent else { return }

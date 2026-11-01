@@ -15,7 +15,13 @@ struct Attempt {
     tries: usize,
     settle: Option<Sealed>,
     settled: bool,
+    expires_at: u64,
+    slot_held: bool,
 }
+
+// The carrier has ten slots per asking device. Keep nine for the eight
+// concurrent broker operations and one Connect handoff, even before they wait.
+const MAX_ACCESS_IN_FLIGHT: usize = 1;
 
 pub(super) fn run(shared: &Shared) {
     let mut attempts: BTreeMap<String, Attempt> = BTreeMap::new();
@@ -33,6 +39,7 @@ pub(super) fn run(shared: &Shared) {
             lock(&shared.view).access_local_only.clear();
             epoch = Some(active.epoch);
         }
+        attempts.retain(|_, a| a.expires_at > unix_now());
         let records = {
             let mut guard = lock(&shared.vault);
             let Some(v) = Shared::vault_of(&mut guard, &active) else {
@@ -66,6 +73,14 @@ pub(super) fn run(shared: &Shared) {
                 if !shared.queue.pending().is_empty() {
                     continue;
                 }
+                // Reserve before the first POST; an uncertain response can
+                // already have occupied a relay slot. Only confirmed settlement
+                // or the original expiry releases that reservation.
+                if attempts.values().filter(|a| a.slot_held).count() >= MAX_ACCESS_IN_FLIGHT {
+                    lock(&shared.view).access_local_only.insert(r.id,
+                        "Review on this Mac. Relay capacity is reserved for execution questions and iPhone connection.".into());
+                    continue;
+                }
                 let sealed = (|| {
                     let signature = active
                         .client
@@ -93,6 +108,8 @@ pub(super) fn run(shared: &Shared) {
                         tries: 0,
                         settle: None,
                         settled: false,
+                        expires_at: c.expires_at,
+                        slot_held: true,
                     },
                 );
             }
@@ -202,7 +219,10 @@ pub(super) fn run(shared: &Shared) {
                 }
                 if let Some(settle) = &a.settle {
                     match active.client.settle(&c.qid, settle) {
-                        Ok(()) => a.settled = true,
+                        Ok(()) => {
+                            a.settled = true;
+                            a.slot_held = false;
+                        }
                         Err(e) if !e.can_pass() => a.settled = true,
                         Err(_) => {}
                     }

@@ -87,7 +87,15 @@ fn write_message(output: &Mutex<impl Write>, message: &Value) -> io::Result<()> 
     writer.flush()
 }
 
-// Three mutating calls plus a reserved read slot. No unbounded input queue.
+#[derive(Default)]
+struct CallCancellation {
+    stopped: AtomicBool,
+    // EOF/output failure stops waiting, but only an explicit MCP cancellation
+    // abandons an asynchronous scoped access request.
+    explicit: AtomicBool,
+}
+
+// Three mutating calls plus a reserved read/control slot. No unbounded input queue.
 fn serve(
     config: &AdapterConfig,
     mut input: impl BufRead,
@@ -95,7 +103,7 @@ fn serve(
     cadence: Duration,
 ) -> io::Result<()> {
     let output = Mutex::new(output);
-    let active = Mutex::new(BTreeMap::<String, (Arc<AtomicBool>, bool)>::new());
+    let active = Mutex::new(BTreeMap::<String, (Arc<CallCancellation>, bool)>::new());
     let drained = std::sync::Condvar::new();
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
@@ -136,7 +144,8 @@ fn serve(
                 if message["method"] == "notifications/cancelled" && message.get("id").is_none() {
                     let key = message["params"]["requestId"].to_string();
                     if let Some((cancel, _)) = active.lock().unwrap().get(&key) {
-                        cancel.store(true, Ordering::SeqCst);
+                        cancel.explicit.store(true, Ordering::SeqCst);
+                        cancel.stopped.store(true, Ordering::SeqCst);
                     }
                     continue;
                 }
@@ -149,8 +158,10 @@ fn serve(
                 let id = message["id"].clone();
                 let key = id.to_string();
                 let params = message["params"].clone();
-                let read_only = params["name"] == TOOL_LIST_ACCESS;
-                let cancel = Arc::new(AtomicBool::new(false));
+                let read_only = [TOOL_LIST_ACCESS, TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL]
+                    .iter()
+                    .any(|name| params["name"] == *name);
+                let cancel = Arc::new(CallCancellation::default());
                 {
                     let mut calls = active.lock().unwrap();
                     if calls.contains_key(&key) {
@@ -183,13 +194,13 @@ fn serve(
                                 "progressToken":token, "progress":progress, "operation_id":operation_id,
                                 "message":format!("Operation {operation_id}; waiting for the broker, owner, or bouncer.")
                             }})).is_err() {
-                                for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
+                                for (cancel, _) in active.lock().unwrap().values() { cancel.stopped.store(true, Ordering::SeqCst); }
                             }
                             progress += 1;
                         }
                     });
                     if write_message(output, &json!({"jsonrpc":"2.0", "id":id, "result":result})).is_err() {
-                        for (cancel, _) in active.lock().unwrap().values() { cancel.store(true, Ordering::SeqCst); }
+                        for (cancel, _) in active.lock().unwrap().values() { cancel.stopped.store(true, Ordering::SeqCst); }
                     }
                     active.lock().unwrap().remove(&key);
                     drained.notify_all();
@@ -207,7 +218,7 @@ fn serve(
                 .0;
         }
         for (cancel, _) in calls.values() {
-            cancel.store(true, Ordering::SeqCst);
+            cancel.stopped.store(true, Ordering::SeqCst);
         }
         drop(calls);
         for worker in workers {
@@ -499,7 +510,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
     call_tool_control(
         config,
         params,
-        &AtomicBool::new(false),
+        &CallCancellation::default(),
         Duration::from_secs(15),
         |_| {},
     )
@@ -508,7 +519,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
 fn call_tool_control(
     config: &AdapterConfig,
     params: &Value,
-    cancelled: &AtomicBool,
+    cancelled: &CallCancellation,
     cadence: Duration,
     mut progress: impl FnMut(&str),
 ) -> Value {
@@ -583,6 +594,7 @@ fn call_tool_control(
             "The adapter has no agent token. Set APASSY_AGENT_TOKEN in the MCP server configuration.",
         );
     };
+    let asynchronous_access = matches!(action, Action::RequestAccess { scope: Some(_), .. });
     let operation_id = if action.trackable() {
         match new_operation_id() {
             Ok(id) => Some(id),
@@ -619,7 +631,7 @@ fn call_tool_control(
             }
             last_progress = Instant::now();
         }
-        cancelled.load(Ordering::SeqCst)
+        cancelled.stopped.load(Ordering::SeqCst)
     });
     let result = match response {
         Ok(mut response) => {
@@ -629,6 +641,15 @@ fn call_tool_control(
             return tool_result(response);
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            if asynchronous_access && !cancelled.explicit.load(Ordering::SeqCst) {
+                return attach_operation(
+                    tool_error(
+                        "unknown_outcome",
+                        "The asynchronous access request may have been created. Retrieve operation status, then query or explicitly cancel its request ID.",
+                    ),
+                    operation_id.as_deref(),
+                );
+            }
             if let Some(id) = &operation_id {
                 let cancel = client::send_with(
                     &config.socket,
@@ -668,6 +689,7 @@ fn call_tool_control(
             // finished adapter worker. Cancellation is best effort; keep the
             // unknown-outcome diagnostic and receipt ID even if it succeeds.
             if let Some(id) = &operation_id
+                && !asynchronous_access
                 && !matches!(
                     error.kind(),
                     io::ErrorKind::InvalidInput

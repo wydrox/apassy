@@ -28,6 +28,8 @@ struct State {
     waiting: bool,
     outcome: Option<Value>,
     finished: Option<Instant>,
+    // An asynchronous scoped request can outlive this operation's response.
+    access_request: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +84,29 @@ pub(super) fn cancelled() -> bool {
             let state = lock(&c.state);
             state.cancelled && !state.invalidated
         })
+    })
+}
+
+/// Bind while holding the vault arbiter. Cancellation before binding is applied
+/// here; cancellation after binding uses the same exact agent/request target.
+pub(super) fn bind_access_request(
+    vault: &mut crate::vault::Vault,
+    agent: u64,
+    id: u64,
+) -> crate::vault::VaultResult<bool> {
+    CURRENT.with(|current| {
+        let current = current.borrow();
+        let Some(control) = current.as_ref() else {
+            return Ok(false);
+        };
+        let mut state = lock(&control.state);
+        state.access_request = Some(id);
+        let cancelled = state.cancelled || state.invalidated;
+        drop(state);
+        if cancelled {
+            vault.cancel_scoped_access_request(agent, id)?;
+        }
+        Ok(cancelled)
     })
 }
 
@@ -246,7 +271,7 @@ impl Operations {
                 drop(records);
                 let mut state = lock(&control.state);
                 if matches!(request.action, Action::CancelOperation { .. })
-                    && state.outcome.is_none()
+                    && (state.outcome.is_none() || state.access_request.is_some())
                 {
                     state.cancelled = true;
                     // Wait only for withdrawal of a pending question. Inference may
@@ -260,7 +285,28 @@ impl Operations {
                             .0;
                     }
                 }
-                return receipt(id, &state);
+                let access = matches!(request.action, Action::CancelOperation { .. })
+                    .then_some(state.access_request)
+                    .flatten();
+                // Never take the vault while holding control.state: creation
+                // binds its request under the opposite lock order.
+                drop(state);
+                if let Some(access) = access {
+                    let mut guard = decide::lock(&ctx.vault);
+                    let Some(vault) = guard
+                        .as_mut()
+                        .filter(|v| !v.is_locked() && v.epoch() == scope.0)
+                    else {
+                        return decide::locked_response();
+                    };
+                    if vault.cancel_scoped_access_request(scope.1, access).is_err() {
+                        return WireResponse::failure(
+                            "access_once_unavailable",
+                            "The scoped request could not be withdrawn. Check its status on the Mac.",
+                        );
+                    }
+                }
+                return receipt(id, &lock(&control.state));
             }
             if matches!(request.action, Action::CancelOperation { .. })
                 && records.len() < MAX_RECORDS

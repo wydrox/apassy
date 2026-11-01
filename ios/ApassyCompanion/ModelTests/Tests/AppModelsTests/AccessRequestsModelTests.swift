@@ -122,6 +122,32 @@ struct AccessRequestsModelTests {
     await task.value
     #expect(await service.accessPosts().count == 1)
   }
+  @Test func expiryInvalidatesPendingFaceIDBeforeTheSignerReturns() async {
+    let (service, signer, model, _) = await fixture()
+    let row = PreviewVaultService.sampleAccessRequest(expiresIn: 2)
+    await service.setAccessRequests([row])
+    await model.refresh()
+    signer.state.withLock { $0.held = true }
+    let task = Task { await model.answer(row, choice: .allow_once) }
+    await started(signer)
+    try? await Task.sleep(for: .seconds(2.1))
+    #expect(signer.invalidated)
+    #expect(model.busy == nil)
+    signer.state.withLock { $0.held = false }
+    await task.value
+    #expect(await service.accessPosts().isEmpty)
+  }
+  @Test func taskCancellationInvalidatesTheActualPendingContext() async {
+    let (service, signer, model, row) = await fixture()
+    signer.state.withLock { $0.held = true }
+    let task = Task { await model.answer(row, choice: .allow_once) }
+    await started(signer)
+    task.cancel()
+    #expect(signer.invalidated)
+    signer.state.withLock { $0.held = false }
+    await task.value
+    #expect(await service.accessPosts().isEmpty)
+  }
   @Test func unsupportedBiometryEnrollmentFailureAndExpiryFailClosed() async {
     let (service, signer, model, row) = await fixture()
     signer.state.withLock { $0.supported = false }

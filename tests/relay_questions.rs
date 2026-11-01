@@ -60,6 +60,50 @@ const ANSWER_PUBLIC: &str =
     "BAotqUNjRqTfgIY4YuJGS5yZV2N5Jat0I5dFMlv29IqSFmgkZk2dzWe-n2AcgOt933rMrBOrK054Bc7RwNTeyts";
 
 #[test]
+fn access_spam_reserves_relay_capacity_for_execution_and_connect() {
+    use apassy::questions::access_request as access;
+    fn wait_until(ready: impl Fn() -> bool) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < end, "relay capacity test timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let w = world(true);
+    w.with_a(|v| {
+        v.set_env_binding(w.items[1], "API_TOKEN", "token").unwrap();
+        for i in 0..10 {
+            let (agent, _) = v
+                .register_agent(&format!("Synthetic access spam {i}"))
+                .unwrap();
+            v.set_agent_sees_all(agent.id, true).unwrap();
+            let result = apassy::broker::access_once::create(
+                v,
+                &agent,
+                w.items[1],
+                "Synthetic capacity test",
+                w._root.path().to_str(),
+                &access::Scope {
+                    action: access::Action::Read,
+                    hosts: vec!["api.example.test".into()],
+                },
+            );
+            assert!(result.ok, "{result:?}");
+        }
+    });
+    wait_until(|| w.relay.questions_posted() >= 1);
+    // The relay permits ten open questions from this asking device. Eight
+    // concurrent broker operations and a Connect handoff need the other nine.
+    std::thread::sleep(Duration::from_millis(750));
+    assert_eq!(w.relay.questions_posted(), 1);
+    let waiting = w.ask(w.run(vec![AnswerKind::Once]), Duration::from_secs(60));
+    wait_until(|| !w.worker.view().posted.is_empty());
+    assert_eq!(w.relay.questions_posted(), 2);
+    assert!(w.queue.deny(w.queue.pending()[0].id));
+    let _ = waiting.join().unwrap();
+}
+
+#[test]
 fn access_cards_and_both_signed_choices_use_the_unchanged_fake_carrier() {
     use apassy::questions::access_request as access;
     for choice in [access::Choice::Deny, access::Choice::AllowOnce] {

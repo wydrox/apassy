@@ -570,7 +570,24 @@ fn request_access(
         Err(response) => return response,
     };
     if let Some(scope) = scope {
-        let response = super::access_once::create(vault, &agent, item_id, reason, cwd, scope);
+        let mut response = super::access_once::create(vault, &agent, item_id, reason, cwd, scope);
+        if response.ok
+            && let Some(id) = response
+                .result
+                .as_ref()
+                .and_then(|r| r["request_id"].as_u64())
+        {
+            match super::operations::bind_access_request(vault, agent.id, id) {
+                Ok(false) => {}
+                Ok(true) => response = super::operations::cancelled_response(),
+                Err(_) => {
+                    return WireResponse::failure(
+                        "access_once_unavailable",
+                        "The scoped request could not be withdrawn. Review on the Mac.",
+                    );
+                }
+            }
+        }
         let _ = vault.record_activity(&NewActivity {
             agent_id: Some(agent.id),
             agent_name: agent.name.clone(),
