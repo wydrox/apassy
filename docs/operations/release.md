@@ -172,7 +172,7 @@ Use `--shard-count 4` for Linux.
 Rust dependency caches separate the OS, architecture, compiler, Cargo configuration, lockfile, and job group.
 The release build has its own cache. Only pushes to `main` save these caches; pull requests only restore them.
 The advisory job caches the pinned `cargo-audit` executable and refreshes the advisory database on each run.
-No test or advisory check is removed.
+On a qualifying main push, test and advisory results are reused as described below.
 
 The binary artifact contains five executables and `manifest.json`.
 Its name is `apassy-release-COMMIT-ATTEMPT`, and GitHub retains it for seven days.
@@ -189,6 +189,48 @@ The five-job configuration reduces competition for macOS slots. Its duration sti
 The first run, a dependency change, runner queues, or notarization delays can take longer.
 Confirm the target with live CI and Release timings before treating it as a release time guarantee.
 The artifact tools require Python 3.11 or later; CI selects Python 3.12.
+
+## Reusing PR CI on main
+
+Only a push to `main` may reuse a completed, successful CI run from a merged PR
+whose head repository is this repository. The new `reuse-pr` job records
+`github.sha` (the synthetic PR merge commit), its Git tree, PR head, run ID, and
+attempt in a seven-day `ci-tested-tree-RUN-ATTEMPT` artifact. Recording happens in
+the PR run itself; that entire run must subsequently succeed. The lookup checks
+the exact workflow ID/path, run and attempt, GitHub's artifact SHA-256 digest,
+and the tested commit's tree and merge parent through the Git API. The tested
+tree must equal `git rev-parse HEAD^{tree}` on the main push. PR head SHA alone
+is never evidence of what was tested.
+
+No PR run skips checks. Missing, expired, malformed, ambiguous, failed, fork, or
+API evidence runs the full suite. Multiple associated PRs or candidate runs are
+conservatively treated as ambiguous. A changed main tree also runs the full suite.
+Existing job names stay stable; reused jobs show as skipped, and the successful
+push run remains the Release gate. The lookup job alone adds `actions: read`.
+Its summary links the reuse decision to the source run ID and exact tree.
+
+The main push always runs `release-binaries`. Its binaries embed
+`APASSY_BUILD_COMMIT` (also consumed by `src/desktop/update/manifest.rs`), so adopting
+PR binaries would misidentify the published main commit. Release continues to
+verify the exact push run, attempt, commit, artifact digest, and binary manifest;
+no signing, notarization, or upload logic changes.
+
+To force the full suite, run **CI**, not Release, with `workflow_dispatch` on main:
+`gh workflow run ci.yml --ref main`. Manual CI runs never reuse PR results and do
+not automatically publish (Release accepts push CI runs only). A main push with a tree that lacks matching evidence runs all checks and
+produces the usual publishable push artifact.
+
+Measured on 2026-11-01 via `gh run view --json jobs`: push CI
+[41311544688](https://github.com/wydrox/apassy/actions/runs/41311544688) spent 7m00s
+in `macos`, 9m23s–10m01s in macOS test shards, 12m55s in the longest Linux shard,
+and 3m11s in `release-binaries`. Its eleven reusable jobs totalled 74m28s of runner
+time. With a matching tree, the critical path would be about 3m11s plus lookup
+and queue overhead instead of 12m57s: roughly 9m46s saved before Release.
+PR CI [41309938571](https://github.com/wydrox/apassy/actions/runs/41309938571)
+also showed queue sensitivity: its macOS jobs started up to 9m27s after creation.
+These are estimates from existing jobs, not measurements of the new path; runner
+queues, mutable dependencies and advisory data can change. Reuse does not refresh
+RustSec advisories; dispatch a full CI run when a fresh advisory check is needed.
 
 ## Release eligibility
 
