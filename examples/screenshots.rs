@@ -741,6 +741,7 @@ fn ask_in_background() {
     let project = std::fs::canonicalize(&project).unwrap_or(project);
     std::thread::spawn(move || {
         let action = apassy::agent::wire::Action::Run {
+            access_request_id: None,
             items: vec![item],
             command: ["stripe", "payouts", "list", "--limit", "10"]
                 .map(str::to_owned)

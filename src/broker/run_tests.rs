@@ -69,6 +69,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
         let items = [item.id];
         let command = vec!["git".to_owned(), "status".into()];
         let request = RunRequest {
+            access_request_id: None,
             items: &items,
             command: &command,
             cwd: cwd.to_str().unwrap(),

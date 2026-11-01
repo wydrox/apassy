@@ -10,6 +10,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessAction {
+    Read,
+    Change,
+    Deploy,
+    Delete,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessScope {
+    pub action: AccessAction,
+    pub hosts: Vec<String>,
+}
+
 pub const WIRE_VERSION: u32 = 0;
 /// Largest request line in bytes, including the newline.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
@@ -159,6 +174,12 @@ impl ZeroizeOnDrop for WireRequest {}
 pub enum Action {
     /// List the items and named operations that the owner permits for this agent.
     ListAccess,
+    AccessRequestStatus {
+        request_id: u64,
+    },
+    CancelAccessRequest {
+        request_id: u64,
+    },
     /// Run one named operation with one stored credential.
     Call {
         item_id: u64,
@@ -169,6 +190,8 @@ pub enum Action {
     /// Run one command with vault items in its environment (ADR 0006).
     /// The broker starts the process. The response never contains a secret value.
     Run {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_request_id: Option<u64>,
         items: Vec<u64>,
         command: Vec<String>,
         cwd: String,
@@ -184,6 +207,8 @@ pub enum Action {
     /// Ask the owner for process access to one item that the agent sees (ADR 0012).
     /// The broker records the request and answers at once. The owner decides in the app.
     RequestAccess {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<AccessScope>,
         item_id: u64,
         /// Why the agent needs the item. The owner reads it.
         reason: String,
@@ -305,6 +330,8 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Self::ListAccess => "list_access",
+            Self::AccessRequestStatus { .. } => "access_request_status",
+            Self::CancelAccessRequest { .. } => "cancel_access_request",
             Self::Call { .. } => "call",
             Self::Run { .. } => "run",
             Self::RequestAccess { .. } => "request_access",

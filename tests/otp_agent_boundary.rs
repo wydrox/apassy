@@ -231,6 +231,7 @@ fn a_run_gets_the_password_variable_and_no_setup_key() {
     let response = send(
         &fx,
         Action::Run {
+            access_request_id: None,
             items: vec![fx.login],
             command: vec![
                 "/bin/sh".into(),

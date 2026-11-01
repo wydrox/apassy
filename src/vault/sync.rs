@@ -538,6 +538,7 @@ impl Vault {
                 conn: None,
                 epoch,
                 delivery: Default::default(),
+                access_once: Default::default(),
                 #[cfg(feature = "desktop")]
                 access_expiry: None,
             },

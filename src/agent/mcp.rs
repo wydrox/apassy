@@ -17,6 +17,8 @@ use super::wire::{Action, AgentSecret, Extract, GenerateSpec, MAX_LINE_BYTES, Wi
 pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
+pub const TOOL_ACCESS_STATUS: &str = "apassy_access_request_status";
+pub const TOOL_ACCESS_CANCEL: &str = "apassy_cancel_access_request";
 pub const TOOL_REQUEST_ACCESS: &str = "apassy_request_access";
 pub const TOOL_CAPTURE_CREDENTIAL: &str = "apassy_capture_credential";
 pub const TOOL_GENERATE_CREDENTIAL: &str = "apassy_generate_credential";
@@ -182,6 +184,8 @@ fn extract_schema() -> Value {
 
 pub fn tool_list() -> Value {
     json!([
+        {"name": TOOL_ACCESS_STATUS,"title":"Check scoped access consent","description":"Read this agent's exact request status without creating anything. A receipt never proves execution succeeded.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
+        {"name": TOOL_ACCESS_CANCEL,"title":"Cancel scoped access consent","description":"Cancel an abandoned request or its unused/pending allowance. Does not recall released values. Never creates a request.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
         {
             "name": TOOL_LIST_ACCESS,
             "title": "List the credentials you can use",
@@ -222,6 +226,7 @@ pub fn tool_list() -> Value {
                     "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
                     "cwd": { "type": "string", "description": "Absolute working directory: the project folder. The bouncer uses the project." },
                     "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." },
+                    "access_request_id": { "type": "integer", "minimum": 1, "description": "Consume this exact scoped access request once. Retries after admission are refused; query status." },
                     "user_request": { "type": "string", "description": "The user's own words from the conversation that led to this command. Quote them. Do not summarize or add words. The bouncer compares the command with this request, and the owner sees it." }
                 },
                 "required": ["items", "command", "cwd", "purpose", "user_request"],
@@ -231,11 +236,12 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_REQUEST_ACCESS,
             "title": "Tell the owner why you need a credential",
-            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. This legacy tool gives no permission and creates no Decisions question. Its owner inbox is CLI-only (apassy request list). It requires a visible catalog item ID and only records a note to the owner about one catalog credential and returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
+            "description": "Usually not needed: no grant is required. Use a catalog credential directly with apassy_run_with_secrets; the bouncer decides, and when it asks the owner the call waits up to 5 minutes. Without scope this legacy tool records a note. With scope it requests one asynchronous access consent, expiring in 300 seconds; the bouncer still checks the eventual command. Its owner inbox is CLI-only (apassy request list). It requires a visible catalog item ID and only records a note to the owner about one catalog credential and returns at once. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "item_id": { "type": "integer", "minimum": 1, "description": "Item ID from the catalog." },
+                    "scope": { "type": "object", "properties": { "action": { "enum": ["read","change","deploy","delete"] }, "hosts": { "type": "array", "items": {"type":"string"}, "maxItems":16 } }, "required":["action","hosts"], "additionalProperties":false },
                     "reason": { "type": "string", "description": "Why you need this credential, with the user's own words when you have them. The owner reads it. At most 500 characters." },
                     "cwd": { "type": "string", "description": "The absolute working directory where you want to use it. Optional." }
                 },
@@ -373,6 +379,19 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
+        TOOL_ACCESS_STATUS | TOOL_ACCESS_CANCEL => (|| {
+            let o = arguments_object(&arguments, &["request_id"])?;
+            let request_id = o
+                .get("request_id")
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0)
+                .ok_or_else(|| "Use a positive request_id.".to_owned())?;
+            Ok(if name == TOOL_ACCESS_STATUS {
+                Action::AccessRequestStatus { request_id }
+            } else {
+                Action::CancelAccessRequest { request_id }
+            })
+        })(),
         TOOL_CAPTURE_CREDENTIAL => capture_action(&arguments),
         TOOL_GENERATE_CREDENTIAL => generate_action(&arguments),
         TOOL_SAVE_CREDENTIAL => save_action(&arguments),
@@ -447,7 +466,7 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     if let Some(_extra) = object.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "items" | "command" | "cwd" | "purpose" | "user_request"
+            "items" | "command" | "cwd" | "purpose" | "user_request" | "access_request_id"
         )
     }) {
         return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
@@ -485,6 +504,14 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
         return Err("Give at least one item and a nonempty command argument list.".to_owned());
     }
     Ok(Action::Run {
+        access_request_id: object
+            .get("access_request_id")
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| "Use a positive access_request_id.".to_owned())
+            })
+            .transpose()?,
         items,
         command,
         cwd: text("cwd")?,
@@ -501,7 +528,7 @@ fn request_action(arguments: &Value) -> Result<Action, String> {
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
     if let Some(_extra) = object
         .keys()
-        .find(|key| !matches!(key.as_str(), "item_id" | "reason" | "cwd"))
+        .find(|key| !matches!(key.as_str(), "item_id" | "reason" | "cwd" | "scope"))
     {
         return Err("An unexpected argument is not permitted. Use the tool schema.".to_owned());
     }
@@ -525,6 +552,12 @@ fn request_action(arguments: &Value) -> Result<Action, String> {
         ),
     };
     Ok(Action::RequestAccess {
+        scope: object
+            .get("scope")
+            .map(|v| {
+                serde_json::from_value(v.clone()).map_err(|_| "Use the scope schema.".to_owned())
+            })
+            .transpose()?,
         item_id,
         reason,
         cwd,
@@ -1348,6 +1381,7 @@ mod tests {
         assert_eq!(
             action,
             Action::RequestAccess {
+                scope: None,
                 item_id: 7,
                 reason: "The user asked to deploy.".to_owned(),
                 cwd: Some("/Users/me/Dev/app".to_owned()),

@@ -261,6 +261,7 @@ pub struct RunNetwork {
 }
 
 struct Shared {
+    access: Option<super::access_once::Admission>,
     secrets: Vec<ProxySecret>,
     ca: ca::RunCa,
     tls: TlsClient,
@@ -377,6 +378,13 @@ pub struct RunProxy {
 
 impl RunProxy {
     pub fn start(secrets: Vec<ProxySecret>, options: ProxyOptions) -> io::Result<Self> {
+        Self::start_with_access(secrets, options, None)
+    }
+    pub(crate) fn start_with_access(
+        secrets: Vec<ProxySecret>,
+        options: ProxyOptions,
+        access: Option<super::access_once::Admission>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let addr = listener.local_addr()?;
         let mut hosts: Vec<String> = secrets
@@ -394,6 +402,7 @@ impl RunProxy {
         let proxy_url = format!("http://apassy:{}@127.0.0.1:{}", token.as_str(), addr.port());
         let network = network_for(ca.cert_pem(), &proxy_url, addr.port(), options.enforce)?;
         let shared = Arc::new(Shared {
+            access,
             secrets,
             ca,
             tls: options.tls,
@@ -926,6 +935,21 @@ fn serve_requests(shared: &Arc<Shared>, client: &mut Conn<ClientSide>, host: &st
                 return;
             }
         };
+        if shared
+            .access
+            .as_ref()
+            .is_some_and(|a| !a.covers(host, port))
+        {
+            respond(
+                &mut client.inner,
+                403,
+                "Forbidden",
+                "The exact scoped access consent expired, was revoked, or does not cover this host and port.",
+                "",
+            );
+            shared.record(ProxyEvent::new(host, port, ProxyOutcome::Refused));
+            return;
+        }
         let swapped = match swap_request(&request, host, port, &secrets) {
             Ok(swapped) => swapped,
             Err(refusal) => {

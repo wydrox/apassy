@@ -1831,6 +1831,9 @@ fn request_row(request: AccessRequest) -> RequestRow {
             RequestState::Open => "open",
             RequestState::Granted => "granted",
             RequestState::Denied => "denied",
+            RequestState::AllowedOnce => "allowed_once",
+            RequestState::Expired => "expired",
+            RequestState::Invalidated => "invalidated",
         }
         .to_owned(),
     }

@@ -153,6 +153,7 @@ fn send_run(socket: &Path, token: &str, item: u64, cwd: &Path, script: &str) -> 
         socket,
         token,
         Action::Run {
+            access_request_id: None,
             items: vec![item],
             command: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: cwd.display().to_string(),
@@ -606,6 +607,7 @@ fn send_argv(fx: &Fixture, items: &[u64], argv: &[&str]) -> WireResponse {
         &fx.socket,
         &fx.token,
         Action::Run {
+            access_request_id: None,
             items: items.to_vec(),
             command: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: fx.project.display().to_string(),
@@ -637,6 +639,7 @@ fn argv_later_at(
             &socket,
             &token,
             Action::Run {
+                access_request_id: None,
                 items,
                 command,
                 cwd: project.display().to_string(),

@@ -328,6 +328,7 @@ fn an_allowed_run_proposes_a_correction() {
         &socket,
         token.expose(),
         Action::Run {
+            access_request_id: None,
             items: vec![item],
             command: vec![
                 "/bin/sh".into(),

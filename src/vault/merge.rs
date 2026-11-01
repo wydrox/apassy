@@ -79,7 +79,7 @@ pub(super) const CHILD_TABLES: [&str; 11] = [
 
 /// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
 /// reads them from another copy.
-pub const LOCAL_TABLES: [&str; 31] = [
+pub const LOCAL_TABLES: [&str; 34] = [
     "agent",
     "grant_rule",
     "activity",
@@ -103,6 +103,9 @@ pub const LOCAL_TABLES: [&str; 31] = [
     "companion_device",
     "relay_membership",
     "relay_connect_pending",
+    "access_request_v1",
+    "access_request_creation",
+    "access_request_clock",
     "agent_exception",
     "owner_answer",
     "bouncer_scope",
@@ -158,7 +161,7 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 
 /// The previous schema. Schema 21 adds only local Connect staging, so older copies
 /// preserve their existing synced semantics and migrate without a pending key.
-pub(super) const UPGRADABLE_SCHEMA: i64 = 20;
+pub(super) const UPGRADABLE_SCHEMA: i64 = 21;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -167,7 +170,7 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 and 21 add local state only; future synced schemas require another merge step.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 4);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 5);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades.

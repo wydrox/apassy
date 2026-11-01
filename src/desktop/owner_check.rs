@@ -226,6 +226,10 @@ pub struct PasskeyRequest {
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
+    AllowAccessOnce {
+        request_id: u64,
+        digest: String,
+    },
     BackupVault {
         path: PathBuf,
     },
@@ -611,6 +615,10 @@ impl OwnerRequest {
     /// The action that the proof must name.
     pub fn action(&self) -> OwnerAction {
         match self {
+            Self::AllowAccessOnce { request_id, digest } => OwnerAction::AllowAccessOnce {
+                request_id: *request_id,
+                digest: digest.clone(),
+            },
             Self::BackupVault { path } => OwnerAction::BackupVault { path: path.clone() },
             Self::ExportDecisions => OwnerAction::ExportDecisions,
             Self::RegisterAgent { name } => OwnerAction::RegisterAgent { name: name.clone() },
@@ -802,10 +810,17 @@ impl OwnerRequest {
             }
             | Self::SetProcessAccess {
                 agent_id, item_id, ..
-            }
-            | Self::GrantRequest {
-                agent_id, item_id, ..
             } => OwnerAction::ChangeGrant {
+                agent_id: *agent_id,
+                item_id: *item_id,
+            },
+            Self::GrantRequest {
+                request_id,
+                agent_id,
+                item_id,
+                ..
+            } => OwnerAction::GrantAccessRequest {
+                request_id: *request_id,
                 agent_id: *agent_id,
                 item_id: *item_id,
             },
@@ -920,6 +935,7 @@ impl OwnerRequest {
     /// One sentence for the owner check dialog. It has no secret value.
     pub fn describe(&self) -> String {
         match self {
+            Self::AllowAccessOnce{..} => "Allow one scoped use attempt before the original request expires. The bouncer still checks the command and may ask you. This saves no grant.".into(),
             Self::BackupVault { path } => format!("Write an encrypted vault backup to {}? The vault locks afterwards.",page_text(&path.display().to_string())),
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
             Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
@@ -1948,6 +1964,10 @@ impl DesktopApp {
                     result,
                     "\"Only these items\" is removed. The agent sees all credentials without values, and the bouncer decides each use.",
                 );
+            }
+            OwnerRequest::AllowAccessOnce{request_id,..} => {
+                let result=session.with_vault(|v|crate::broker::access_once::local_answer(v,request_id,crate::questions::access_request::Choice::AllowOnce,Some(proof)));
+                match result {Some(Ok(()))=>self.set_ok("Consent recorded for one attempt. The bouncer still checks the command."),Some(Err(e))=>self.set_err(e),None=>self.set_err("Unlock the vault first.")}
             }
             OwnerRequest::GrantRequest {
                 request_id,

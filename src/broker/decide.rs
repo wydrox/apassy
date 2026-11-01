@@ -79,6 +79,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     let Action::Run {
+        access_request_id,
         items,
         command,
         cwd,
@@ -93,6 +94,7 @@ pub fn evaluate_run(ctx: &BrokerContext, request: &WireRequest) -> WireResponse 
         ctx,
         &request.token,
         &super::run::RunRequest {
+            access_request_id: *access_request_id,
             items,
             command,
             cwd,
@@ -112,12 +114,35 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
     }
     match &request.action {
         Action::ListAccess => list_access(vault, &request.token),
+        Action::AccessRequestStatus { request_id } | Action::CancelAccessRequest { request_id } => {
+            let mut guard = lock(vault);
+            let Some(v) = guard.as_mut().filter(|v| !v.is_locked()) else {
+                return locked_response();
+            };
+            let agent = match authenticate(v, &request.token, "access request status") {
+                Ok(a) => a,
+                Err(e) => return e,
+            };
+            if matches!(request.action, Action::CancelAccessRequest { .. })
+                && v.cancel_scoped_access_request(agent.id, *request_id)
+                    .is_err()
+            {
+                return WireResponse::failure("not_found", "This request is unavailable.");
+            }
+            match v.access_status(agent.id, *request_id) {
+                Ok(s) => WireResponse::success(
+                    serde_json::to_value(s).unwrap_or(serde_json::Value::Null),
+                ),
+                Err(_) => WireResponse::failure("not_found", "This request is unavailable."),
+            }
+        }
         Action::Call {
             item_id,
             operation,
             params,
         } => call(ctx, &request.token, *item_id, operation, params),
         Action::Run {
+            access_request_id,
             items,
             command,
             cwd,
@@ -128,6 +153,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             ctx,
             &request.token,
             &super::run::RunRequest {
+                access_request_id: *access_request_id,
                 items,
                 command,
                 cwd,
@@ -138,10 +164,18 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             },
         ),
         Action::RequestAccess {
+            scope,
             item_id,
             reason,
             cwd,
-        } => request_access(ctx, &request.token, *item_id, reason, cwd.as_deref()),
+        } => request_access(
+            ctx,
+            &request.token,
+            *item_id,
+            reason,
+            cwd.as_deref(),
+            scope.as_ref(),
+        ),
         Action::SubmitUserRequest {
             host,
             cwd,
@@ -515,6 +549,7 @@ fn request_access(
     item_id: u64,
     reason: &str,
     cwd: Option<&str>,
+    scope: Option<&crate::agent::wire::AccessScope>,
 ) -> WireResponse {
     let label = format!("request access to item {item_id}");
     let mut guard = lock(&ctx.vault);
@@ -525,6 +560,9 @@ fn request_access(
         Ok(agent) => agent,
         Err(response) => return response,
     };
+    if let Some(scope) = scope {
+        return super::access_once::create(vault, &agent, item_id, reason, cwd, scope);
+    }
     let result = vault.request_access(agent.id, item_id, reason, cwd.unwrap_or_default());
     let (decision, answer) = match result {
         Ok((request_id, created)) => (
