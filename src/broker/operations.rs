@@ -78,10 +78,10 @@ pub(super) fn observed_effect() {
 
 pub(super) fn cancelled() -> bool {
     CURRENT.with(|current| {
-        current
-            .borrow()
-            .as_ref()
-            .is_some_and(|c| lock(&c.state).cancelled)
+        current.borrow().as_ref().is_some_and(|c| {
+            let state = lock(&c.state);
+            state.cancelled && !state.invalidated
+        })
     })
 }
 
@@ -388,7 +388,7 @@ impl Operations {
         };
         CURRENT.with(|current| *current.borrow_mut() = None);
         let mut state = lock(&control.state);
-        if state.cancelled && !state.effect_started {
+        if state.cancelled && !state.invalidated && !state.effect_started {
             response = cancelled_response();
         }
         if !state.invalidated {

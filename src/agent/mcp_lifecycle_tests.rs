@@ -850,7 +850,10 @@ fn vault_lock_ends_owner_wait_and_previous_session_receipts_are_unavailable() {
     let id = host.operation();
     fx.pending();
     fx.vault.lock().unwrap().as_mut().unwrap().lock().unwrap();
-    assert_eq!(host.reply(1)["structuredContent"]["code"], "cancelled");
+    assert_eq!(
+        host.reply(1)["structuredContent"]["code"],
+        "approval_invalidated"
+    );
     assert!(fx.broker.approvals().pending().is_empty());
     fx.vault
         .lock()
