@@ -539,6 +539,7 @@ impl Vault {
                 epoch,
                 delivery: Default::default(),
                 access_once: Default::default(),
+                session_cleanup: Vec::new(),
                 #[cfg(feature = "desktop")]
                 access_expiry: None,
             },

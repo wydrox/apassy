@@ -2739,3 +2739,118 @@ fn without_random_values(body: &str) -> String {
         Err(_) => body.to_owned(),
     }
 }
+
+/// MCP cancellation must withdraw the question on the Mac and settle the exact
+/// encrypted question already delivered to an iPhone through the fake relay.
+#[test]
+fn mcp_cancellation_settles_the_iphone_relay_question() {
+    use apassy::agent::{client, wire::Action};
+    use apassy::broker::{BrokerOptions, http::TlsClient, server};
+    let mut world = world(true);
+    let phone = world.iphone();
+    let token = world.with_a(|vault| {
+        vault
+            .set_env_binding(world.items[1], "SYNTHETIC_API", "token")
+            .unwrap();
+        let (agent, token) = vault.register_agent("Synthetic MCP relay test").unwrap();
+        vault.set_agent_sees_all(agent.id, true).unwrap();
+        token
+    });
+    world.worker.stop();
+    let mut options = BrokerOptions::with_tls(TlsClient::platform().unwrap());
+    options.approval_timeout = Duration::from_secs(10);
+    options.run_timeout = Duration::from_secs(2);
+    let broker = server::start_with(
+        Arc::clone(&world.shared_a),
+        &world._root.path().join("broker/run.sock"),
+        options,
+    )
+    .unwrap();
+    world.queue = Arc::clone(broker.approvals());
+    world.worker = QuestionsWorker::start(
+        Arc::clone(&world.queue),
+        Arc::clone(&world.shared_a),
+        OwnerGate::new(Arc::clone(&world.shared_a), None),
+        QuestionsConfig {
+            tick: Duration::from_millis(20),
+            feed: false,
+            ..QuestionsConfig::default()
+        },
+    );
+    let socket = broker.socket_path().to_owned();
+    let caller_token = token.expose().to_owned();
+    let item = world.items[1];
+    let cwd = world.a.data.display().to_string();
+    let operation_id = "1234567890abcdef1234567890abcdef";
+    let waiting = std::thread::spawn(move || {
+        client::send(
+            &socket,
+            &caller_token,
+            Action::Tracked {
+                operation_id: operation_id.into(),
+                idempotency_key: Some("relay-cancel".into()),
+                action: Box::new(Action::Run {
+                    access_request_id: None,
+                    items: vec![item],
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "printf forbidden > cancelled.txt".into(),
+                    ],
+                    cwd,
+                    purpose: "Synthetic cancellation test".into(),
+                    path: None,
+                    user_request: Some("Test cancellation".into()),
+                }),
+            },
+        )
+        .unwrap()
+    });
+    let opened = phone.next(&[]);
+    let cancelled = client::send(
+        broker.socket_path(),
+        token.expose(),
+        Action::CancelOperation {
+            operation_id: operation_id.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(cancelled.result.unwrap()["may_have_run"], false);
+    assert_eq!(waiting.join().unwrap().error.unwrap().code, "cancelled");
+    assert!(world.queue.pending().is_empty());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while world.relay.question_state(&opened.record.qid).as_deref() != Some("settled") {
+        assert!(
+            Instant::now() < deadline,
+            "the iPhone question was not withdrawn"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let record = phone
+        .client
+        .list(0, Duration::ZERO)
+        .unwrap()
+        .questions
+        .into_iter()
+        .find(|r| r.qid == opened.record.qid)
+        .unwrap();
+    assert_eq!(
+        open_settle(&record, &phone.team, &phone.keys)
+            .unwrap()
+            .outcome,
+        "invalidated"
+    );
+    let late = prepare_answer(&opened, &phone.uuid, Choice::Deny, now()).unwrap();
+    assert_eq!(
+        send_answer(
+            &phone.client,
+            &opened,
+            &late,
+            &phone.sign(late.text.as_bytes()),
+            &phone.keys
+        )
+        .unwrap_err(),
+        AnswerError::AlreadyAnswered
+    );
+    assert!(!world.a.data.join("cancelled.txt").exists());
+}

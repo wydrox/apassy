@@ -113,6 +113,12 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
     match &request.action {
+        Action::Tracked { .. }
+        | Action::OperationStatus { .. }
+        | Action::CancelOperation { .. } => WireResponse::failure(
+            "invalid_request",
+            "Operation envelopes require the socket server.",
+        ),
         Action::ListAccess => list_access(vault, &request.token),
         Action::AccessRequestStatus { request_id } | Action::CancelAccessRequest { request_id } => {
             let mut guard = lock(vault);
@@ -336,6 +342,9 @@ pub(super) fn authenticate(
     token: &str,
     action: &str,
 ) -> Result<AgentSummary, WireResponse> {
+    if !super::operations::session_matches(vault.epoch()) {
+        return Err(locked_response());
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
@@ -796,6 +805,9 @@ fn call(
         }
     };
 
+    if !super::operations::start_effect() {
+        return super::operations::cancelled_response();
+    }
     let outcome = execute(&prepared, &ctx.tls);
     let (decision, reason) = match &outcome {
         Ok(_) => (ActivityDecision::Allow, "The operation ran.".to_owned()),

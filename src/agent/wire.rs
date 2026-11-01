@@ -172,6 +172,19 @@ impl ZeroizeOnDrop for WireRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    /// Execute once, retaining a value-free outcome in the broker across reconnects.
+    Tracked {
+        operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
+        action: Box<Action>,
+    },
+    OperationStatus {
+        operation_id: String,
+    },
+    CancelOperation {
+        operation_id: String,
+    },
     /// List the items and named operations that the owner permits for this agent.
     ListAccess,
     AccessRequestStatus {
@@ -329,6 +342,9 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Tracked { .. } => "tracked",
+            Self::OperationStatus { .. } => "operation_status",
+            Self::CancelOperation { .. } => "cancel_operation",
             Self::ListAccess => "list_access",
             Self::AccessRequestStatus { .. } => "access_request_status",
             Self::CancelAccessRequest { .. } => "cancel_access_request",
@@ -355,11 +371,26 @@ impl Action {
                 | Self::UpdateCredential { .. }
         )
     }
+
+    pub fn trackable(&self) -> bool {
+        !matches!(
+            self,
+            Self::ListAccess
+                | Self::AccessRequestStatus { .. }
+                | Self::CancelAccessRequest { .. }
+                | Self::SubmitUserRequest { .. }
+                | Self::Tracked { .. }
+                | Self::OperationStatus { .. }
+                | Self::CancelOperation { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
@@ -377,6 +408,7 @@ pub struct WireError {
 impl WireResponse {
     pub fn success(result: Value) -> Self {
         Self {
+            operation_id: None,
             ok: true,
             result: Some(result),
             error: None,
@@ -385,6 +417,7 @@ impl WireResponse {
 
     pub fn failure(code: &str, message: impl Into<String>) -> Self {
         Self {
+            operation_id: None,
             ok: false,
             result: None,
             error: Some(WireError {

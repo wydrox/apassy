@@ -1201,8 +1201,9 @@ impl ApprovalQueue {
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> Result<Settled, QuestionRefusal> {
+        let _waiting = super::operations::waiting();
         let mut state = self.state();
-        if state.closed {
+        if state.closed || super::operations::cancelled() {
             return Ok(Settled::ended(ApprovalOutcome::Invalidated));
         }
         let generation = state.generation;
@@ -1295,7 +1296,7 @@ impl ApprovalQueue {
             if state.replaced.remove(&id) {
                 return Err(QuestionRefusal::Superseded);
             }
-            if state.generation != generation {
+            if state.generation != generation || super::operations::cancelled() {
                 Self::forget(&mut state, id, ApprovalOutcome::Invalidated);
                 state.decisions.remove(&id);
                 return Ok(Settled::ended(ApprovalOutcome::Invalidated));
