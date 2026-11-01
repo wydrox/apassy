@@ -139,6 +139,7 @@ impl OwnerWindow {
     }
     /// Lock, sleep, session switch, quit, failed/cancelled check, setting change,
     /// or observer loss all revoke issued proofs as well as the active window.
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate(&self) {
         self.invalidate_for("explicit_invalidation");
     }
