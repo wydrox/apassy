@@ -1,4 +1,4 @@
-import { test, expect, LOGINS, NEW_PASSWORD, TYPED_PASSWORD } from "../support/fixtures.mjs";
+import { test, expect, passwordSha256, LOGINS, NEW_PASSWORD, TYPED_PASSWORD } from "../support/fixtures.mjs";
 
 // The "Save this login" and "New password" views of the popup. popup.html runs
 // in a tab of its own; the background takes the page tab used before it.
@@ -57,7 +57,7 @@ test("the Save view saves the typed login after the owner check", async ({ h }) 
   await expect(popup.locator("#note")).toHaveText("Approve in Apassy, or use your vault passphrase if asked.");
   await expect(popup.locator("#note")).toHaveText("Saved.");
   expect(h.requests("save")).toEqual([{
-    v: 1, cmd: "save", url: page.url(), title: "Typed site", username: "typed-user", password: TYPED_PASSWORD, trusted_gesture: true,
+    v: 1, cmd: "save", url: page.url(), title: "Typed site", username: "typed-user", password: "[redacted]", password_sha256: passwordSha256(TYPED_PASSWORD), trusted_gesture: true,
   }]);
   expect(await popup.content()).not.toContain(TYPED_PASSWORD);
   // Back asks Apassy again for the list.

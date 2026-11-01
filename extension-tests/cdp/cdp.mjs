@@ -1,5 +1,6 @@
 // Minimal CDP WebSocket client, adapted from the 2026-10-31 suggestion audit.
 export const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const CDP_PORT = Number(process.env.APASSY_CDP_PORT || 9371);
 export async function connect(url) {
   const ws = new WebSocket(url);
   await new Promise((r, j) => {
@@ -55,11 +56,11 @@ export async function connect(url) {
   };
 }
 export async function browser() {
-  const v = await (await fetch("http://127.0.0.1:9371/json/version")).json();
+  const v = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json();
   return connect(v.webSocketDebuggerUrl);
 }
 export async function targets() {
-  return await (await fetch("http://127.0.0.1:9371/json/list")).json();
+  return await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
 }
 export async function worker() {
   let t = (await targets()).find(
@@ -72,12 +73,12 @@ export async function worker() {
     const wake = await b.send("Target.createTarget", {
       url: "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/popup.html",
     });
-    await delay(300);
-    t = (await targets()).find(
-      (t) =>
-        t.type === "service_worker" &&
-        t.url.includes("bbnpgnjnfjlbgggmpnhejpmfjhmmhiih"),
-    );
+    for (let i = 0; i < 100 && !t; i++) {
+      await delay(100);
+      t = (await targets()).find(
+        (t) => t.type === "service_worker" && t.url.includes("bbnpgnjnfjlbgggmpnhejpmfjhmmhiih"),
+      );
+    }
     await b.send("Target.closeTarget", { targetId: wake.targetId });
     b.close();
   }
