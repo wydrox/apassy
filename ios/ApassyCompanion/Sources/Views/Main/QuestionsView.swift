@@ -42,7 +42,7 @@ struct ConnectQuestionsView: View {
                         if case .failed(let message) = model.attach {
                             Text(message).foregroundStyle(.red)
                         } else {
-                            Text("On your Mac: Settings > Devices > Get approvals on your iPhone. Use the same vault from iCloud Drive on this iPhone. After reinstalling, make a new pairing code on the Mac.")
+                            Text("On your Mac: Settings > Devices > Get approvals on your iPhone. Use the same vault from iCloud Drive on this iPhone. After reinstalling, remove the old iPhone in Devices on the Mac, then make a new pairing code.")
                         }
                     }
                 case .companion:
@@ -57,7 +57,7 @@ struct ConnectQuestionsView: View {
                     } header: {
                         Text("Your Mac shows these words")
                     } footer: {
-                        Text("Confirm on the Mac only when it shows the same two words. Keep that screen open while Apassy transfers the connection keys.")
+                        Text("Confirm on the Mac only when it shows all the same words. Keep that screen open while Apassy transfers the connection keys.")
                         if let notice = model.attachNotice { Text(notice).foregroundStyle(.orange) }
                     }
                 case .attached:

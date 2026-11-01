@@ -900,10 +900,15 @@ impl DesktopApp {
                 if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
                     match result {
                         Ok(code) => {
-                            add.channel = add
-                                .via
-                                .as_ref()
-                                .and_then(|_| crate::relay::pairing::PairingChannel::generate());
+                            add.channel = add.via.as_ref().and_then(|_| {
+                                crate::relay::pairing::PairingChannel::generate(&code.link)
+                            });
+                            if add.via.is_some() && add.channel.is_none() {
+                                add.error = Some(
+                                    "Could not make a secure pairing code. Try again.".to_owned(),
+                                );
+                                return;
+                            }
                             if let Some(channel) = &add.channel {
                                 let shared = LinkCode {
                                     code: code.code.clone(),
@@ -960,7 +965,18 @@ impl DesktopApp {
                 if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
                     add.next_poll = Instant::now() + POLL_EVERY;
                     match result {
-                        Ok(links) => {
+                        Ok(mut links) => {
+                            if let (Some(channel), Some(client)) = (&add.channel, &add.via) {
+                                links.retain(|link| {
+                                    channel
+                                        .mac_safety(
+                                            client.team_id(),
+                                            &link.public_key,
+                                            &link.device_name,
+                                        )
+                                        .is_some()
+                                });
+                            }
                             add.links = links;
                             add.error = None;
                         }
@@ -2133,6 +2149,14 @@ impl DesktopApp {
             self.set_err("The “Add a device” sheet is closed. Nothing was added.");
             return;
         };
+        if link.expires_at <= kit::now()
+            || add
+                .and_then(|a| a.code.as_ref())
+                .is_none_or(|c| c.expires_at <= kit::now())
+        {
+            self.set_err("This pairing code expired. Make a new code.");
+            return;
+        }
         let expected = OwnerAction::ConfirmSyncDevice {
             link_id,
             device_name: link.device_name.clone(),
@@ -2906,6 +2930,11 @@ impl DesktopApp {
         self.relay_settle_for_test();
     }
 
+    pub(crate) fn relay_set_link_expiry_for_test(&mut self, expires_at: u64) -> Option<u64> {
+        let code = self.sync.relay.add.as_mut()?.code.as_mut()?;
+        Some(std::mem::replace(&mut code.expires_at, expires_at))
+    }
+
     /// The link of the open "Add a device…" sheet.
     pub(crate) fn relay_add_mac_link_for_test(&self) -> Option<String> {
         let add = self.sync.relay.add.as_ref()?;
@@ -3309,10 +3338,12 @@ pub(super) fn add_mac_sheet(
                 });
                 ui.add_space(10.0);
             }
-            let heading = ui.label(kit::text("Link", Font::Headline).color(kit::LABEL));
-            kit::code_block(ui, link, 1).labelled_by(heading.id);
+            if !iphone {
+                let heading = ui.label(kit::text("Link", Font::Headline).color(kit::LABEL));
+                kit::code_block(ui, link, 1).labelled_by(heading.id);
+            }
             ui.horizontal(|ui| {
-                if kit::small_button(ui, "Copy link", Style::Bordered).clicked() {
+                if !iphone && kit::small_button(ui, "Copy link", Style::Bordered).clicked() {
                     ui.ctx().copy_text(link.to_string());
                 }
                 if expired && kit::small_button(ui, "New link", Style::Link).clicked() {
@@ -3366,14 +3397,23 @@ pub(super) fn add_mac_sheet(
                     } else {
                         ""
                     };
+                    let bound_words = app.sync.relay.add.as_ref().and_then(|add| {
+                        let channel = add.channel.as_ref()?;
+                        let client = add.via.as_ref()?;
+                        channel.mac_safety(
+                            client.team_id(),
+                            &pending.public_key,
+                            &pending.device_name,
+                        )
+                    });
                     safety_lines(
                         ui,
                         &format!(
                             "“{shown}”{kind} {asks} “{}”. Both devices show:",
                             entry.name
                         ),
-                        words,
-                        "Confirm only if the other device shows the same words.",
+                        bound_words.as_deref().unwrap_or(words),
+                        "Compare every word. Confirm only if all words match.",
                     );
                     ui.add_enabled_ui(!deciding, |ui| {
                         ui.horizontal(|ui| {

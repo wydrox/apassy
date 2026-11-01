@@ -891,13 +891,14 @@ fn connect_handoff_registers_the_confirmed_phone_without_waiting_for_icloud() {
     }
     call(&setup.core, json!({"op":"unlock","passphrase":PASS}));
     let (raw, _) = setup.relay.link();
-    let channel = PairingChannel::generate().unwrap();
+    let channel = PairingChannel::generate(&raw).unwrap();
     let link = channel.link(&raw);
     let waiting = call(
         &setup.core,
         json!({"op":"join_attach", "link":link.as_str(), "answer_key":ANSWER_PUBLIC}),
     );
     assert_eq!(waiting["state"], "waiting");
+    assert_eq!(waiting["words"].as_array().unwrap().len(), 6);
     assert_eq!(
         call(&setup.core, json!({"op":"join_attach_poll"}))["state"],
         "waiting"
@@ -905,6 +906,17 @@ fn connect_handoff_registers_the_confirmed_phone_without_waiting_for_icloud() {
     let ids = setup.relay.confirm_links();
     let (device_id, name, public) = setup.relay.confirmed().pop().unwrap();
     assert_eq!(ids, vec![device_id]);
+    let expected_words = channel.mac_safety(TEAM, &public, &name).unwrap();
+    assert_eq!(
+        waiting["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join(" "),
+        expected_words
+    );
     // Confirmation alone never imports keys or reports success.
     assert_eq!(
         call(&setup.core, json!({"op":"join_attach_poll"}))["state"],

@@ -187,7 +187,9 @@ impl RelaySync {
         Ok(LinkCode {
             code,
             link,
-            expires_at: created.expires_at,
+            expires_at: created
+                .expires_at
+                .min(super::unix_now().saturating_add(LINK_CODE_SECONDS)),
         })
     }
 

@@ -7,10 +7,10 @@ final class ConnectUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-ApassyPreviewVault", "-ApassyPreviewUnlocked", "-ApassyOpen", "decisions",
-            "-ApassyConnectLink", "https://relay.example.test/link#apassy_lnk_t_7k2m5q4x3c_00"]
+            "-ApassyConnectLink", "https://relay.example.test/link#apassy_lnk_t_7k2m5q4x3c_0000000000000000000000000000000000000000000000000000000000000000&handoff=2.AQEBAQEBAQEBAQEBAQEBAQ.AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI.BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA"]
         app.launch()
         XCTAssertTrue(app.navigationBars["Connect this iPhone"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.staticTexts["amber marble"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["amber marble cedar river panda tulip"].waitForExistence(timeout: 5))
         capture(app, "iphone-connect-safety-words")
         XCTAssertTrue(app.buttons["Open Requests"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.switches["Request Notifications"].exists)

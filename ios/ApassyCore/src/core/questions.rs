@@ -367,6 +367,7 @@ struct Attaching {
     pending: PendingJoin,
     channel: Option<apassy::relay::pairing::PairingChannel>,
     answer_key: Option<Vec<u8>>,
+    device_name: String,
     /// The team of a removed membership of this iPhone that the new key replaces.
     replaces: Option<String>,
     vault_id: String,
@@ -2548,17 +2549,15 @@ impl Core {
         if let Some(previous) = previous {
             let _ = previous.pending.cancel();
         }
+        let full_link = link;
         let parsed = apassy::relay::pairing::PairingChannel::parse(link);
         if link.contains("&handoff=") && parsed.is_none() {
             return Err(CoreError::invalid(
                 "This pairing code is damaged. Make a new code on the Mac.",
             ));
         }
-        let (link, channel) = match parsed {
-            Some((raw, channel)) => (raw, Some(channel)),
-            None => (link, None),
-        };
-        let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name).map_err(
+        let channel = parsed.map(|(_, channel)| channel);
+        let pending = PendingJoin::request(full_link, DEFAULT_RELAY_URL, device_name).map_err(
             |error| match CoreError::from(error) {
                 error if matches!(error.code, "removed" | "not_found") => CoreError::new(
                     "link_invalid",
@@ -2568,6 +2567,7 @@ impl Core {
             },
         )?;
         let attaching = Attaching {
+            device_name: device_name.to_owned(),
             answer_key: apassy::questions::device_link::split_link_device_name(device_name).1,
             channel,
             replaces,
@@ -2628,7 +2628,12 @@ impl Core {
             match channel.receive(
                 &client,
                 joined.member().team_id(),
-                joined.member().public_key(),
+                &apassy::sync::DeviceKey::from_pkcs8(
+                    joined
+                        .key_pkcs8()
+                        .ok_or_else(|| CoreError::invalid("Missing pairing private key"))?,
+                )?,
+                &attaching.device_name,
             ) {
                 Ok(Some(handoff)) => Some(handoff),
                 result => {

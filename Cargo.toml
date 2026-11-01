@@ -18,7 +18,7 @@ default-members = ["."]
 default = []
 desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2", "dep:ciborium", "dep:rustix"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:rustix"]
 
 [dependencies]
 toml_edit = { version = "=0.25.15", optional = true, default-features = false, features = ["parse"] }
@@ -44,6 +44,7 @@ ring = { version = "=0.17.14", optional = true, default-features = false, featur
 # Passkeys (schema 17): the CBOR of the attestation object and the COSE public key.
 ciborium = { version = "=0.2.2", optional = true, default-features = false, features = ["std"] }
 # WebAuthn RP validation includes ICANN and private public suffixes.
+p256 = { version = "=0.13.2", optional = true, default-features = false, features = ["ecdh", "pkcs8", "std"] }
 psl = "=2.1.238"
 # Browser Website and page hosts use the same UTS #46 canonicalization.
 idna = "=1.1.0"

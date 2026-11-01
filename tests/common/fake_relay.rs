@@ -192,6 +192,8 @@ struct Relay {
     team_codes: Vec<String>,
     connect_keys: BTreeMap<Vec<u8>, String>,
     connect_recovery: bool,
+    connect_challenge_patch: Option<Value>,
+    link_expiry_override: Option<u64>,
     connect_nonces: BTreeMap<String, Vec<u8>>,
     teams: BTreeMap<String, Team>,
     tokens: BTreeMap<String, (String, u64)>,
@@ -307,6 +309,12 @@ impl FakeRelay {
         Some(format!("{}/link#{code}", self.url))
     }
 
+    pub fn advertise_link_expiry(&self, expires_at: u64) {
+        lock(&self.shared.0).link_expiry_override = Some(expires_at);
+    }
+    pub fn alter_connect_challenge(&self, patch: Value) {
+        lock(&self.shared.0).connect_challenge_patch = Some(patch);
+    }
     pub fn support_connect_recovery(&self) {
         lock(&self.shared.0).connect_recovery = true;
     }
@@ -1024,9 +1032,17 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             let Some(public) = body["public_key"].as_str().and_then(decode_b64u) else {
                 return fail(400, "invalid_request");
             };
-            let nonce = encode_b64u(&[7u8; 32]);
+            let mut bytes = [0; 32];
+            getrandom::fill(&mut bytes).expect("synthetic nonce");
+            let nonce = encode_b64u(&bytes);
             relay.connect_nonces.insert(nonce.clone(), public);
-            ok(json!({"nonce":nonce, "origin":relay.origin, "expires_at": now()+60}))
+            let mut result = json!({"nonce":nonce, "origin":relay.origin, "expires_at": now()+60});
+            if let Some(patch) = &relay.connect_challenge_patch {
+                for (key, value) in patch.as_object().expect("test object") {
+                    result[key] = value.clone();
+                }
+            }
+            ok(result)
         }
         ("POST", ["v1", "teams"] | ["v1", "connect"]) => {
             let body = request.json();
@@ -1204,6 +1220,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             };
             relay.next_link += 1;
             let id = relay.next_link;
+            let expiry = relay.link_expiry_override.unwrap_or_else(|| now() + 600);
             let Some(team) = relay.teams.get_mut(&team_id) else {
                 return fail(403, "forbidden");
             };
@@ -1219,7 +1236,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 };
                 let name = team.name.clone();
                 return ok(json!({"id": link.id, "team_id": team_id, "team": name,
-                          "safety": link.safety, "expires_at": now() + 600, "by": "owner"}));
+                          "safety": link.safety, "expires_at": expiry, "by": "owner"}));
             };
             team.codes.remove(at);
             let safety = safety_words(&team_id, &code, &public_key);
@@ -1234,7 +1251,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             let name = team.name.clone();
             ok(
                 json!({"id": id, "team_id": team_id, "team": name, "safety": safety,
-                      "expires_at": now() + 600, "by": "owner"}),
+                      "expires_at": expiry, "by": "owner"}),
             )
         }
         ("POST", ["v1", "devices", "link", "cancel"]) => {
@@ -1318,7 +1335,9 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .expect("team")
                         .codes
                         .push(code.clone());
-                    ok(json!({"secret": code, "expires_at": now() + 600}))
+                    ok(
+                        json!({"secret": code, "expires_at": relay.link_expiry_override.unwrap_or_else(|| now() + 600)}),
+                    )
                 }
                 ("GET", ["devices", "links"]) => {
                     let links: Vec<Value> = relay.teams[&team_id]
@@ -1328,7 +1347,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .map(|link| {
                             json!({"id": link.id, "device_name": link.device_name,
                                    "public_key": encode_b64u(&link.public_key),
-                                   "created_at": now(), "expires_at": now() + 600})
+                                   "created_at": now(), "expires_at": relay.link_expiry_override.unwrap_or_else(|| now() + 600)})
                         })
                         .collect();
                     ok(json!(links))
