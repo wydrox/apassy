@@ -146,6 +146,31 @@ impl Operations {
         if request.v != WIRE_VERSION {
             return decide::handle(ctx, request);
         }
+        if request.action.trackable() {
+            // Legacy clients must not bypass active-operation fairness. Their
+            // temporary admission record is removed before the ordinary v0 reply.
+            let mut random = [0; 16];
+            if getrandom::fill(&mut random).is_err() {
+                return WireResponse::failure("busy", "No operation was started.");
+            }
+            let id: String = random.iter().map(|b| format!("{b:02x}")).collect();
+            let mut response = self.handle(
+                ctx,
+                &WireRequest {
+                    v: request.v,
+                    token: request.token.clone(),
+                    host_session: request.host_session.clone(),
+                    action: Action::Tracked {
+                        operation_id: id.clone(),
+                        idempotency_key: None,
+                        action: Box::new(request.action.clone()),
+                    },
+                },
+            );
+            lock(&self.records).remove(&id);
+            response.operation_id = None;
+            return response;
+        }
         if !matches!(
             request.action,
             Action::Tracked { .. }
@@ -456,6 +481,90 @@ fn summary(response: &WireResponse) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_clients_share_active_limits_without_changing_their_wire_responses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("vault.db"), "synthetic-legacy-pass")
+                .unwrap();
+        vault.unlock("synthetic-legacy-pass").unwrap();
+        let (_, token) = vault.register_agent("Synthetic legacy caller").unwrap();
+        let ctx = BrokerContext {
+            vault: Arc::new(Mutex::new(Some(vault))),
+            tls: super::super::http::TlsClient::platform().unwrap(),
+            approvals: Arc::new(super::super::approvals::ApprovalQueue::new()),
+            approval_timeout: Duration::from_secs(5),
+            run_timeout: Duration::from_secs(2),
+            bouncer: None,
+            model_gate: None,
+            prompts: Arc::new(super::super::prompts::PromptStore::new(vec![])),
+        };
+        let operations = Operations::new().unwrap();
+        let request = WireRequest {
+            v: WIRE_VERSION,
+            token: token.expose().into(),
+            host_session: None,
+            action: Action::AskOwnerForCredential {
+                name: "Synthetic legacy wait".into(),
+                purpose: "Test legacy limits".into(),
+                where_to_get: None,
+                cwd: Some(dir.path().display().to_string()),
+                folder: None,
+            },
+        };
+        std::thread::scope(|threads| {
+            let mut workers = Vec::new();
+            for n in 1..=MAX_AGENT_ACTIVE {
+                workers.push(threads.spawn(|| operations.handle(&ctx, &request)));
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while lock(&operations.records)
+                    .values()
+                    .filter(|r| lock(&r.control.state).waiting)
+                    .count()
+                    < n
+                {
+                    assert!(Instant::now() < deadline, "legacy calls bypassed admission");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let mut mutation = request.clone();
+            mutation.action = Action::GenerateCredential {
+                name: "Must not bypass the active cap".into(),
+                length: None,
+                alphabet: None,
+                cwd: Some(dir.path().display().to_string()),
+                folder: None,
+            };
+            let refused = operations.handle(&ctx, &mutation);
+            ctx.vault.lock().unwrap().as_mut().unwrap().lock().unwrap();
+            for worker in workers {
+                assert!(worker.join().unwrap().operation_id.is_none());
+            }
+            assert_eq!(refused.error.unwrap().code, "busy");
+            assert!(refused.operation_id.is_none());
+        });
+        assert!(lock(&operations.records).is_empty());
+        ctx.vault
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .unlock("synthetic-legacy-pass")
+            .unwrap();
+        let mut refusal = request.clone();
+        refusal.action = Action::RequestAccess {
+            item_id: 0,
+            reason: "Synthetic refusal".into(),
+            cwd: None,
+        };
+        let response = operations.handle(&ctx, &refusal);
+        assert!(response.operation_id.is_none());
+        assert!(
+            lock(&operations.records).is_empty(),
+            "legacy completion must not consume retained capacity"
+        );
+    }
 
     #[test]
     fn vault_lock_erases_receipts_and_late_workers_cannot_restore_them() {
