@@ -1435,6 +1435,7 @@ fn run_inner(
             std::mem::take(&mut secrets.proxied),
             options,
             access_admission.clone(),
+            !request.codes.is_empty(),
         ) {
             Ok(proxy) => Some(proxy),
             Err(_) => {
@@ -1532,12 +1533,12 @@ fn run_inner(
             }
             if !checked.placeholder_names.is_empty() {
                 answer["placeholders"] = json!(checked.placeholder_names);
-                answer["network"] = json!({
-                    "proxy": true,
-                    "only_proxy": enforced,
-                    "requests": requests,
+                answer["network"] = network_report(enforced, &requests, !request.codes.is_empty());
+                answer["note"] = json!(if request.codes.is_empty() {
+                    PLACEHOLDER_NOTE
+                } else {
+                    "Secret values in stdout/stderr are masked. Per-request network details are omitted for runs with one-time codes."
                 });
-                answer["note"] = json!(PLACEHOLDER_NOTE);
             }
             WireResponse::success(answer)
         }
@@ -2189,6 +2190,26 @@ fn read_secrets(vault: &Vault, items: &[u64], codes: &[u64]) -> Result<RunSecret
 const PLACEHOLDER_NOTE: &str = "Secret values in the output are replaced with [apassy:NAME]. The variables in `placeholders` hold a placeholder, not the real value. Apassy puts the real value into HTTPS requests to the hosts of each variable, in the Authorization header, a known API key header, or a known key parameter. `network.requests` lists each request. A request that Apassy stopped has the header X-Apassy-Proxy: refused and a reason.";
 
 /// One sentence about the proxy for the activity log.
+/// A generated code may enter any free-text request field, including host, method
+/// and path. Proxy events predate code injection and cannot mask its generated
+/// value. For code-bearing runs release only counts, never those event details.
+fn network_report(
+    enforced: bool,
+    requests: &[ProxyEvent],
+    includes_codes: bool,
+) -> serde_json::Value {
+    if includes_codes {
+        json!({
+            "proxy": true,
+            "only_proxy": enforced,
+            "request_count": requests.len(),
+            "details_omitted": true,
+        })
+    } else {
+        json!({"proxy": true, "only_proxy": enforced, "requests": requests})
+    }
+}
+
 fn proxy_summary(requests: &[ProxyEvent]) -> String {
     if requests.is_empty() {
         return String::new();

@@ -156,3 +156,27 @@ fn code_protocol_version_is_distinct_and_survives_tracking() {
     assert_eq!(tracked.wire_version(), CODE_WIRE_VERSION);
     assert_eq!(Action::ListAccess.wire_version(), WIRE_VERSION);
 }
+
+#[test]
+fn code_runs_never_return_unmasked_proxy_event_text() {
+    let events = [ProxyEvent {
+        host: "123456.example.invalid".into(),
+        port: 443,
+        method: Some("123456".into()),
+        path: Some("/confirm/123456".into()),
+        status: Some(200),
+        outcome: ProxyOutcome::Passed,
+        secrets: vec!["TOKEN".into()],
+        reason: Some("synthetic 123456".into()),
+    }];
+    let report = network_report(true, &events, true);
+    assert_eq!(report["request_count"], 1);
+    assert_eq!(report["details_omitted"], true);
+    assert!(report.get("requests").is_none());
+    assert!(!report.to_string().contains("123456"));
+    assert!(
+        network_report(true, &events, false)
+            .get("requests")
+            .is_some()
+    );
+}

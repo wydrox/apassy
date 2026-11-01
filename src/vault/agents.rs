@@ -1815,8 +1815,8 @@ pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Op
 }
 
 /// Whether Apassy may choose this field by itself. A passkey field or the setup key of
-/// a one-time password (the rule of the vault access model) needs an explicit owner
-/// binding. The value is read only when the name alone does not decide, and it is
+/// a one-time password (the rule of the vault access model) is never delivered,
+/// even with an explicit binding. The value is read only when the name alone does not decide, and it is
 /// erased on drop.
 fn automatic_field_allowed(conn: &Connection, item: i64, name: &str) -> VaultResult<bool> {
     if super::types::is_passkey_field(name) {

@@ -293,6 +293,9 @@ both a publishing token and its code. Use the catalog variable, for example
 or injected, including from an older explicit seed binding. There is no clipboard
 path for agents. Multiple OTP settings on one item are refused as ambiguous.
 
+Code runs with placeholders return aggregate network counts instead of individual
+request details, because a code can appear in a request path or hostname.
+
 Every code run asks the owner unless an explicit Allow in project answer includes
 codes for that item, project, action and destinations. Older password-only answers,
 patterns and an allowing model never cover codes. Allow once covers one run. Other

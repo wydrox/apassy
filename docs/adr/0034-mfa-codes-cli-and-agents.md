@@ -95,7 +95,17 @@ outcome metadata only. Original stdout/stderr are masked before leaving the brok
 Code and seed buffers erase on drop; the OS process environment has the same
 same-user access and child-process limitations as other injected secrets.
 
-Masking uses exact literal matches, including inside a longer number. A six-digit
+When a code run also uses the run proxy, the response omits per-request network
+details and returns only `request_count`, `proxy`, `only_proxy` and
+`details_omitted: true`. A code can appear in a path, hostname or other free text;
+the proxy's existing placeholder masker does not know that generated code.
+The proxy erases event free text before retaining a code run's events.
+Ordinary runs retain their per-request details. Activity records only aggregate
+proxy outcome counts, and receipts/status retain their metadata allowlist.
+
+Masking uses exact literal matches, including inside a longer number. At a truncated
+output stream's end it also redacts a matching code prefix, so collection cannot
+expose leading digits of a complete printed code. A six-digit
 code does not mask all six-digit output: unrelated counts, ports and numbers remain.
 A coincidental occurrence of those exact digits in an identifier or larger number
 is redacted too. This deliberate loss of numeric output avoids leaking a code

@@ -153,7 +153,9 @@ authority in schema 23. Answers are not synced; restore clears them.
 The broker generates codes only at spawn, choosing the next period when at most five
 whole seconds remain. Provider acceptance of a future-period code is not guaranteed.
 Literal code values are masked in original run output; matching substrings in other
-numbers are also redacted. Unrelated numbers survive. Encoding or fragmentation can
+numbers and prefixes at an output truncation boundary are also redacted. Code runs
+omit per-request proxy metadata so a path or hostname cannot echo a code to the
+agent. Unrelated numbers survive. Encoding or fragmentation can
 bypass exact masking. Codes/seeds are absent from generated logs, model/relay cards,
 receipts and operation status, and no agent clipboard API exists. An owner-approved
 child still possesses the code and inherits the existing environment/descendant and

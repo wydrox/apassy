@@ -4,7 +4,8 @@
 //! new connection and reads one [`Response`]. Item and agent references are text: an
 //! ID, or the exact name without regard to case.
 //!
-//! A response never has a secret value of an item. It has a token only when the owner
+//! Only `Code` returns a generated one-time code after a fresh owner check; stored
+//! item secrets and seeds never return. A response has a token only when the owner
 //! just made one: a command-line session after the owner check, or an agent token
 //! after a registration or a rotation.
 
