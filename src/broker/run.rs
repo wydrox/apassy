@@ -9,8 +9,8 @@
 //! 5. For each item: the agent may see it (ADR 0025 §3f: no "Not for this agent"
 //!    exception, and for an agent with "only these items" the item is listed; an unknown
 //!    item gives the same `not_granted`), the owner reviewed the item after a restore,
-//!    the item is not archived, the item has a process binding (a one-time-code setup key
-//!    is never chosen automatically), and the variables differ. A process grant is no
+//!    the item is not archived, ordinary values have a process binding and codes have
+//!    one unambiguous OTP setting, and the variables differ. OTP seeds never enter runs. A process grant is no
 //!    authority and is not read: the upgrade to schema 18 turned each grant that asked or
 //!    had a rule into "Always ask for this agent".
 //! 6. The bouncer decides the use (ADR 0025 §3), in this order. The command analysis
@@ -25,6 +25,8 @@
 //!       §3b): one for the item, the project, and the kind of action, where the rules are
 //!       certain of that kind, and where each destination host of the run is a host of
 //!       the allowance or a known host of the item.
+//!       A requested code additionally needs an explicit code-covering owner answer
+//!       for this item/project/action. Patterns and models cannot waive that veto.
 //!    2. Without a running bouncer, each run asks the owner. Every remembered route
 //!       below needs it.
 //!    3. A working directory that is no project (the root, the home folder, and its
@@ -923,6 +925,11 @@ fn run_inner(
         }
     };
     let log_note = format!("{} {risk_note}", resolved.log_note());
+    let risk_note = if request.codes.is_empty() {
+        risk_note
+    } else {
+        format!("This run includes one-time codes. {risk_note}")
+    };
     let needs_approval = matches!(route, Route::Ask(_));
     let (decided_by, mut use_decided_by) = match route {
         Route::Ask(_) => ("Owner approved", UseDecidedBy::Owner),
@@ -945,9 +952,11 @@ fn run_inner(
             &mut ready,
         );
         // A pattern acts only with a running bouncer.
+        // Pattern keys predate field/code selection. A code-only approval must not
+        // teach a pattern that later authorizes the item's stored password.
         let remember = learned
             .offer(pattern.as_ref(), &context, always_asks)
-            .filter(|_| ready.get().is_ok());
+            .filter(|_| request.codes.is_empty() && ready.get().is_ok());
         (valid, remember)
     } else {
         (Vec::new(), None)
@@ -1368,7 +1377,10 @@ fn run_inner(
             }
         }
         // The run starts in the session of the decision. Now learning can count it.
-        if remembered && let Some(pattern) = &pattern {
+        if remembered
+            && request.codes.is_empty()
+            && let Some(pattern) = &pattern
+        {
             let _ = learning::remember(vault, pattern, learning::now());
         }
         if route == Route::Pattern
@@ -1452,7 +1464,7 @@ fn run_inner(
             sandbox_profile: network.sandbox_profile.as_deref(),
         }),
         ctx.run_timeout,
-        |cmd| {
+        |cmd, prepare| {
             if let Some(a) = &access_admission {
                 let guard = lock(&ctx.vault);
                 let Some(vault) = guard.as_ref().filter(|v| a.live_in(v)) else {
@@ -1460,10 +1472,13 @@ fn run_inner(
                 };
                 vault
                     .delivery_fence()
-                    .deliver(|| cmd.spawn())
+                    .deliver(|| {
+                        prepare(cmd)?;
+                        cmd.spawn()
+                    })
                     .unwrap_or_else(|| Err(std::io::Error::other("vault locked")))
             } else {
-                spawn_in_session(&ctx.vault, checked.epoch, cmd)
+                spawn_in_session(&ctx.vault, checked.epoch, cmd, prepare)
             }
         },
     );
@@ -2066,6 +2081,7 @@ pub(super) fn spawn_in_session(
     vault: &super::SharedVault,
     epoch: [u8; 32],
     cmd: &mut std::process::Command,
+    prepare: &mut dyn FnMut(&mut std::process::Command) -> std::io::Result<()>,
 ) -> std::io::Result<std::process::Child> {
     if !super::operations::start_effect() {
         return Err(std::io::Error::new(
@@ -2081,7 +2097,12 @@ pub(super) fn spawn_in_session(
             .map(Vault::delivery_fence)
     };
     delivery
-        .and_then(|fence| fence.deliver(|| cmd.spawn()))
+        .and_then(|fence| {
+            fence.deliver(|| {
+                prepare(cmd)?;
+                cmd.spawn()
+            })
+        })
         .unwrap_or_else(|| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,

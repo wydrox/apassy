@@ -1824,6 +1824,7 @@ fn cli_code_show_json_copy_and_owner_window_keep_values_out_of_status() {
             item: ItemInput {
                 name: Some("Synthetic CLI MFA".into()),
                 kind: Some(CredentialKind::Login),
+                username: Some("synthetic-user".into()),
                 secret: Some(SecretText::new(SECRET.into())),
                 details: vec![DetailInput {
                     label: crate::otp::LABEL.into(),
@@ -1834,6 +1835,7 @@ fn cli_code_show_json_copy_and_owner_window_keep_values_out_of_status() {
             },
         },
     );
+    assert!(added.ok, "{added:?}");
     let Data::Items { items } = added.data else {
         panic!("missing item")
     };

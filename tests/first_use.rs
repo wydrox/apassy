@@ -906,7 +906,7 @@ fn the_catalog_names_the_variable_and_the_folder_of_each_usable_credential() {
     assert!(!data.to_string().contains(SECRET));
 }
 
-/// OTP setup keys require an explicit owner-selected field before any use.
+/// OTP setup keys never enter ordinary item runs; codes use the separate selector.
 #[test]
 fn otp_only_items_are_needs_field_in_the_broker_catalog_and_cannot_be_used() {
     for (kind, name, value) in [

@@ -9,7 +9,8 @@ Always ask, missing-context and unavailable-bouncer rules remain in force.
 
 `apassy code ITEM` resolves an ID or exact name and prints the current TOTP code
 and seconds left. `--json` returns the ordinary owner CLI envelope with
-`data.type = "code"`, `code`, `seconds_left`, and `copied: false`. `--copy` uses
+`data.type = "code"`, `code`, `seconds_left`, and `copied: false`, plus the
+CLI JSON contract markers `stage: "complete"` and empty `partial_state`. `--copy` uses
 the app's existing concealed clipboard and its code-expiry/session cleanup;
 it returns only seconds left and `copied: true`, omitting `code` even in JSON.
 No code appears in app status text. A missing OTP detail gives `no_code`;
@@ -42,7 +43,8 @@ The tool still takes an argument list and adds no implicit shell.
 
 Seeds are parsed after the unchanged-authorization recheck and kept in erasing
 buffers. Codes are generated in the spawn callback, after proxy setup, immediately
-before session-fenced process creation. If at most five whole seconds remain,
+before process creation, inside the session delivery guard after any vault-lock
+wait. A delayed lock acquisition cannot age a precomputed code. If at most five whole seconds remain,
 Apassy supplies the **next period's code**. It does not sleep. A service with no
 future-window tolerance may reject that code until the boundary; retry only after
 checking the operation receipt and external outcome, with a new run approval as
@@ -55,6 +57,8 @@ Every requested code is a hard veto before pattern/model execution routing. The
 question names each affected item as “includes one-time code” and lists its code
 variable. An allowing model, a learned pattern, usage history, an evaluation scope
 or an old password-only answer cannot waive it. Allow once covers only that run.
+Legacy pattern remembering is disabled for code-bearing runs: its old item-only key
+must not turn a code-only approval into stored-password authority.
 An explicit Allow in project answer (or its production counterpart) saves
 `includes_codes` for each affected item, project, action and destination scope.
 The normal hard rules still apply, including Always ask even after that answer.

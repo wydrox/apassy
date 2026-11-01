@@ -298,7 +298,7 @@ fn bind_variable(tx: &Transaction<'_>, item: i64, detected: &Detected) -> VaultR
         .and_then(|name| detected.field(name))
         .filter(|field| field.secret)
         .ok_or_else(|| err(VaultErrorKind::InvalidInput))?;
-    // A setup key makes one-time codes. Only the owner binds it, explicitly.
+    // A setup key never enters an agent process; generated codes use a separate selector.
     if super::is_setup_key_field(&field.name, field.value.expose()) {
         return Ok(());
     }

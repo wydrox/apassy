@@ -1312,7 +1312,9 @@ fn mfa_fixture() -> Fixture {
         None,
         common::fake_bouncer(&[]),
     );
+    let original = fx.item_id;
     fx.item_id = with_vault(&fx, |v| {
+        v.clear_env_binding(original).unwrap();
         let item = v
             .add(ItemDraft {
                 title: "Synthetic MFA login".into(),
@@ -1320,6 +1322,11 @@ fn mfa_fixture() -> Fixture {
                 notes: String::new(),
                 tags: vec![],
                 fields: vec![
+                    Field {
+                        name: "username".into(),
+                        value: SecretValue::new("synthetic-user".into()),
+                        secret: false,
+                    },
                     Field {
                         name: "password".into(),
                         value: SecretValue::new(SECRET.into()),
@@ -1360,6 +1367,14 @@ fn mfa_action(fx: &Fixture, normal: bool, command: &[&str], cwd: &Path) -> Actio
     }
 }
 
+fn mfa_password_action(fx: &Fixture) -> Action {
+    let mut action = mfa_action(fx, true, &["true"], &fx.project);
+    if let Action::Run { codes, .. } = &mut action {
+        codes.clear();
+    }
+    action
+}
+
 fn mfa_later(fx: &Fixture, action: Action) -> std::thread::JoinHandle<WireResponse> {
     let socket = fx.socket.clone();
     let token = fx.token.clone();
@@ -1369,8 +1384,10 @@ fn mfa_later(fx: &Fixture, action: Action) -> std::thread::JoinHandle<WireRespon
 #[test]
 fn mfa_old_password_answers_and_model_allow_never_cover_codes_but_explicit_project_does() {
     let fx = mfa_fixture();
-    let response = answer_with(&fx, &fx.project, "true", in_project);
-    assert!(response.ok, "{response:?}");
+    let handle = mfa_later(&fx, mfa_password_action(&fx));
+    let run = waiting(&fx);
+    owner(&fx, in_project(run)).unwrap();
+    assert!(handle.join().unwrap().ok);
     let old = with_vault(&fx, |v| v.answers_for_item(fx.item_id)).unwrap();
     assert!(!old[0].includes_codes);
     let calls = model_calls(&fx);
@@ -1383,7 +1400,11 @@ fn mfa_old_password_answers_and_model_allow_never_cover_codes_but_explicit_proje
                 .name
                 .contains("includes one-time code")
         );
-        assert!(run.risk.contains("one-time code"));
+        assert!(run.risk.starts_with("This run includes one-time codes."));
+        assert!(
+            run.remember.is_none(),
+            "code approvals cannot teach legacy password patterns"
+        );
         owner(&fx, OwnerAction::ApproveRun(run)).unwrap();
         assert!(handle.join().unwrap().ok);
         assert_eq!(model_calls(&fx), calls);
@@ -1424,6 +1445,22 @@ fn mfa_old_password_answers_and_model_allow_never_cover_codes_but_explicit_proje
 #[test]
 fn mfa_injection_masks_output_and_excludes_values_from_cards_logs_and_receipts() {
     let fx = mfa_fixture();
+    let catalog = client::send(&fx.socket, &fx.token, Action::ListAccess)
+        .unwrap()
+        .result
+        .unwrap();
+    let row = catalog["catalog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["item_id"] == fx.item_id)
+        .unwrap();
+    assert_eq!(row["has_code"], true);
+    assert_eq!(
+        row["code_env_name"],
+        apassy::vault::mfa::code_env_name(fx.item_id)
+    );
+    assert!(!catalog.to_string().contains(MFA_SEED));
     let env = apassy::vault::mfa::code_env_name(fx.item_id);
     let script = format!(
         "printf 'code=%s password=%s count=42 port=5432\\n' \"${env}\" \"${ENV_NAME}\"; printf '%s' \"${env}\" >&2"
@@ -1509,7 +1546,7 @@ fn mfa_code_only_project_answer_never_grants_the_password_and_always_ask_still_w
         .remove(0);
     assert!(answer.includes_codes);
     assert!(!answer.includes_values);
-    let normal = run_later(&fx, &fx.project, "true");
+    let normal = mfa_later(&fx, mfa_password_action(&fx));
     let run = waiting(&fx);
     assert!(run.risk.contains("stored secret"));
     fx.broker.approvals().deny(run.id);

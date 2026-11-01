@@ -268,7 +268,7 @@ apassy --json item list | jq -r '.data.items[] | select(.variable == null) | .na
 
 ## JSON output contract
 
-For doctor, setup (Claude, Codex, and browser), logout, and decisions export, `--json` writes exactly one JSON document to stdout. Progress and human instructions belong on stderr. Parse the whole document, then inspect `ok` and the exit status. These results share `ok`, `code`, `stage`, and `partial_state`; command data is in `data`, or `checks` for doctor. A `message` may explain the result. Failures before command work starts use the standard `ok`, `code`, `message`, `data` error envelope with `stage: "request"` and empty `partial_state`. Partial browser changes are reported and are not rolled back.
+For doctor, setup (Claude, Codex, and browser), logout, code, and decisions export, `--json` writes exactly one JSON document to stdout. Progress and human instructions belong on stderr. Parse the whole document, then inspect `ok` and the exit status. These results share `ok`, `code`, `stage`, and `partial_state`; command data is in `data`, or `checks` for doctor. A `message` may explain the result. Failures before command work starts use the standard `ok`, `code`, `message`, `data` error envelope with `stage: "request"` and empty `partial_state`. Partial browser changes are reported and are not rolled back.
 
 Claude/Codex setup returns `data.type: "setup"` and `data.connection_verified: false`. Its top-level `stage` is the last marker reached (or `preflight` before any marker). `partial_state.stages` lists the ordered markers reached; `partial_state.partial` means a failed setup made confirmed changes, and `partial_state.changes_unknown` means a connection request lost its response and may have created an agent. Check both flags before recovery. Without `--write`, a successful preview has `stage: "preview"` and neither flag set. Setup usage errors exit 2, a missing app during connection exits 3, and other failures exit 1.
 
@@ -327,7 +327,7 @@ another app replaced the content. It never prints the code.
 `--json` writes exactly one ordinary response envelope to stdout; owner-check
 instructions go to stderr. Success is `{ "ok": true, "code": "ok", "message":
 "...", "data": { "type": "code", "code": "123456", "seconds_left": 19,
-"copied": false } }`. With `--copy`, `copied` is true and `data.code` is omitted.
+"copied": false }, "stage": "complete", "partial_state": {} }`. With `--copy`, `copied` is true and `data.code` is omitted.
 Failures use the standard error envelope and nonzero exit status. These codes are
 intentional owner output; protect terminal history/redirected output accordingly.
 

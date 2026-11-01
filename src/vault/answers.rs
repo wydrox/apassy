@@ -16,7 +16,9 @@
 //! Each answer keeps the destination hosts of the runs that the owner saw (`hosts`, a
 //! JSON array): the hosts of the command and the known hosts of the item then. A later
 //! run with a host outside them and outside the known hosts of the item asks the owner
-//! again (`broker::run`). The same answer again adds the hosts of its run.
+//! again (`broker::run`). Password-only answers add hosts only to password authority.
+//! Schema 23 records code and stored-value coverage separately. A code-bearing answer
+//! replaces destination history; a password-only answer clears code authority.
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
 

@@ -1097,8 +1097,9 @@ impl Vault {
         }))
     }
 
-    /// Resolve process delivery without reading secret values. A stored binding
-    /// takes precedence. Otherwise a supported secret field gets an automatic name.
+    /// Resolve process metadata without returning values. A usable stored binding
+    /// takes precedence; OTP seeds and passkeys are excluded even when selected.
+    /// Otherwise a supported ordinary secret gets an automatic name.
     pub fn process_binding(&self, item_id: u64) -> VaultResult<Option<EnvBinding>> {
         process_binding_in(self.conn_ref()?, to_sql_id(item_id)?)
     }
@@ -1716,8 +1717,8 @@ pub(super) fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultRe
 }
 
 /// Shared metadata resolver for reads and grant/request transactions. SQL tests
-/// whether a secret has a value. Only an automatic choice reads a value, and only to
-/// recognize the setup key of a one-time password; that copy is erased on drop.
+/// whether a secret has a value. Candidate values are inspected only to recognize
+/// OTP setup links, including legacy explicit choices; each copy erases on drop.
 pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Option<EnvBinding>> {
     let kind: Option<String> = conn
         .query_row(

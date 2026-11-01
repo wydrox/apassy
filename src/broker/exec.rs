@@ -133,11 +133,15 @@ pub(crate) fn run_with_spawn(
         &[],
         network,
         timeout,
-        spawn,
+        |cmd, prepare| {
+            prepare(cmd)?;
+            spawn(cmd)
+        },
     )
 }
 
-/// Parse seeds earlier, generate only at the spawn boundary. Codes never enter argv.
+/// Parse seeds earlier; the session-fenced caller invokes `prepare` only after
+/// acquiring its delivery guard, immediately before spawn. Codes never enter argv.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_codes_spawn(
     command: &[String],
@@ -148,7 +152,10 @@ pub(crate) fn run_with_codes_spawn(
     codes: &[(String, crate::otp::Totp)],
     network: Network<'_>,
     timeout: Duration,
-    spawn: impl FnOnce(&mut Command) -> io::Result<Child>,
+    spawn: impl FnOnce(
+        &mut Command,
+        &mut dyn FnMut(&mut Command) -> io::Result<()>,
+    ) -> io::Result<Child>,
 ) -> io::Result<RunOutput> {
     if secrets
         .iter()
@@ -161,7 +168,10 @@ pub(crate) fn run_with_codes_spawn(
         ));
     }
     let mut generated = Vec::new();
-    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, |cmd| {
+    let mut prepare = |cmd: &mut Command| -> io::Result<()> {
+        if codes.is_empty() {
+            return Ok(());
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| io::Error::other("System clock is before the Unix epoch."))?;
@@ -173,7 +183,10 @@ pub(crate) fn run_with_codes_spawn(
                 value,
             });
         }
-        spawn(cmd)
+        Ok(())
+    };
+    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout, |cmd| {
+        spawn(cmd, &mut prepare)
     })?;
     let all: Vec<&SecretEnv> = secrets.iter().chain(masks).chain(&generated).collect();
     let masked_out = mask_output(&raw.stdout, &all);
@@ -482,7 +495,7 @@ mod tests {
                 // Pause at the actual delivery seam, after Command contains the
                 // prepared environment. Model a lock winning the vault mutex.
                 shared.lock().unwrap().as_mut().unwrap().lock().unwrap();
-                crate::broker::run::spawn_in_session(&shared, epoch, cmd)
+                crate::broker::run::spawn_in_session(&shared, epoch, cmd, &mut |_| Ok(()))
             },
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
@@ -774,7 +787,9 @@ mod tests {
             &[("OTP".into(), otp)],
             super::Network::default(),
             std::time::Duration::from_secs(5),
-            |cmd| {
+            |cmd, prepare| {
+                assert!(cmd.get_envs().all(|(name, _)| name != "OTP"));
+                prepare(cmd)?;
                 let code = cmd
                     .get_envs()
                     .find(|(n, _)| *n == "OTP")
@@ -792,5 +807,39 @@ mod tests {
         .unwrap();
         assert_eq!(out.stdout, "[apassy:OTP]");
         assert_eq!(out.stderr, "[apassy:OTP]");
+    }
+    #[test]
+    fn revoked_session_refuses_before_generating_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-code-fence")
+                .unwrap();
+        vault.unlock("synthetic-code-fence").unwrap();
+        let epoch = vault.epoch();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(vault)));
+        let prepared = std::cell::Cell::new(false);
+        let otp = crate::otp::Totp::parse("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let result = super::run_with_codes_spawn(
+            &["true".into()],
+            dir.path(),
+            None,
+            &[],
+            &[],
+            &[("OTP".into(), otp)],
+            super::Network::default(),
+            std::time::Duration::from_secs(5),
+            |cmd, prepare| {
+                shared.lock().unwrap().as_mut().unwrap().lock().unwrap();
+                crate::broker::run::spawn_in_session(&shared, epoch, cmd, &mut |cmd| {
+                    prepared.set(true);
+                    prepare(cmd)
+                })
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            !prepared.get(),
+            "no code may be generated outside the live delivery guard"
+        );
     }
 }

@@ -1848,11 +1848,18 @@ pub fn code(cli: &Cli, mut args: Args) -> Outcome {
     expect_owner_check();
     let response = cli.call(Command::Code { item, copy })?;
     if cli.json {
-        print_json(&response);
+        print_json(&code_json(&response));
     } else if let Some(text) = code_text(&response.data) {
         println!("{}", text.as_str());
     }
     Ok(())
+}
+
+fn code_json(response: &Response) -> serde_json::Value {
+    serde_json::json!({
+        "ok": response.ok, "code": response.code, "message": response.message,
+        "data": response.data, "stage": "complete", "partial_state": {}
+    })
 }
 
 fn code_text(data: &Data) -> Option<zeroize::Zeroizing<String>> {
@@ -2024,5 +2031,10 @@ mod code_output_tests {
             "Copied. 19 seconds left."
         );
         assert!(!serde_json::to_string(&copied).unwrap().contains("123456"));
+        let value = code_json(&Response::ok("Copied.", copied));
+        assert_eq!(value["stage"], "complete");
+        assert_eq!(value["partial_state"], serde_json::json!({}));
+        assert_eq!(value["data"]["copied"], true);
+        assert!(value["data"].get("code").is_none());
     }
 }

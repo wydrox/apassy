@@ -51,7 +51,7 @@ Also in scope: an injection through the purpose, the user request, a command, or
 [ADR 0030](docs/adr/0030-owner-check-window.md) defines an opt-in exception to
 per-action identity checks. Every time remains the default. Protected per-Mac
 choices can reuse a fresh local verification for browser and macOS AutoFill
-password/code actions, passkey sign-ins (UP/UV set), and an explicit Allow once
+password/code actions, owner CLI code, passkey sign-ins (UP/UV set), and an explicit Allow once
 click for each agent request. A window never answers an agent request itself.
 Browser fills from trusted extension gestures need no Apassy sheet in a window.
 App UI reveal/copy/OTP display, exports/backups/restores, production/project and durable

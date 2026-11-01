@@ -194,7 +194,7 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         "the test digest is the algorithm of the app"
     );
     if version < 23 {
-        conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes")
+        conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values")
             .unwrap();
     }
     if version < 22 {
