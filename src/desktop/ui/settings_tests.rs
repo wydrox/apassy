@@ -366,10 +366,8 @@ fn the_relay_questions_switch_offers_a_team_without_relay_sync() {
     assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
     let (text, _) = frames(&mut app, TALL);
     assert!(text.contains(RELAY_QUESTIONS_NEW_TEAM), "{text}");
-    assert!(
-        !text.contains(ADD_IPHONE),
-        "no iPhone before it is on: {text}"
-    );
+    assert!(text.contains("Get approvals on your iPhone"), "{text}");
+    assert!(!text.contains("code from the operator"), "{text}");
 
     // A lock leaves Settings, and a locked vault has no relay state to change.
     app.owner_ui.session.lock().expect("lock");

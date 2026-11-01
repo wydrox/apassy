@@ -133,6 +133,7 @@ fn storage<T>(result: Result<T, rusqlite::Error>) -> VaultResult<T> {
 /// vault file and not a stripped copy. The new file has the current schema here.
 pub(super) fn prepare_adopted(tx: &Transaction<'_>) -> VaultResult<()> {
     storage(tx.execute("DELETE FROM relay_membership", []))?;
+    storage(tx.execute("DELETE FROM relay_connect_pending", []))?;
     Ok(())
 }
 

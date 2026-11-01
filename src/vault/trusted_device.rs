@@ -52,7 +52,10 @@ fn storage<E>(_: E) -> super::VaultError {
 }
 
 /// The kind of a trusted device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum TrustedDeviceKind {
     Mac,
     Iphone,
@@ -77,7 +80,7 @@ impl TrustedDeviceKind {
 }
 
 /// A device that may answer the questions of this vault. The keys are public keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrustedDevice {
     /// The UUID that the device chose for itself.
     pub uuid: String,
@@ -386,7 +389,7 @@ fn live_device(conn: &Connection, uuid: &str) -> VaultResult<Option<TrustedDevic
 }
 
 /// Whether `key` is the `sign_key` or the `answer_key` of a removed device.
-fn key_removed(conn: &Connection, key: &[u8]) -> VaultResult<bool> {
+pub(super) fn key_removed(conn: &Connection, key: &[u8]) -> VaultResult<bool> {
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM trusted_device WHERE deleted_at IS NOT NULL

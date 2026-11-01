@@ -36,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 20;
+const CURRENT: i64 = 21;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
@@ -193,6 +193,10 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < 21 {
+        conn.execute_batch("DROP TABLE relay_connect_pending")
+            .unwrap();
+    }
     if version < 20 {
         let names: Vec<String> = conn.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'bouncer_scope_%'").unwrap()
             .query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();

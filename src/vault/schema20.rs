@@ -112,7 +112,7 @@ pub(super) fn downgrade_sql() -> String {
         .into_iter()
         .map(|name| format!("DROP TRIGGER bouncer_scope_{name};\n"))
         .collect::<String>();
-    sql.push_str("DROP TABLE bouncer_scope; UPDATE vault_meta SET schema_version = 19 WHERE id = 1; PRAGMA user_version = 19;");
+    sql.push_str("DROP TABLE IF EXISTS relay_connect_pending; DROP TABLE bouncer_scope; UPDATE vault_meta SET schema_version = 19 WHERE id = 1; PRAGMA user_version = 19;");
     sql
 }
 

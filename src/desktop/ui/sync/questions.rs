@@ -6,9 +6,9 @@
 //!
 //! - A vault that syncs through the relay: the sync membership gets the purpose
 //!   `questions` ([`enable_questions`]), with no relay call.
-//! - Any other vault: the "Questions through the relay" sheet asks for the relay address
-//!   and an operator team code, as "Turn on" of relay sync does. After the check, `POST
-//!   /v1/teams` runs on its own thread ([`new_questions_team`], no vault), then the vault
+//! - Any other vault: "Get approvals on your iPhone" prepares and persists a Connect
+//!   key after the owner check, then signed `POST /v1/connect` runs on its own thread.
+//!   The operator-code API stays available for existing callers. Then the vault
 //!   keeps the membership ([`adopt_questions_team`]). The team never gets a snapshot;
 //!   iCloud Drive stays the sync. A vault that has a questions team already (another Mac
 //!   made it) never gets a second one: the sheet joins that team with a device link from
@@ -41,13 +41,11 @@ use eframe::egui;
 use zeroize::Zeroizing;
 
 use super::super::kit::{self, Style, Tone};
-use super::super::{forget_secret_field, secure_input};
 use super::SyncSheet;
-use super::relay::{TEAM_CODE_CAPACITY, TEAM_CODE_FIELD, call_error};
+use super::relay::call_error;
 use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
-use crate::desktop::owner_store::Ephemeral;
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::relay::membership::{
     QuestionsAvailability, adopt_questions_team, disable_questions, enable_questions,
@@ -118,7 +116,8 @@ struct NewTeam {
 struct Creating {
     vault: String,
     device: String,
-    task: Task<Result<RelayMembership, SyncError>>,
+    task: Task<Result<RelayMembership, String>>,
+    connect: bool,
 }
 
 /// The state of "Send questions through the relay" in the window.
@@ -341,7 +340,7 @@ impl DesktopApp {
                 .to_owned(),
         };
         let code = Zeroizing::new(code.trim().to_owned());
-        if !valid_team_code(&code) {
+        if !code.is_empty() && !valid_team_code(&code) {
             return Err(
                 "Type the team code from the operator of the relay. It starts with apassy_tcd_."
                     .to_owned(),
@@ -681,14 +680,36 @@ impl DesktopApp {
             code,
             device,
         } = new;
+        let connect = code.is_empty();
+        let staged = if connect {
+            match self.owner_ui.session.with_vault(|open| {
+                crate::relay::connect::prepare_connect(open, &url, &name, &device)
+            }) {
+                Some(Ok(pending)) => Some(pending),
+                Some(Err(error)) => {
+                    self.sync.relay.questions.error = Some(error.to_string());
+                    return self.set_err(error.to_string());
+                }
+                None => return self.set_err("Unlock the vault first. Nothing changed."),
+            }
+        } else {
+            None
+        };
         let team_device = device.clone();
-        let task = Task::spawn(self.sync.relay.questions.repaint.clone(), move || {
-            new_questions_team(&url, &code, &name, &team_device)
-        });
+        let task = Task::spawn(
+            self.sync.relay.questions.repaint.clone(),
+            move || match staged {
+                Some(pending) => {
+                    crate::relay::connect::create_connect(&pending).map_err(|e| e.to_string())
+                }
+                None => new_questions_team(&url, &code, &name, &team_device).map_err(call_error),
+            },
+        );
         self.sync.relay.questions.creating = Some(Creating {
             vault,
             device,
             task,
+            connect,
         });
     }
 
@@ -771,20 +792,21 @@ impl DesktopApp {
     fn questions_team_made(
         &mut self,
         creating: &Creating,
-        result: Option<Result<RelayMembership, SyncError>>,
+        result: Option<Result<RelayMembership, String>>,
     ) {
         let open = self.vault_list.current.as_deref() == Some(creating.vault.as_str());
         let outcome = match result {
             None => Err("The relay call ended without an answer. Try again.".to_owned()),
-            Some(Err(SyncError::Relay(RelayRefusal::InviteInvalid))) => Err(
-                "The team code is wrong, used, or expired. Ask the operator of the relay for a new one."
-                    .to_owned(),
-            ),
-            Some(Err(error)) => Err(call_error(error)),
+            Some(Err(error)) => Err(error),
             Some(Ok(membership)) if open => self
                 .owner_ui
                 .session
-                .with_vault(|vault| adopt_questions_team(vault, &membership, &creating.device))
+                .with_vault(|vault| {
+                    if creating.connect {
+                        vault.keep_connect_result(&membership)?;
+                    }
+                    adopt_questions_team(vault, &membership, &creating.device)
+                })
                 .unwrap_or(Err(SyncError::Vault(VaultErrorKind::Locked)))
                 .map(|_| ())
                 .map_err(|error| match error {
@@ -808,9 +830,12 @@ impl DesktopApp {
                 {
                     self.ui.sheet = None;
                 }
-                self.set_ok(
-                    "Questions now also go to your other devices through the relay. Add an iPhone in Devices to answer them there.",
-                );
+                if creating.connect {
+                    self.set_ok("Connected. Scan the pairing code with Apassy on your iPhone.");
+                    self.questions_add_iphone(None);
+                } else {
+                    self.set_ok("Questions now also go to your other devices through the relay. Add an iPhone in Devices to answer them there.");
+                }
             }
             Err(text) => {
                 self.sync.relay.questions.error = Some(text.clone());
@@ -978,14 +1003,13 @@ impl DesktopApp {
         match only {
             Some(true) => self.sync_open_sheet(SyncSheet::AddIphone { id }, ctx),
             Some(false) => self.sync_open_sheet(SyncSheet::AddMac { id }, ctx),
-            None => self.set_err("Turn on “Send questions through the relay” first."),
+            None => self.questions_turn_on(ctx),
         }
     }
 }
 
-/// "Send questions through the relay" for a vault that does not sync through the relay:
-/// the relay address, the operator team code, and the name of this Mac. "Turn On…" runs
-/// the owner check, then makes a notifications-only team. Returns true on Escape.
+/// Account-free Connect setup for a vault that does not use relay sync. The owner
+/// check precedes durable staging and creation. Returns true on Escape.
 pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) -> bool {
     // A vault with a questions team never gets a second one: this Mac joins it.
     let join =
@@ -1004,16 +1028,16 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
     let response = kit::sheet(ctx, "questions-relay-team", 520.0, |ui| {
         kit::sheet_title(
             ui,
-            &format!("Questions of “{}” through the Apassy relay", entry.name),
+            "Get approvals on your iPhone",
             Some(
-                "This vault does not sync through the relay, so Apassy makes a team on the relay for its questions only. The relay passes each question, end-to-end encrypted, to your other devices of this vault. It never gets the vault, a command, or a credential. Your vault keeps syncing as it does now.",
+                "Connect your iPhone to approve requests from this vault on any network. No account or subscription is needed. Your vault keeps syncing as it does now.",
             ),
         );
         kit::section(
             ui,
             None,
             Some(
-                "The operator of the relay gives you a team code. It works once. Apassy makes a key for this Mac and keeps it in the vault. Turning it on needs Touch ID or your passphrase.",
+                "Apassy saves a connection key in this encrypted vault before connecting. Then scan the pairing code on your iPhone and compare the safety words. Connecting needs Touch ID or your passphrase.",
             ),
             |s| {
                 s.field("Relay address", |ui| {
@@ -1022,16 +1046,6 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
                         &mut app.sync.relay.url_input,
                         "questions-relay-url",
                         DEFAULT_RELAY_URL,
-                    )
-                });
-                // A one-time secret: masked, and erased after each try.
-                s.field("Team code", |ui| {
-                    secure_input(
-                        ui,
-                        TEAM_CODE_FIELD,
-                        &mut app.sync.relay.team_code,
-                        TEAM_CODE_CAPACITY,
-                        "apassy_tcd_…",
                     )
                 });
                 s.field("Name of this Mac", |ui| {
@@ -1045,7 +1059,7 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
             },
         );
         if busy {
-            kit::tone_note(ui, "Apassy makes the team on the relay…", Tone::Accent);
+            kit::tone_note(ui, "Connecting…", Tone::Accent);
         }
         if let Some(error) = app.sync.relay.questions.error.clone() {
             kit::tone_note(ui, error, Tone::Critical);
@@ -1055,7 +1069,7 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
             |_| {},
             |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
-                    turn_on = kit::button(ui, "Turn On…", Style::Prominent).clicked();
+                    turn_on = kit::button(ui, "Connect…", Style::Prominent).clicked();
                 });
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
             },
@@ -1069,9 +1083,7 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
             app.sync.relay.url_input.clone(),
             app.sync.relay.device_input.clone(),
         );
-        // The code works once: the field forgets it after each try.
-        let code = Ephemeral::take(&mut app.sync.relay.team_code).into_zeroizing();
-        forget_secret_field(ctx, TEAM_CODE_FIELD);
+        let code = Zeroizing::new(String::new());
         if let Err(text) = app.questions_ask_new_team(entry, &url, code, &device, Some(ctx)) {
             app.sync.relay.questions.error = Some(text.clone());
             app.set_err(text);

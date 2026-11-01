@@ -620,7 +620,12 @@ impl QuestionsClient {
         Ok(LinkCode {
             code,
             link,
-            expires_at: created.expires_at,
+            expires_at: created.expires_at.min(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+                    .saturating_add(600),
+            ),
         })
     }
 

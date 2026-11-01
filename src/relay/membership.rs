@@ -108,7 +108,7 @@ pub enum QuestionsAvailability {
     /// Off; the relay sync team of the vault can carry them, with no relay call.
     CanTurnOn { team_id: String },
     /// Off; the vault is not on the relay and has no questions team. A
-    /// notifications-only team needs a team code.
+    /// Connect makes a questions-only team without an account or operator code.
     NeedsTeam,
     /// Off; the vault has a questions team that this Mac is not in: it joins with a
     /// device link from a Mac in it ([`join_questions_team`]), never with a new team.

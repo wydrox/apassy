@@ -44,8 +44,13 @@ struct AgentsView: View {
             isPresented: $showsConnect,
             onDismiss: {
                 let opensCompanion = questions?.attach == .companion
+                let opensRequests = questions?.attach == .attached
                 questions?.dismissAttach()
                 if opensCompanion { root?.openPreparedCompanion() }
+                if opensRequests {
+                    ui?.tab = .decisions
+                    close?()
+                }
             }
         ) {
             if let questions { ConnectQuestionsView(model: questions) }

@@ -494,7 +494,8 @@ extension PreviewVaultService {
         questionsState.attachPolls = 0
         questionsState.attachAnswerKey = answerKey
         let info = AttachInfo(
-            state: .waiting, team: "Notifications", words: ["amber", "marble"],
+            state: .waiting, team: "Notifications",
+            words: link.contains("&handoff=2.") ? ["amber", "marble", "cedar", "river", "panda", "tulip"] : ["amber", "marble"],
             expiresAt: Int64(Date().timeIntervalSince1970) + 600)
         questionsState.attach = info
         return info

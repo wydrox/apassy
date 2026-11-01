@@ -7,6 +7,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 ### Added
 
 - **MCP:** bounded concurrent calls with a reserved catalog/status slot, cancellation that withdraws pending questions, and 15-second progress. Broker operation receipts support reconnect recovery and optional idempotency keys without blind mutation replay. Receipts retain metadata only for 15 minutes after completion; executing commands are not undone by cancellation.
+- Free and Personal vaults can connect an iPhone for approvals and push without an account or operator code. Connect saves its key before contacting the relay, reuses it after failures, and confirms each iPhone with safety words.
 - **Browser extension:** offer to save a typed login or update an existing account after a sign-in/sign-up submission and same-origin navigation or form transition. Username-first flows retain short-lived metadata. A trusted Save/Update click uses the existing app owner check; pending passwords stay only in memory for at most three minutes. Never for this site shares the toolbar's reversible hostname exclusion.
 - Transactional staged host-file repair, connection identity metadata, and Settings host health with owner-checked reconnect.
 - Opt-in isolated synthetic broker/MCP/hook diagnostic through `doctor --live`.

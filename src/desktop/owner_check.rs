@@ -1270,7 +1270,7 @@ impl OwnerRequest {
                 relay_url,
                 team_id: None,
             } => format!(
-                "Make a team for the questions of this vault on the Apassy relay at {relay_url}, with the team code. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+                "Connect this vault to the Apassy relay at {relay_url} for iPhone approvals. No account or subscription is needed. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
             ),
             Self::AnswerRemoteQuestion { choice, action, .. } => {
                 let (agent, asker) = match action {

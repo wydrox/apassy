@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		08D0DB40140EFF9FAB34D4FE /* ConnectUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95E9C2176924E5C4BE987027 /* ConnectUITests.swift */; };
 		00DA596667674069A3E69886 /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEF0032D16E75A0003ECAA5C /* InboxView.swift */; };
 		0506ED95D4D2BD5CFC0B9311 /* PushRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47ED2073D0F7DC0E0A74B8F /* PushRegistrar.swift */; };
 		08FEE1E0E93044E3ECA287D2 /* VaultPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4C217EDB49F26B587027C8 /* VaultPrompts.swift */; };
@@ -145,6 +146,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		95E9C2176924E5C4BE987027 /* ConnectUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectUITests.swift; sourceTree = "<group>"; };
 		09431E87D7B3F006155FFB5D /* RunSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunSnapshot.swift; sourceTree = "<group>"; };
 		0BC42EE11D63D65DD187A2A1 /* AutoFillViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillViews.swift; sourceTree = "<group>"; };
 		0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExchangeView.swift; sourceTree = "<group>"; };
@@ -361,6 +363,7 @@
 		69C07771ACD15672D409A137 /* UITests */ = {
 			isa = PBXGroup;
 			children = (
+				95E9C2176924E5C4BE987027 /* ConnectUITests.swift */,
 				C9EE9019A903F7A1549BBB47 /* RequestsUITests.swift */,
 				328E3085509CB1EF6B2A4400 /* VaultTabsUITests.swift */,
 			);
@@ -775,6 +778,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				08D0DB40140EFF9FAB34D4FE /* ConnectUITests.swift in Sources */,
 				7C3184E037869027ECC7CDFE /* RequestsUITests.swift in Sources */,
 				C49AC2E93BFAE315331E62DC /* VaultTabsUITests.swift in Sources */,
 			);

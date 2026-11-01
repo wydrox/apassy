@@ -883,7 +883,7 @@ ALTER TABLE agent DROP COLUMN note;
 /// also loses the parts of the later schemas ([`SCHEMA19_ONLY`], [`SCHEMA18_ONLY`]), so
 /// the snapshot is then the snapshot of the app of that schema.
 fn set_schema(path: &Path, version: i64) {
-    assert_eq!(schema_marks(path), (20, 20));
+    assert_eq!(schema_marks(path), (21, 21));
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.pragma_update(None, "key", PASS).unwrap();
     let stored: Vec<u8> = conn
@@ -894,6 +894,10 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 21 {
+        conn.execute_batch("DROP TABLE relay_connect_pending")
+            .unwrap();
+    }
     if version < 20 {
         let names: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'bouncer_scope_%'")
@@ -933,14 +937,14 @@ fn old_snapshot(f: &mut Fixture) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema20_with_no_edit() {
+fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit() {
     let mut f = Fixture::new();
     f.mac.add(draft("Mac credential")).unwrap();
 
     // A later schema and a wrong passphrase make no vault on the phone.
     let (future, _) = f.paths();
     f.mac.write_sync_copy(&future, "Newer Mac").unwrap();
-    set_schema(&future, 21);
+    set_schema(&future, apassy::vault::SCHEMA_VERSION + 1);
     let import = |input: &Path, passphrase: &str| json!({"op":"icloud_import", "name":"Personal", "passphrase":passphrase, "input_path":input});
     assert_eq!(fails(&f.phone, import(&future, PASS)), "unsupported_schema");
     let (input, _) = old_snapshot(&mut f);
@@ -973,7 +977,7 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema20_with_no_edit() 
     );
     assert_eq!(apassy::sync::file_sha256(&input).unwrap(), input_sha);
     assert_eq!(schema_marks(&input), (17, 17));
-    assert_eq!(schema_marks(&output), (20, 20));
+    assert_eq!(schema_marks(&output), (21, 21));
     let complete = f.complete(&prepared);
     assert_eq!(complete["state"], "ok");
     assert_eq!(complete["merged"]["inserted"], 0);
@@ -982,7 +986,7 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema20_with_no_edit() 
 
     // The Mac and a new Mac take the output: no duplicate, no conflict.
     let report = f.mac.merge_from(&output, &SyncScope::vault()).unwrap();
-    assert_eq!(report.remote_schema, 20);
+    assert_eq!(report.remote_schema, 21);
     assert!(!report.remote_outdated());
     assert!(!report.changed_local());
     assert!(report.conflicts.is_empty());
@@ -1090,13 +1094,13 @@ fn already_connected_phone_accepts_a_released_schema16_conflict_snapshot() {
     let input_sha = apassy::sync::file_sha256(&input).unwrap();
     let prepared = f.prepare(&input, &output);
     assert_eq!(prepared["write_required"], true);
-    assert_eq!(schema_marks(&output), (20, 20));
+    assert_eq!(schema_marks(&output), (21, 21));
     assert_eq!(f.titles().len(), 3);
     // Swift processes provider conflicts first, the current file last, and completes
     // only the final preparation. All recovered records must survive that chain.
     let final_prepared = f.prepare(&current_input, &final_output);
     assert_eq!(final_prepared["write_required"], true);
-    assert_eq!(schema_marks(&final_output), (20, 20));
+    assert_eq!(schema_marks(&final_output), (21, 21));
     let status = f.complete(&final_prepared);
     assert_eq!(status["state"], "ok");
     assert_eq!(status["merged"]["inserted"], 0);

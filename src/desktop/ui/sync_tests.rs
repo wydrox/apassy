@@ -2927,11 +2927,10 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     );
     let text = frames(&mut a);
     for expected in [
-        "Questions of “Personal” through the Apassy relay",
+        "Get approvals on your iPhone",
         "Relay address",
-        "Team code",
         "Name of this Mac",
-        "Turn On…",
+        "Connect…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -2975,7 +2974,7 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     assert!(
         request
             .describe()
-            .starts_with("Make a team for the questions of this vault on the Apassy relay"),
+            .starts_with("Connect this vault to the Apassy relay"),
         "{}",
         request.describe()
     );
@@ -3104,13 +3103,16 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         "{link}"
     );
     for expected in [
-        "Add a device to the questions of “Personal”",
-        "On the iPhone, open Apassy, select Questions, and scan this code",
-        "Copy link",
+        "Connect your iPhone to “Personal”",
+        "On your iPhone, open the same vault from iCloud Drive",
         "Waiting for the other device…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    assert!(
+        !text.contains("Copy link"),
+        "Connect must not copy its capability to the pasteboard"
+    );
     assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
 
     // The iPhone scans the code and asks, as `join_attach` does: its link carries its
@@ -3120,11 +3122,21 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         crate::questions::device_link::link_device_name("Test iPhone", phone_key.public_key())
             .expect("name");
     let pending = PendingJoin::request(&link, "", &link_name).expect("join");
+    assert_eq!(pending.safety.split_whitespace().count(), 6);
     a.relay_add_mac_poll_for_test();
     let links = a.relay_add_mac_links_for_test();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].device_name, link_name);
-    assert_eq!(links[0].safety.as_deref(), Some(pending.safety.as_str()));
+    assert_eq!(
+        links[0]
+            .safety
+            .as_deref()
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        2,
+        "legacy wire proof"
+    );
     let text = frames(&mut a);
     assert!(
         text.contains("“Test iPhone” (an iPhone that answers with Face ID) asks for the questions of “Personal”. Both devices show:"),
@@ -3180,13 +3192,22 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     };
     assert!(no_iphone(&a), "no row before the confirmation");
 
+    // Even an owner proof cannot confirm after the locally held code expires.
+    let expiry = a.relay_set_link_expiry_for_test(0).unwrap();
+    a.relay_ask_confirm_for_test(links[0].id);
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.relay_settle_for_test();
+    assert!(pending.poll().unwrap().is_none());
+    assert!(no_iphone(&a));
+    a.relay_set_link_expiry_for_test(expiry).unwrap();
     a.relay_ask_confirm_for_test(links[0].id);
     a.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
     a.relay_settle_for_test();
     assert_eq!(
         a.status_text,
-        "Added. Test iPhone gets the questions of this vault and answers with Face ID once this vault syncs to it.",
+        "Connected. Test iPhone can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts.",
         "{}",
         a.status_text
     );
@@ -3346,7 +3367,7 @@ fn add_an_iphone_twice_adds_two_answering_devices() {
         a.relay_settle_for_test();
         assert!(
             a.status_text
-                .starts_with(&format!("Added. {name} gets the questions")),
+                .starts_with(&format!("Connected. {name} can now show requests")),
             "{}",
             a.status_text
         );
@@ -3486,7 +3507,12 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
     let links = a.relay_add_mac_links_for_test();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].device_name, "Synthetic Mac mini");
-    assert_eq!(links[0].safety.as_deref(), Some(words.as_str()));
+    assert_eq!(words.split_whitespace().count(), 6);
+    let text = frames(&mut a);
+    assert!(
+        text.contains(&words),
+        "both devices authenticate the same transcript: {text}"
+    );
     a.relay_ask_confirm_for_test(links[0].id);
     let request = a.owner.check.as_ref().expect("owner check").request.clone();
     assert!(
@@ -3545,4 +3571,55 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
         .expect("open");
     assert_eq!(rows_a.len(), 1, "A wrote no row for B");
     assert_eq!(relay.devices().len(), 2, "one team");
+}
+
+#[test]
+fn connect_onboarding_checks_the_owner_then_continues_to_iphone_pairing() {
+    use crate::broker::approvals::OwnerCheck;
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut app = folders.mac("connect-mac");
+    create(&mut app, "Personal", PASS, Some(&folders.icloud));
+    let id = current_id(&app);
+    super::open_settings(&mut app, super::SettingsSection::Devices);
+    app.questions_add_iphone(None);
+    let text = frames(&mut app);
+    assert!(text.contains("Get approvals on your iPhone"), "{text}");
+    assert!(!text.contains("Team code"), "{text}");
+    let entry = app.vault_list.registry.get(&id).unwrap().clone();
+    app.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(String::new()),
+        "Synthetic Mac",
+        None,
+    )
+    .unwrap();
+    assert!(relay.log().is_empty(), "no write before the owner check");
+    assert!(
+        app.owner_ui
+            .session
+            .with_vault(|v| v.pending_connect().unwrap().is_none())
+            .unwrap()
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    app.questions_settle_for_test();
+    assert!(questions_of(&app).is_some());
+    assert!(
+        app.owner_ui
+            .session
+            .with_vault(|v| v.pending_connect().unwrap().unwrap().created.is_some())
+            .unwrap()
+    );
+    assert!(matches!(
+        app.ui.sheet,
+        Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::AddIphone { .. })))
+    ));
+    assert!(relay.log().iter().any(|line| line == "POST /v1/connect"));
+    assert!(
+        !relay
+            .log()
+            .iter()
+            .any(|line| line.contains("/v1/teams") || line.contains("/v1/sync"))
+    );
 }

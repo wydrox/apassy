@@ -365,6 +365,9 @@ struct ListAnswer {
 /// A join of a notifications-only team.
 struct Attaching {
     pending: PendingJoin,
+    channel: Option<apassy::relay::pairing::PairingChannel>,
+    answer_key: Option<Vec<u8>>,
+    device_name: String,
     /// The team of a removed membership of this iPhone that the new key replaces.
     replaces: Option<String>,
     vault_id: String,
@@ -1796,6 +1799,9 @@ impl Core {
                     continue;
                 }
                 last = last.max(record.seq);
+                if record.key_id == apassy::relay::pairing::HANDOFF_KEY_ID {
+                    continue;
+                }
                 if let Some(old) = context.records.get(&record.qid) {
                     // A call that ran at the same time brought a newer state.
                     if old.seq > record.seq {
@@ -2543,7 +2549,15 @@ impl Core {
         if let Some(previous) = previous {
             let _ = previous.pending.cancel();
         }
-        let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name).map_err(
+        let full_link = link;
+        let parsed = apassy::relay::pairing::PairingChannel::parse(link);
+        if link.contains("&handoff=") && parsed.is_none() {
+            return Err(CoreError::invalid(
+                "This pairing code is damaged. Make a new code on the Mac.",
+            ));
+        }
+        let channel = parsed.map(|(_, channel)| channel);
+        let pending = PendingJoin::request(full_link, DEFAULT_RELAY_URL, device_name).map_err(
             |error| match CoreError::from(error) {
                 error if matches!(error.code, "removed" | "not_found") => CoreError::new(
                     "link_invalid",
@@ -2553,6 +2567,9 @@ impl Core {
             },
         )?;
         let attaching = Attaching {
+            device_name: device_name.to_owned(),
+            answer_key: apassy::questions::device_link::split_link_device_name(device_name).1,
+            channel,
             replaces,
             vault_id: entry.id,
             team: pending.team.clone(),
@@ -2575,6 +2592,13 @@ impl Core {
         let attaching = guard(&self.questions).attach.take().ok_or_else(|| {
             CoreError::invalid("No connection waits. Scan the code of the Mac again.")
         })?;
+        if attaching.expires_at <= now() {
+            let _ = attaching.pending.cancel();
+            return Err(CoreError::new(
+                "link_invalid",
+                "This pairing code expired. Make a new code in Settings > Devices on the Mac.",
+            ));
+        }
         let joined = match attaching.pending.poll() {
             Ok(None) => {
                 let view = attaching.view("waiting");
@@ -2598,6 +2622,36 @@ impl Core {
                 return Err(error);
             }
         };
+        let handoff = if let Some(channel) = &attaching.channel {
+            let member = joined.member();
+            let client = apassy::questions::QuestionsClient::from_member(member);
+            match channel.receive(
+                &client,
+                joined.member().team_id(),
+                &apassy::sync::DeviceKey::from_pkcs8(
+                    joined
+                        .key_pkcs8()
+                        .ok_or_else(|| CoreError::invalid("Missing pairing private key"))?,
+                )?,
+                &attaching.device_name,
+            ) {
+                Ok(Some(handoff)) => Some(handoff),
+                result => {
+                    let view = attaching.view("waiting");
+                    guard(&self.questions).attach.get_or_insert(attaching);
+                    return match result {
+                        Ok(None) => Ok(view),
+                        Err(_) => Err(CoreError::new(
+                            "relay_unreachable",
+                            "Waiting for the Mac to transfer the connection keys. Check your internet connection and keep the pairing screen open on the Mac.",
+                        )),
+                        _ => unreachable!(),
+                    };
+                }
+            }
+        } else {
+            None
+        };
         let member = joined.member();
         let stored = (|| -> CoreResult<()> {
             if self.selected()?.id != attaching.vault_id {
@@ -2613,9 +2667,6 @@ impl Core {
             self.with_vault_mut(|vault| {
                 // The removed key goes; the row of this iPhone comes from the Mac that
                 // confirmed it, through the sync of the vault.
-                if let Some(team) = &replaces {
-                    vault.remove_relay_membership(team)?;
-                }
                 let membership = RelayMembership {
                     team_id: member.team_id().to_owned(),
                     relay_url: member.relay_url().to_owned(),
@@ -2625,7 +2676,23 @@ impl Core {
                     purposes: BTreeSet::from([MembershipPurpose::Questions]),
                     created_at: 0,
                 };
-                vault.add_relay_membership(&membership)?;
+                if let Some(handoff) = &handoff {
+                    let answer_key = attaching
+                        .answer_key
+                        .as_deref()
+                        .ok_or_else(|| CoreError::invalid("The answer key is missing."))?;
+                    vault.adopt_question_handoff(
+                        handoff,
+                        &membership,
+                        answer_key,
+                        replaces.as_deref(),
+                    )?;
+                } else {
+                    if let Some(team) = &replaces {
+                        vault.remove_relay_membership(team)?;
+                    }
+                    vault.add_relay_membership(&membership)?;
+                }
                 // The new device starts the context of this vault, with its session.
                 if let Some((_, keys)) = read_keys(vault)? {
                     guard(&self.questions).put(&attaching.vault_id, Arc::new(member), keys);
