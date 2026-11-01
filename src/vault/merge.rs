@@ -3133,6 +3133,10 @@ mod schema16_tests {
         fixture(&source);
         let mut local = adopt(&source, &dir.path().join("local.db"));
         let baseline = local.sync_content(&SyncScope::vault()).unwrap();
+        let future_sql = format!(
+            "PRAGMA user_version = {0}; UPDATE vault_meta SET schema_version = {0};",
+            crate::vault::SCHEMA_VERSION + 1
+        );
         for (name, sql, digest, expected) in [
             (
                 "changed",
@@ -3148,7 +3152,7 @@ mod schema16_tests {
             ),
             (
                 "future",
-                "PRAGMA user_version = 21; UPDATE vault_meta SET schema_version = 21;",
+                future_sql.as_str(),
                 true,
                 VaultErrorKind::UnsupportedSchema,
             ),
