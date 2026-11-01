@@ -79,11 +79,13 @@ test("Never excludes the site after reload and can be undone in toolbar settings
   await type(page, "#username", "new@example.test"); await type(page, "#password", OFFER_PASSWORD);
   await page.locator("#submit").click(); await expect.poll(() => shadowText(cdp, banner)).toContain("Save this login");
   await shadowButton(cdp, banner, "Never for this site");
+  await expect.poll(async () => (await h.handle({ type: "login_access_state" })).siteOff).toBe(true);
+  await expect(page.locator("[data-apassy-save-offer]")).toHaveCount(0);
   await page.goto(h.url("/offer/signin", "localhost"));
   await type(page, "#username", "new@example.test"); await type(page, "#password", OFFER_PASSWORD);
   await page.locator("#submit").click(); await expect(page).toHaveURL(/\/offer\/done/);
   await expect(page.locator("[data-apassy-save-offer]")).toHaveCount(0);
-  expect((await h.handle({ type: "login_access_state" })).siteOff).toBe(true);
+  await expect.poll(async () => (await h.handle({ type: "login_access_state" })).siteOff).toBe(true);
   await h.handle({ type: "login_site", url: page.url(), on: true });
-  expect((await h.handle({ type: "login_access_state" })).siteOff).toBe(false);
+  await expect.poll(async () => (await h.handle({ type: "login_access_state" })).siteOff).toBe(false);
 });
