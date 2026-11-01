@@ -162,6 +162,14 @@ final class RequestsUITests: XCTestCase {
         XCTAssertTrue(answered.waitForExistence(timeout:10))
         XCTAssertFalse(app.buttons["access.allow-once"].exists)
         attach(app,"iphone-access-denied")
+        app.navigationBars.buttons.firstMatch.tap()
+        app.segmentedControls.buttons["History"].tap()
+        let saved=app.buttons.matching(NSPredicate(format:"label CONTAINS %@","Synthetic API key")).firstMatch
+        XCTAssertTrue(saved.waitForExistence(timeout:5));saved.tap()
+        XCTAssertTrue(app.navigationBars["Access consent history"].waitForExistence(timeout:5))
+        XCTAssertFalse(app.buttons["access.allow-once"].exists)
+        XCTAssertFalse(app.buttons["access.deny"].exists)
+        attach(app,"iphone-access-history")
     }
     func testAccessFaceIDStateCancellationAndFreshRetry() {
         let app=launch(["-ApassyPreviewDecisions","access"])
