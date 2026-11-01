@@ -1103,7 +1103,11 @@ impl OwnerGate {
         source: LocalWindowSource,
     ) -> Option<OwnerProof> {
         if !source.permits(&action) {
-            tracing::info!(reason = "source_action", "owner window reuse refused");
+            tracing::info!(
+                reason = "source_action",
+                heartbeat_age_ms = self.window.heartbeat_age_ms(),
+                "owner window reuse refused"
+            );
             return None;
         }
         // Current OS state is checked outside the vault mutex, in addition to the
@@ -1113,7 +1117,11 @@ impl OwnerGate {
             .as_ref()
             .is_some_and(|h| !h.owner_session_active())
         {
-            tracing::info!(reason = "session_inactive", "owner window reuse refused");
+            tracing::info!(
+                reason = "session_inactive",
+                heartbeat_age_ms = self.window.heartbeat_age_ms(),
+                "owner window reuse refused"
+            );
             self.window.observe(false);
             return None;
         }
@@ -1181,7 +1189,8 @@ impl OwnerGate {
             {
                 self.window.seed(proof.epoch, proof.method, generation)
             }
-            Err(_) => self.window.invalidate(),
+            Err(OwnerAuthError::Cancelled) => self.window.invalidate_for("check_cancelled"),
+            Err(_) => self.window.invalidate_for("check_failed"),
             _ => {}
         }
         result

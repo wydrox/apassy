@@ -1794,7 +1794,10 @@ impl DesktopApp {
     pub(crate) fn close_owner_check(&mut self, ctx: Option<&egui::Context>) {
         self.owner.check_probe = None;
         if let Some(mut dialog) = self.owner.check.take() {
-            self.owner_ui.session.owner_window.invalidate();
+            self.owner_ui
+                .session
+                .owner_window
+                .invalidate_for("check_cancelled");
             dialog.passphrase.zeroize();
         }
         if let Some(ctx) = ctx {

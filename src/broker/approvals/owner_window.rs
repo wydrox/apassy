@@ -140,6 +140,10 @@ impl OwnerWindow {
     /// Lock, sleep, session switch, quit, failed/cancelled check, setting change,
     /// or observer loss all revoke issued proofs as well as the active window.
     pub(crate) fn invalidate(&self) {
+        self.invalidate_for("explicit_invalidation");
+    }
+    pub(crate) fn invalidate_for(&self, event: &'static str) {
+        tracing::info!(event, "owner window revoked");
         let mut s = self.state.lock().unwrap();
         s.generation = s
             .generation
@@ -216,6 +220,13 @@ impl OwnerWindow {
                 method,
             });
         }
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn heartbeat_age_ms(&self) -> Option<u64> {
+        let s = self.state.lock().unwrap();
+        s.healthy_at
+            .map(|at| self.clock.now().saturating_sub(at).as_millis() as u64)
     }
 
     #[cfg(any(feature = "desktop", test))]
