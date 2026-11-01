@@ -4,6 +4,8 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-11-01
+
 ### Added
 
 - **MCP:** bounded concurrent calls with a reserved catalog/status slot, cancellation that withdraws pending questions, and 15-second progress. Broker operation receipts support reconnect recovery and optional idempotency keys without blind mutation replay. Receipts retain metadata only for 15 minutes after completion; executing commands are not undone by cancellation.
@@ -16,6 +18,11 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - **Inline login menu:** align directly below the field, or above when the menu would cover Submit and room permits. Clamp to the viewport and reposition on scrolling and resizing; never detach beside the form.
 - Preserve existing catalog restrictions during reconnect; align helper help/version/usage handling and bound fixture inputs.
+
+### Upgrade notes
+
+- A 0.5.9 Mac converts the vault to schema 21 at unlock. Keep shared-vault clients locked/closed and keep an encrypted pre-upgrade backup. Update every Mac to 0.5.9 and the iPhone to TestFlight 0.5.9 before resuming sync; older apps cannot read schema 21.
+- TestFlight and the Chrome Web Store update follow separately. The Mac download and in-app auto-update publish with this release; relay 0.5.9 is already live.
 
 ## [0.5.8] - 2026-10-31
 
