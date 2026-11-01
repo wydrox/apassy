@@ -194,7 +194,7 @@ Best-effort settle retries resend the identical envelope (the relay's idempotent
 | Per local vault on each asking Mac | Ten open access requests; twenty new incarnations per rolling hour. Not a shared cross-Mac quota |
 | Coalescing | Same agent/item UUID/revision/policy/canonical cwd/project/action/hosts returns the existing id/qid unchanged, retains first reason, sends no new push. A different scope while active is `access_request_waiting`; do not replace/relabel a card |
 | Notification | One logical publication per incarnation (bounded card-POST retries use the same qid/body), and one new dispatch per agent per 30 seconds on this Mac. During cooldown refuse remote dispatch rather than delay beyond its deadline. Relay/APNs delivery may retry, duplicate, collapse or drop |
-| Local remote-publication reservation | At most one unsettled access-card publication per asking Mac; reserve before POST, including uncertain responses. Nine of the device's ten relay slots remain for eight concurrent broker operations and one Connect handoff. Other access requests retain local review and their original expiry |
+| Local remote-publication reservation | At most one unsettled access-card publication per asking Mac; reserve in encrypted local state before POST, including uncertain responses and vault/worker restarts. Nine of the device's ten relay slots remain for eight concurrent broker operations and one Connect handoff. Other access requests retain local review and their original expiry |
 | Relay | Shared existing limits: 20 open/team, 10/asking device, 15/member; 300 questions/team/hour, configured shares/byte budget; three answers/device/question, twenty total; existing long-poll limits |
 | Ciphertext caps | Card 32784; answer 8208; settle 1040 bytes; include wrapper/signature overhead before sending |
 
@@ -216,8 +216,12 @@ The `policy_digest` serializer and added agent input/status/error types must be 
 
 ## 9. Implementation encoding and agent operations
 
-The policy serializer is `apassy-access-policy-v1\0`, then F(epoch), F(canonical cwd),
-F(project key). Each query below contributes F(its exact SQL text), then rows in the
+The local policy serializer is `apassy-access-policy-v2\0`, then F(epoch), F(canonical cwd),
+F(project key), U64(global mutation generation), U64(agent mutation generation),
+U64(item mutation generation). Connection-local TEMP triggers increment these
+generations on authorization-table writes, including a change later reverted to
+its old value. They roll back with failed transactions; a new connection has a
+new epoch and no permits. These counters are not synced or exported. Each query below contributes F(its exact SQL text), then rows in the
 stated order: byte 1 per row, followed by typed columns, and byte 0 after the last
 row. NULL is byte 0; INTEGER is byte 1 plus signed i64 big endian; TEXT is byte 2
 plus F(exact UTF-8); BLOB is byte 3 plus F(bytes). REAL fails closed. SHA-256 covers

@@ -81,23 +81,48 @@ pub(super) fn run(shared: &Shared) {
                         "Review on this Mac. Relay capacity is reserved for execution questions and iPhone connection.".into());
                     continue;
                 }
-                let sealed = (|| {
-                    let signature = active
-                        .client
-                        .sign(&body_signature_message("card", &r.card.body).ok()?)
-                        .ok()?;
-                    let wrapper = SignedBody::new("card", &r.card.body, &signature).ok()?;
-                    let bytes = serde_json::to_vec(&wrapper).ok()?;
-                    Sealed::new(
-                        &key,
-                        &card_aad(&c.team_id, &c.qid, &c.key_id, "member", c.expires_at),
-                        &bytes,
-                    )
-                })();
+                let sealed = if let Some(bytes) = &r.envelope {
+                    serde_json::from_slice::<(String, String, String)>(bytes)
+                        .ok()
+                        .map(|(key_id, nonce, ciphertext)| Sealed {
+                            key_id,
+                            nonce,
+                            ciphertext,
+                        })
+                } else {
+                    (|| {
+                        let signature = active
+                            .client
+                            .sign(&body_signature_message("card", &r.card.body).ok()?)
+                            .ok()?;
+                        let wrapper = SignedBody::new("card", &r.card.body, &signature).ok()?;
+                        let bytes = serde_json::to_vec(&wrapper).ok()?;
+                        Sealed::new(
+                            &key,
+                            &card_aad(&c.team_id, &c.qid, &c.key_id, "member", c.expires_at),
+                            &bytes,
+                        )
+                    })()
+                };
                 let Some(sealed) = sealed else {
                     lock(&shared.view).access_local_only.insert(r.id,"Review this access request on this Mac. It could not be sent to your other devices.".into());
                     continue;
                 };
+                let reserved = (|| {
+                    let bytes =
+                        serde_json::to_vec(&(&sealed.key_id, &sealed.nonce, &sealed.ciphertext))
+                            .ok()?;
+                    let mut guard = lock(&shared.vault);
+                    Shared::vault_of(&mut guard, &active)?
+                        .keep_access_envelope(r.id, &bytes)
+                        .ok()
+                })()
+                .is_some();
+                if !reserved {
+                    lock(&shared.view).access_local_only.insert(r.id,
+                        "Review on this Mac. A prior relay publication still reserves the access slot until settlement or expiry.".into());
+                    continue;
+                }
                 attempts.insert(
                     c.qid.clone(),
                     Attempt {
@@ -221,7 +246,12 @@ pub(super) fn run(shared: &Shared) {
                     match active.client.settle(&c.qid, settle) {
                         Ok(()) => {
                             a.settled = true;
-                            a.slot_held = false;
+                            let mut guard = lock(&shared.vault);
+                            if Shared::vault_of(&mut guard, &active)
+                                .is_some_and(|v| v.release_access_envelope(r.id).is_ok())
+                            {
+                                a.slot_held = false;
+                            }
                         }
                         Err(e) if !e.can_pass() => a.settled = true,
                         Err(_) => {}

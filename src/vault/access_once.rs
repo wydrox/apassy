@@ -67,6 +67,97 @@ fn storage<E>(_: E) -> super::VaultError {
     err(VaultErrorKind::Storage)
 }
 
+/// Connection-local mutation counters prevent an authorization ABA: restoring
+/// earlier values must not restore an earlier signed consent. TEMP triggers also
+/// cover transactional merge paths without relying on each setter remembering a
+/// callback. Their updates roll back with the policy transaction. A new
+/// connection has a new vault epoch and no permit authority.
+fn policy_generations(conn: &rusqlite::Connection, agent: u64, item: u64) -> VaultResult<[u64; 3]> {
+    let installed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='access_policy_generation')",
+        [], |r|r.get(0)).map_err(storage)?;
+    if !installed {
+        let mut sql = String::from(
+            "SAVEPOINT access_policy_generation_install;
+            CREATE TEMP TABLE access_policy_generation (
+            entity TEXT NOT NULL, entity_id INTEGER NOT NULL, generation INTEGER NOT NULL,
+            PRIMARY KEY(entity,entity_id));",
+        );
+        for (table, entity, id) in [
+            ("agent", "agent", "id"),
+            ("agent_exception", "agent", "agent_id"),
+            ("exec_grant", "agent", "agent_id"),
+            ("grant_rule", "agent", "agent_id"),
+            ("item", "item", "id"),
+            ("env_binding", "item", "item_id"),
+            ("declaration", "item", "item_id"),
+            ("declaration_source", "item", "item_id"),
+            ("item_policy", "item", "item_id"),
+            ("item_field", "item", "item_id"),
+            ("item_archive", "item", "item_id"),
+            ("restore_review", "item", "item_id"),
+            ("trusted_device", "global", ""),
+            ("relay_membership", "global", ""),
+            ("vault_secret", "global", ""),
+        ] {
+            for (event, rows) in [
+                ("INSERT", &["NEW"][..]),
+                ("UPDATE", &["OLD", "NEW"][..]),
+                ("DELETE", &["OLD"][..]),
+            ] {
+                sql.push_str(&format!("CREATE TEMP TRIGGER access_policy_{table}_{event} AFTER {event} ON main.{table} BEGIN "));
+                for row in rows {
+                    let identity = if id.is_empty() {
+                        "0".into()
+                    } else {
+                        format!("{row}.{id}")
+                    };
+                    sql.push_str(&format!(
+                        "INSERT INTO access_policy_generation(entity,entity_id,generation)
+                        VALUES('{entity}',{identity},1) ON CONFLICT(entity,entity_id)
+                        DO UPDATE SET generation=generation+1;"
+                    ));
+                }
+                sql.push_str(" END;");
+            }
+        }
+        // Ordinary metadata writes do not revoke authority; these exact vault
+        // policy columns do. Inserts/deletes occur only at initialization/restore,
+        // which already create a different epoch.
+        for (table, column) in [
+            ("vault_meta", "token_lifetime_days"),
+            ("sync_meta", "vault_id"),
+        ] {
+            sql.push_str(&format!("CREATE TEMP TRIGGER access_policy_{table}_UPDATE AFTER UPDATE OF {column} ON main.{table}
+                WHEN OLD.{column} IS NOT NEW.{column} BEGIN
+                INSERT INTO access_policy_generation(entity,entity_id,generation) VALUES('global',0,1)
+                ON CONFLICT(entity,entity_id) DO UPDATE SET generation=generation+1; END;"));
+        }
+        sql.push_str(" RELEASE access_policy_generation_install;");
+        if let Err(error) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK TO access_policy_generation_install; RELEASE access_policy_generation_install;");
+            return Err(storage(error));
+        }
+    }
+    let mut values = [0; 3];
+    for (index, (entity, id)) in [("global", 0), ("agent", agent), ("item", item)]
+        .into_iter()
+        .enumerate()
+    {
+        let value: i64 = conn
+            .query_row(
+                "SELECT generation FROM access_policy_generation WHERE entity=?1 AND entity_id=?2",
+                params![entity, i64::try_from(id).map_err(storage)?],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?
+            .unwrap_or(0);
+        values[index] = u64::try_from(value).map_err(storage)?;
+    }
+    Ok(values)
+}
+
 #[derive(Debug, Clone)]
 pub struct AccessRecord {
     pub id: u64,
@@ -127,7 +218,8 @@ impl Vault {
         project: &str,
     ) -> VaultResult<String> {
         let conn = self.conn_ref()?;
-        let mut out = Zeroizing::new(b"apassy-access-policy-v1\0".to_vec());
+        let generations = policy_generations(conn, agent, item)?;
+        let mut out = Zeroizing::new(b"apassy-access-policy-v2\0".to_vec());
         let field = |out: &mut Vec<u8>, bytes: &[u8]| -> VaultResult<()> {
             out.extend(u32::try_from(bytes.len()).map_err(storage)?.to_be_bytes());
             out.extend(bytes);
@@ -135,6 +227,9 @@ impl Vault {
         };
         for bytes in [self.epoch.as_slice(), cwd.as_bytes(), project.as_bytes()] {
             field(&mut out, bytes)?;
+        }
+        for generation in generations {
+            out.extend(generation.to_be_bytes());
         }
         // Fixed order, column order and SQL storage types; no SELECT *, Debug or secret fields.
         for (sql, args) in [
@@ -635,12 +730,46 @@ impl Vault {
             })
     }
     pub fn keep_access_envelope(&mut self, id: u64, envelope: &[u8]) -> VaultResult<()> {
+        let record = self.scoped_access_request(id)?;
+        if let Some(saved) = &record.envelope {
+            return if saved == envelope {
+                Ok(())
+            } else {
+                Err(err(VaultErrorKind::Conflict))
+            };
+        }
+        if record.state != "open" || !self.access_record_live(&record) {
+            return Err(err(VaultErrorKind::Expired));
+        }
+        // A relay slot can outlive this vault session. Keep its reservation in
+        // encrypted local state until confirmed settlement or original expiry.
+        // Agent revocation may remove the legacy parent row. Its relay lease
+        // still exists, so read reservations independently of that join. At most
+        // twenty creations/hour can have an unexpired five-minute lease.
+        let mut stmt = self.conn_ref()?.prepare(
+            "SELECT card FROM access_request_v1 WHERE envelope IS NOT NULL ORDER BY id DESC LIMIT 100").map_err(storage)?;
+        let cards = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(storage)?;
+        for card in cards {
+            let card: Card = serde_json::from_slice(&card.map_err(storage)?).map_err(storage)?;
+            if card.expires_at > now() {
+                return Err(err(VaultErrorKind::Busy));
+            }
+        }
+        drop(stmt);
         self.conn_mut()?
             .execute(
                 "UPDATE access_request_v1 SET envelope=?2 WHERE id=?1 AND envelope IS NULL",
                 params![to_sql_id(id)?, envelope],
             )
             .map_err(storage)?;
+        Ok(())
+    }
+    pub(crate) fn release_access_envelope(&mut self, id: u64) -> VaultResult<()> {
+        self.conn_mut()?.execute(
+            "UPDATE access_request_v1 SET envelope=NULL WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM access_request WHERE id=?1 AND state='open')",
+            [to_sql_id(id)?]).map_err(storage)?;
         Ok(())
     }
 }
@@ -850,6 +979,72 @@ mod tests {
         assert!(!v.access_admission_live(id, &op));
     }
     #[test]
+    fn reverting_a_policy_change_never_revives_access_consent() {
+        for admitted in [false, true] {
+            for visibility in [false, true] {
+                let (_dir, mut v, agent, item, id) = fixture();
+                allow(&mut v, id);
+                let operation = admitted.then(|| consume(&mut v, id, agent, item).unwrap());
+                if visibility {
+                    v.set_agent_sees_all(agent, false).unwrap();
+                    v.set_agent_sees_all(agent, true).unwrap();
+                } else {
+                    v.set_always_ask(item, true).unwrap();
+                    v.set_always_ask(item, false).unwrap();
+                }
+                assert!(!v.access_record_live(&v.scoped_access_request(id).unwrap()));
+                if let Some(operation) = operation {
+                    assert!(!v.access_admission_live(id, &operation));
+                } else {
+                    assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+                    assert!(consume(&mut v, id, agent, item).is_err());
+                }
+            }
+        }
+    }
+    #[test]
+    fn rolled_back_policy_writes_do_not_change_the_authorization_generation() {
+        let (_dir, mut v, _, item, id) = fixture();
+        allow(&mut v, id);
+        v.conn_ref()
+            .unwrap()
+            .execute_batch(&format!(
+                "SAVEPOINT synthetic_failed_policy;
+            INSERT INTO item_policy(item_id,always_ask) VALUES({item},1);
+            ROLLBACK TO synthetic_failed_policy; RELEASE synthetic_failed_policy;"
+            ))
+            .unwrap();
+        assert!(v.access_record_live(&v.scoped_access_request(id).unwrap()));
+    }
+    #[test]
+    fn visibility_restriction_records_invalidation_but_keeps_accepted_consent_history() {
+        for accepted in [false, true] {
+            let (_dir, mut v, agent, _, id) = fixture();
+            if accepted {
+                allow(&mut v, id);
+            }
+            v.set_agent_sees_all(agent, false).unwrap();
+            let record = v.scoped_access_request(id).unwrap();
+            assert_eq!(
+                record.state,
+                if accepted {
+                    "allowed_once"
+                } else {
+                    "invalidated"
+                }
+            );
+            assert_eq!(
+                record.receipt.unwrap().outcome,
+                if accepted {
+                    wire::Outcome::AllowedOnce
+                } else {
+                    wire::Outcome::Invalidated
+                }
+            );
+            assert_eq!(v.access_status(agent, id).unwrap().permit, "unavailable");
+        }
+    }
+    #[test]
     fn restart_loses_permits_but_keeps_receipts_and_creation_budget() {
         let (dir, mut v, agent, item, id) = fixture();
         allow(&mut v, id);
@@ -901,6 +1096,48 @@ mod tests {
         );
         v.cancel_scoped_access_request(agent, id).unwrap();
         assert!(!access_once::create(&mut v, &a, item, "Again", dir.path().to_str(), &scope).ok);
+    }
+    #[test]
+    fn remote_publication_reservation_survives_a_vault_restart() {
+        let (dir, mut v, old_agent, item, id) = fixture();
+        v.keep_access_envelope(id, b"synthetic encrypted envelope")
+            .unwrap();
+        v.lock().unwrap();
+        v.unlock("synthetic-access-test").unwrap();
+        let (agent, _) = v.register_agent("Synthetic second publisher").unwrap();
+        v.set_agent_sees_all(agent.id, true).unwrap();
+        let result = access_once::create(
+            &mut v,
+            &agent,
+            item,
+            "New session",
+            dir.path().to_str(),
+            &wire::Scope {
+                action: wire::Action::Read,
+                hosts: vec!["api.example.test".into()],
+            },
+        );
+        assert!(result.ok, "{result:?}");
+        let next = result.result.unwrap()["request_id"].as_u64().unwrap();
+        assert_eq!(
+            v.keep_access_envelope(next, b"synthetic second envelope")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::Busy
+        );
+        assert_eq!(v.scoped_access_request(id).unwrap().state, "invalidated");
+        v.revoke_agent(old_agent).unwrap();
+        assert!(v.scoped_access_request(id).is_err());
+        assert_eq!(
+            v.keep_access_envelope(next, b"synthetic second envelope")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::Busy
+        );
+        // Represents confirmed relay settlement of the old, invalidated card.
+        v.release_access_envelope(id).unwrap();
+        v.keep_access_envelope(next, b"synthetic second envelope")
+            .unwrap();
     }
     #[test]
     fn exact_ports_and_unknown_destination_forms_fail_closed() {
