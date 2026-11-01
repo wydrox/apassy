@@ -72,6 +72,7 @@ mod passkey_export;
 mod passkeys;
 mod project_key;
 mod provider_hosts;
+mod relay_connect;
 mod relay_feed;
 mod relay_questions;
 mod relay_sync;

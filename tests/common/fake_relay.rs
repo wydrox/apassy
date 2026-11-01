@@ -190,6 +190,11 @@ impl Team {
 struct Relay {
     origin: String,
     team_codes: Vec<String>,
+    connect_keys: BTreeMap<Vec<u8>, String>,
+    connect_recovery: bool,
+    connect_challenge_patch: Option<Value>,
+    link_expiry_override: Option<u64>,
+    connect_nonces: BTreeMap<String, Vec<u8>>,
     teams: BTreeMap<String, Team>,
     tokens: BTreeMap<String, (String, u64)>,
     nonces: BTreeMap<String, (String, Vec<u8>)>,
@@ -297,6 +302,23 @@ impl FakeRelay {
     }
 
     /// Add an operator team code: `apassy_tcd_<64 hex>`.
+    /// Synthetic screenshot helper: return the newest unconsumed link, never a real team.
+    pub fn latest_device_link(&self) -> Option<String> {
+        let relay = lock(&self.shared.0);
+        let code = relay.teams.values().find_map(|team| team.codes.last())?;
+        Some(format!("{}/link#{code}", self.url))
+    }
+
+    pub fn advertise_link_expiry(&self, expires_at: u64) {
+        lock(&self.shared.0).link_expiry_override = Some(expires_at);
+    }
+    pub fn alter_connect_challenge(&self, patch: Value) {
+        lock(&self.shared.0).connect_challenge_patch = Some(patch);
+    }
+    pub fn support_connect_recovery(&self) {
+        lock(&self.shared.0).connect_recovery = true;
+    }
+
     pub fn team_code(&self) -> String {
         let mut relay = lock(&self.shared.0);
         relay.next_secret += 1;
@@ -1001,17 +1023,76 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
     let (mutex, changed) = &**shared;
     let segments: Vec<&str> = request.path.trim_start_matches('/').split('/').collect();
     match (request.method.as_str(), segments.as_slice()) {
-        ("POST", ["v1", "teams"]) => {
+        ("POST", ["v1", "connect", "challenge"]) => {
             let body = request.json();
             let mut relay = lock(mutex);
-            let code = body["code"].as_str().unwrap_or_default().to_owned();
-            let Some(at) = relay.team_codes.iter().position(|known| *known == code) else {
-                return fail(403, "invite_invalid");
-            };
-            relay.team_codes.remove(at);
-            let Some(public_key) = body["public_key"].as_str().and_then(decode_b64u) else {
+            if !relay.connect_recovery {
+                return fail(404, "not_found");
+            }
+            let Some(public) = body["public_key"].as_str().and_then(decode_b64u) else {
                 return fail(400, "invalid_request");
             };
+            let mut bytes = [0; 32];
+            getrandom::fill(&mut bytes).expect("synthetic nonce");
+            let nonce = encode_b64u(&bytes);
+            relay.connect_nonces.insert(nonce.clone(), public);
+            let mut result = json!({"nonce":nonce, "origin":relay.origin, "expires_at": now()+60});
+            if let Some(patch) = &relay.connect_challenge_patch {
+                for (key, value) in patch.as_object().expect("test object") {
+                    result[key] = value.clone();
+                }
+            }
+            ok(result)
+        }
+        ("POST", ["v1", "teams"] | ["v1", "connect"]) => {
+            let body = request.json();
+            let mut relay = lock(mutex);
+            let connect = request.path == "/v1/connect";
+            let Some(public_text) = body["public_key"].as_str() else {
+                return fail(400, "invalid_request");
+            };
+            let Some(public_key) = decode_b64u(public_text) else {
+                return fail(400, "invalid_request");
+            };
+            if connect {
+                let mut message =
+                    format!("apassy-relay connect v1\0{}\0{public_text}", relay.origin)
+                        .into_bytes();
+                if let Some(nonce) = body["recovery_nonce"].as_str() {
+                    if !relay.connect_recovery
+                        || relay.connect_nonces.remove(nonce).as_deref() != Some(&public_key)
+                    {
+                        return fail(401, "unauthenticated");
+                    }
+                    message.extend_from_slice(b"\0recovery\0");
+                    message.extend_from_slice(nonce.as_bytes());
+                }
+                let signature = body["signature"]
+                    .as_str()
+                    .and_then(decode_b64u)
+                    .unwrap_or_default();
+                if body["v"] != 1 || !verify(&public_key, &message, &signature) {
+                    return fail(400, "invalid_request");
+                }
+                if let Some(team_id) = relay.connect_keys.get(&public_key) {
+                    if body["recovery_nonce"].is_string() {
+                        let device_id = relay.teams[team_id].devices[0].id;
+                        return ok(
+                            json!({"team_id":team_id, "device_id":device_id, "kind":"connect"}),
+                        );
+                    }
+                    return fail(409, "connect_key_used");
+                }
+                if body["recovery_nonce"].is_string() {
+                    return fail(409, "connect_key_used");
+                }
+            } else {
+                let code = body["code"].as_str().unwrap_or_default();
+                let Some(at) = relay.team_codes.iter().position(|known| known == code) else {
+                    return fail(403, "invite_invalid");
+                };
+                relay.team_codes.remove(at);
+            }
             relay.next_team += 1;
             // A relay team id: `t_` and 10 characters of `a-z2-7`.
             let team_id: String = format!("t_fake{:06}", relay.next_team)
@@ -1023,6 +1104,11 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 .collect();
             let device_id = relay.next_device;
             relay.next_device += 1;
+            if connect {
+                relay
+                    .connect_keys
+                    .insert(public_key.clone(), team_id.clone());
+            }
             relay.teams.insert(
                 team_id.clone(),
                 Team {
@@ -1036,7 +1122,9 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                     ..Team::default()
                 },
             );
-            ok(json!({"team_id": team_id, "member_id": 1, "device_id": device_id}))
+            ok(
+                json!({"team_id": team_id, "member_id": 1, "device_id": device_id, "kind": if connect { "connect" } else { "operator" }}),
+            )
         }
         ("POST", ["v1", "auth", "challenge"]) => {
             if request.header("authorization").is_some() {
@@ -1132,6 +1220,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             };
             relay.next_link += 1;
             let id = relay.next_link;
+            let expiry = relay.link_expiry_override.unwrap_or_else(|| now() + 600);
             let Some(team) = relay.teams.get_mut(&team_id) else {
                 return fail(403, "forbidden");
             };
@@ -1147,7 +1236,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                 };
                 let name = team.name.clone();
                 return ok(json!({"id": link.id, "team_id": team_id, "team": name,
-                          "safety": link.safety, "expires_at": now() + 600, "by": "owner"}));
+                          "safety": link.safety, "expires_at": expiry, "by": "owner"}));
             };
             team.codes.remove(at);
             let safety = safety_words(&team_id, &code, &public_key);
@@ -1162,7 +1251,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
             let name = team.name.clone();
             ok(
                 json!({"id": id, "team_id": team_id, "team": name, "safety": safety,
-                      "expires_at": now() + 600, "by": "owner"}),
+                      "expires_at": expiry, "by": "owner"}),
             )
         }
         ("POST", ["v1", "devices", "link", "cancel"]) => {
@@ -1246,7 +1335,9 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .expect("team")
                         .codes
                         .push(code.clone());
-                    ok(json!({"secret": code, "expires_at": now() + 600}))
+                    ok(
+                        json!({"secret": code, "expires_at": relay.link_expiry_override.unwrap_or_else(|| now() + 600)}),
+                    )
                 }
                 ("GET", ["devices", "links"]) => {
                     let links: Vec<Value> = relay.teams[&team_id]
@@ -1256,7 +1347,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                         .map(|link| {
                             json!({"id": link.id, "device_name": link.device_name,
                                    "public_key": encode_b64u(&link.public_key),
-                                   "created_at": now(), "expires_at": now() + 600})
+                                   "created_at": now(), "expires_at": relay.link_expiry_override.unwrap_or_else(|| now() + 600)})
                         })
                         .collect();
                     ok(json!(links))

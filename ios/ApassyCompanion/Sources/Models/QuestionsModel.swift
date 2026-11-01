@@ -208,6 +208,7 @@ final class QuestionsModel {
     static let quickWait: Duration = .seconds(1)
     static let maxWaitPause: Duration = .seconds(30)
 
+    private(set) var attachNotice: String?
     private(set) var phase = Phase.loading
     /// The selected vault.
     private(set) var status = QuestionsStatus.off
@@ -1448,6 +1449,7 @@ final class QuestionsModel {
         }
         attachGeneration += 1
         let generation = attachGeneration
+        attachNotice = nil
         let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             _ = try PairingLink.parse(trimmed, now: now())
@@ -1481,7 +1483,11 @@ final class QuestionsModel {
             // Each questions team has its own answer key. The core rejects a key that belonged to a
             // removed row: a removed iPhone gets a new key for that team only.
             let team = VaultText.linkTeam(trimmed) ?? status.teamID
-            let renews = status.removed && (status.teamID == nil || team == status.teamID)
+            // iOS can retain Keychain keys after reinstall. A fresh Connect pairing of an
+            // unconnected vault gets a new answer key, so removing the old device cannot also
+            // revoke this one. Keep a currently connected vault's key until a valid re-pair.
+            let freshConnect = trimmed.contains("&handoff=") && (!status.enabled || status.removed)
+            let renews = freshConnect || (status.removed && (status.teamID == nil || team == status.teamID))
             let key = try renews ? signers.renew(team: team) : signers.joinKey(team: team)
             let info = try await service.joinAttach(link: trimmed, deviceName: name, answerKey: key)
             onDeviceName(name)
@@ -1509,6 +1515,7 @@ final class QuestionsModel {
             do {
                 let info = try await service.joinAttachPoll()
                 guard isCurrentAttach(generation), case .waiting = attach else { return }
+                attachNotice = nil
                 if info.state == .attached {
                     attach = .attached
                     await refresh()
@@ -1523,12 +1530,13 @@ final class QuestionsModel {
                 return
             } catch {
                 guard isCurrentAttach(generation), case .waiting = attach else { return }
-                // No network: the next poll tries again.
+                attachNotice = "Waiting for the connection keys. Check your internet connection and keep the pairing screen open on the Mac. Apassy will try again."
             }
         }
     }
 
     func cancelAttach() {
+        attachNotice = nil
         attachGeneration += 1
         attachTask?.cancel()
         attachTask = nil
@@ -1537,6 +1545,7 @@ final class QuestionsModel {
     }
 
     func dismissAttach() {
+        attachNotice = nil
         attachGeneration += 1
         attachTask?.cancel()
         attachTask = nil

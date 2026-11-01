@@ -315,3 +315,9 @@ When the API key has no access to cloud-managed distribution certificates (the e
 The build number is the minutes since 1970, so each run is higher than the last; the version is `MARKETING_VERSION` in `project.yml`. App Store Connect needs a few minutes to process a build. Internal testers of the team see it in TestFlight then. `--no-upload` writes the `.ipa` to `target/ios/export` instead.
 
 The app declares `ITSAppUsesNonExemptEncryption = NO` (ADR 0023, section 8), so a build needs no export compliance answer.
+
+### Connect without an account
+
+On the Mac, Settings > Devices > Get approvals on your iPhone creates a questions-only Connect connection. No operator code, paid sync, or account is required. Open the same vault from iCloud Drive on the iPhone, then Requests > Connect this iPhone; scan the Mac's code, compare the safety words and confirm on the Mac. Keep the Mac's pairing screen open while it sends the connection keys. The iPhone then offers Request Notifications and Open Requests. A reinstall needs a new code and confirmation; remove the previous iPhone in the Mac's Devices list.
+
+Simulator UI fixtures accept `-ApassyConnectLink <synthetic link>` only together with `-ApassyPreviewVault`; the preview service simulates confirmation. These screenshots prove layout, not relay delivery, Face ID, or APNs. Local fake-relay Rust integration tests exercise the actual confirmed key transfer.

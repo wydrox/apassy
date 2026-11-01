@@ -209,6 +209,10 @@ enum Reply {
     TurnedOn(Box<TurnedOn>),
     Link(Result<LinkCode, SyncError>),
     Links(Result<Vec<PendingLink>, SyncError>),
+    Handoff {
+        qid: String,
+        result: Result<(), String>,
+    },
     Confirmed {
         link: PendingLink,
         result: Result<DeviceView, SyncError>,
@@ -275,6 +279,8 @@ struct AddMac {
     /// "Add an iPhone…" of a notifications-only team (plan §A7): the links go through
     /// the questions team of the vault, not through relay sync.
     via: Option<QuestionsClient>,
+    channel: Option<crate::relay::pairing::PairingChannel>,
+    handoff: Option<(crate::questions::envelope::Sealed, u64, String)>,
 }
 
 impl AddMac {
@@ -288,6 +294,8 @@ impl AddMac {
             error,
             added: None,
             via,
+            channel: None,
+            handoff: None,
         }
     }
 }
@@ -892,10 +900,64 @@ impl DesktopApp {
                 if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
                     match result {
                         Ok(code) => {
-                            add.qr = link_qr(&code);
+                            add.channel = add.via.as_ref().and_then(|_| {
+                                crate::relay::pairing::PairingChannel::generate(&code.link)
+                            });
+                            if add.via.is_some() && add.channel.is_none() {
+                                add.error = Some(
+                                    "Could not make a secure pairing code. Try again.".to_owned(),
+                                );
+                                return;
+                            }
+                            if let Some(channel) = &add.channel {
+                                let shared = LinkCode {
+                                    code: code.code.clone(),
+                                    link: channel.link(&code.link),
+                                    expires_at: code.expires_at,
+                                };
+                                add.qr = link_qr(&shared);
+                            } else {
+                                add.qr = link_qr(&code);
+                            }
+                            add.handoff = None;
                             add.code = Some(code);
                         }
                         Err(error) => add.error = Some(call_error(error)),
+                    }
+                }
+            }
+            Reply::Handoff { qid, result } => {
+                if let Some(add) = self.sync.relay.add.as_mut().filter(|add| {
+                    add.id == id
+                        && add.handoff.is_some()
+                        && add
+                            .channel
+                            .as_ref()
+                            .is_some_and(|channel| channel.qid() == qid)
+                }) {
+                    match result {
+                        Ok(()) => {
+                            let name = add
+                                .handoff
+                                .as_ref()
+                                .map(|(_, _, name)| name.as_str())
+                                .unwrap_or("Your iPhone");
+                            let text = format!(
+                                "Connected. {name} can now show requests and answer with Face ID. Turn on request notifications on the iPhone for push alerts."
+                            );
+                            add.added = Some(text.clone());
+                            add.handoff = None;
+                            add.code = None;
+                            add.qr = None;
+                            add.channel = None;
+                            add.error = None;
+                            self.set_ok(text);
+                        }
+                        Err(error) => {
+                            add.error = Some(format!(
+                                "The iPhone was confirmed, but its connection keys have not arrived. Keep this screen open and select Check again. {error}"
+                            ))
+                        }
                     }
                 }
             }
@@ -903,7 +965,18 @@ impl DesktopApp {
                 if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
                     add.next_poll = Instant::now() + POLL_EVERY;
                     match result {
-                        Ok(links) => {
+                        Ok(mut links) => {
+                            if let (Some(channel), Some(client)) = (&add.channel, &add.via) {
+                                links.retain(|link| {
+                                    channel
+                                        .mac_safety(
+                                            client.team_id(),
+                                            &link.public_key,
+                                            &link.device_name,
+                                        )
+                                        .is_some()
+                                });
+                            }
                             add.links = links;
                             add.error = None;
                         }
@@ -1238,6 +1311,14 @@ impl DesktopApp {
             SyncSheet::QuestionsTeam { .. } => {
                 relay.questions.error = None;
                 self.relay_fill_fields();
+                if let Some(Some(pending)) = self
+                    .owner_ui
+                    .session
+                    .with_vault(|vault| vault.pending_connect().ok().flatten())
+                {
+                    self.sync.relay.url_input = pending.relay_url;
+                    self.sync.relay.device_input = pending.device_name;
+                }
             }
             SyncSheet::TurnOff { .. } => {
                 relay.turn_off = None;
@@ -1935,6 +2016,34 @@ impl DesktopApp {
         }
     }
 
+    /// Retry the same sealed handoff after an ambiguous response; never mint another device.
+    fn relay_send_handoff(&mut self) {
+        let Some(add) = self.sync.relay.add.as_ref() else {
+            return;
+        };
+        let (Some(channel), Some(client), Some((sealed, expiry, _))) =
+            (&add.channel, &add.via, &add.handoff)
+        else {
+            return;
+        };
+        if self.relay_busy(&add.id, Job::Confirm) {
+            return;
+        }
+        let (id, channel, client, sealed, expiry) = (
+            add.id.clone(),
+            channel.clone(),
+            client.clone(),
+            sealed.clone(),
+            *expiry,
+        );
+        self.relay_spawn(&id, Job::Confirm, move || Reply::Handoff {
+            qid: channel.qid().to_owned(),
+            result: channel
+                .send(&client, expiry, &sealed)
+                .map_err(|_| "Check the internet connection and try again.".to_owned()),
+        });
+    }
+
     /// The client of the notifications-only questions team of the open, unlocked vault
     /// `id`, with its key in memory. It reads the vault for a moment, with no network.
     pub(crate) fn questions_team_client(&self, id: &str) -> Result<QuestionsClient, String> {
@@ -1956,6 +2065,16 @@ impl DesktopApp {
 
     /// Ask the relay for the Macs that wait for a confirmation, with their safety words.
     fn relay_add_mac_poll(&mut self) {
+        if self
+            .sync
+            .relay
+            .add
+            .as_ref()
+            .is_some_and(|add| add.handoff.is_some())
+        {
+            self.relay_send_handoff();
+            return;
+        }
         let Some(add) = self.sync.relay.add.as_ref() else {
             return;
         };
@@ -2030,6 +2149,14 @@ impl DesktopApp {
             self.set_err("The “Add a device” sheet is closed. Nothing was added.");
             return;
         };
+        if link.expires_at <= kit::now()
+            || add
+                .and_then(|a| a.code.as_ref())
+                .is_none_or(|c| c.expires_at <= kit::now())
+        {
+            self.set_err("This pairing code expired. Make a new code.");
+            return;
+        }
         let expected = OwnerAction::ConfirmSyncDevice {
             link_id,
             device_name: link.device_name.clone(),
@@ -2096,6 +2223,48 @@ impl DesktopApp {
                 // row of an iPhone is written here, from them (relay-questions-v1
                 // section 5.2). A Mac writes its own row after its own owner check.
                 let iphone = self.relay_register_linked(id, link, device.id);
+                if matches!(&iphone, Some(Ok(()))) {
+                    let channel = self
+                        .sync
+                        .relay
+                        .add
+                        .as_ref()
+                        .and_then(|add| add.channel.clone());
+                    if let Some(channel) = channel {
+                        let team = self
+                            .sync
+                            .relay
+                            .add
+                            .as_ref()
+                            .and_then(|add| add.via.as_ref())
+                            .map(|client| client.team_id().to_owned());
+                        if let Some(team) = team {
+                            let sealed = self
+                                .owner_ui
+                                .session
+                                .with_vault(|vault| channel.seal(vault, &team, &link.public_key));
+                            match sealed {
+                                Some(Ok(sealed)) => {
+                                    forget_link(self);
+                                    if let Some(add) = self.sync.relay.add.as_mut() {
+                                        let expiry = add
+                                            .code
+                                            .as_ref()
+                                            .map(|c| c.expires_at)
+                                            .unwrap_or(kit::now());
+                                        add.handoff = Some((sealed, expiry, name.clone()));
+                                    }
+                                    self.relay_send_handoff();
+                                    return;
+                                }
+                                _ => {
+                                    self.set_err("The iPhone was confirmed, but the vault could not transfer its keys. Keep the vault unlocked and pair again with a new code.");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
                 let text = match iphone {
                     Some(Err(error)) => format!(
                         "Added {name} to the relay, but the vault did not keep its keys: {}",
@@ -2761,10 +2930,18 @@ impl DesktopApp {
         self.relay_settle_for_test();
     }
 
+    pub(crate) fn relay_set_link_expiry_for_test(&mut self, expires_at: u64) -> Option<u64> {
+        let code = self.sync.relay.add.as_mut()?.code.as_mut()?;
+        Some(std::mem::replace(&mut code.expires_at, expires_at))
+    }
+
     /// The link of the open "Add a device…" sheet.
     pub(crate) fn relay_add_mac_link_for_test(&self) -> Option<String> {
         let add = self.sync.relay.add.as_ref()?;
-        add.code.as_ref().map(|code| code.link.to_string())
+        add.code.as_ref().map(|code| match &add.channel {
+            Some(channel) => channel.link(&code.link).to_string(),
+            None => code.link.to_string(),
+        })
     }
 
     /// The QR code of the open "Add a device…" sheet.
@@ -3118,10 +3295,10 @@ pub(super) fn add_mac_sheet(
     let Some(add) = app.sync.relay.add.as_ref() else {
         return false;
     };
-    let link = add
-        .code
-        .as_ref()
-        .map(|code| Zeroizing::new(code.link.to_string()));
+    let link = add.code.as_ref().map(|code| match &add.channel {
+        Some(channel) => channel.link(&code.link),
+        None => Zeroizing::new(code.link.to_string()),
+    });
     let expired = add
         .code
         .as_ref()
@@ -3136,8 +3313,8 @@ pub(super) fn add_mac_sheet(
     let link = link.filter(|_| added.is_none() && !removed);
     let (title, intro, asks) = if iphone {
         (
-            format!("Add a device to the questions of “{}”", entry.name),
-            "On the iPhone, open Apassy, select Questions, and scan this code: it answers with Face ID. On another Mac with this vault, turn on “Send questions through the relay” in Settings > Devices and paste the link: it answers after Touch ID. The device gets no vault and no secret value through the relay. The link works once, for 10 minutes. It gives nothing until you confirm the device here.",
+            format!("Connect your iPhone to “{}”", entry.name),
+            "On your iPhone, open the same vault from iCloud Drive, open Requests, and choose Connect this iPhone. Scan this code, compare the safety words, and confirm here. Requests work on any network; answers use Face ID. No account or subscription is needed. This code works once, for 10 minutes. After reinstalling, use a new code and remove the old iPhone in Devices.",
             "asks for the questions of",
         )
     } else {
@@ -3161,10 +3338,12 @@ pub(super) fn add_mac_sheet(
                 });
                 ui.add_space(10.0);
             }
-            let heading = ui.label(kit::text("Link", Font::Headline).color(kit::LABEL));
-            kit::code_block(ui, link, 1).labelled_by(heading.id);
+            if !iphone {
+                let heading = ui.label(kit::text("Link", Font::Headline).color(kit::LABEL));
+                kit::code_block(ui, link, 1).labelled_by(heading.id);
+            }
             ui.horizontal(|ui| {
-                if kit::small_button(ui, "Copy link", Style::Bordered).clicked() {
+                if !iphone && kit::small_button(ui, "Copy link", Style::Bordered).clicked() {
                     ui.ctx().copy_text(link.to_string());
                 }
                 if expired && kit::small_button(ui, "New link", Style::Link).clicked() {
@@ -3218,14 +3397,23 @@ pub(super) fn add_mac_sheet(
                     } else {
                         ""
                     };
+                    let bound_words = app.sync.relay.add.as_ref().and_then(|add| {
+                        let channel = add.channel.as_ref()?;
+                        let client = add.via.as_ref()?;
+                        channel.mac_safety(
+                            client.team_id(),
+                            &pending.public_key,
+                            &pending.device_name,
+                        )
+                    });
                     safety_lines(
                         ui,
                         &format!(
                             "“{shown}”{kind} {asks} “{}”. Both devices show:",
                             entry.name
                         ),
-                        words,
-                        "Confirm only if the other device shows the same words.",
+                        bound_words.as_deref().unwrap_or(words),
+                        "Compare every word. Confirm only if all words match.",
                     );
                     ui.add_enabled_ui(!deciding, |ui| {
                         ui.horizontal(|ui| {

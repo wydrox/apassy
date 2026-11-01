@@ -126,6 +126,11 @@ struct DecisionsView: View {
                     .onAppear { localSheetPresented = true }
             }
         }
+        #if targetEnvironment(simulator)
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("-ApassyPreviewVault"), UserDefaults.standard.string(forKey: "ApassyConnectLink") != nil { showsConnect = true }
+        }
+        #endif
         .onAppear {
             questions?.setRequestsPresented(isPresented)
             questions?.setRequestsVisible(requestsListVisible)
@@ -317,7 +322,7 @@ struct DecisionsView: View {
             ContentUnavailableView {
                 Label("Connect a Mac", systemImage: "desktopcomputer")
             } description: { Text("Approve requests on this iPhone.") } actions: {
-                Button("Connect Mac") { showsConnect = true }.buttonStyle(.bordered).frame(minHeight: 44)
+                Button("Connect this iPhone") { showsConnect = true }.buttonStyle(.bordered).frame(minHeight: 44)
             }
         default:
             ContentUnavailableView {

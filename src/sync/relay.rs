@@ -2439,6 +2439,9 @@ impl PendingJoin {
         text: &str,
         relay_url: &str,
     ) -> Result<(RelayUrl, Zeroizing<String>), SyncError> {
+        let parsed = crate::relay::pairing::PairingChannel::parse(text);
+        let text = parsed.as_ref().map_or(text, |(raw, _)| *raw);
+
         let text = text.trim();
         let (url, code) = match text.split_once("/link#") {
             Some((url, code)) => (RelayUrl::parse(url)?, code),
@@ -2488,6 +2491,13 @@ impl PendingJoin {
         if !same_words(&safety, &answer.safety) {
             return Err(SyncError::SafetyMismatch);
         }
+        // The legacy words stay on the relay wire; a Connect screen authenticates both keys.
+        let safety = match crate::relay::pairing::PairingChannel::parse(text) {
+            Some((_, channel)) => channel
+                .phone_safety(&team_id, &key, &clean_name(device, "Mac"))
+                .ok_or(SyncError::SafetyMismatch)?,
+            None => safety,
+        };
         Ok(Self {
             session: Arc::new(Session::new(url, &team_id, key, None)),
             code,
@@ -2495,7 +2505,7 @@ impl PendingJoin {
             link_id: answer.id,
             team: answer.team,
             safety,
-            expires_at: answer.expires_at,
+            expires_at: answer.expires_at.min(unix_now().saturating_add(600)),
         })
     }
 
