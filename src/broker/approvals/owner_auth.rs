@@ -89,6 +89,10 @@ const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerAction {
+    RemoveOlderIphone {
+        device: TrustedDevice,
+        team: String,
+    },
     /// Fresh local access consent; deliberately absent from the owner-window allowlist.
     AllowAccessOnce {
         request_id: u64,
@@ -98,6 +102,8 @@ pub enum OwnerAction {
         request_id: u64,
         agent_id: u64,
         item_id: u64,
+        place: crate::vault::GrantPlace,
+        mode: crate::vault::ExecMode,
     },
     BackupVault {
         path: PathBuf,
@@ -397,6 +403,7 @@ impl OwnerAction {
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
+            Self::RemoveOlderIphone { .. } => "remove the older paired iPhone".into(),
             Self::AllowAccessOnce { .. } => "allow one scoped access attempt".to_owned(),
             Self::GrantAccessRequest { .. } => "grant access for this exact request".to_owned(),
             Self::BackupVault { .. } => "write an encrypted vault backup".to_owned(),

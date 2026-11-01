@@ -226,6 +226,10 @@ pub struct PasskeyRequest {
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
+    RemoveOlderIphone {
+        device: crate::vault::TrustedDevice,
+        team: String,
+    },
     AllowAccessOnce {
         request_id: u64,
         digest: String,
@@ -615,6 +619,10 @@ impl OwnerRequest {
     /// The action that the proof must name.
     pub fn action(&self) -> OwnerAction {
         match self {
+            Self::RemoveOlderIphone { device, team } => OwnerAction::RemoveOlderIphone {
+                device: device.clone(),
+                team: team.clone(),
+            },
             Self::AllowAccessOnce { request_id, digest } => OwnerAction::AllowAccessOnce {
                 request_id: *request_id,
                 digest: digest.clone(),
@@ -818,11 +826,15 @@ impl OwnerRequest {
                 request_id,
                 agent_id,
                 item_id,
+                place,
+                mode,
                 ..
             } => OwnerAction::GrantAccessRequest {
                 request_id: *request_id,
                 agent_id: *agent_id,
                 item_id: *item_id,
+                place: place.clone(),
+                mode: *mode,
             },
             Self::GrantMany {
                 agent_id, item_ids, ..
@@ -935,6 +947,7 @@ impl OwnerRequest {
     /// One sentence for the owner check dialog. It has no secret value.
     pub fn describe(&self) -> String {
         match self {
+            Self::RemoveOlderIphone { device, .. } => format!("Remove the older paired iPhone '{}'? It will no longer receive or answer this vault's requests.", page_text(&device.name)),
             Self::AllowAccessOnce{..} => "Allow one scoped use attempt before the original request expires. The bouncer still checks the command and may ask you. This saves no grant.".into(),
             Self::BackupVault { path } => format!("Write an encrypted vault backup to {}? The vault locks afterwards.",page_text(&path.display().to_string())),
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
@@ -2140,6 +2153,7 @@ impl DesktopApp {
                 }
             }
             OwnerRequest::OpenCliSession => self.open_cli_session(proof),
+            OwnerRequest::RemoveOlderIphone { device, team } => self.questions_remove_older_device(&device.uuid,&team,proof),
             OwnerRequest::BindVariables { variables } => self.bind_variables(variables, proof),
             OwnerRequest::PairCompanion { .. } => self.complete_pairing(proof),
             OwnerRequest::ConfirmSyncDevice { vault, link_id, .. }

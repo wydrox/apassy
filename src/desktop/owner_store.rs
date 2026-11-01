@@ -1589,6 +1589,8 @@ impl OwnerSession {
                 request_id,
                 agent_id,
                 item_id,
+                place: place.clone(),
+                mode,
             },
         )?
         .set_exec_grants_for_request(agent_id, &[item_id], &place, mode, Some(request_id))
