@@ -53,6 +53,16 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.10 staged app release
+
+The owner approved merging the 0.5.10 release PR to publish the Mac download and
+in-app auto-update. Relay needs no change and stays at 0.5.9. TestFlight and Chrome
+Web Store uploads follow separately; this is not yet a completed six-component
+release. A 0.5.10 Mac converts the vault to schema 23 at unlock. Older apps
+(0.5.9 and earlier, Mac or iPhone) cannot read it. Keep an encrypted pre-upgrade
+backup and shared-vault clients closed. Update every Mac to 0.5.10 and the iPhone
+to TestFlight 0.5.10 before resuming sync.
+
 ## 0.5.9 staged app release
 
 The owner approved merging the 0.5.9 release PR to publish the Mac download and
