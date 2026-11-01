@@ -215,17 +215,42 @@ impl OwnerSession {
 
     /// Correct the environment of a credential from a question with `proof` for its
     /// exact question and item (`OwnerAction::QuestionDevelopment`). Toward development the bouncer is
-    /// less careful, so the owner check comes first.
+    /// less careful, so the owner check comes first. Acquire vault before queue,
+    /// then hold both through exact pending-offer and proof validation and mutation.
     pub fn correct_environment(
         &mut self,
-        run_id: u64,
+        queue: &ApprovalQueue,
+        run: &crate::broker::approvals::PendingRun,
         item_id: u64,
         environment: Environment,
         proof: OwnerProof,
     ) -> ModelResult<()> {
-        self.unlocked_for(proof, &OwnerAction::QuestionDevelopment { run_id, item_id })?
-            .set_declaration_environment(item_id, environment)
-            .map_err(map_err)
+        let no_longer_waiting = || {
+            fail(
+                "not_waiting",
+                "The question no longer offers this correction.",
+            )
+        };
+        let mut vault = self.unlocked()?;
+        if environment != Environment::Development {
+            return Err(no_longer_waiting());
+        }
+        queue
+            .with_pending_development(run, item_id, || {
+                proof
+                    .check(
+                        &OwnerAction::QuestionDevelopment {
+                            run_id: run.id,
+                            item_id,
+                        },
+                        &vault.epoch(),
+                    )
+                    .map_err(|refusal| fail("owner_check_required", refusal.message()))?;
+                vault
+                    .set_declaration_environment(item_id, environment)
+                    .map_err(map_err)
+            })
+            .ok_or_else(no_longer_waiting)?
     }
 
     // ---- Credential requests (ADR 0025 §6). ----

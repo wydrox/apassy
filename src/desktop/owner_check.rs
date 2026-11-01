@@ -386,7 +386,7 @@ pub enum OwnerRequest {
     /// (ADR 0025 §3, §5). The bouncer is then less careful with it, so it needs the
     /// check or its exact local window proof. The question still waits. "Production" is stricter and needs none.
     CorrectEnvironment {
-        run_id: u64,
+        run: PendingRun,
         agent: String,
         item_id: u64,
         name: String,
@@ -884,10 +884,8 @@ impl OwnerRequest {
                 delivery,
                 setup_key,
             } => bind_action(*item_id, env_name, field, delivery, *setup_key),
-            Self::CorrectEnvironment {
-                run_id, item_id, ..
-            } => OwnerAction::QuestionDevelopment {
-                run_id: *run_id,
+            Self::CorrectEnvironment { run, item_id, .. } => OwnerAction::QuestionDevelopment {
+                run_id: run.id,
                 item_id: *item_id,
             },
             Self::SaveDeclaration { item_id, .. }
@@ -1813,29 +1811,7 @@ impl DesktopApp {
         ) {
             return self.complete_passkey(&request.action(), proof);
         }
-        if let OwnerRequest::CorrectEnvironment {
-            run_id,
-            item_id,
-            environment,
-            ..
-        } = &request
-        {
-            let valid = *environment == crate::vault::Environment::Development
-                && self.approvals().is_some_and(|q| {
-                    q.pending().iter().any(|r| {
-                        r.id == *run_id
-                            && Choice::CorrectEnvironment {
-                                item_id: *item_id,
-                                environment: RemoteEnvironment::Development,
-                            }
-                            .valid_for(&r.question)
-                    })
-                });
-            if !valid {
-                self.set_err("The question no longer offers this correction.");
-                return;
-            }
-        }
+        let approvals = self.approvals();
         let session = &mut self.owner_ui.session;
         match request {
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
@@ -1966,13 +1942,16 @@ impl DesktopApp {
                 }
             }
             OwnerRequest::CorrectEnvironment {
-                run_id,
+                run,
                 agent,
                 item_id,
                 name,
                 environment,
                 ..
-            } => match session.correct_environment(run_id, item_id, environment, proof) {
+            } => match approvals.as_ref().ok_or_else(|| super::model::ModelError {
+                code: "not_waiting",
+                message: "The question no longer offers this correction.".into(),
+            }).and_then(|queue| session.correct_environment(queue, &run, item_id, environment, proof)) {
                 Ok(()) => self.set_ok(format!(
                     "{name} is marked as {}. The question of {agent} still waits: allow it or deny it.",
                     environment.as_str()

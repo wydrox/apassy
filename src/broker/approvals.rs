@@ -672,6 +672,51 @@ impl ApprovalQueue {
         }
     }
 
+    /// Deterministically cross the deadline without sleeping in desktop regressions.
+    #[cfg(all(test, feature = "desktop"))]
+    pub(crate) fn expire_question_for_test(&self, id: u64) {
+        self.state()
+            .questions
+            .get_mut(&id)
+            .expect("waiting question")
+            .deadline = Instant::now();
+    }
+
+    /// Run a local Development correction while its exact question still waits.
+    /// The caller must already hold the vault lock (vault before queue). Keep this
+    /// guard through proof validation and persistence; never call UI or biometry here.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn with_pending_development<T>(
+        &self,
+        confirmed: &PendingRun,
+        item_id: u64,
+        correct: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state();
+        let waiting = state.pending.iter().find(|run| run.id == confirmed.id)?;
+        if waiting != confirmed
+            || !waiting.question.item_ids.contains(&item_id)
+            || !waiting
+                .question
+                .valid_answers
+                .contains(&AnswerKind::CorrectEnvironment)
+            || !waiting
+                .question
+                .items
+                .iter()
+                .any(|item| item.item_id == item_id && item.unconfirmed)
+            || !state
+                .questions
+                .get(&confirmed.id)
+                .is_some_and(|q| Instant::now() < q.deadline)
+        {
+            return None;
+        }
+        let result = correct();
+        drop(state);
+        Some(result)
+    }
+
     /// Runs that wait for a decision, oldest first.
     pub fn pending(&self) -> Vec<PendingRun> {
         self.state().pending.clone()

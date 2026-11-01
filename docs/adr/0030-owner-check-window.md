@@ -137,6 +137,15 @@ need no check. All other always-fresh actions above remain fresh, including item
 rule edits elsewhere, Allow production, Allow in project and ApproveAndEvaluate.
 Remote and iPhone answers neither use nor seed the window.
 
+**Residual risk: synthetic UI input.** An agent with macOS Accessibility/UI-automation
+permission can activate both Allow Once (already covered since 0.5.8, and granting
+more authority) and Development inside a valid window. egui cannot distinguish
+synthetic from physical input; this is an accepted residual risk. Agents should
+not be granted Accessibility permission for the Apassy app. Possible future
+hardening includes rejecting events whose `kCGEventSourceUnixProcessID` identifies
+another process, and not exposing AccessKit press actions for approval buttons
+inside a window. No such hardening is implemented here.
+
 B. Display sleep alone does not revoke any frequency. Absolute timed deadlines
 still apply. Real screen lock, system sleep, user switch/session off console,
 quit, vault lifecycle, setting changes, failed/cancelled checks and observer

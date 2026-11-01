@@ -2329,7 +2329,7 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
             }
             app.development_clicked(
                 OwnerRequest::CorrectEnvironment {
-                    run_id: run.id,
+                    run: run.clone(),
                     agent: run.agent.clone(),
                     item_id,
                     name,
