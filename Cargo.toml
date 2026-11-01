@@ -21,6 +21,7 @@ storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:rustix"]
 
 [dependencies]
+tracing = "=0.1.44"
 toml_edit = { version = "=0.25.15", optional = true, default-features = false, features = ["parse"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"

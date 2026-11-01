@@ -584,7 +584,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             )
             .inner
         });
-        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills, passkey sign-ins, and Allow once until this time is up. It always asks again when your Mac locks or sleeps.");
+        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills and saves, passkey sign-ins, Allow Once, and Development on agent questions until this time is up. The window ends when your Mac locks or sleeps, not when the display turns off.");
     });
     if let Some(note) = &app.owner.frequency_note {
         rows::footnote(ui, note);

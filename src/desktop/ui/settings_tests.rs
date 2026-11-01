@@ -783,8 +783,9 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
         "Agents can't use your credentials while the vault is locked.",
         "How often to ask for Touch ID",
         "Every time",
-        "browser fills, passkey sign-ins, and Allow once",
+        "Allow Once, and Development on agent questions",
         "Mac locks or sleeps",
+        "not when the display turns off",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }

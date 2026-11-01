@@ -7,6 +7,7 @@
 
 import Foundation
 import LocalAuthentication
+import os.log
 
 let biometricPolicy = LAPolicy.deviceOwnerAuthenticationWithBiometrics
 let fallbackTitle = "Use Apassy Passphrase"
@@ -64,9 +65,12 @@ func biometryStatus() -> String {
     let context = LAContext()
     var error: NSError?
     if context.canEvaluatePolicy(biometricPolicy, error: &error) {
+        os_log("biometry status: available", type: .info)
         return "available"
     }
-    return mapLAError(error).code.rawValue
+    let status = mapLAError(error).code.rawValue
+    os_log("biometry status: %{public}@", type: .info, status)
+    return status
 }
 
 /// `authenticate {reason}`: show the Touch ID prompt and wait.

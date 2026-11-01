@@ -30,7 +30,7 @@ Covered actions:
   authenticator data sets UP and UV, as after a fresh check: the owner verified
   locally within the configured window. This is the explicitly accepted session
   verification model, including requests that require user verification.
-- Agent **Allow once**, only after the owner clicks that answer for each exact
+- Agent **Allow once** and **Development** on agent questions, only after the owner clicks that answer for each exact
   pending request. The window itself never answers a question.
 
 A covered browser action with trusted provenance completes immediately inside the
@@ -53,7 +53,7 @@ Touch ID setup checks are not relaxed. Unknown actions always stay fresh.
 `OwnerGate` is the only proof issuer. The desktop vault session owns one shared
 memory-only `OwnerWindow`, passed to every app gate. Reuse is available only to the
 local controller with a live signed browser/AutoFill request or an explicit Allow
-once click, and only for the source-specific action allowlist. No wire API accepts
+once or Development click, and only for the source-specific action allowlist. No wire API accepts
 an authorization window or a skip-auth instruction. Each use makes a new non-Clone
 proof for one exact action, target and vault epoch. Consumption rechecks the window
 generation and absolute deadline as well as the existing proof lifetime. A proof
@@ -82,12 +82,12 @@ account, revision, peer, cancellation and response-erasure checks still apply.
 
 ## Revocation
 
-Screen lock, system/display sleep, session resignation/fast user switch, app quit,
+Screen lock, system sleep, session resignation/fast user switch, app quit,
 vault lock/switch/rekey/backup/restore, setting changes and failed/cancelled checks
 revoke the window and issued reuse proofs. A late check cannot resurrect a revoked
 window. A successful fresh fallback may start a new one.
 
-A caller-checked native helper observes NSWorkspace sleep, display sleep and
+A caller-checked native helper observes NSWorkspace system sleep and
 session resignation, plus the distributed screen-lock notification. Distributed
 events can only revoke. A CGSession snapshot must positively report on-console and logged-in, and the
 kernel IORegistry root's `IOConsoleLocked` property must explicitly report false
@@ -125,3 +125,51 @@ A new proof still binds item, OTP field, show/copy and vault epoch, with the
 revocation fence. UI Show Code and Copy Code remain always fresh. Agent code use
 requires an explicit owner decision; the window never answers an agent question
 automatically.
+
+## Owner decision 2026-11-02
+
+A. Development on the agent classification sheet follows the window, like Allow
+Once. Each requires an explicit local Mac UI click for the exact pending question,
+item and action. Development uses its own question-bound action; it cannot supply
+an ordinary item-rule proof. The question must still offer that item correction
+at completion. Classification leaves the question pending. Production and Deny
+need no check. All other always-fresh actions above remain fresh, including item
+rule edits elsewhere, Allow production, Allow in project and ApproveAndEvaluate.
+Remote and iPhone answers neither use nor seed the window.
+
+**Residual risk: synthetic UI input.** An agent with macOS Accessibility/UI-automation
+permission can activate both Allow Once (already covered since 0.5.8, and granting
+more authority) and Development inside a valid window. egui cannot distinguish
+synthetic from physical input; this is an accepted residual risk. Agents should
+not be granted Accessibility permission for the Apassy app. Possible future
+hardening includes rejecting events whose `kCGEventSourceUnixProcessID` identifies
+another process, and not exposing AccessKit press actions for approval buttons
+inside a window. No such hardening is implemented here.
+
+B. Display sleep alone does not revoke any frequency. Absolute timed deadlines
+still apply. Real screen lock, system sleep, user switch/session off console,
+quit, vault lifecycle, setting changes, failed/cancelled checks and observer
+failure still revoke. The helper keeps sampling the explicit IOConsoleLocked
+property even with the display off; a distributed com.apple.screenIsLocked event
+also revokes immediately. Unknown state fails closed. Unlock cannot restore old
+verification or proofs.
+
+C. Keep the two-second health bound. An activity assertion with
+userInitiatedAllowingIdleSystemSleep and a strict dispatch timer with zero leeway
+maintain the 250 ms heartbeat without App Nap/coalescing. Idle system sleep remains
+allowed. Four wakeups per second while the observer lives cost energy; the strict
+cadence is intentional for bounded revocation. Scheduling delays can still fail
+closed. App Nap was a suspected cause, not a hardware-confirmed diagnosis.
+
+D. Each fresh local check re-probes biometry asynchronously, bound to the current
+dialog identity. A transient startup failure must not permanently hide Touch ID.
+Biometric-only LocalAuthentication and explicit vault-passphrase fallback remain.
+
+E. Privacy-safe info diagnostics record seed/reuse reason kinds, heartbeat age,
+generation transitions, lifecycle revocation kinds and per-check biometric status.
+They never record item names, values, paths, request contents or tokens. Swift
+uses os_log and Rust emits tracing events.
+
+F. Settings copy and the Unreleased changelog describe the covered actions and
+lock/sleep boundary. Added synthetic regression tests are not physical Touch ID,
+App Nap, or real lock-after-display-sleep timing acceptance.

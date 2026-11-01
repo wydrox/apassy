@@ -216,7 +216,7 @@ fn not_available_helper(dir: &Path) -> NativeHelper {
     let script = dir.join("helper");
     std::fs::write(
         &script,
-        "#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' \"$line\" >> \"$(dirname \"$0\")/requests.log\"\nprintf '%s\\n' '{\"ok\":false,\"error\":\"not_available\",\"message\":\"synthetic\"}'\n",
+        "#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' \"$line\" >> \"$(dirname \"$0\")/requests.log\"\ncase \"$line\" in *ping*) printf '%s\\n' '{\"ok\":true,\"protocol\":1,\"helper_version\":\"synthetic\",\"biometry\":\"not_available\"}' ;; *) printf '%s\\n' '{\"ok\":false,\"error\":\"not_available\",\"message\":\"synthetic\"}' ;; esac\n",
     )
     .expect("fake helper");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");

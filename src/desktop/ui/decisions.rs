@@ -2316,16 +2316,28 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
             };
             app.ask_owner(request, Some(ctx));
         }
-        Answer::Development { item_id, name } => app.ask_owner(
-            OwnerRequest::CorrectEnvironment {
-                run_id: run.id,
-                agent: run.agent.clone(),
-                item_id,
-                name,
-                environment: Environment::Development,
-            },
-            Some(ctx),
-        ),
+        Answer::Development { item_id, name } => {
+            if !queue.pending().iter().any(|r| r == run)
+                || !(Choice::CorrectEnvironment {
+                    item_id,
+                    environment: RemoteEnvironment::Development,
+                })
+                .valid_for(&run.question)
+            {
+                app.set_err("The question no longer offers this correction.");
+                return;
+            }
+            app.development_clicked(
+                OwnerRequest::CorrectEnvironment {
+                    run: run.clone(),
+                    agent: run.agent.clone(),
+                    item_id,
+                    name,
+                    environment: Environment::Development,
+                },
+                ctx,
+            );
+        }
         Answer::MarkProduction { item_id, name } => {
             let result = app.owner_ui.session.mark_production(item_id);
             let _ = app.apply(

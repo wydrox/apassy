@@ -384,9 +384,9 @@ pub enum OwnerRequest {
     },
     /// "Development" on a question about a credential that is production only by default
     /// (ADR 0025 §3, §5). The bouncer is then less careful with it, so it needs the
-    /// check. The question still waits. "Production" is stricter and needs none.
+    /// check or its exact local window proof. The question still waits. "Production" is stricter and needs none.
     CorrectEnvironment {
-        run_id: u64,
+        run: PendingRun,
         agent: String,
         item_id: u64,
         name: String,
@@ -884,12 +884,15 @@ impl OwnerRequest {
                 delivery,
                 setup_key,
             } => bind_action(*item_id, env_name, field, delivery, *setup_key),
+            Self::CorrectEnvironment { run, item_id, .. } => OwnerAction::QuestionDevelopment {
+                run_id: run.id,
+                item_id: *item_id,
+            },
             Self::SaveDeclaration { item_id, .. }
             | Self::SaveConnector { item_id, .. }
             | Self::ConfirmReview { item_id }
             | Self::Unarchive { item_id, .. }
             | Self::SetEnvironment { item_id, .. }
-            | Self::CorrectEnvironment { item_id, .. }
             | Self::AnswerSuggestion { item_id, .. }
             | Self::AlwaysAskOff { item_id, .. } => {
                 OwnerAction::ChangeItemRules { item_id: *item_id }
@@ -1487,6 +1490,7 @@ pub struct OwnerFlows {
     pub(crate) frequency_note: Option<String>,
     pub(crate) native: NativeState,
     native_probe: Option<Task<NativeState>>,
+    check_probe: Option<(u64, Task<NativeState>)>,
     pub(crate) check: Option<CheckDialog>,
     pub(crate) unlock: UnlockState,
     pub(crate) notifications: Option<NotificationCenter>,
@@ -1649,8 +1653,8 @@ impl DesktopApp {
             .check
             .as_ref()
             .is_some_and(|dialog| dialog.request.starts_touch_id());
-        if start && starts && self.owner.touch_id_ready() {
-            self.start_owner_check(OwnerCheck::TouchId, ctx.cloned());
+        if start && starts {
+            self.probe_owner_biometry(ctx.cloned());
         }
     }
 
@@ -1673,9 +1677,41 @@ impl DesktopApp {
             self.finish_owner_check(dialog, proof);
             return;
         }
-        if dialog.request.starts_touch_id() && self.owner.touch_id_ready() {
-            self.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
+        if dialog.request.starts_touch_id() {
+            self.probe_owner_biometry(Some(ctx.clone()));
         }
+    }
+
+    fn probe_owner_biometry(&mut self, ctx: Option<egui::Context>) {
+        let Some(helper) = self.owner.helper.clone() else {
+            tracing::info!(biometry = "no_helper", "owner check biometry");
+            return;
+        };
+        let Some(dialog) = self.owner.check.as_ref() else {
+            return;
+        };
+        self.owner.check_probe = Some((
+            dialog.identity,
+            Task::spawn(ctx, move || match helper.ping() {
+                Ok(info) => NativeState {
+                    biometry: Some(info.biometry),
+                    problem: None,
+                },
+                Err(_) => NativeState {
+                    biometry: None,
+                    problem: Some("helper probe failed".into()),
+                },
+            }),
+        ));
+    }
+
+    pub(crate) fn development_clicked(&mut self, request: OwnerRequest, ctx: &egui::Context) {
+        self.prepare_owner(request, Some(ctx), false);
+        self.start_local_owner(
+            crate::broker::approvals::LocalWindowSource::DevelopmentClick,
+            true,
+            ctx,
+        );
     }
 
     /// Called only after the owner clicks Allow once for this exact pending run.
@@ -1716,6 +1752,7 @@ impl DesktopApp {
 
     /// Run the gate on a worker thread for the open dialog.
     pub(crate) fn start_owner_check(&mut self, check: OwnerCheck, ctx: Option<egui::Context>) {
+        self.owner.check_probe = None;
         let gate = self.owner_gate();
         let Some(dialog) = self.owner.check.as_mut() else {
             return;
@@ -1753,8 +1790,12 @@ impl DesktopApp {
 
     /// Close the dialog. The passphrase field and its undo history are erased.
     pub(crate) fn close_owner_check(&mut self, ctx: Option<&egui::Context>) {
+        self.owner.check_probe = None;
         if let Some(mut dialog) = self.owner.check.take() {
-            self.owner_ui.session.owner_window.invalidate();
+            self.owner_ui
+                .session
+                .owner_window
+                .invalidate_for("check_cancelled");
             dialog.passphrase.zeroize();
         }
         if let Some(ctx) = ctx {
@@ -1770,6 +1811,7 @@ impl DesktopApp {
         ) {
             return self.complete_passkey(&request.action(), proof);
         }
+        let approvals = self.approvals();
         let session = &mut self.owner_ui.session;
         match request {
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
@@ -1900,12 +1942,16 @@ impl DesktopApp {
                 }
             }
             OwnerRequest::CorrectEnvironment {
+                run,
                 agent,
                 item_id,
                 name,
                 environment,
                 ..
-            } => match session.correct_environment(item_id, environment, proof) {
+            } => match approvals.as_ref().ok_or_else(|| super::model::ModelError {
+                code: "not_waiting",
+                message: "The question no longer offers this correction.".into(),
+            }).and_then(|queue| session.correct_environment(queue, &run, item_id, environment, proof)) {
                 Ok(()) => self.set_ok(format!(
                     "{name} is marked as {}. The question of {agent} still waits: allow it or deny it.",
                     environment.as_str()
@@ -2406,8 +2452,43 @@ impl DesktopApp {
         self.finish_owner_check(dialog, proof);
     }
 
+    pub(crate) fn finish_biometry_probe(
+        &mut self,
+        identity: u64,
+        state: NativeState,
+        ctx: &egui::Context,
+    ) {
+        tracing::info!(biometry = ?state.biometry, "owner check biometry");
+        if self
+            .owner
+            .check
+            .as_ref()
+            .is_some_and(|d| d.identity == identity && d.running.is_none())
+        {
+            self.owner.native = state;
+            if self.owner.touch_id_ready() {
+                self.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
+            }
+        }
+    }
+
     /// Poll the worker threads. The UI calls this at the start of each frame.
     pub(crate) fn poll_owner_flows(&mut self, ctx: &egui::Context) {
+        if let Some((identity, probe)) = &self.owner.check_probe {
+            let identity = *identity;
+            let state = match probe.poll() {
+                TaskPoll::Waiting => None,
+                TaskPoll::Done(state) => Some(state),
+                TaskPoll::Lost => Some(NativeState {
+                    biometry: None,
+                    problem: Some("helper probe failed".into()),
+                }),
+            };
+            if let Some(state) = state {
+                self.owner.check_probe = None;
+                self.finish_biometry_probe(identity, state, ctx);
+            }
+        }
         if let Some(probe) = &self.owner.native_probe
             && let TaskPoll::Done(state) = probe.poll()
         {
@@ -2486,6 +2567,7 @@ impl DesktopApp {
                 }
             }
             Err(err) => {
+                self.owner.check_probe = None;
                 if let Some(mut dialog) = self.owner.check.take() {
                     if let Some(ticket) = dialog.origin.take() {
                         ticket.send(crate::owner::wire::Response::error(

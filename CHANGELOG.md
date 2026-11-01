@@ -6,6 +6,9 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Fixed
 
+- Development on agent questions follows the owner check window after each local click. Other sensitive and durable actions still ask.
+- Display sleep keeps the window open. Mac lock and system sleep still end it. Keep lifecycle heartbeats active and check Touch ID availability again for each fresh check.
+- Add privacy-safe owner window diagnostics.
 - **Browser extension:** Explain passkey and code refusals when the browser was started with remote debugging or a test extension.
 
 ## [0.5.10] - 2026-11-01
