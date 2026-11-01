@@ -24,13 +24,14 @@ test("menu aligns to the field, flips over Submit and follows scroll/resize", as
   await page.addStyleTag({ content: "body{margin:320px 200px;min-height:1500px}#username,#password{box-sizing:border-box;width:320px;height:40px;margin:8px 0}" });
   await page.focus("#password");
   await expect(page.locator(selector)).toHaveAttribute("data-state", "list");
-  const checkGeometry = async () => {
+  // Scroll/resize positioning is asynchronous; wait for the complete geometry.
+  const checkGeometry = async () => expect(async () => {
     const field = await page.locator("#password").boundingBox();
     const menu = await page.locator(selector).boundingBox();
     expect(menu.x).toBeCloseTo(field.x, 0);
     expect(menu.width).toBeGreaterThanOrEqual(field.width);
     expect(menu.y + menu.height).toBeLessThanOrEqual(field.y);
-  };
+  }).toPass({ timeout: 5000 });
   await checkGeometry();
   await page.evaluate(() => window.scrollTo(0, 40));
   await expect.poll(async () => (await page.locator(selector).boundingBox()).y).toBeLessThan(320);

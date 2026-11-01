@@ -53,6 +53,15 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.9 staged app release
+
+The owner approved merging the 0.5.9 release PR to publish the Mac download and
+in-app auto-update. Relay 0.5.9 is already live. TestFlight and Chrome Web Store
+uploads follow separately; this is not yet a completed six-component release.
+Schema 21 adds only local encrypted Connect staging. Unlock migrates schemas
+1–20; sync merge retains schema 16–21 support. Keep an encrypted backup and
+shared-vault clients closed until every Mac and iPhone runs 0.5.9 before syncing.
+
 ## 0.5.8 staged app release
 
 Owner decision for 0.5.8: prepare the app repository and extension only. Leave
