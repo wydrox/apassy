@@ -32,6 +32,10 @@ public actor PreviewVaultService: VaultService {
     private var status: SyncStatus
     /// Questions through the relay (`PreviewVaultService+Questions.swift`).
     var questionsState = PreviewQuestions()
+    var accessPreviewRows: [RelayAccessRequest] = []
+    var accessPreviewPosts: [AccessPost] = []
+    var accessPreviewAttempts: [String:Int] = [:]
+    var accessPreviewFailures: [VaultError] = []
     /// Folders and the options of each credential (`PreviewVaultService+Organize.swift`).
     var organizeState = PreviewOrganize()
     /// The agents of the Macs (`PreviewVaultService+Feed.swift`).

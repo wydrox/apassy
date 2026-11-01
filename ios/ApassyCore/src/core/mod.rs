@@ -573,6 +573,14 @@ impl Core {
             | "item_folder_set" | "detect" | "add_pasted" | "item_options_set" => {
                 self.organize_call(&op, request)
             }
+            "access_requests_list"
+            | "access_requests_history"
+            | "access_request_prepare"
+            | "access_request_answer"
+            | "access_request_cancel_prepared" => {
+                self.require_app()?;
+                self.access_call(&op, request)
+            }
             // 5.10 Questions through the relay: the app only.
             "questions_list"
             | "request_history"
