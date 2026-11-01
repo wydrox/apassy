@@ -59,6 +59,57 @@ const ANSWER_PRIVATE: &str = "bb684f0551ffd30d7040500bc8fa0d83efd5dbde18ea1e253f
 const ANSWER_PUBLIC: &str =
     "BAotqUNjRqTfgIY4YuJGS5yZV2N5Jat0I5dFMlv29IqSFmgkZk2dzWe-n2AcgOt933rMrBOrK054Bc7RwNTeyts";
 
+#[test]
+fn access_cards_and_both_signed_choices_use_the_unchanged_fake_carrier() {
+    use apassy::questions::access_request as access;
+    for choice in [access::Choice::Deny,access::Choice::AllowOnce] {
+        let w=world(true);
+        let phone=w.iphone();
+        let id=w.with_a(|v|{
+            v.set_env_binding(w.items[1],"API_TOKEN","token").unwrap();
+            v.set_agent_sees_all(w.agent,true).unwrap();
+            let agent=v.list_agents().unwrap().into_iter().find(|a|a.id==w.agent).unwrap();
+            let response=apassy::broker::access_once::create(v,&agent,w.items[1],"Read synthetic status.",w._root.path().to_str(),
+                &access::Scope{action:access::Action::Read,hosts:vec!["api.example.test".into()]});
+            assert!(response.ok,"{response:?}");
+            response.result.unwrap()["request_id"].as_u64().unwrap()
+        });
+        let request=w.with_a(|v|v.scoped_access_request(id).unwrap());
+        let start=Instant::now();
+        let record=loop {
+            if let Some(r)=phone.client.list(0,Duration::ZERO).unwrap().questions.into_iter().find(|r|r.qid==request.card.card.qid) {break r}
+            assert!(start.elapsed()<Duration::from_secs(15));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let c=&request.card.card;
+        let mac=phone.devices.iter().find(|d|d.uuid==c.asker.device).unwrap();
+        let plaintext=record.card().open(&phone.keys[0],&card_aad(&w.team,&record.qid,&record.key_id,"member",record.expires_at)).unwrap();
+        let verified=access::verify_card(&plaintext,&mac.sign_key,&access::Context{
+            vault_id:&c.vault_id,team_id:&w.team,qid:&record.qid,key_id:&record.key_id,asker:&mac.uuid,
+            relay_device_id:record.from_device_id,expires_at:record.expires_at},now()).unwrap();
+        let mut answer=access::Answer::prepare(&verified,&phone.uuid,choice,now()).unwrap();
+        let message=answer.message(&verified).unwrap();
+        answer.signature=encode_b64u(&if choice==access::Choice::Deny {phone.client.sign(&message).unwrap()}else{answer_key().sign(&message).unwrap()});
+        let bytes=serde_json::to_vec(&answer).unwrap();
+        let sealed=Sealed::new(&phone.keys[0],&answer_aad(&w.team,&record.qid,&record.key_id,phone.client.device_id().unwrap()),&bytes).unwrap();
+        phone.client.post_answer(&record.qid,&sealed).unwrap();
+        // Appended duplicate copies can never install another permit.
+        let _=phone.client.post_answer(&record.qid,&sealed);
+        let start=Instant::now();
+        let receipt=loop {
+            let state=w.with_a(|v|v.scoped_access_request(id).unwrap());
+            if let Some(receipt)=state.receipt {break receipt}
+            assert!(start.elapsed()<Duration::from_secs(15));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(receipt.outcome,if choice==access::Choice::Deny{access::Outcome::Denied}else{access::Outcome::AllowedOnce});
+        assert_eq!(receipt.answered_by.as_deref(),Some(phone.uuid.as_str()));
+        assert_eq!(w.with_a(|v|v.access_status(w.agent,id).unwrap().permit),if choice==access::Choice::Deny{"unavailable"}else{"available"});
+        assert!(w.with_a(|v|v.exec_grants_for_agent(w.agent).unwrap()).is_empty());
+        assert!(w.with_a(|v|v.deny_access_request(id)).is_err());
+    }
+}
+
 type SharedVault = Arc<Mutex<Option<Vault>>>;
 
 fn now() -> u64 {

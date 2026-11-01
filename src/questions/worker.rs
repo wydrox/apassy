@@ -531,7 +531,7 @@ pub(super) struct State {
 }
 
 pub(super) struct Shared {
-    queue: Arc<ApprovalQueue>,
+    pub(super) queue: Arc<ApprovalQueue>,
     pub(super) vault: SharedVault,
     pub(super) gate: OwnerGate,
     pub(super) config: QuestionsConfig,
@@ -600,6 +600,10 @@ impl QuestionsWorker {
             ("apassy-questions-post", poster as fn(&Shared)),
             ("apassy-questions-read", reader as fn(&Shared)),
             ("apassy-questions-list", lister as fn(&Shared)),
+            (
+                "apassy-access-requests",
+                super::access_worker::run as fn(&Shared),
+            ),
             ("apassy-feed-publish", feed_publisher as fn(&Shared)),
             ("apassy-feed-actions", feed_actions as fn(&Shared)),
         ] {
