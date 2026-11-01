@@ -26,7 +26,6 @@ Covered actions:
 
 - Browser password and one-time-code fill, save, create and password update.
 - macOS AutoFill password and code fill.
-- CLI code (`apassy code ITEM`, showing or copying), added by ADR 0034 on 2026-11-01.
 - Passkey sign-in/assertion through the extension or macOS AutoFill. Its signed
   authenticator data sets UP and UV, as after a fresh check: the owner verified
   locally within the configured window. This is the explicitly accepted session
@@ -39,7 +38,7 @@ window. There is no Apassy confirmation sheet or additional click. Multiple
 passkey accounts still require selecting the exact account. No passkey is selected
 by the window. The system's own AutoFill chooser and prompts remain OS-controlled.
 
-Always fresh: vault unlock; app UI reveal/show/copy/large type, including OTP; secret
+Always fresh: vault unlock; CLI code; app UI reveal/show/copy/large type, including OTP; secret
 export, backup and restore; Allow production, Allow in project and all durable
 grants; Allow once and let the bouncer evaluate; rule and environment relaxations;
 agent connect and token issue/rotate; devices and pairing; remote/iPhone answers;
@@ -118,9 +117,11 @@ system appearance captures do not claim that this PR implements a dark theme.
 
 ## Amendment — 2026-11-01: CLI code
 
-[ADR 0034](0034-mfa-codes-cli-and-agents.md) adds CLI code to covered actions.
-The authenticated owner socket supplies internal CLI provenance; a new proof binds
-item, OTP field, show/copy and vault epoch, with the same window deadline and
-revocation fence. UI Show Code and Copy Code remain always fresh. No other CLI
-action gains reuse. Agent code use still requires an explicit owner decision; the
-window never answers an agent question automatically.
+[ADR 0034](0034-mfa-codes-cli-and-agents.md) initially proposed CLI code reuse.
+Security review found that the owner socket's bearer session can be inherited by
+an unsandboxed agent and supplies no verified interactive-owner provenance.
+CLI code therefore stays always fresh until a verified owner transport exists.
+A new proof still binds item, OTP field, show/copy and vault epoch, with the
+revocation fence. UI Show Code and Copy Code remain always fresh. Agent code use
+requires an explicit owner decision; the window never answers an agent question
+automatically.

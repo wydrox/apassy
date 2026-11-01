@@ -4,13 +4,6 @@ use std::time::Duration;
 #[cfg(not(target_os = "macos"))]
 use std::time::Instant;
 
-/// CLI code is the only owner CLI value action covered by this window.
-/// UI ShowCode and CopyCode deliberately remain outside this allowlist.
-#[cfg(feature = "desktop")]
-pub(crate) fn covers_cli_code(action: &super::OwnerAction) -> bool {
-    matches!(action, super::OwnerAction::CliCode { .. })
-}
-
 /// The six owner-approved choices. Unknown stored values fail closed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerFrequency {
@@ -385,8 +378,8 @@ mod tests {
     }
     #[cfg(feature = "desktop")]
     #[test]
-    fn cli_code_window_is_exact_and_expires_with_injected_clock() {
-        use super::super::{LocalWindowSource, OwnerAction, OwnerGate, ProofRefusal};
+    fn cli_code_never_reuses_a_window_and_fresh_proofs_are_exact() {
+        use super::super::{LocalWindowSource, OwnerAction, OwnerCheck, OwnerGate, ProofRefusal};
         let dir = tempfile::tempdir().unwrap();
         let mut vault =
             crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-window-pass")
@@ -403,8 +396,18 @@ mod tests {
             field: "x_OTP".into(),
             copy: false,
         };
+        for source in [
+            LocalWindowSource::BrowserGesture,
+            LocalWindowSource::AutoFill,
+            LocalWindowSource::AllowOnceClick,
+        ] {
+            assert!(gate.reuse_local(action.clone(), source).is_none());
+        }
         let proof = gate
-            .reuse_local(action.clone(), LocalWindowSource::CliCode)
+            .authorize(
+                action.clone(),
+                OwnerCheck::passphrase("synthetic-window-pass"),
+            )
             .unwrap();
         assert_eq!(proof.check(&action, &epoch), Ok(()));
         for other in [
@@ -432,7 +435,7 @@ mod tests {
                     item_id: 7,
                     field: "x_OTP".into()
                 },
-                LocalWindowSource::CliCode
+                LocalWindowSource::BrowserGesture
             )
             .is_none()
         );
@@ -442,7 +445,7 @@ mod tests {
                     item_id: 7,
                     field: "x_OTP".into()
                 },
-                LocalWindowSource::CliCode
+                LocalWindowSource::AutoFill
             )
             .is_none()
         );
@@ -450,10 +453,7 @@ mod tests {
             clock.0.store(time, Ordering::SeqCst);
             w.observe(true);
         }
+        w.invalidate();
         assert!(!proof.is_fresh());
-        assert!(
-            gate.reuse_local(action, LocalWindowSource::CliCode)
-                .is_none()
-        );
     }
 }

@@ -317,8 +317,11 @@ Helpers accept offline `--help` and `--version` with exit 0; invalid arguments e
 `apassy code ITEM` prints `123456 (19 seconds left)` after the owner check. ITEM
 is an ID or exact name and must have exactly one OTP detail. No detail gives a
 clear `no_code` error; ambiguous or invalid settings are refused. A logged-in owner
-CLI session is required. The check follows Settings > Security > How often to ask
-for Touch ID (ADR 0030); app UI Show Code and Copy Code stay always fresh.
+CLI session is required. Every request needs a fresh local owner check, even inside
+the Touch ID frequency window: the bearer session can be inherited by an
+unsandboxed agent and does not prove an interactive owner. Window reuse is deferred
+until that provenance can be verified (ADR 0034). App UI Show Code and Copy Code
+also stay always fresh.
 
 `apassy code ITEM --copy` uses the app's concealed clipboard, clearing it at code
 expiry (within the existing clipboard limits), vault/session end or lock, unless

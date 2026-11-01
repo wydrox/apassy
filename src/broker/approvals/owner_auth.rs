@@ -125,7 +125,8 @@ pub enum OwnerAction {
     Reveal {
         item_id: u64,
     },
-    /// Owner CLI code, bound to the exact item, OTP field and show/copy action.
+    /// Always-fresh CLI code: the owner socket cannot attest an interactive owner.
+    /// Bound to the exact item, OTP field and show/copy action.
     CliCode {
         item_id: u64,
         field: String,
@@ -1687,7 +1688,6 @@ pub(crate) enum LocalWindowSource {
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
-    CliCode,
 }
 #[cfg(feature = "desktop")]
 impl LocalWindowSource {
@@ -1711,7 +1711,6 @@ impl LocalWindowSource {
                     | OwnerAction::FillSystemCode { .. }
                     | OwnerAction::SignPasskey { origin: None, .. }
             ),
-            Self::CliCode => super::owner_window::covers_cli_code(action),
             Self::AllowOnceClick => matches!(action, OwnerAction::ApproveRun(_)),
         }
     }

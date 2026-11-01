@@ -1231,6 +1231,16 @@ fn read_call_secret(
             "The item has no value for the connector.",
         ));
     };
+    // Connectors do not resolve process bindings. Apply the same no-seed boundary
+    // here, including an old token field whose value is a TOTP setup URI. Otherwise
+    // a destination could receive the seed and return only its extracted key.
+    if crate::vault::is_setup_key_field(checked.secret_field, secret.expose()) {
+        return Err(deny(
+            vault,
+            "setup_key_refused",
+            "One-time password setup keys cannot be used by agent connectors.",
+        ));
+    }
     Ok(Prepared {
         agent: checked.agent.clone(),
         destination,

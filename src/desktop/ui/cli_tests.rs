@@ -1798,7 +1798,7 @@ fn raw_registration_proof_cannot_connect_the_full_catalog() {
 }
 
 #[test]
-fn cli_code_show_json_copy_and_owner_window_keep_values_out_of_status() {
+fn cli_code_requires_fresh_checks_even_with_an_inherited_session_and_open_window() {
     use crate::broker::approvals::{CheckMethod, OwnerFrequency};
     use crate::desktop::clipboard::{CodeClipboard, memory::MemoryBoard};
     let dir = TempDir::new().unwrap();
@@ -1883,6 +1883,16 @@ fn cli_code_show_json_copy_and_owner_window_keep_values_out_of_status() {
             copy: true,
         },
     );
+    assert!(
+        copied.try_recv().is_err(),
+        "a bearer session is not owner provenance"
+    );
+    assert!(app.owner.check.is_some());
+    assert!(
+        board.text().is_none(),
+        "no code reaches the clipboard before approval"
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
     let copied = now(&copied);
     assert!(copied.ok);
     assert!(app.owner.check.is_none());
@@ -1891,7 +1901,6 @@ fn cli_code_show_json_copy_and_owner_window_keep_values_out_of_status() {
     assert!(json["data"].get("code").is_none());
     assert_eq!(board.text().unwrap().len(), 6);
     assert!(app.owner.clipboard.is_pending());
-    window.invalidate();
     let fresh = ask(
         &mut app,
         &ctx,

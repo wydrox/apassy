@@ -1839,7 +1839,7 @@ pub fn vault(cli: &Cli, mut args: Args) -> Outcome {
     }
 }
 
-pub const CODE_HELP: &str = "apassy code ITEM [--copy] [--json]\n\nITEM is an ID or exact name with exactly one one-time password detail.\nShows the current code and seconds left. --copy uses the app's expiring clipboard\nand never prints the code. Uses the owner's Touch ID frequency window.\n";
+pub const CODE_HELP: &str = "apassy code ITEM [--copy] [--json]\n\nITEM is an ID or exact name with exactly one one-time password detail.\nShows the current code and seconds left. --copy uses the app's expiring clipboard\nand never prints the code. Requires a fresh owner check for every request.\n";
 
 pub fn code(cli: &Cli, mut args: Args) -> Outcome {
     let item = args.required("item ID or exact name")?;

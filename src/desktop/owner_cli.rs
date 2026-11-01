@@ -395,17 +395,12 @@ impl DesktopApp {
             // A batch binding has its refusals in the ticket already.
             _ => {}
         }
-        let is_code = matches!(request, OwnerRequest::CliCode { .. });
-        self.prepare_owner(request, Some(ctx), !is_code);
+        // The socket authenticates a bearer session, not an interactive owner.
+        // An unsandboxed agent can inherit that session. Never let a CLI code
+        // request consume the owner's verification window without a fresh check.
+        self.prepare_owner(request, Some(ctx), true);
         if let Some(dialog) = self.owner.check.as_mut() {
             dialog.origin = Some(ticket);
-        }
-        if is_code {
-            self.start_local_owner(
-                crate::broker::approvals::LocalWindowSource::CliCode,
-                true,
-                ctx,
-            );
         }
         if self.owner.check.is_some() {
             bring_to_front(ctx);

@@ -51,7 +51,7 @@ Also in scope: an injection through the purpose, the user request, a command, or
 [ADR 0030](docs/adr/0030-owner-check-window.md) defines an opt-in exception to
 per-action identity checks. Every time remains the default. Protected per-Mac
 choices can reuse a fresh local verification for browser and macOS AutoFill
-password/code actions, owner CLI code, passkey sign-ins (UP/UV set), and an explicit Allow once
+password/code actions, passkey sign-ins (UP/UV set), and an explicit Allow once
 click for each agent request. A window never answers an agent request itself.
 Browser fills from trusted extension gestures need no Apassy sheet in a window.
 App UI reveal/copy/OTP display, exports/backups/restores, production/project and durable
@@ -135,12 +135,16 @@ for arbitrary command output.
 ### One-time codes (ADR 0034)
 
 `apassy code` intentionally releases a current code to the authenticated owner CLI,
-using an exact item/field/show-or-copy proof and the configured Touch ID window.
+using an exact item/field/show-or-copy proof and a fresh local check for every
+request. The owner socket authenticates a bearer session, not an interactive owner;
+an unsandboxed same-user agent can inherit that token. CLI code window reuse is
+deferred until owner provenance can be verified.
 `--copy` uses the app's concealed expiring clipboard and omits the value from its
 response. UI reveal/copy checks remain fresh. Owner terminal output is sensitive.
 
 Agent runs explicitly select `codes`; they never receive an OTP setup key, including
-through an old explicit seed binding. A code is a hard owner veto unless a remembered
+through an old explicit seed binding or a connector token containing a setup URI.
+A code is a hard owner veto unless a remembered
 owner project/action answer explicitly includes codes for that item and destinations.
 Models and patterns cannot grant this authority. Existing Always ask, production,
 host, missing-context and session fences still apply. Old answers default to no code

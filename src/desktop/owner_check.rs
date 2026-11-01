@@ -969,7 +969,7 @@ impl OwnerRequest {
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
             Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
-            Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line. This action uses your Touch ID frequency window.", if *copy { "Copy" } else { "Show" }),
+            Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line. A fresh owner check is required because a command-line session can be inherited by an agent.", if *copy { "Copy" } else { "Show" }),
             Self::ShowCode { field, .. } => format!(
                 "Show the code of \"{}\" for 30 seconds. The other secret values stay hidden.",
                 super::owner_store::field_label(field)
@@ -1278,7 +1278,7 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
-            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can show a current one-time code with apassy code after an owner check, using your Touch ID frequency window. Grants, approvals, and new tokens still ask you here.".to_owned(),
+            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can show a current one-time code with apassy code after a fresh owner check for each request. Grants, approvals, and new tokens still ask you here.".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "Bind 1 credential to the environment variable below. Programs get the real value.".to_owned(),
                 count => format!(

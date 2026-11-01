@@ -17,13 +17,23 @@ No code appears in app status text. A missing OTP detail gives `no_code`;
 multiple OTP details are ambiguous and refused, as is an invalid setting.
 Legacy OTP labels and explicit TOTP URIs use the shared vault discovery rule.
 
-An authenticated owner CLI session is required. CLI code is a distinct covered
-action in the ADR 0030 source allowlist. A new single-use proof binds the exact
-item, seed field, show-versus-copy action and vault epoch. Inside a healthy
-configured window it completes without another prompt; outside it the ordinary
-fresh local check runs. Delivery rechecks the window/session fence. UI Show Code
-and Copy Code retain their always-fresh checks. No agent API accepts this action
-or an owner-window token.
+An authenticated owner CLI session and a **fresh local owner check for each code
+request** are required. A new single-use proof binds the exact item, seed field,
+show-versus-copy action and vault epoch. Delivery rechecks its session and
+revocation fence. UI Show Code and Copy Code also retain always-fresh checks.
+No agent API accepts this action or an owner-window token.
+
+Security review correction: the requested ADR 0030 window reuse is deferred.
+The owner socket has filesystem permissions and a bearer session, but no peer
+identity or interactive-owner attestation. `APASSY_SESSION` is inherited by child
+processes; the MCP/hook wrappers authenticate the adapter with an agent token and
+do not identify arbitrary shell commands. The supported sandbox removes the owner
+session and denies the owner socket, but an unsandboxed same-user agent could
+inherit a valid session and silently fetch codes while the owner's window is open.
+TTY checks and caller-supplied flags or environment markers do not prove ownership.
+Consequently no local window source covers `CliCode`; even a valid session with
+an open window must pass a fresh check. Reuse needs a separate verified owner
+transport before it can be enabled safely.
 
 ## Agent selection and timing
 
@@ -76,7 +86,8 @@ All clients sharing a vault need a schema-23-capable build before sync resumes.
 ## Exposure and masking
 
 Agents receive only the generated code in the child environment. Stored OTP
-setup keys, including legacy explicit process bindings, cannot be delivered.
+setup keys, including legacy explicit process bindings and connector token fields
+containing setup URIs, cannot be delivered.
 There is no agent clipboard path. Generated values are absent from model input,
 approval/relay cards, activity/use/decision logs, receipts and operation status:
 generation happens after those inputs are constructed, and receipts whitelist
