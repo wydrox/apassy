@@ -104,6 +104,9 @@ pub fn create(relay: &str, team: &str, name: &str, device: Option<&str>) -> Resu
     })?;
     store.remove(&relay, &staging)?;
     remove_recovery(&staging)?;
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":made.team_id,"member_id":made.member_id,"device_id":id}),
+    )?;
     println!(
         "Created team {} ({}). You are its owner {} (device {}).",
         clean(team),
@@ -165,6 +168,9 @@ fn save_granted(relay: &str, granted: AccessGranted) -> Result<i32, CliError> {
         true,
     )?;
     remove_recovery(&granted.team_id)?;
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":granted.team_id,"member_id":granted.member_id,"device_id":granted.device_id,"state":"joined"}),
+    )?;
     println!(
         "Joined {} as {} (device {})",
         clean(&granted.team),
@@ -176,6 +182,7 @@ fn save_granted(relay: &str, granted: AccessGranted) -> Result<i32, CliError> {
 
 fn wait(client: &Client, id: &TeamId, key: &DeviceKey, no_wait: bool) -> Result<i32, CliError> {
     if no_wait {
+        crate::cli::output::result(&serde_json::json!({"team_id":id,"state":"pending"}))?;
         eprintln!(
             "The request waits for confirmation. Use `apassy-team --team {id} join --resume` to wait again."
         );
@@ -335,6 +342,9 @@ fn submit(
             safety_verified: Some(true),
         },
         false,
+    )?;
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":id,"team":pending.team,"state":"pending","safety":safety,"invited_by":pending.by}),
     )?;
     println!(
         "Team {} ({}), from {}. Safety words: {}",

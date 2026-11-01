@@ -66,6 +66,7 @@ fn start_host(
     let edge = relay.edge_secret.clone();
     let owner = relay.owner_token.clone();
     let dir = keys_dir.to_path_buf();
+    let team = relay.team_id.clone();
     let thread = std::thread::spawn(move || {
         let client = Client::new(
             &url,
@@ -75,6 +76,7 @@ fn start_host(
         let store = KeyStore::at(dir);
         let rules = RuleSet::builtin().unwrap();
         let ctx = HostContext {
+            team_id: &team,
             client: &client,
             store: &store,
             options,
@@ -122,6 +124,7 @@ fn add_hosted_item(
         .add(KeyEntry {
             relay_url: relay.url.clone(),
             team: "Test Team".to_string(),
+            team_id: Some(relay.team_id.clone()),
             uid: sealed.uid.clone(),
             item_id: Some(id),
             name: format!("Item {env_name}"),
@@ -560,4 +563,30 @@ fn the_key_file_modes_hold_after_the_host_wrote_its_log() {
         assert_eq!(got, mode, "{}", path.display());
     }
     let _ = world.dir.path();
+}
+
+#[test]
+fn a_host_never_releases_another_teams_or_unbound_legacy_keys() {
+    for binding in [Value::Null, json!("t_abcdefgh23")] {
+        let world = world();
+        let mut keys: Value =
+            serde_json::from_slice(&std::fs::read(world.store.path()).unwrap()).unwrap();
+        // Same relay, display name, UID and item id as the requested item. Only the
+        // stable ownership differs, or is absent in a legacy key file.
+        keys["entries"][0]["team_id"] = binding;
+        std::fs::write(world.store.path(), serde_json::to_vec(&keys).unwrap()).unwrap();
+        let host = start_host(
+            &world.relay,
+            world.store.dir(),
+            HostOptions::default(),
+            |_| Answer::Yes,
+        );
+        let run = world.ask_for(&[world.stripe], &["stripe", "balance", "retrieve"], None);
+        let result = world.decided(run);
+        assert_eq!(result["status"], "denied");
+        assert_eq!(result["note"], "Unknown item on this host.");
+        assert!(result.get("session").is_none());
+        assert!(host.asked().is_empty());
+        host.finish();
+    }
 }

@@ -34,10 +34,12 @@ fn execute_for(command: Command, selected: Option<&str>) -> Result<i32, CliError
     match command {
         Command::Selected { team, command } => execute_for(*command, Some(&team)),
         Command::Help => {
+            crate::cli::output::result(&serde_json::json!({"help":USAGE}))?;
             print!("{USAGE}");
             Ok(0)
         }
         Command::Version => {
+            crate::cli::output::result(&serde_json::json!({"version":env!("CARGO_PKG_VERSION")}))?;
             println!("apassy-team {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
@@ -80,7 +82,7 @@ fn execute_for(command: Command, selected: Option<&str>) -> Result<i32, CliError
         Command::TeamList { json } => {
             let saved = settings::saved_teams()?;
             let teams = saved.teams;
-            if json {
+            if json || crate::cli::output::enabled() {
                 let rows: Vec<_> = teams
                     .iter()
                     .map(|(id, team)| {
@@ -120,6 +122,7 @@ fn execute_for(command: Command, selected: Option<&str>) -> Result<i32, CliError
             let id = crate::ids::TeamId::parse(&id)
                 .ok_or_else(|| CliError::usage("The team id is not valid."))?;
             settings::set_current(&id)?;
+            crate::cli::output::result(&serde_json::json!({"team_id":id}))?;
             println!("Current team: {id}.");
             Ok(0)
         }
@@ -147,8 +150,8 @@ fn execute_for(command: Command, selected: Option<&str>) -> Result<i32, CliError
                 auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
             },
         ),
-        Command::HostUninstall => crate::cli::service::uninstall(),
-        Command::HostStatus => crate::cli::service::status(),
+        Command::HostUninstall => crate::cli::service::uninstall(selected),
+        Command::HostStatus => crate::cli::service::status(selected),
         other => {
             let settings = settings::load_for(selected)?;
             member_command(&settings, other)?;
@@ -250,6 +253,9 @@ fn init(relay: &str) -> Result<i32, CliError> {
         },
         false,
     )?;
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":me.team_id,"member_id":me.member_id,"settings_file":path}),
+    )?;
     println!(
         "Saved settings for {} ({}) of team {} in {}.",
         clean(&me.member_name),
@@ -270,7 +276,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 agent_client(settings)?
             };
             let me: MeView = client.ok(Method::Get, paths::ME, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&me);
             }
             match (&me.agent_name, &me.agent_id) {
@@ -311,7 +317,10 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             })?;
             let issued: Issued = client.ok(Method::Post, paths::INVITES, Some(&payload))?;
             // The one-time output: the code alone on stdout, the rest on stderr.
-            println!("{}/join#{}", client.base(), issued.secret.expose());
+            crate::cli::output::secret(
+                "url",
+                &format!("{}/join#{}", client.base(), issued.secret.expose()),
+            )?;
             eprintln!(
                 "Invite {} for role {}, expires {}. The code works once. Send it over a private channel.",
                 issued.id,
@@ -326,7 +335,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         Command::Invites { json } => {
             let items: Vec<InviteView> =
                 member_client(settings)?.ok(Method::Get, paths::INVITES, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             let rows = items
@@ -347,7 +356,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         Command::Members { json } => {
             let items: Vec<MemberView> =
                 member_client(settings)?.ok(Method::Get, paths::MEMBERS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             let rows = items
@@ -370,6 +379,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 &format!("{}/{id}", paths::MEMBERS),
                 None,
             )?;
+            crate::cli::output::result(&done)?;
             println!("Revoked member {}.", done.id);
             Ok(())
         }
@@ -380,13 +390,14 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             })?;
             let done: Created =
                 member_client(settings)?.ok(Method::Post, paths::COLLECTIONS, Some(&payload))?;
+            crate::cli::output::result(&done)?;
             println!("{}", done.id);
             Ok(())
         }
         Command::CollectionList { json } => {
             let items: Vec<CollectionView> =
                 member_client(settings)?.ok(Method::Get, paths::COLLECTIONS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             let rows = items
@@ -410,6 +421,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 &format!("{}/{id}/policy", paths::COLLECTIONS),
                 Some(&payload),
             )?;
+            crate::cli::output::result(&view)?;
             println!(
                 "Collection {} ({}): {}",
                 view.id,
@@ -425,7 +437,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 None => paths::ITEMS.to_owned(),
             };
             let items: Vec<ItemView> = member_client(settings)?.ok(Method::Get, &path, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             let rows = items
@@ -453,6 +465,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 &format!("{}/{id}", paths::ITEMS),
                 None,
             )?;
+            crate::cli::output::result(&done)?;
             println!("Archived item {}.", done.id);
             Ok(())
         }
@@ -463,13 +476,14 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             })?;
             let done: Created =
                 member_client(settings)?.ok(Method::Post, paths::GRANTS, Some(&payload))?;
+            crate::cli::output::result(&done)?;
             println!("{}", done.id);
             Ok(())
         }
         Command::Grants { json } => {
             let items: Vec<GrantView> =
                 member_client(settings)?.ok(Method::Get, paths::GRANTS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             let rows = items
@@ -492,6 +506,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 &format!("{}/{id}", paths::GRANTS),
                 None,
             )?;
+            crate::cli::output::result(&done)?;
             println!("Revoked grant {}.", done.id);
             Ok(())
         }
@@ -503,7 +518,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             let issued: Issued =
                 member_client(settings)?.ok(Method::Post, paths::AGENTS, Some(&payload))?;
             // The one-time output: the token alone on stdout, the rest on stderr.
-            println!("{}", issued.secret.expose());
+            crate::cli::output::secret("token", issued.secret.expose())?;
             eprintln!(
                 "Agent {} (id {}), expires {}. The token is shown once. Set it as APASSY_TOKEN.",
                 clean(&name),
@@ -518,7 +533,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         Command::AgentList { json } => {
             let items: Vec<AgentView> =
                 member_client(settings)?.ok(Method::Get, paths::AGENTS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             let rows = items
@@ -542,13 +557,14 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 &format!("{}/{id}", paths::AGENTS),
                 None,
             )?;
+            crate::cli::output::result(&done)?;
             println!("Revoked agent {}.", done.id);
             Ok(())
         }
         Command::Pending { json } => {
             let items: Vec<ApprovalView> =
                 member_client(settings)?.ok(Method::Get, paths::APPROVALS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&items);
             }
             if items.is_empty() {
@@ -575,7 +591,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
                 format!("{}?{}", paths::AUDIT, query.join("&"))
             };
             let entries: Vec<AuditEntry> = member_client(settings)?.ok(Method::Get, &path, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&entries);
             }
             for e in &entries {
@@ -593,7 +609,7 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         }
         Command::Access { json } => {
             let view: AccessView = agent_client(settings)?.ok(Method::Get, paths::ACCESS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&view);
             }
             println!(
@@ -696,6 +712,7 @@ fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
     drop(value);
 
     let entry = KeyEntry {
+        team_id: Some(me.team_id.clone().ok_or_else(|| CliError::usage("The relay did not return a stable team id. Update the relay before adding item keys."))?),
         relay_url: client.base().to_owned(),
         team: me.team.clone(),
         uid: uid.clone(),
@@ -764,6 +781,7 @@ fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
             error.message
         );
     }
+    crate::cli::output::result(&done)?;
     println!("{}", done.id);
     // The id goes to stdout for scripts. The rest goes to stderr.
     for host in &done.hosts {
@@ -827,10 +845,19 @@ fn decide(
         Ok(view) => view,
         // Nobody approves on the relay: the keys are on the owner's host.
         Err(CallError::Api(e)) if e.code == crate::error::codes::APPROVE_ON_HOST => {
-            return Err(CliError::usage(clean(&e.message)));
+            let message = clean(&e.message);
+            let mut error = CallError::Api(e).into_cli();
+            error.code = 2;
+            error.message = message;
+            return Err(error);
         }
         Err(error) => return Err(error.into_cli()),
     };
+    // A decision result must never expose RunView.session.env, even if a relay
+    // answers with an unexpected ready view.
+    crate::cli::output::result(&serde_json::json!({
+        "run_id":view.run_id,"status":view.status,"code":view.code,"note":view.note
+    }))?;
     println!(
         "Run {}: {}. {}",
         view.run_id,
@@ -874,6 +901,9 @@ fn print_pending(run: &ApprovalView) {
 }
 
 pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
+    if crate::cli::output::enabled() {
+        return crate::cli::output::result(value);
+    }
     let text = serde_json::to_string_pretty(value)
         .map_err(|_| CliError::relay("Cannot encode the answer."))?;
     println!("{text}");

@@ -150,3 +150,189 @@ fn legacy_host_install_saves_the_resolved_team_before_service_start() {
     assert_eq!(saved["teams"][TEAM_A]["relay_url"], relay.url);
     assert_eq!(saved["teams"][TEAM_A]["member_token"], "saved-owner-a");
 }
+
+#[test]
+fn two_teams_get_distinct_host_services_and_logs() {
+    let a = TeamId::parse(TEAM_A).unwrap();
+    let b = TeamId::parse(TEAM_B).unwrap();
+    let plist = |team| {
+        generate_plist(
+            Path::new("/exe"),
+            team,
+            HostOptions::default(),
+            Path::new("/log"),
+            None,
+        )
+        .unwrap()
+    };
+    let label = |text: String| {
+        text.split("<key>Label</key>")
+            .nth(1)
+            .unwrap()
+            .split("</string>")
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert_ne!(
+        label(plist(&a)),
+        label(plist(&b)),
+        "installing B cannot replace A"
+    );
+    let unit = |team| generate_unit(Path::new("/exe"), team, HostOptions::default(), None).unwrap();
+    assert!(unit(&a).contains(&format!("service-{TEAM_A}.log")));
+    assert!(unit(&b).contains(&format!("service-{TEAM_B}.log")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn install_migrates_team_a_then_installs_and_removes_team_b_without_replacing_a() {
+    let owner = |team: &'static str| {
+        Mock::start(move |_, _| {
+            ok(json!({"team_id":team,"team":"Team","kind":"member",
+        "member_id":1,"member_name":"owner","role":"owner"}))
+        })
+    };
+    let a = owner(TEAM_A);
+    let b = owner(TEAM_B);
+    let cli = Cli::new();
+    let bin = cli.home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let manager = bin.join("systemctl");
+    std::fs::write(&manager,"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SERVICE_COMMANDS\"\ncase \"$*\" in *is-active*) echo active;; *show*) echo LoadState=loaded;; esac\n").unwrap();
+    std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let calls = cli.home.path().join("service-commands");
+    let cli = cli
+        .with("PATH", &format!("{}:/usr/bin:/bin", bin.display()))
+        .with("SERVICE_COMMANDS", calls.to_str().unwrap());
+    save_teams(&cli, &a.url, &b.url);
+    let run = |args: &[&str]| {
+        let output = cli.run(args, None);
+        assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+        output
+    };
+    run(&[
+        "--team",
+        TEAM_A,
+        "host",
+        "install",
+        "--ask-all",
+        "--auto-limit",
+        "7",
+    ]);
+    let units = cli.config_dir().join("systemd/user");
+    let path_a = units.join(format!("apassy-team-host-{TEAM_A}.service"));
+    let path_b = units.join(format!("apassy-team-host-{TEAM_B}.service"));
+    let original = std::fs::read_to_string(&path_a).unwrap();
+    let legacy = units.join("apassy-team-host.service");
+    std::fs::write(
+        &legacy,
+        original.replace(&format!("service-{TEAM_A}.log"), "service.log"),
+    )
+    .unwrap();
+    std::fs::remove_file(&path_a).unwrap();
+    run(&["--team", TEAM_B, "host", "install"]);
+    assert_eq!(std::fs::read_to_string(&path_a).unwrap(), original);
+    assert!(path_b.exists());
+    assert!(!legacy.exists());
+    let output = run(&["--team", TEAM_A, "host", "status", "--json"]);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["result"]["service"],
+        format!("apassy-team-host-{TEAM_A}.service")
+    );
+    // Removing saved credentials must not strand an installed service.
+    std::fs::remove_file(cli.settings_file()).unwrap();
+    run(&["--team", TEAM_B, "host", "uninstall"]);
+    assert_eq!(
+        a.requests().len(),
+        1,
+        "status/removal never contact the relay"
+    );
+    assert_eq!(
+        b.requests().len(),
+        1,
+        "status/removal never contact the relay"
+    );
+    assert!(path_a.exists());
+    assert!(!path_b.exists());
+    let commands = std::fs::read_to_string(calls).unwrap();
+    assert!(commands.contains("disable --now apassy-team-host.service"));
+    assert!(commands.contains(&format!("enable --now apassy-team-host-{TEAM_A}.service")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_migration_restores_legacy_and_a_retry_is_idempotent() {
+    for failure in [
+        "--user daemon-reload",
+        "--user enable --now apassy-team-host-t_abcdefgh23.service",
+    ] {
+        let relay = Mock::start(|_, _| {
+            ok(json!({"team_id":TEAM_B,"team":"Team","kind":"member",
+            "member_id":1,"member_name":"owner","role":"owner"}))
+        });
+        let cli = Cli::new();
+        save_teams(&cli, &relay.url, &relay.url);
+        let bin = cli.home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let manager = bin.join("systemctl");
+        std::fs::write(
+            &manager,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$SERVICE_COMMANDS"
+if [ "$*" = "$SERVICE_FAILURE" ] && [ ! -f "$SERVICE_FAILED" ]; then
+    touch "$SERVICE_FAILED"
+    exit 1
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let calls = cli.home.path().join("calls");
+        let failed = cli.home.path().join("failed");
+        let cli = cli
+            .with("PATH", &format!("{}:/usr/bin:/bin", bin.display()))
+            .with("SERVICE_COMMANDS", calls.to_str().unwrap())
+            .with("SERVICE_FAILURE", failure)
+            .with("SERVICE_FAILED", failed.to_str().unwrap());
+        let units = cli.config_dir().join("systemd/user");
+        std::fs::create_dir_all(&units).unwrap();
+        let legacy = units.join("apassy-team-host.service");
+        let original = generate_unit(
+            Path::new("/exe"),
+            &TeamId::parse(TEAM_A).unwrap(),
+            HostOptions {
+                ask_all: true,
+                auto_limit: 7,
+            },
+            None,
+        )
+        .unwrap();
+        std::fs::write(&legacy, &original).unwrap();
+        let output = cli.run(&["--team", TEAM_B, "host", "install"], None);
+        assert_eq!(code(&output), 2, "{}", text(&output.stderr));
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), original);
+        let commands = std::fs::read_to_string(&calls).unwrap();
+        let cleanup = commands
+            .find("disable --now apassy-team-host-t_abcdefgh23.service")
+            .unwrap();
+        let restored = commands
+            .rfind("enable --now apassy-team-host.service")
+            .unwrap();
+        assert!(cleanup < restored);
+        let output = cli.run(&["--team", TEAM_B, "host", "install"], None);
+        assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+        assert!(!legacy.exists());
+        assert!(
+            units
+                .join(format!("apassy-team-host-{TEAM_A}.service"))
+                .exists()
+        );
+        assert!(
+            units
+                .join(format!("apassy-team-host-{TEAM_B}.service"))
+                .exists()
+        );
+    }
+}

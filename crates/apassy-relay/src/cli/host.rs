@@ -645,6 +645,37 @@ pub fn lock_host(dir: &Path) -> Result<std::fs::File, CliError> {
     Ok(file)
 }
 
+/// Per-team exclusion plus a shared legacy fence: new teams can run together,
+/// while an old binary holding the single exclusive host.lock must stop first.
+pub struct TeamHostLocks(Vec<std::fs::File>);
+impl Drop for TeamHostLocks {
+    fn drop(&mut self) {
+        for file in &self.0 {
+            let _ = file.unlock();
+        }
+    }
+}
+
+pub fn lock_team_host(dir: &Path, team: &crate::ids::TeamId) -> Result<TeamHostLocks, CliError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    crate::cli::settings::ensure_private_dir(dir)?;
+    let legacy = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("host.lock"))
+        .map_err(|_| CliError::usage("Cannot open the legacy host lock."))?;
+    legacy.try_lock_shared().map_err(|_| CliError::usage(
+        "A legacy host still runs for this config directory. Stop it before starting per-team hosts."))?;
+    let mut locks = TeamHostLocks(vec![legacy]);
+    locks
+        .0
+        .push(lock_host(&dir.join("hosts").join(team.as_str()))?);
+    Ok(locks)
+}
+
 // ---- The log ----
 
 /// What the host did with a run. The names are the words of the log.
@@ -738,6 +769,7 @@ pub fn append_log(store: &KeyStore, request: &HostRequestView, decision: Decisio
 
 /// Everything the host needs.
 pub struct HostContext<'a> {
+    pub team_id: &'a crate::ids::TeamId,
     pub client: &'a Client,
     pub store: &'a KeyStore,
     pub options: HostOptions,
@@ -754,6 +786,13 @@ fn send_release(
     local: &[&KeyEntry],
     reason: &str,
 ) -> Result<(), CliError> {
+    if local.iter().any(|entry| {
+        entry.team_id.as_ref() != Some(ctx.team_id) || entry.relay_url != ctx.client.base()
+    }) {
+        return Err(CliError::usage(
+            "The item key does not belong to this host's team.",
+        ));
+    }
     let run_key: [u8; hostkeys::KEY_BYTES] = hostkeys::decode_array(&request.run_key)
         .map_err(|_| CliError::relay("The relay sent a run key that is not valid."))?;
     let mut texts = Vec::with_capacity(local.len());
@@ -826,7 +865,7 @@ pub fn handle_request(
     if now >= request.expires_at {
         return Decision::Expired;
     }
-    let entries = match ctx.store.load() {
+    let entries = match ctx.store.load_for_team(ctx.team_id) {
         Ok(entries) => entries,
         Err(error) => {
             eprintln!("apassy-team host: {}", error.message);
@@ -984,25 +1023,52 @@ pub fn check_owner(settings: &Settings) -> Result<(Client, MeView), CliError> {
             "This device is not the key holder. Copy keys.json and move the key-holder flag before you start host.",
         ));
     }
+    let expected = settings.team_id.clone().or_else(|| {
+        settings
+            .member_token
+            .as_ref()
+            .and_then(|token| crate::secret::parse_token(token.expose()))
+            .and_then(|token| token.team)
+    });
+    if me.team_id.is_none()
+        || expected
+            .as_ref()
+            .is_some_and(|id| Some(id) != me.team_id.as_ref())
+    {
+        return Err(CliError::usage(
+            "The relay owner identity does not match the selected stable team id.",
+        ));
+    }
     Ok((client, me))
 }
 
 /// `apassy-team host`.
 pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i32, CliError> {
     let store = KeyStore::open()?;
-    let _lock = lock_host(store.dir())?;
+    let team = settings.team_id.clone().or_else(|| {
+        settings
+            .member_token
+            .as_ref()
+            .and_then(|token| crate::secret::parse_token(token.expose()))
+            .and_then(|token| token.team)
+    });
+    let _locks = match team.as_ref() {
+        Some(team) => lock_team_host(store.dir(), team)?,
+        None => TeamHostLocks(vec![lock_host(store.dir())?]), // old relays without team ids
+    };
     let (client, me) = check_owner(settings)?;
     let count = store
-        .load()?
+        .load_for_team(me.team_id.as_ref().expect("check_owner requires a team id"))?
         .iter()
         .filter(|entry| entry.relay_url == client.base())
         .count();
     let rules = RuleSet::builtin()
         .map_err(|_| CliError::relay("The built-in rule packs of the core cannot be loaded."))?;
     eprintln!(
-        "apassy-team host: team {} at {}. {count} item keys in {}. {}",
+        "apassy-team host: team {} at {}. Version {}. {count} item keys in {}. {}",
         clean(&me.team),
         client.base(),
+        env!("CARGO_PKG_VERSION"),
         store.path().display(),
         if options.ask_all {
             "Asking for every run (--ask-all).".to_string()
@@ -1014,6 +1080,7 @@ pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i3
         }
     );
     let ctx = HostContext {
+        team_id: me.team_id.as_ref().expect("check_owner requires a team id"),
         client: &client,
         store: &store,
         options,
@@ -1042,6 +1109,7 @@ mod tests {
         KeyEntry {
             relay_url: RELAY.to_string(),
             team: "Test Team".to_string(),
+            team_id: crate::ids::TeamId::parse("t_abcdefgh23"),
             uid: format!("{n:02x}").repeat(16),
             item_id: Some(n),
             name: format!("Item {n}"),

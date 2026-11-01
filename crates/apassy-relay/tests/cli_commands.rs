@@ -303,14 +303,14 @@ fn me_works_with_an_agent_token_and_json_prints_the_result() {
     let output = Cli::new().agent(&mock.url).run(&["me", "--json"], None);
     assert_eq!(code(&output), 0);
     let printed: Value = serde_json::from_str(&text(&output.stdout)).unwrap();
-    assert_eq!(printed["agent_name"], "ci");
+    assert_eq!(printed["result"]["agent_name"], "ci");
     assert_eq!(
         mock.requests()[0].header("authorization"),
         Some(format!("Bearer {AGENT_TOKEN}").as_str())
     );
 }
 
-const ME: &str = r#"{"ok":true,"result":{"team":"Test Team","kind":"member","member_id":1,"member_name":"olga","role":"owner"}}"#;
+const ME: &str = r#"{"ok":true,"result":{"team_id":"t_abcdefgh23","team":"Test Team","kind":"member","member_id":1,"member_name":"olga","role":"owner"}}"#;
 
 /// A relay that answers `GET /v1/me` and takes every item.
 fn item_mock(item_answer: fn() -> Answer) -> Mock {

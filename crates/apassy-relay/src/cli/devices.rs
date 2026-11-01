@@ -24,7 +24,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
     match command {
         Command::DeviceList { json } => {
             let devices: Vec<DeviceView> = client.ok(Method::Get, paths::DEVICES, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&devices);
             }
             table(
@@ -56,6 +56,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
         Command::DeviceRevoke { id } => {
             let _: Created =
                 client.ok(Method::Delete, &format!("{}/{id}", paths::DEVICES), None)?;
+            crate::cli::output::result(&serde_json::json!({"id":id}))?;
             println!("Revoked device {id}.");
         }
         Command::DeviceKeyHolder { id } => {
@@ -65,6 +66,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                 &format!("{}/{id}/key-holder", paths::DEVICES),
                 None,
             )?;
+            crate::cli::output::result(&device)?;
             println!(
                 "Device {} ({}) is the key holder.",
                 device.id,
@@ -73,7 +75,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
         }
         Command::DeviceAdd => {
             let link: LinkCreated = client.ok(Method::Post, paths::DEVICE_LINKS, None)?;
-            println!("{}", link.secret.expose());
+            crate::cli::output::secret("code", link.secret.expose())?;
             eprintln!("Save the link code in a private file.");
             eprintln!(
                 "On the new device, run: apassy-team device link --relay {} < link-code-file",
@@ -86,7 +88,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
         }
         Command::DevicePending { json } => {
             let links: Vec<LinkView> = client.ok(Method::Get, paths::DEVICE_LINKS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&links);
             }
             table(
@@ -121,6 +123,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                 &format!("{}/{id}/confirm", paths::DEVICE_LINKS),
                 Some(&payload),
             )?;
+            crate::cli::output::result(&device)?;
             println!("Confirmed device {} ({}).", device.id, clean(&device.name));
         }
         Command::DeviceRefuse { id } => {
@@ -129,11 +132,12 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                 &format!("{}/{id}/refuse", paths::DEVICE_LINKS),
                 None,
             )?;
+            crate::cli::output::result(&serde_json::json!({"id":id}))?;
             println!("Refused device link {id}.");
         }
         Command::Joins { json } => {
             let joins: Vec<JoinView> = client.ok(Method::Get, paths::JOINS, None)?;
-            if json {
+            if json || crate::cli::output::enabled() {
                 return print_json(&joins);
             }
             table(
@@ -182,6 +186,9 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                 &format!("{}/{id}/confirm", paths::JOINS),
                 Some(&payload),
             )?;
+            crate::cli::output::result(
+                &serde_json::json!({"member_id":confirmed.member_id,"device_id":confirmed.device_id}),
+            )?;
             println!(
                 "Confirmed member {} ({}) with device {}.",
                 clean(&join.name),
@@ -192,6 +199,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
         Command::Refuse { id } => {
             let _: Created =
                 client.ok(Method::Post, &format!("{}/{id}/refuse", paths::JOINS), None)?;
+            crate::cli::output::result(&serde_json::json!({"id":id}))?;
             println!("Refused join {id}.");
         }
         Command::Leave => {
@@ -205,6 +213,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
             keys.remove(client.base(), &team)?;
             settings::remove_team(&team)?;
             crate::cli::onboarding::remove_recovery(&team)?;
+            crate::cli::output::result(&serde_json::json!({"team_id":team}))?;
             println!("Left team {} ({}).", clean(&me.team), team);
         }
         Command::MemberRole { id, role } => {
@@ -214,6 +223,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                 &format!("{}/{id}/role", paths::MEMBERS),
                 Some(&payload),
             )?;
+            crate::cli::output::result(&member)?;
             println!(
                 "Member {} ({}) has role {}.",
                 clean(&member.name),
@@ -278,6 +288,9 @@ fn enroll(settings: &Settings, name: Option<String>) -> Result<(), CliError> {
                         safety_verified: entry.safety_verified,
                     };
                     settings::save_team(id, &saved, false)?;
+                    crate::cli::output::result(
+                        &serde_json::json!({"team_id":id,"device_id":granted.device_id}),
+                    )?;
                     println!("Enrolled device {} for team {}.", granted.device_id, id);
                     return Ok(());
                 }
@@ -388,17 +401,18 @@ fn enroll(settings: &Settings, name: Option<String>) -> Result<(), CliError> {
         Err(error) => {
             let error = error.into_cli();
             return Err(CliError {
-                code: error.code,
                 message: format!(
                     "{} The device key is saved. Run `apassy-team device enroll` again to check enrollment for team {team}.",
                     error.message
                 ),
+                ..error
             });
         }
     };
     saved.device_id = Some(device.id);
     saved.member_token = None;
     settings::save_team(&team, &saved, false)?;
+    crate::cli::output::result(&serde_json::json!({"team_id":team,"device_id":device.id}))?;
     println!(
         "Enrolled device {} ({}) for team {}.",
         device.id,

@@ -43,6 +43,10 @@ fn default_reversibility() -> String {
 pub struct KeyEntry {
     pub relay_url: String,
     pub team: String,
+    /// Stable ownership, never inferred from a display name or an item UID.
+    /// Old entries remain readable but are ineligible for host release until bound.
+    #[serde(default)]
+    pub team_id: Option<crate::ids::TeamId>,
     pub uid: String,
     /// Set after the relay took the item. `None` while the upload is open, or when
     /// the answer of the relay was lost. The host finds an item by its uid.
@@ -85,6 +89,8 @@ struct KeyFile {
 struct KeyEntryRef<'a> {
     relay_url: &'a str,
     team: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    team_id: Option<&'a crate::ids::TeamId>,
     uid: &'a str,
     item_id: Option<u64>,
     name: &'a str,
@@ -182,6 +188,15 @@ impl KeyStore {
         Ok(file.entries)
     }
 
+    /// Only keys explicitly owned by this team. Legacy/unbound keys fail closed.
+    pub fn load_for_team(&self, team: &crate::ids::TeamId) -> Result<Vec<KeyEntry>, CliError> {
+        Ok(self
+            .load()?
+            .into_iter()
+            .filter(|entry| entry.team_id.as_ref() == Some(team))
+            .collect())
+    }
+
     /// Adds an entry and writes the file to disk before it returns. A second entry
     /// with the same uid is refused.
     pub fn add(&self, entry: KeyEntry) -> Result<(), CliError> {
@@ -247,6 +262,7 @@ impl KeyStore {
                 .map(|e| KeyEntryRef {
                     relay_url: &e.relay_url,
                     team: &e.team,
+                    team_id: e.team_id.as_ref(),
                     uid: &e.uid,
                     item_id: e.item_id,
                     name: &e.name,
@@ -304,6 +320,7 @@ mod tests {
         KeyEntry {
             relay_url: RELAY.to_string(),
             team: "Test Team".to_string(),
+            team_id: crate::ids::TeamId::parse("t_abcdefgh23"),
             uid: uid.to_string(),
             item_id: None,
             name: "Stripe test key".to_string(),
@@ -320,6 +337,32 @@ mod tests {
 
     fn uid(n: u8) -> String {
         format!("{n:02x}").repeat(16)
+    }
+
+    #[test]
+    fn stable_team_binding_excludes_other_teams_and_unbound_legacy_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KeyStore::at(dir.path().join("keys"));
+        let a = crate::ids::TeamId::parse("t_abcdefgh23").unwrap();
+        let b = crate::ids::TeamId::parse("t_abcdefgh24").unwrap();
+        let key = hostkeys::new_key().unwrap();
+        store.add(entry(&uid(1), &key)).unwrap();
+        assert_eq!(store.load_for_team(&a).unwrap().len(), 1);
+        assert!(store.load_for_team(&b).unwrap().is_empty());
+        let mut legacy = entry(&uid(2), &key);
+        legacy.team_id = None;
+        store.add(legacy).unwrap();
+        assert_eq!(
+            store.load().unwrap().len(),
+            2,
+            "legacy material is preserved"
+        );
+        assert_eq!(store.load_for_team(&a).unwrap().len(), 1);
+        assert!(store.load_for_team(&b).unwrap().is_empty());
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(store.path()).unwrap()).unwrap();
+        assert_eq!(saved["entries"][0]["team_id"], a.as_str());
+        assert!(saved["entries"][1].get("team_id").is_none());
     }
 
     #[test]

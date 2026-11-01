@@ -14,6 +14,13 @@ use crate::ids::TeamId;
 pub const LABEL: &str = "com.wydrox.apassy.team-host";
 pub const UNIT: &str = "apassy-team-host.service";
 
+pub fn label(team: &TeamId) -> String {
+    format!("{LABEL}.{team}")
+}
+pub fn unit(team: &TeamId) -> String {
+    format!("apassy-team-host-{team}.service")
+}
+
 fn path_text(path: &Path) -> Result<&str, CliError> {
     if !path.is_absolute() {
         return Err(CliError::usage("The service path must be absolute."));
@@ -65,6 +72,7 @@ pub fn generate_plist(
     log: &Path,
     xdg: Option<&str>,
 ) -> Result<String, CliError> {
+    let label = label(team);
     let exe = xml(path_text(exe)?)?;
     let log = xml(path_text(log)?)?;
     let mut arguments = format!("        <string>{exe}</string>\n");
@@ -82,7 +90,7 @@ pub fn generate_plist(
         None => String::new(),
     };
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{LABEL}</string>\n    <key>ProgramArguments</key>\n    <array>\n{arguments}    </array>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n    <key>ThrottleInterval</key>\n    <integer>30</integer>\n    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n    <key>ProcessType</key>\n    <string>Interactive</string>\n    <key>StandardOutPath</key>\n    <string>{log}</string>\n    <key>StandardErrorPath</key>\n    <string>{log}</string>\n{environment}</dict>\n</plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{label}</string>\n    <key>ProgramArguments</key>\n    <array>\n{arguments}    </array>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n    <key>ThrottleInterval</key>\n    <integer>30</integer>\n    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n    <key>ProcessType</key>\n    <string>Interactive</string>\n    <key>StandardOutPath</key>\n    <string>{log}</string>\n    <key>StandardErrorPath</key>\n    <string>{log}</string>\n{environment}</dict>\n</plist>\n"
     ))
 }
 
@@ -112,12 +120,12 @@ pub fn generate_unit(
             let value = unit_path(Path::new(value))?;
             (
                 format!("Environment=XDG_CONFIG_HOME={value}\n"),
-                format!("{value}/apassy-team/service.log"),
+                format!("{value}/apassy-team/service-{team}.log"),
             )
         }
         None => (
             String::new(),
-            "%h/.config/apassy-team/service.log".to_string(),
+            format!("%h/.config/apassy-team/service-{team}.log"),
         ),
     };
     Ok(format!(
@@ -148,27 +156,29 @@ fn xdg_config() -> Result<Option<String>, CliError> {
     }
 }
 
-fn service_path() -> Result<PathBuf, CliError> {
+fn service_path(team: Option<&TeamId>) -> Result<PathBuf, CliError> {
+    let label = team.map(label).unwrap_or_else(|| LABEL.into());
+    let unit = team.map(unit).unwrap_or_else(|| UNIT.into());
     if cfg!(target_os = "macos") {
         Ok(home()?
             .join("Library/LaunchAgents")
-            .join(format!("{LABEL}.plist")))
+            .join(format!("{label}.plist")))
     } else if cfg!(target_os = "linux") {
         let config = match xdg_config()? {
             Some(value) => PathBuf::from(value),
             None => home()?.join(".config"),
         };
-        Ok(config.join("systemd/user").join(UNIT))
+        Ok(config.join("systemd/user").join(unit))
     } else {
         Err(CliError::usage("Host services need macOS or Linux."))
     }
 }
 
-fn service_log() -> Result<PathBuf, CliError> {
+fn service_log(team: &TeamId) -> Result<PathBuf, CliError> {
     if cfg!(target_os = "macos") {
-        Ok(home()?.join("Library/Logs/apassy-team-host.log"))
+        Ok(home()?.join(format!("Library/Logs/apassy-team-host-{team}.log")))
     } else {
-        Ok(settings::settings_dir()?.join("service.log"))
+        Ok(settings::settings_dir()?.join(format!("service-{team}.log")))
     }
 }
 
@@ -276,8 +286,8 @@ fn launch_not_loaded(output: &Output) -> bool {
         || text.contains("could not find specified service")
 }
 
-fn bootout(domain: &str) -> Result<(), CliError> {
-    let service = format!("{domain}/{LABEL}");
+fn bootout(domain: &str, label: &str) -> Result<(), CliError> {
+    let service = format!("{domain}/{label}");
     let output = command("/bin/launchctl", &["bootout", &service])?;
     if output.status.success() || launch_not_loaded(&output) {
         Ok(())
@@ -291,7 +301,7 @@ fn bootout(domain: &str) -> Result<(), CliError> {
 fn check_saved_settings(settings: &Settings, path: &Path) -> Result<(), CliError> {
     let text = zeroize::Zeroizing::new(fs::read_to_string(path).map_err(|_| {
         CliError::usage(
-            "The service needs saved settings. Run `apassy-team init` with the owner token first.",
+            "The service needs saved settings. Run `apassy-team create` or `apassy-team join` first.",
         )
     })?);
     let saved: SavedServiceSettings = serde_json::from_str(&text).map_err(|_| {
@@ -349,14 +359,220 @@ struct SavedServiceEntry {
     device_id: Option<crate::ids::DeviceId>,
 }
 
+fn pinned_team(text: &str) -> Option<TeamId> {
+    let markers = text.matches("<string>--team</string>").count();
+    if markers > 0 {
+        if markers != 1 {
+            return None;
+        }
+        let rest = text.split("<string>--team</string>").nth(1)?;
+        return rest
+            .split("<string>")
+            .nth(1)
+            .and_then(|s| s.split("</string>").next())
+            .and_then(TeamId::parse);
+    }
+    let args: Vec<_> = text
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))?
+        .split_whitespace()
+        .collect();
+    let teams: Vec<_> = args.windows(2).filter(|pair| pair[0] == "--team").collect();
+    if teams.len() != 1 {
+        return None;
+    }
+    TeamId::parse(teams[0][1])
+}
+
+/// Service status/removal must work after credentials/settings were removed, and
+/// must never contact the relay or migrate legacy authentication settings.
+fn selected_service_team(selected: Option<&str>) -> Result<TeamId, CliError> {
+    if let Some(text) = selected.map(str::to_owned).or_else(|| {
+        std::env::var(settings::ENV_TEAM)
+            .ok()
+            .filter(|text| !text.is_empty())
+    }) {
+        return TeamId::parse(&text).ok_or_else(|| CliError::usage("The team id is not valid."));
+    }
+    #[derive(serde::Deserialize)]
+    struct Selection {
+        current: Option<TeamId>,
+    }
+    let path = settings::settings_path()?;
+    if let Ok(text) = fs::read_to_string(&path) {
+        let text = zeroize::Zeroizing::new(text);
+        if let Ok(selection) = serde_json::from_str::<Selection>(&text)
+            && let Some(team) = selection.current
+        {
+            return Ok(team);
+        }
+    }
+    if let Ok(text) = fs::read_to_string(service_path(None)?)
+        && let Some(team) = pinned_team(&text)
+    {
+        return Ok(team);
+    }
+    Err(CliError::usage(
+        "Select the host service with --team ID, or select a saved current team.",
+    ))
+}
+
+/// Preserve arguments/options when converting the old single service to its pinned team.
+fn migrated_text(text: &str, team: &TeamId) -> Result<String, CliError> {
+    if cfg!(target_os = "macos") {
+        Ok(text
+            .replace(
+                &format!("<string>{LABEL}</string>"),
+                &format!("<string>{}</string>", label(team)),
+            )
+            .replace(
+                &xml(path_text(
+                    &home()?.join("Library/Logs/apassy-team-host.log"),
+                )?)?,
+                &xml(path_text(&service_log(team)?)?)?,
+            ))
+    } else {
+        Ok(text.replace(
+            "apassy-team/service.log",
+            &format!("apassy-team/service-{team}.log"),
+        ))
+    }
+}
+
+fn migration_file(legacy: &Path, target: &Path, text: &str) -> Result<(), CliError> {
+    if target.exists() {
+        if fs::read_to_string(target).map_err(|e| io_error("read the team service", e))? != text {
+            return Err(CliError::usage(
+                "The legacy service conflicts with an existing team service. Keep both files and reconcile them before host install.",
+            ));
+        }
+    } else {
+        write_service(target, text)?;
+    }
+    // The old file is retained until the new service has started successfully.
+    if !legacy.exists() {
+        return Err(CliError::usage(
+            "The legacy service disappeared during migration.",
+        ));
+    }
+    Ok(())
+}
+
+fn migrate_legacy_service() -> Result<(), CliError> {
+    let path = service_path(None)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) if text.len() <= 65536 => text,
+        Ok(_) => {
+            return Err(CliError::usage(
+                "The legacy service is too large to migrate safely.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error("read the legacy service", error)),
+    };
+    let team = pinned_team(&text).ok_or_else(|| CliError::usage(
+        "The legacy host service has no unambiguous --team ID. Preserve its file, identify its team, and remove/reinstall that legacy service before installing another team."))?;
+    let target = service_path(Some(&team))?;
+    let converted = migrated_text(&text, &team)?;
+    protect_log(&service_log(&team)?)?;
+    migration_file(&path, &target, &converted)?;
+    if cfg!(target_os = "macos") {
+        let domain = launch_domain()?;
+        let loaded = command(
+            "/bin/launchctl",
+            &["print", &format!("{domain}/{}", label(&team))],
+        )?
+        .status
+        .success();
+        bootout(&domain, LABEL)?;
+        if !loaded
+            && let Err(error) = require_success(
+                "launchctl bootstrap",
+                command(
+                    "/bin/launchctl",
+                    &["bootstrap", &domain, path_text(&target)?],
+                )?,
+            )
+        {
+            let _ = bootout(&domain, &label(&team));
+            let _ = command("/bin/launchctl", &["bootstrap", &domain, path_text(&path)?]);
+            return Err(error);
+        }
+    } else {
+        let activate = (|| {
+            require_success(
+                "systemctl disable legacy",
+                command("systemctl", &["--user", "disable", "--now", UNIT])?,
+            )?;
+            require_success(
+                "systemctl daemon-reload",
+                command("systemctl", &["--user", "daemon-reload"])?,
+            )?;
+            require_success(
+                "systemctl enable migrated",
+                command("systemctl", &["--user", "enable", "--now", &unit(&team)])?,
+            )
+        })();
+        if let Err(error) = activate {
+            // enable --now can enable a unit and still fail to start it. Stop its
+            // restart loop before restoring the retained legacy service. Also
+            // restore the legacy service when daemon-reload fails after disable.
+            let _ = command("systemctl", &["--user", "disable", "--now", &unit(&team)]);
+            let _ = command("systemctl", &["--user", "daemon-reload"]);
+            let _ = command("systemctl", &["--user", "enable", "--now", UNIT]);
+            return Err(error);
+        }
+    }
+    fs::remove_file(&path).map_err(|e| io_error("remove the migrated legacy service", e))?;
+    if cfg!(target_os = "linux") {
+        require_success(
+            "systemctl daemon-reload",
+            command("systemctl", &["--user", "daemon-reload"])?,
+        )?;
+    }
+    eprintln!(
+        "Migrated the legacy host to team {team}: {}",
+        target.display()
+    );
+    Ok(())
+}
+
+fn selected_service(team: &TeamId) -> Result<(PathBuf, String), CliError> {
+    let path = service_path(Some(team))?;
+    if !path.exists() {
+        let legacy = service_path(None)?;
+        if fs::read_to_string(&legacy)
+            .ok()
+            .and_then(|text| pinned_team(&text))
+            .as_ref()
+            == Some(team)
+        {
+            return Ok((
+                legacy,
+                if cfg!(target_os = "macos") {
+                    LABEL.into()
+                } else {
+                    UNIT.into()
+                },
+            ));
+        }
+    }
+    Ok((
+        path,
+        if cfg!(target_os = "macos") {
+            label(team)
+        } else {
+            unit(team)
+        },
+    ))
+}
+
 /// Check the owner, write the per-user service, and start it.
 pub fn install(settings: &Settings, options: HostOptions) -> Result<i32, CliError> {
-    let path = service_path()?;
     let exe = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|error| io_error("get the executable path", error))?;
     let xdg = xdg_config()?;
-    let log = service_log()?;
     let settings_path = settings::settings_path()?;
     check_saved_settings(settings, &settings_path)?;
     // A legacy entry needs its saved team ID before the service can select it.
@@ -370,9 +586,14 @@ pub fn install(settings: &Settings, options: HostOptions) -> Result<i32, CliErro
     };
     check_saved_settings(settings, &settings_path)?;
     let team = settings.team_id.as_ref().ok_or_else(|| {
-        CliError::usage("The service needs a saved team. Run `apassy-team init` first.")
+        CliError::usage(
+            "The service needs a saved team. Run `apassy-team create` or `apassy-team join` first.",
+        )
     })?;
     host::check_owner(settings)?;
+    let path = service_path(Some(team))?;
+    let log = service_log(team)?;
+    let unit = unit(team);
     let text = if cfg!(target_os = "macos") {
         generate_plist(&exe, team, options, &log, xdg.as_deref())?
     } else {
@@ -382,10 +603,11 @@ pub fn install(settings: &Settings, options: HostOptions) -> Result<i32, CliErro
         settings::ensure_private_dir(&settings::settings_dir()?)?;
     }
     protect_log(&log)?;
+    migrate_legacy_service()?;
     if cfg!(target_os = "macos") {
         let domain = launch_domain()?;
         write_service(&path, &text)?;
-        bootout(&domain)?;
+        bootout(&domain, &label(team))?;
         require_success(
             "launchctl bootstrap",
             command("/bin/launchctl", &["bootstrap", &domain, path_text(&path)?])?,
@@ -398,31 +620,35 @@ pub fn install(settings: &Settings, options: HostOptions) -> Result<i32, CliErro
         )?;
         require_success(
             "systemctl enable",
-            command("systemctl", &["--user", "enable", "--now", UNIT])?,
+            command("systemctl", &["--user", "enable", "--now", &unit])?,
         )?;
         // enable --now does not restart an already active service after an edit.
         require_success(
             "systemctl restart",
-            command("systemctl", &["--user", "restart", UNIT])?,
+            command("systemctl", &["--user", "restart", &unit])?,
         )?;
         println!(
             "For GUI dialogs, run: systemctl --user import-environment DISPLAY WAYLAND_DISPLAY"
         );
-        println!("Then run: systemctl --user restart {UNIT}");
+        println!("Then run: systemctl --user restart {unit}");
         println!("Without a GUI, the host denies runs that need a dialog.");
     }
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":team,"service_file":path,"log":log,"cli_version":env!("CARGO_PKG_VERSION")}),
+    )?;
     println!("The host service is installed: {}", path.display());
     println!("Service output: {}", log.display());
     Ok(0)
 }
 
-/// Stop and remove the per-user service. Does not read credentials or contact the relay.
-pub fn uninstall() -> Result<i32, CliError> {
-    let path = service_path()?;
+/// Stop and remove the selected service. Does not require credentials or contact the relay.
+pub fn uninstall(selected: Option<&str>) -> Result<i32, CliError> {
+    let team = selected_service_team(selected)?;
+    let (path, name) = selected_service(&team)?;
     if cfg!(target_os = "macos") {
-        bootout(&launch_domain()?)?;
+        bootout(&launch_domain()?, &name)?;
     } else {
-        let output = command("systemctl", &["--user", "disable", "--now", UNIT])?;
+        let output = command("systemctl", &["--user", "disable", "--now", &name])?;
         let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
         if !output.status.success()
             && !(stderr.contains("does not exist") || stderr.contains("not loaded"))
@@ -441,6 +667,9 @@ pub fn uninstall() -> Result<i32, CliError> {
             command("systemctl", &["--user", "daemon-reload"])?,
         )?;
     }
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":team,"removed":true,"service_file":path}),
+    )?;
     println!("The host service is removed. The settings, keys, and logs remain.");
     Ok(0)
 }
@@ -478,8 +707,13 @@ fn recent_log(path: &Path) -> Result<(), CliError> {
 }
 
 /// Show local installation, service state, and the last ten lines of each log.
-pub fn status() -> Result<i32, CliError> {
-    let path = service_path()?;
+pub fn status(selected: Option<&str>) -> Result<i32, CliError> {
+    let team = selected_service_team(selected)?;
+    let (path, name) = selected_service(&team)?;
+    let installed = path
+        .try_exists()
+        .map_err(|error| io_error("read the service file state", error))?;
+    let mut state = "stopped".to_owned();
     println!("Service file: {}", path.display());
     println!(
         "Installed: {}",
@@ -493,16 +727,17 @@ pub fn status() -> Result<i32, CliError> {
         }
     );
     if cfg!(target_os = "macos") {
-        let service = format!("{}/{LABEL}", launch_domain()?);
+        let service = format!("{}/{name}", launch_domain()?);
         let output = command("/bin/launchctl", &["print", &service])?;
         if output.status.success() {
             println!("Loaded: yes");
             let text = String::from_utf8_lossy(&output.stdout);
-            let state = text
+            state = text
                 .lines()
                 .find_map(|line| line.trim().strip_prefix("state = "))
-                .unwrap_or("unknown");
-            println!("State: {}", clean_output(state));
+                .unwrap_or("unknown")
+                .to_owned();
+            println!("State: {}", clean_output(&state));
         } else if launch_not_loaded(&output) {
             println!("Loaded: no");
             println!("State: stopped");
@@ -510,8 +745,8 @@ pub fn status() -> Result<i32, CliError> {
             require_success("launchctl print", output)?;
         }
     } else {
-        let active = command("systemctl", &["--user", "is-active", UNIT])?;
-        let state = String::from_utf8_lossy(&active.stdout);
+        let active = command("systemctl", &["--user", "is-active", &name])?;
+        state = String::from_utf8_lossy(&active.stdout).trim().to_owned();
         if active.status.success() || matches!(active.status.code(), Some(3 | 4)) {
             println!("State: {}", clean_output(state.trim()));
         } else {
@@ -522,7 +757,7 @@ pub fn status() -> Result<i32, CliError> {
             &[
                 "--user",
                 "show",
-                UNIT,
+                &name,
                 "--property=LoadState",
                 "--property=ActiveState",
                 "--property=SubState",
@@ -538,8 +773,13 @@ pub fn status() -> Result<i32, CliError> {
             require_success("systemctl show", output)?;
         }
     }
-    recent_log(&settings::settings_dir()?.join("host.log"))?;
-    recent_log(&service_log()?)?;
+    if !crate::cli::output::enabled() {
+        recent_log(&settings::settings_dir()?.join("host.log"))?;
+        recent_log(&service_log(&team)?)?;
+    }
+    crate::cli::output::result(
+        &serde_json::json!({"team_id":team,"service":name,"service_file":path,"installed":installed,"state":state,"cli_version":env!("CARGO_PKG_VERSION")}),
+    )?;
     Ok(0)
 }
 
@@ -549,6 +789,63 @@ mod tests {
 
     fn test_team() -> TeamId {
         TeamId::parse("t_abcdefgh23").unwrap()
+    }
+
+    #[test]
+    fn explicit_service_selection_needs_no_saved_credentials_or_relay() {
+        assert_eq!(
+            selected_service_team(Some("t_abcdefgh23")).unwrap(),
+            test_team()
+        );
+        assert!(selected_service_team(Some("bad-id")).is_err());
+    }
+
+    #[test]
+    fn legacy_migration_preserves_the_original_team_options_and_other_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = test_team();
+        let b = TeamId::parse("t_abcdefgh24").unwrap();
+        let options = HostOptions {
+            ask_all: true,
+            auto_limit: 7,
+        };
+        let legacy = if cfg!(target_os = "macos") {
+            generate_plist(Path::new("/exe"), &a, options, Path::new("/log"), None)
+                .unwrap()
+                .replace(
+                    &format!("<string>{}</string>", label(&a)),
+                    &format!("<string>{LABEL}</string>"),
+                )
+        } else {
+            generate_unit(Path::new("/exe"), &a, options, None)
+                .unwrap()
+                .replace(&format!("service-{a}.log"), "service.log")
+        };
+        assert_eq!(pinned_team(&legacy), Some(a.clone()));
+        let converted = migrated_text(&legacy, &a).unwrap();
+        assert!(converted.contains("--ask-all"));
+        assert!(converted.contains("7"));
+        assert_eq!(pinned_team(&converted), Some(a.clone()));
+        let old = dir.path().join("legacy");
+        let first = dir.path().join(unit(&a));
+        let second = dir.path().join(unit(&b));
+        fs::write(&old, &legacy).unwrap();
+        write_service(&second, "team B must survive").unwrap();
+        migration_file(&old, &first, &converted).unwrap();
+        assert_eq!(fs::read_to_string(&second).unwrap(), "team B must survive");
+        assert_eq!(
+            fs::read_to_string(&old).unwrap(),
+            legacy,
+            "legacy remains until successful start"
+        );
+        migration_file(&old, &first, &converted).unwrap(); // retry is idempotent
+        fs::write(&first, "different custom team A service").unwrap();
+        assert!(migration_file(&old, &first, &converted).is_err());
+        assert!(old.exists());
+        assert!(pinned_team("ExecStart=/exe host").is_none());
+        assert!(
+            pinned_team("ExecStart=/exe --team t_abcdefgh23 --team t_abcdefgh24 host").is_none()
+        );
     }
 
     #[test]
@@ -808,7 +1105,7 @@ mod tests {
         assert!(!text.contains("Environment="));
         assert!(text.contains("Restart=on-failure\nRestartSec=30\n"));
         assert_eq!(
-            text.matches("append:%h/.config/apassy-team/service.log")
+            text.matches("append:%h/.config/apassy-team/service-t_abcdefgh23.log")
                 .count(),
             2
         );
@@ -832,7 +1129,7 @@ mod tests {
         );
         assert!(text.contains("Environment=XDG_CONFIG_HOME=/custom/config\n"));
         assert_eq!(
-            text.matches("append:/custom/config/apassy-team/service.log")
+            text.matches("append:/custom/config/apassy-team/service-t_abcdefgh23.log")
                 .count(),
             2
         );

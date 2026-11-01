@@ -129,6 +129,7 @@ fn untrusted_text_is_one_argument_and_the_script_is_fixed() {
     r.agent = hostile.into();
     r.member = hostile.into();
     let entry = KeyEntry {
+        team_id: apassy_relay::ids::TeamId::parse("t_abcdefgh23"),
         relay_url: "https://relay.example.test".into(),
         team: "test".into(),
         uid: "00".repeat(16),
@@ -312,4 +313,33 @@ fn generated_plist_passes_the_mac_validator() {
         "plutil -lint: {}",
         String::from_utf8_lossy(&output.stdout).trim()
     );
+}
+
+#[test]
+fn team_host_locks_allow_two_teams_but_fence_duplicates_and_legacy_hosts() {
+    use apassy_relay::cli::host::lock_team_host;
+    use apassy_relay::ids::TeamId;
+    let dir = tempfile::tempdir().unwrap();
+    let a = TeamId::parse("t_abcdefgh23").unwrap();
+    let b = TeamId::parse("t_abcdefgh24").unwrap();
+    let first = lock_team_host(dir.path(), &a).unwrap();
+    let second = lock_team_host(dir.path(), &b).unwrap();
+    assert!(lock_team_host(dir.path(), &a).is_err());
+    assert!(
+        lock_host(dir.path()).is_err(),
+        "an old binary cannot run beside per-team hosts"
+    );
+    drop(first);
+    assert!(
+        lock_host(dir.path()).is_err(),
+        "team B still fences old hosts"
+    );
+    drop(second);
+    let old = lock_host(dir.path()).unwrap();
+    assert!(
+        lock_team_host(dir.path(), &a).is_err(),
+        "new binary cannot bypass a running old host"
+    );
+    drop(old);
+    assert!(lock_team_host(dir.path(), &a).is_ok());
 }
