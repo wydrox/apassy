@@ -13,7 +13,7 @@
 // nothing.
 
 /* exported fillLogin */
-function fillLogin(origin, username, password, mode) {
+function fillLogin(origin, username, password, mode, agentReceipt) {
   const isNew = mode === "new";
   if (location.origin !== origin) {
     const refused = { ok: false, reason: "origin", username: false, password: false };
@@ -135,6 +135,20 @@ function fillLogin(origin, username, password, mode) {
   if (password) {
     for (const field of passwordFields) {
       put(field, password);
+      if (agentReceipt) {
+        const clear = () => {
+          if (field.type === "password") return;
+          valueSetter.call(field, "");
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+          chrome.runtime.sendMessage({ type: "apassy_agent_visibility", receipt: agentReceipt }).catch(() => {});
+          observer.disconnect();
+        };
+        const observer = new MutationObserver(clear);
+        observer.observe(field, { attributes: true, attributeFilter: ["type"] });
+        clear();
+        const timer = setTimeout(() => observer.disconnect(), 120000);
+        addEventListener("pagehide", () => { clearTimeout(timer); observer.disconnect(); }, { once: true });
+      }
       result.password = true;
       if (isNew) result.passwords += 1;
     }

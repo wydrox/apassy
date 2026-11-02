@@ -175,6 +175,14 @@ impl ZeroizeOnDrop for WireRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    FillInBrowser {
+        item_id: u64,
+        url: String,
+        fields: Vec<String>,
+        user_request: String,
+        purpose: String,
+        cwd: String,
+    },
     /// Execute once, retaining a value-free outcome in the broker across reconnects.
     Tracked {
         operation_id: String,
@@ -356,6 +364,7 @@ impl Action {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Self::FillInBrowser { .. } => "fill_in_browser",
             Self::Tracked { .. } => "tracked",
             Self::OperationStatus { .. } => "operation_status",
             Self::CancelOperation { .. } => "cancel_operation",
@@ -379,7 +388,8 @@ impl Action {
     pub fn waits(&self) -> bool {
         matches!(
             self,
-            Self::Run { .. }
+            Self::FillInBrowser { .. }
+                | Self::Run { .. }
                 | Self::CaptureCredential { .. }
                 | Self::AskOwnerForCredential { .. }
                 | Self::UpdateCredential { .. }

@@ -16,6 +16,61 @@
 
 importScripts("fill.js");
 
+// Agent delivery is separate from owner gestures. Native caller guards authenticate
+// each poll; no value travels over MCP or through the clipboard.
+const agentInstance = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+let agentPolling = false;
+const agentReceipts = new Map();
+async function pollAgentFill(receipt = null, filled = [], exposed = false) {
+  let url = "";
+  let tab;
+  try {
+    const window = await chrome.windows.getLastFocused();
+    if (window.focused) [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
+    url = tab && tab.url || "";
+    const answer = await ask({ cmd: "agent_poll", instance: agentInstance, url, receipt, filled, exposed });
+    if (answer && !answer.ok && answer.code === "unsupported" && /remote debugging/.test(answer.message || "")) {
+      await ask({ cmd: "agent_blocked", instance: agentInstance, url });
+    }
+    const data = answer && answer.data;
+    if (!answer || !answer.ok || !data || data.type !== "agent_fill") return;
+    answer.data = null;
+    let actual = [];
+    try {
+      const windowNow = await chrome.windows.getLastFocused();
+      const [active] = await chrome.tabs.query({ active: true, windowId: windowNow.id });
+      if (!tab || !windowNow.focused || !active || active.id !== tab.id || !await tabOn(tab.id, data.origin)) return;
+      agentReceipts.set(data.receipt, { tabId: tab.id, origin: data.origin, until: Date.now() + 120000 });
+      const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: fillLogin, args: [data.origin, data.username, data.password, "login", data.receipt] });
+      const result = results && results[0] && results[0].result;
+      if (result && result.username) actual.push("username");
+      if (result && result.password) actual.push("password");
+      if (data.code && await tabOn(tab.id, data.origin)) {
+        const codes = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: fillOneTimeCode, args: [data.origin, data.code] });
+        if (codes && codes[0] && codes[0].result && codes[0].result.ok) actual.push("code");
+      }
+    } finally {
+      data.username = ""; data.password = ""; data.code = "";
+      await ask({ cmd: "agent_poll", instance: agentInstance, url, receipt: data.receipt, filled: actual });
+    }
+  } catch (_) { /* Unavailable or untrusted browser: no delivery. */ }
+}
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (!message || message.type !== "apassy_agent_visibility" || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
+  const saved = agentReceipts.get(message.receipt);
+  if (saved && saved.until >= Date.now() && saved.tabId === sender.tab.id && originOf(sender.url) === saved.origin) {
+    void pollAgentFill(message.receipt, [], true);
+  }
+  return false;
+});
+if (typeof setInterval === "function" && chrome.windows) setInterval(() => {
+  for (const [id, entry] of agentReceipts) if (entry.until < Date.now()) agentReceipts.delete(id);
+  if (agentPolling) return;
+  agentPolling = true;
+  pollAgentFill().finally(() => { agentPolling = false; });
+}, 1000);
+self.apassyAgentFillTest = { pollAgentFill };
+
 const HOST = "com.wydrox.apassy";
 const WIRE_VERSION = 1;
 // The host waits up to 240 s for the app (an owner check waits up to 180 s).

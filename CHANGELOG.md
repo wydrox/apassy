@@ -4,6 +4,9 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+- Add `apassy_fill_in_browser` for agent website logins, with broker authorization, saved-site binding, and status-only responses.
+- **Browser extension:** Deliver agent fills to one matching focused tab, refuse unsafe browser targets, and clear agent-filled passwords when a show-password toggle makes them visible.
+
 ## [0.5.12] - 2026-11-02
 
 ### Fixed

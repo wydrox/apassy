@@ -91,6 +91,17 @@ fn is_zero(value: &u32) -> bool {
 /// A checked request. Debug output hides the password of a save.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
+    AgentBlocked {
+        instance: String,
+        url: String,
+    },
+    AgentPoll {
+        instance: String,
+        url: String,
+        receipt: Option<String>,
+        filled: Vec<String>,
+        exposed: bool,
+    },
     Status,
     /// Bring the window to the front.
     Show,
@@ -144,6 +155,7 @@ pub enum Command {
 /// The commands that the host passes to the app only after the caller check
 /// ([`super::caller::check_browser_parent`]).
 pub const GUARDED_COMMANDS: &[&str] = &[
+    "agent_poll",
     "passkey_get",
     "passkey_create",
     "fill_code",
@@ -259,6 +271,47 @@ impl Request {
         // `Request` keeps its fields, so the old commands parse as before.
         if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(line) {
             match cmd.as_str() {
+                "agent_poll" | "agent_blocked" => {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Poll {
+                        v: u32,
+                        cmd: String,
+                        instance: String,
+                        url: String,
+                        receipt: Option<String>,
+                        #[serde(default)]
+                        filled: Vec<String>,
+                        #[serde(default)]
+                        exposed: bool,
+                    }
+                    let p: Poll = serde_json::from_slice(line).map_err(|_| invalid())?;
+                    if p.v != BROWSER_WIRE_VERSION
+                        || p.instance.len() != 32
+                        || !p.instance.bytes().all(|b| b.is_ascii_hexdigit())
+                        || p.url.len() > MAX_URL_BYTES
+                        || p.receipt.as_ref().is_some_and(|r| r.len() > 64)
+                        || p.filled.len() > 3
+                        || p.filled
+                            .iter()
+                            .any(|f| !["username", "password", "code"].contains(&f.as_str()))
+                    {
+                        return Err(invalid());
+                    }
+                    if p.cmd == "agent_blocked" {
+                        return Ok(Command::AgentBlocked {
+                            instance: p.instance,
+                            url: p.url,
+                        });
+                    }
+                    return Ok(Command::AgentPoll {
+                        instance: p.instance,
+                        url: p.url,
+                        receipt: p.receipt,
+                        filled: p.filled,
+                        exposed: p.exposed,
+                    });
+                }
                 "suggestions" => {
                     let packet: SuggestionsPacket =
                         serde_json::from_slice(line).map_err(|_| invalid())?;
@@ -727,6 +780,13 @@ impl Response {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Data {
+    AgentFill {
+        receipt: String,
+        origin: String,
+        username: SecretText,
+        password: SecretText,
+        code: SecretText,
+    },
     #[default]
     None,
     Status {
@@ -796,6 +856,7 @@ pub enum Data {
 impl std::fmt::Debug for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AgentFill { .. } => f.write_str("AgentFill([redacted])"),
             Self::None => f.write_str("None"),
             Self::Status { vault, version } => f
                 .debug_struct("Status")

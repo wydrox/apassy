@@ -71,7 +71,10 @@ pub(crate) struct BrowserRequest {
 fn guarded(command: &Command) -> bool {
     matches!(
         command,
-        Command::PasskeyGet(_) | Command::PasskeyCreate(_) | Command::FillCode { .. }
+        Command::AgentPoll { .. }
+            | Command::PasskeyGet(_)
+            | Command::PasskeyCreate(_)
+            | Command::FillCode { .. }
     )
 }
 
@@ -362,6 +365,29 @@ impl DesktopApp {
         let mut ticket = BrowserTicket::new(reply, gone);
         ticket.trusted_gesture = trusted_gesture;
         match request {
+            Command::AgentBlocked { instance, url } => {
+                crate::broker::browser_fill::blocked(&instance, &url);
+                ticket.send(Response::ok(
+                    "Browser cannot receive agent fills",
+                    Data::None,
+                ));
+            }
+            Command::AgentPoll {
+                instance,
+                url,
+                receipt,
+                filled,
+                exposed,
+            } => {
+                let answer = crate::broker::browser_fill::poll(
+                    &instance,
+                    &url,
+                    receipt.as_deref(),
+                    filled,
+                    exposed,
+                );
+                ticket.send(answer);
+            }
             Command::Status => {
                 ticket.send(self.browser_status());
             }

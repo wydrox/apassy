@@ -19,6 +19,7 @@ use super::wire::{Action, AgentSecret, Extract, GenerateSpec, MAX_LINE_BYTES, Wi
 pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
+pub const TOOL_FILL_IN_BROWSER: &str = "apassy_fill_in_browser";
 pub const TOOL_ACCESS_STATUS: &str = "apassy_access_request_status";
 pub const TOOL_ACCESS_CANCEL: &str = "apassy_cancel_access_request";
 pub const TOOL_REQUEST_ACCESS: &str = "apassy_request_access";
@@ -283,12 +284,17 @@ fn initialize_result(params: &Value) -> Value {
         .find(|supported| **supported == requested)
         .copied()
         .unwrap_or(SUPPORTED_PROTOCOLS[0]);
-    json!({
+    let mut result = json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Apassy lets you use the owner's credentials without seeing them. First-use checklist: confirm the host connection and prompt hook, start in apassy-sandbox, and test with a synthetic credential. Call apassy_list_access first: its catalog lists each credential with its item_id and env_name, never a value. has_code and code_env_name describe one-time codes; explicitly select codes in runs, including code-only runs with items: []. Code use requires owner approval unless a remembered project answer explicitly includes codes. You need no grant: put item_ids in apassy_run_with_secrets and use the env_names in your command. The bouncer decides each use; when it asks the owner, the call waits up to 5 minutes. On question_waiting, a different owner question is pending: wait for that question to finish before submitting this request. After a host timeout or lost response the execution outcome is unknown: retrieve the operation with apassy_list_access(operation_id), and inspect activity and the external target with the owner before retrying a mutating call. Use the same idempotency_key with identical arguments within retention for ordinary calls. With access_request_id, every repeated use is refused; query access/operation status instead. Repeating a call without that key is not guaranteed safe. To store a new credential, prefer apassy_capture_credential (a command or a file prints it) or apassy_generate_credential (a new password or token); apassy_ask_owner_for_credential asks the owner to paste one. Use apassy_save_credential only for a value that is already in your transcript. Do not ask for secret values, and do not try to print them.",
-    })
+    });
+    let instructions = result["instructions"].as_str().unwrap_or_default();
+    result["instructions"] = json!(format!(
+        "To log in on a website, use apassy_fill_in_browser. Never copy secrets to the clipboard or type them. {instructions}"
+    ));
+    result
 }
 
 /// The `extract` argument of capture and update: which part of the output to store.
@@ -309,6 +315,7 @@ fn extract_schema() -> Value {
 
 pub fn tool_list() -> Value {
     let mut tools = json!([
+        {"name":TOOL_FILL_IN_BROWSER,"title":"Fill a website login","description":"To log in on a website during computer use or browser automation, use this tool. Apassy fills the focused browser tab through its extension and returns status and filled field names only. Never copy secrets to the clipboard or type them. Save the website on the credential first. Remote debugging browsers currently require profile trust and are refused. The bouncer may ask the owner; waiting and timeout handling is the same as runs.","inputSchema":{"type":"object","properties":{"item_id":{"type":"integer","minimum":1},"url":{"type":"string"},"fields":{"type":"array","minItems":1,"maxItems":3,"uniqueItems":true,"items":{"enum":["username","password","code"]}},"user_request":{"type":"string","minLength":1},"purpose":{"type":"string","minLength":1},"cwd":{"type":"string"}},"required":["item_id","url","user_request","purpose"],"additionalProperties":false}},
         {"name": TOOL_ACCESS_STATUS,"title":"Check scoped access consent","description":"Read this agent's exact request status without creating anything. A receipt never proves execution succeeded.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
         {"name": TOOL_ACCESS_CANCEL,"title":"Cancel scoped access consent","description":"Cancel an abandoned request or its unused/pending allowance. Does not recall released values. Never creates a request.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
         {
@@ -563,6 +570,7 @@ fn call_tool_control(
         }),
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
+        TOOL_FILL_IN_BROWSER => fill_browser_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
         TOOL_ACCESS_STATUS | TOOL_ACCESS_CANCEL => (|| {
             let o = arguments_object(&arguments, &["request_id"])?;
@@ -777,6 +785,72 @@ fn call_action(arguments: &Value) -> Result<Action, String> {
         operation,
         params,
     })
+}
+
+fn fill_browser_action(arguments: &Value) -> Result<Action, String> {
+    let o = arguments_object(
+        arguments,
+        &["item_id", "url", "fields", "user_request", "purpose", "cwd"],
+    )?;
+    let url = required_text(o, "url")?;
+    crate::browser::site::Page::parse(&url).map_err(|e| e.message().to_owned())?;
+    let fields = optional_strings(o, "fields")?
+        .unwrap_or_else(|| vec!["username".into(), "password".into()]);
+    if fields.is_empty()
+        || fields.len() > 3
+        || fields
+            .iter()
+            .any(|f| !["username", "password", "code"].contains(&f.as_str()))
+        || fields
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != fields.len()
+    {
+        return Err("fields must be a nonempty unique subset of username, password, code.".into());
+    }
+    Ok(Action::FillInBrowser {
+        item_id: item_id(o)?,
+        url,
+        fields,
+        user_request: required_text(o, "user_request")?,
+        purpose: required_text(o, "purpose")?,
+        cwd: optional_text(o, "cwd")?.unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .display()
+                .to_string()
+        }),
+    })
+}
+
+#[cfg(test)]
+mod fill_browser_tests {
+    use super::*;
+    #[test]
+    fn browser_fill_arguments() {
+        let args = json!({"item_id":1,"url":"https://example.com/login","purpose":"Log in","user_request":"Open my account"});
+        let Action::FillInBrowser { fields, .. } = fill_browser_action(&args).unwrap() else {
+            panic!("wrong action")
+        };
+        assert_eq!(fields, ["username", "password"]);
+        for (key, value) in [
+            ("item_id", json!(0)),
+            ("url", json!("https://example.com@evil.com")),
+            ("purpose", json!("")),
+            ("user_request", json!("")),
+            ("fields", json!([])),
+            ("fields", json!(["seed"])),
+            ("fields", json!(["code", "code"])),
+        ] {
+            let mut bad = args.clone();
+            bad[key] = value;
+            assert!(fill_browser_action(&bad).is_err(), "{key}");
+        }
+        let mut code = args;
+        code["fields"] = json!(["code"]);
+        assert!(fill_browser_action(&code).is_ok());
+    }
 }
 
 fn run_action(arguments: &Value) -> Result<Action, String> {
@@ -1646,7 +1720,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(12));
+        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(13));
         for name in [TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL] {
             assert!(
                 reply["result"]["tools"]
