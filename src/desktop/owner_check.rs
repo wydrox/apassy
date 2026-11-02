@@ -1513,7 +1513,7 @@ pub struct OwnerFlows {
     pub(crate) frequency_note: Option<String>,
     pub(crate) native: NativeState,
     native_probe: Option<Task<NativeState>>,
-    check_probe: Option<(u64, Task<NativeState>)>,
+    pub(crate) check_probe: Option<(u64, Task<NativeState>)>,
     pub(crate) check: Option<CheckDialog>,
     pub(crate) unlock: UnlockState,
     pub(crate) notifications: Option<NotificationCenter>,
