@@ -361,6 +361,10 @@ public struct QuestionSettle: Codable, Sendable, Equatable {
 
 /// The kinds of answer (contract section 9.1).
 public enum AnswerKind: String, Codable, Sendable, CaseIterable {
+    case approve
+    case approveAsDevelopment = "approve_as_development"
+    case approveAsProduction = "approve_as_production"
+    case denyWithComment = "deny_with_comment"
     case approveOnce = "approve_once"
     case approveInProject = "approve_in_project"
     case allowProduction = "allow_production"
@@ -382,20 +386,40 @@ public struct RemoteAnswer: Sendable, Equatable, Hashable {
     public var kind: AnswerKind
     public var itemID: String?
     public var environment: QuestionEnvironment?
+    /// Nil on the UI's draft comment action; the model refuses to send that draft.
+    public private(set) var comment: String?
 
-    public init(kind: AnswerKind, itemID: String? = nil, environment: QuestionEnvironment? = nil) {
-        self.kind = kind
+    public init(kind: AnswerKind, itemID: String? = nil, environment: QuestionEnvironment? = nil, comment: String? = nil) {
+        let normalized = Self.normalizeComment(comment ?? "")
+        self.kind = kind == .denyWithComment && comment != nil && normalized.isEmpty ? .deny : kind
         self.itemID = itemID
         self.environment = environment
+        self.comment = self.kind == .denyWithComment && comment != nil ? normalized : nil
+    }
+
+    public static func normalizeComment(_ text: String) -> String {
+        let scalars = text.unicodeScalars.filter {
+            $0.properties.generalCategory != .control && $0.value != 0x2028 && $0.value != 0x2029
+        }.prefix(500)
+        // Unicode White_Space (unlike Foundation's whitespace set, excludes U+200B).
+        let filtered = Array(scalars)
+        let start = filtered.firstIndex { !$0.properties.isWhitespace } ?? filtered.endIndex
+        let end = filtered.lastIndex { !$0.properties.isWhitespace }.map { $0 + 1 } ?? start
+        return String(String.UnicodeScalarView(filtered[start..<end]))
+    }
+
+    public var signedChoice: String {
+        kind == .denyWithComment
+            ? "deny_with_comment:\(Base64URL.encode(Data((comment ?? "").utf8)))" : kind.rawValue
     }
 
     /// Whether this answer gives authority, so the answer key signs it after Face ID (contract
     /// section 5.3). The others take authority away: the core signs them without Face ID.
     public var needsFaceID: Bool {
         switch kind {
-        case .approveOnce, .approveInProject, .allowProduction: true
+        case .approve, .approveAsDevelopment, .approveAsProduction, .approveOnce, .approveInProject, .allowProduction: true
         case .correctEnvironment: environment == .development
-        case .deny, .neverForAgent, .alwaysAskForAgent, .disconnect: false
+        case .deny, .denyWithComment, .neverForAgent, .alwaysAskForAgent, .disconnect: false
         }
     }
 
@@ -404,6 +428,7 @@ public struct RemoteAnswer: Sendable, Equatable, Hashable {
         var params: [String: Any] = ["kind": kind.rawValue]
         if let itemID { params["item_id"] = itemID }
         if let environment { params["environment"] = environment.rawValue }
+        if kind == .denyWithComment, let comment { params["comment"] = comment }
         return params
     }
 }

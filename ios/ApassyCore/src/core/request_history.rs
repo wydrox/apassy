@@ -265,6 +265,10 @@ impl Journal {
                 && (entry.sent_at.is_some() || entry.attempted_at.is_some())
         })?;
         match entry.selected_kind.as_deref()? {
+            "approve" => Some("approve"),
+            "approve_as_development" => Some("approve_as_development"),
+            "approve_as_production" => Some("approve_as_production"),
+            "deny_with_comment" => Some("deny_with_comment"),
             "approve_once" => Some("approve_once"),
             "approve_in_project" => Some("approve_in_project"),
             "allow_production" => Some("allow_production"),

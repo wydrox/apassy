@@ -67,7 +67,7 @@ struct WaitingDecision: Identifiable, Equatable {
     /// A production credential: the row has a red dot.
     var production: Bool {
         if case .question(let question) = source {
-            return question.card?.question.items.contains(where: \.production) ?? false
+            return question.card?.question.items.contains(where: { $0.production && !$0.unconfirmed }) ?? false
         }
         return false
     }
@@ -130,8 +130,8 @@ enum Decisions {
     /// The environment of a question: "Production", "Production?" (production only by default:
     /// the owner can correct it), or "Development".
     static func environment(_ items: [QuestionInfo.Item]) -> String {
-        if items.contains(where: { $0.production && !$0.unconfirmed }) { return "Production" }
         if items.contains(where: \.unconfirmed) { return "Production?" }
+        if items.contains(where: { $0.production && !$0.unconfirmed }) { return "Production" }
         return "Development"
     }
 
