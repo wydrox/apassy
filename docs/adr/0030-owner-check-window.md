@@ -28,8 +28,15 @@ Rust assigns each spawned helper a distinct identity. Seeding stores that identi
 and counter. Before issuing, consuming or delivering a reused proof, Rust sends a
 numbered synchronous probe to that SAME helper and waits at most 500 ms for its
 matching response. Probes are serialized; late responses cannot satisfy later
-requests. A timeout disables reuse until the helper is restarted, preventing pipe
-backlog and unbounded writes. Fresh authentication remains available.
+requests. A timeout immediately advances the revocation generation and marks the
+helper unhealthy. Only one request can remain outstanding: its late response drains
+that request but cannot satisfy a later probe. Subsequent probes can recover the
+same helper, with retries backed off by 1, 2, then 5 seconds (capped). Broken streams
+or exited helpers are terminated/restarted with the same capped restart backoff and
+a new identity. Recovery never restores verification or old proofs; a fresh local
+authentication must seed a new window with the recovered helper identity and lock
+counter. Privacy-safe diagnostics record timeout, restart and recovery transitions.
+Fresh authentication remains available throughout.
 
 The helper reads requests off-main and schedules replies on its notification run
 loop after explicitly draining pending default-mode run-loop sources, with

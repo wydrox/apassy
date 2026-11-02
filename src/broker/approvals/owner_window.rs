@@ -131,6 +131,12 @@ impl OwnerWindow {
         self.invalidate_for("helper_started");
         *self.probe.lock().unwrap() = Some(probe);
     }
+    #[cfg(feature = "desktop")]
+    pub(crate) fn clear_probe(&self) {
+        self.invalidate_for("helper_stopped");
+        *self.probe.lock().unwrap() = None;
+        self.observe(false);
+    }
     fn refresh(&self) -> bool {
         let probe = self.probe.lock().unwrap().clone();
         if probe.is_some_and(|p| !(p.0)()) {
