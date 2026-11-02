@@ -1339,8 +1339,7 @@ fn two_macs_round_trip() {
     // Activity is newest first; the replay above is the first refused line.
     let lines = world.wait_refused(2);
     assert_eq!(
-        lines[0],
-        "An answer from Test iPhone did not count: its signature does not verify.",
+        lines[0], "An answer from Test iPhone did not count: its signature does not verify.",
         "{lines:?}"
     );
     let good = prepare_answer(&opened, PHONE_UUID, choice, now()).unwrap();

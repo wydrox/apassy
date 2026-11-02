@@ -848,7 +848,10 @@ fn revision_conflict_and_invalid_update_are_atomic() {
         VaultErrorKind::InvalidInput,
     );
     let after_category = expect_ok(vault.details(added.id));
-    assert_eq!(after_category, before, "a different category changes nothing");
+    assert_eq!(
+        after_category, before,
+        "a different category changes nothing"
+    );
     assert_eq!(after_category.summary.kind, CredentialKind::ApiKey);
     assert_eq!(after_category.summary.revision, revision);
     assert_eq!(
