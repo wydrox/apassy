@@ -7,7 +7,9 @@ use super::decide::BrokerContext;
 use crate::agent::wire::WireResponse;
 use crate::browser::site::{Page, Website, is_website_field};
 use crate::browser::trust::InstanceIdentity;
-use crate::browser::wire::{BrowserDocument, Data, Response};
+#[cfg(any(feature = "desktop", test))]
+use crate::browser::wire::Response;
+use crate::browser::wire::{BrowserDocument, Data};
 use crate::contracts::CredentialKind;
 use crate::owner::wire::SecretText;
 use crate::vault::{Vault, custom_detail_label};
@@ -34,6 +36,7 @@ struct Target {
     identity: Option<InstanceIdentity>,
     history: Vec<Job>,
 }
+#[cfg_attr(not(all(feature = "desktop", feature = "vault")), allow(dead_code))]
 struct Job {
     document: BrowserDocument,
     completed: bool,
@@ -72,6 +75,7 @@ pub fn agent_fill_allowed_in(
 }
 
 /// Untrusted metadata can only veto a fill, never authorize delivery.
+#[cfg(feature = "desktop")]
 pub(crate) fn blocked(instance: &str, url: &str) {
     let mut targets = lock(&TARGETS);
     if targets.len() < 16 || targets.contains_key(instance) {
@@ -452,6 +456,7 @@ fn run_inner(
 }
 
 /// Called only after the native host and socket peer caller guards pass.
+#[cfg(any(feature = "desktop", test))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll(
     instance: &str,

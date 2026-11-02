@@ -184,6 +184,7 @@ function holdRefusedOwnerRequest(port, wire, answer) {
   }
   if (answer?.code !== "unsafe_browser") return false;
   if (pending) return true;
+  wire.bypass_nonce ??= wire.rid || crypto.randomUUID();
   refusedOwnerRequests.set(wire.bypass_nonce, { port, wire, approving: false });
   showFailure(messageOf(answer));
   return true;
@@ -1410,7 +1411,6 @@ async function startPasskey(session, message) {
     return;
   }
   session.native = native;
-  wire.bypass_nonce = crypto.randomUUID();
   session.bypassWire = wire;
   // Negotiate on this session's port: cancellation and the request deadline
   // cover status as well as the owner check. Never cache across app reconnects.

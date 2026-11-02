@@ -189,6 +189,7 @@ impl OwnerWindow {
     pub(crate) fn invalidate(&self) {
         self.invalidate_for("explicit_invalidation");
     }
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate_for(&self, event: &'static str) {
         tracing::info!(event, "owner window revoked");
         let mut s = self.state.lock().unwrap();

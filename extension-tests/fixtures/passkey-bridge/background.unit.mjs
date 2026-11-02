@@ -15,14 +15,25 @@ import { createSyntheticAuthenticator, fail, ok } from "./synthetic-authenticato
 const ORIGIN = "https://login.example.com";
 
 test("bypass controls only send requests and never an approval or profile", async () => {
-  const bg = loadBackground();
+  const bg = setup();
   const seen = [];
-  bg.setHost((wire, record) => { seen.push(wire); record.port.postMessage(ok({ type: "none" })); });
-  assert.equal((await bg.handle({ type: "bypass_request", scope: "once" })).ok, true);
+  bg.setHost((wire, record) => {
+    seen.push(wire);
+    if (wire.cmd === "passkey_get") record.port.postMessage(fail("unsafe_browser", "Owner permission required"));
+  });
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once" })).ok, false);
+  await request(bg, { op: "get", options: getOptions() });
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once", approved: true, identity: "forged", profile: "forged" })).ok, true);
   assert.equal((await bg.handle({ type: "bypass_request", scope: "five_minutes" })).ok, true);
   assert.equal((await bg.handle({ type: "bypass_request", scope: "forever" })).ok, false);
-  assert.deepEqual(seen.map(({ cmd, scope }) => ({ cmd, scope })), [{ cmd: "bypass_request", scope: "once" }, { cmd: "bypass_request", scope: "five_minutes" }]);
-  assert.ok(seen.every(wire => !("approved" in wire) && !("identity" in wire)));
+  await flush();
+  const controls = seen.filter(wire => wire.cmd === "bypass_request");
+  assert.deepEqual(controls.map(({ cmd, scope }) => ({ cmd, scope })), [{ cmd: "bypass_request", scope: "once" }, { cmd: "bypass_request", scope: "five_minutes" }]);
+  for (const wire of controls) {
+    assert.deepEqual(Object.keys(wire).sort(), ["bypass_nonce", "cmd", "scope", "v"]);
+    assert.match(wire.bypass_nonce, UUID);
+  }
+
 });
 const b64u = (bytes) => Buffer.from(bytes).toString("base64url");
 const b64 = (bytes) => Buffer.from(bytes).toString("base64");
@@ -102,6 +113,34 @@ test("a valid get goes to the app with the browser origin and a clientDataJSON b
   assert.equal(Buffer.from(wire.client_data_json, "base64").toString("utf8"),
     `{"type":"webauthn.get","challenge":"${b64u(challenge)}","origin":"${ORIGIN}","crossOrigin":false}`);
   assert.equal(port.received.length, 0);
+});
+
+test("an owner-approved once retry includes the refused request nonce on its original port", async () => {
+  const bg = setup();
+  let initial;
+  let nonce;
+  bg.setHost((wire, record) => {
+    if (wire.cmd === "bypass_request") {
+      assert.equal(wire.scope, "once");
+      nonce = wire.bypass_nonce;
+      record.port.postMessage(ok({ type: "bypass", remaining: 1 }));
+    } else if (!initial) {
+      initial = wire;
+      record.port.postMessage(fail("unsafe_browser", "Owner permission required"));
+    } else {
+      assert.deepEqual(wire, { ...initial, bypass_nonce: nonce });
+      record.port.postMessage(getAnswer(wire));
+    }
+  });
+  const port = await request(bg, { op: "get", options: getOptions() });
+  assert.equal(Object.hasOwn(initial, "bypass_nonce"), false);
+  assert.equal(port.received.length, 0);
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once" })).ok, true);
+  await flush();
+  assert.match(nonce, UUID);
+  assert.equal(bg.natives.length, 1);
+  assert.equal(bg.natives[0].sent.length, 3);
+  assert.equal(port.received[0].kind, "result");
 });
 
 test("the page cannot choose the origin: an extra field is refused before the app", async () => {
@@ -626,7 +665,7 @@ test("turning off ends an open passkey request", async () => {
 test("the manifest asks for the passkey site access only as optional", async () => {
   const manifest = loadBackground().chrome.runtime.getManifest();
   assert.deepEqual(manifest.optional_host_permissions, ["https://*/*", "http://localhost/*"]);
-  assert.deepEqual(manifest.permissions, ["nativeMessaging", "activeTab", "scripting", "storage"]);
+  assert.deepEqual(manifest.permissions, ["nativeMessaging", "activeTab", "scripting", "webNavigation", "storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.content_scripts, undefined);
   assert.ok(!JSON.stringify(manifest).includes("webAuthenticationProxy"));
@@ -684,7 +723,10 @@ test("fill code: the request, the fill in frame 0 with the code, and a reply wit
   bg.scripts.result = () => ({ ok: true, reason: "", fields: 1 });
   const reply = await bg.handle({ type: "fill_code", tabId: 5, url: `${ORIGIN}/login`, item: 9 });
   assert.deepEqual(reply, { ok: true, code: "ok", message: "Code filled.", filled: { fields: 1 } });
-  assert.deepEqual(bg.natives[0].sent, [{ v: 1, cmd: "fill_code", url: `${ORIGIN}/login`, item: 9 }]);
+  const { bypass_nonce, ...codeRequest } = bg.natives[0].sent[0];
+  assert.match(bypass_nonce, UUID);
+  assert.equal(bg.natives[0].sent.length, 1);
+  assert.deepEqual(codeRequest, { v: 1, cmd: "fill_code", url: `${ORIGIN}/login`, item: 9 });
   assert.equal(bg.scripts[0].func.name, "fillOneTimeCode");
   assert.deepEqual(bg.scripts[0].target, { tabId: 5, frameIds: [0] });
   assert.deepEqual(bg.scripts[0].args, [ORIGIN, "246810"]);

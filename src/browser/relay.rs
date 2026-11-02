@@ -293,6 +293,25 @@ fn answer(
             ));
         }
     }
+    // Normal passkey packets need no bypass field. Their random request ID also
+    // binds a later owner-approved retry on this same native connection.
+    #[derive(serde::Deserialize)]
+    struct PasskeyBinding {
+        cmd: String,
+        rid: String,
+        #[serde(default)]
+        bypass_nonce: Option<String>,
+    }
+    if let Ok(binding) = serde_json::from_slice::<PasskeyBinding>(&line)
+        && matches!(binding.cmd.as_str(), "passkey_get" | "passkey_create")
+        && binding.bypass_nonce.is_none()
+        && super::wire::is_request_id(&binding.rid)
+    {
+        let end = line.iter().rposition(|b| *b == b'}').expect("JSON object");
+        line.truncate(end);
+        // is_request_id restricts the value to UUID characters.
+        line.extend_from_slice(format!(",\"bypass_nonce\":\"{}\"}}", binding.rid).as_bytes());
+    }
     // One ID per native-messaging process, never supplied by the extension.
     // Together with the random nonce this binds retries to the same open port.
     if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(&line)
@@ -720,6 +739,12 @@ mod tests {
                     let mut line = Vec::new();
                     BufReader::new(stream).read_until(b'\n', &mut line).unwrap();
                     let request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+                    if request["cmd"] == "passkey_get" {
+                        assert_eq!(request["bypass_nonce"], request["rid"]);
+                        assert!(request["host_connection"].as_str().is_some());
+                    } else {
+                        assert!(request.get("bypass_nonce").is_none());
+                    }
                     seen.push(request["cmd"].as_str().unwrap().to_owned());
                     writer
                         .write_all(b"{\"ok\":true,\"code\":\"ok\",\"message\":\"\",\"data\":{\"type\":\"none\"}}\n")
