@@ -2745,13 +2745,16 @@ fn a_sync_now_that_a_pause_ends_tells_nothing() {
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
     add_item(&mut a, "Beta", "SYNTH-beta");
-    let upload = relay.hold("PUT /v1/sync/snapshot", Duration::from_secs(3));
+    relay.delay("PUT /v1/sync/snapshot", Duration::from_secs(3));
+    let puts = relay.count("PUT /v1/sync/snapshot");
     let before = a.sync.statuses.get(&id).cloned();
     a.status_text.clear();
     a.sync_now();
-    upload.wait_entered();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while relay.count("PUT /v1/sync/snapshot") == puts && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     a.relay_of(&id).expect("relay").pause();
-    upload.release();
     a.relay_settle_for_test();
     assert_eq!(a.sync.statuses.get(&id).cloned(), before);
     assert!(!a.status_text.contains("locked"), "{}", a.status_text);
