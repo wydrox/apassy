@@ -534,8 +534,9 @@ fn a_key_that_the_relay_cannot_use_ends_in_an_error_and_no_loop() {
     std::fs::write(&path, text.replace(entry.key.expose(), "not-a-key")).unwrap();
     let host = world.start_host(HostOptions::default(), never_asked);
     let run = world.ask_for(&[world.stripe], &["git", "status"], Some(USER));
-    // The run is not released. It stays pending until it times out.
-    std::thread::sleep(Duration::from_millis(2500));
+    // The run is not released. It stays pending until it times out. The host polls at
+    // most once a second: a loop would try again within this wait.
+    std::thread::sleep(Duration::from_millis(1500));
     let view = world
         .relay
         .ok("GET", &format!("/v1/runs/{run}"), &world.agent, None);

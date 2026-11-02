@@ -343,7 +343,10 @@ fn a_run_times_out_and_can_no_longer_be_released() {
         2
     );
     assert_eq!(relay.host_requests().len(), 2);
-    std::thread::sleep(Duration::from_millis(2500));
+    // Both runs are past their expiry (no wait for the 2 s): the relay sees it at a read.
+    relay.edit_vault_live(&format!(
+        "UPDATE run SET expires_at = 1 WHERE id IN ({run}, {second})"
+    ));
     // A read of the run shows the timeout.
     let view = get_run(&relay, &team, run);
     assert_eq!(view["status"], "timed_out");
@@ -382,7 +385,7 @@ fn a_late_release_is_refused_even_before_any_read() {
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
     let body = release_body(&relay, run, None);
-    std::thread::sleep(Duration::from_millis(2600));
+    relay.edit_vault_live(&format!("UPDATE run SET expires_at = 1 WHERE id = {run}"));
     let (status, answer) = release_with(&relay, run, &body);
     assert_eq!(status, 409, "{answer}");
     assert_eq!(get_run(&relay, &team, run)["status"], "timed_out");
@@ -391,7 +394,7 @@ fn a_late_release_is_refused_even_before_any_read() {
 #[test]
 fn a_run_with_no_host_times_out() {
     let relay = start_with(
-        |config| config.approval_timeout_secs = 2,
+        |config| config.approval_timeout_secs = 1,
         UpstreamOptions::default(),
     );
     let team = relay.setup("staging");

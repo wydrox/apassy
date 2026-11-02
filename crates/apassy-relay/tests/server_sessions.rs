@@ -115,13 +115,14 @@ fn find_is_none_after_the_expiry() {
 #[test]
 fn a_run_shows_ended_after_the_session_expires() {
     let relay = start_with(
-        |config| config.session_ttl_secs = 3,
+        |config| config.session_ttl_secs = 2,
         UpstreamOptions::default(),
     );
     let team = relay.setup("staging");
     let (run, key, _) = ready_run(&relay, &team);
     assert_eq!(status_of(&relay, &team, run), "ready");
-    std::thread::sleep(Duration::from_millis(4200));
+    // The time to live in whole seconds, and a second for the second it started in.
+    std::thread::sleep(Duration::from_millis(3200));
     assert!(relay.sessions().find(&key, now_unix()).is_none());
     let view = relay.ok("GET", &format!("/v1/runs/{run}"), &team.agent_token, None);
     assert_eq!(view["status"], "ended");

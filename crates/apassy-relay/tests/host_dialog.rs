@@ -238,10 +238,13 @@ fn a_program_that_ignores_the_timeout_cannot_release_after_expiry() {
     let dir = tempfile::tempdir().unwrap();
     let path = program(dir.path(), "import time\ntime.sleep(10)\nprint('release')");
     let mut r = request();
-    r.expires_at = apassy_relay::now_unix() + 5;
+    // A fake dialog takes a duration below the five seconds of a real one.
+    r.expires_at = apassy_relay::now_unix() + 2;
     let start = std::time::Instant::now();
     assert_eq!(
-        DialogAsker::with_program(path, DialogKind::MacOs).ask(&r, &[], "why"),
+        DialogAsker::with_program(path, DialogKind::MacOs)
+            .with_minimum_seconds(1)
+            .ask(&r, &[], "why"),
         Answer::Expired
     );
     assert!(start.elapsed() < std::time::Duration::from_secs(7));
