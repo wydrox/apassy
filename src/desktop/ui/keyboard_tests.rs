@@ -12,6 +12,10 @@ use super::{Sheet, draw, kit};
 use crate::desktop::{DesktopApp, Place};
 
 const SIZE: Vec2 = Vec2::new(1180.0, 760.0);
+/// The frames after a key press until the focus and its scroll settle.
+const SETTLE_FRAMES: usize = 8;
+/// The frames after a Tab of a walk that has not reached its target yet.
+const STEP_FRAMES: usize = 3;
 
 /// One window with a context that keeps the focus between frames, and the AccessKit
 /// names of the last frame.
@@ -75,6 +79,11 @@ impl Window {
 
     /// Press a key, then draw frames until the focus settles.
     fn press(&mut self, app: &mut DesktopApp, key: Key, modifiers: Modifiers) {
+        self.press_then(app, key, modifiers, SETTLE_FRAMES);
+    }
+
+    /// Press a key, then draw `frames` frames.
+    fn press_then(&mut self, app: &mut DesktopApp, key: Key, modifiers: Modifiers, frames: usize) {
         self.frame(
             app,
             vec![Event::Key {
@@ -85,9 +94,23 @@ impl Window {
                 modifiers,
             }],
         );
-        for _ in 0..8 {
+        for _ in 0..frames {
             self.frame(app, Vec::new());
         }
+    }
+
+    /// One Tab of a walk: the focus moves within two frames, so a step draws
+    /// [`STEP_FRAMES`]; the press that reaches the target draws the rest of
+    /// [`SETTLE_FRAMES`] too, as [`Window::press`] does.
+    fn tab_step(&mut self, app: &mut DesktopApp, reached: impl Fn(&Self) -> bool) -> bool {
+        self.press_then(app, Key::Tab, Modifiers::NONE, STEP_FRAMES);
+        if !reached(self) {
+            return false;
+        }
+        for _ in STEP_FRAMES..SETTLE_FRAMES {
+            self.frame(app, Vec::new());
+        }
+        true
     }
 
     fn idle(&mut self, app: &mut DesktopApp) {
@@ -147,8 +170,7 @@ impl Window {
     /// Press Tab until the focused control has `name`. Fails after `max` presses.
     fn tab_to(&mut self, app: &mut DesktopApp, name: &str, max: usize) {
         for _ in 0..max {
-            self.press(app, Key::Tab, Modifiers::NONE);
-            if self.focused_name().as_deref() == Some(name) {
+            if self.tab_step(app, |window| window.focused_name().as_deref() == Some(name)) {
                 return;
             }
         }
@@ -161,8 +183,7 @@ impl Window {
     /// Press Tab until a text field has the focus. Fails after `max` presses.
     fn tab_to_text_field(&mut self, app: &mut DesktopApp, max: usize) {
         for _ in 0..max {
-            self.press(app, Key::Tab, Modifiers::NONE);
-            if self.ctx.text_edit_focused() {
+            if self.tab_step(app, |window| window.ctx.text_edit_focused()) {
                 return;
             }
         }
