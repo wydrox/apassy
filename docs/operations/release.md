@@ -226,7 +226,7 @@ A Linux group runs eight tests at a time and a macOS group six: twice the proces
 The processors are still the limit: under nextest the tests keep all of them busy, so more groups, not more threads, make a group shorter.
 A test that uses a resource outside its process (a fixed port, a fixed path, an environment-dependent location, the Keychain) runs in the `serial` test group of `.config/nextest.toml`, one at a time.
 On macOS, the native helper tests (`it::native_helper::`) are in it: they build the Swift helper and notifier into fixed paths.
-nextest stops a test after five minutes.
+nextest stops a test after five minutes. In CI it runs a failed test once more and reports a test that then passes as FLAKY: on a busy runner a test can miss a deadline of a few seconds. A FLAKY test needs a fix, not the retry.
 nextest does not run doc tests: the `linux` and `macos` jobs run `cargo test --features vault --doc`, and the `relay` job runs the doc tests of the relay and the iPhone vault core.
 
 The two `relay (K)` jobs test the relay crate and the iPhone vault core (`ios/ApassyCore`) with `cargo nextest run -p apassy-relay -p apassy-core --partition slice:K/2`; `relay (1)` also runs their doc tests and the relay end-to-end script.

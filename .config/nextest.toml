@@ -64,5 +64,12 @@ priority = 50
 [profile.ci]
 # Run every test, and show the output of each failure when it fails and at the end.
 fail-fast = false
+# The tests keep every processor of a CI runner busy, so a test can take twice its
+# time on an idle machine. Some tests have deadlines of a few seconds that this can
+# miss (relay server_http::expired_stalled_body_frees_capacity_for_a_new_connection,
+# desktop::sync_worker::tests::live::a_mac_refused_for_a_moment_syncs_again_at_its_next_try).
+# A failed test runs once more; nextest reports a test that passes the second time
+# as FLAKY in the summary. Fix such a test rather than rely on the retry.
+retries = 1
 failure-output = "immediate-final"
 final-status-level = "slow"
