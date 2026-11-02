@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::decide::BrokerContext;
 use crate::agent::wire::WireResponse;
 use crate::browser::site::{Page, Website, is_website_field};
+use crate::browser::trust::InstanceIdentity;
 use crate::browser::wire::{BrowserDocument, Data, Response};
 use crate::contracts::CredentialKind;
 use crate::owner::wire::SecretText;
@@ -13,8 +14,7 @@ use crate::vault::{Vault, custom_detail_label};
 use serde_json::json;
 
 const OPEN: &str = "Open the login page in the browser first";
-const REMOTE: &str =
-    "This browser runs with remote debugging. Trust this browser profile in Apassy first.";
+const REMOTE: &str = "This browser runs with remote debugging. In Apassy, trust this browser instance first (Settings → Browser).";
 const FRESH: Duration = Duration::from_secs(4);
 const CHANGED: &str = "The login page changed. Ask again.";
 
@@ -31,6 +31,7 @@ struct Target {
     seen: Instant,
     job: Option<Job>,
     remote: bool,
+    identity: Option<InstanceIdentity>,
     history: Vec<Job>,
 }
 struct Job {
@@ -54,12 +55,16 @@ pub(super) struct Fill {
     target: String,
     document: BrowserDocument,
     fields: Vec<String>,
+    identity: Option<InstanceIdentity>,
     pub agent_can_read_page: bool,
 }
 
-/// The trust worker can replace this predicate without changing delivery policy.
-pub fn agent_fill_allowed_in(agent_can_read_page: bool) -> Result<(), &'static str> {
-    if agent_can_read_page {
+/// Only device-local instance trust authorizes an unsafe browser, never owner grants.
+pub fn agent_fill_allowed_in(
+    remote: bool,
+    identity: Option<&InstanceIdentity>,
+) -> Result<(), &'static str> {
+    if remote && !identity.is_some_and(crate::browser::bypass::authorize_agent_fill) {
         Err(REMOTE)
     } else {
         Ok(())
@@ -79,6 +84,7 @@ pub(crate) fn blocked(instance: &str, url: &str) {
                 seen: Instant::now(),
                 job: None,
                 remote: true,
+                identity: None,
                 history: Vec::new(),
             },
         );
@@ -95,10 +101,13 @@ impl Fill {
             .get(&self.target)
             .filter(|t| t.seen.elapsed() < FRESH)
             .ok_or(CHANGED)?;
-        if target.document.as_ref() != Some(&self.document) {
+        if target.document.as_ref() != Some(&self.document)
+            || target.identity != self.identity
+            || target.remote != self.agent_can_read_page
+        {
             return Err(CHANGED.into());
         }
-        agent_fill_allowed_in(target.remote).map_err(str::to_owned)?;
+        agent_fill_allowed_in(target.remote, target.identity.as_ref()).map_err(str::to_owned)?;
         let actual = Page::parse(&target.url).map_err(|_| CHANGED)?;
         if actual.origin() != self.requested.origin() {
             return Err(CHANGED.into());
@@ -133,7 +142,7 @@ impl Fill {
             if target.document.as_ref() != Some(&self.document) {
                 return refused(CHANGED);
             }
-            if let Err(reason) = agent_fill_allowed_in(target.remote) {
+            if let Err(reason) = agent_fill_allowed_in(target.remote, target.identity.as_ref()) {
                 return refused(reason);
             }
             if target.focused && target.seen >= start && target.seen.elapsed() < FRESH {
@@ -148,7 +157,8 @@ impl Fill {
         if let Err(reason) = self.validate_site(vault) {
             return refused(&reason);
         }
-        if let Err(reason) = agent_fill_allowed_in(self.agent_can_read_page) {
+        if let Err(reason) = agent_fill_allowed_in(self.agent_can_read_page, self.identity.as_ref())
+        {
             return refused(reason);
         }
         let read = |field: &str| -> Result<SecretText, String> {
@@ -182,6 +192,9 @@ impl Fill {
         let mut targets = lock(&TARGETS);
         let Some(target) = targets.get_mut(&self.target).filter(|t| {
             t.document.as_ref() == Some(&self.document)
+                && t.identity == self.identity
+                && t.remote == self.agent_can_read_page
+                && agent_fill_allowed_in(t.remote, t.identity.as_ref()).is_ok()
                 && t.focused
                 && t.seen.elapsed() < FRESH
                 && t.job.as_ref().is_none_or(|j| j.completed)
@@ -348,14 +361,19 @@ fn run_inner(
         Ok(t) => t,
         Err(e) => return refused(e),
     };
-    let agent_can_read_page = lock(&TARGETS).get(&target).is_some_and(|t| t.remote);
-    if let Err(reason) = agent_fill_allowed_in(agent_can_read_page) {
-        return refused(reason);
-    }
-    // agent_poll passes both caller guards, which currently reject unsafe switches.
-    let Some(document) = lock(&TARGETS).get(&target).and_then(|t| t.document.clone()) else {
+    let targets = lock(&TARGETS);
+    let Some(selected) = targets.get(&target) else {
         return refused(CHANGED);
     };
+    let agent_can_read_page = selected.remote;
+    let identity = selected.identity.clone();
+    if let Err(reason) = agent_fill_allowed_in(agent_can_read_page, identity.as_ref()) {
+        return refused(reason);
+    }
+    let Some(document) = selected.document.clone() else {
+        return refused(CHANGED);
+    };
+    drop(targets);
     let fill = Fill {
         item,
         requested,
@@ -363,6 +381,7 @@ fn run_inner(
         document,
         fields: fields.to_vec(),
         agent_can_read_page,
+        identity,
     };
     let items = if fields.iter().any(|f| f != "code") {
         vec![item]
@@ -436,6 +455,7 @@ fn run_inner(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll(
     instance: &str,
+    identity: Option<InstanceIdentity>,
     url: &str,
     document: Option<BrowserDocument>,
     focused: bool,
@@ -454,10 +474,17 @@ pub(crate) fn poll(
         focused,
         seen: Instant::now(),
         job: None,
-        remote: false,
+        remote: identity.is_some(),
+        identity: identity.clone(),
         history: Vec::new(),
     });
-    target.remote = false;
+    // Identity is supplied by the socket guard, never by the extension packet.
+    // A changed security context invalidates any already approved delivery.
+    if target.identity != identity || target.remote != identity.is_some() {
+        target.job = None;
+    }
+    target.remote = identity.is_some();
+    target.identity = identity;
     // Losing browser focus must not discard the owner's selected document.
     if !url.is_empty() {
         target.url = url.into();
@@ -465,6 +492,10 @@ pub(crate) fn poll(
     }
     target.focused = focused && document.is_some();
     target.seen = Instant::now();
+    if let Err(reason) = agent_fill_allowed_in(target.remote, target.identity.as_ref()) {
+        target.job = None;
+        return Response::error("unsafe_browser", reason);
+    }
     let old_report = receipt.and_then(|id| target.history.iter_mut().find(|j| j.id == id));
     let active = old_report.is_none();
     if let Some(job) = old_report.or(target.job.as_mut()) {
@@ -532,6 +563,77 @@ pub(crate) fn poll(
 mod tests {
     use super::*;
     #[test]
+    fn extension_cannot_supply_guard_identity_or_remote_flag() {
+        let packet = json!({
+            "v": 1, "cmd": "agent_poll",
+            "instance": "0123456789abcdef0123456789abcdef",
+            "url": "https://example.com", "document": null
+        });
+        assert!(
+            crate::browser::wire::Request::parse(&serde_json::to_vec(&packet).unwrap()).is_ok()
+        );
+        for field in ["identity", "remote", "agent_can_read_page"] {
+            let mut forged = packet.clone();
+            forged[field] = json!(false);
+            assert!(
+                crate::browser::wire::Request::parse(&serde_json::to_vec(&forged).unwrap())
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn owner_bypass_does_not_authorize_agent_poll_or_clear_remote_identity() {
+        use crate::browser::bypass::{BypassScope, OwnerPasskeyCodeBypass, consume};
+        // Invalid identity fails trust before any native-helper access. No owner
+        // vault, keychain, or installed browser is needed by this regression.
+        let identity = InstanceIdentity {
+            bundle_id: String::new(),
+            team_id: String::new(),
+            user_data_root: String::new(),
+            debugging: "9223".into(),
+            unsafe_switches: vec!["remote-debugging-port".into()],
+        };
+        let now = Instant::now();
+        let mut grant = Some(OwnerPasskeyCodeBypass::approved(
+            identity.clone(),
+            BypassScope::FiveMinutes,
+            now,
+        ));
+        assert!(grant.as_ref().unwrap().remaining(&identity, now).is_some());
+        let command = crate::browser::wire::Command::AgentPoll {
+            instance: "remote-bypass-regression".into(),
+            url: "https://example.com/login".into(),
+            document: None,
+            focused: false,
+            receipt: None,
+            filled: vec![],
+            exposed: false,
+        };
+        assert!(!consume(&mut grant, &identity, now, &command, None));
+        assert_eq!(agent_fill_allowed_in(true, Some(&identity)), Err(REMOTE));
+        for _ in 0..2 {
+            let response = poll(
+                "remote-bypass-regression",
+                Some(identity.clone()),
+                "https://example.com/login",
+                None,
+                false,
+                None,
+                vec![],
+                false,
+            );
+            assert!(!response.ok);
+            assert_eq!(response.message, REMOTE);
+            let targets = lock(&TARGETS);
+            let target = targets.get("remote-bypass-regression").unwrap();
+            assert!(target.remote);
+            assert_eq!(target.identity.as_ref(), Some(&identity));
+            assert!(target.job.is_none());
+        }
+        assert!(grant.is_some());
+        lock(&TARGETS).remove("remote-bypass-regression");
+    }
+    #[test]
     fn unfocused_poll_preserves_binding_and_navigation_replaces_it() {
         let instance = "binding-test";
         let document = BrowserDocument {
@@ -543,6 +645,7 @@ mod tests {
         };
         poll(
             instance,
+            None,
             "https://example.com/login",
             Some(document.clone()),
             true,
@@ -550,7 +653,7 @@ mod tests {
             vec![],
             false,
         );
-        poll(instance, "", None, false, None, vec![], false);
+        poll(instance, None, "", None, false, None, vec![], false);
         {
             let targets = lock(&TARGETS);
             let target = targets.get(instance).unwrap();
@@ -562,6 +665,7 @@ mod tests {
         next.document_id = "second-document".into();
         poll(
             instance,
+            None,
             "https://example.com/login",
             Some(next.clone()),
             true,
@@ -589,8 +693,8 @@ mod tests {
             site_binding(&[], &page, &page),
             Err("Save the website on the credential first")
         );
-        assert_eq!(agent_fill_allowed_in(true), Err(REMOTE));
-        assert!(agent_fill_allowed_in(false).is_ok());
+        assert_eq!(agent_fill_allowed_in(true, None), Err(REMOTE));
+        assert!(agent_fill_allowed_in(false, None).is_ok());
     }
     #[test]
     fn none_one_several_targets() {
@@ -612,6 +716,7 @@ mod tests {
                     seen: Instant::now(),
                     job: None,
                     remote: false,
+                    identity: None,
                     history: Vec::new(),
                 },
             );

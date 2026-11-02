@@ -81,7 +81,7 @@ pub fn run(
     if let Err(status) = check_args(args) {
         return status;
     }
-    let gate: Gate<'_> = &super::caller::check_browser_parent;
+    let gate: Gate<'_> = &super::caller::check_browser_parent_for_app;
     loop {
         let message = match read_frame(&mut input) {
             Ok(Some(message)) => message,
@@ -113,7 +113,7 @@ pub fn serve(
         input,
         output,
         socket,
-        &super::caller::check_browser_parent,
+        &super::caller::check_browser_parent_for_app,
     )
 }
 
@@ -261,9 +261,11 @@ fn answer(
         trusted_gesture: bool,
         #[serde(default)]
         owner_window_host: u32,
+        #[serde(default)]
+        host_connection: Option<String>,
     }
     let gesture = match serde_json::from_slice::<Gesture>(&line) {
-        Ok(g) if g.owner_window_host == 0 => g,
+        Ok(g) if g.owner_window_host == 0 && g.host_connection.is_none() => g,
         _ => {
             return encode(&Response::error(
                 "bad_request",
@@ -290,6 +292,29 @@ fn answer(
                 "The request is not valid browser wire JSON.",
             ));
         }
+    }
+    // One ID per native-messaging process, never supplied by the extension.
+    // Together with the random nonce this binds retries to the same open port.
+    if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(&line)
+        && matches!(
+            cmd.as_str(),
+            "passkey_get" | "passkey_create" | "fill_code" | "bypass_request"
+        )
+    {
+        static CONNECTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let connection = CONNECTION.get_or_init(|| {
+            format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )
+        });
+        let end = line.iter().rposition(|b| *b == b'}').expect("JSON object");
+        line.truncate(end);
+        line.extend_from_slice(format!(",\"host_connection\":\"{connection}\"}}").as_bytes());
     }
     match exchange(socket, &line, watch) {
         Ok(answer) => answer,

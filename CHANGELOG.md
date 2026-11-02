@@ -4,8 +4,12 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Added
+
 - Add `apassy_fill_in_browser` for agent website logins, with broker authorization, saved-site binding, and status-only responses.
-- **Browser extension:** Deliver agent fills to one matching focused tab, refuse unsafe browser targets, and clear agent-filled passwords when a show-password toggle makes them visible.
+- **Browser extension:** Deliver agent fills to one matching focused tab, require device-local trust for the exact remote-debugging instance, disclose agent page access in owner questions, and clear agent-filled passwords when a show-password toggle makes them visible.
+- **Browser extension:** Request permission in Apassy to allow passkeys and codes once or for five minutes in an exactly identified remote-debugging profile. Show remaining time and End now in the popup.
+- Protected, device-local browser profile trust list for agent fills, with owner approval to add and removal in Browser settings. A grant for one debugging port never covers another.
 
 ## [0.5.12] - 2026-11-02
 

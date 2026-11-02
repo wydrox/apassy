@@ -46,13 +46,18 @@ access. The page receives the password and can process it normally.
 Observation ends when the value changes, the field is removed, or the document
 unloads. Visibility reports have no two-minute expiry either.
 
-A CDP agent can read DOM values even when a field is masked. Remote debugging and
-other unsafe browser switches currently fail the caller guards. A small
-`agent_fill_allowed_in` predicate is the trust integration point; routing also
-accepts `agent_can_read_page`, which adds the secret-output risk when true.
-Untrusted blocked-browser metadata can only veto a fill and cannot authorize one.
-The profile-trust worker owns future guard/profile integration; this ADR does not
-introduce a trust module or bypass the existing guard.
+A CDP agent can read DOM values even when a field is masked. For remote debugging
+and other unsafe switches, agent fills require `bypass::authorize_agent_fill` for
+the exact `InstanceIdentity` verified by the socket guard for the native host
+connection of the extension reporting the bound tab. Extension data cannot supply
+this identity. Device-local trust covers the bundle, signing team, canonical
+user-data root and debugging port or pipe, across all its profiles (ADR 0021).
+Owner passkey/code grants, including an active five-minute grant, never authorize
+agent polls or fills. Polling retains the verified identity and remote flag;
+changes invalidate queued delivery, and trust is checked again before release.
+Trusted unsafe instances set `agent_can_read_page = true` for secret-output risk
+routing. The owner question states that the named agent can read the page through
+remote debugging. Untrusted blocked-browser metadata can only veto a fill.
 
 ## Delivery and limits
 

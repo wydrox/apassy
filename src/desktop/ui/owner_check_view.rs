@@ -67,6 +67,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     };
     let action = dialog.request.describe();
+    let debugging = matches!(dialog.request, OwnerRequest::BrowserDebugging { .. });
     let copy_item_name = match &dialog.request {
         OwnerRequest::CopyField { item_id, .. } => app
             .owner_ui
@@ -195,10 +196,21 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             },
             |ui| {
                 passphrase |= ui
-                    .add_enabled_ui(idle, |ui| kit::button(ui, "Confirm", Style::Prominent))
+                    .add_enabled_ui(idle, |ui| {
+                        kit::button(
+                            ui,
+                            if debugging { "Allow" } else { "Confirm" },
+                            Style::Prominent,
+                        )
+                    })
                     .inner
                     .clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::button(
+                    ui,
+                    if debugging { "Dismiss" } else { "Cancel" },
+                    Style::Bordered,
+                )
+                .clicked();
             },
         );
     });
@@ -225,6 +237,21 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
                 )
             };
             app.start_local_owner(source, eligible, ctx);
+        }
+    } else if debugging && passphrase && ready {
+        let has_passphrase = app
+            .owner
+            .check
+            .as_ref()
+            .is_some_and(|d| !d.passphrase.is_empty());
+        if has_passphrase {
+            app.start_passphrase_check(ctx);
+        } else {
+            app.start_local_owner(
+                crate::broker::approvals::LocalWindowSource::BrowserDebuggingClick,
+                true,
+                ctx,
+            );
         }
     } else if touch_id && ready {
         app.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));

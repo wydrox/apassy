@@ -1130,14 +1130,22 @@ fn run_inner(
                 || request.purpose.trim().to_owned(),
                 |fill| {
                     format!(
-                        "{} wants to fill {} on {} in the connected browser. {}",
+                        "{} wants to fill {} on {} in the connected browser. {}{}",
                         checked.agent.name,
                         checked
                             .facts
                             .first()
                             .map_or("credential", |f| f.name.as_str()),
                         fill.site_label(),
-                        request.purpose.trim()
+                        request.purpose.trim(),
+                        if fill.agent_can_read_page {
+                            format!(
+                                " {} can read this page through remote debugging.",
+                                checked.agent.name
+                            )
+                        } else {
+                            String::new()
+                        }
                     )
                 },
             ),

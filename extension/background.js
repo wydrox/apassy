@@ -157,6 +157,44 @@ const READ_FAILED = "Apassy could not read this page.";
 const CREATED = "Filled. The new login is in Apassy. Submit the form on the page.";
 const NEW_LENGTH = { min: 12, max: 64 };
 
+// Refused operations retain their own native port and exact packet until retry,
+// cancellation, navigation or deadline. Never move a grant to another request.
+const refusedOwnerRequests = new Map();
+async function requestDebuggingBypass(scope) {
+  const pending = [...refusedOwnerRequests.values()].at(-1);
+  if (!pending) return { ok: false, message: "Start the passkey or code request first, then request permission here." };
+  pending.port.postMessage({ v: WIRE_VERSION, cmd: "bypass_request", scope, bypass_nonce: pending.wire.bypass_nonce });
+  pending.approving = true;
+  return { ok: true, message: "Confirm this exact request in Apassy. It will retry on its original connection." };
+}
+
+function holdRefusedOwnerRequest(port, wire, answer) {
+  const pending = refusedOwnerRequests.get(wire.bypass_nonce);
+  if (pending?.approving) {
+    if (answer?.data?.type === "bypass" && answer.data.remaining != null) {
+      pending.approving = false;
+      port.postMessage(wire);
+    } else {
+      pending.timer = setTimeout(() => {
+        if (refusedOwnerRequests.get(wire.bypass_nonce) === pending)
+          port.postMessage({ v: WIRE_VERSION, cmd: "bypass_status" });
+      }, 500);
+    }
+    return true;
+  }
+  if (answer?.code !== "unsafe_browser") return false;
+  if (pending) return true;
+  refusedOwnerRequests.set(wire.bypass_nonce, { port, wire, approving: false });
+  showFailure(messageOf(answer));
+  return true;
+}
+
+function forgetRefused(wire) {
+  const pending = refusedOwnerRequests.get(wire?.bypass_nonce);
+  if (pending) clearTimeout(pending.timer);
+  refusedOwnerRequests.delete(wire?.bypass_nonce);
+}
+
 // One native port per request. The open port keeps this service worker alive
 // while the app waits for Touch ID.
 // Probe each trusted action rather than caching across an app downgrade/reconnect.
@@ -182,6 +220,8 @@ async function ask(request) {
 }
 
 function askNative(request) {
+  const ownerRequest = ["fill_code", "passkey_get", "passkey_create"].includes(request.cmd);
+  if (ownerRequest) request = { ...request, bypass_nonce: crypto.randomUUID() };
   return new Promise((resolve) => {
     let done = false;
     let port;
@@ -190,6 +230,7 @@ function askNative(request) {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      forgetRefused(request);
       try { port.disconnect(); } catch (_) { /* already closed */ }
       resolve(answer);
     };
@@ -199,7 +240,10 @@ function askNative(request) {
       resolve(localError("host_missing"));
       return;
     }
-    port.onMessage.addListener((answer) => finish(answer));
+    port.onMessage.addListener((answer) => {
+      if (ownerRequest && holdRefusedOwnerRequest(port, request, answer)) return;
+      finish(answer);
+    });
     port.onDisconnect.addListener(() => {
       const error = chrome.runtime.lastError;
       const text = error && error.message ? error.message : "";
@@ -215,6 +259,7 @@ function localError(code) {
 }
 
 function messageOf(answer) {
+  if (answer?.code === "unsafe_browser") return "Other programs can control this browser. Open the Apassy popup and choose Allow once…; confirm in Apassy.";
   return (answer && typeof answer.message === "string" && answer.message) ||
     MESSAGES[answer && answer.code] || MESSAGES.host_failed;
 }
@@ -687,6 +732,12 @@ async function handleMessage(message) {
   const bad = () => ({ ok: false, code: "bad_request", message: MESSAGES.bad_request });
   const onPage = message && Number.isInteger(message.tabId) && typeof message.url === "string";
   switch (message && message.type) {
+    case "bypass_status":
+    case "bypass_end":
+      return ask({ cmd: message.type });
+    case "bypass_request":
+      if (!["once", "five_minutes"].includes(message.scope)) return bad();
+      return requestDebuggingBypass(message.scope);
     case "state":
       return state();
     case "fill": {
@@ -1264,6 +1315,7 @@ function endPasskey(session, reply) {
 }
 
 function closeNative(session) {
+  forgetRefused(session.bypassWire);
   const native = session.native;
   session.native = null;
   if (native) {
@@ -1358,6 +1410,8 @@ async function startPasskey(session, message) {
     return;
   }
   session.native = native;
+  wire.bypass_nonce = crypto.randomUUID();
+  session.bypassWire = wire;
   // Negotiate on this session's port: cancellation and the request deadline
   // cover status as well as the owner check. Never cache across app reconnects.
   let awaitingStatus = Object.hasOwn(wire, "trusted_gesture");
@@ -1374,6 +1428,7 @@ async function startPasskey(session, message) {
       }).catch(() => endPasskey(session, NOT_ALLOWED));
       return;
     }
+    if (holdRefusedOwnerRequest(native, wire, answer)) return;
     // One answer per passkey request: the host is done.
     closeNative(session);
     for (const timer of session.timers) clearTimeout(timer);
@@ -1399,7 +1454,7 @@ async function deliverPasskey(session, answer) {
   if (!expect) return;
   const reply = await checkPasskeyAnswer(expect, answer);
   if (reply.kind !== "result") {
-    if (answer && answer.ok === false && answer.code === "unsupported" && answer.message &&
+    if (answer && answer.ok === false && ["unsupported", "unsafe_browser"].includes(answer.code) && answer.message &&
         !session.done && session.open && await tabStillOn(session.peer)) {
       await showFailure(messageOf(answer));
     }

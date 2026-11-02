@@ -89,6 +89,11 @@ const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerAction {
+    BrowserDebugging {
+        identity: crate::browser::trust::InstanceIdentity,
+        scope: Option<crate::browser::bypass::BypassScope>,
+        binding: Option<crate::browser::bypass::RequestBinding>,
+    },
     RemoveOlderIphone {
         device: TrustedDevice,
         team: String,
@@ -414,6 +419,7 @@ impl OwnerAction {
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
+            Self::BrowserDebugging { .. } => "allow this exact browser debugging instance".into(),
             Self::RemoveOlderIphone { .. } => "remove the older paired iPhone".into(),
             Self::AllowAccessOnce { .. } => "allow one scoped access attempt".to_owned(),
             Self::GrantAccessRequest { .. } => "grant access for this exact request".to_owned(),
@@ -1776,6 +1782,7 @@ mod evaluation_tests {
 #[derive(Clone, Copy)]
 #[cfg(feature = "desktop")]
 pub(crate) enum LocalWindowSource {
+    BrowserDebuggingClick,
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
@@ -1785,6 +1792,7 @@ pub(crate) enum LocalWindowSource {
 impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
+            Self::BrowserDebuggingClick => matches!(action, OwnerAction::BrowserDebugging { .. }),
             Self::BrowserGesture => matches!(
                 action,
                 OwnerAction::FillLogin { .. }

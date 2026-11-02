@@ -10,6 +10,35 @@
 const main = document.getElementById("main");
 const site = document.getElementById("site");
 
+// These controls only request a native owner question. Browser clicks cannot approve.
+let refreshingBypass = false;
+async function refreshBypass() {
+  if (refreshingBypass) return;
+  refreshingBypass = true;
+  const result = await send({ type: "bypass_status" });
+  refreshingBypass = false;
+  const data = result?.ok && result.data?.type === "bypass" ? result.data : null;
+  document.getElementById("debugging").hidden = !data?.identity;
+  if (!data?.identity) return;
+  const active = data.remaining !== null && data.remaining !== undefined;
+  document.getElementById("bypass-end").hidden = !active;
+  document.getElementById("debugging-note").textContent = active
+    ? (data.remaining === 0 ? "Allowed for the exact refused request on its original connection." : `Owner passkeys and codes allowed across all profiles of this instance for ${Math.floor(data.remaining / 60)}:${String(data.remaining % 60).padStart(2, "0")}.`)
+    : "Remote debugging is on. Other programs can control this browser. Permission is confirmed in Apassy.";
+}
+for (const [id, scope] of [["bypass-once", "once"], ["bypass-five", "five_minutes"]]) {
+  document.getElementById(id).addEventListener("click", async () => {
+    const result = await send({ type: "bypass_request", scope });
+    document.getElementById("debugging-note").textContent = result.message;
+  });
+}
+document.getElementById("bypass-end").addEventListener("click", async () => {
+  await send({ type: "bypass_end" });
+  await refreshBypass();
+});
+refreshBypass();
+setInterval(refreshBypass, 1000);
+
 const NEW_LENGTH = { min: 12, max: 64, standard: 20 };
 const NO_PASSWORD = "Type your password on the page first.";
 const NO_NEW_FIELD = "This page has no field for a new password.";

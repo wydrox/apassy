@@ -2246,6 +2246,7 @@ fn ask_gesture(app: &mut DesktopApp, ctx: &egui::Context, command: Command) -> R
         },
         Some(PeerGone::default()),
         true,
+        None,
         ctx,
     );
     answer

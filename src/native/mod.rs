@@ -1134,6 +1134,43 @@ impl NativeHelper {
     }
 
     #[cfg(all(feature = "vault", feature = "desktop"))]
+    pub(crate) fn browser_trust_read(
+        &self,
+    ) -> Result<Vec<crate::browser::trust::InstanceIdentity>, NativeError> {
+        let fields = self.call(
+            &self.keychain_helper,
+            request("browser_trust_read"),
+            self.timeouts.quick,
+        )?;
+        let profiles: Vec<crate::browser::trust::InstanceIdentity> =
+            serde_json::from_str(str_field(&fields, "profiles")?)
+                .map_err(|_| NativeError::Protocol("invalid browser trust store".into()))?;
+        if profiles.len() > 32 || profiles.iter().any(|p| !p.valid()) {
+            return Err(NativeError::Protocol("invalid browser identity".into()));
+        }
+        Ok(profiles)
+    }
+    #[cfg(all(feature = "vault", feature = "desktop"))]
+    pub(crate) fn browser_trust_write(
+        &self,
+        profiles: &[crate::browser::trust::InstanceIdentity],
+    ) -> Result<(), NativeError> {
+        if profiles.len() > 32 || profiles.iter().any(|p| !p.valid()) {
+            return Err(NativeError::Protocol("invalid browser identity".into()));
+        }
+        let json = serde_json::to_string(profiles)
+            .map_err(|_| NativeError::Protocol("invalid trust store".into()))?;
+        let mut req = request("browser_trust_write");
+        req.insert("profiles".into(), Value::String(json.clone()));
+        let fields = self.call(&self.keychain_helper, req, self.timeouts.quick)?;
+        if str_field(&fields, "profiles")? != json {
+            return Err(NativeError::Protocol(
+                "browser trust readback failed".into(),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn owner_policy_read(
         &self,
     ) -> Result<crate::broker::approvals::OwnerFrequency, NativeError> {
@@ -1895,6 +1932,41 @@ time.sleep(0.8)
 #[cfg(all(test, feature = "vault", feature = "desktop", unix))]
 mod owner_policy_tests {
     use super::*;
+    #[test]
+    fn browser_trust_protected_store_readback_and_corruption() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("synthetic-trust-helper");
+        std::fs::write(&file, "#!/usr/bin/python3\nimport sys,json\nr=json.loads(sys.stdin.readline())\nassert r['cmd'] in ('browser_trust_read','browser_trust_write')\nassert set(r)==({'cmd'} if r['cmd']=='browser_trust_read' else {'cmd','profiles'})\nprint(json.dumps({'ok':True,'profiles':r.get('profiles','[]')}))\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let helper = NativeHelper::with_paths(&file, &file);
+        assert!(helper.browser_trust_read().unwrap().is_empty());
+        let id = crate::browser::trust::InstanceIdentity {
+            bundle_id: "net.imput.helium".into(),
+            team_id: "S4Q33XPHB4".into(),
+            user_data_root: "/tmp/synthetic".into(),
+            debugging: "9223".into(),
+            unsafe_switches: vec!["remote-debugging-port".into()],
+        };
+        helper
+            .browser_trust_write(std::slice::from_ref(&id))
+            .unwrap();
+        std::fs::write(
+            &file,
+            "#!/bin/sh\necho '{\"ok\":true,\"profiles\":\"[]\"}'\n",
+        )
+        .unwrap();
+        assert!(
+            helper.browser_trust_write(&[id]).is_err(),
+            "readback cannot silently lose trust entries"
+        );
+        std::fs::write(
+            &file,
+            "#!/bin/sh\necho '{\"ok\":true,\"profiles\":\"[{}]\"}'\n",
+        )
+        .unwrap();
+        assert!(helper.browser_trust_read().is_err());
+    }
     use std::os::unix::fs::PermissionsExt;
     #[test]
     fn owner_policy_unknown_corrupt_or_failed_readback_is_refused() {
