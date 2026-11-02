@@ -21,7 +21,7 @@ class ReuseTests(unittest.TestCase):
         self.run = dict(id=12, run_attempt=2, path=reuse.WORKFLOW, workflow_id=34,
                         event='pull_request', head_sha=self.head, status='completed', conclusion='success',
                         repository={'full_name': self.repo}, head_repository={'full_name': self.repo})
-        self.record = dict(schema=1, repository=self.repo, workflow=reuse.WORKFLOW,
+        self.record = dict(schema=2, suite='full', repository=self.repo, workflow=reuse.WORKFLOW,
                            run_id='12', run_attempt='2', tested_sha=self.tested,
                            head_sha=self.head, tree=self.tree)
         self.pr = dict(merged_at='2026-11-01', base={'ref': 'main', 'repo': {'full_name': self.repo}},
@@ -105,6 +105,74 @@ class ReuseTests(unittest.TestCase):
         key = f'actions/workflows/ci.yml/runs?event=pull_request&head_sha={self.head}&per_page=100'
         self.responses[key] = {'total_count': 2, 'workflow_runs': [self.run, dict(self.run, id=13)]}
         self.assertFalse(self.decision())
+
+    def runs_of_head(self, *runs):
+        key = f'actions/workflows/ci.yml/runs?event=pull_request&head_sha={self.head}&per_page=100'
+        self.responses[key] = {'total_count': len(runs), 'workflow_runs': list(runs)}
+        for run in runs:
+            self.responses[f"actions/runs/{run['id']}"] = run
+
+    def draft_run(self, **changes):
+        # A draft run records no evidence: its artifact list has no tree evidence.
+        run = dict(copy.deepcopy(self.run), id=11, run_attempt=1, **changes)
+        self.responses['actions/runs/11/artifacts?per_page=100'] = {'total_count': 0, 'artifacts': []}
+        return run
+
+    def test_a_draft_run_of_the_same_head_does_not_block_the_full_run(self):
+        self.runs_of_head(self.draft_run(), self.run)
+        self.assertTrue(self.decision())
+
+    def test_a_cancelled_run_of_the_same_head_is_ignored(self):
+        self.runs_of_head(self.draft_run(conclusion='cancelled'), self.run)
+        self.assertTrue(self.decision())
+
+    def test_a_failed_or_running_run_of_the_same_head_runs_the_full_suite(self):
+        for changes in [dict(conclusion='failure'), dict(status='in_progress', conclusion=None)]:
+            with self.subTest(changes=changes):
+                self.runs_of_head(self.draft_run(**changes), self.run)
+                self.assertFalse(self.decision())
+
+    def test_two_full_runs_of_the_same_head_are_ambiguous(self):
+        other = dict(copy.deepcopy(self.run), id=13)
+        self.responses['actions/runs/13/artifacts?per_page=100'] = {
+            'total_count': 1, 'artifacts': [dict(self.artifact, id=57, name='ci-tested-tree-13-2')]}
+        self.runs_of_head(self.run, other)
+        self.assertFalse(self.decision())
+
+    def test_only_draft_runs_run_the_full_suite(self):
+        self.runs_of_head(self.draft_run())
+        self.assertFalse(self.decision())
+
+    def test_evidence_without_the_full_suite_is_refused(self):
+        for changes in [dict(schema=1), dict(suite='draft'), dict(suite=None)]:
+            with self.subTest(changes=changes):
+                original = copy.deepcopy(self.record)
+                self.record.update(changes)
+                self.refresh_archive()
+                self.assertFalse(self.decision())
+                self.record = original
+                self.refresh_archive()
+
+    def test_an_ambiguous_artifact_is_refused(self):
+        self.responses['actions/runs/12/artifacts?per_page=100'] = {
+            'total_count': 2, 'artifacts': [self.artifact, dict(self.artifact, id=58)]}
+        self.assertFalse(self.decision())
+
+    def test_a_ready_pr_run_records_full_suite_evidence(self):
+        env = dict(GITHUB_EVENT_NAME='pull_request', GITHUB_RUN_ID='12', GITHUB_RUN_ATTEMPT='2')
+        event = {'pull_request': {'draft': False, 'head': {'sha': self.head}}}
+        record = reuse.make_record(env, event, self.repo, self.tested, self.tree)
+        self.assertEqual(record, self.record)
+
+    def test_a_draft_or_non_pr_run_records_no_evidence(self):
+        env = dict(GITHUB_EVENT_NAME='pull_request', GITHUB_RUN_ID='12', GITHUB_RUN_ATTEMPT='2')
+        for draft in [True, None]:
+            with self.subTest(draft=draft), self.assertRaises(ValueError):
+                event = {'pull_request': {'draft': draft, 'head': {'sha': self.head}}}
+                reuse.make_record(env, event, self.repo, self.tested, self.tree)
+        with self.assertRaises(ValueError):
+            event = {'pull_request': {'draft': False, 'head': {'sha': self.head}}}
+            reuse.make_record(dict(env, GITHUB_EVENT_NAME='push'), event, self.repo, self.tested, self.tree)
 
     def test_no_candidate(self):
         key = f'actions/workflows/ci.yml/runs?event=pull_request&head_sha={self.head}&per_page=100'

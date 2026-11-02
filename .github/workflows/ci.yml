@@ -3,6 +3,9 @@ name: CI
 # One run for each update of a pull request, and one for each push to main. A push
 # to another branch or a tag runs nothing: its pull request or main runs the same
 # code. The site has its own workflow, and design/ is not part of the app.
+# A draft pull request skips the macOS test groups and the release build, so that
+# work in progress does not hold the five macOS runners. Marking it ready for review
+# runs the full suite; only that run can be reused on main.
 on:
   workflow_dispatch:
   push:
@@ -11,6 +14,7 @@ on:
       - "site/**"
       - "design/**"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - "site/**"
       - "design/**"
@@ -44,11 +48,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-reuse-pr.py select
+      # A draft run skips the macOS tests, so it records no evidence for main.
       - name: Record the actual synthetic merge tree
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
         run: python3 scripts/ci-reuse-pr.py record --record "$RUNNER_TEMP/tested-tree.json"
       - name: Save PR tree evidence
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-tested-tree-${{ github.run_id }}-${{ github.run_attempt }}
@@ -264,18 +269,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04]
+        # A draft pull request runs the Linux groups only. A ready pull request
+        # runs five macOS jobs (three test groups, macos, extension): the standard
+        # five-runner macOS limit. Linux keeps four test groups.
+        os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-24.04"]' || '["macos-15", "ubuntu-24.04"]') }}
         shard: [0, 1, 2, 3]
-        # Three macOS test jobs plus quality and release jobs fit the standard
-        # five-runner macOS limit. Linux retains four test groups.
         exclude:
           - os: macos-15
             shard: 3
-        include:
-          - os: macos-15
-            shard-count: 3
-          - os: ubuntu-24.04
-            shard-count: 4
+    env:
+      TEST_SHARD_COUNT: ${{ matrix.os == 'macos-15' && 3 || 4 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -285,7 +288,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: dev-tests-${{ matrix.shard-count }}-${{ matrix.shard }}
+          key: dev-tests-${{ env.TEST_SHARD_COUNT }}-${{ matrix.shard }}
           cache-bin: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch Cargo dependencies
@@ -293,12 +296,13 @@ jobs:
       - name: Run serial test group
         env:
           TEST_SHARD: ${{ matrix.shard }}
-          TEST_SHARD_COUNT: ${{ matrix.shard-count }}
         run: python3 scripts/ci-test-shard.py --shard "$TEST_SHARD" --shard-count "$TEST_SHARD_COUNT"
 
   release-binaries:
     # No signing credentials enter this job. Its artifact is eligible for Release
-    # only after all CI jobs pass for a push to main in this repository.
+    # only after all CI jobs pass for a push to main in this repository, so a pull
+    # request does not build it; the macos job compiles the same features.
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
