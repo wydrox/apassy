@@ -678,6 +678,10 @@ struct Timing {
     idle: Option<Duration>,
     /// How long a run waits for a first start that downloads the base weights.
     first_start_wait: Duration,
+    /// How often the monitor thread looks at the server.
+    tick: Duration,
+    /// How often a server that Apassy did not start gets a health check.
+    probe_every: Duration,
 }
 
 impl Default for Timing {
@@ -685,6 +689,8 @@ impl Default for Timing {
         Self {
             idle: None,
             first_start_wait: FIRST_START_WAIT,
+            tick: TICK,
+            probe_every: PROBE_EVERY,
         }
     }
 }
@@ -761,6 +767,7 @@ impl ModelServer {
             Timing {
                 idle,
                 first_start_wait,
+                ..Timing::default()
             },
         )
     }
@@ -1108,7 +1115,7 @@ impl ModelServer {
             if !inner.launch {
                 drop(
                     self.wake
-                        .wait_timeout(inner, TICK)
+                        .wait_timeout(inner, self.timing.tick)
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
             }
@@ -1161,7 +1168,7 @@ impl ModelServer {
         if probe
             && inner
                 .last_probe
-                .is_none_or(|at| now.saturating_duration_since(at) >= PROBE_EVERY)
+                .is_none_or(|at| now.saturating_duration_since(at) >= self.timing.probe_every)
         {
             inner.last_probe = Some(now);
             return Some(Job::Probe(inner.generation));
@@ -3122,6 +3129,26 @@ mod tests {
         assert!(!group_alive(pgid));
     }
 
+    /// The production timing with a monitor tick of 50 ms and a health check of an
+    /// outside server every 200 ms.
+    fn fast_timing(idle: Option<Duration>) -> Timing {
+        Timing {
+            idle,
+            tick: Duration::from_millis(50),
+            probe_every: Duration::from_millis(200),
+            ..Timing::default()
+        }
+    }
+
+    #[test]
+    fn the_default_timing_is_the_production_one() {
+        let timing = Timing::default();
+        assert_eq!(timing.idle, None);
+        assert_eq!(timing.first_start_wait, FIRST_START_WAIT);
+        assert_eq!(timing.tick, Duration::from_secs(2));
+        assert_eq!(timing.probe_every, Duration::from_secs(10));
+    }
+
     /// A port on 127.0.0.1 where nothing listens now.
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -3588,7 +3615,8 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let pids = dir.path().join("pids");
         let port = free_port();
-        let server = ModelServer::start_for_test(
+        let server = ModelServer::start_timed(
+            None,
             BouncerSettings {
                 start: StartMode::WhenNeeded,
                 idle_minutes: 10,
@@ -3596,8 +3624,7 @@ mod tests {
             },
             fake_server_layout(dir.path(), &pids),
             Host::none(),
-            Some(Duration::from_secs(1)),
-            FIRST_START_WAIT,
+            fast_timing(Some(Duration::from_millis(1_500))),
         );
         server.start_now();
         wait_until(Duration::from_secs(10), "the script starts", || {
@@ -3621,7 +3648,7 @@ mod tests {
         let pgid = first_pid(&pids);
         assert!(group_alive(pgid));
 
-        // No run for 1 second: the monitor (each 2 seconds) stops it.
+        // No run for 1.5 seconds: the monitor (each 50 ms) stops it.
         wait_until(Duration::from_secs(15), "the idle stop", || {
             server.state() == ServerState::Stopped && !server.status().owned
         });
@@ -3639,7 +3666,8 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let pids = dir.path().join("pids");
         let port = free_port();
-        let server = ModelServer::start_for_test(
+        let server = ModelServer::start_timed(
+            None,
             BouncerSettings {
                 start: StartMode::WhenNeeded,
                 idle_minutes: 10,
@@ -3647,8 +3675,7 @@ mod tests {
             },
             fake_server_layout(dir.path(), &pids),
             Host::none(),
-            Some(Duration::from_secs(1)),
-            FIRST_START_WAIT,
+            fast_timing(Some(Duration::from_millis(1_500))),
         );
         server.start_now();
         wait_until(Duration::from_secs(5), "the script starts", || {
@@ -3698,7 +3725,8 @@ mod tests {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
         let outside = serve_fake_model(listener, Arc::clone(&stop));
-        let server = ModelServer::start_for_test(
+        let server = ModelServer::start_timed(
+            None,
             BouncerSettings {
                 start: StartMode::WithApassy,
                 idle_minutes: 10,
@@ -3706,8 +3734,7 @@ mod tests {
             },
             fake_server_layout(dir.path(), &pids),
             Host::none(),
-            None,
-            FIRST_START_WAIT,
+            fast_timing(None),
         );
         wait_until(
             Duration::from_secs(10),
