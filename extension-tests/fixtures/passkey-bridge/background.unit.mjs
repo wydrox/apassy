@@ -723,8 +723,8 @@ test("fill code: the request, the fill in frame 0 with the code, and a reply wit
   bg.scripts.result = () => ({ ok: true, reason: "", fields: 1 });
   const reply = await bg.handle({ type: "fill_code", tabId: 5, url: `${ORIGIN}/login`, item: 9 });
   assert.deepEqual(reply, { ok: true, code: "ok", message: "Code filled.", filled: { fields: 1 } });
-  const { bypass_nonce, ...codeRequest } = bg.natives[0].sent[0];
-  assert.match(bypass_nonce, UUID);
+  const codeRequest = bg.natives[0].sent[0];
+  assert.equal(Object.hasOwn(codeRequest, "bypass_nonce"), false);
   assert.equal(bg.natives[0].sent.length, 1);
   assert.deepEqual(codeRequest, { v: 1, cmd: "fill_code", url: `${ORIGIN}/login`, item: 9 });
   assert.equal(bg.scripts[0].func.name, "fillOneTimeCode");
@@ -816,4 +816,30 @@ test("unsafe browser code: preserve the actionable message for the popup", async
   const reply = await bg.handle({ type: "fill_code", tabId: 5, url: `${ORIGIN}/login`, item: 1 });
   assert.equal(reply.ok, false);
   assert.equal(reply.message, UNSAFE_BROWSER_MESSAGE);
+});
+
+test("code binds only after Allow once and retries the exact packet on the same port", async () => {
+  const bg = setup();
+  const seen = [];
+  bg.setHost((wire, record) => {
+    seen.push(wire);
+    if (wire.cmd === "bypass_request") {
+      record.port.postMessage(ok({ type: "bypass", remaining: 1 }));
+    } else if (seen.length < 4) {
+      record.port.postMessage(fail("unsafe_browser", "Owner permission required"));
+    } else {
+      record.port.postMessage(fail("cancelled"));
+    }
+  });
+  const result = bg.context.askNative({ cmd: "fill_code", url: ORIGIN + "/login", item: 9 });
+  await flush();
+  assert.equal(seen.length, 1);
+  assert.equal(Object.hasOwn(seen[0], "bypass_nonce"), false);
+  await bg.handle({ type: "bypass_request", scope: "once" });
+  await flush();
+  await result;
+  assert.deepEqual(seen.map(w => w.cmd), ["fill_code", "fill_code", "bypass_request", "fill_code"]);
+  assert.deepEqual(seen[1], seen[3]);
+  assert.equal(seen[1].bypass_nonce, seen[2].bypass_nonce);
+  assert.equal(bg.natives.length, 1);
 });

@@ -61,7 +61,19 @@ remote debugging. Untrusted blocked-browser metadata can only veto a fill.
 
 ## Delivery and limits
 
-The service worker polls with an ephemeral random instance ID. A guarded poll may
+The service worker uses an ephemeral random instance ID and a singleton
+`agent_wait` long poll. Its request contains only the command, wire version and
+instance ID; its answer data is `{type:"agent_wait", pending:true|false}`.
+The app holds it for up to 50 seconds, replacing any older wait for that instance.
+Only an authenticated fill demand wakes discovery, with no site or values in
+the signal. Targeted polls then run at one-second intervals for at most 60 seconds;
+discovery and delivery signals are consumed once per instance. Idle browsers
+send no URLs and start roughly one host per 50 seconds instead of every second.
+Failures back off at 5, 10, 30 and 60 seconds, resetting after success. Worker
+evaluation, startup and installation restart the loop without an idle interval.
+None of this signal path grants remote-debugging trust or authorizes a fill.
+
+A guarded poll may
 receive a single short-lived, erasing secret packet. Delivery is tied to the vault
 epoch; locking or replacing the vault invalidates queued packets. A separate
 acknowledgement contains only field names, never page text or secret values.

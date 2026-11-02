@@ -15,6 +15,27 @@ use crate::owner::wire::SecretText;
 use crate::vault::{Vault, custom_detail_label};
 use serde_json::json;
 
+// Demand is value-free. Only a fresh guarded poll can establish a target.
+static DEMAND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DEMAND_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+struct Demand;
+impl Demand {
+    fn new() -> Self {
+        DEMAND_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        DEMAND.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for Demand {
+    fn drop(&mut self) {
+        DEMAND.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn pending() -> bool {
+    DEMAND.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
 const OPEN: &str = "Open the login page in the browser first";
 const REMOTE: &str = "This browser runs with remote debugging. In Apassy, trust this browser instance first (Settings → Browser).";
 const FRESH: Duration = Duration::from_secs(4);
@@ -60,6 +81,11 @@ pub(super) struct Fill {
     fields: Vec<String>,
     identity: Option<InstanceIdentity>,
     pub agent_can_read_page: bool,
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn pending_epoch() -> Option<u64> {
+    pending().then(|| DEMAND_EPOCH.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 /// Only device-local instance trust authorizes an unsafe browser, never owner grants.
@@ -137,6 +163,7 @@ impl Fill {
     pub(super) fn deliver(&self, vault: &Vault, shared: &super::SharedVault) -> WireResponse {
         // Approval may bring Apassy forward. Wait for the bound document only;
         // a poll of another tab/document permanently fails this request.
+        DEMAND_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let start = Instant::now();
         loop {
             let targets = lock(&TARGETS);
@@ -361,6 +388,15 @@ fn run_inner(
         Ok(p) => p,
         Err(e) => return refused(e.message()),
     };
+    let _demand = Demand::new();
+    // Give waiting instances time to report their current document. No URL is
+    // collected until an authenticated agent actually asks for a fill.
+    let discovery = Instant::now();
+    while select_target(&lock(&TARGETS), &requested.origin()).is_err()
+        && discovery.elapsed() < Duration::from_secs(3)
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let target = match select_target(&lock(&TARGETS), &requested.origin()) {
         Ok(t) => t,
         Err(e) => return refused(e),
@@ -561,7 +597,10 @@ pub(crate) fn poll(
             }
         }
     }
-    Response::ok("Waiting for an agent fill", Data::None)
+    Response::ok(
+        "Waiting for an agent fill",
+        Data::AgentWait { pending: pending() },
+    )
 }
 
 #[cfg(test)]

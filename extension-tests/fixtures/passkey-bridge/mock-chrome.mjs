@@ -131,6 +131,8 @@ export function loadBackground({ permissions = [] } = {}) {
     getURL: (p = "") => `chrome-extension://${EXTENSION_ID}/${p}`,
     getManifest: () => structuredClone(MANIFEST),
     get lastError() { return lastError ? { message: lastError } : undefined; },
+    onStartup: event(),
+    onInstalled: event(),
     onConnect: event(),
     onMessage: event(),
     getContexts: async () => [],

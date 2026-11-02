@@ -17,9 +17,9 @@
 importScripts("fill.js");
 
 // Agent delivery is separate from owner gestures. Native caller guards authenticate
-// each poll; no value travels over MCP or through the clipboard.
+// each poll; no value travels over MCP.
 const agentInstance = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
-let agentPolling = false;
+let agentLoopRunning = false;
 const agentReceipts = new Map();
 const agentGenerations = new Map();
 let agentLastTab;
@@ -78,7 +78,8 @@ async function pollAgentFill(receipt = null, filled = [], exposed = false) {
       await ask({ cmd: "agent_blocked", instance: agentInstance, url });
     }
     const data = answer && answer.data;
-    if (!answer || !answer.ok || !data || data.type !== "agent_fill") return;
+    if (!answer?.ok || (data?.type === "agent_wait" && !data.pending)) return true;
+    if (!data || data.type !== "agent_fill") return;
     answer.data = null;
     let actual = [];
     try {
@@ -96,6 +97,7 @@ async function pollAgentFill(receipt = null, filled = [], exposed = false) {
     } finally {
       data.username = ""; data.password = ""; data.code = "";
       await ask({ cmd: "agent_poll", instance: agentInstance, url: "", document: null, focused: false, receipt: data.receipt, filled: actual });
+      return true;
     }
   } catch (_) { /* Unavailable or untrusted browser: no delivery. */ }
 }
@@ -107,11 +109,33 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
   return false;
 });
-if (typeof setInterval === "function" && chrome.windows) setInterval(() => {
-  if (agentPolling) return;
-  agentPolling = true;
-  pollAgentFill().finally(() => { agentPolling = false; });
-}, 1000);
+const agentDelay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function runAgentWaitLoop() {
+  if (agentLoopRunning || !chrome.windows) return;
+  agentLoopRunning = true;
+  let backoff = 5000;
+  try {
+    for (;;) {
+      const answer = await ask({ cmd: "agent_wait", instance: agentInstance });
+      if (!answer?.ok || answer.data?.type !== "agent_wait" || typeof answer.data.pending !== "boolean") {
+        await agentDelay(backoff);
+        backoff = backoff === 5000 ? 10000 : backoff === 10000 ? 30000 : 60000;
+        continue;
+      }
+      backoff = 5000;
+      if (!answer.data.pending) continue;
+      const end = Date.now() + 60000;
+      do {
+        if (await pollAgentFill() === true) break;
+        await agentDelay(1000);
+      } while (Date.now() < end);
+    }
+  } finally { agentLoopRunning = false; }
+}
+chrome.runtime.onStartup?.addListener(() => { void runAgentWaitLoop(); });
+chrome.runtime.onInstalled?.addListener(() => { void runAgentWaitLoop(); });
+// Start after this worker has initialized its wire constants and request state.
+setTimeout(() => { void runAgentWaitLoop(); }, 0);
 self.apassyAgentFillTest = { pollAgentFill };
 
 const HOST = "com.wydrox.apassy";
@@ -167,6 +191,12 @@ const refusedOwnerRequests = new Map();
 async function requestDebuggingBypass(scope) {
   const pending = [...refusedOwnerRequests.values()].at(-1);
   if (!pending) return { ok: false, message: "Start the passkey or code request first, then request permission here." };
+  // Codes have no request ID: bind their refused packet on this connection
+  // only after the owner clicks Allow once (before requesting approval).
+  if (pending.needsBinding) {
+    pending.port.postMessage({ v: WIRE_VERSION, ...pending.wire });
+    pending.needsBinding = false;
+  }
   pending.port.postMessage({ v: WIRE_VERSION, cmd: "bypass_request", scope, bypass_nonce: pending.wire.bypass_nonce });
   pending.approving = true;
   return { ok: true, message: "Confirm this exact request in Apassy. It will retry on its original connection." };
@@ -175,9 +205,10 @@ async function requestDebuggingBypass(scope) {
 function holdRefusedOwnerRequest(port, wire, answer) {
   const pending = refusedOwnerRequests.get(wire.bypass_nonce);
   if (pending?.approving) {
+    if (answer?.code === "unsafe_browser") return true;
     if (answer?.data?.type === "bypass" && answer.data.remaining != null) {
       pending.approving = false;
-      port.postMessage(wire);
+      port.postMessage({ v: WIRE_VERSION, ...wire });
     } else {
       pending.timer = setTimeout(() => {
         if (refusedOwnerRequests.get(wire.bypass_nonce) === pending)
@@ -188,8 +219,9 @@ function holdRefusedOwnerRequest(port, wire, answer) {
   }
   if (answer?.code !== "unsafe_browser") return false;
   if (pending) return true;
+  const needsBinding = wire.cmd === "fill_code" && !wire.bypass_nonce;
   wire.bypass_nonce ??= wire.rid || crypto.randomUUID();
-  refusedOwnerRequests.set(wire.bypass_nonce, { port, wire, approving: false });
+  refusedOwnerRequests.set(wire.bypass_nonce, { port, wire, approving: false, needsBinding });
   showFailure(messageOf(answer));
   return true;
 }
@@ -226,7 +258,7 @@ async function ask(request) {
 
 function askNative(request) {
   const ownerRequest = ["fill_code", "passkey_get", "passkey_create"].includes(request.cmd);
-  if (ownerRequest) request = { ...request, bypass_nonce: crypto.randomUUID() };
+
   return new Promise((resolve) => {
     let done = false;
     let port;

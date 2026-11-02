@@ -73,7 +73,8 @@ pub(crate) struct BrowserRequest {
 fn guarded(command: &Command) -> bool {
     matches!(
         command,
-        Command::AgentPoll { .. }
+        Command::AgentWait { .. }
+            | Command::AgentPoll { .. }
             | Command::PasskeyGet(_)
             | Command::PasskeyCreate(_)
             | Command::FillCode { .. }
@@ -159,6 +160,8 @@ impl LineWire for BrowserWire {
 /// The browser socket, and the values of a fill on their way to its ticket.
 #[derive(Default)]
 pub(crate) struct BrowserHost {
+    agent_epochs: std::collections::BTreeMap<String, u64>,
+    agent_waits: std::collections::BTreeMap<String, (Instant, BrowserTicket)>,
     next_binding: Option<crate::browser::bypass::RequestBinding>,
     refused: Vec<(crate::browser::bypass::RequestBinding, Command, Instant)>,
     pub(crate) unsafe_instance: Option<crate::browser::trust::InstanceIdentity>,
@@ -246,6 +249,29 @@ struct FilledCode {
 pub(crate) struct PasskeyEcho {
     rid: String,
     client_data_json: String,
+}
+
+impl BrowserHost {
+    fn poll_agent_waits(&mut self, epoch: Option<u64>, ctx: &egui::Context) {
+        let waits = std::mem::take(&mut self.agent_waits);
+        for (instance, (started, ticket)) in waits {
+            let pending = epoch.is_some_and(|e| self.agent_epochs.get(&instance) != Some(&e));
+            if !ticket.is_live() || pending || started.elapsed() >= Duration::from_secs(50) {
+                if pending {
+                    self.agent_epochs.insert(instance.clone(), epoch.unwrap());
+                }
+                ticket.send(Response::ok(
+                    "Agent wait completed",
+                    Data::AgentWait { pending },
+                ));
+            } else {
+                self.agent_waits.insert(instance, (started, ticket));
+            }
+        }
+        if !self.agent_waits.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
 }
 
 /// The values of one fill. The password is erased on drop.
@@ -359,6 +385,8 @@ impl DesktopApp {
         {
             self.browser.bypass = None;
         }
+        self.browser
+            .poll_agent_waits(crate::broker::browser_fill::pending_epoch(), ctx);
         // A browser that hung up closes its dialog, also while the window is hidden.
         self.expire_browser_check(ctx);
         let Some(inbox) = &self.browser.inbox else {
@@ -479,6 +507,25 @@ impl DesktopApp {
         }
         ticket.trusted_gesture = trusted_gesture;
         match request {
+            Command::AgentWait { instance } => {
+                if self.browser.agent_epochs.len() >= 16
+                    && !self.browser.agent_epochs.contains_key(&instance)
+                {
+                    self.browser
+                        .agent_epochs
+                        .retain(|id, _| self.browser.agent_waits.contains_key(id));
+                }
+                if let Some((_, old)) = self.browser.agent_waits.remove(&instance) {
+                    old.send(Response::ok(
+                        "Wait replaced",
+                        Data::AgentWait { pending: false },
+                    ));
+                }
+                self.browser
+                    .agent_waits
+                    .insert(instance, (Instant::now(), ticket));
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             Command::AgentBlocked { instance, url } => {
                 crate::broker::browser_fill::blocked(&instance, &url);
                 ticket.send(Response::ok(
@@ -1544,6 +1591,59 @@ impl DesktopApp {
 #[cfg(test)]
 mod owner_window_delivery_tests {
     use super::*;
+
+    #[test]
+    fn agent_wait_pending_timeout_and_replacement() {
+        let mut host = BrowserHost::default();
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.agent_waits.insert(
+            "instance".into(),
+            (Instant::now(), BrowserTicket::new(tx, None)),
+        );
+        host.poll_agent_waits(None, &ctx);
+        assert!(rx.try_recv().is_err());
+        host.poll_agent_waits(Some(1), &ctx);
+        assert!(matches!(
+            rx.recv().unwrap().data,
+            Data::AgentWait { pending: true }
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.agent_waits.insert(
+            "instance".into(),
+            (
+                Instant::now() - Duration::from_secs(51),
+                BrowserTicket::new(tx, None),
+            ),
+        );
+        // The same demand cannot trigger another document polling window.
+        host.poll_agent_waits(Some(1), &ctx);
+        assert!(matches!(
+            rx.recv().unwrap().data,
+            Data::AgentWait { pending: false }
+        ));
+
+        let mut app = DesktopApp::new();
+        let (tx, old) = std::sync::mpsc::channel();
+        let (next, new) = std::sync::mpsc::channel();
+        for reply in [tx, next] {
+            app.handle_browser(
+                Envelope {
+                    request: Command::AgentWait {
+                        instance: "same".into(),
+                    },
+                    reply,
+                },
+                &ctx,
+            );
+        }
+        assert!(matches!(
+            old.recv().unwrap().data,
+            Data::AgentWait { pending: false }
+        ));
+        assert!(new.try_recv().is_err());
+        assert_eq!(app.browser.agent_waits.len(), 1);
+    }
 
     #[test]
     fn lifecycle_revocation_discards_debugging_grants() {

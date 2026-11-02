@@ -49,6 +49,7 @@ const CREATED_PASSWORD = "Mock-generated_Passw0rd!42";
 
 // The fields of each command, as in docs/contracts/browser-v1.md, section 2.
 const FIELDS = {
+  agent_wait: { instance: true },
   status: {},
   show: {},
   logins: { url: true },
@@ -154,6 +155,9 @@ async function answer(request) {
   const vault = s.vault || "unlocked";
 
   switch (request.cmd) {
+    case "agent_wait":
+      await new Promise(resolve => setTimeout(resolve, 50000));
+      return { ok: true, data: { type: "agent_wait", pending: false } };
     case "status":
       return {
         ok: true, code: "ok",

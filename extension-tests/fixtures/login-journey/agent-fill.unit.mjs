@@ -217,3 +217,45 @@ test("the agent visibility guard clears a password revealed after three minutes"
   assert.equal(reports[0].receipt, "synthetic-ticket");
   assert.equal(JSON.stringify(reports).includes("synthetic-password"), false);
 });
+
+
+// Idle traffic carries only an instance ID and holds one native request.
+test("agent wait is singleton, carries no page data, and backs off on errors", async () => {
+  const bg = agentBackground();
+  bg.chrome.windows = { getLastFocused: async () => { throw new Error("idle probe"); } };
+  const sent = [];
+  bg.setHost((wire, record) => { sent.push({ wire, record }); });
+  await bg.clock.advance(0);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(Object.keys(sent[0].wire).sort(), ["cmd", "instance", "v"]);
+  assert.equal(sent[0].wire.cmd, "agent_wait");
+  bg.chrome.runtime.onStartup.fire();
+  bg.chrome.runtime.onInstalled.fire();
+  await bg.clock.advance(49000);
+  assert.equal(sent.length, 1);
+  assert.equal(bg.probes.length, 0);
+  sent[0].record.port.postMessage({ ok: false, code: "not_running" });
+  await bg.clock.advance(0);
+  await bg.clock.advance(4999);
+  assert.equal(sent.length, 1);
+  await bg.clock.advance(1);
+  assert.equal(sent.length, 2);
+  for (const delay of [10000, 30000, 60000, 60000]) {
+    const before = sent.length;
+    sent.at(-1).record.port.postMessage({ ok: false, code: "not_running" });
+    await bg.clock.advance(0);
+    await bg.clock.advance(delay - 1);
+    assert.equal(sent.length, before);
+    await bg.clock.advance(1);
+    assert.equal(sent.length, before + 1);
+  }
+  const beforeSuccess = sent.length;
+  sent.at(-1).record.port.postMessage({ ok: true, data: { type: "agent_wait", pending: false } });
+  await bg.clock.advance(0);
+  assert.equal(sent.length, beforeSuccess + 1);
+  sent.at(-1).record.port.postMessage({ ok: false, code: "not_running" });
+  await bg.clock.advance(0);
+  await bg.clock.advance(5000);
+  assert.equal(sent.length, beforeSuccess + 2);
+  assert.equal(bg.probes.length, 0);
+});

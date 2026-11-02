@@ -102,6 +102,9 @@ pub struct BrowserDocument {
 /// A checked request. Debug output hides the password of a save.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
+    AgentWait {
+        instance: String,
+    },
     AgentBlocked {
         instance: String,
         url: String,
@@ -171,6 +174,7 @@ pub enum Command {
 /// The commands that the host passes to the app only after the caller check
 /// ([`super::caller::check_browser_parent`]).
 pub const GUARDED_COMMANDS: &[&str] = &[
+    "agent_wait",
     "agent_poll",
     "passkey_get",
     "passkey_create",
@@ -287,6 +291,26 @@ impl Request {
         // `Request` keeps its fields, so the old commands parse as before.
         if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(line) {
             match cmd.as_str() {
+                "agent_wait" => {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Wait {
+                        v: u32,
+                        cmd: String,
+                        instance: String,
+                    }
+                    let p: Wait = serde_json::from_slice(line).map_err(|_| invalid())?;
+                    if p.v != BROWSER_WIRE_VERSION
+                        || p.cmd != "agent_wait"
+                        || p.instance.len() != 32
+                        || !p.instance.bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return Err(invalid());
+                    }
+                    return Ok(Command::AgentWait {
+                        instance: p.instance,
+                    });
+                }
                 "agent_poll" | "agent_blocked" => {
                     #[derive(Deserialize)]
                     #[serde(deny_unknown_fields)]
@@ -851,6 +875,9 @@ impl Response {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Data {
+    AgentWait {
+        pending: bool,
+    },
     AgentFill {
         receipt: String,
         origin: String,
@@ -932,6 +959,10 @@ pub enum Data {
 impl std::fmt::Debug for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AgentWait { pending } => f
+                .debug_struct("AgentWait")
+                .field("pending", pending)
+                .finish(),
             Self::AgentFill { .. } => f.write_str("AgentFill([redacted])"),
             Self::Bypass {
                 identity,
@@ -1034,6 +1065,28 @@ pub struct LoginRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_wait_is_value_free_and_strict() {
+        let packet = r#"{"v":1,"cmd":"agent_wait","instance":"0123456789abcdef0123456789abcdef"}"#;
+        assert!(matches!(
+            Request::parse(packet.as_bytes()).unwrap(),
+            Command::AgentWait { .. }
+        ));
+        for field in ["url", "document", "tab_id", "identity", "remote"] {
+            let mut forged: serde_json::Value = serde_json::from_str(packet).unwrap();
+            forged[field] = serde_json::json!(null);
+            assert!(Request::parse(&serde_json::to_vec(&forged).unwrap()).is_err());
+        }
+        for pending in [true, false] {
+            let value = serde_json::to_value(Data::AgentWait { pending }).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({"type":"agent_wait","pending":pending})
+            );
+        }
+        assert!(is_guarded_command("agent_wait"));
+    }
 
     #[test]
     fn bypass_requests_never_carry_approval_or_identity() {
