@@ -396,6 +396,16 @@ const OLD_TOKEN: [u8; 32] = [0x22; 32];
 const REVOKED_TOKEN: [u8; 32] = [0x33; 32];
 const RULE_JSON: &str = r#"{"allowed_prefixes":["npm test"],"forbidden_words":["prod"],"expires_at":null,"max_runs_per_hour":5,"instruction":"Only tests."}"#;
 
+/// A temporary directory whose vault files keep the SQLCipher 4 KDF also in a test build:
+/// its name does not start with `.tmp` (`apassy::vault::test_kdf`). The legacy files are
+/// plain SQLCipher 4 files, as the earlier versions made them.
+fn real_kdf_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("apassy-real-kdf-")
+        .tempdir()
+        .expect("temp dir")
+}
+
 fn now() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -833,7 +843,7 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
 fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
     let mut sync_ids: Vec<String> = Vec::new();
     for version in 1..14 {
-        let dir = TempDir::new().expect("temp dir");
+        let dir = real_kdf_dir();
         let path = dir.path().join(format!("v{version}.db"));
         build_legacy(&path, version);
         assert_eq!(raw_versions(&path), (version, version));
@@ -1140,7 +1150,7 @@ fn sync_columns(path: &Path) -> (Vec<String>, Vec<(i64, String, String)>) {
 /// each migrates on its own Mac, so they merge record by record.
 #[test]
 fn two_copies_of_one_vault_get_the_same_record_uuids() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let first = dir.path().join("first.db");
     build_legacy(&first, 13);
     let second = dir.path().join("second.db");
@@ -1163,7 +1173,7 @@ fn two_copies_of_one_vault_get_the_same_record_uuids() {
 /// and its data.
 #[test]
 fn a_failed_migration_from_version_13_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked13.db");
     build_legacy(&path, 13);
     {
@@ -1202,7 +1212,7 @@ fn a_failed_migration_from_version_13_keeps_the_old_version_and_data() {
 /// and its data.
 #[test]
 fn a_failed_migration_from_version_12_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked12.db");
     build_legacy(&path, 12);
     {
@@ -1239,7 +1249,7 @@ fn a_failed_migration_from_version_12_keeps_the_old_version_and_data() {
 /// and its data.
 #[test]
 fn a_failed_migration_from_version_11_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked11.db");
     build_legacy(&path, 11);
     {
@@ -1276,7 +1286,7 @@ fn a_failed_migration_from_version_11_keeps_the_old_version_and_data() {
 
 #[test]
 fn a_failed_migration_from_version_10_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked10.db");
     build_legacy(&path, 10);
     {
@@ -1310,7 +1320,7 @@ fn a_failed_migration_from_version_10_keeps_the_old_version_and_data() {
 
 #[test]
 fn a_failed_migration_from_version_9_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked9.db");
     build_legacy(&path, 9);
     {
@@ -1347,7 +1357,7 @@ fn a_failed_migration_from_version_9_keeps_the_old_version_and_data() {
 
 #[test]
 fn a_failed_migration_from_version_8_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked8.db");
     build_legacy(&path, 8);
     {
@@ -1397,7 +1407,7 @@ fn migrated_pattern(agent_id: u64) -> PatternKey {
 /// its learning data.
 #[test]
 fn a_failed_migration_from_version_7_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked7.db");
     build_legacy(&path, 7);
     {
@@ -1435,7 +1445,7 @@ fn a_failed_migration_from_version_7_keeps_the_old_version_and_data() {
 /// The step from version 6 to 7 also runs in one transaction.
 #[test]
 fn a_failed_migration_from_version_6_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked6.db");
     build_legacy(&path, 6);
     {
@@ -1473,7 +1483,7 @@ fn a_failed_migration_from_version_6_keeps_the_old_version_and_data() {
 /// The migration runs in one transaction. A failure leaves the file at its old version.
 #[test]
 fn a_failed_migration_keeps_the_old_version_and_data() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("blocked.db");
     build_legacy(&path, 5);
     {
@@ -1511,7 +1521,7 @@ fn a_failed_migration_keeps_the_old_version_and_data() {
 /// agent settings for the owner review (goal items V4 and V6).
 #[test]
 fn restore_migrates_an_old_backup() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let backup = dir.path().join("v3.backup");
     build_legacy(&backup, 3);
     let mut restored =
@@ -1665,7 +1675,7 @@ PRAGMA user_version = 14;
 
 #[test]
 fn version_14_migration_keeps_sync_records_and_is_atomic() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("v14.db");
     build_legacy(&path, 13);
     let conn = rusqlite::Connection::open(&path).expect("open");
@@ -1753,7 +1763,7 @@ PRAGMA user_version = 15;
 /// transaction. A failure keeps version 15 and its data.
 #[test]
 fn version_15_migration_adds_the_relay_device_table_and_is_atomic() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("v15.db");
     build_legacy(&path, 13);
     let conn = rusqlite::Connection::open(&path).expect("open");
@@ -1824,7 +1834,7 @@ PRAGMA user_version = 16;
 /// stay. The test compares values and does not print them.
 #[test]
 fn version_17_migration_renames_reserved_fields_and_their_binding() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("v16.db");
     build_legacy(&path, 13);
     let conn = rusqlite::Connection::open(&path).expect("open");
@@ -1973,7 +1983,7 @@ fn kept_counts(path: &Path) -> [i64; 5] {
 /// leaves version 17 without any table, column, or exception of version 18.
 #[test]
 fn version_18_migration_derives_exceptions_and_is_atomic() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("v17.db");
     build_legacy(&path, 13);
     let conn = rusqlite::Connection::open(&path).expect("open");
@@ -2096,7 +2106,7 @@ type Derived = Vec<(i64, String, i64)>;
 ///
 /// All grants are "Bouncer decides". Returns the exceptions by agent and the time `now`.
 fn migrated_v18_agents() -> (std::collections::BTreeMap<i64, Derived>, i64) {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("v17-agents.db");
     build_legacy(&path, 13);
     let now = now();
@@ -2333,7 +2343,7 @@ fn schema19_parts(path: &Path) -> Vec<&'static str> {
 /// has the DDL of a new vault.
 #[test]
 fn version_19_migration_moves_relay_device_and_is_atomic() {
-    let dir = TempDir::new().expect("temp dir");
+    let dir = real_kdf_dir();
     let path = dir.path().join("v18.db");
     let mut vault = Vault::create(&path, PASS).expect("create");
     vault.unlock(PASS).expect("unlock");

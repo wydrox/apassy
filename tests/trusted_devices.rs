@@ -118,7 +118,7 @@ fn id_of(vault: &Vault, title: &str) -> u64 {
 /// The rows of `trusted_device` in the closed or open file at `path` with a removal.
 fn removed_rows(path: &Path) -> i64 {
     let conn = rusqlite::Connection::open(path).unwrap();
-    conn.pragma_update(None, "key", PASS).unwrap();
+    crate::common::key_raw(&conn, PASS).unwrap();
     let count = conn
         .query_row(
             "SELECT count(*) FROM trusted_device WHERE deleted_at IS NOT NULL",
@@ -281,7 +281,7 @@ fn relay_memberships_stay_on_their_mac() {
     .unwrap();
     let copy = w.copy_of(true);
     let conn = rusqlite::Connection::open(&copy).unwrap();
-    conn.pragma_update(None, "key", PASS).unwrap();
+    crate::common::key_raw(&conn, PASS).unwrap();
     let rows: i64 = conn
         .query_row("SELECT count(*) FROM relay_membership", [], |row| {
             row.get(0)

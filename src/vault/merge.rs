@@ -510,6 +510,11 @@ impl SyncScope {
         alias: &str,
         passphrase: &str,
     ) -> VaultResult<()> {
+        // A test copy with the reduced KDF gets its raw key (`test_kdf::attach_key`).
+        #[cfg(feature = "insecure-test-kdf")]
+        let raw_key = super::test_kdf::attach_key(path, passphrase);
+        #[cfg(feature = "insecure-test-kdf")]
+        let passphrase = raw_key.as_deref().map_or(passphrase, String::as_str);
         let path = path
             .to_str()
             .ok_or_else(|| err(VaultErrorKind::InvalidInput))?;

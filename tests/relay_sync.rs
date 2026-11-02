@@ -1401,8 +1401,7 @@ fn a_copy_with_a_newer_schema_is_downloaded_once() {
         .expect("copy");
     {
         let conn = rusqlite::Connection::open(&copy).expect("open copy");
-        conn.execute_batch(&format!("PRAGMA key = '{PASS}'"))
-            .expect("key");
+        crate::common::key_raw(&conn, PASS).expect("key");
         let schema: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema");

@@ -150,3 +150,25 @@ Then it checks the rule packs and the provider files two times: with the JSON Sc
 Format, advisories, the Node model tests, and whitespace do not depend on the system, so only the `macos` job runs them.
 
 A configured workflow is not a remotely executed check.
+
+## Test vault KDF
+
+The vault keys its file with SQLCipher 4 defaults: PBKDF2-HMAC-SHA512 with 256,000 iterations.
+Each create, unlock, owner check, and copy check derives the key one time, about 0.3 s on a CI runner.
+To make the tests faster, the test-only feature `insecure-test-kdf` lowers this count to 2 for test vaults (`src/vault/test_kdf.rs`).
+CI tests with `--all-features`, so CI uses the lower count.
+
+The lower count applies only when all of these conditions are true:
+
+- The build has the feature. No shipped build names it. The macOS app, the release binaries of CI, the iPhone core, the relay, and the Linux CLI are built with named features or with `-p`.
+- The build has debug assertions. In a build without debug assertions, `REDUCED_KDF_ITER` is 256,000, and a constant assertion checks it. Every shipped artifact is a `--release` build.
+- A directory above the vault file has a name that starts with `.tmp`, the prefix of `tempfile::TempDir`. A vault in the data directory of the app keeps 256,000 iterations, also in a `cargo r` debug build with `--all-features`.
+
+The open check (`verify_cipher_defaults`) still requires exactly one count for each path. In a build without the feature, the check compares with the constant 256,000, and the code for the lower count is not compiled. A test vault refuses 256,000, and every other vault refuses the lower count.
+So a file with the lower count does not open in a shipped app.
+
+`no_shipped_build_enables_the_reduced_kdf` reads the manifests and the release build commands. It fails if a shipped build names the feature or `--all-features`, or if a profile turns on debug assertions.
+
+These tests keep the real values: `sqlcipher_probe` uses plain SQLCipher connections, and `vault_migration`, the two file checks of `vault_passphrase`, and the cipher-defaults unit tests use directories with the `apassy-real-kdf-` prefix.
+A test that opens a vault file with its own SQLCipher connection calls `common::key_raw` (or `test_kdf::match_vault_kdf` in the library) after the key.
+Do not use a test vault of the lower count for real secrets: the passphrase is its only protection.
