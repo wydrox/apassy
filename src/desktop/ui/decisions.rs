@@ -1461,7 +1461,7 @@ fn question_detail(
     });
     decision_body(ui, ("decision", Some(current.run.id)), |ui| {
         super::shell::banners(app, ui, pending);
-        draw_question(app, ui, &current, &mut answer, None);
+        draw_question(app, ui, &current, None);
     });
     if let Some(answer) = answer {
         apply(app, ui.ctx(), &current.run, answer);
@@ -1501,7 +1501,7 @@ fn remote_detail(
     };
     decision_body(ui, ("decision-remote", Some(remote.question.id)), |ui| {
         super::shell::banners(app, ui, pending);
-        draw_question(app, ui, &current, &mut answer, Some(&remote.question));
+        draw_question(app, ui, &current, Some(&remote.question));
     });
     if let Some(answer) = answer {
         apply_remote(app, ui.ctx(), &remote.question, answer);
@@ -1775,11 +1775,6 @@ fn more_menu(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) {
     });
 }
 
-/// The first credential of a question that is production only by default.
-fn unconfirmed(run: &PendingRun) -> Option<&QuestionItem> {
-    run.question.items.iter().find(|item| item.unconfirmed)
-}
-
 /// A queued offer is a snapshot. Changed scope details require an explicit review;
 /// they never replace classification edits while the owner is reading the question.
 fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
@@ -1928,7 +1923,6 @@ fn draw_question(
     app: &mut DesktopApp,
     ui: &mut egui::Ui,
     waiting: &Waiting,
-    answer: &mut Option<Answer>,
     remote: Option<&RemoteQuestion>,
 ) {
     let run = &waiting.run;
