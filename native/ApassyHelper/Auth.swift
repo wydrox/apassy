@@ -76,6 +76,28 @@ func biometryStatus() -> String {
 /// `authenticate {reason}`: show the Touch ID prompt and wait.
 func handleAuthenticate(_ request: Request) throws -> Fields {
     let reason = try request.text("reason", min: 1, max: 200)
+    let title = try request.authenticationTitle()
+    let context = try biometricContext()
+    if let outcome = evaluateInAuthPanel(context: context, title: title, reason: reason, evaluate: { reply in
+        context.evaluatePolicy(biometricPolicy, localizedReason: reason, reply: reply)
+    }) {
+        try requireAuthPanelSuccess(outcome)
+        return ["ok": true]
+    }
+    context.invalidate()
+    return try authenticateWithSystemDialog(reason: reason)
+}
+
+func requireAuthPanelSuccess(_ outcome: AuthPanelOutcome) throws {
+    switch outcome {
+    case .success: return
+    case .cancelled: throw HelperError(.cancelled, "The owner cancelled Touch ID.")
+    case .fallback: throw HelperError(.fallback, "The owner selected the Apassy passphrase.")
+    case .failure(let error): throw mapLAError(error)
+    }
+}
+
+private func authenticateWithSystemDialog(reason: String) throws -> Fields {
     let context = try biometricContext()
     let done = DispatchSemaphore(value: 0)
     let box = ResultBox<(Bool, Error?)>()

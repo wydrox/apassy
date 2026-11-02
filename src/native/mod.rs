@@ -792,7 +792,7 @@ impl NativeHelper {
     /// passed Touch ID now. `Fallback` and `Cancelled` mean: ask for the
     /// Apassy passphrase.
     pub fn authenticate(&self, reason: &str) -> Result<(), NativeError> {
-        self.authenticate_with(reason, None)
+        self.authenticate_with(reason, None, None)
     }
 
     /// [`NativeHelper::authenticate`] that `cancel` can stop. After
@@ -804,17 +804,32 @@ impl NativeHelper {
         reason: &str,
         cancel: &AuthCancel,
     ) -> Result<(), NativeError> {
-        self.authenticate_with(reason, Some(cancel))
+        self.authenticate_with(reason, None, Some(cancel))
+    }
+
+    /// Fixed-template heading for a broker owner check; cancellation is unchanged.
+    pub fn authenticate_titled(
+        &self,
+        reason: &str,
+        title: &'static str,
+        cancel: Option<&AuthCancel>,
+    ) -> Result<(), NativeError> {
+        self.authenticate_with(reason, Some(title), cancel)
     }
 
     fn authenticate_with(
         &self,
         reason: &str,
+        title: Option<&str>,
         cancel: Option<&AuthCancel>,
     ) -> Result<(), NativeError> {
         check_reason(reason)?;
         let mut req = request("authenticate");
         req.insert("reason".into(), Value::String(reason.to_owned()));
+        if let Some(title) = title {
+            check_title(title)?;
+            req.insert("title".into(), Value::String(title.to_owned()));
+        }
         self.call_with(&self.helper, req, self.timeouts.interactive, cancel)
             .map(drop)
     }
@@ -919,11 +934,34 @@ impl NativeHelper {
         account: &str,
         reason: &str,
     ) -> Result<KeychainSecret, NativeError> {
+        self.keychain_read_with_title(account, reason, None)
+    }
+
+    /// Unlock heading comes from the desktop's fixed template.
+    pub fn keychain_read_titled(
+        &self,
+        account: &str,
+        reason: &str,
+        title: &'static str,
+    ) -> Result<KeychainSecret, NativeError> {
+        self.keychain_read_with_title(account, reason, Some(title))
+    }
+
+    fn keychain_read_with_title(
+        &self,
+        account: &str,
+        reason: &str,
+        title: Option<&str>,
+    ) -> Result<KeychainSecret, NativeError> {
         check_identifier(account, ACCOUNT_RULE)?;
         check_reason(reason)?;
         let mut req = request("keychain_read");
         req.insert("account".into(), Value::String(account.to_owned()));
         req.insert("reason".into(), Value::String(reason.to_owned()));
+        if let Some(title) = title {
+            check_title(title)?;
+            req.insert("title".into(), Value::String(title.to_owned()));
+        }
         let mut response = self.call(&self.keychain_helper, req, self.timeouts.interactive)?;
         let Some(Value::String(encoded)) = response.remove("secret_b64") else {
             return Err(NativeError::Protocol(
@@ -1618,6 +1656,20 @@ fn stop(child: &mut Child) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn authentication_title_has_a_bounded_plain_text_contract() {
+        assert!(check_title("Unlock Apassy").is_ok());
+        assert!(check_title(&"é".repeat(60)).is_ok());
+        for invalid in [
+            "".to_owned(),
+            "x".repeat(61),
+            "line\nbreak".to_owned(),
+            "tab\there".to_owned(),
+        ] {
+            assert!(check_title(&invalid).is_err());
+        }
+    }
+
     #[cfg(all(unix, feature = "desktop", feature = "vault"))]
     #[test]
     fn clipboard_transport_uses_stdin_and_returns_only_exact_write_identity() {
@@ -1980,4 +2032,13 @@ mod auto_lock_tests {
             .auto_lock_write(crate::desktop::auto_lock::LockPolicy::OneHour)
             .unwrap();
     }
+}
+
+fn check_title(title: &str) -> Result<(), NativeError> {
+    if title.is_empty() || title.chars().count() > 60 || title.chars().any(char::is_control) {
+        return Err(NativeError::Protocol(
+            "title must have 1 to 60 characters and no control characters".into(),
+        ));
+    }
+    Ok(())
 }

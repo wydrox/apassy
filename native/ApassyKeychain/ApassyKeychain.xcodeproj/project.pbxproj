@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A0C0F0910000000000000006 /* OwnerSessionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C0F0900000000000000006 /* OwnerSessionPolicy.swift */; };
+		A0C0F0910000000000000005 /* OwnerSessionLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C0F0900000000000000005 /* OwnerSessionLifecycle.swift */; };
+		A0C0F0910000000000000001 /* AuthPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C0F0900000000000000001 /* AuthPanel.swift */; };
         A0C0F0800000000000000001 /* Clipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C0F0800000000000000002 /* Clipboard.swift */; };
 		0309CDA7725CC60698B5A64C /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 341204F7FEF786DA77F74474 /* Keychain.swift */; };
 		7418F6B2AD0886DC536255A1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FC3E930B0873F645B7BD574 /* main.swift */; };
@@ -17,6 +20,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A0C0F0900000000000000006 /* OwnerSessionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerSessionPolicy.swift; sourceTree = "<group>"; };
+		A0C0F0900000000000000005 /* OwnerSessionLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerSessionLifecycle.swift; sourceTree = "<group>"; };
+		A0C0F0900000000000000001 /* AuthPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthPanel.swift; sourceTree = "<group>"; };
         A0C0F0800000000000000002 /* Clipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clipboard.swift; sourceTree = "<group>"; };
 		336EF5E174E99C26F86FB2A5 /* ApassyKeychain.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ApassyKeychain.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		341204F7FEF786DA77F74474 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
@@ -58,6 +64,9 @@
 			children = (
                 A0C0F0800000000000000002 /* Clipboard.swift */,
 				780C38547DCB396D0319892B /* Auth.swift */,
+				A0C0F0900000000000000006 /* OwnerSessionPolicy.swift */,
+				A0C0F0900000000000000005 /* OwnerSessionLifecycle.swift */,
+				A0C0F0900000000000000001 /* AuthPanel.swift */,
 				498B9522CDF2988CE9DD0C92 /* Caller.swift */,
 				341204F7FEF786DA77F74474 /* Keychain.swift */,
 				3FC3E930B0873F645B7BD574 /* main.swift */,
@@ -127,6 +136,9 @@
 			files = (
                 A0C0F0800000000000000001 /* Clipboard.swift in Sources */,
 				A966B83CD0571E6070D4AB2A /* Auth.swift in Sources */,
+				A0C0F0910000000000000006 /* OwnerSessionPolicy.swift in Sources */,
+				A0C0F0910000000000000005 /* OwnerSessionLifecycle.swift in Sources */,
+				A0C0F0910000000000000001 /* AuthPanel.swift in Sources */,
 				9E13FC56F09EBB75D9824CCA /* Caller.swift in Sources */,
 				0309CDA7725CC60698B5A64C /* Keychain.swift in Sources */,
 				E3F3B7BA6EEE5EFA4E4122A9 /* Protocol.swift in Sources */,
@@ -239,6 +251,7 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
+				OTHER_LDFLAGS = ("$(inherited)", "-framework", AppKit, "-weak_framework", LocalAuthenticationEmbeddedUI);
 			};
 			name = Release;
 		};
@@ -302,6 +315,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
+				OTHER_LDFLAGS = ("$(inherited)", "-framework", AppKit, "-weak_framework", LocalAuthenticationEmbeddedUI);
 			};
 			name = Debug;
 		};

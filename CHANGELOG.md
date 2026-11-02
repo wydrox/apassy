@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Touch ID prompts appear in an Apassy panel instead of the macOS dialog.
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.

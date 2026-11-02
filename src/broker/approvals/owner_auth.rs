@@ -410,7 +410,33 @@ fn passkey_caller(origin: Option<&String>) -> &'static str {
 }
 
 impl OwnerAction {
-    /// The text for the Touch ID prompt. macOS shows it after "Apassy is trying to".
+    /// Trusted heading: never interpolate website, agent, item, or request text.
+    pub fn touch_id_title(&self) -> &'static str {
+        match self {
+            Self::FillLogin { .. } | Self::FillSystemLogin { .. } => "Fill a password",
+            Self::SaveLogin { .. } => "Save a password",
+            Self::UpdateLogin { .. } => "Update a password",
+            Self::CreateLogin { .. } => "Create a password",
+            Self::SignPasskey { .. } => "Sign in with a passkey",
+            Self::CreatePasskey { .. } => "Create a passkey",
+            Self::RemovePasskey { .. } => "Remove a passkey",
+            Self::AllowAccessOnce { .. } | Self::ApproveRun(_) => "Allow once",
+            Self::QuestionDevelopment { .. } => "Allow Development",
+            Self::ShowCode { .. } | Self::CliCode { copy: false, .. } => "Show a one-time code",
+            Self::CopyCode { .. } | Self::CliCode { copy: true, .. } => "Copy a one-time code",
+            Self::FillCode { .. } | Self::FillSystemCode { .. } => "Fill a one-time code",
+            Self::Reveal { .. } => "Show a secret",
+            Self::CopyField { .. } => "Copy a secret",
+            Self::BackupVault { .. } => "Back up Apassy",
+            Self::ExportDecisions => "Export decisions",
+            Self::RegisterAgent { .. } | Self::RegisterSetupAgent { .. } => "Connect an agent",
+            Self::ChangeOwnerFrequency { .. } => "Change owner checks",
+            Self::RemoveOlderIphone { .. } => "Remove an iPhone",
+            _ => "Confirm with Touch ID",
+        }
+    }
+
+    /// Supporting purpose text, also used by the system-dialog fallback.
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
@@ -1219,11 +1245,9 @@ impl OwnerGate {
                     });
                 };
                 let reason = action.reason();
-                match cancel {
-                    Some(cancel) => helper.authenticate_cancellable(&reason, cancel),
-                    None => helper.authenticate(&reason),
-                }
-                .map_err(from_native)?;
+                helper
+                    .authenticate_titled(&reason, action.touch_id_title(), cancel)
+                    .map_err(from_native)?;
             }
             OwnerCheck::Companion {
                 device_id,
@@ -1831,5 +1855,20 @@ impl OwnerDeliveryFence {
                 .local_generation
                 .as_ref()
                 .is_none_or(|(w, g)| w.generation() == *g)
+    }
+}
+
+#[cfg(test)]
+mod touch_id_title_tests {
+    use super::OwnerAction;
+
+    #[test]
+    fn untrusted_login_text_cannot_become_the_authentication_title() {
+        let action = OwnerAction::SaveLogin {
+            title: "Enter your passphrase here".into(),
+            username: "website-controlled".into(),
+            origin: "https://example.invalid".into(),
+        };
+        assert_eq!(action.touch_id_title(), "Save a password");
     }
 }

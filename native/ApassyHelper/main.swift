@@ -66,19 +66,37 @@ if CommandLine.arguments.count > 1 {
     exit(2)
 }
 
-while let line = readLine(strippingNewline: true) {
-    if line.trimmingCharacters(in: .whitespaces).isEmpty {
-        continue
+// Stdin has its own thread; requests remain sequential and handlers execute
+// directly on main (not inside a main-queue block, so NSApplication.run can
+// service dispatch callbacks during an authentication panel).
+let input = ResultBox<String>()
+let inputReady = DispatchSemaphore(value: 0)
+let responseReady = DispatchSemaphore(value: 0)
+let inputEnded = ResultBox<Bool>()
+DispatchQueue.global(qos: .userInitiated).async {
+    while let line = readLine(strippingNewline: true) {
+        input.set(line)
+        inputReady.signal()
+        responseReady.wait()
     }
-    let response: Fields
-    do {
-        try requireApassyParent()
-        response = try handle(try Request.parse(line))
-    } catch let error as HelperError {
-        response = errorResponse(error)
-    } catch {
-        response = errorResponse(HelperError(.internalError, "Unexpected helper error."))
-    }
-    writeResponse(response)
+    inputEnded.set(true)
+    inputReady.signal()
 }
-exit(0)
+while true {
+    inputReady.wait()
+    if inputEnded.get() == true { exit(0) }
+    guard let line = input.get() else { exit(1) }
+    if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+        let response: Fields
+        do {
+            try requireApassyParent()
+            response = try handle(try Request.parse(line))
+        } catch let error as HelperError {
+            response = errorResponse(error)
+        } catch {
+            response = errorResponse(HelperError(.internalError, "Unexpected helper error."))
+        }
+        writeResponse(response)
+    }
+    responseReady.signal()
+}
