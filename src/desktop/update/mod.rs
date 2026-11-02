@@ -178,6 +178,33 @@ fn staged_is_newer(staged: &Staged, build: &BuildIdentity) -> bool {
     offered.cmp(&running) == Ordering::Greater
 }
 
+fn keep_attempt(
+    attempt: &store::AutoRestartAttempt,
+    staged: Option<&Staged>,
+    build: &BuildIdentity,
+) -> bool {
+    staged_is_newer(&attempt.staged, build)
+        && staged
+            .is_none_or(|s| s.commit == attempt.staged.commit && s.build == attempt.staged.build)
+}
+
+fn restart_allowed(
+    manual: bool,
+    staged: &Staged,
+    attempt: Option<&store::AutoRestartAttempt>,
+) -> bool {
+    manual
+        || attempt
+            .is_none_or(|a| a.staged.commit != staged.commit || a.staged.build != staged.build)
+}
+
+fn attempt_message(staged: &Staged) -> String {
+    format!(
+        "Apassy couldn't install {} automatically. Choose Restart to update to try again.",
+        staged.version
+    )
+}
+
 impl Updater {
     /// An updater without files and without a thread. Tests and the smoke test use
     /// it, so they never check for updates.
@@ -223,7 +250,7 @@ impl Updater {
         let mut file = UpdateFile::load(&paths.file);
         let before = file.clone();
         let log = install::log_path(&paths.dir);
-        let note = install::read_result(&log).map(|result| {
+        let mut note = install::read_result(&log).map(|result| {
             let (ok, message) = match result {
                 Ok(()) => (
                     true,
@@ -248,7 +275,9 @@ impl Updater {
             } else {
                 let _ = std::fs::rename(&log, paths.dir.join("install-failed.log"));
                 // A new check downloads and checks the version again.
-                file.staged = None;
+                if file.auto_restart_attempt.is_none() {
+                    file.staged = None;
+                }
             }
             if ok { Ok(message) } else { Err(message) }
         });
@@ -258,6 +287,16 @@ impl Updater {
         if !keep {
             file.staged = None;
             pipeline::clean(&paths.dir);
+        }
+        if file
+            .auto_restart_attempt
+            .as_ref()
+            .is_some_and(|a| !keep_attempt(a, file.staged.as_ref(), &self.build))
+        {
+            file.auto_restart_attempt = None;
+        }
+        if let Some(attempt) = &file.auto_restart_attempt {
+            note = Some(Err(attempt_message(&attempt.staged)));
         }
         // Only the thread stages a version, and it runs only on macOS.
         let phase = file.staged.clone().map_or(Phase::Idle, Phase::Ready);
@@ -302,6 +341,31 @@ impl Updater {
 
     pub(crate) fn build(&self) -> &BuildIdentity {
         &self.build
+    }
+
+    pub(crate) fn automatic_retry_message(&self, staged: &Staged) -> Option<String> {
+        let state = self.shared.lock();
+        (!restart_allowed(false, staged, state.file.auto_restart_attempt.as_ref()))
+            .then(|| attempt_message(staged))
+    }
+
+    /// Fail closed: never quit automatically unless the retry guard is on disk.
+    fn record_automatic_restart(&self, staged: &Staged) -> Result<(), String> {
+        let mut state = self.shared.lock();
+        if state.file.staged.as_ref() != Some(staged)
+            || !restart_allowed(false, staged, state.file.auto_restart_attempt.as_ref())
+        {
+            return Err("The staged update changed or was already attempted.".to_owned());
+        }
+        state.file.auto_restart_attempt = Some(store::AutoRestartAttempt {
+            staged: staged.clone(),
+            at: unix_now(),
+        });
+        let paths = self.paths.as_ref().ok_or("The updater is not started.")?;
+        state
+            .file
+            .save(&paths.file)
+            .map_err(|err| format!("Cannot save the automatic update attempt: {err}"))
     }
 
     fn change(&self, edit: impl FnOnce(&mut UpdateFile)) {
@@ -566,6 +630,14 @@ fn run_once(
             };
         }
         Ok(Outcome::Ready(staged)) => {
+            if state
+                .file
+                .auto_restart_attempt
+                .as_ref()
+                .is_some_and(|a| !keep_attempt(a, Some(&staged), build))
+            {
+                state.file.auto_restart_attempt = None;
+            }
             state.file.last_result = Some(format!("Apassy {} is ready.", staged.version));
             state.file.staged = Some(staged.clone());
             state.phase = Phase::Ready(staged);
@@ -629,6 +701,7 @@ impl DesktopApp {
             || self.ui.sheet.is_some()
             || self.pending_delete
             || self.owner.unlock.unlocking.is_some()
+            || !self.owner_ui.passphrase.is_empty()
             || ctx.memory(|m| m.top_modal_layer()).is_some()
             || egui::Popup::is_any_open(ctx);
         if !self.updates.attempted_while_locked
@@ -642,7 +715,15 @@ impl DesktopApp {
             )
         {
             self.updates.attempted_while_locked = true;
-            self.restart_to_update(ctx);
+            if let Some(staged) = staged {
+                if self.updates.automatic_retry_message(staged).is_some() {
+                    return;
+                }
+                match self.updates.record_automatic_restart(staged) {
+                    Ok(()) => self.restart_to_update(ctx),
+                    Err(err) => self.set_err(err),
+                }
+            }
         }
     }
     /// Start the updater of the window. Tests and the smoke test do not call this.
@@ -696,6 +777,60 @@ impl DesktopApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_attempt_blocks_only_the_same_build_and_manual_retries_work() {
+        let staged = Staged {
+            version: "0.3.1".to_owned(),
+            build: "abcdef0".to_owned(),
+            commit: "abcdef0123456789".to_owned(),
+            kind: StagedKind::App,
+            team: "TEAM".to_owned(),
+        };
+        let attempt = store::AutoRestartAttempt {
+            staged: staged.clone(),
+            at: 42,
+        };
+        assert!(!restart_allowed(false, &staged, Some(&attempt)));
+        assert!(restart_allowed(true, &staged, Some(&attempt)));
+        assert!(restart_allowed(false, &staged, None));
+        let mut different = staged.clone();
+        different.commit = "newcommit".to_owned();
+        assert!(restart_allowed(false, &different, Some(&attempt)));
+        assert!(!keep_attempt(&attempt, Some(&different), &running()));
+        assert!(keep_attempt(&attempt, Some(&staged), &running()));
+        // Missing staged files must not permit re-downloading into a restart loop.
+        assert!(keep_attempt(&attempt, None, &running()));
+        for version in ["0.3.1", "0.3.2"] {
+            let updated = BuildIdentity::from_parts(version, None, None);
+            assert!(!keep_attempt(&attempt, Some(&staged), &updated));
+        }
+    }
+
+    #[test]
+    fn failed_automatic_attempt_survives_startup_and_success_clears_it() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let (updater, fake) = make_updater(&temp, Fake::new(temp.path()));
+        run(&updater, &fake, Request::Check);
+        let Phase::Ready(staged) = updater.view().phase else {
+            panic!("ready")
+        };
+        updater
+            .record_automatic_restart(&staged)
+            .expect("persist attempt");
+        let data = temp.path().join("data");
+        let mut again = Updater::with_system(fake.clone(), running(), &data);
+        assert_eq!(again.load(&data), Some(Err(attempt_message(&staged))));
+        assert!(again.automatic_retry_message(&staged).is_some());
+        let updated = BuildIdentity::from_parts(&staged.version, None, None);
+        let after = Updater::with_system(fake, updated, &data);
+        assert!(after.shared.lock().file.auto_restart_attempt.is_none());
+        assert!(
+            UpdateFile::load(&data.join("update.json"))
+                .auto_restart_attempt
+                .is_none()
+        );
+    }
+
     #[test]
     fn restart_requires_every_safety_condition() {
         for bits in 0u8..64 {

@@ -243,12 +243,14 @@ pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let (title, message) = match staged.kind {
         StagedKind::App => (
             format!("Apassy {} is ready.", staged.version),
-            if view.auto_install {
+            if let Some(message) = app.updates.automatic_retry_message(staged) {
+                message
+            } else if view.auto_install {
                 "It installs when the vault locks or you quit Apassy. Choose Restart to update to install it at once."
+                    .to_owned()
             } else {
-                "Restart Apassy to install it."
-            }
-            .to_owned(),
+                "Restart Apassy to install it.".to_owned()
+            },
         ),
         StagedKind::Image => (
             format!("Apassy {} is downloaded.", staged.version),
