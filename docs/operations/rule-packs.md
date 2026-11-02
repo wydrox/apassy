@@ -80,7 +80,7 @@ A new stack needs a new pack, not a code change.
 | `vercel` | vercel | deployments, aliases, environment variables, read commands |
 | `wrangler` | wrangler | deployments, deletions, KV, R2, D1, and secret writes, local and read commands |
 
-The 63 packs have 275 flag rules, 117 safe rules, 21 exceptions, 5 project command entries, 17 write entries, and 3 access read entries. Each has a `note` with its reason. The test `every_built_in_rule_has_a_note` checks this. Dev round 2 added 13 packs and more knowledge in 20 packs ([dev-round2.md](../evaluation/dev-round2.md)). Dev round 3 audited every safe rule, added the `glab` and `celery` packs, and changed 33 packs ([dev-round3.md](../evaluation/dev-round3.md)). Dev round 4 added the `debug-output` pack (10 rules) and 7 flag rules in 5 packs ([dev-round4.md](../evaluation/dev-round4.md)).
+The 63 packs have 275 flag rules, 117 safe rules, 21 exceptions, 5 project command entries, 17 write entries, and 3 access read entries. Each has a `note` with its reason. The test `every_built_in_pack_file_loads` checks this. Dev round 2 added 13 packs and more knowledge in 20 packs ([dev-round2.md](../evaluation/dev-round2.md)). Dev round 3 audited every safe rule, added the `glab` and `celery` packs, and changed 33 packs ([dev-round3.md](../evaluation/dev-round3.md)). Dev round 4 added the `debug-output` pack (10 rules) and 7 flag rules in 5 packs ([dev-round4.md](../evaluation/dev-round4.md)).
 
 **Reads of personal data (dev round 4).** A read of contact or payment columns of people is not known safe and not a known command, so it always needs `task_match`. See section 2.
 
@@ -281,8 +281,7 @@ Tests in `tests/rule_packs.rs`:
 | `a_local_pack_cannot_relax_a_restriction` | Eight attempts: a safe rule, an exception, the `usage` role for `rm`, a known host, a `writes` entry, a replacement of the `git` pack, an `allow` flag, and an unknown field. Each is rejected. The rule set and the analysis of the target command do not change. |
 | `local_rules_only_add_flags_on_the_replay_sets` | Broad local rules with `not` and `any_of` on 2074 replay commands: no built-in flag goes away, and no command becomes known safe. 1823 commands change. |
 | `a_rejected_local_directory_fails_closed` | A relaxing pack in the directory: the loader names the file, and `npm test` gets `rule_pack_error`. After the owner removes the file, the other local pack is active. |
-| `every_built_in_pack_file_loads` | Each file in `packs/` is embedded, loads, has schema version 1, and has a unique tool name. |
-| `every_built_in_rule_has_a_note` | Each flag rule, safe rule, exception, project command, write, and access read of a built-in pack has a `note` with its reason. |
+| `every_built_in_pack_file_loads` | Each file in `packs/` is embedded, loads, has schema version 1, and has a unique tool name. Each flag rule, safe rule, exception, project command, write, and access read of a built-in pack has a `note` with its reason. |
 
 ## 5. Replay evidence
 

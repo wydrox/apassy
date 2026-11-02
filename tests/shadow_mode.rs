@@ -333,9 +333,11 @@ fn decisions(fx: &Fixture) -> Vec<String> {
 
 /// ADR 0010: the candidate decides in parallel with no effect. The broker gives the
 /// same decisions with and without a candidate that answers the opposite. The vault
-/// records each candidate answer next to the real outcome and the owner decision.
+/// records each candidate answer next to the real outcome and the owner decision. A
+/// candidate that is down, answers as another version, or is slow changes nothing. A
+/// slow candidate does not delay a run.
 #[test]
-fn shadow_answers_never_change_a_decision() {
+fn a_candidate_that_is_down_slow_or_another_version_changes_nothing() {
     let fx = fixture();
     let baseline = decisions(&fx);
     assert_eq!(
@@ -349,6 +351,7 @@ fn shadow_answers_never_change_a_decision() {
     );
     assert_eq!(fx.active.calls(), 3, "a rule flag skips the model");
 
+    // Opposite: the candidate answers the opposite of the active model.
     let candidate = fake_model(Some(CANDIDATE), opposite_answer, None);
     let id = register(&fx, &candidate.url);
     assert_eq!(decisions(&fx), baseline, "the candidate changed a decision");
@@ -374,14 +377,6 @@ fn shadow_answers_never_change_a_decision() {
         log.iter()
             .all(|record| !record.entry.note.contains(CANDIDATE))
     );
-}
-
-/// A candidate that is down, answers as another version, or is slow changes nothing. A
-/// slow candidate does not delay a run.
-#[test]
-fn a_candidate_that_is_down_slow_or_another_version_changes_nothing() {
-    let fx = fixture();
-    let baseline = decisions(&fx);
 
     // Down: nothing listens on the port.
     let port = TcpListener::bind("127.0.0.1:0")

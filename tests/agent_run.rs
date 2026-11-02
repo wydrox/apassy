@@ -1409,23 +1409,6 @@ fn grants_and_bindings_are_checked() {
     assert_eq!(code(&other), "invalid_request");
 }
 
-#[test]
-fn restore_removes_process_grants() {
-    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
-    let backup = fx.dir.path().join("backup.db");
-    with_vault(&fx, |v| v.backup(&backup).expect("backup"));
-    let mut restored =
-        Vault::restore(&backup, &fx.dir.path().join("restored.db"), PASS).expect("restore");
-    restored.unlock(PASS).expect("unlock");
-    assert!(
-        restored
-            .exec_grants_for_agent(fx.agent_id)
-            .expect("grants")
-            .is_empty()
-    );
-    assert!(restored.env_binding(fx.item_id).expect("binding").is_some());
-}
-
 /// Goal item V4: a restore revokes every agent and removes every grant and rule. Items
 /// with agent settings wait for the owner review. The broker refuses a run with such an
 /// item until the owner confirms the settings.

@@ -1804,7 +1804,7 @@ pub struct PackSummary {
     pub writes: usize,
     pub access_reads: usize,
     /// Entries without a `note`, as `<kind> <id>`. Each entry of a built-in pack needs a
-    /// note with its reason (test `every_built_in_rule_has_a_note`).
+    /// note with its reason (test `every_built_in_pack_file_loads`).
     pub without_note: Vec<String>,
     /// The tool name is one of the embedded packs. The file replaces that pack at the next
     /// build. A local pack cannot have such a name.
