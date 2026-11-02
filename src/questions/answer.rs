@@ -287,14 +287,13 @@ pub fn local_action(run: &PendingRun, choice: &Choice) -> Option<OwnerAction> {
     match choice {
         Choice::Approve => Some(OwnerAction::ApproveRun(run.clone())),
         Choice::ApproveAsDevelopment | Choice::ApproveAsProduction => {
-            Some(OwnerAction::QuestionDevelopment {
-                run_id: run.id,
-                item_id: run
-                    .question
-                    .items
-                    .iter()
-                    .find(|item| item.unconfirmed)?
-                    .item_id,
+            Some(OwnerAction::ClassifyRemoteRun {
+                run: run.clone(),
+                environment: if matches!(choice, Choice::ApproveAsDevelopment) {
+                    crate::vault::Environment::Development
+                } else {
+                    crate::vault::Environment::Production
+                },
             })
         }
         Choice::ApproveOnce => Some(OwnerAction::ApproveRun(run.clone())),

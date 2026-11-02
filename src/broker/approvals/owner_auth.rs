@@ -241,6 +241,11 @@ pub enum OwnerAction {
     },
     /// Approve one waiting run, exactly as the owner saw it.
     ApproveRun(PendingRun),
+    /// Remote classification binds the entire run and chosen environment to the proof.
+    ClassifyRemoteRun {
+        run: PendingRun,
+        environment: crate::vault::Environment,
+    },
     /// Development clicked locally for this exact pending question and item.
     QuestionDevelopment {
         run_id: u64,
@@ -475,6 +480,10 @@ impl OwnerAction {
                 passkey_caller(origin.as_ref())
             ),
             Self::ApproveRun(run) => format!("approve a run of agent \"{}\"", short_name(run)),
+            Self::ClassifyRemoteRun { run, environment } => format!(
+                "classify as {environment:?} and approve a run of agent \"{}\"",
+                short_name(run)
+            ),
             Self::ApproveAndRemember(run) => {
                 format!(
                     "approve and remember a run of agent \"{}\"",

@@ -1005,21 +1005,26 @@ impl ApprovalQueue {
         proof: OwnerProof,
     ) -> bool {
         let mut state = self.state();
-        if !state.questions.get(&run.id).is_some_and(|q| {
-            proof
-                .check(
-                    &OwnerAction::QuestionDevelopment {
-                        run_id: run.id,
-                        item_id,
-                    },
-                    &q.session,
-                )
-                .is_ok()
-        }) || !run
-            .question
-            .items
-            .iter()
-            .any(|item| item.item_id == item_id && item.unconfirmed)
+        let expected = if matches!(proof.action(), OwnerAction::ClassifyRemoteRun { .. }) {
+            OwnerAction::ClassifyRemoteRun {
+                run: run.clone(),
+                environment,
+            }
+        } else {
+            OwnerAction::QuestionDevelopment {
+                run_id: run.id,
+                item_id,
+            }
+        };
+        if !state
+            .questions
+            .get(&run.id)
+            .is_some_and(|q| proof.check(&expected, &q.session).is_ok())
+            || !run
+                .question
+                .items
+                .iter()
+                .any(|item| item.item_id == item_id && item.unconfirmed)
             || !matches!(
                 environment,
                 crate::vault::Environment::Development | crate::vault::Environment::Production
@@ -1485,6 +1490,8 @@ mod tests {
         ] {
             for end in [
                 "happy",
+                "remote-wrong-environment",
+                "remote-wrong-run",
                 "changed",
                 "expired",
                 "removed",
@@ -1512,11 +1519,30 @@ mod tests {
                 let id = wait_until_pending(&queue);
                 let pending = queue.pending()[0].clone();
                 let item_id = if end == "wrong-item" { 8 } else { 7 };
-                let proof = OwnerProof::issue_for_test(
-                    OwnerAction::QuestionDevelopment {
+                let action = match end {
+                    "remote-wrong-environment" => OwnerAction::ClassifyRemoteRun {
+                        run: pending.clone(),
+                        environment: if environment == crate::vault::Environment::Development {
+                            crate::vault::Environment::Production
+                        } else {
+                            crate::vault::Environment::Development
+                        },
+                    },
+                    "remote-wrong-run" => {
+                        let mut changed = pending.clone();
+                        changed.purpose.push_str("changed");
+                        OwnerAction::ClassifyRemoteRun {
+                            run: changed,
+                            environment,
+                        }
+                    }
+                    _ => OwnerAction::QuestionDevelopment {
                         run_id: id,
                         item_id,
                     },
+                };
+                let proof = OwnerProof::issue_for_test(
+                    action,
                     if end == "wrong-epoch" {
                         [2; 32]
                     } else {
