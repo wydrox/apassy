@@ -26,6 +26,9 @@ pub const AAD_TAG: &str = "apassy-question-v1";
 pub const ANSWER_TAG: &str = "apassy-question-answer-v1";
 /// The version of every card, answer, settle, and request body.
 pub const VERSION: u32 = 1;
+/// Published card version. Keep 1 until every recipient can decode card v2:
+/// the relay sends one ciphertext to all devices, without capability negotiation.
+pub const QUESTION_CARD_VERSION: u32 = 1;
 
 /// The largest plaintext of a card, an answer, and a settle (section 6.3).
 pub const MAX_CARD_BYTES: usize = 32_768;
@@ -252,16 +255,11 @@ pub struct OwnerPrompt {
 pub fn allowed_answer_kinds(question: &QuestionInfo) -> Vec<String> {
     let mut kinds = vec!["deny".to_owned(), "deny_with_comment".to_owned()];
     if question.items.iter().any(|item| item.unconfirmed) {
-        if question
-            .valid_answers
-            .contains(&AnswerKind::CorrectEnvironment)
-        {
-            kinds.extend([
-                "approve_as_development".into(),
-                "approve_as_production".into(),
-            ]);
-        }
-    } else if question.valid_answers.contains(&AnswerKind::Once) {
+        kinds.extend([
+            "approve_as_development".into(),
+            "approve_as_production".into(),
+        ]);
+    } else {
         kinds.push("approve".into());
     }
     kinds
@@ -351,9 +349,28 @@ impl Card {
         created_at: u64,
         run: &PendingRun,
     ) -> Self {
+        Self::from_run_with_version(
+            qid,
+            asker_device,
+            asker_name,
+            created_at,
+            run,
+            QUESTION_CARD_VERSION,
+        )
+    }
+
+    fn from_run_with_version(
+        qid: &str,
+        asker_device: &str,
+        asker_name: &str,
+        created_at: u64,
+        run: &PendingRun,
+        version: u32,
+    ) -> Self {
+        assert!(matches!(version, 1 | 2));
         let question = &run.question;
         Self {
-            v: 2,
+            v: version,
             qid: qid.to_owned(),
             asker: CardAsker {
                 device: asker_device.to_owned(),
@@ -405,7 +422,7 @@ impl Card {
                     .collect(),
             },
             digest: question_digest_v2_hex(run),
-            owner_prompt: Some(OwnerPrompt {
+            owner_prompt: (version == 2).then(|| OwnerPrompt {
                 agent_stated_task: if run.agent_request.is_empty() {
                     run.user_request.clone()
                 } else {
@@ -1164,6 +1181,31 @@ mod tests {
         let card = r#"{"v":1,"qid":"q","asker":{"device":"d","name":"n"},"created_at":1,"run":{"id":"1","agent":"a","command":[],"cwd":"/","env_names":[],"purpose":"","risk":"","user_request":"","request_source":"","agent_request":"","remember":null},"question":{"id":"1","item_ids":[],"items":[],"project":null,"action":"read","production":false,"why":"","valid_answers":["once"]},"digest":"x"}"#;
         let parsed = Card::parse(card.as_bytes()).unwrap();
         assert!(parsed.to_run().is_some());
+        let run = parsed.to_run().unwrap();
+        for version in [1, 2] {
+            let encoded = Card::from_run_with_version("q", "d", "n", 1, &run, version);
+            assert_eq!(encoded.v, version);
+            assert_eq!(encoded.owner_prompt.is_some(), version == 2);
+            if let Some(prompt) = &encoded.owner_prompt {
+                assert!(prompt.environment_known);
+                assert_eq!(
+                    prompt.allowed_answer_kinds,
+                    ["deny", "deny_with_comment", "approve"]
+                );
+                assert_eq!(prompt.purpose, run.purpose);
+            }
+            let bytes = encoded.to_plaintext().unwrap();
+            assert_eq!(Card::parse(&bytes).unwrap(), encoded);
+            assert_eq!(encoded.to_run().unwrap(), run);
+            let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            wire.as_object_mut().unwrap().remove("owner_prompt");
+            wire["v"] = 1.into();
+            wire["digest"] = "x".into();
+            assert_eq!(
+                wire,
+                serde_json::from_str::<serde_json::Value>(card).unwrap()
+            );
+        }
         let missing = card.replace(r#","remember":null"#, "");
         assert_eq!(Card::parse(missing.as_bytes()), Err(CardError::Unreadable));
         let missing = card.replace(r#""project":null,"#, "");
@@ -1179,5 +1221,47 @@ mod tests {
         );
         let mismatch = card.replace(r#""item_ids":[]"#, r#""item_ids":["7"]"#);
         assert!(Card::parse(mismatch.as_bytes()).unwrap().to_run().is_none());
+    }
+
+    #[test]
+    fn current_offers_follow_environment_even_without_legacy_offers() {
+        let mut question = QuestionInfo::default();
+        question.valid_answers.clear();
+        assert!(Choice::Approve.valid_for(&question));
+        assert!(!Choice::ApproveOnce.valid_for(&question));
+        assert!(!Choice::ApproveAsDevelopment.valid_for(&question));
+        question.items.push(QuestionItem {
+            item_id: 1,
+            name: "No environment declaration".into(),
+            production: false,
+            unconfirmed: true,
+            always_ask: false,
+        });
+        assert_eq!(
+            allowed_answer_kinds(&question),
+            [
+                "deny",
+                "deny_with_comment",
+                "approve_as_development",
+                "approve_as_production"
+            ]
+        );
+        assert!(!Choice::Approve.valid_for(&question));
+        assert!(Choice::ApproveAsDevelopment.valid_for(&question));
+        assert!(Choice::ApproveAsProduction.valid_for(&question));
+        assert!(
+            !Choice::CorrectEnvironment {
+                item_id: 1,
+                environment: RemoteEnvironment::Development
+            }
+            .valid_for(&question)
+        );
+        assert!(Choice::Deny.valid_for(&question));
+        assert!(
+            Choice::DenyWithComment {
+                comment: "No".into()
+            }
+            .valid_for(&question)
+        );
     }
 }

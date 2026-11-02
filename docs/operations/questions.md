@@ -2,15 +2,20 @@
 
 ## Remote owner prompt contract (2026-11-02)
 
-New command-question cards use **card `v: 2`**. The iPhone decoder in
+Command questions publish the exact **card `v: 1`** format by default, so old
+iPhones keep working and new signed answer choices are accepted. Publication is
+controlled by `QUESTION_CARD_VERSION = 1` in `src/questions/envelope.rs`.
+The v2 encoder is retained but OFF. Do not switch it to 2 until all recipients
+support it: `post_question` sends one ciphertext to all member devices, devices
+declare no capabilities, and the relay is unchanged. The iPhone decoder in
 `ios/ApassyCore/src/core/questions/envelope.rs` uses `exact()` to reject extra
-fields and versions other than 1; it does not ignore new fields. Older phones
-therefore show Update Apassy for these cards. Updating that decoder and the Swift
-UI is a separate task. The Mac still reads card v1 and accepts every old answer
+fields and versions other than 1; it does not ignore new fields. TestFlight
+0.5.10 therefore cannot read v2. A new iPhone can use the v1 fields below without
+enabling v2 publication. The Mac reads both versions and accepts every old answer
 kind. Answer/settle/envelope versions, encryption AAD, routes and digest v2 remain
 unchanged. This extension applies to command approvals, not access-request cards.
 
-Card v2 keeps every v1 field and adds this required root object:
+The disabled card v2 encoder keeps every v1 field and adds this required root object:
 
 ```json
 {
@@ -37,13 +42,29 @@ when no question item is `unconfirmed`. These display fields are sealed but do
 not change digest v2. Clients must continue to compute digest v2 from the original
 v1 fields, including `question.valid_answers`; do not add `owner_prompt` to it.
 
-`owner_prompt.allowed_answer_kinds` contains `deny` and `deny_with_comment`
-always. Known environments add `approve` when `question.valid_answers` contains
-`once`. Unknown environments instead add `approve_as_development` and
-`approve_as_production` when `question.valid_answers` contains
-`correct_environment`. The receiving Mac derives this offer from its live pending
-question, rather than trusting an answer or a display field. New unoffered kinds
-are refused. The original `question.valid_answers` remains the legacy offer list.
+### iPhone button derivation from v1
+
+Inspect `question.items[*].unconfirmed`. Any `true` means the environment is
+unknown, including an item with no environment declaration (the Mac represents
+that absence as `unconfirmed: true`; there is no nullable environment field).
+Offer **Allow as dev** (`approve_as_development`), **Allow as prod**
+(`approve_as_production`), **Dismiss** (`deny`), and **Dismiss with comment**
+(`deny_with_comment`). Unknown takes precedence even in a mixed question that
+also contains confirmed production items.
+
+When every item has `unconfirmed: false`, the environment is known. Offer
+**Allow** (`approve`), **Dismiss** (`deny`), and **Dismiss with comment**
+(`deny_with_comment`). An item's `production: true` with `unconfirmed: false`
+means confirmed production; both flags false mean known non-production.
+`question.production` is the question-level production flag, not the unknown
+environment test. Do not infer unknown status from `why`, `risk`, item names,
+or `question.production`.
+
+The Mac derives these offers from its live pending question exactly as for its
+local buttons, independent of card version and the legacy offer list.
+`owner_prompt.allowed_answer_kinds`, when v2 is enabled, reflects the same rule.
+New unoffered kinds are refused. The original `question.valid_answers` remains
+unchanged for legacy clients and digest v2; it gates only legacy answer kinds.
 
 Answer plaintext JSON has exactly `v` (1), `qid`, `by` (trusted-device UUID),
 `kind`, `digest` (unchanged lowercase digest v2), `time` (Unix seconds integer),

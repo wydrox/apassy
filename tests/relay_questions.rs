@@ -537,12 +537,14 @@ fn the_contract_test_vectors_reproduce_exactly() {
     );
 
     // The card.
-    let mut card = Card::from_run(QID, ASKER_UUID, "MacBook Pro", 1_790_000_000, &run);
-    // Preserve the published v1 encryption vector; new publications use card v2.
-    card.v = 1;
-    card.owner_prompt = None;
+    let card = Card::from_run(QID, ASKER_UUID, "MacBook Pro", 1_790_000_000, &run);
+    assert_eq!(card.v, 1);
+    assert!(card.owner_prompt.is_none());
     assert_eq!(card.digest, digest);
     let plaintext = card.to_plaintext().expect("card");
+    // Frozen v1 plaintext, also decoded by the TestFlight 0.5.10 iPhone core.
+    const V1_FIXTURE: &str = r#"{"v":1,"qid":"oKGio6SlpqeoqaqrrK2urw","asker":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"MacBook Pro"},"created_at":1790000000,"run":{"id":"123456789012345","agent":"claude-code","command":["npm","run","migrate"],"cwd":"/tmp/synthetic-shop","env_names":["DATABASE_URL","API_TOKEN"],"purpose":"Apply the new migration.","risk":"production credential: always asks the owner","user_request":"Deploy the new schema to staging.","request_source":"from the host hook","agent_request":"Run the migration.","remember":null},"question":{"id":"123456789012345","item_ids":["7","9"],"items":[{"item_id":"7","name":"Shop database","production":true,"unconfirmed":false,"always_ask":false},{"item_id":"9","name":"API token","production":false,"unconfirmed":true,"always_ask":false}],"project":{"key":"/tmp/synthetic-shop/.git","label":"synthetic-shop"},"action":"deploy","production":true,"why":"A production credential goes to a deploy.","valid_answers":["once","production:deploy","correct_environment","never_for_agent","always_ask_for_agent","disconnect"]},"digest":"f3b3231d5e65efa3edf428f34bb446d0b6d81ac964256e973c2ebf1d517f267d"}"#;
+    assert_eq!(plaintext.as_slice(), V1_FIXTURE.as_bytes());
     assert_eq!(plaintext.len(), 1138);
     assert_eq!(
         hex(ring::digest::digest(&ring::digest::SHA256, &plaintext).as_ref()),
@@ -1807,15 +1809,13 @@ fn current_remote_kinds_settle_with_signed_comments_and_guarded_classification()
         }
         let waiting = world.ask(run, Duration::from_secs(60));
         let opened = phone.next(&[]);
-        assert_eq!(opened.card.v, 2);
-        let prompt = opened.card.owner_prompt.as_ref().unwrap();
+        assert_eq!(opened.card.v, 1);
+        assert!(opened.card.owner_prompt.is_none());
         assert!(
-            prompt
-                .allowed_answer_kinds
+            apassy::questions::envelope::allowed_answer_kinds(&opened.run.question)
                 .iter()
                 .any(|kind| kind == choice.kind())
         );
-        assert_eq!(prompt.purpose, opened.run.purpose);
         let prepared = prepare_answer(&opened, PHONE_UUID, choice.clone(), now()).unwrap();
         let signature = if choice.needs_owner_check() {
             answer_key().sign(prepared.text.as_bytes()).unwrap()
