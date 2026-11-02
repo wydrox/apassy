@@ -114,3 +114,37 @@ The observation ends at the route decision, before the owner wait or execution;
 it does not claim that a command succeeded. Retries count as separate requests.
 Legacy remote cards retain their existing broker explanation as the headline;
 the relay envelope and authentication contract do not change.
+
+
+## Owner task and floating questions — 2026-11-02
+
+A verified hook task stays preferred. Without one, use the agent's required
+`user_request` and `purpose` for task match and every model question. Record
+hook versus agent-stated provenance in activity and decision records. Session
+ambiguity still escalates. Agent-stated task text can be wrong or manipulated.
+
+Production credentials may pass the bouncer only with declared `ReadOnly` scope,
+model task match and all other checks passing. Read-write/admin, Always ask,
+one-time codes and project rules still require owner review. Read-only scope
+relies on the owner's declaration; it does not confine the credential provider.
+
+Unknown environments offer Allow as dev, Allow as prod, Dismiss, and Dismiss with
+comment. Either allow classifies the unknown items of this exact pending run
+and approves it once. Known environments offer Allow, Dismiss, and Dismiss with
+comment, with remembering only as a secondary checkbox, off by default.
+Classification is carried by the exact guarded owner answer; the broker saves
+it after its unchanged-authorization check and before execution. This prevents
+an unrelated mutation from being accepted as part of the classification.
+
+All allow actions use the standard owner check and its owner-window policy.
+No owner-window lifecycle changes are part of this decision. Dismiss needs no
+owner check. Its optional single-line plain-text comment is limited to 500
+characters and is returned only as refusal data, never as owner approval.
+
+A small always-on-top, inactive-on-creation Apassy viewport shows the oldest
+waiting question, its agent and local host, credentials and environment badges,
+reason, task provenance, purpose, truncated command with hover text, countdown,
+and the same answer controls. It shows 1 of N and disappears on settlement or
+expiry. Unsupported embedded viewports route to Decisions in the main window.
+Native focus, monitor positioning and fallback behavior require device QA;
+unit tests establish queue selection only, not operating-system behavior.

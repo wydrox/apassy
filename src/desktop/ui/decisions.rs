@@ -70,12 +70,12 @@ use crate::desktop::{BrokerState, DesktopApp};
 use crate::questions::{
     AnswerError, AnswerReceipt, Choice, RemoteEnvironment, RemoteQuestion, remote_owner_action,
 };
+use crate::vault::Environment;
 use crate::vault::agent_items::{
     Correction, CorrectionAnswer, CorrectionKind, CredentialRequest, RAISED_FROM_FACT,
 };
 use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::detect::{self, Detected};
-use crate::vault::{Environment, RiskLevel};
 
 /// The color of the time left, as in the mockup (#c86a00).
 const TIMER: egui::Color32 = egui::Color32::from_rgb(200, 106, 0);
@@ -150,6 +150,7 @@ impl Drop for Paste {
 pub(crate) struct State {
     /// The selected decision.
     selected: Option<Key>,
+    floating_fallback: Option<u64>,
     /// Notification navigation never substitutes a newer request.
     routed: bool,
     activity_id: Option<u64>,
@@ -181,8 +182,6 @@ struct EvaluationDraft {
     run_id: u64,
     offer: EvaluationOffer,
     confirmations: Vec<EvaluationConfirmation>,
-    expanded: bool,
-    stale: bool,
 }
 
 impl EvaluationDraft {
@@ -195,8 +194,6 @@ impl EvaluationDraft {
                 .map(|item| item.confirmation.clone())
                 .collect(),
             offer,
-            expanded: false,
-            stale: false,
         }
     }
 }
@@ -289,8 +286,11 @@ pub(super) enum Primary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Answer {
     Deny,
+    DenyWithComment(String),
     Once,
     /// Allow this run once and separately authorize later model evaluation.
+    #[allow(dead_code)]
+    // Retained for existing owner evaluation requests; the prompt offers run answers.
     Evaluate {
         offer: EvaluationOffer,
         confirmations: Vec<EvaluationConfirmation>,
@@ -1627,8 +1627,6 @@ enum Bar {
     Deny,
     /// The main answer, in the accent color.
     Main,
-    /// The main answer that allows production: red, as on the iPhone.
-    Production,
 }
 
 /// A button of a bar at the bottom of a detail, as in the mockup: 28 points high, 7
@@ -1668,15 +1666,6 @@ fn bar_button(ui: &mut egui::Ui, label: &str, kind: Bar) -> egui::Response {
                 egui::Color32::from_rgb(0, 94, 224)
             } else {
                 egui::Color32::from_rgb(10, 108, 255)
-            },
-            egui::Color32::WHITE,
-            None,
-        ),
-        Bar::Production => (
-            if pressed || hovered {
-                egui::Color32::from_rgb(200, 40, 32)
-            } else {
-                kit::PRODUCTION
             },
             egui::Color32::WHITE,
             None,
@@ -1802,208 +1791,77 @@ fn prepare_evaluation(app: &mut DesktopApp, run_id: u64) {
         return;
     };
     match app.ui.decisions.evaluation.as_mut() {
-        Some(draft) if draft.run_id == run_id => {
-            if draft.offer != offer {
-                draft.stale = true;
-            }
-        }
+        Some(draft) if draft.run_id == run_id && draft.offer == offer => {}
         _ => app.ui.decisions.evaluation = Some(EvaluationDraft::new(run_id, offer)),
     }
 }
 
-fn evaluation_panel(
-    app: &mut DesktopApp,
-    ui: &mut egui::Ui,
-    run: &PendingRun,
-    answer: &mut Option<Answer>,
-) {
-    let Some(draft) = app.ui.decisions.evaluation.as_mut() else {
-        return;
-    };
-    ui.add_space(12.0);
-    kit::disclosure(ui, &mut draft.expanded, "Let the bouncer decide next time");
-    if !draft.expanded {
-        return;
-    }
-    if draft.stale {
-        kit::tone_note(
-            ui,
-            "The permission details changed. Review them again before enabling the bouncer.",
-            Tone::Warning,
-        );
-        let run_id = draft.run_id;
-        if kit::small_button(ui, "Review updated details", Style::Bordered).clicked() {
-            app.ui.decisions.forget_evaluation();
-            prepare_evaluation(app, run_id);
-            if let Some(draft) = app.ui.decisions.evaluation.as_mut() {
-                draft.expanded = true;
-            }
-        }
-        return;
-    }
-    kit::section(
-        ui,
-        None,
-        Some(
-            "Confirm each credential's environment and risk. This run is allowed once; matching later requests are evaluated by the model. Production, always-ask, and hard checks still apply.",
-        ),
-        |s| {
-            s.labeled(
-                "Agent",
-                kit::text(
-                    format!("{} (ID {})", run.agent, draft.offer.agent_id),
-                    Font::Body,
-                ),
-            );
-            s.labeled("Project", kit::text(&draft.offer.project.label, Font::Body));
-            s.labeled(
-                "Project folder",
-                kit::text(&draft.offer.project.key, Font::Mono),
-            );
-            s.labeled(
-                "Action",
-                kit::text(action_label(draft.offer.action), Font::Body),
-            );
-            for (item, confirmation) in draft.offer.items.iter().zip(&mut draft.confirmations) {
-                s.row(|ui| {
-                    ui.label(kit::medium(&item.name, Font::Body));
-                });
-                s.field("Environment", |ui| {
-                    egui::ComboBox::from_id_salt((
-                        "evaluation-environment",
-                        draft.run_id,
-                        confirmation.item_id,
-                    ))
-                    .selected_text(environment_label(confirmation.environment))
-                    .show_ui(ui, |ui| {
-                        for value in Environment::ALL {
-                            ui.selectable_value(
-                                &mut confirmation.environment,
-                                *value,
-                                environment_label(*value),
-                            );
-                        }
-                    })
-                    .response
-                });
-                s.field("Risk", |ui| {
-                    egui::ComboBox::from_id_salt((
-                        "evaluation-risk",
-                        draft.run_id,
-                        confirmation.item_id,
-                    ))
-                    .selected_text(confirmation.risk.as_str())
-                    .show_ui(ui, |ui| {
-                        for value in RiskLevel::ALL {
-                            ui.selectable_value(&mut confirmation.risk, *value, value.as_str());
-                        }
-                    })
-                    .response
-                });
-                s.labeled(
-                    "Hosts",
-                    kit::text(
-                        if confirmation.hosts.is_empty() {
-                            "No destination host".to_owned()
-                        } else {
-                            confirmation.hosts.join(", ")
-                        },
-                        Font::Mono,
-                    ),
-                );
-            }
-            if draft.offer.command_binding.is_some() {
-                s.labeled("Applies to", kit::text("Only this exact command, execution context and directly selected script version.", Font::Body));
-            }
-            s.row(|ui| {
-                if kit::small_button(ui, "Allow once and enable bouncer", Style::Prominent)
-                    .clicked()
-                {
-                    *answer = Some(Answer::Evaluate {
-                        offer: draft.offer.clone(),
-                        confirmations: draft.confirmations.clone(),
-                    });
-                }
-            });
-        },
-    );
-}
-
 /// The bar at the bottom: Deny on the left; a caption; Allow Once; the main answer.
 fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) {
-    let question = &run.question;
-    let main = primary(question);
-    let main_label = primary_label(question);
-    let caption = match (main, &question.project) {
-        (Some(Primary::InProject(_)), Some(project)) => format!(
-            "All agents in {} · from the next matching use.",
-            short(&project.label)
-        ),
-        // The button names the action; the caption stays on two lines next to it.
-        (Some(Primary::Production(_)), Some(project)) => format!(
-            "Production allowance in {} · all agents · next matching use.",
-            short(&project.label)
-        ),
-        _ => "Allow Once allows this run only.".to_owned(),
-    };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        if bar_button(ui, "Deny", Bar::Deny).clicked() {
+    let unknown = run.question.items.iter().find(|item| item.unconfirmed);
+    ui.horizontal_wrapped(|ui| {
+        if let Some(item) = unknown {
+            if bar_button(ui, "Allow as dev", Bar::Main).clicked() {
+                *answer = Some(Answer::Development {
+                    item_id: item.item_id,
+                    name: item.name.clone(),
+                });
+            }
+            if bar_button(ui, "Allow as prod", Bar::Main).clicked() {
+                *answer = Some(Answer::MarkProduction {
+                    item_id: item.item_id,
+                    name: item.name.clone(),
+                });
+            }
+        } else {
+            let key = egui::Id::new(("remember-project", run.id));
+            let remember = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<bool>(key).unwrap_or(false));
+            if bar_button(ui, "Allow", Bar::Main).clicked() {
+                *answer = Some(if remember {
+                    match primary(&run.question) {
+                        Some(Primary::InProject(a)) => Answer::InProject(a),
+                        Some(Primary::Production(a)) => Answer::Production(a),
+                        _ => Answer::Once,
+                    }
+                } else {
+                    Answer::Once
+                });
+            }
+        }
+        if bar_button(ui, "Dismiss", Bar::Deny).clicked() {
             *answer = Some(Answer::Deny);
         }
-        ui.add_space(4.0);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            match (main, &main_label) {
-                (Some(Primary::Correct), Some(label)) => {
-                    let item = unconfirmed(run);
-                    if bar_button(ui, label, Bar::Plain).clicked()
-                        && let Some(item) = item
-                    {
-                        *answer = Some(Answer::Development {
-                            item_id: item.item_id,
-                            name: item.name.clone(),
-                        });
-                    }
-                    if bar_button(ui, "Production", Bar::Plain).clicked()
-                        && let Some(item) = item
-                    {
-                        *answer = Some(Answer::MarkProduction {
-                            item_id: item.item_id,
-                            name: item.name.clone(),
-                        });
-                    }
-                    if bar_button(ui, "Allow Once", Bar::Main).clicked() {
-                        *answer = Some(Answer::Once);
-                    }
-                }
-                (Some(remembered), Some(label)) => {
-                    // Production has its own red button, as on the iPhone (ADR 0025 §3b).
-                    let kind = if matches!(remembered, Primary::Production(_)) {
-                        Bar::Production
-                    } else {
-                        Bar::Main
-                    };
-                    if bar_button(ui, label, kind).clicked() {
-                        *answer = Some(match remembered {
-                            Primary::Production(action) => Answer::Production(action),
-                            Primary::InProject(action) => Answer::InProject(action),
-                            Primary::Correct => Answer::Once,
-                        });
-                    }
-                    if bar_button(ui, "Allow Once", Bar::Plain).clicked() {
-                        *answer = Some(Answer::Once);
-                    }
-                }
-                _ => {
-                    if bar_button(ui, "Allow Once", Bar::Main).clicked() {
-                        *answer = Some(Answer::Once);
-                    }
-                }
-            }
-            ui.add_space(8.0);
-            bar_caption(ui, &caption);
-        });
+        let key = egui::Id::new(("refusal-comment", run.id));
+        let mut comment = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<String>(key).unwrap_or_default());
+        ui.add(
+            TextEdit::singleline(&mut comment)
+                .char_limit(500)
+                .desired_width(170.0)
+                .hint_text("Comment"),
+        );
+        if bar_button(ui, "Dismiss with comment", Bar::Plain).clicked() {
+            *answer = Some(Answer::DenyWithComment(comment.clone()));
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(key, comment));
     });
+    if unknown.is_none()
+        && matches!(
+            primary(&run.question),
+            Some(Primary::InProject(_) | Primary::Production(_))
+        )
+    {
+        let key = egui::Id::new(("remember-project", run.id));
+        let mut remember = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<bool>(key).unwrap_or(false));
+        ui.checkbox(&mut remember, "Remember for this project")
+            .on_hover_text(primary_label(&run.question).unwrap_or_default());
+        ui.ctx().data_mut(|d| d.insert_temp(key, remember));
+    }
 }
 
 /// A credential of the question with its provider tile and its production cap.
@@ -2061,7 +1919,7 @@ pub(super) fn classification_line(question: &QuestionInfo) -> Option<String> {
         .items
         .iter()
         .find(|item| item.unconfirmed)
-        .map(|item| format!("Is {} a development credential?", item.name))
+        .map(|item| format!("{}: environment unknown", item.name))
 }
 
 fn draw_question(
@@ -2149,13 +2007,13 @@ fn draw_question(
     });
     // The request of the user shows only when the agent sent a different one (goal item
     // B6): the owner then compares the two. Else the mockup has no request group.
-    if !run.user_request.is_empty() && !run.agent_request.is_empty() {
+    if !run.user_request.is_empty() {
         let source = if run.request_source.is_empty() {
             "from the agent"
         } else {
             run.request_source.as_str()
         };
-        group_label(ui, "Request");
+        group_label(ui, "What the agent says you asked");
         kit::section(ui, None, None, |s| {
             s.row(|ui| {
                 kit::paragraph(
@@ -2165,14 +2023,16 @@ fn draw_question(
                     kit::LABEL,
                 );
                 // Goal item B6: the hook request replaced a different text of the agent.
-                kit::tone_note(
-                    ui,
-                    format!(
-                        "The agent sent a different request: \"{}\"",
-                        run.agent_request
-                    ),
-                    Tone::Warning,
-                );
+                if !run.agent_request.is_empty() {
+                    kit::tone_note(
+                        ui,
+                        format!(
+                            "The agent sent a different request: \"{}\"",
+                            run.agent_request
+                        ),
+                        Tone::Warning,
+                    );
+                }
             });
         });
     }
@@ -2205,57 +2065,6 @@ fn draw_question(
     kit::section(ui, None, None, |s| {
         s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::LABEL));
     });
-    if remote.is_none() {
-        evaluation_panel(app, ui, run, answer);
-    }
-    // The correction stays at hand when the bar offers a remembered answer.
-    if question
-        .valid_answers
-        .contains(&AnswerKind::CorrectEnvironment)
-        && primary(question) != Some(Primary::Correct)
-    {
-        group_label(ui, "Environment");
-        kit::section(
-            ui,
-            None,
-            Some("Until you answer, the bouncer treats it as production and asks more often."),
-            |s| {
-                for item in question.items.iter().filter(|item| item.unconfirmed) {
-                    s.row(|ui| {
-                        egui::Sides::new().shrink_left().show(
-                            ui,
-                            |ui| {
-                                ui.add(
-                                    Label::new(
-                                        kit::text(
-                                            format!("{} is production only by default.", item.name),
-                                            Font::Body,
-                                        )
-                                        .color(kit::LABEL),
-                                    )
-                                    .wrap(),
-                                );
-                            },
-                            |ui| {
-                                if kit::small_button(ui, "Development", Style::Bordered).clicked() {
-                                    *answer = Some(Answer::Development {
-                                        item_id: item.item_id,
-                                        name: item.name.clone(),
-                                    });
-                                }
-                                if kit::small_button(ui, "Production", Style::Bordered).clicked() {
-                                    *answer = Some(Answer::MarkProduction {
-                                        item_id: item.item_id,
-                                        name: item.name.clone(),
-                                    });
-                                }
-                            },
-                        );
-                    });
-                }
-            },
-        );
-    }
     // The quiet line at the foot of a detail of the mockup (`.meta-foot`).
     ui.add_space(2.0);
     ui.vertical_centered(|ui| {
@@ -2282,6 +2091,11 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
     };
     let names = item_names(run);
     match answer {
+        Answer::DenyWithComment(comment) => {
+            if !queue.deny_with_comment(run.id, &comment) {
+                app.set_err("The question no longer waits.");
+            }
+        }
         Answer::Deny => {
             if queue.deny(run.id) {
                 app.set_ok(format!("Denied. {} gets a refusal.", run.agent));
@@ -2363,13 +2177,25 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
             );
         }
         Answer::MarkProduction { item_id, name } => {
-            let result = app.owner_ui.session.mark_production(item_id);
-            let _ = app.apply(
-                result,
-                &format!(
-                    "{name} is marked as production. The question of {} still waits.",
-                    run.agent
-                ),
+            if !queue.pending().iter().any(|r| r == run)
+                || !(Choice::CorrectEnvironment {
+                    item_id,
+                    environment: RemoteEnvironment::Production,
+                })
+                .valid_for(&run.question)
+            {
+                app.set_err("The question no longer offers this correction.");
+                return;
+            }
+            app.development_clicked(
+                OwnerRequest::CorrectEnvironment {
+                    run: run.clone(),
+                    agent: run.agent.clone(),
+                    item_id,
+                    name,
+                    environment: Environment::Production,
+                },
+                ctx,
             );
         }
         Answer::Never | Answer::AlwaysAsk => {
@@ -2404,7 +2230,7 @@ pub(super) fn remote_choice(run: &PendingRun, answer: &Answer) -> Option<Choice>
     Some(match answer {
         Answer::Deny => Choice::Deny,
         Answer::Once => Choice::ApproveOnce,
-        Answer::Evaluate { .. } => return None,
+        Answer::Evaluate { .. } | Answer::DenyWithComment(_) => return None,
         Answer::InProject(action) => Choice::ApproveInProject {
             action: *action,
             project_key: project_key()?,
@@ -3301,5 +3127,125 @@ mod answered_tests {
             answered(2, "Test iPhone", 0).line(),
             "Answered on Test iPhone"
         );
+    }
+}
+
+/// Stable oldest-first selection; answered, expired, and replaced entries disappear.
+fn prompt_queue(waiting: &[Waiting]) -> Option<(&Waiting, usize)> {
+    waiting
+        .iter()
+        .filter(|w| !w.left.is_zero())
+        .min_by_key(|w| (w.left, w.run.id))
+        .map(|first| (first, waiting.iter().filter(|w| !w.left.is_zero()).count()))
+}
+
+pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending: &[PendingRun]) {
+    let waiting = waiting(app, pending);
+    let Some((first, count)) = prompt_queue(&waiting) else {
+        return;
+    };
+    let run = &first.run;
+    let position = ctx
+        .input(|i| i.viewport().monitor_size)
+        .map(|size| egui::pos2((size.x - 440.0).max(0.0) / 2.0, 32.0))
+        .unwrap_or(egui::pos2(100.0, 32.0));
+    let mut answer = None;
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of(("owner-question", run.id)),
+        egui::ViewportBuilder::default()
+            .with_title("Apassy")
+            .with_inner_size([440.0, 320.0])
+            .with_position(position)
+            .with_resizable(false)
+            .with_always_on_top()
+            .with_active(false),
+        |ui, class| {
+            if class == egui::ViewportClass::EmbeddedWindow {
+                if app.ui.decisions.floating_fallback != Some(run.id) {
+                    app.ui.decisions.floating_fallback = Some(run.id);
+                    select(app, run.id);
+                    app.place = crate::desktop::Place::Decisions;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                return;
+            }
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            ui.label(kit::medium(
+                format!("{} · on this Mac · 1 of {count}", run.agent),
+                Font::Body,
+            ));
+            ui.strong(run.question.reason.headline());
+            egui::ScrollArea::vertical()
+                .max_height(145.0)
+                .show(ui, |ui| {
+                    for item in &run.question.items {
+                        let environment = if item.unconfirmed {
+                            "Unknown".to_owned()
+                        } else {
+                            app.owner_ui
+                                .session
+                                .declaration(item.item_id)
+                                .ok()
+                                .flatten()
+                                .map(|d| environment_label(d.environment).to_owned())
+                                .unwrap_or_else(|| {
+                                    if item.production {
+                                        "Production".to_owned()
+                                    } else {
+                                        "Unknown".to_owned()
+                                    }
+                                })
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(&item.name);
+                            kit::cap(ui, &environment, item.production);
+                        });
+                    }
+                    ui.label("What the agent says you asked");
+                    ui.label(&run.user_request);
+                    ui.small(&run.request_source);
+                    ui.label(&run.purpose);
+                    let command = shell_words(&run.command);
+                    ui.add(Label::new(kit::text(&command, Font::Mono)).truncate())
+                        .on_hover_text(command);
+                });
+            ui.label(timer_text(clock(first.left), Font::Body).color(TIMER));
+            action_bar(ui, run, &mut answer);
+        },
+    );
+    if let Some(answer) = answer {
+        apply(app, ctx, run, answer);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    #[test]
+    fn queue_skips_expired_and_advances_after_answer_elsewhere() {
+        let make = |id, seconds| Waiting {
+            run: PendingRun {
+                id,
+                agent: "Synthetic".into(),
+                command: vec![],
+                cwd: String::new(),
+                env_names: vec![],
+                purpose: String::new(),
+                risk: String::new(),
+                user_request: String::new(),
+                request_source: String::new(),
+                agent_request: String::new(),
+                remember: None,
+                question: QuestionInfo::default(),
+            },
+            left: Duration::from_secs(seconds),
+        };
+        assert!(prompt_queue(&[]).is_none());
+        let mut queue = vec![make(3, 20), make(2, 10), make(1, 0)];
+        let (first, count) = prompt_queue(&queue).unwrap();
+        assert_eq!((first.run.id, count), (2, 2));
+        queue.retain(|w| w.run.id != 2);
+        assert_eq!(prompt_queue(&queue).unwrap().0.run.id, 3);
     }
 }

@@ -1230,7 +1230,7 @@ impl OwnerRequest {
                 environment,
                 ..
             } => format!(
-                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production. The question of agent \"{agent}\" still waits for your answer.",
+                "Allow this run for \"{agent}\" and mark its unknown credentials (including \"{name}\") as {}.",
                 environment.as_str()
             ),
             Self::AnswerSuggestion {
@@ -1953,7 +1953,7 @@ impl DesktopApp {
                 message: "The question no longer offers this correction.".into(),
             }).and_then(|queue| session.correct_environment(queue, &run, item_id, environment, proof)) {
                 Ok(()) => self.set_ok(format!(
-                    "{name} is marked as {}. The question of {agent} still waits: allow it or deny it.",
+                    "Allowed for {agent}. {name} will be marked as {} after the final credential check.",
                     environment.as_str()
                 )),
                 Err(err) => self.set_err(err.message),

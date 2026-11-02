@@ -4,6 +4,12 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+- Let the bouncer use agent-stated tasks when no verified hook task is available, with visible provenance.
+- Permit declared read-only production credentials after model and policy checks; production write/admin still asks the owner.
+- Simplify owner questions to allow or dismiss, add guarded environment-and-allow actions and refusal comments, and show a floating question queue.
+
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.

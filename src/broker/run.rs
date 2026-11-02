@@ -421,12 +421,32 @@ fn hard_rules(
         ), ReasonKind::ForeignHost));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
-        if facts.includes_code && !known.answer.get(index).copied().unwrap_or(false) {
+        if facts.includes_code
+            && ((facts.production
+                || checked
+                    .declarations
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(Declaration::is_production))
+                || !known.answer.get(index).copied().unwrap_or(false))
+        {
             why.push((format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name), ReasonKind::OneTimeCode));
         }
-        if facts.production && !known.answer.get(index).copied().unwrap_or(false) {
+        let production = facts.production
+            || checked
+                .declarations
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(Declaration::is_production);
+        if production
+            && !checked
+                .declarations
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly)
+        {
             let mut text = format!(
-                "\"{}\" is a production credential: you approve each run, unless you allow production for {place}: {}.",
+                "\"{}\" is a production credential with write or admin scope: you approve each run in {place}: {}.",
                 facts.name,
                 action_words(run.action)
             );
@@ -527,7 +547,14 @@ fn route<F: FnMut() -> Result<(), String>>(
             ReasonKind::MissingDeclaration,
         );
     }
-    if !known.answer.is_empty() && known.answer.iter().all(|answer| *answer) {
+    if !checked
+        .declarations
+        .iter()
+        .flatten()
+        .any(Declaration::is_production)
+        && !known.answer.is_empty()
+        && known.answer.iter().all(|answer| *answer)
+    {
         return Route::Answer;
     }
     // An answer of the owner that does not cover this run, for example a run to another
@@ -581,7 +608,13 @@ fn route<F: FnMut() -> Result<(), String>>(
             );
         }
     }
-    if run.pattern {
+    if run.pattern
+        && !checked
+            .declarations
+            .iter()
+            .flatten()
+            .any(Declaration::is_production)
+    {
         return Route::Pattern;
     }
     Route::Model
@@ -624,7 +657,9 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
             AnswerKind::InProject(run.action)
         });
     }
-    if checked.facts.iter().any(|facts| facts.unconfirmed) {
+    if checked.facts.iter().any(|facts| facts.unconfirmed)
+        || checked.declarations.iter().any(Option::is_none)
+    {
         valid.push(AnswerKind::CorrectEnvironment);
     }
     valid
@@ -1036,11 +1071,12 @@ fn run_inner(
     let question_items: Vec<QuestionItem> = items
         .iter()
         .zip(&checked.facts)
-        .map(|(item, facts)| QuestionItem {
+        .enumerate()
+        .map(|(index, (item, facts))| QuestionItem {
             item_id: *item,
             name: facts.name.clone(),
             production: facts.production,
-            unconfirmed: facts.unconfirmed,
+            unconfirmed: facts.unconfirmed || checked.declarations[index].is_none(),
             always_ask: facts.asks_always(),
         })
         .collect();
@@ -1068,6 +1104,7 @@ fn run_inner(
     let mut remembered = false;
     let mut answer_choice: Option<AnswerChoice> = None;
     let mut evaluation_choice: Option<EvaluationChoice> = None;
+    let mut classification_choice = None;
 
     if !needs_approval {
         let outcome = match route {
@@ -1172,6 +1209,8 @@ fn run_inner(
             answer: chosen,
             evaluation: chosen_evaluation,
             attached,
+            refusal_comment,
+            classification,
             ..
         } = match settled {
             Ok(settled) => settled,
@@ -1218,6 +1257,7 @@ fn run_inner(
         };
         answer_choice = chosen;
         evaluation_choice = chosen_evaluation;
+        classification_choice = classification;
         if checked_with == Some(CheckMethod::Companion) {
             logged_decided_by = OWNER_APPROVED_ON_IPHONE;
             ANSWERED_ON_IPHONE.clone_into(&mut answered_on);
@@ -1256,7 +1296,7 @@ fn run_inner(
             | ApprovalOutcome::ApprovedAndGranted => None,
             ApprovalOutcome::Denied => Some((
                 "approval_denied",
-                "The owner denied this run.".to_owned(),
+                super::approvals::owner_refusal(refusal_comment),
                 UseOutcome::Denied,
                 UseDecidedBy::Owner,
             )),
@@ -1388,6 +1428,21 @@ fn run_inner(
                 "",
             );
             return WireResponse::failure("authorization_changed", reason);
+        }
+        // Persist classification only after the original authorization baseline passed.
+        if let Some(environment) = classification_choice {
+            for (index, facts) in checked.facts.iter().enumerate() {
+                if (facts.unconfirmed || checked.declarations[index].is_none())
+                    && vault
+                        .set_declaration_environment(items[index], environment)
+                        .is_err()
+                {
+                    return WireResponse::failure(
+                        "classification_failed",
+                        "Could not save the environment. Nothing ran.",
+                    );
+                }
+            }
         }
         // The opt-in local evaluator stops before preparing the secret environment or starting any
         // process/proxy. This mode is not available through the agent wire protocol.

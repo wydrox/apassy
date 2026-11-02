@@ -25,7 +25,7 @@ The goal closes each open item in ADRs 0001 to 0009. [goal.md](../goal.md) lists
 
 - The owner accepts the risks in ADR 0006 ("What this mode does not protect") for all environments.
 - This acceptance starts when the goal items for isolation, storage, and owner authentication are done. Until then, the real-secret gate stays BLOCKED.
-- A run with an item that has a production declaration always waits for the owner. The model, remembered patterns, and threshold calibration cannot change this. This changes step 5 of the decision order in ADR 0008.
+- A production credential with read-write or admin scope always waits for the owner. As of 2026-11-02, declared read-only production credentials may run when the model confirms task match and all other checks pass (no leak, destruction, rule break, always-ask setting, one-time code, or project-rule violation). Remembered answers and patterns cannot bypass this model check. This changes step 5 of the decision order in ADR 0008.
 
 ### Vault storage and unlock (ADR 0002, ADR 0003)
 
@@ -94,7 +94,7 @@ The goal closes each open item in ADRs 0001 to 0009. [goal.md](../goal.md) lists
 | 0005 | No change. |
 | 0006 | The owner accepts the risks for all environments, with the production rule above. |
 | 0007 | The Touch ID stage uses the Swift helper. |
-| 0008 | A production declaration always waits for the owner. |
+| 0008 | Production read-write/admin always waits; read-only may pass the bouncer (2026-11-02). |
 | 0009 | The open questions are decided. All six steps are in the goal. |
 
 ## Decisions on 2026-09-26, second round
