@@ -19,3 +19,12 @@
   website/changelog. Pending store review is not published.
 - Do not report a complete release until all six are live at the shared version.
   If blocked, identify each unfinished component, its actual version, and the blocker.
+
+# Pull requests and CI
+
+- Open each pull request as a draft (`gh pr create --draft`) and keep it a draft
+  while you still push fixes. Mark it ready (`gh pr ready`) when the work is
+  complete; that runs the full suite, macOS test groups included.
+- A draft run skips the macOS test groups because the account has five macOS
+  runners for all runs. A green draft run is not a green PR: merge only after the
+  run of the ready PR succeeds.

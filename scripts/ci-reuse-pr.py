@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Record PR merge-tree evidence and conservatively select it for main CI reuse."""
+"""Record PR merge-tree evidence and conservatively select it for main CI reuse.
+
+Only a run of a ready (not draft) pull request runs the full suite and records
+evidence. A draft run skips the macOS test groups and records none.
+"""
 
 import argparse
 import hashlib
@@ -12,6 +16,8 @@ import subprocess
 import zipfile
 
 WORKFLOW = '.github/workflows/ci.yml'
+SCHEMA = 2
+FULL_SUITE = 'full'
 
 
 def require(condition, reason):
@@ -50,12 +56,16 @@ def validate_run(run, repository, workflow_id, head):
     require(type(run['run_attempt']) is int and run['run_attempt'] > 0, 'bad attempt')
 
 
-def evidence(run, repository, tree, get):
+def evidence_artifact(run, get):
+    """The evidence artifact of a run, or None: a draft run records no evidence."""
     name = f"ci-tested-tree-{run['id']}-{run['run_attempt']}"
     artifacts = bounded_list(get(f"actions/runs/{run['id']}/artifacts?per_page=100"), 'artifacts')
     matches = [a for a in artifacts if a['name'] == name]
-    require(len(matches) == 1, 'missing or ambiguous artifact')
-    artifact = matches[0]
+    require(len(matches) <= 1, 'ambiguous artifact')
+    return matches[0] if matches else None
+
+
+def evidence(run, artifact, repository, tree, get):
     require(artifact['expired'] is False and artifact['size_in_bytes'] < 65536,
             'expired or oversized artifact')
     data = get(f"actions/artifacts/{artifact['id']}/zip", raw=True)
@@ -65,9 +75,9 @@ def evidence(run, repository, tree, get):
         require(archive.namelist() == ['tested-tree.json'], 'unexpected artifact contents')
         require(archive.getinfo('tested-tree.json').file_size < 16384, 'oversized evidence')
         record = json.loads(archive.read('tested-tree.json'))
-    expected = {'schema': 1, 'repository': repository, 'workflow': WORKFLOW,
-                'run_id': str(run['id']), 'run_attempt': str(run['run_attempt']),
-                'head_sha': run['head_sha'], 'tree': tree}
+    expected = {'schema': SCHEMA, 'suite': FULL_SUITE, 'repository': repository,
+                'workflow': WORKFLOW, 'run_id': str(run['id']),
+                'run_attempt': str(run['run_attempt']), 'head_sha': run['head_sha'], 'tree': tree}
     require(all(record.get(k) == v for k, v in expected.items()), 'conflicting tree evidence')
     tested = record['tested_sha']
     require(re.fullmatch('[0-9a-f]{40}', tested) is not None, 'invalid tested commit')
@@ -92,12 +102,23 @@ def select(repository, commit, tree, get):
     head = pr['head']['sha']
     runs = bounded_list(get(f'actions/workflows/ci.yml/runs?event=pull_request&head_sha={head}&per_page=100'),
                         'workflow_runs')
-    # Multiple runs are conservatively ambiguous, even if they might agree.
-    require(len(runs) == 1, 'missing or conflicting candidate runs')
-    run = get(f"actions/runs/{runs[0]['id']}")
-    require(run['id'] == runs[0]['id'], 'conflicting run ID')
-    validate_run(run, repository, workflow['id'], head)
-    evidence(run, repository, tree, get)
+    candidates = []
+    for listed in runs:
+        run = get(f"actions/runs/{listed['id']}")
+        require(run['id'] == listed['id'], 'conflicting run ID')
+        # A cancelled run, such as a draft run superseded when the PR became ready,
+        # decides nothing. Every other run of this head must have succeeded.
+        if run.get('status') == 'completed' and run.get('conclusion') == 'cancelled':
+            continue
+        validate_run(run, repository, workflow['id'], head)
+        artifact = evidence_artifact(run, get)
+        if artifact is not None:
+            candidates.append((run, artifact))
+    # Only full-suite runs record evidence. Two of them are conservatively
+    # ambiguous, even if they might agree.
+    require(len(candidates) == 1, 'missing or conflicting candidate runs')
+    run, artifact = candidates[0]
+    evidence(run, artifact, repository, tree, get)
     # A rerun starting during the lookup invalidates our evidence.
     require(get(f"actions/runs/{run['id']}") == run, 'candidate changed during lookup')
     return str(run['id'])
@@ -113,6 +134,16 @@ def decide(event, ref, repository, commit, tree, get):
         return False, f'full suite required: {error}'
 
 
+def make_record(env, event, repository, commit, tree):
+    """The evidence of a full-suite PR run. A draft run skips the macOS tests."""
+    require(env['GITHUB_EVENT_NAME'] == 'pull_request', 'only PR runs record evidence')
+    pull = event['pull_request']
+    require(pull.get('draft') is False, 'a draft PR run does not run the full suite')
+    return dict(schema=SCHEMA, suite=FULL_SUITE, repository=repository, workflow=WORKFLOW,
+                run_id=env['GITHUB_RUN_ID'], run_attempt=env['GITHUB_RUN_ATTEMPT'],
+                tested_sha=commit, tree=tree, head_sha=pull['head']['sha'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=['record', 'select'])
@@ -124,11 +155,8 @@ def main():
     require(commit == env['GITHUB_SHA'], 'checkout differs from event commit')
     tree = git('rev-parse', f'{commit}^{{tree}}')
     if args.mode == 'record':
-        require(env['GITHUB_EVENT_NAME'] == 'pull_request', 'only PR runs record evidence')
         event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
-        record = dict(schema=1, repository=repository, workflow=WORKFLOW,
-                      run_id=env['GITHUB_RUN_ID'], run_attempt=env['GITHUB_RUN_ATTEMPT'],
-                      tested_sha=commit, tree=tree, head_sha=event['pull_request']['head']['sha'])
+        record = make_record(env, event, repository, commit, tree)
         args.record.write_text(json.dumps(record) + '\n')
         return
     get = lambda path, **kw: api(f'repos/{repository}/{path}', **kw)

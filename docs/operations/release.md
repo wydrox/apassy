@@ -196,16 +196,27 @@ Later step, not done yet: when every installed app runs 0.5.0 or later, one rele
 
 ## CI duration and binary artifacts
 
-CI runs the quality checks, advisory check, test groups, and the unsigned release build at the same time.
+CI runs the quality checks, advisory check, and test groups at the same time.
 macOS uses three test groups. Linux uses four.
-This keeps the total at five macOS jobs, within the [standard macOS concurrency limit](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners) for Free, Pro, and Team plans.
-Other workflows can still use these shared runner slots.
+The account has five macOS runners, the [standard macOS concurrency limit](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners) for Free, Pro, and Team plans, shared by all runs and workflows.
+A run of a ready pull request uses five macOS jobs: `macos`, `extension`, and the three macOS test groups.
+A run of a draft pull request uses two: it skips the macOS test groups, and so records no evidence for main (below).
+Only a push to `main` or a manual run builds the unsigned release binaries, the sixth macOS job.
+On 2026-11-02, fourteen pull request runs in one hour each queued their macOS jobs for 9 to 36 minutes, while their Linux jobs started at once.
+Open a pull request as a draft while you still push to it, and mark it ready (`gh pr ready`) when it is complete. The ready event runs the full suite.
 The existing `macos` and `linux` checks remain. Release waits for the complete CI workflow to succeed.
+
 `scripts/ci-test-shard.py` reads Cargo metadata to include every target, including new targets.
-Group 0 runs the library tests. The other groups contain all remaining targets, balanced with measured test times.
+The library is one unit for each module of its tests, and `tests/it.rs` one unit for each of its modules; every other target is one unit.
+Each group lists the library tests first and runs its library tests by exact name, so each test runs in exactly one group.
+The groups are balanced with the measured times in `scripts/ci-test-weights.json`.
+A library module without a measurement counts 0.7 seconds for each test.
 Each test process uses `--test-threads=1`.
-Use `python3 scripts/ci-test-shard.py --list --shard-count 3` to see the macOS groups.
+Use `python3 scripts/ci-test-shard.py --list --shard-count 3` to see the macOS groups; it builds and lists the library tests.
 Use `--shard-count 4` for Linux.
+When one group of a green run takes much longer than the others, measure again from that run's logs:
+`python3 scripts/ci-test-times.py RUN_ID > scripts/ci-test-weights.json`.
+Before this split, the library was one unit in group 0: 640 to 920 seconds on Linux, against 300 to 480 seconds for each other group.
 
 Rust dependency caches separate the OS, architecture, compiler, Cargo configuration, lockfile, and job group.
 The release build has its own cache. Only pushes to `main` save these caches; pull requests only restore them.
@@ -233,16 +244,21 @@ The artifact tools require Python 3.11 or later; CI selects Python 3.12.
 Only a push to `main` may reuse a completed, successful CI run from a merged PR
 whose head repository is this repository. The new `reuse-pr` job records
 `github.sha` (the synthetic PR merge commit), its Git tree, PR head, run ID, and
-attempt in a seven-day `ci-tested-tree-RUN-ATTEMPT` artifact. Recording happens in
+attempt in a seven-day `ci-tested-tree-RUN-ATTEMPT` artifact, schema 2 with
+`"suite": "full"`. Only a run of a ready (not draft) PR records it; a draft run
+skips the macOS test groups and records nothing. Recording happens in
 the PR run itself; that entire run must subsequently succeed. The lookup checks
 the exact workflow ID/path, run and attempt, GitHub's artifact SHA-256 digest,
 and the tested commit's tree and merge parent through the Git API. The tested
 tree must equal `git rev-parse HEAD^{tree}` on the main push. PR head SHA alone
 is never evidence of what was tested.
 
-No PR run skips checks. Missing, expired, malformed, ambiguous, failed, fork, or
-API evidence runs the full suite. Multiple associated PRs or candidate runs are
-conservatively treated as ambiguous. A changed main tree also runs the full suite.
+A draft PR run skips the macOS test groups; it is never evidence. Missing, expired,
+malformed, ambiguous, failed, fork, or API evidence runs the full suite. The lookup
+reads every CI run of the PR head: it ignores cancelled runs and draft runs without
+evidence, and every other run must have succeeded. Exactly one run with evidence must
+remain; multiple associated PRs or several full runs are conservatively treated as
+ambiguous. A changed main tree also runs the full suite.
 Existing job names stay stable; reused jobs show as skipped, and the successful
 push run remains the Release gate. The lookup job alone adds `actions: read`.
 Its summary links the reuse decision to the source run ID and exact tree.
