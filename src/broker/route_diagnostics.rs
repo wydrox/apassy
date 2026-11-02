@@ -44,9 +44,9 @@ impl ReasonKind {
     pub fn headline(self) -> &'static str {
         match self {
             Self::MissingTask => "The agent didn't say what you asked it to do.",
-            Self::LowTaskMatch => "The bouncer wasn't sure this fits your task.",
-            Self::ModelUnavailable => "No bouncer is running.",
-            Self::ModelTimeout => "The bouncer didn't answer in time.",
+            Self::LowTaskMatch => "The bouncer brain wasn't sure this fits your task.",
+            Self::ModelUnavailable => "The bouncer brain is not running.",
+            Self::ModelTimeout => "The bouncer brain didn't answer in time.",
             Self::HookUnverified => "The agent task could not be verified in the host transcript.",
             Self::HookAmbiguous => "More than one agent session could be the source of this task.",
             Self::HookFlags => "The command or task context needs your review.",
@@ -58,7 +58,7 @@ impl ReasonKind {
             Self::MissingDeclaration => "This credential has no declaration.",
             Self::UnfitAnswer => "Your earlier answer doesn't cover this run.",
             Self::OneTimeCode => "This run needs a one-time code.",
-            Self::ModelUnsure => "The bouncer wasn't sure this run is safe.",
+            Self::ModelUnsure => "The bouncer brain wasn't sure this run is safe.",
             Self::AccessCheck => "This request didn't pass the access checks.",
             Self::Connector => "This connector operation needs your approval.",
             Self::ModelAllowed => "The bouncer allowed this run.",

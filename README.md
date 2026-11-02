@@ -32,14 +32,14 @@
 
 Coding agents such as Claude Code and Codex need your API keys to do real work. Usually they read them from a `.env` file, and then the key is in the agent's context: it can print it, log it, or send it anywhere, and a prompt injection in a README is enough to ask it to.
 
-Apassy keeps your credentials in an encrypted vault on your Mac and lets agents **use** them without **receiving** them. An agent asks Apassy to run a command with a credential. A local bouncer reads the command against your rules. Normal work runs with the secret in the environment of that one process, anything uncertain waits for you, and what you forbid never runs.
+Apassy keeps your credentials in an encrypted vault on your Mac and lets agents **use** them without **receiving** them. An agent asks Apassy to run a command with a credential. A local bouncer reads the command: the bouncer gate checks your rules and the rule packs, and the bouncer brain, a local model, judges what the rules do not settle. Normal work runs with the secret in the environment of that one process, anything uncertain waits for you, and what you forbid never runs.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     A["Agent<br/>Claude Code · Codex · MCP"] -->|"run a command<br/>with STRIPE_SECRET_KEY"| B["Apassy broker"]
-    B --> C{"Bouncer<br/>your rules · rule packs<br/>local model"}
+    B --> C{"Bouncer<br/>gate: your rules · rule packs<br/>brain: local model"}
     C -->|"normal work"| D["The process gets<br/>the secret in its environment"]
     C -->|"uncertain or production"| E["You approve or deny"]
     C -->|"forbidden"| F["Blocked and logged"]
@@ -49,7 +49,7 @@ flowchart LR
 
 - **Credential values stay out of catalog responses.** Run output masks supplied literal values, but transformed, fragmented, or unrelated secrets may remain. Commands should return only needed non-secret fields. The command receives its credential ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - **Placeholders.** A variable can hold a placeholder that looks like the key. Apassy's proxy puts the real value only into HTTPS requests to the hosts of that credential, and refuses the placeholder anywhere else ([ADR 0011](docs/adr/0011-run-proxy-placeholders.md)).
-- **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential waits for you, unless you allowed production for that project and kind of action ([bouncer](docs/operations/bouncer.md), [ADR 0025](docs/adr/0025-low-friction-access.md)).
+- **The bouncer runs on your Mac.** The bouncer gate (your rules and 64 rule packs) and the bouncer brain (the `apassy-base-v1` model) check every command. A production credential waits for you, unless you allowed production for that project and kind of action ([bouncer](docs/operations/bouncer.md), [ADR 0025](docs/adr/0025-low-friction-access.md)).
 - **It learns.** "Allow ACTION in PROJECT" remembers your answer for the credential, the project, and the kind of action, and the line under Decisions shows how often you were asked this week ([learning](docs/operations/learning.md)).
 - **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vaults, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
 - **Several vaults, synced if you want it.** Keep personal and client credentials apart: each vault has its own passphrase, agents, and rules, and one is open at a time. A vault can sync between your Macs through iCloud Drive, Dropbox, Google Drive, OneDrive, or Syncthing, and changes merge one credential at a time ([several vaults](docs/operations/multiple-vaults.md), [sync](docs/operations/sync.md)).

@@ -14,8 +14,8 @@ The profile denies read and write to:
 - the Apassy data directory (`~/Library/Application Support/Apassy`). This
   directory holds the vaults, the vault list `vaults.json`, the broker socket,
   the owner socket of the command line
-  ([ADR 0017](../adr/0017-owner-command-line.md)), and the Laya model at
-  `.../Apassy/laya`.
+  ([ADR 0017](../adr/0017-owner-command-line.md)), and the bouncer brain (the
+  Laya model) at `.../Apassy/laya`.
 - the vault file. The owner can place it outside the data directory.
 - each other vault file in the vault list that is outside the data directory
   ([several vaults](multiple-vaults.md), ADR 0013).
@@ -196,9 +196,9 @@ first one cannot start (section 5). So the owner turns off the host's own
 sandbox and lets the Apassy profile confine the host and its commands.
 
 This does not weaken the Apassy boundary. The Apassy profile protects the vault,
-the backup, and the Laya model. It denies these paths to the host process, to
-the host's file tools, to every command, and to the MCP servers, because they
-are all child processes of the host.
+the backup, and the bouncer brain (the Laya model). It denies these paths to the
+host process, to the host's file tools, to every command, and to the MCP
+servers, because they are all child processes of the host.
 
 ### Claude Code
 

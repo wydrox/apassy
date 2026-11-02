@@ -95,7 +95,7 @@ python3 tests/isolation/test_fixture_boundary.py
 git diff --check
 ```
 
-The isolation tests need macOS and `sandbox-exec`. The evaluation harness needs the local model; see [bouncer](docs/operations/bouncer.md).
+The isolation tests need macOS and `sandbox-exec`. The evaluation harness needs the bouncer brain (the local model); see [bouncer](docs/operations/bouncer.md).
 
 The integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file. Run one area with a module filter: `cargo test --all-features --test it companion::`. A new test file needs a `mod` line in `tests/it.rs`. The tests share one process and run in parallel: a test that changes process-wide state (the current directory, an environment variable, the active rule set) runs in a child process of the program, as `rule_packs::a_rejected_local_directory_fails_closed` does.
 

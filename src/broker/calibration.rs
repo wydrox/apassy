@@ -152,7 +152,7 @@ fn asks_at(record: &DecisionRecord, thresholds: Thresholds) -> bool {
 
 fn verdict_of(record: &DecisionRecord) -> BouncerVerdict {
     if record.entry.model_facts.is_empty() {
-        BouncerVerdict::Unavailable("no model answer in the log".to_owned())
+        BouncerVerdict::Unavailable("no bouncer brain answer in the log".to_owned())
     } else {
         BouncerVerdict::Scored {
             facts: record
@@ -210,7 +210,7 @@ pub fn propose(records: &[DecisionRecord], current: Thresholds) -> Proposal {
     if fit_owner_decisions < MIN_OWNER_DECISIONS {
         let mut proposal = evaluate(records, current, current);
         proposal.reason = format!(
-            "Not enough owner decisions at the model step: {fit_owner_decisions} of {MIN_OWNER_DECISIONS} in the older part of the log."
+            "Not enough owner decisions at the bouncer brain step: {fit_owner_decisions} of {MIN_OWNER_DECISIONS} in the older part of the log."
         );
         return proposal;
     }

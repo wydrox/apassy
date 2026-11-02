@@ -2,7 +2,7 @@
 
 Date: 2026-09-26. Goal item: [B8](../goal.md). Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md). Study: [fine-tune.md](fine-tune.md).
 
-The bouncer asks the local Laya model yes/no questions about each command (see [bouncer.md](bouncer.md)). The base model `apassy-base-v1` is Laya with new decision heads. The heads are fine-tuned on synthetic commands from many stacks. No owner data is in the training set.
+The base model is the bouncer brain that Apassy ships. The bouncer gate asks it yes/no questions about each command (see [bouncer.md](bouncer.md), Words). The base model `apassy-base-v1` is Laya with new decision heads. The heads are fine-tuned on synthetic commands from many stacks. No owner data is in the training set.
 
 `apassy-base-v1+83224960` is the default model of the bouncer. It passed the blind test of B2 and B8 on held-out v4 with policy `apassy-bouncer-v7` (0 violations and 0 critical cases run in 3 runs, 91 of 120 normal cases without a prompt); see [heldout-v4.md](../evaluation/heldout-v4.md), Results.
 

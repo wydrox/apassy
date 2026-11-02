@@ -2,14 +2,14 @@
 
 Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [ADR 0025](../adr/0025-low-friction-access.md) (execution answers), and [ADR 0029](../adr/0029-bouncer-evaluation-permission.md) (explicit evaluation permission, section 3a). Goal items: B3, B5, B10, and the wait record of N3.
 
-Apassy learns from the owner decisions in two ways:
+Apassy learns from the owner decisions in two ways in the bouncer gate ([bouncer.md](bouncer.md), Words):
 
 - A remembered pattern lets a matching command run after 3 explicit "Approve and remember" approvals (ADR 0009 step 1). Ordinary "Allow once" and "Allow once and enable bouncer" do not add to this count.
 - A calibration lowers the `task_match` level of the model step when the decision log supports it (ADR 0009 step 3).
 
 Both act only at the model step. They never change a hard rule, the production rule (a production item without an owner allowance), a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
 
-A third way is a local fine-tune of the model (ADR 0009 step 5c, goal item B9). The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
+A third way is a local fine-tune of the bouncer brain (ADR 0009 step 5c, goal item B9). It changes only its decision heads. The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
 
 ## 1. Decision log
 
@@ -139,7 +139,7 @@ Proposal:
 4. The held-out part gives the ask rate now and with the proposal, and the misses: owner denials that the proposal allows.
 5. The gate: a replay on all past decisions. The proposal is valid only if it allows no request that the owner denied.
 
-Apply: in Settings > Bouncer, the owner opens "Calibration and models" under "Calibration and learning", clicks "Compute a proposal", then "Apply N%". This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
+Apply: in Settings > Bouncer, the owner opens "Calibration and brain versions" under "Calibration and learning", clicks "Compute a proposal", then "Apply N%". This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
 
 Test: `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it` (`tests/learning.rs`). The owner approves 45 general requests at `task_match` 0.7 and denies 5 at 0.3. The proposal is 0.7, the held-out misses are 0, and the held-out ask rate falls. Before the owner applies it, the broker asks for a request at 0.7. After, the model allows it. A production item still waits. A new owner denial at 0.72 makes the same level invalid, and `apply` refuses it.
 
@@ -149,9 +149,9 @@ Since 0.5.0 the Learning view is not in the window ([ADR 0026](../adr/0026-simpl
 
 - "Ran without you": successful allowed requests this week that did not ask the owner, split into model, pattern, and remembered-answer decisions. Both automatic-use summaries use this same total. Denials, unanswered requests, and manual owner approvals do not count as successful automation; they remain in the applicable decision/question counts.
 - "Remembered patterns": the number of active patterns and of patterns that still learn. `apassy pattern list` lists each pattern with its state (learning with its approvals, active, blocked, or expired) and runs. `apassy pattern remove ID` removes one.
-- The disclosure "Calibration and models" has the calibration ("Threshold calibration"): the active level, "Compute a proposal", the replay numbers, "Apply N%", and "Back to the default (75%)".
-- The same disclosure has the candidate model card ("Candidate model", goal items B9 and B10). [The fine-tune](fine-tune.md), sections 6 to 10, describes the pipeline.
-  - Without a candidate: "No candidate model."
+- The disclosure "Calibration and brain versions" has the calibration ("Threshold calibration"): the active level, "Compute a proposal", the replay numbers, "Apply N%", and "Back to the default (75%)".
+- The same disclosure has the candidate model card ("Candidate brain", goal items B9 and B10). [The fine-tune](fine-tune.md), sections 6 to 10, describes the pipeline.
+  - Without a candidate: "No candidate brain."
   - With a candidate in shadow mode: its version, the shadow decisions (owner decisions that the candidate also answered), the agreement with the owner, the owner denials that the candidate would allow, the requests in shadow mode, the requests without a candidate answer, the requests with the same outcome as the active model, and the command that starts the candidate server.
   - "Promote" is on only when the shadow gate passes: 100 or more shadow decisions, 95% or more agreement, and no owner denial that the candidate would allow (`CandidateAgreement::can_promote`, ADR 0010). Otherwise the card names each threshold that fails. "Promote" needs the owner check (`OwnerAction::PromoteModel`).
   - The training gate: the owner decisions of 300, the owner denials of 30, and the power source. "Train a candidate" is on only when the gate is open. During a training, the card shows the elapsed time against the limit of 60 minutes, and "Stop training".

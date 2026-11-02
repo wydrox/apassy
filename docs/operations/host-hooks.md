@@ -5,14 +5,14 @@ Scope: goal item B6 in [goal.md](../goal.md). Use only synthetic values.
 
 ## 1. What the hook does
 
-The bouncer compares each command with the user request (ADR 0008). Before this change, the agent sent the user request in the `user_request` argument of `apassy_run_with_secrets`. An agent can invent or change that text.
+The bouncer brain compares each command with the user request (ADR 0008). Before this change, the agent sent the user request in the `user_request` argument of `apassy_run_with_secrets`. An agent can invent or change that text.
 
 With the hook, the agent host sends the user request to Apassy directly:
 
 1. The user submits a prompt. The host starts `apassy-hook` (a `UserPromptSubmit` hook) and writes the hook JSON to its stdin.
 2. `apassy-hook` sends the prompt to the broker (`submit_user_request`, [broker contract](../contracts/broker-v0.md) section 3). It uses the agent token, like `apassy-mcp`.
 3. The broker keeps the newest prompt for each agent and host session in memory.
-4. When the agent calls `apassy_run_with_secrets`, the broker finds the hook prompt for the run. The hook prompt replaces the text from the agent. The bouncer gets the hook prompt.
+4. When the agent calls `apassy_run_with_secrets`, the broker finds the hook prompt for the run. The hook prompt replaces the text from the agent. The bouncer brain gets the hook prompt.
 5. Before the broker trusts the hook prompt, it checks the host transcript. The prompt must be the newest user message in the transcript file of the same session.
 6. The question in Decisions and the activity log show the request, its source, and a different text from the agent.
 
@@ -187,7 +187,7 @@ What the hook and the checks stop:
 
 | Attack | Result |
 | --- | --- |
-| The agent writes a false `user_request` argument | The hook prompt replaces it. The card and the log show both texts. The bouncer sees only the hook prompt. |
+| The agent writes a false `user_request` argument | The hook prompt replaces it. The card and the log show both texts. The bouncer brain sees only the hook prompt. |
 | The agent sends a false prompt with `apassy-hook` or with `submit_user_request` | The prompt is not the newest user message in the transcript. Flag `hook_unverified`: the owner decides. |
 | The agent sends an older real prompt again (replay) | The prompt is not the newest user message. Flag `hook_unverified`. |
 | The agent points `transcript_path` to a file that it wrote in another directory, or to the transcript of another session | Flag `hook_unverified`. |
@@ -229,7 +229,7 @@ The `hook_channel` check is the built-in pack `host-hooks` (`packs/host-hooks.js
 | --- | --- |
 | `hook_request_replaces_the_agent_text_and_matches_the_transcript` | The request in the activity log is equal to the newest user prompt of the transcript (read by the test itself). The bouncer state has the hook prompt, not the agent text. The log also has the agent text. |
 | `approval_card_shows_the_source_and_the_difference` | The card data: request, source, and the different agent text |
-| `a_false_hook_request_waits_for_the_owner` | A false prompt, a replay, and a transcript outside the host directories give `hook_unverified`. The model is not called. |
+| `a_false_hook_request_waits_for_the_owner` | A false prompt, a replay, and a transcript outside the host directories give `hook_unverified`. The bouncer brain is not called. |
 | `a_command_that_names_the_hook_channel_waits_for_the_owner` | `apassy-hook`, a transcript file, and `.codex/hooks.json` in a command give `hook_channel` |
 | `codex_hook_request_matches_by_project_directory` | A Codex hook prompt and a run without a session: match by directory, verified in a Codex transcript |
 | `a_lock_ends_the_hook_request` | After a lock and an unlock, the run uses the agent text. A locked vault refuses the hook request, and the hook exits with 0. |

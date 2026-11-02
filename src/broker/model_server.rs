@@ -8,7 +8,7 @@
 //! - [`ModelGate`] is the hook of the broker. The broker calls it just before it asks
 //!   the active model. It never changes the decision policy: a model that does not
 //!   answer makes the run wait for the owner, as before.
-//! - "Install the model" in Settings runs the `uv` commands of section 1 on its own
+//! - "Install the bouncer brain" in Settings runs the `uv` commands of section 1 on its own
 //!   thread ([`ModelServer::install`]). Each command is an argument vector, never a shell.
 //!   The last step downloads the Laya base weights with `tools/basemodel/fetch_weights.py`.
 //! - Without the base weights in the Hugging Face cache ([`weights_cached`]), the first
@@ -609,7 +609,7 @@ pub struct Status {
     pub owned: bool,
     /// The Laya environment has `python` and `laya-serve`.
     pub venv_ready: bool,
-    /// `uv` for "Install the model". Apassy looks for it only while the environment is
+    /// `uv` for "Install the bouncer brain". Apassy looks for it only while the environment is
     /// missing or after a failed install.
     pub uv: Option<PathBuf>,
     /// The arguments of `uv venv` for the Terminal commands. `None`: the environment
@@ -1567,7 +1567,7 @@ pub const WEIGHTS_LATER: &str =
     "The Laya environment is installed. The first start of the model server downloads the weights.";
 
 impl ModelServer {
-    /// "Install the model" in Settings: run the install steps on their own thread. It
+    /// "Install the bouncer brain" in Settings: run the install steps on their own thread. It
     /// returns at once. `Err` when `uv` is missing or an install runs.
     pub fn install(self: &Arc<Self>) -> Result<(), String> {
         let uv = find_uv(&self.host.uv_dirs).ok_or_else(|| UV_MISSING.to_owned())?;
@@ -4047,7 +4047,7 @@ mod tests {
         assert!(fetch.contains("common.base_dir()"), "{fetch}");
     }
 
-    /// "Install the model" downloads the base weights as its own last step, with the
+    /// "Install the bouncer brain" downloads the base weights as its own last step, with the
     /// Python of the environment. A failed download fails the install with the log.
     #[test]
     fn the_install_downloads_the_weights_as_its_own_step() {

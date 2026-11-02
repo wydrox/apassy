@@ -1,6 +1,6 @@
 # Rule packs and provider files
 
-The files here are the tool knowledge of the bouncer, as data.
+The files here are the tool knowledge of the bouncer gate, as data.
 
 | Path | Content | Format | Documentation |
 | --- | --- | --- | --- |

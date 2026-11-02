@@ -204,10 +204,10 @@ The other providers (Anthropic, OpenAI, Resend, SendGrid, Slack, Twilio, Sentry,
 
 ## 8d. Questions and answers (ADR 0025)
 
-The bouncer decides after hard rules/security vetoes, successful inference
+The bouncer gate decides after hard rules/security vetoes, successful inference
 readiness, a usable project, fitting execution answers, the foreign-project check,
 a user request and declaration, and owner-taught patterns. Every remaining request
-reaches the model, including default-source classification and missing evaluation
+reaches the bouncer brain, including default-source classification and missing evaluation
 scope. Defaults require 80% task match. Low confidence asks with the exact failed
 check. A stored evaluation scope cannot cover a foreign declared project. See
 [the bouncer](bouncer.md), section 3.0, and ADR 0031.
@@ -259,7 +259,7 @@ A capture question ("Tool agent wants to capture the output of: /opt/homebrew/bi
 What to expect:
 
 - The agent gets `item_id`, `name`, `env_name`, and a one-line summary such as `GitHub token · GH_TOKEN · production`. Never the value: not in the answer, a question, the activity, the history, or an error.
-- The paste detection (ADR 0025 §4) finds the provider, the variable, the hosts, and the declaration. A value without a signal is unconfirmed production by default; it reaches the model with the stricter 80% task-match check.
+- The paste detection (ADR 0025 §4) finds the provider, the variable, the hosts, and the declaration. A value without a signal is unconfirmed production by default; it reaches the bouncer brain with the stricter 80% task-match check.
 - The item history and the activity log say `Added by AGENT in PROJECT (capture).` The bouncer decides each use of the item as for any other item.
 - An agent changes only the credentials that it made with capture, generate, or save. Any other credential gives `not_owner`.
 - A new value keeps the old one on the item for you (`Vault::restore_previous_value`; the item page will offer it). It goes after the next allowed use of the item, or after 7 days. The declaration becomes the stricter of the old one and the one that the new value shows, with the weaker sources.
