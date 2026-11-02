@@ -72,6 +72,8 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if columns.sidebar == SidebarMode::Float {
         super::sidebar::draw_float(app, &ctx, &pending);
     }
+    #[cfg(feature = "vault")]
+    super::decisions::floating_prompt(app, &ctx, &pending);
     sheets(app, &ctx);
 }
 

@@ -231,8 +231,11 @@ impl OwnerSession {
                 "The question no longer offers this correction.",
             )
         };
-        let mut vault = self.unlocked()?;
-        if environment != Environment::Development {
+        let vault = self.unlocked()?;
+        if !matches!(
+            environment,
+            Environment::Development | Environment::Production
+        ) {
             return Err(no_longer_waiting());
         }
         queue
@@ -246,11 +249,13 @@ impl OwnerSession {
                         &vault.epoch(),
                     )
                     .map_err(|refusal| fail("owner_check_required", refusal.message()))?;
-                vault
-                    .set_declaration_environment(item_id, environment)
-                    .map_err(map_err)
+                Ok::<(), super::super::model::ModelError>(())
             })
-            .ok_or_else(no_longer_waiting)?
+            .ok_or_else(no_longer_waiting)??;
+        if !queue.classify_and_approve(run, environment, item_id, proof) {
+            return Err(no_longer_waiting());
+        }
+        Ok(())
     }
 
     // ---- Credential requests (ADR 0025 §6). ----

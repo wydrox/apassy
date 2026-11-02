@@ -362,6 +362,8 @@ pub struct GrantChoice {
 /// for "Allow in this folder" or a remembered answer what the broker saves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settled {
+    pub refusal_comment: Option<String>,
+    pub classification: Option<crate::vault::Environment>,
     pub outcome: ApprovalOutcome,
     pub method: Option<CheckMethod>,
     pub grant: Option<GrantChoice>,
@@ -377,6 +379,8 @@ impl Settled {
     fn ended(outcome: ApprovalOutcome) -> Self {
         Self {
             outcome,
+            refusal_comment: None,
+            classification: None,
             method: None,
             grant: None,
             answer: None,
@@ -527,6 +531,8 @@ impl ApprovalRefusal {
 /// An answer with the check that the owner did for it. A denial has no check.
 #[derive(Debug, Clone)]
 struct Decision {
+    refusal_comment: Option<String>,
+    classification: Option<crate::vault::Environment>,
     answer: Answer,
     method: Option<CheckMethod>,
     grant: Option<GrantChoice>,
@@ -979,6 +985,68 @@ impl ApprovalQueue {
         true
     }
 
+    /// Refusal text is data returned only on the denied path, never an approval.
+    pub fn deny_with_comment(&self, id: u64, comment: &str) -> bool {
+        let mut state = self.state();
+        if !state.pending.iter().any(|run| run.id == id) {
+            return false;
+        }
+        Self::settle(&mut state, id, Answer::Deny, None, None, None, None);
+        state.decisions.get_mut(&id).unwrap().refusal_comment = Some(refusal_comment(comment));
+        self.changed.notify_all();
+        true
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn classify_and_approve(
+        &self,
+        run: &PendingRun,
+        environment: crate::vault::Environment,
+        item_id: u64,
+        proof: OwnerProof,
+    ) -> bool {
+        let mut state = self.state();
+        if !state.questions.get(&run.id).is_some_and(|q| {
+            proof
+                .check(
+                    &OwnerAction::QuestionDevelopment {
+                        run_id: run.id,
+                        item_id,
+                    },
+                    &q.session,
+                )
+                .is_ok()
+        }) || !run
+            .question
+            .items
+            .iter()
+            .any(|item| item.item_id == item_id && item.unconfirmed)
+            || !matches!(
+                environment,
+                crate::vault::Environment::Development | crate::vault::Environment::Production
+            )
+            || !state.pending.iter().any(|r| r == run)
+            || !state
+                .questions
+                .get(&run.id)
+                .is_some_and(|q| Instant::now() < q.deadline)
+        {
+            return false;
+        }
+        Self::settle(
+            &mut state,
+            run.id,
+            Answer::Approve,
+            Some(proof.method()),
+            None,
+            None,
+            None,
+        );
+        state.decisions.get_mut(&run.id).unwrap().classification = Some(environment);
+        self.changed.notify_all();
+        true
+    }
+
     /// Deny a waiting question and make the agent stricter (ADR 0025 §3f): "Not for this
     /// agent" or "Always ask for this agent" for each item of the question, or
     /// "Disconnect the agent". It takes authority away and needs no owner check.
@@ -1077,6 +1145,8 @@ impl ApprovalQueue {
         state.decisions.insert(
             id,
             Decision {
+                refusal_comment: None,
+                classification: None,
                 answer,
                 method,
                 grant,
@@ -1356,6 +1426,8 @@ impl ApprovalQueue {
                 let outcome = Self::outcome_of(decision.answer);
                 return Ok(Settled {
                     outcome,
+                    refusal_comment: decision.refusal_comment,
+                    classification: decision.classification,
                     method: decision.method,
                     grant: decision.grant,
                     answer: decision.remember,
@@ -1405,6 +1477,32 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+
+    #[test]
+    fn dismissal_comment_is_bounded_plain_text_and_only_a_denial() {
+        let queue = ApprovalQueue::new();
+        let mut pending = run();
+        pending.id = 17;
+        queue.state().pending.push(pending);
+        assert!(queue.deny_with_comment(17, &format!("No\n\r{}", "é".repeat(600))));
+        let mut state = queue.state();
+        let decision = state.decisions.remove(&17).unwrap();
+        assert_eq!(
+            ApprovalQueue::outcome_of(decision.answer),
+            ApprovalOutcome::Denied
+        );
+        assert_eq!(owner_refusal(None), "The owner denied this run.");
+        assert_eq!(
+            owner_refusal(Some("Stop here".into())),
+            "The owner refused: Stop here"
+        );
+        let comment = decision.refusal_comment.unwrap();
+        assert_eq!(comment.chars().count(), 500);
+        assert!(!comment.chars().any(char::is_control));
+        assert!(decision.classification.is_none());
+        drop(state);
+        assert!(!queue.deny_with_comment(999, "wrong run"));
+    }
 
     fn run() -> PendingRun {
         PendingRun {
@@ -2338,4 +2436,22 @@ fn shown_paths_hide_format_characters_and_keep_printable_unicode() {
         shown_path("\u{0600}\u{0891}\u{180E}\u{1343F}\u{FFF9}", usize::MAX),
         "?????"
     );
+}
+
+/// A bounded plain single line; control characters cannot impersonate UI/protocol lines.
+pub(crate) fn refusal_comment(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{2028}' | '\u{2029}'))
+        .take(500)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// Used exclusively by the denied response, never by an authorization path.
+pub(crate) fn owner_refusal(comment: Option<String>) -> String {
+    comment.map_or_else(
+        || "The owner denied this run.".to_owned(),
+        |text| format!("The owner refused: {text}"),
+    )
 }
