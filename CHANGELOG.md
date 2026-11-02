@@ -4,11 +4,6 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-### Changed
-
-- **iPhone:** Match Mac owner choices for known and unknown environments, with signed dismissal comments returned to the agent.
-- **iPhone:** Add a device-local “Ask for Face ID” setting shared by approvals and vault actions in the app. Every time remains the default; AutoFill still authenticates every fill.
-
 ## [0.5.13] - 2026-11-02
 
 ### Added
@@ -20,6 +15,8 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Changed
 
+- **iPhone:** Match Mac owner choices for known and unknown environments, with signed dismissal comments returned to the agent.
+- **iPhone:** Add a device-local “Ask for Face ID” setting shared by approvals and vault actions in the app. Every time remains the default; AutoFill still authenticates every fill.
 - The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
 - Staged updates install when the vault locks, or right away with Restart to update.
 - Make the Touch ID frequency global for all owner actions, including revealing secrets, production approvals, settings and pairing. Replace heartbeat-gap revocation with synchronous lifecycle-helper state checks; lock, sleep, session changes and helper loss still end the window.
@@ -30,8 +27,8 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Upgrade notes
 
-- No vault schema change: schema stays at 23. iPhones on TestFlight 0.5.10 keep receiving the same question cards; the new iPhone answer buttons need a later TestFlight update.
-- The Mac download and in-app auto-update publish with this release. The browser extension changes (remote-debugging bypass, agent fills) reach browsers after a separate Chrome Web Store submission. Relay stays at 0.5.9.
+- No vault schema change: schema stays at 23. iPhones on TestFlight 0.5.10 keep receiving the same question cards and answers; TestFlight 0.5.13 adds the new answer buttons and the Face ID window.
+- Coordinated release: macOS, iOS (TestFlight), browser extension (Chrome Web Store), relay, Linux CLI and website move to 0.5.13 together. The extension reaches browsers after Chrome Web Store review. The relay and Linux CLI have no protocol or schema change.
 
 ## [0.5.12] - 2026-11-02
 
