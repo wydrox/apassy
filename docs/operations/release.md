@@ -53,6 +53,15 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.12 staged app release
+
+The owner approved the bouncer reason headline and privacy-safe route counters for
+0.5.12. Merging the release PR publishes the Mac download and in-app auto-update.
+The vault schema stays at 23: Macs on 0.5.11 and the iPhone on TestFlight 0.5.10
+keep syncing. No TestFlight update is needed. Relay stays at 0.5.9. The Chrome
+Web Store extension update follows separately (0.5.10 is in review); this is not
+yet a completed six-component release.
+
 ## 0.5.11 staged app release
 
 The owner approved the owner window fixes and browser refusal explanations for
