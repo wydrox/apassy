@@ -2395,6 +2395,8 @@ pub struct PendingJoin {
     code: Zeroizing<String>,
     /// When the next poll may ask the relay, and the wait after the next failure.
     retry: Mutex<(Instant, Duration)>,
+    /// The first wait after a failure that can pass: [`JOIN_RETRY_FIRST`].
+    retry_first: Duration,
     /// The link id on the relay.
     pub link_id: u64,
     /// The team name.
@@ -2502,11 +2504,21 @@ impl PendingJoin {
             session: Arc::new(Session::new(url, &team_id, key, None)),
             code,
             retry: Mutex::new((Instant::now(), Duration::ZERO)),
+            retry_first: JOIN_RETRY_FIRST,
             link_id: answer.id,
             team: answer.team,
             safety,
             expires_at: answer.expires_at.min(unix_now().saturating_add(600)),
         })
+    }
+
+    /// The join with another first wait after a failure that can pass, for tests that
+    /// cannot wait the 2 s of the app.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_first_retry_wait(mut self, wait: Duration) -> Self {
+        self.retry_first = wait;
+        self
     }
 
     /// Ask the relay whether the other Mac confirmed (every 5 s, section 7.2 step 4).
@@ -2541,7 +2553,7 @@ impl PendingJoin {
                 error if is_transient(error) => {
                     let mut retry = lock(&self.retry);
                     let wait = if retry.1.is_zero() {
-                        JOIN_RETRY_FIRST
+                        self.retry_first
                     } else {
                         (retry.1 * 2).min(JOIN_RETRY_MAX)
                     };
@@ -2673,6 +2685,12 @@ impl JoinedDevice {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_join_waits_2_seconds_after_the_first_failure_that_can_pass() {
+        assert_eq!(super::JOIN_RETRY_FIRST, std::time::Duration::from_secs(2));
+        assert_eq!(super::JOIN_RETRY_MAX, std::time::Duration::from_secs(60));
+    }
+
     use super::*;
     use crate::sync::relay_crypto::{decode_b64u, is_hash_hex};
 
