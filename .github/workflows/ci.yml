@@ -240,11 +240,18 @@ jobs:
   # The tests of the relay crate (ADR 0037) and of the vault core of the iPhone app
   # (ADR 0023), and the relay end-to-end script with the real binaries. Both crates
   # use the apassy library with the `vault` feature only, so one build serves both.
+  # Two jobs build the same targets and each runs one slice of the tests; the second
+  # also runs the doc tests and the end-to-end script. Both use one cache key.
   # The linux job runs their Clippy, the macOS job checks the format (`cargo fmt --all`).
   relay:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    name: relay (${{ matrix.slice }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2]
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
@@ -267,11 +274,16 @@ jobs:
       - name: Run the relay and iPhone vault core tests
         env:
           NEXTEST_TEST_THREADS: "8"
-        run: cargo nextest run --profile ci --offline --locked -p apassy-relay -p apassy-core
+          SLICE: ${{ matrix.slice }}
+        run: >-
+          cargo nextest run --profile ci --offline --locked -p apassy-relay -p apassy-core
+          --partition "slice:$SLICE/2"
       # nextest does not run doc tests.
       - name: Run the relay and iPhone vault core doc tests
+        if: matrix.slice == 2
         run: cargo test --offline --locked -p apassy-relay -p apassy-core --doc
       - name: Run the relay end-to-end script
+        if: matrix.slice == 2
         run: bash crates/apassy-relay/scripts/e2e.sh
 
   relay-worker:
@@ -332,8 +344,10 @@ jobs:
           key: ${{ steps.audit-cache.outputs.cache-primary-key }}
 
   # The Rust tests of the apassy package run with cargo-nextest: each test in its own
-  # process, several at a time (.config/nextest.toml). Each OS splits the tests into
-  # two slices; `--partition slice:K/2` gives each test to exactly one of them.
+  # process, several at a time (.config/nextest.toml). Linux splits the tests into
+  # four slices and macOS into two; `--partition slice:K/N` gives each test to
+  # exactly one slice of its OS. The tests use the processors of the runner fully,
+  # so a slice takes about 1/N of the CPU time of the suite.
   tests:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
@@ -346,9 +360,14 @@ jobs:
         # runs four macOS jobs (two test groups, macos, extension), and a push to
         # main five (release-binaries): within the five-runner macOS limit.
         os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-24.04"]' || '["macos-15", "ubuntu-24.04"]') }}
-        shard: [1, 2]
+        shard: [0, 1, 2, 3]
+        exclude:
+          - os: macos-15
+            shard: 2
+          - os: macos-15
+            shard: 3
     env:
-      TEST_SHARD_COUNT: 2
+      TEST_SHARD_COUNT: ${{ matrix.os == 'macos-15' && 2 || 4 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -367,15 +386,15 @@ jobs:
         run: cargo fetch --locked
       - name: Install cargo-nextest 0.9.150
         run: bash scripts/ci-install-nextest.sh
-      # Most tests wait (for a timeout, a child process, or a socket) rather than
-      # compute, so each runner runs twice as many tests as it has processors.
+      # Many tests wait (for a timeout, a child process, or a socket), so each runner
+      # runs twice as many tests as it has processors. Slices count from 1.
       - name: Run test group
         env:
           TEST_SHARD: ${{ matrix.shard }}
           NEXTEST_TEST_THREADS: ${{ matrix.os == 'macos-15' && '6' || '8' }}
         run: >-
           cargo nextest run --profile ci --offline --locked --all-features --all-targets
-          --partition "slice:$TEST_SHARD/$TEST_SHARD_COUNT"
+          --partition "slice:$((TEST_SHARD + 1))/$TEST_SHARD_COUNT"
 
   release-binaries:
     # No signing credentials enter this job. Its artifact is eligible for Release

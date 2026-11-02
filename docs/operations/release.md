@@ -209,7 +209,7 @@ Later step, not done yet: when every installed app runs 0.5.0 or later, one rele
 ## CI duration and binary artifacts
 
 CI runs the quality checks, advisory check, and test groups at the same time.
-macOS and Linux each use two test groups.
+macOS uses two test groups. Linux uses four.
 The account has five macOS runners, the [standard macOS concurrency limit](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners) for Free, Pro, and Team plans, shared by all runs and workflows.
 A run of a ready pull request uses four macOS jobs: `macos`, `extension`, and the two macOS test groups.
 A run of a draft pull request uses two: it skips the macOS test groups, and so records no evidence for main (below).
@@ -219,17 +219,18 @@ Open a pull request as a draft while you still push to it, and mark it ready (`g
 The existing `macos` and `linux` checks remain. Release waits for the complete CI workflow to succeed.
 
 The test groups run the Rust tests of the apassy package with [cargo-nextest](https://nexte.st), version 0.9.150, which `scripts/ci-install-nextest.sh` installs after it checks the SHA-256 of the release archive.
-Each group runs `cargo nextest run --profile ci --offline --locked --all-features --all-targets --partition slice:K/2`.
-The slices take every target of the package from Cargo, and each test is in exactly one slice.
+Each group runs `cargo nextest run --profile ci --offline --locked --all-features --all-targets --partition slice:K/N`, with N = 2 on macOS and 4 on Linux.
+The slices take every target of the package from Cargo, and each test is in exactly one slice of its OS.
 nextest runs each test in its own process, so the tests do not share process-wide state (the active rule packs, the live-wait registry, the relay rate limits, the sync workers).
-A Linux group runs eight tests at a time and a macOS group six: twice the processors of the runner, because most tests wait for a timeout, a child process, or a socket.
+A Linux group runs eight tests at a time and a macOS group six: twice the processors of the runner, because many tests wait for a timeout, a child process, or a socket.
+The processors are still the limit: under nextest the tests keep all of them busy, so more groups, not more threads, make a group shorter.
 A test that uses a resource outside its process (a fixed port, a fixed path, an environment-dependent location, the Keychain) runs in the `serial` test group of `.config/nextest.toml`, one at a time.
 On macOS, the native helper tests (`it::native_helper::`) are in it: they build the Swift helper and notifier into fixed paths.
 nextest stops a test after five minutes.
 nextest does not run doc tests: the `linux` and `macos` jobs run `cargo test --features vault --doc`, and the `relay` job runs the doc tests of the relay and the iPhone vault core.
 
-The `relay` job tests the relay crate and the iPhone vault core (`ios/ApassyCore`) with one nextest run, `-p apassy-relay -p apassy-core`, then runs the relay end-to-end script.
-Both crates use the apassy library with the `vault` feature only, so it and SQLCipher build once.
+The two `relay (K)` jobs test the relay crate and the iPhone vault core (`ios/ApassyCore`) with `cargo nextest run -p apassy-relay -p apassy-core --partition slice:K/2`; `relay (2)` also runs their doc tests and the relay end-to-end script.
+Both crates use the apassy library with the `vault` feature only, so it and SQLCipher build once in each job, and both jobs share the cache key `dev-relay`.
 The `linux` job runs Clippy for both crates.
 The vault core has no macOS code; the `macos` job keeps the Swift and Xcode checks.
 
