@@ -3,8 +3,8 @@
 //! Passkey export for Credential Exchange: only canonical passkeys leave the vault, the
 //! key is the normalized PKCS #8 form, and the export record has no values. A conflict
 //! copy of a credential that a normal item has, active or archived, is never a
-//! candidate. When the owner deletes each normal item with the credential, the restored
-//! copy is the candidate (tests/passkey_conflict_recovery.rs has more recovery cases).
+//! candidate. The case where the owner deletes each normal item with the credential, so
+//! the restored copy is the candidate, is in tests/passkey_conflict_recovery.rs.
 //! Synthetic values only.
 
 use apassy::contracts::CredentialKind;
@@ -302,38 +302,6 @@ fn a_conflict_copy_is_never_a_candidate_even_when_the_original_is_archived() {
         &public_point(&export)
     ));
     not_found(a.sign_passkey(copy, RP, &credential_id, &HASH));
-    not_found(a.export_passkey(copy));
-}
-
-#[test]
-fn a_restored_copy_is_the_candidate_after_the_original_is_deleted() {
-    let dir = TempDir::new().unwrap();
-    let (mut a, original, copy, credential_id) = conflict(&dir);
-    let point = public_point(&a.export_passkey(original).unwrap());
-    a.set_archived(copy, false).unwrap();
-    // The original (a normal item) has the credential: the copy is not the candidate.
-    not_found(a.sign_passkey(copy, RP, &credential_id, &HASH));
-    not_found(a.export_passkey(copy));
-    // The owner deletes the original. The restored copy has the last key of the
-    // credential, so it is the candidate.
-    let revision = a.details(original).unwrap().summary.revision;
-    a.delete(original, revision).unwrap();
-    let listed = a.all_passkeys().unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].item_id, copy);
-    let export = a.export_passkey(copy).unwrap();
-    assert_eq!(export.info.credential_id, credential_id);
-    assert_eq!(public_point(&export), point);
-    assert!(signs_with(&a, copy, &credential_id, &point));
-    // The export imports into another vault and signs for the same point.
-    let mut fresh = vault(&dir, "fresh.db");
-    let imported = fresh
-        .import_passkey(import(&export.pkcs8, credential_id.clone()))
-        .unwrap();
-    assert!(signs_with(&fresh, imported, &credential_id, &point));
-    // Archived again, the copy is not the candidate.
-    a.set_archived(copy, true).unwrap();
-    assert!(a.all_passkeys().unwrap().is_empty());
     not_found(a.export_passkey(copy));
 }
 

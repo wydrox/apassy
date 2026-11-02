@@ -202,7 +202,7 @@ fn a_passkey_lost_to_a_later_password_edit_signs_from_the_restored_copy() {
 
     // The export has the key of the registration, and it imports into another vault.
     let export = a.export_passkey(copy).unwrap();
-    let exported_point = EcdsaKeyPair::from_pkcs8(
+    let export_point = EcdsaKeyPair::from_pkcs8(
         &ECDSA_P256_SHA256_ASN1_SIGNING,
         &export.pkcs8,
         &SystemRandom::new(),
@@ -211,7 +211,7 @@ fn a_passkey_lost_to_a_later_password_edit_signs_from_the_restored_copy() {
     .public_key()
     .as_ref()
     .to_vec();
-    assert!(exported_point == point, "the export has the registered key");
+    assert!(export_point == point, "the export has the registered key");
     let import = |pkcs8: &[u8]| PasskeyImport {
         rp_id: export.info.rp_id.clone(),
         credential_id: export.info.credential_id.clone(),
@@ -235,6 +235,46 @@ fn a_passkey_lost_to_a_later_password_edit_signs_from_the_restored_copy() {
     assert!(a.all_passkeys().unwrap().is_empty());
     a.set_archived(copy, false).unwrap();
     assert!(signs_with(&a, copy, &credential_id, &point));
+
+    // The copy archived again, the owner deletes the winning version. The copy stays
+    // archived: only an explicit restore makes it sign.
+    a.set_archived(copy, true).unwrap();
+    let revision = a.details(original).unwrap().summary.revision;
+    a.delete(original, revision).unwrap();
+    assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&None));
+    assert!(a.is_archived(copy).unwrap());
+    assert!(a.all_passkeys().unwrap().is_empty());
+    not_found(a.sign_passkey(copy, RP, &credential_id, &HASH));
+    not_found(a.export_passkey(copy));
+    // Restored after the delete, the copy is the one passkey of the credential.
+    a.set_archived(copy, false).unwrap();
+    let listed = a.all_passkeys().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].item_id, copy);
+    assert!(signs_with(&a, copy, &credential_id, &point));
+    // The export after the delete has the key of the registration, and it signs in
+    // another vault.
+    let export = a.export_passkey(copy).unwrap();
+    assert_eq!(exported_point(&a, copy), point);
+    let mut other = vault(&dir, "fresh-after-delete.db");
+    let imported = other
+        .import_passkey(PasskeyImport {
+            rp_id: export.info.rp_id.clone(),
+            credential_id: export.info.credential_id.clone(),
+            user_handle: export.info.user_handle.clone(),
+            user_name: export.info.user_name.clone(),
+            user_display_name: export.info.user_display_name.clone(),
+            pkcs8: Zeroizing::new(export.pkcs8.to_vec()),
+            title: String::new(),
+            attach: None,
+        })
+        .unwrap();
+    assert!(signs_with(&other, imported, &credential_id, &point));
+    // Archived again after the delete, the copy stops signing.
+    a.set_archived(copy, true).unwrap();
+    assert!(a.all_passkeys().unwrap().is_empty());
+    not_found(a.sign_passkey(copy, RP, &credential_id, &HASH));
+    not_found(a.export_passkey(copy));
 }
 
 #[test]
@@ -392,51 +432,6 @@ fn a_normal_item_with_the_credential_has_priority_active_or_archived() {
     a.delete(normal_on_a, revision).unwrap();
     assert_eq!(listed(&a), [copy]);
     assert!(signs_with(&a, copy, &credential_id, &point));
-}
-
-#[test]
-fn a_restored_copy_signs_after_its_original_is_deleted() {
-    let dir = TempDir::new().unwrap();
-    let (mut a, _b, original, copy, created) = lost_passkey(&dir);
-    let credential_id = created.credential_id.clone();
-    let point = point(&created);
-    // The owner deletes the winning version first. The copy stays archived: only an
-    // explicit restore makes it sign.
-    let revision = a.details(original).unwrap().summary.revision;
-    a.delete(original, revision).unwrap();
-    assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&None));
-    assert!(a.is_archived(copy).unwrap());
-    assert!(a.all_passkeys().unwrap().is_empty());
-    not_found(a.sign_passkey(copy, RP, &credential_id, &HASH));
-    not_found(a.export_passkey(copy));
-
-    a.set_archived(copy, false).unwrap();
-    let listed = a.all_passkeys().unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].item_id, copy);
-    assert!(signs_with(&a, copy, &credential_id, &point));
-    // The export has the key of the registration, and it signs in another vault.
-    let export = a.export_passkey(copy).unwrap();
-    assert_eq!(exported_point(&a, copy), point);
-    let mut fresh = vault(&dir, "fresh.db");
-    let imported = fresh
-        .import_passkey(PasskeyImport {
-            rp_id: export.info.rp_id.clone(),
-            credential_id: export.info.credential_id.clone(),
-            user_handle: export.info.user_handle.clone(),
-            user_name: export.info.user_name.clone(),
-            user_display_name: export.info.user_display_name.clone(),
-            pkcs8: Zeroizing::new(export.pkcs8.to_vec()),
-            title: String::new(),
-            attach: None,
-        })
-        .unwrap();
-    assert!(signs_with(&fresh, imported, &credential_id, &point));
-    // Archived again, the copy stops signing.
-    a.set_archived(copy, true).unwrap();
-    assert!(a.all_passkeys().unwrap().is_empty());
-    not_found(a.sign_passkey(copy, RP, &credential_id, &HASH));
-    not_found(a.export_passkey(copy));
 }
 
 #[test]
