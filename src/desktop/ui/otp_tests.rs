@@ -392,11 +392,12 @@ fn the_code_has_the_digits_and_the_seconds_of_the_period() {
 }
 
 #[test]
-fn the_code_is_masked_until_the_owner_shows_it() {
+fn show_code_asks_for_the_code_of_that_field_and_not_for_the_password() {
     let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = app_with_login(&dir);
+    let (mut app, item_id) = app_with_login(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
+    // The code is masked until the owner shows it.
     for expected in ["One-time password", "Show code", MASKED_CODE] {
         assert!(
             window.text.contains(expected),
@@ -417,14 +418,8 @@ fn the_code_is_masked_until_the_owner_shows_it() {
         window.text
     );
     assert_eq!(window.clipboard_writes, 0);
-}
 
-#[test]
-fn show_code_asks_for_the_code_of_that_field_and_not_for_the_password() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = app_with_login(&dir);
-    let mut window = Window::new();
-    window.idle(&mut app);
+    // Show code asks for the code of that field only.
     window.click(&mut app, "Show code");
     let check = app.owner.check.as_ref().expect("the owner check opens");
     let OwnerRequest::ShowCode { item_id: id, field } = &check.request else {
@@ -529,6 +524,16 @@ fn a_shown_code_does_not_change_the_generic_show_of_the_password() {
     pass_owner_check(&mut app);
     window.idle(&mut app);
     assert!(shows_a_current_code(&window.text), "{}", window.text);
+    // A shown code has Hide, Copy code and its seconds, and no mask or seed.
+    for expected in ["Hide", "Copy code", "s"] {
+        assert!(
+            window.text.contains(expected),
+            "{expected}: {}",
+            window.text
+        );
+    }
+    assert!(!window.text.contains(MASKED_CODE), "{}", window.text);
+    window.assert_no_seed();
     // The secret section still offers "Show": the password is masked.
     assert!(window.has("Show"), "{}", window.text);
     assert!(!window.text.contains(PASSWORD), "{}", window.text);
@@ -539,31 +544,18 @@ fn a_shown_code_does_not_change_the_generic_show_of_the_password() {
         "{:?}",
         check.request.action()
     );
-}
 
-#[test]
-fn a_shown_code_follows_the_clock_and_hides_with_the_values() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = app_with_login(&dir);
-    show_code(&mut app, item_id, otp::LABEL);
-    let mut window = Window::new();
-    window.idle(&mut app);
-    assert!(shows_a_current_code(&window.text), "{}", window.text);
-    for expected in ["Hide", "Copy code", "s"] {
-        assert!(
-            window.text.contains(expected),
-            "{expected}: {}",
-            window.text
-        );
-    }
-    assert!(!window.text.contains(MASKED_CODE), "{}", window.text);
-    window.assert_no_seed();
-
+    // The shown code hides with the values: the page masks it again.
+    app.close_owner_check(None);
     app.owner_ui.session.hide(item_id).expect("hide");
     window.idle(&mut app);
-    assert!(window.text.contains("Show code"), "{}", window.text);
-    assert!(window.text.contains(MASKED_CODE), "{}", window.text);
-    assert!(!shows_any_current_digits(&window.text), "{}", window.text);
+    assert!(window.text.contains("Show code"), "after hide: {}", window.text);
+    assert!(window.text.contains(MASKED_CODE), "after hide: {}", window.text);
+    assert!(
+        !shows_any_current_digits(&window.text),
+        "after hide: {}",
+        window.text
+    );
 }
 
 #[test]
@@ -1094,7 +1086,7 @@ fn app_with_uri_label(dir: &TempDir) -> (DesktopApp, u64) {
 }
 
 #[test]
-fn a_link_under_a_custom_label_gets_the_code_controls_and_keeps_its_label() {
+fn a_link_under_a_custom_label_shows_only_its_own_code() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, item_id) = app_with_uri_label(&dir);
     // The owner store keeps the label as typed. It marks the detail, and it gives no seed.
@@ -1126,23 +1118,15 @@ fn a_link_under_a_custom_label_gets_the_code_controls_and_keeps_its_label() {
     assert!(window.has(NOTES_LABEL), "{}", window.text);
     assert!(!window.text.contains("plain recovery text"));
     window.click(&mut app, "Show code");
-    let request = &app.owner.check.as_ref().expect("check").request;
+    let open = &app.owner.check.as_ref().expect("check").request;
     assert_eq!(
-        *request,
+        *open,
         OwnerRequest::ShowCode {
             item_id,
             field: detail_field_name(URI_LABEL),
-        }
+        },
+        "the open check asks for the code of the custom label"
     );
-}
-
-#[test]
-fn a_link_under_a_custom_label_shows_only_its_own_code() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = app_with_uri_label(&dir);
-    let mut window = Window::new();
-    window.idle(&mut app);
-    window.click(&mut app, "Show code");
     let request = pass_owner_check(&mut app);
     let field = detail_field_name(URI_LABEL);
     assert_eq!(
