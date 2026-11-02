@@ -4,6 +4,8 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-11-02
+
 ### Added
 
 - Add `apassy_fill_in_browser` for agent website logins, with broker authorization, saved-site binding, and status-only responses.
@@ -20,6 +22,11 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - Permit declared read-only production credentials after model and policy checks; production write/admin still asks the owner.
 - Simplify owner questions to allow or dismiss, add guarded environment-and-allow actions and refusal comments, and show a floating question queue.
 - Keep v1 remote question cards so old iPhones keep working; accept new signed allow/classify/dismiss answer choices, including bounded refusal comments, alongside legacy kinds. Card v2 publication stays off.
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. iPhones on TestFlight 0.5.10 keep receiving the same question cards; the new iPhone answer buttons need a later TestFlight update.
+- The Mac download and in-app auto-update publish with this release. The browser extension changes (remote-debugging bypass, agent fills) reach browsers after a separate Chrome Web Store submission. Relay stays at 0.5.9.
 
 ## [0.5.12] - 2026-11-02
 
@@ -600,7 +607,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.12...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.13...HEAD
+[0.5.13]: https://github.com/wydrox/apassy/compare/v0.5.12...v0.5.13
 [0.5.12]: https://github.com/wydrox/apassy/compare/v0.5.11...v0.5.12
 [0.5.0]: https://github.com/wydrox/apassy/releases/tag/v0.5.0
 [0.4.1]: https://github.com/wydrox/apassy/releases/tag/v0.4.1
