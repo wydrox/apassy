@@ -991,6 +991,8 @@ struct MockWorker {
     hang: Arc<AtomicBool>,
     status: Arc<AtomicU16>,
     stop: Arc<AtomicBool>,
+    /// When each call arrived, in the order of `calls`.
+    times: Arc<Mutex<Vec<Instant>>>,
 }
 
 impl MockWorker {
@@ -1004,6 +1006,8 @@ impl MockWorker {
         let status = Arc::new(AtomicU16::new(200));
         let http_status = status.clone();
         let (seen, set, slow, done) = (calls.clone(), answers.clone(), hang.clone(), stop.clone());
+        let times: Arc<Mutex<Vec<Instant>>> = Arc::default();
+        let arrived = times.clone();
         std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 let Ok(Some(mut request)) = server.recv_timeout(Duration::from_millis(100)) else {
@@ -1017,7 +1021,10 @@ impl MockWorker {
                 let mut text = String::new();
                 request.as_reader().read_to_string(&mut text).unwrap();
                 let body: Value = serde_json::from_str(&text).unwrap();
-                seen.lock().unwrap().push((secret, body.clone()));
+                let mut seen_calls = seen.lock().unwrap();
+                arrived.lock().unwrap().push(Instant::now());
+                seen_calls.push((secret, body.clone()));
+                drop(seen_calls);
                 let set = set.clone();
                 let slow = slow.load(Ordering::Relaxed);
                 let status = http_status.load(Ordering::Relaxed);
@@ -1053,6 +1060,7 @@ impl MockWorker {
             hang,
             status,
             stop,
+            times,
         }
     }
 
@@ -1780,9 +1788,9 @@ fn the_request_time_of_a_question_call_is_taken_after_its_body() {
 
 #[test]
 fn push_retries_worker_and_apns_transient_failures_with_backoff() {
-    // Retries come 1, 2, 4 units after a call (plus up to 2 units of jitter); the unit
-    // is longer than the moment that `calls` waits for a wrong extra call.
-    let unit = Duration::from_millis(300);
+    // Retries come 1, 2, 4 units after a call (plus up to 2 units of jitter). Two units
+    // are about three times the moment that `calls` waits for a wrong extra call.
+    let unit = Duration::from_millis(500);
     for status in [429, 503] {
         let worker = MockWorker::start();
         worker.status.store(status, Ordering::Relaxed);
@@ -1795,10 +1803,10 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
         let phone = add_device(&relay, &mac, "iPhone");
         let token = token_of('a');
         assert_eq!(put_token(&relay, &phone, &token, "production").0, 200);
-        let began = Instant::now();
         ask(&relay, &mac, &qid(70), "member");
         assert_eq!(worker.calls(2).len(), 2, "HTTP {status} must retry");
-        assert!(began.elapsed() >= unit, "retry has backoff");
+        let times = worker.times.lock().unwrap().clone();
+        assert!(times[1] - times[0] >= unit, "retry has backoff");
         worker.status.store(200, Ordering::Relaxed);
         worker
             .answers
@@ -1825,7 +1833,7 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
 fn a_slow_team_cannot_block_another_teams_push_and_timeout_is_retried() {
     let worker = MockWorker::start();
     // The hanging call times out after 4 s instead of 10 s: still longer than the
-    // second team needs to post its question.
+    // second team needs to post its question, and twice the bound below.
     let push = worker.config_with(Duration::from_secs(4), Duration::from_millis(300));
     let mut relay = start_with(
         |config| config.push = Some(push),
@@ -1846,7 +1854,7 @@ fn a_slow_team_cannot_block_another_teams_push_and_timeout_is_retried() {
     ask(&relay, &other, &qid(73), "member");
     let calls = worker.calls(2);
     assert!(
-        began.elapsed() < Duration::from_secs(5),
+        began.elapsed() < Duration::from_secs(2),
         "another team bypasses slow sender"
     );
     assert_eq!(calls[1].1["tokens"], json!([token_of('b')]));

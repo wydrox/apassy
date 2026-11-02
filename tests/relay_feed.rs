@@ -2047,7 +2047,7 @@ fn a_flood_of_actions_that_do_not_open_leaves_activity_alone() {
     let phone = world.phone("Test iPhone", answer_key());
     // The early wait is the production 5 s (`QuestionsConfig::default`) scaled down.
     world.start(QuestionsConfig {
-        feed_early_wait: Duration::from_secs(1),
+        feed_early_wait: Duration::from_secs(2),
         ..config()
     });
     phone.wait_feed(&world, "a feed", |_| true);
@@ -2260,9 +2260,9 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
             .count()
     };
     world.relay.rate_feed_reads(1);
-    // The pause is the production minute (`QuestionsConfig::default`) scaled down.
-    let pause = Duration::from_millis(1_500);
-    let started = Instant::now();
+    // The pause is the production minute (`QuestionsConfig::default`) scaled down, and
+    // longer than the first back-off of an ordinary failure (2 s).
+    let pause = Duration::from_secs(3);
     world.start(QuestionsConfig {
         feed_rate_wait: pause,
         ..config()
@@ -2270,6 +2270,8 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
     wait_until("the refused read-back", || {
         (reads(&world) == 1).then_some(())
     });
+    // At most one poll of `wait_until` after the refused read.
+    let refused = Instant::now();
     // A tick is 50 ms: a loop would have read about 16 times by now.
     std::thread::sleep(Duration::from_millis(800));
     assert_eq!(reads(&world), 1, "one read, then the pause");
@@ -2280,7 +2282,7 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
         let start = Instant::now();
         loop {
             if world.feed_puts() > 0 {
-                break started.elapsed();
+                break refused.elapsed();
             }
             assert!(
                 start.elapsed() < Duration::from_secs(90),
@@ -2289,7 +2291,7 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
             std::thread::sleep(Duration::from_millis(100));
         }
     };
-    assert!(put >= pause, "{put:?}");
+    assert!(put >= pause - Duration::from_millis(100), "{put:?}");
     assert_eq!(reads(&world), 2, "one read-back after the pause");
     phone.wait_feed(&world, "the feed after the pause", |_| true);
 }

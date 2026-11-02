@@ -1257,7 +1257,9 @@ fn a_feed_rate_answer_pauses_the_feed_reads_for_a_minute() {
         call(&setup.phone, json!({"op": "lock"}));
         assert_eq!(waiting.join().unwrap(), "locked");
     });
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // The lock comes after 0.5 s and a step of the pause is 200 ms; a pause that the
+    // lock does not end lasts FEED_RATE_PAUSE.
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
