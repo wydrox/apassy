@@ -2569,7 +2569,26 @@ fn owner_window_touch_id_setup_seeds_only_after_fresh_passphrase() {
     let window = app.owner_ui.session.owner_window.clone();
     window.configure(crate::broker::approvals::OwnerFrequency::OneMinute);
     window.observe(true);
-    for (passphrase, verified) in [(PASS, true), ("incorrect-synthetic-passphrase", false)] {
+    // The 2026-11-02 global-window decision still requires the actual passphrase
+    // for Touch ID setup. Isolate seeding from a ticket left by an earlier success,
+    // and check that even an existing ticket cannot authorize a wrong input.
+    for (passphrase, verified, warm) in [
+        (PASS, true, false),
+        ("incorrect-synthetic-passphrase", false, false),
+        ("incorrect-synthetic-passphrase", false, true),
+        ("", false, true),
+    ] {
+        window.invalidate();
+        if warm {
+            window.seed(
+                app.owner_ui.session.epoch().unwrap(),
+                crate::broker::approvals::CheckMethod::Passphrase,
+                window.generation(),
+            );
+        }
+        if helper.with_extension("waiting").exists() {
+            std::fs::remove_file(helper.with_extension("waiting")).unwrap();
+        }
         app.owner.unlock.setup_passphrase = passphrase.into();
         app.start_touch_id_setup(&ctx);
         if verified {
@@ -2604,8 +2623,20 @@ fn owner_window_touch_id_setup_seeds_only_after_fresh_passphrase() {
             window
                 .ticket(app.owner_ui.session.epoch().unwrap())
                 .is_some(),
-            verified,
+            verified || warm,
             "only a freshly verified passphrase can seed"
         );
+        if !verified {
+            assert!(
+                !helper.with_extension("waiting").exists(),
+                "a warm window must not bypass passphrase verification or store a key"
+            );
+            let expected = if passphrase.is_empty() {
+                "Type the passphrase to turn on Touch ID unlock."
+            } else {
+                "The passphrase is incorrect. Touch ID unlock stays off."
+            };
+            assert!(app.status_text.contains(expected), "{}", app.status_text);
+        }
     }
 }

@@ -2377,78 +2377,95 @@ fn fresh_biometry_probe_recovers_and_ignores_old_dialogs() {
 }
 
 #[test]
-fn durable_and_evaluation_answers_still_ask_inside_window() {
+fn durable_and_evaluation_answers_reuse_global_window_only_while_valid() {
     use crate::broker::approvals::{CheckMethod, OwnerFrequency};
-    for answer in [
-        Answer::InProject(ActionKind::Read),
-        Answer::Production(ActionKind::Read),
+    // The 2026-11-02 owner decision includes durable and evaluation answers.
+    // Each still needs an explicit click; revoked windows and Every time ask again.
+    for (policy, revoke) in [
+        (OwnerFrequency::UntilLock, false),
+        (OwnerFrequency::UntilLock, true),
+        (OwnerFrequency::EveryTime, false),
     ] {
-        let dir = TempDir::new().unwrap();
-        let (mut app, item_id) = unlocked_app_with_item(&dir);
-        let queue = queue_of(&mut app, &dir);
-        let (waiter, pending) = ask(
-            &app,
-            &queue,
-            1,
-            run(
-                "Synthetic",
-                question(
-                    vec![item(item_id, "Synthetic")],
-                    &[
-                        AnswerKind::InProject(ActionKind::Read),
-                        AnswerKind::Production(ActionKind::Read),
-                    ],
+        for choice in 0..3 {
+            let dir = TempDir::new().unwrap();
+            let (mut app, item_id) = unlocked_app_with_item(&dir);
+            let queue = queue_of(&mut app, &dir);
+            let offer = evaluation_offer(item_id);
+            let answer = match choice {
+                0 => Answer::InProject(ActionKind::Read),
+                1 => Answer::Production(ActionKind::Read),
+                _ => Answer::Evaluate {
+                    confirmations: offer.items.iter().map(|i| i.confirmation.clone()).collect(),
+                    offer: offer.clone(),
+                },
+            };
+            let production = matches!(answer, Answer::Production(_));
+            let (waiter, pending) = ask_with_evaluation(
+                &app,
+                &queue,
+                1,
+                run(
+                    "Synthetic",
+                    question(
+                        vec![item(item_id, "Synthetic")],
+                        &[
+                            AnswerKind::InProject(ActionKind::Read),
+                            AnswerKind::Production(ActionKind::Read),
+                        ],
+                    ),
                 ),
-            ),
-        );
-        let w = app.owner_ui.session.owner_window.clone();
-        w.configure(OwnerFrequency::UntilLock);
-        w.observe(true);
-        w.seed(
-            app.owner_ui.session.epoch().unwrap(),
-            CheckMethod::Passphrase,
-            w.generation(),
-        );
-        decisions::apply(&mut app, &egui::Context::default(), &pending, answer);
-        assert!(app.owner.check.is_some());
-        assert!(queue.pending().iter().any(|r| r.id == pending.id));
-        app.close_owner_check(None);
-        queue.deny(pending.id);
-        waiter.join().unwrap().unwrap();
+                (choice == 2).then_some(offer.clone()),
+            );
+            let w = app.owner_ui.session.owner_window.clone();
+            w.configure(policy);
+            w.observe(true);
+            w.seed(
+                app.owner_ui.session.epoch().unwrap(),
+                CheckMethod::Passphrase,
+                w.generation(),
+            );
+            if revoke {
+                w.invalidate();
+            }
+            assert!(
+                queue.pending().iter().any(|r| r.id == pending.id),
+                "verification alone never answers a question"
+            );
+            decisions::apply(&mut app, &egui::Context::default(), &pending, answer);
+            if policy == OwnerFrequency::UntilLock && !revoke {
+                assert!(app.owner.check.is_none(), "global verification is reused");
+                assert!(!queue.pending().iter().any(|r| r.id == pending.id));
+                let settled = waiter.join().unwrap().unwrap();
+                assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+                if choice != 2 {
+                    let remembered = settled.answer.expect("durable answer is preserved");
+                    assert_eq!(remembered.action, ActionKind::Read);
+                    assert_eq!(remembered.project.label, "acme-billing");
+                    assert_eq!(remembered.production, production);
+                } else {
+                    let evaluation = settled.evaluation.expect("exact evaluation permission");
+                    assert_eq!(evaluation.offer, offer);
+                    assert_eq!(
+                        evaluation.confirmations,
+                        offer
+                            .items
+                            .iter()
+                            .map(|i| i.confirmation.clone())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            } else {
+                assert!(
+                    app.owner.check.is_some(),
+                    "fresh authentication is required"
+                );
+                assert!(queue.pending().iter().any(|r| r.id == pending.id));
+                app.close_owner_check(None);
+                queue.deny(pending.id);
+                waiter.join().unwrap().unwrap();
+            }
+        }
     }
-    let dir = TempDir::new().unwrap();
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    let queue = queue_of(&mut app, &dir);
-    let offer = evaluation_offer(item_id);
-    let (waiter, pending) = ask_with_evaluation(
-        &app,
-        &queue,
-        1,
-        run("Synthetic", question(vec![item(item_id, "Synthetic")], &[])),
-        Some(offer.clone()),
-    );
-    let w = app.owner_ui.session.owner_window.clone();
-    w.configure(OwnerFrequency::UntilLock);
-    w.observe(true);
-    w.seed(
-        app.owner_ui.session.epoch().unwrap(),
-        CheckMethod::Passphrase,
-        w.generation(),
-    );
-    decisions::apply(
-        &mut app,
-        &egui::Context::default(),
-        &pending,
-        Answer::Evaluate {
-            confirmations: offer.items.iter().map(|i| i.confirmation.clone()).collect(),
-            offer,
-        },
-    );
-    assert!(app.owner.check.is_some());
-    assert!(queue.pending().iter().any(|r| r.id == pending.id));
-    app.close_owner_check(None);
-    queue.deny(pending.id);
-    waiter.join().unwrap().unwrap();
 }
 
 #[test]

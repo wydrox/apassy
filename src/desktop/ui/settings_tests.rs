@@ -777,15 +777,16 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     app.place = Place::Settings;
     app.ui.settings_section = SettingsSection::Security;
     let (text, _) = frames(&mut app, TALL);
+    // The 2026-11-02 owner decision covers all manual actions globally.
     for expected in [
         "Lock after inactivity",
         "Never",
         "Agents can't use your credentials while the vault is locked.",
         "How often to ask for Touch ID",
         "Every time",
-        "Allow Once, and Development on agent questions",
+        "After you confirm with Touch ID or your passphrase",
+        "Apassy doesn't ask again for anything until this time is up",
         "Mac locks or sleeps",
-        "not when the display turns off",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
