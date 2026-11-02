@@ -1,4 +1,5 @@
-//! Minimal HTTP/1.1 GET client for connector destinations (ADR 0005).
+//! Minimal HTTP/1.1 client for connector destinations (ADR 0005) and the
+//! bouncer decision model (ADR 0007, ADR 0035).
 //!
 //! `https://` uses rustls with the macOS trust store. Plain `http://` is
 //! permitted only on loopback addresses. The client sends no agent-controlled
@@ -6,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -256,6 +257,7 @@ fn request_bytes(parts: &[&[u8]]) -> Zeroizing<Vec<u8>> {
 
 /// POST a JSON body to a loopback service with one time limit for the whole
 /// exchange. The bouncer uses this for the local decision model (ADR 0007).
+/// An `https://` destination is a protocol failure here; use [`post_json`].
 pub fn post_json_loopback(
     destination: &DestinationUrl,
     path: &str,
@@ -263,11 +265,44 @@ pub fn post_json_loopback(
     bearer: Option<&str>,
     timeout: std::time::Duration,
 ) -> Result<HttpResponse, HttpFailure> {
+    post_json(destination, path, body, bearer, timeout, None)
+}
+
+/// POST a JSON body with one time limit for the whole exchange: name lookup,
+/// connect, TLS handshake, request, and response (ADR 0035). An `https://`
+/// destination needs `tls`; without it the call is a protocol failure. The
+/// client sends no body byte before the handshake and the certificate check
+/// succeed. When the time limit ends, the failure is [`HttpFailure::Timeout`].
+pub fn post_json(
+    destination: &DestinationUrl,
+    path: &str,
+    body: &[u8],
+    bearer: Option<&str>,
+    timeout: Duration,
+    tls: Option<&TlsClient>,
+) -> Result<HttpResponse, HttpFailure> {
+    post_json_with(
+        destination,
+        path,
+        body,
+        bearer,
+        timeout,
+        tls,
+        system_resolve,
+    )
+}
+
+fn post_json_with(
+    destination: &DestinationUrl,
+    path: &str,
+    body: &[u8],
+    bearer: Option<&str>,
+    timeout: Duration,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<HttpResponse, HttpFailure> {
     let deadline = Instant::now() + timeout;
-    let DestinationUrl::Loopback { addr, host_header } = destination else {
-        return Err(HttpFailure::Protocol);
-    };
-    if !path.starts_with('/') || path.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
+    if !is_request_path(path) {
         return Err(HttpFailure::Protocol);
     }
     let (auth_start, auth_key, auth_end): (&[u8], &[u8], &[u8]) = match bearer {
@@ -277,12 +312,13 @@ pub fn post_json_loopback(
         Some(_) => return Err(HttpFailure::Protocol),
         None => (b"", b"", b""),
     };
+    let host = destination.host_header();
     let length = body.len().to_string();
     let request = request_bytes(&[
         b"POST ",
         path.as_bytes(),
         b" HTTP/1.1\r\nHost: ",
-        host_header.as_bytes(),
+        host.as_bytes(),
         b"\r\n",
         auth_start,
         auth_key,
@@ -292,18 +328,139 @@ pub fn post_json_loopback(
         b"\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
         body,
     ]);
-    let remaining = deadline
+    send_before(destination, &request, deadline, tls, resolve)
+}
+
+/// Send one GET request with no bearer token, for a health route such as
+/// `/health`. The time limit and the TLS rules are the same as in [`post_json`].
+pub fn get_health(
+    destination: &DestinationUrl,
+    path: &str,
+    timeout: Duration,
+    tls: Option<&TlsClient>,
+) -> Result<HttpResponse, HttpFailure> {
+    get_health_with(destination, path, timeout, tls, system_resolve)
+}
+
+fn get_health_with(
+    destination: &DestinationUrl,
+    path: &str,
+    timeout: Duration,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<HttpResponse, HttpFailure> {
+    let deadline = Instant::now() + timeout;
+    if !is_request_path(path) {
+        return Err(HttpFailure::Protocol);
+    }
+    let host = destination.host_header();
+    let request = request_bytes(&[
+        b"GET ",
+        path.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        host.as_bytes(),
+        b"\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+    ]);
+    send_before(destination, &request, deadline, tls, resolve)
+}
+
+fn is_request_path(path: &str) -> bool {
+    path.starts_with('/') && path.bytes().all(|b| (0x21..0x7f).contains(&b))
+}
+
+/// A name lookup. Tests replace the system lookup, so they need no network.
+type Resolve = fn(&str, u16) -> io::Result<Vec<SocketAddr>>;
+
+fn system_resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    Ok((host, port).to_socket_addrs()?.collect())
+}
+
+/// The time that is left before `deadline`, or a timeout when none is left.
+fn remaining_before(deadline: Instant) -> Result<Duration, HttpFailure> {
+    deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
-        .ok_or(HttpFailure::Timeout)?;
-    let stream = TcpStream::connect_timeout(addr, remaining.min(CONNECT_TIMEOUT))
-        .map_err(|err| classify(&err))?;
-    let mut stream = DeadlineStream { stream, deadline };
-    exchange(&mut stream, &request)
+        .ok_or(HttpFailure::Timeout)
+}
+
+/// Look up `host` on a helper thread and wait at most until `deadline`. The
+/// system lookup has no time limit of its own. After a timeout the thread ends
+/// on its own when the lookup returns; nobody reads its result.
+fn resolve_before(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    resolve: Resolve,
+) -> Result<Vec<SocketAddr>, HttpFailure> {
+    let remaining = remaining_before(deadline)?;
+    let (sender, receiver) = mpsc::channel();
+    let host = host.to_owned();
+    std::thread::Builder::new()
+        .name("apassy-http-lookup".to_owned())
+        .spawn(move || {
+            let _ = sender.send(resolve(&host, port));
+        })
+        .map_err(|_| HttpFailure::Connect)?;
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),
+        Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(HttpFailure::Connect),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(HttpFailure::Timeout),
+    }
+}
+
+/// Connect to the first address that answers. Each attempt has at most
+/// `CONNECT_TIMEOUT` and never more than the time left before `deadline`.
+fn connect_before(addrs: &[SocketAddr], deadline: Instant) -> Result<TcpStream, HttpFailure> {
+    let mut failure = HttpFailure::Connect;
+    for addr in addrs {
+        let remaining = remaining_before(deadline)?;
+        match TcpStream::connect_timeout(addr, remaining.min(CONNECT_TIMEOUT)) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => failure = classify(&err),
+        }
+    }
+    Err(failure)
+}
+
+/// Send `request` and read the response before `deadline`. Every socket
+/// operation, the TLS handshake included, stops at the deadline.
+fn send_before(
+    destination: &DestinationUrl,
+    request: &[u8],
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<HttpResponse, HttpFailure> {
+    match destination {
+        DestinationUrl::Loopback { addr, .. } => {
+            let stream = connect_before(&[*addr], deadline)?;
+            let mut stream = DeadlineStream { stream, deadline };
+            exchange(&mut stream, request)
+        }
+        DestinationUrl::Https { host, port } => {
+            let tls = tls.ok_or(HttpFailure::Protocol)?;
+            let name = ServerName::try_from(host.clone()).map_err(|_| HttpFailure::Protocol)?;
+            let addrs = resolve_before(host, *port, deadline, resolve)?;
+            let stream = connect_before(&addrs, deadline)?;
+            let conn = ClientConnection::new(Arc::clone(&tls.config), name)
+                .map_err(|_| HttpFailure::Tls)?;
+            let mut stream = StreamOwned::new(conn, DeadlineStream { stream, deadline });
+            // Finish the handshake before any request byte. A failed check sends
+            // no token and no body.
+            while stream.conn.is_handshaking() {
+                stream
+                    .conn
+                    .complete_io(&mut stream.sock)
+                    .map_err(|err| classify(&err))?;
+            }
+            exchange(&mut stream, request)
+        }
+    }
 }
 
 /// Refresh the socket limit before every operation, so fragmented responses cannot
-/// extend a bouncer request beyond its total exchange budget.
+/// extend a bouncer request beyond its total exchange budget. Under TLS it also
+/// limits the handshake.
 struct DeadlineStream {
     stream: TcpStream,
     deadline: Instant,
@@ -738,6 +895,461 @@ mod tests {
         assert_eq!(
             classify(&io::Error::from(io::ErrorKind::InvalidData)),
             HttpFailure::Tls
+        );
+    }
+
+    /// A local HTTPS service for `localhost` with its own test root. The client
+    /// trusts that root in addition to the platform roots.
+    struct TestTls {
+        config: Arc<rustls::ServerConfig>,
+        client: TlsClient,
+    }
+
+    fn test_tls() -> TestTls {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType,
+            ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+        };
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        fn validity(params: &mut CertificateParams) {
+            let now = time::OffsetDateTime::now_utc();
+            params.not_before = now - time::Duration::hours(1);
+            params.not_after = now + time::Duration::days(1);
+        }
+
+        let mut root = CertificateParams::default();
+        let mut name = DistinguishedName::new();
+        name.push(DnType::CommonName, "Apassy http test root");
+        root.distinguished_name = name;
+        root.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        validity(&mut root);
+        let root_key = KeyPair::generate().expect("root key");
+        let root_cert = root.self_signed(&root_key).expect("root");
+        let issuer = Issuer::new(root, root_key);
+        let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).expect("leaf");
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf.use_authority_key_identifier_extension = true;
+        validity(&mut leaf);
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf_cert = leaf.signed_by(&leaf_key, &issuer).expect("leaf cert");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf_cert.der().clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+        )
+        .expect("server config");
+        TestTls {
+            config: Arc::new(config),
+            client: TlsClient::with_extra_roots(vec![root_cert.der().clone()])
+                .expect("TLS client with test root"),
+        }
+    }
+
+    /// Every name is this computer, on the port of the destination. No network.
+    fn resolve_to_this_computer(_host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        Ok(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)])
+    }
+
+    /// A name lookup that does not answer in time.
+    fn resolve_slowly(_host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+        std::thread::sleep(Duration::from_secs(3));
+        Err(io::Error::from(io::ErrorKind::TimedOut))
+    }
+
+    /// Read one request with its body. A failed handshake or a closed
+    /// connection ends the read; the result is the plaintext that arrived.
+    fn read_request<S: Read>(stream: &mut S) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return seen,
+                Ok(read) => seen.extend_from_slice(&buf[..read]),
+            }
+            let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&seen[..end]).into_owned();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .map_or(0, |value| value.parse::<usize>().expect("length"));
+            if seen.len() >= end + 4 + length {
+                return seen;
+            }
+        }
+    }
+
+    /// Accept one TLS connection and read one request. Then write `answer`, or,
+    /// without an answer, stall until `release`. Returns the request plaintext.
+    fn answer_one_tls_request(
+        listener: std::net::TcpListener,
+        config: Arc<rustls::ServerConfig>,
+        answer: Option<Vec<u8>>,
+        release: mpsc::Receiver<()>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().expect("accept");
+            tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let conn = rustls::ServerConnection::new(config).expect("server connection");
+            let mut tls = StreamOwned::new(conn, tcp);
+            let seen = read_request(&mut tls);
+            match answer {
+                Some(answer) => {
+                    let _ = tls.write_all(&answer);
+                    let _ = tls.flush();
+                    tls.conn.send_close_notify();
+                    let _ = tls.conn.complete_io(&mut tls.sock);
+                }
+                None => {
+                    let _ = release.recv_timeout(Duration::from_secs(10));
+                }
+            }
+            seen
+        })
+    }
+
+    fn localhost_https(listener: &std::net::TcpListener) -> DestinationUrl {
+        DestinationUrl::Https {
+            host: "localhost".to_owned(),
+            port: listener.local_addr().expect("addr").port(),
+        }
+    }
+
+    #[test]
+    fn a_stalled_tls_server_fails_at_the_exchange_deadline() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let (release, held) = mpsc::channel::<()>();
+        // The server accepts the connection and never answers the client hello.
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let _ = held.recv_timeout(Duration::from_secs(10));
+            drop(stream);
+        });
+        let timeout = Duration::from_millis(400);
+        let began = Instant::now();
+        let result = post_json_with(
+            &destination,
+            "/v1/score",
+            br#"{"synthetic":true}"#,
+            Some("synthetic-model-key"),
+            timeout,
+            Some(&pki.client),
+            resolve_to_this_computer,
+        );
+        let elapsed = began.elapsed();
+        release.send(()).expect("release");
+        server.join().expect("server");
+        assert_eq!(result.unwrap_err(), HttpFailure::Timeout);
+        assert!(
+            elapsed < timeout + Duration::from_secs(1),
+            "the handshake stopped at the deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_stalls_after_the_handshake_fails_at_the_deadline() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let (release, held) = mpsc::channel();
+        let server = answer_one_tls_request(listener, Arc::clone(&pki.config), None, held);
+        let timeout = Duration::from_millis(1500);
+        let began = Instant::now();
+        let result = post_json_with(
+            &destination,
+            "/v1/score",
+            br#"{"synthetic":true}"#,
+            Some("synthetic-model-key"),
+            timeout,
+            Some(&pki.client),
+            resolve_to_this_computer,
+        );
+        let elapsed = began.elapsed();
+        release.send(()).expect("release");
+        let seen = String::from_utf8(server.join().expect("server")).expect("text");
+        assert!(
+            seen.ends_with(r#"{"synthetic":true}"#),
+            "the handshake finished and the request arrived: {seen:?}"
+        );
+        assert_eq!(result.unwrap_err(), HttpFailure::Timeout);
+        assert!(
+            elapsed < timeout + Duration::from_secs(1),
+            "the response read stopped at the deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_slow_name_lookup_fails_at_the_deadline() {
+        let pki = test_tls();
+        let destination = DestinationUrl::Https {
+            host: "bouncer.example.invalid".to_owned(),
+            port: 443,
+        };
+        let timeout = Duration::from_millis(300);
+        let began = Instant::now();
+        let post = post_json_with(
+            &destination,
+            "/v1/score",
+            b"{}",
+            Some("synthetic-model-key"),
+            timeout,
+            Some(&pki.client),
+            resolve_slowly,
+        );
+        assert_eq!(post.unwrap_err(), HttpFailure::Timeout);
+        assert!(
+            began.elapsed() < timeout + Duration::from_secs(1),
+            "the lookup wait stopped at the deadline"
+        );
+        let began = Instant::now();
+        let health = get_health_with(
+            &destination,
+            "/health",
+            timeout,
+            Some(&pki.client),
+            resolve_slowly,
+        );
+        assert_eq!(health.unwrap_err(), HttpFailure::Timeout);
+        assert!(
+            began.elapsed() < timeout + Duration::from_secs(1),
+            "the health lookup wait stopped at the deadline"
+        );
+    }
+
+    #[test]
+    fn a_wrong_server_name_sends_no_byte_of_the_body() {
+        let pki = test_tls();
+        let body = br#"{"synthetic-marker":"not-for-a-wrong-server"}"#;
+        // The certificate is for `localhost`; the destination asks for another
+        // name. Then a client without the test root asks for the right name.
+        let platform = TlsClient::platform().expect("platform TLS");
+        for (host, client) in [
+            ("wrong.example.invalid", &pki.client),
+            ("localhost", &platform),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let destination = DestinationUrl::Https {
+                host: host.to_owned(),
+                port: listener.local_addr().expect("addr").port(),
+            };
+            let (_release, held) = mpsc::channel();
+            let server = answer_one_tls_request(
+                listener,
+                Arc::clone(&pki.config),
+                Some(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()),
+                held,
+            );
+            let result = post_json_with(
+                &destination,
+                "/v1/score",
+                body,
+                Some("synthetic-model-key"),
+                Duration::from_secs(5),
+                Some(client),
+                resolve_to_this_computer,
+            );
+            assert_eq!(result.unwrap_err(), HttpFailure::Tls, "{host}");
+            let seen = server.join().expect("server");
+            assert!(seen.is_empty(), "{host}: no request byte arrived");
+        }
+    }
+
+    #[test]
+    fn a_response_over_the_cap_is_too_large() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let size = MAX_RESPONSE_BYTES + 1;
+        let mut answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\n\r\n").into_bytes();
+        answer.resize(answer.len() + size, b'a');
+        let (_release, held) = mpsc::channel();
+        let server = answer_one_tls_request(listener, Arc::clone(&pki.config), Some(answer), held);
+        let result = post_json_with(
+            &destination,
+            "/v1/score",
+            b"{}",
+            None,
+            Duration::from_secs(5),
+            Some(&pki.client),
+            resolve_to_this_computer,
+        );
+        assert_eq!(result.unwrap_err(), HttpFailure::TooLarge);
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn https_post_returns_the_status_and_body() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let port = listener.local_addr().expect("addr").port();
+        let (_release, held) = mpsc::channel();
+        let server = answer_one_tls_request(
+            listener,
+            Arc::clone(&pki.config),
+            Some(b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\n\r\n{\"ok\":true}".to_vec()),
+            held,
+        );
+        let response = post_json_with(
+            &destination,
+            "/v1/score",
+            br#"{"synthetic":true}"#,
+            Some("synthetic-model-key"),
+            Duration::from_secs(5),
+            Some(&pki.client),
+            resolve_to_this_computer,
+        )
+        .expect("post");
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body, br#"{"ok":true}"#);
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "POST /v1/score HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Bearer synthetic-model-key\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: 18\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n{{\"synthetic\":true}}"
+            )
+        );
+
+        // Without TLS settings an https destination is a protocol failure.
+        assert_eq!(
+            post_json(
+                &destination,
+                "/v1/score",
+                b"{}",
+                None,
+                Duration::from_secs(5),
+                None
+            )
+            .unwrap_err(),
+            HttpFailure::Protocol
+        );
+    }
+
+    #[test]
+    fn health_get_sends_no_bearer() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let port = listener.local_addr().expect("addr").port();
+        let (_release, held) = mpsc::channel();
+        let server = answer_one_tls_request(
+            listener,
+            Arc::clone(&pki.config),
+            Some(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}".to_vec()),
+            held,
+        );
+        let response = get_health_with(
+            &destination,
+            "/health",
+            Duration::from_secs(5),
+            Some(&pki.client),
+            resolve_to_this_computer,
+        )
+        .expect("health over TLS");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, br#"{"status":"ok"}"#);
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "GET /health HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+            )
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+        let server = capture_one_request(listener);
+        let response =
+            get_health(&destination, "/health", Duration::from_secs(5), None).expect("health");
+        assert_eq!(response.body, b"{}");
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+            )
+        );
+    }
+
+    #[test]
+    fn loopback_post_is_unchanged() {
+        let pki = test_tls();
+        for use_wrapper in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+            let server = capture_one_request(listener);
+            let body = br#"{"synthetic":true}"#;
+            let bearer = Some("synthetic-model-key");
+            let timeout = Duration::from_secs(5);
+            let response = if use_wrapper {
+                post_json_loopback(&destination, "/v1/score", body, bearer, timeout)
+            } else {
+                // TLS settings change nothing for a loopback destination.
+                post_json(
+                    &destination,
+                    "/v1/score",
+                    body,
+                    bearer,
+                    timeout,
+                    Some(&pki.client),
+                )
+            }
+            .expect("post");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, b"{}");
+            assert_eq!(
+                String::from_utf8(server.join().expect("server")).expect("text"),
+                format!(
+                    "POST /v1/score HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer synthetic-model-key\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: 18\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n{{\"synthetic\":true}}"
+                )
+            );
+        }
+
+        // The loopback wrapper still refuses https:// without a connection.
+        let https = DestinationUrl::Https {
+            host: "bouncer.example.invalid".to_owned(),
+            port: 443,
+        };
+        let began = Instant::now();
+        assert_eq!(
+            post_json_loopback(&https, "/v1/score", b"{}", None, Duration::from_secs(5))
+                .unwrap_err(),
+            HttpFailure::Protocol
+        );
+        assert!(began.elapsed() < Duration::from_secs(1));
+        for (path, bearer) in [("v1/score", None), ("/v1/score", Some("")), ("/a b", None)] {
+            let loopback = parse_destination("http://127.0.0.1:9").expect("url");
+            assert_eq!(
+                post_json_loopback(&loopback, path, b"{}", bearer, Duration::from_secs(5))
+                    .unwrap_err(),
+                HttpFailure::Protocol,
+                "{path:?} {bearer:?}"
+            );
+        }
+        // A closed loopback port is a connection failure, not a timeout, so the
+        // bouncer does not retry it.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = closed.local_addr().expect("addr").port();
+        drop(closed);
+        let loopback = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+        assert_eq!(
+            post_json_loopback(&loopback, "/v1/score", b"{}", None, Duration::from_secs(5))
+                .unwrap_err(),
+            HttpFailure::Connect
         );
     }
 }

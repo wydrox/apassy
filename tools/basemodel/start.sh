@@ -20,6 +20,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LAYA_DIR="${APASSY_LAYA_DIR:-$HOME/Library/Application Support/Apassy/laya}"
 export LAYA_HOST="${LAYA_HOST:-127.0.0.1}"
 export LAYA_PORT="${LAYA_PORT:-8770}"
+# Uploaded head sets (docs/contracts/bouncer-brain-v1.md) live in the data directory,
+# never next to a checkpoint inside the signed Apassy.app.
+export APASSY_HEADS_DIR="${APASSY_HEADS_DIR:-$LAYA_DIR/heads}"
 
 CKPT="${APASSY_BASE_MODEL:-}"
 if [ -z "$CKPT" ]; then

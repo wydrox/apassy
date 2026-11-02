@@ -31,6 +31,7 @@ mod agent_path;
 mod agent_run;
 mod analysis_replay;
 mod automatic_access;
+mod bouncer_brain_contract;
 mod bouncer_eval;
 mod bouncer_rules;
 mod browser_passkeys;

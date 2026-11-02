@@ -168,6 +168,12 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p 'test_extension_package.py'
           python3 -m unittest discover -s scripts/tests -p 'test_dmg_notary_retry.py'
 
+      - name: Test the bouncer brain server without torch
+        run: |
+          python3 -m venv "$RUNNER_TEMP/brain-venv"
+          "$RUNNER_TEMP/brain-venv/bin/pip" install --quiet 'fastapi==0.141.1' 'httpx==0.28.1'
+          PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/brain-venv/bin/python" -I -m unittest discover -s tests/basemodel -p 'test_*.py'
+
       - name: Check coordinated release versions
         run: |
           python3 scripts/check-release-versions.py

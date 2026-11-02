@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Serve the Apassy base model over the Laya `/v1/systemone` protocol (goal B8).
 
-The server is `laya.serve.create_app` with one router. The router:
+The server is `app.create_app` (laya-serve's routes and guardrails, plus the head
+routes) with one router. The router:
 
 1. loads the English Laya checkpoint at the pinned Hugging Face revision
    (`common.BASE_REVISION`) and checks the SHA-256 of its weights,
@@ -13,8 +14,15 @@ The server is `laya.serve.create_app` with one router. The router:
 Questions in the manifest list `serve.zero_shot_questions` get the answer of the
 stock heads (same encoder pass). See docs/operations/base-model.md.
 
+The server is also the bouncer brain of ADR 0035 (contract bouncer-brain-v1): it
+keeps a cache of head sets on the one encoder (`heads_cache.py`), answers the
+`heads` and `shadow_heads` of a request from one encoder pass, and serves the head
+routes (`app.py`). Without `heads`, a request gets the checkpoint above, as before.
+
 Environment: `LAYA_HOST` (default 127.0.0.1), `LAYA_PORT` (default 8770),
-`LAYA_DEVICE`, `LAYA_API_KEY` (as in laya-serve).
+`LAYA_DEVICE`, `LAYA_API_KEY` (as in laya-serve), `APASSY_HEADS_DIR` (uploaded head
+sets; default `<folder of the checkpoint>/heads`), `APASSY_HEADS_CACHE` (loaded
+uploaded head sets, default 4).
 
 Run inside the Laya virtual environment:
   .venv/bin/python tools/basemodel/serve.py --checkpoint <file> [--manifest <file>]
@@ -22,6 +30,7 @@ Run inside the Laya virtual environment:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import re
@@ -34,6 +43,8 @@ sys.path.insert(0, HERE)
 _WRITE_BYTECODE = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 import common  # noqa: E402
+import heads_cache  # noqa: E402
+import app as brain_app  # noqa: E402
 
 sys.dont_write_bytecode = _WRITE_BYTECODE
 
@@ -128,7 +139,28 @@ def fp16_encoder_on_mps(agent, model):
     return True
 
 
-def build_router(checkpoint, manifest_path=None, device=None):
+def zero_shot_rows(zero_shot, questions):
+    """Which rows take the stock heads. Rows follow the question order of one state
+    (laya Agent._encode_state). None when no question is zero-shot."""
+    return [qid in zero_shot for qid in questions] if zero_shot else None
+
+
+class HeadSelection:
+    """The head sets of one request. Set and cleared inside the single inference worker."""
+
+    def __init__(self, active, shadow, questions):
+        # None keeps the default path of the server before ADR 0035 (`DualHeads`).
+        self.active = None if active.default else active.module
+        self.stock_rows = zero_shot_rows(active.zero_shot, questions)
+        self.shadow = None if shadow is None else shadow.module
+        self.shadow_rows = None if shadow is None else zero_shot_rows(shadow.zero_shot, questions)
+        # (logits, act probabilities, markers per row) of the shadow, or the error.
+        self.shadow_out = None
+        self.shadow_error = None
+
+
+def build_router(checkpoint, manifest_path=None, device=None, heads_dir=None,
+                 cache_limit=heads_cache.DEFAULT_CACHE_LIMIT):
     import torch
     from laya.agent import Agent
     from laya.common import DecisionModel
@@ -146,25 +178,54 @@ def build_router(checkpoint, manifest_path=None, device=None):
     for diagnostic in diagnostics:
         warnings.warn(temperature_diagnostic(diagnostic.message), diagnostic.category, stacklevel=2)
     tuned = agent.model
+    head_layers = agent.cfg.get("head_layers", 2)
+    n_act = len(agent.cfg.get("act_costs", {})) + 1
     stock = None
     if zero_shot:
         # A second head set with the stock weights. It shares the encoder module.
-        stock = DecisionModel(tuned.encoder, agent.cfg.get("head_layers", 2),
-                              len(agent.cfg.get("act_costs", {})) + 1)
+        stock = DecisionModel(tuned.encoder, head_layers, n_act)
         stock.load_state_dict(tuned.state_dict(), strict=True)
         stock.to(agent.device).eval()
+    expected_shapes = {k: list(v.shape) for k, v in tuned.state_dict().items()
+                       if k.startswith(common.TRAINED_PREFIXES)}
     tensors, _meta = common.load_checkpoint(checkpoint)
     common.apply_heads(tuned, tensors)
+    del tensors
     tuned.eval()
 
-    class DualHeads(torch.nn.Module):
-        """The tuned model, with the stock heads for some rows. One encoder pass."""
+    def load_head_set(path):
+        """An uploaded head set: a DecisionModel on the one encoder, fp32 heads, eval mode.
+
+        Built like `stock`; the untrained parts (`act_head`, `temperature`) come from the
+        base checkpoint, the trained parts from the file (`common.apply_heads`).
+        """
+        heads, _ = common.load_checkpoint(path)
+        model = DecisionModel(tuned.encoder, head_layers, n_act)
+        untrained = {k: v for k, v in tuned.state_dict().items()
+                     if not k.startswith("encoder.") and not k.startswith(common.TRAINED_PREFIXES)}
+        model.load_state_dict(untrained, strict=False)
+        common.apply_heads(model, heads)
+        return model.to(agent.device).eval()
+
+    def on_device(module, device):
+        # After laya's GPU-to-CPU fallback, `agent.model.to(cpu)` moved the encoder, the
+        # default and the stock heads, but not the uploaded head sets.
+        if module is not None and module.scorer[-1].weight.device != device:
+            module.to(device)
+        return module
+
+    class MultiHeads(torch.nn.Module):
+        """The default model, the head sets of a request, and the stock heads for some rows.
+
+        One encoder pass: the active head set answers through laya; the shadow head set
+        runs on the same encoder states and keeps its outputs for the shadow answers.
+        """
 
         def __init__(self):
             super().__init__()
             self.tuned = tuned
             self.stock = stock
-            self.stock_rows = None
+            self.request = None
 
         @staticmethod
         def heads(m, h, attention_mask, marker_pos, marker_mask, qtype):
@@ -181,24 +242,80 @@ def build_router(checkpoint, manifest_path=None, device=None):
             p = torch.softmax(logits.detach(), -1)
             k = marker_mask.sum(-1).clamp(min=2).float()
             ent = -(p * torch.log(p.clamp_min(1e-9))).sum(-1) / torch.log(k)
-            top2 = p.topk(2, -1).values
+            if p.size(-1) >= 2:
+                top2 = p.topk(2, -1).values
+            else:
+                # One option only (laya pads the second slot with 0.0).
+                top1 = p.topk(1, -1).values
+                top2 = torch.cat([top1, torch.zeros_like(top1)], dim=-1)
             feats = torch.stack([top2[:, 0], top2[:, 0] - top2[:, 1], ent, k / 255.0], -1)
             pooled = h[:, 0].float()
             return logits, m.act_head(torch.cat([pooled, feats], -1))
 
         def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype):
-            rows = self.stock_rows
-            if self.stock is None or rows is None or not any(rows) or len(rows) != input_ids.shape[0]:
-                return self.tuned(input_ids, attention_mask, marker_pos, marker_mask, qtype)
-            h = self.tuned.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-            lt, at = self.heads(self.tuned, h, attention_mask, marker_pos, marker_mask, qtype)
-            ls, as_ = self.heads(self.stock, h, attention_mask, marker_pos, marker_mask, qtype)
-            use = torch.tensor(rows, device=input_ids.device)[:, None]
-            return torch.where(use, ls, lt), torch.where(use, as_, at)
+            request = self.request
+            n = input_ids.shape[0]
+            device = input_ids.device
 
-    dual = DualHeads()
+            def stock_used(rows):
+                return self.stock is not None and rows is not None and any(rows) and len(rows) == n
+
+            if request is None:
+                return self.tuned(input_ids, attention_mask, marker_pos, marker_mask, qtype)
+            active = self.tuned if request.active is None else on_device(request.active, device)
+            if request.shadow is None and not stock_used(request.stock_rows):
+                return active(input_ids, attention_mask, marker_pos, marker_mask, qtype)
+            h = self.tuned.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            args = (h, attention_mask, marker_pos, marker_mask, qtype)
+            stock_out = []
+
+            def answer(m, rows):
+                lt, at = self.heads(m, *args)
+                if not stock_used(rows):
+                    return lt, at
+                if not stock_out:
+                    stock_out.append(self.heads(self.stock, *args))
+                ls, as_ = stock_out[0]
+                use = torch.tensor(rows, device=device)[:, None]
+                return torch.where(use, ls, lt), torch.where(use, as_, at)
+
+            logits, act = answer(active, request.stock_rows)
+            if request.shadow is not None:
+                request.shadow_out, request.shadow_error = None, None
+                try:
+                    sl, sa = answer(on_device(request.shadow, device), request.shadow_rows)
+                    # The conversion of laya Agent._forward.
+                    request.shadow_out = (sl.float().cpu().numpy(),
+                                          torch.softmax(sa.float(), -1).cpu().numpy(),
+                                          [int(k) for k in marker_mask.sum(-1).tolist()])
+                except Exception as error:  # noqa: BLE001 -- the shadow never fails the request
+                    request.shadow_error = error
+            return logits, act
+
+    dual = MultiHeads()
     agent.model = dual
     on_mps = fp16_encoder_on_mps(agent, dual)
+
+    default_set = heads_cache.HeadSet(digest, version, tuned, zero_shot,
+                                      manifest["checkpoint"]["size_bytes"], default=True)
+    cache = heads_cache.HeadSetCache(
+        default_set,
+        heads_dir or os.path.join(os.path.dirname(os.path.abspath(checkpoint)), "heads"),
+        manifest["base"], load_head_set, limit=cache_limit, expected_shapes=expected_shapes,
+        stock_available=stock is not None, log=brain_app.LOG)
+
+    def shadow_answers(request, questions):
+        """Decode the stashed shadow outputs with laya's own answer decoder."""
+        if not questions:
+            return {}
+        if request.shadow_out is None:
+            raise request.shadow_error or RuntimeError("no shadow output")
+        logits, act, markers = request.shadow_out
+        ids = list(questions.keys())
+        internal = {qid: agent._to_internal(questions[qid]) for qid in ids}
+        # `_decode_answers` reads only the number of markers of each row.
+        items = [{"markers": range(k)} for k in markers]
+        return agent._decode_answers(logits, act, items, ids, internal, 0)
 
     class BaseRouter(Router):
         """Every request goes to the fine-tuned English checkpoint."""
@@ -208,12 +325,13 @@ def build_router(checkpoint, manifest_path=None, device=None):
             self.attach("english", agent)
             self.version = version
             self.zero_shot = zero_shot
+            self.cache = cache
 
         def _route(self, state, questions=None, model=None, task=None, lang=None, lang_guess=None):
             return RouteDecision(model="english", repo="%s@%s" % (common.BASE_REPO, common.BASE_REVISION),
                                  reason="apassy base model", detection=None, workflow=None)
 
-        def predict(self, state, questions, model=None, **kwargs):
+        def predict(self, state, questions, model=None, heads=None, shadow_heads=None, **kwargs):
             from fastapi import HTTPException
 
             try:
@@ -221,19 +339,42 @@ def build_router(checkpoint, manifest_path=None, device=None):
             except ValueError as error:
                 raise HTTPException(status_code=422, detail={
                     "code": "input_too_long", "message": str(error)}) from error
-            # Rows follow the question order of one state (laya Agent._encode_state).
-            dual.stock_rows = [qid in self.zero_shot for qid in questions] if self.zero_shot else None
+            return heads_cache.answer(
+                cache, lambda active, shadow: self._infer(state, questions, active, shadow, kwargs),
+                heads, shadow_heads)
+
+        def _infer(self, state, questions, active, shadow, kwargs):
+            request = HeadSelection(active, shadow, questions)
+            dual.request = request
             try:
                 result = super().predict(state, questions, model=None, **kwargs)
+                answers = None
+                if shadow is not None:
+                    try:
+                        answers = shadow_answers(request, questions)
+                    except Exception as error:  # noqa: BLE001 -- the shadow never fails the request
+                        answers = error
             finally:
-                dual.stock_rows = None
+                dual.request = None
                 if on_mps:
                     # Give the activation buffers of this request back to the system.
                     torch.mps.empty_cache()
-            result["model"] = self.version
-            return result
+            return result, answers
 
     return BaseRouter(), version, sorted(zero_shot)
+
+
+def cache_limit_from_env():
+    raw = os.environ.get("APASSY_HEADS_CACHE", "").strip()
+    if not raw:
+        return heads_cache.DEFAULT_CACHE_LIMIT
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 0
+    if limit < 1:
+        raise SystemExit("serve: invalid APASSY_HEADS_CACHE %r: must be an integer >= 1" % raw)
+    return limit
 
 
 def main():
@@ -245,16 +386,29 @@ def main():
         raise SystemExit("serve: no checkpoint. Use the stock laya-serve for zero-shot answers.")
 
     import uvicorn
-    from laya.serve import _resolve_port, create_app
+    from laya.serve import _resolve_port
 
     os.environ.setdefault("LAYA_PORT", "8770")
+    limit = cache_limit_from_env()
+    heads_dir = os.environ.get("APASSY_HEADS_DIR") or None
     router, version, zero_shot = build_router(args.checkpoint, args.manifest or None,
-                                              os.environ.get("LAYA_DEVICE") or None)
+                                              os.environ.get("LAYA_DEVICE") or None,
+                                              heads_dir=heads_dir, cache_limit=limit)
     host = os.environ.get("LAYA_HOST", "127.0.0.1")
-    print("apassy base model %s on %s:%s (zero-shot questions: %s)" % (
-        version, host, os.environ["LAYA_PORT"], ", ".join(zero_shot) or "none"), flush=True)
-    uvicorn.run(create_app(router), host=host, port=_resolve_port(),
-                log_level=os.environ.get("LAYA_LOG_LEVEL", "warning"))
+    log_level = os.environ.get("LAYA_LOG_LEVEL", "warning")
+    # Counts, latency, status and head hashes only (app.py); never a state or an answer.
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    brain_app.LOG.addHandler(handler)
+    brain_app.LOG.setLevel(getattr(logging, log_level.upper(), logging.WARNING))
+    brain_app.LOG.propagate = False
+    print("apassy base model %s on %s:%s (zero-shot questions: %s; head sets: %s, %d loaded at most)" % (
+        version, host, os.environ["LAYA_PORT"], ", ".join(zero_shot) or "none",
+        router.cache.heads_dir, router.cache.limit), flush=True)
+    # h11 refuses a request head over 16 KiB with its own 400; allow more, so the
+    # 16 KiB limit of the Apassy-Manifest header answers 413 (app.py).
+    uvicorn.run(brain_app.create_app(router, router.cache), host=host, port=_resolve_port(),
+                log_level=log_level, h11_max_incomplete_event_size=64 * 1024)
 
 
 if __name__ == "__main__":
