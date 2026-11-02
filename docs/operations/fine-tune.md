@@ -1,4 +1,4 @@
-# Fine-tune study and local fine-tune of the bouncer model (goal B8/B9)
+# Fine-tune study and local fine-tune of the bouncer brain (goal B8/B9)
 
 Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md).
 
@@ -11,6 +11,8 @@ Sections 1 to 5 are the study. They answer three questions for the goal:
 
 Sections 6 to 13 describe the local fine-tune of goal item B9: the pipeline, the
 training gate, shadow mode, promotion and rollback, and the measurements.
+
+A fine-tune changes only the decision heads of the bouncer brain. The encoder of the bouncer brain and the whole bouncer gate do not change ([bouncer.md](bouncer.md), Words).
 
 All measurements are synthetic. No owner data and no real secret is used.
 

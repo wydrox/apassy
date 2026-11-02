@@ -176,7 +176,7 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Bouncer,
-            &["Model", "Calibration and learning"],
+            &["Bouncer brain", "Calibration and learning"],
             &[
                 "Back up now…",
                 "Asked you",

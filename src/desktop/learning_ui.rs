@@ -23,7 +23,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         "Learning",
         Some(
-            "Apassy learns from your decisions. A remembered pattern and a calibrated level act only at the model step. They never change the hard rules, the production rule, or a rule flag.",
+            "Apassy learns from your decisions. A remembered pattern and a calibrated level act only in the bouncer gate. They never change the hard rules, the production rule, or a rule flag.",
         ),
         |_| {},
     );
@@ -34,8 +34,8 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
 pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> {
     let Some(candidate) = candidate else {
         return vec![
-            "No candidate model.".to_owned(),
-            "When the training gate is open, you can train a candidate model on this computer. It decides in shadow mode, with no effect. This card then shows its agreement with your decisions. You promote it by hand after 100 shadow decisions with 95% agreement and no allowed denial.".to_owned(),
+            "No candidate brain.".to_owned(),
+            "When the training gate is open, you can train a candidate brain on this computer. It decides in shadow mode, with no effect. This card then shows its agreement with your decisions. You promote it by hand after 100 shadow decisions with 95% agreement and no allowed denial.".to_owned(),
         ];
     };
     let port = candidate
@@ -62,7 +62,7 @@ pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> 
             }
         ),
         format!(
-            "Requests in shadow mode: {}. No answer from the candidate: {}. Same outcome as the active model: {}.",
+            "Requests in shadow mode: {}. No answer from the candidate: {}. Same outcome as the active brain: {}.",
             candidate.requests, candidate.no_answer, candidate.same_as_active
         ),
         format!(
@@ -151,23 +151,23 @@ pub(crate) fn active_lines(active: Option<&crate::vault::ModelActivation>) -> Ve
     use crate::vault::{ActivationAction, format_utc, model_label};
     match active {
         None => vec![
-            "Active model: the default model (APASSY_BOUNCER_URL). You did not promote a model."
+            "Active brain: the default model (APASSY_BOUNCER_URL). You did not promote a brain."
                 .to_owned(),
         ],
         Some(activation) if activation.action == ActivationAction::Promote => vec![
             format!(
-                "Active model: {} at {}, promoted {}.",
+                "Active brain: {} at {}, promoted {}.",
                 activation.version,
                 activation.url,
                 format_utc(activation.at)
             ),
             format!(
-                "The model before it stays available: {}. A rollback needs your confirmation.",
+                "The brain before it stays available: {}. A rollback needs your confirmation.",
                 model_label(&activation.previous_version)
             ),
         ],
         Some(activation) => vec![format!(
-            "Active model: {}{}, after a rollback on {}.",
+            "Active brain: {}{}, after a rollback on {}.",
             model_label(&activation.version),
             if activation.is_default() {
                 " (APASSY_BOUNCER_URL)".to_owned()
@@ -378,7 +378,13 @@ mod vault_view {
         draw_patterns(app, ui, &loaded, now);
         draw_automatic(app, ui, &loaded, now);
         let mut advanced = app.ui.is_expanded(ADVANCED);
-        if kit::disclosure(ui, &mut advanced, "Advanced: calibration and models").changed() {
+        if kit::disclosure(
+            ui,
+            &mut advanced,
+            "Advanced: calibration and brain versions",
+        )
+        .changed()
+        {
             app.ui.set_expanded(ADVANCED, advanced);
         }
         if advanced {
@@ -426,7 +432,7 @@ mod vault_view {
                 s.labeled(
                     "Ran without you",
                     super::super::ui::settings_rows::value(format!(
-                        "{} this week · model {} · pattern {} · remembered answers {}",
+                        "{} this week · bouncer {} · pattern {} · remembered answers {}",
                         week.automatic(),
                         week.by_model,
                         week.by_pattern,
@@ -446,7 +452,7 @@ mod vault_view {
             return;
         }
         let mut open = app.ui.is_expanded(SETTINGS_ADVANCED);
-        if kit::disclosure(ui, &mut open, "Calibration and models").changed() {
+        if kit::disclosure(ui, &mut open, "Calibration and brain versions").changed() {
             app.ui.set_expanded(SETTINGS_ADVANCED, open);
         }
         if open {
@@ -501,7 +507,7 @@ mod vault_view {
         let mut rollback = None;
         kit::section(
             ui,
-            Some("Candidate model"),
+            Some("Candidate brain"),
             Some(
                 "A candidate decides in shadow mode, with no effect. You promote it by hand. A promotion and a rollback need your passphrase.",
             ),
@@ -657,7 +663,7 @@ mod vault_view {
         drop(guard);
         match result {
             Ok(activation) => app.set_ok(format!(
-                "The bouncer now uses {}. {} stays available for a rollback.",
+                "The bouncer brain is now {}. {} stays available for a rollback.",
                 activation.version,
                 model_label(&activation.previous_version)
             )),
@@ -676,7 +682,7 @@ mod vault_view {
         drop(guard);
         match result {
             Ok(activation) => app.set_ok(format!(
-                "The bouncer uses {} again.",
+                "The bouncer brain is {} again.",
                 model_label(&activation.version)
             )),
             Err(message) => app.set_err(message),
@@ -733,7 +739,7 @@ mod vault_view {
                 "Ran without you",
                 &week.automatic().to_string(),
                 &format!(
-                    "model {} · pattern {} · remembered answers {}",
+                    "bouncer {} · pattern {} · remembered answers {}",
                     week.by_model, week.by_pattern, week.by_answer
                 ),
             );
@@ -807,7 +813,7 @@ mod vault_view {
                                 "Day",
                                 "Requests",
                                 "Asked",
-                                "Model",
+                                "Bouncer",
                                 "Pattern",
                                 "Remembered answers",
                                 "Ask rate",
@@ -899,7 +905,7 @@ mod vault_view {
                 };
                 ui.painter().rect_filled(column, radius, kit::ACCENT);
                 let tip = format!(
-                    "{}: {} of {} requests asked you ({:.0}%). Model {}, pattern {}, remembered answers {}.",
+                    "{}: {} of {} requests asked you ({:.0}%). Bouncer {}, pattern {}, remembered answers {}.",
                     format_utc(day.day).split(' ').next().unwrap_or_default(),
                     day.asked,
                     day.decisions,
@@ -967,7 +973,7 @@ mod vault_view {
             ui,
             Some("Automatic decisions"),
             Some(
-                "Runs that started without you: the model allowed them, or a remembered pattern did. Open a run to see what Apassy knew.",
+                "Runs that started without you: the bouncer allowed them, or a remembered pattern did. Open a run to see what Apassy knew.",
             ),
             |s| {
                 if loaded.automatic.is_empty() {
@@ -979,7 +985,7 @@ mod vault_view {
                     let by = if entry.decided_by == DecidedBy::Pattern {
                         "Pattern"
                     } else {
-                        "Model"
+                        "Bouncer"
                     };
                     let name = format!(
                         "{} by {by}, {}, {}",
@@ -1134,7 +1140,7 @@ mod vault_view {
             ("Secrets", none(entry.env_names.clone())),
             ("Declarations", none(declarations)),
             ("Rule flags", none(entry.rule_flags.clone())),
-            ("Model facts", none(facts)),
+            ("Brain answers", none(facts)),
             ("Pattern", entry.pattern.clone()),
             (
                 "Decision",
@@ -1433,7 +1439,7 @@ mod tests {
     #[test]
     fn candidate_card_says_no_candidate_until_shadow_mode() {
         let none = candidate_lines(None);
-        assert_eq!(none[0], "No candidate model.");
+        assert_eq!(none[0], "No candidate brain.");
         let promotable = view(120, 115, 0);
         assert!(promotable.can_promote());
         let some = candidate_lines(Some(&promotable));
@@ -1473,7 +1479,7 @@ mod tests {
         assert!(training_lines(&open, None)[0].ends_with("The gate is open."));
         let running = training_lines(&open, Some(std::time::Duration::from_secs(125)));
         assert!(running[1].starts_with("Training runs: 2 min 5 s of 60 min."));
-        assert!(active_lines(None)[0].starts_with("Active model: the default model"));
+        assert!(active_lines(None)[0].starts_with("Active brain: the default model"));
     }
 
     #[test]
@@ -1572,7 +1578,7 @@ mod tests {
         let text = draw_with(&mut app, settings_panel);
         assert!(text.contains("Calibration and learning"), "{text}");
         assert!(text.contains("Nothing to learn from yet."), "{text}");
-        assert!(!text.contains("Calibration and models"), "{text}");
+        assert!(!text.contains("Calibration and brain versions"), "{text}");
 
         let entry = |asked: bool, decided_by: DecidedBy| DecisionEntry {
             at: now(),
@@ -1618,10 +1624,10 @@ mod tests {
         let text = draw_with(&mut app, settings_panel);
         for expected in [
             "Ran without you",
-            "3 this week · model 1 · pattern 1 · remembered answers 1",
+            "3 this week · bouncer 1 · pattern 1 · remembered answers 1",
             "Remembered patterns",
             "0 active · 0 still learning",
-            "Calibration and models",
+            "Calibration and brain versions",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1629,7 +1635,7 @@ mod tests {
         let text = draw_view(&mut app);
         for expected in [
             "2 of 5 runs · goal 10% or less",
-            "model 1 · pattern 1 · remembered answers 1",
+            "bouncer 1 · pattern 1 · remembered answers 1",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1638,8 +1644,8 @@ mod tests {
         for expected in [
             "Threshold calibration",
             "Active task_match level: 75% (default).",
-            "Candidate model",
-            "No candidate model.",
+            "Candidate brain",
+            "No candidate brain.",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1750,7 +1756,7 @@ mod tests {
             "just now · View agent",
             "Credential 1: no declaration",
             "Active task_match level: 75% (default).",
-            "No candidate model.",
+            "No candidate brain.",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1824,7 +1830,7 @@ mod tests {
             "Denials that the candidate would allow: 0. You can promote it.",
             "Promote",
             "Training gate: 0 of 300 owner decisions, 0 of 30 owner denials",
-            "Active model: the default model",
+            "Active brain: the default model",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1855,11 +1861,11 @@ mod tests {
         assert_eq!(promotion.version, version);
         let text = draw_view(&mut app);
         assert!(
-            text.contains("Active model: apassy-local-v1+0badc0de at http://127.0.0.1:8775"),
+            text.contains("Active brain: apassy-local-v1+0badc0de at http://127.0.0.1:8775"),
             "{text}"
         );
         assert!(text.contains("Roll back to the default model"), "{text}");
-        assert!(text.contains("No candidate model."), "{text}");
+        assert!(text.contains("No candidate brain."), "{text}");
 
         let rollback = OwnerRequest::RollbackModel {
             activation_id: promotion.id,
@@ -1878,6 +1884,6 @@ mod tests {
         let back = active().expect("rollback");
         assert_eq!(back.action, ActivationAction::Rollback);
         assert!(back.is_default());
-        assert!(draw_view(&mut app).contains("Active model: the default model"));
+        assert!(draw_view(&mut app).contains("Active brain: the default model"));
     }
 }

@@ -73,7 +73,7 @@ Providers with `"real_value": true` (Gate 2, 2026-10-12; [agent-path.md §8b](ag
 | `supabase` | 3 | The Supabase CLI (Go) uses the `sbp_` access token; `supabase secrets set` copies keys to another service. |
 | `planetscale` | 3 | `pscale` is a Go program; a `pscale_pw_` password goes over the MySQL protocol, not HTTPS. |
 
-The cost: such a credential reaches the process as it is, so a command can send it to any host. The `foreign_host` flag (section 6) and the bouncer still see the provider hosts, and the owner can choose "Placeholder" for one credential. `tests/add_detected.rs` (`providers_of_cli_tools_get_the_real_value`) checks the delivery.
+The cost: such a credential reaches the process as it is, so a command can send it to any host. The `foreign_host` flag (section 6) and the bouncer gate still see the provider hosts, and the owner can choose "Placeholder" for one credential. `tests/add_detected.rs` (`providers_of_cli_tools_get_the_real_value`) checks the delivery.
 
 All conditions in `when` must hold. A list means "one of the items".
 
@@ -128,7 +128,7 @@ ADR 0025 §4 ("Two steps to add"). `apassy::vault::detect::detect(text) -> Vec<D
 | `-----BEGIN ... PRIVATE KEY-----` | An SSH key. |
 | Anything else | A Custom item "Credential" with the field `secret` and no variable: the vault names it `APASSY_ITEM_<id>`. |
 
-The declaration comes from the catalog signals of section 2, with the facts of the new item (variable, fields, URL hosts). Each value has a source: `signal`, or `default`. ADR 0025 §4: the bouncer is more careful with a value that only a weak signal found, so the detection stores only strong values as `signal`:
+The declaration comes from the catalog signals of section 2, with the facts of the new item (variable, fields, URL hosts). Each value has a source: `signal`, or `default`. ADR 0025 §4: the bouncer gate is more careful with a value that only a weak signal found, so the detection stores only strong values as `signal`:
 
 - Strong: a value signal (strength 3: `sk_live_`, `sk_test_`, a shape, a JWT, a JSON key file), with all its fields, and an environment word of the variable name (`STRIPE_LIVE_KEY`, `DEV_API_TOKEN`, `LOCAL_DATABASE_URL`), with the environment only.
 - Weak: a host, a variable or field name condition of a provider, a word of a plain field (user, database), a host word, and "live", "prod", or "production" as a word of the value. A weak value never lowers a value. It can only raise a strong value, and a raised value has the source `default`. Without a strong value, a field keeps the most sensitive default (production, high, admin, irreversible) with the source `default`.
