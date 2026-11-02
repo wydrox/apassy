@@ -1,4 +1,5 @@
 import ApassyVaultKit
+import ApassyCompanionKit
 import SwiftUI
 
 /// Settings > Security: Face ID unlock, the lock, and the time a copied secret stays.
@@ -6,9 +7,35 @@ struct SecuritySettingsView: View {
     /// Closes the Settings sheet (`dismiss` here would only go back to the root).
     let close: DismissAction
     @Environment(RootModel.self) private var root
+    @State private var frequency = FaceIDWindow.app.frequency
+    @State private var changingFrequency = false
+    @State private var frequencyError: String?
 
     var body: some View {
         Form {
+            Section {
+                Picker("Ask for Face ID", selection: $frequency) {
+                    ForEach(FaceIDFrequency.allCases) { Text($0.label).tag($0) }
+                }
+                .disabled(changingFrequency)
+                .onChange(of: frequency) { _, value in
+                    guard value != FaceIDWindow.app.frequency else { return }
+                    changingFrequency = true
+                    Task {
+                        PrivacyCover.shared.beginSystemPrompt()
+                        do {
+                            try await FaceIDWindow.app.changeFrequency(value)
+                            frequencyError = nil
+                        } catch { frequencyError = error.localizedDescription }
+                        frequency = FaceIDWindow.app.frequency
+                        changingFrequency = false
+                        PrivacyCover.shared.endSystemPrompt()
+                    }
+                }
+                if let frequencyError { Text(frequencyError).foregroundStyle(.red) }
+            } footer: {
+                Text("After you confirm with Face ID, Apassy doesn't ask again in this app until the time is up or your iPhone locks. AutoFill always asks.")
+            }
             if let vault = root.vault, vault.hasVault, vault.isUnlocked {
                 SecuritySections(vault: vault, close: close)
             } else {

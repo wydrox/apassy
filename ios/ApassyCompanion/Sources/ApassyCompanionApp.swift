@@ -7,6 +7,7 @@
 // (except behind its own system prompts), so the app switcher shows nothing of it.
 
 import AuthenticationServices
+import ApassyCompanionKit
 import SwiftUI
 
 @main
@@ -67,6 +68,12 @@ struct RootView: View {
             }
         }
         .environment(root)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataWillBecomeUnavailableNotification)) { _ in
+            FaceIDWindow.app.end()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
+            FaceIDWindow.app.end()
+        }
         .onChange(of: root.companionIsPaired) { _, paired in
             if paired { root.companionPairingFinished() }
         }

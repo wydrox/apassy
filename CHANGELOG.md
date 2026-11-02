@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- **iPhone:** Add a device-local “Ask for Face ID” setting shared by approvals and vault actions in the app. Every time remains the default; AutoFill still authenticates every fill.
+
 ## [0.5.12] - 2026-11-02
 
 ### Fixed
