@@ -863,6 +863,31 @@ fn field_suggestions_filter_metadata_without_an_owner_check() {
         .collect();
     assert_eq!(keys, vec!["has_totp", "item", "title", "username"]);
     assert!(!packet.to_string().contains(PASSWORD));
+
+    // The filter comes before the limit of rows: more logins of the site than the
+    // limit sort before the one that matches.
+    for index in 0..crate::browser::wire::MAX_LOGINS {
+        add_login(
+            &mut app,
+            &format!("A account {index:03}"),
+            "other",
+            &["example.test"],
+        );
+    }
+    let selected = add_login(&mut app, "Z account", "needle", &["example.test"]);
+    let response = now(&ask(
+        &mut app,
+        &ctx,
+        Command::Suggestions {
+            url: "https://example.test".to_owned(),
+            username: "need".to_owned(),
+        },
+    ));
+    let Data::Logins { logins, .. } = response.data else {
+        panic!("no metadata");
+    };
+    assert_eq!(logins.len(), 1, "filter before the limit");
+    assert_eq!(logins[0].item, selected, "filter before the limit");
 }
 
 #[test]
@@ -1023,6 +1048,33 @@ fn update_refuses_wrong_site_account_stale_item_and_cancelled_requests() {
         PASSWORD
     );
 
+    // An update that loses its browser ticket before the owner check changes nothing.
+    // (Before the edit below: it needs the first revision.)
+    let gone = crate::desktop::owner_socket::PeerGone::default();
+    let (reply, answer) = mpsc::channel();
+    app.handle_browser_watched(
+        Envelope {
+            request: Command::Update {
+                url: "https://example.test".to_owned(),
+                item,
+                username: "alice".to_owned(),
+                password: crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
+            },
+            reply,
+        },
+        Some(gone.clone()),
+        &ctx,
+    );
+    gone.set();
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    assert_eq!(now(&answer).code, "cancelled", "lost browser ticket");
+    assert!(app.browser_pending_is_empty(), "lost browser ticket");
+    assert_eq!(
+        fill_now(&mut app, &ctx, "https://example.test", item),
+        PASSWORD,
+        "lost browser ticket"
+    );
+
     let answer = update_login(&mut app, &ctx, item, "https://example.test", "alice");
     // A separate edit during the owner check invalidates the approved revision.
     app.owner_ui
@@ -1062,73 +1114,6 @@ fn update_refuses_wrong_site_account_stale_item_and_cancelled_requests() {
 }
 
 #[test]
-fn a_fill_proof_cannot_authorize_a_password_update() {
-    let dir = TempDir::new().unwrap();
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    let ctx = egui::Context::default();
-    let item = add_login(&mut app, "Example", "alice", &["example.test"]);
-    let page = Page::parse("https://example.test").unwrap();
-    let revision = app.owner_ui.session.details(item).unwrap().revision;
-    let proof = app
-        .owner_gate()
-        .authorize(
-            OwnerAction::FillLogin {
-                item_id: item,
-                login: "Example".to_owned(),
-                origin: page.origin(),
-            },
-            OwnerCheck::passphrase(PASS),
-        )
-        .unwrap();
-    let err = app
-        .owner_ui
-        .session
-        .update_page_login(
-            item,
-            revision,
-            "alice",
-            crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
-            &page,
-            proof,
-        )
-        .unwrap_err();
-    assert_eq!(err.code, "owner_check_required");
-    assert_eq!(
-        fill_now(&mut app, &ctx, "https://example.test", item),
-        PASSWORD
-    );
-}
-
-#[test]
-fn field_suggestions_filter_before_the_limit() {
-    let dir = TempDir::new().unwrap();
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    let ctx = egui::Context::default();
-    for index in 0..crate::browser::wire::MAX_LOGINS {
-        add_login(
-            &mut app,
-            &format!("A account {index:03}"),
-            "other",
-            &["example.test"],
-        );
-    }
-    let selected = add_login(&mut app, "Z account", "needle", &["example.test"]);
-    let response = now(&ask(
-        &mut app,
-        &ctx,
-        Command::Suggestions {
-            url: "https://example.test".to_owned(),
-            username: "need".to_owned(),
-        },
-    ));
-    let Data::Logins { logins, .. } = response.data else {
-        panic!("no metadata");
-    };
-    assert_eq!(logins.len(), 1);
-    assert_eq!(logins[0].item, selected);
-}
-
-#[test]
 fn update_proof_names_the_exact_item_site_account_and_revision() {
     let dir = TempDir::new().unwrap();
     let (mut app, _) = unlocked_app_with_item(&dir);
@@ -1143,7 +1128,9 @@ fn update_proof_names_the_exact_item_site_account_and_revision() {
         origin: page.origin(),
         revision,
     };
-    for mismatch in 0..4 {
+    // Another item, account, site or revision, and a fill proof for the same login and
+    // site: none authorizes the update.
+    for mismatch in 0..5 {
         let mut action = expected.clone();
         if let OwnerAction::UpdateLogin {
             item_id,
@@ -1157,8 +1144,16 @@ fn update_proof_names_the_exact_item_site_account_and_revision() {
                 0 => *item_id += 1,
                 1 => *username = "bob".to_owned(),
                 2 => *origin = "https://other.test".to_owned(),
-                _ => *revision += 1,
+                3 => *revision += 1,
+                _ => {}
             }
+        }
+        if mismatch == 4 {
+            action = OwnerAction::FillLogin {
+                item_id: item,
+                login: "Example".to_owned(),
+                origin: page.origin(),
+            };
         }
         let proof = app
             .owner_gate()
@@ -1176,39 +1171,8 @@ fn update_proof_names_the_exact_item_site_account_and_revision() {
                 proof,
             )
             .unwrap_err();
-        assert_eq!(error.code, "owner_check_required");
+        assert_eq!(error.code, "owner_check_required", "mismatch {mismatch}");
     }
-    assert_eq!(
-        fill_now(&mut app, &ctx, "https://example.test", item),
-        PASSWORD
-    );
-}
-
-#[test]
-fn an_update_that_loses_its_browser_ticket_changes_nothing() {
-    let dir = TempDir::new().unwrap();
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    let ctx = egui::Context::default();
-    let item = add_login(&mut app, "Example", "alice", &["example.test"]);
-    let gone = crate::desktop::owner_socket::PeerGone::default();
-    let (reply, answer) = mpsc::channel();
-    app.handle_browser_watched(
-        Envelope {
-            request: Command::Update {
-                url: "https://example.test".to_owned(),
-                item,
-                username: "alice".to_owned(),
-                password: crate::owner::wire::SecretText::new(OTHER_PASSWORD.to_owned()),
-            },
-            reply,
-        },
-        Some(gone.clone()),
-        &ctx,
-    );
-    gone.set();
-    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
-    assert_eq!(now(&answer).code, "cancelled");
-    assert!(app.browser_pending_is_empty());
     assert_eq!(
         fill_now(&mut app, &ctx, "https://example.test", item),
         PASSWORD

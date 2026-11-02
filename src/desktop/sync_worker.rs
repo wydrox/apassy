@@ -1784,10 +1784,11 @@ mod tests {
             assert!(!b.has_session(), "the key left the memory");
         }
 
-        /// A relay sync of the worker never holds the sync op lock: the window takes it
-        /// at once while a slow download runs.
+        /// The relay steps of a sync run without the vault mutex and without the sync op
+        /// lock: while a slow download runs, another thread (the window, the agent
+        /// broker) takes the op lock and the vault at once.
         #[test]
-        fn a_relay_transfer_leaves_the_op_lock_free() {
+        fn a_slow_relay_transfer_does_not_hold_the_vault() {
             let root = tempfile::TempDir::new().expect("dir");
             let relay = FakeRelay::start();
             let (a, mut vault_a, b, vault_b) = pair(root.path(), &relay);
@@ -1803,41 +1804,13 @@ mod tests {
             );
             let op = worker.op_lock();
             let now = Instant::now();
-            let waited = std::thread::scope(|scope| {
+            let (op_waited, waited) = std::thread::scope(|scope| {
                 let pull = scope.spawn(|| worker.tick(now));
+                // The download has started and is held for 1.5 s.
                 wait_for(&relay, "GET /v1/sync/snapshot", downloads);
                 let started = Instant::now();
                 drop(lock(&op));
-                let waited = started.elapsed();
-                pull.join().expect("tick");
-                waited
-            });
-            assert!(
-                waited < Duration::from_millis(300),
-                "the op lock waited {waited:?}"
-            );
-        }
-
-        /// The relay steps of a sync run without the vault mutex: while a slow download
-        /// runs, another thread (the window, the agent broker) takes the vault at once.
-        #[test]
-        fn a_slow_relay_transfer_does_not_hold_the_vault() {
-            let root = tempfile::TempDir::new().expect("dir");
-            let relay = FakeRelay::start();
-            let (a, mut vault_a, b, vault_b) = pair(root.path(), &relay);
-            vault_a.add(item("Gamma")).expect("add");
-            a.sync(&mut vault_a).expect("push version 2");
-            relay.delay("GET /v1/sync/snapshot", Duration::from_millis(1500));
-            let vault: SharedVault = Arc::new(Mutex::new(Some(vault_b)));
-            let worker = SyncWorker::default();
-            worker.track_sync(
-                Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
-                Arc::clone(&vault),
-            );
-            let now = Instant::now();
-            let waited = std::thread::scope(|scope| {
-                let pull = scope.spawn(|| worker.tick(now));
-                std::thread::sleep(Duration::from_millis(400));
+                let op_waited = started.elapsed();
                 let started = Instant::now();
                 let titles = lock(&vault)
                     .as_ref()
@@ -1845,8 +1818,12 @@ mod tests {
                 let waited = started.elapsed();
                 assert!(titles.is_some());
                 pull.join().expect("tick");
-                waited
+                (op_waited, waited)
             });
+            assert!(
+                op_waited < Duration::from_millis(300),
+                "the op lock waited {op_waited:?}"
+            );
             assert!(
                 waited < Duration::from_millis(500),
                 "the vault waited {waited:?}"

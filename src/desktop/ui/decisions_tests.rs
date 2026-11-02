@@ -328,35 +328,6 @@ fn evaluation_offer(item_id: u64) -> EvaluationOffer {
 }
 
 #[test]
-fn obsolete_evaluation_setup_is_hidden_even_for_a_queued_compatibility_offer() {
-    let dir = TempDir::new().expect("dir");
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    let queue = queue_of(&mut app, &dir);
-    let (waiter, pending) = ask_with_evaluation(
-        &app,
-        &queue,
-        1,
-        run(
-            "Claude Code",
-            question(vec![item(item_id, "Unclassified key")], &[]),
-        ),
-        Some(evaluation_offer(item_id)),
-    );
-    app.place = Place::Decisions;
-    let (text, _) = frames(&mut app, WIDE, 3);
-    for hidden in [
-        "Let the bouncer decide next time",
-        "Allow once and enable bouncer",
-    ] {
-        assert!(!text.contains(hidden), "{text}");
-    }
-    assert!(decisions::evaluation_confirmations(&app).is_none());
-    assert!(app.owner.check.is_none());
-    assert!(queue.deny(pending.id));
-    waiter.join().expect("waiter").expect("denied");
-}
-
-#[test]
 fn compatibility_evaluation_cannot_be_encoded_remotely_and_has_no_ui_draft() {
     let dir = TempDir::new().expect("dir");
     let (mut app, item_id) = unlocked_app_with_item(&dir);
@@ -392,6 +363,16 @@ fn compatibility_evaluation_cannot_be_encoded_remotely_and_has_no_ui_draft() {
     waiter.join().expect("waiter").expect("denied");
 
     let (waiter, pending) = ask_with_evaluation(&app, &queue, 1, pending_run, Some(offer.clone()));
+    // The obsolete evaluation setup stays hidden even for a queued compatibility offer.
+    let (text, _) = frames(&mut app, WIDE, 3);
+    for hidden in [
+        "Let the bouncer decide next time",
+        "Allow once and enable bouncer",
+    ] {
+        assert!(!text.contains(hidden), "offered: {hidden}: {text}");
+    }
+    assert!(decisions::evaluation_confirmations(&app).is_none());
+    assert!(app.owner.check.is_none(), "offered: no owner check");
     frames(&mut app, WIDE, 2);
     assert!(decisions::evaluation_confirmations(&app).is_none());
     decisions::select_key(&mut app, Key::Run(pending.id));
@@ -677,23 +658,16 @@ fn the_detail_shows_the_facts_the_command_and_why() {
     }
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
-}
 
-/// The command of a command line tool names no host: the card has no "Sends to" row, as
-/// in the mockup.
-#[test]
-fn a_command_without_a_host_has_no_sends_to_row() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    let queue = queue_of(&mut app, &dir);
+    // The command of a command line tool names no host: the card has no "Sends to" row,
+    // as in the mockup.
     let mut cli = run("Codex", question(vec![item(item_id, "Live key")], &[]));
     cli.command = ["stripe", "payouts", "list"].map(str::to_owned).to_vec();
     let (waiter, pending) = ask(&app, &queue, 1, cli);
-    app.place = Place::Decisions;
     let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("stripe payouts list"), "{text}");
-    assert!(!text.contains("Sends to"), "{text}");
-    assert!(!text.contains("No host in the command"), "{text}");
+    assert!(text.contains("stripe payouts list"), "no host: {text}");
+    assert!(!text.contains("Sends to"), "no host: {text}");
+    assert!(!text.contains("No host in the command"), "no host: {text}");
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
 }

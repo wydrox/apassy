@@ -203,7 +203,9 @@ fn cases() -> [(
 
 /// Each section shows its groups and no group of another section. The list column names
 /// every section. The settings of single agents are gone (ADR 0025 §3f), and Settings has
-/// no "Done": it is no window.
+/// no "Done": it is no window. At the smallest window, with the sidebar full, as a rail,
+/// and floating, each section draws its list and its first group, and no text goes past
+/// the right edge.
 #[test]
 fn each_section_shows_its_groups() {
     let dir = TempDir::new().expect("temp dir");
@@ -233,26 +235,27 @@ fn each_section_shows_its_groups() {
             assert!(!text.contains(gone), "{section:?}: {gone} is gone: {text}");
         }
     }
-}
 
-/// At the smallest window, with the sidebar full, as a rail, and floating, each section
-/// draws its list and its first group, and no text goes past the right edge.
-#[test]
-fn each_section_draws_at_the_minimum_window_size() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = unlocked_app_with_item(&dir);
+    // The smallest window.
     for (hidden, float) in [(false, false), (true, false), (false, true)] {
         app.ui.sidebar_hidden = hidden;
         for (section, shown, _) in cases() {
             super::super::open_settings(&mut app, section);
             app.ui.sidebar_float = float;
             let (text, texts) = frames(&mut app, MIN);
-            assert!(text.contains("Settings"), "{section:?}: {text}");
-            assert!(text.contains(shown[0]), "{section:?}: {}: {text}", shown[0]);
+            assert!(
+                text.contains("Settings"),
+                "MIN {hidden} {float}: {section:?}: {text}"
+            );
+            assert!(
+                text.contains(shown[0]),
+                "MIN {hidden} {float}: {section:?}: {}: {text}",
+                shown[0]
+            );
             for (painted, rect) in &texts {
                 assert!(
                     rect.right() <= MIN.x + 0.5 && rect.left() >= -0.5,
-                    "{section:?}: \"{painted}\" at {rect:?} is outside the window"
+                    "MIN {hidden} {float}: {section:?}: \"{painted}\" at {rect:?} is outside the window"
                 );
             }
         }
