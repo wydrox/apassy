@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "apassy-relay"
-version = "0.5.9"
+version = "0.5.13"
 dependencies = [
  "apassy",
  "base64",
