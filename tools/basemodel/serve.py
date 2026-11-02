@@ -104,6 +104,30 @@ def require_complete_state(agent, state, questions):
             raise ValueError("The complete request does not fit the model context. Ask the owner.")
 
 
+def fp16_encoder_on_mps(agent, model):
+    """Keep the encoder in fp16 on an Apple GPU. Return True if it changed the model.
+
+    The base checkpoint stores the encoder in fp16, and Laya autocasts it to fp16 on
+    MPS. But Laya 0.3.20 loads it as fp32 (1.6 GB) and casts every weight again in
+    each request; the allocator then keeps those copies. With fp16 weights and
+    autocast for every request, the answers are the same at about half the memory.
+    The fine-tuned heads stay fp32. Moving the model to the CPU and back drops the
+    fp32 buffers, which would otherwise stay fragmented in the MPS allocator.
+    """
+    import torch
+
+    if agent.device.type != "mps":
+        return False
+    model.tuned.encoder.half()
+    # Laya runs a request with fewer rows in fp32; fp16 weights need autocast for all.
+    agent.mps_amp_min_rows = 1
+    model.to("cpu")
+    torch.mps.empty_cache()
+    model.to(agent.device)
+    torch.mps.empty_cache()
+    return True
+
+
 def build_router(checkpoint, manifest_path=None, device=None):
     import torch
     from laya.agent import Agent
@@ -174,6 +198,7 @@ def build_router(checkpoint, manifest_path=None, device=None):
 
     dual = DualHeads()
     agent.model = dual
+    on_mps = fp16_encoder_on_mps(agent, dual)
 
     class BaseRouter(Router):
         """Every request goes to the fine-tuned English checkpoint."""
@@ -202,6 +227,9 @@ def build_router(checkpoint, manifest_path=None, device=None):
                 result = super().predict(state, questions, model=None, **kwargs)
             finally:
                 dual.stock_rows = None
+                if on_mps:
+                    # Give the activation buffers of this request back to the system.
+                    torch.mps.empty_cache()
             result["model"] = self.version
             return result
 

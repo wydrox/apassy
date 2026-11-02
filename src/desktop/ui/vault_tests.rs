@@ -331,7 +331,12 @@ fn settings_show_how_the_bouncer_model_starts() {
     app.model_server = Some(Arc::clone(&server));
     super::open_settings(&mut app, SettingsSection::Bouncer);
     let text = frames(&mut app);
-    for expected in ["Bouncer", "Model", "Start the model", "When a run needs it"] {
+    for expected in [
+        "Bouncer",
+        "Bouncer brain",
+        "Start the bouncer brain",
+        "When a run needs it",
+    ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("Start now"), "{text}");
@@ -407,7 +412,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     server.shutdown();
 }
 
-/// Settings > Bouncer: "Install the model" shows only in a managed mode while the Laya
+/// Settings > Bouncer: "Install the bouncer brain" shows only in a managed mode while the Laya
 /// environment is missing. A LaunchAgent that runs start.sh with a missing model, or
 /// in a mode where Apassy starts the server, gets a note with the commands that remove
 /// it. The test does not run the install.
@@ -477,7 +482,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     let text = frames(&mut app);
     for expected in [
         "Install…",
-        "The LaunchAgent com.example.bouncer starts the bouncer with APASSY_BASE_MODEL",
+        "The LaunchAgent com.example.bouncer starts the bouncer brain with APASSY_BASE_MODEL",
         "That file does not exist, so the start fails.",
         "Copy remove commands",
     ] {
@@ -525,8 +530,8 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         .expect("settings");
     let text = frames(&mut app);
     for expected in [
-        "The LaunchAgent com.example.bouncer also starts the bouncer.",
-        "With \"With Apassy\", Apassy starts and stops the model itself.",
+        "The LaunchAgent com.example.bouncer also starts the bouncer brain.",
+        "With \"With Apassy\", Apassy starts and stops the bouncer brain itself.",
         "Copy remove commands",
         "Install…",
     ] {
@@ -642,7 +647,7 @@ fn settings_show_start_now_and_the_first_start_download() {
 }
 
 /// Settings > Bouncer: when only the download of the weights failed, the environment is
-/// there. The status does not say that it is missing, and "Install the model" tries the
+/// there. The status does not say that it is missing, and "Install the bouncer brain" tries the
 /// download again.
 #[test]
 fn settings_offer_the_weights_download_again_after_it_failed() {

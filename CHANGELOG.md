@@ -17,11 +17,12 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - **iPhone:** Match Mac owner choices for known and unknown environments, with signed dismissal comments returned to the agent.
 - **iPhone:** Add a device-local “Ask for Face ID” setting shared by approvals and vault actions in the app. Every time remains the default; AutoFill still authenticates every fill.
+- The app names the two parts of the bouncer. The bouncer brain is the model: it answers questions about a command and decides nothing by itself. The bouncer gate is the fixed checks and the decision. Settings > Bouncer, Learning, and the owner checks use these names.
 - The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
 - Staged updates install when the vault locks, or right away with Restart to update.
 - Make the Touch ID frequency global for all owner actions, including revealing secrets, production approvals, settings and pairing. Replace heartbeat-gap revocation with synchronous lifecycle-helper state checks; lock, sleep, session changes and helper loss still end the window.
-- Let the bouncer use agent-stated tasks when no verified hook task is available, with visible provenance.
-- Permit declared read-only production credentials after model and policy checks; production write/admin still asks the owner.
+- Let the bouncer brain use agent-stated tasks when no verified hook task is available, with visible provenance.
+- Permit declared read-only production credentials after the bouncer gate checks the brain's answers and its policy; production write/admin still asks the owner.
 - Simplify owner questions to allow or dismiss, add guarded environment-and-allow actions and refusal comments, and show a floating question queue.
 - Keep v1 remote question cards so old iPhones keep working; accept new signed allow/classify/dismiss answer choices, including bounded refusal comments, alongside legacy kinds. Card v2 publication stays off.
 
@@ -29,6 +30,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - No vault schema change: schema stays at 23. iPhones on TestFlight 0.5.10 keep receiving the same question cards and answers; TestFlight 0.5.13 adds the new answer buttons and the Face ID window.
 - Coordinated release: macOS, iOS (TestFlight), browser extension (Chrome Web Store), relay, Linux CLI and website move to 0.5.13 together. The extension reaches browsers after Chrome Web Store review. The relay and Linux CLI have no protocol or schema change.
+
+### Fixed
+
+- The bouncer brain, the local model, uses about half the memory on Apple Silicon: 1.8 GB idle, before 3.4 GB and more. Its answers do not change.
 
 ## [0.5.12] - 2026-11-02
 

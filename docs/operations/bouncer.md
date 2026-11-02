@@ -2,9 +2,20 @@
 
 Initial guide: 2026-09-25. Current decision flow: 2026-10-21, [ADR 0029](../adr/0029-bouncer-evaluation-permission.md). Model policy: [ADR 0007](../adr/0007-rules-and-local-bouncer.md).
 
-## 1. Install and start Laya
+## Words
 
-Laya is an open-source decision model with the Jev wire protocol. The model has about 421M parameters. It runs on the CPU or the Apple GPU.
+The bouncer has two parts. This guide and the other documents use these names.
+
+- **Bouncer brain**: the decision model. It is `apassy-base-v1`, the Laya encoder with the Apassy decision heads, and `tools/basemodel/serve.py` serves it on this Mac (section 1). It reads the state of one request: the user request, the command, the directory relative to the project, the purpose, the environment variable names and the owner rule. It gives a probability for each question, for example `task_match` or `destroy`. It decides nothing by itself. It never gets a secret value, the vault path or an absolute project path.
+- **Bouncer gate**: the checks and the decision in Apassy (`src/broker/run.rs` and `src/broker/bouncer.rs`). It runs the hard checks, the command analysis with the rule packs, the declarations, your remembered answers and patterns, and the thresholds. It turns the answers of the bouncer brain into "run" or "ask the owner" (section 3). Without a valid answer of the bouncer brain, it asks the owner. After "run", Apassy gives the credential to the process.
+
+Learning ([learning.md](learning.md)) changes the two parts differently. A fine-tune changes only the decision heads of the bouncer brain ([fine-tune.md](fine-tune.md)). The bouncer gate learns only remembered patterns and the `task_match` calibration, inside fixed limits. Its hard checks never learn.
+
+The training gate, the shadow gate and the replay gate of the calibration are conditions of learning ([learning.md](learning.md), [fine-tune.md](fine-tune.md)). They are not parts of the bouncer gate.
+
+## 1. Install and start the bouncer brain (Laya)
+
+The bouncer brain is a Laya model. Laya is an open-source decision model with the Jev wire protocol. The model has about 421M parameters. It runs on the CPU or the Apple GPU.
 
 ```
 D="$HOME/Library/Application Support/Apassy/laya"
@@ -25,7 +36,7 @@ Each real inference attempt has an absolute 10-second deadline for the whole HTT
 
 ### Install from Apassy
 
-You do not need Terminal for these commands. In Settings > Bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
+You do not need Terminal for these commands. In Settings > Bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install…":
 
 - Apassy runs the same `uv` commands: `uv venv --python 3.12 .venv` (only when `.venv/bin/python` is missing, with `--clear` when `.venv` exists without it), `uv pip install --python .venv/bin/python "laya[serve]==0.3.20"`, and `uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt`. The requirements come from `Apassy.app/Contents/Resources/tools/basemodel`, or from the repository when Apassy runs from `target/`.
 - The last step, "Downloading the model weights", runs `.venv/bin/python -B tools/basemodel/fetch_weights.py`. It downloads the pinned base weights (about 800 MB) into the Hugging Face cache of the user, so the first start of the server does not wait for them. Weights that are already there are not downloaded again. `-B`, and the scripts themselves, write no `__pycache__` next to the scripts: in `Apassy.app` it would break the code signature.
@@ -33,19 +44,19 @@ You do not need Terminal for these commands. In Settings > Bouncer, choose "With
 - Each command is an argument vector. No command goes through a shell. `uv` and the Python get only `HOME`, `PATH`, `TMPDIR`, the locale, the user, the proxy variables, and the `UV_`, `SSL_CERT_`, and `HF_` variables. With `HF_HOME` or `HF_HUB_CACHE`, the weights go where the server looks for them.
 - Apassy looks for `uv` in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, and then in `PATH`. Without `uv`, the section says "Install uv first: brew install uv". Apassy does not install Homebrew or `uv`.
 - The section shows the step ("step 2 of 4, Install Laya") and "Cancel install". Cancel stops `uv` or the Python and their child processes.
-- The output goes to `~/Library/Logs/Apassy/bouncer-install.log` (mode `0600`). A failed step shows the last lines of this log and "Open install log". "Install the model" then tries again.
-- If only the download of the weights fails (for example, a network or a proxy that blocks huggingface.co), the environment is still installed. The install says so, the server can start, and its first start downloads the weights. While the weights are not in the cache, the section shows "Install the model" again, to try the download again, and the command for Terminal.
+- The output goes to `~/Library/Logs/Apassy/bouncer-install.log` (mode `0600`). A failed step shows the last lines of this log and "Open install log". "Install…" then tries again.
+- If only the download of the weights fails (for example, a network or a proxy that blocks huggingface.co), the environment is still installed. The install says so, the server can start, and its first start downloads the weights. While the weights are not in the cache, the section shows "Install…" again, to try the download again, and the command for Terminal.
 - After the install, also after a failed download of the weights, "With Apassy" starts the server. "When a run needs it" starts it on the next run.
 - The checkpoint search does not change. See "Start command with the base model".
 
 ### Start from Apassy
 
-Settings > Bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
+Settings > Bouncer > "Start the bouncer brain" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
 - **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for successful readiness inference before its decision request. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
 - **Managed outside Apassy**: Apassy starts and stops nothing. It only uses the address.
-- **Off**: the broker asks no model. Every run that needs it waits for you. The log and the question say "The bouncer is off in Settings."
+- **Off**: Apassy does not ask the bouncer brain. Every run that needs it waits for you. The log and the question say "The bouncer is off in Settings."
 
 Apassy runs `/bin/bash tools/basemodel/start.sh` from `Apassy.app/Contents/Resources`, or from the repository when it runs from `target/`. It sets `LAYA_HOST=127.0.0.1`, `LAYA_PORT` from the address, `APASSY_LAYA_DIR`, and `APASSY_BASE_MODEL` only when it finds a checkpoint. Without a checkpoint the model is zero-shot. The server gets its own process group. Stop sends SIGTERM, then SIGKILL after 5 seconds. The output goes to `~/Library/Logs/Apassy/bouncer.log`. "Open log" opens it.
 
@@ -68,7 +79,7 @@ Apassy reads `~/Library/LaunchAgents` when it starts and then each minute. It re
 
 The note has the commands that remove it, for example `launchctl bootout gui/$(id -u)/com.wydrox.apassy.bouncer` and `rm ~/Library/LaunchAgents/com.wydrox.apassy.bouncer.plist`. Apassy never changes or removes a LaunchAgent.
 
-The status row shows what is missing: the start script, the Laya environment, or a free port. For a missing environment it shows "Install the model" (see "Install from Apassy") and the install commands above with the paths of this Mac. Until the server runs, every run waits for you.
+The status row shows what is missing: the start script, the Laya environment, or a free port. For a missing environment it shows "Install…" (see "Install from Apassy") and the install commands above with the paths of this Mac. Until the server runs, every run waits for you.
 
 The setting is in `bouncer.json` in the Apassy data directory, mode `0600`. It is not in the vault, so each Mac has its own. The fields are `start` (`with_apassy`, `when_needed`, `external`, or `off`), `idle_minutes`, and an optional `url`. The `url` must be a loopback `http://` address. `APASSY_BOUNCER_URL` wins over the file. A missing or damaged file gives `when_needed` and 30 minutes (ADR 0024; before, `external`). A change in Settings needs no owner check: a model that does not run only makes runs wait for you.
 
@@ -91,11 +102,11 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
 
 ## 2. Rules
 
-Since 0.5.0 there is no rule to set for an agent and a credential ([ADR 0025](../adr/0025-low-friction-access.md)). The broker does not read process grants and their rules; the upgrade turned a grant with a rule into "Always ask for this agent" (section 3.0). To make a credential stricter, turn on "Always ask me" on its page. To make one agent stricter, answer a question with "Never for AGENT" ("Not for this agent") or "Always Ask for AGENT" ("Always ask for this agent") in its "⋯" menu. Your answers ("Allow ACTION in PROJECT") are the rules that the bouncer remembers; the page of the credential lists them under "Rules from your answers".
+Since 0.5.0 there is no rule to set for an agent and a credential ([ADR 0025](../adr/0025-low-friction-access.md)). The bouncer gate does not read process grants and their rules; the upgrade turned a grant with a rule into "Always ask for this agent" (section 3.0). To make a credential stricter, turn on "Always ask me" on its page. To make one agent stricter, answer a question with "Never for AGENT" ("Not for this agent") or "Always Ask for AGENT" ("Always ask for this agent") in its "⋯" menu. Your answers ("Allow ACTION in PROJECT") are the rules that the bouncer remembers; the page of the credential lists them under "Rules from your answers".
 
-## 3. Decision order
+## 3. Decision order of the bouncer gate
 
-### 3.0 Order of the broker (ADR 0025, ADR 0031)
+### 3.0 Order of the bouncer gate (ADR 0025, ADR 0031)
 
 A process grant is no longer authority for a run. Schema 18 converted grants with a
 rule, instruction or ask mode into "Always ask for this agent". Access restrictions
@@ -115,7 +126,7 @@ non-archived credentials with valid process bindings, `src/broker/run.rs` uses:
    secret-variable reference. Foreign database hosts still always ask. An evaluation
    scope is never an exception.
 7. An active owner-taught pattern retains its existing execution semantics.
-8. Every remaining request reaches the model: first use, staging, unconfirmed
+8. Every remaining request reaches the bouncer brain: first use, staging, unconfirmed
    production and default-source environment/risk included. No evaluation scope is
    required. Defaults always require at least 80% task match, even for safe commands
    and certain reads; calibration cannot lower this check. The sensitive declaration
@@ -137,8 +148,8 @@ The broker no longer offers evaluation setup and Decisions hides its compatibili
 panel. The authenticated `ApproveAndEvaluate` machinery is retained, without a new
 UI offer. Relay and iPhone wire contracts do not change.
 
-Settings > Bouncer shows **Model ready** only after successful inference readiness,
-and **Model not ready** otherwise. **Today** shows model allowances, owner
+Settings > Bouncer shows **Brain ready** only after successful inference readiness,
+and **Brain not ready** otherwise. **Today** shows model allowances, owner
 questions, and failures for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
 or readiness failure and unanswered/invalidated questions; it can overlap asked.
 A denial by the owner is not by itself a failure. Patterns and remembered answers
@@ -149,7 +160,7 @@ A connector use (`apassy_use_credential`) keeps the standing rules: "Not for thi
 
 The dated policy detail below describes model certainty and vetoes. The current eligibility and approval order is section 3.0. Its step 2 now has the exception of an owner allowance, and its steps 4 and 4a come in the order above. Since 0.5.0 a run has no grant rule and no owner instruction, so step 1 and the `rule_break` check never apply to a run, and "Always ask me" or "Always ask for this agent" takes the place of a grant in "ask" mode.
 
-Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Current policy version: `apassy-bouncer-v9` (ADR 0031 adds agent-stated task fallback and mandatory model task/leak/destruction checks for declared read-only production on 2026-11-02). Code: `decide_routed`, `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
+Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Current policy version: `apassy-bouncer-v9` (ADR 0031 adds agent-stated task fallback and mandatory bouncer brain task/leak/destruction answers checked by the gate for declared read-only production on 2026-11-02). Code: `decide_routed`, `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
 
 Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes steps 6 and 7:
 
@@ -157,11 +168,11 @@ Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes st
 - **A known write is never a certain read.** The packs list the write commands of known tools (`writes`, for example `gh pr comment`, `gh issue close`, `git push`, SQL `INSERT`). For such a command the model's `writes` answer does not replace `task_match`, and a high-risk or irreversible declaration always asks. On held-out v3 the base model gave `writes` 0.08 and 0.10 to `gh pr comment` and `gh issue close`.
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
-2. Production rule (ADR 0010, ADR 0025). If an item in the run has production confirmed by the owner, a signal or usage and the owner has no production allowance for the item, the project, and the kind of action, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
-3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program and general rules give flags: `secret_output`, `data_loss`, `irreversible`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. The analysis looks for injection phrases in the purpose and in the user request (version 5). A flag always asks the owner. The broker does not call the model. Dev round 4 added `secret_output` for debug and trace settings with a bound secret (`TF_LOG=TRACE`, Git trace variables, `NODE_DEBUG=http`, `DEBUG=*`, `aws --debug`, `gcloud --log-http`, `az --debug`, `kubectl -v=8`, `ansible -vvv`, `bash -x`, and others), and for more secret value reads (`kubectl get secret ... --template`, `helm status -o json`, `aws ecr get-login-password`). See [rule-packs.md](rule-packs.md).
+2. Production rule (ADR 0010, ADR 0025). If an item in the run has production confirmed by the owner, a signal or usage and the owner has no production allowance for the item, the project, and the kind of action, the run waits for the owner. The bouncer gate does not ask the bouncer brain. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
+3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program and general rules give flags: `secret_output`, `data_loss`, `irreversible`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. The analysis looks for injection phrases in the purpose and in the user request (version 5). A flag always asks the owner. The bouncer gate does not ask the bouncer brain. Dev round 4 added `secret_output` for debug and trace settings with a bound secret (`TF_LOG=TRACE`, Git trace variables, `NODE_DEBUG=http`, `DEBUG=*`, `aws --debug`, `gcloud --log-http`, `az --debug`, `kubectl -v=8`, `ansible -vvv`, `bash -x`, and others), and for more secret value reads (`kubectl get secret ... --template`, `helm status -o json`, `aws ecr get-login-password`). See [rule-packs.md](rule-packs.md).
 4. A missing user request or a missing declaration asks the owner.
-4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
-5. The model answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction. An unavailable model asks the owner.
+4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The bouncer gate does not ask the bouncer brain. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
+5. The bouncer brain answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction. An unavailable bouncer brain asks the owner.
 6. Needed certainty. A command that is not known safe needs `task_match` at or above the active level: 0.75 by default, or a level from 0.5 to 0.8 that the owner applied after a calibration (ADR 0009 step 3). Only for a known command (below) that is not a known write can a certain read replace this check: `writes` at or below 0.2. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe. A known write never meets this check. With an owner instruction, every command needs `rule_break` at or below 0.2 (version 7). The model answers `rule_break` only for a grant with an instruction, and an answer without an asked fact is unavailable, so the answer is present exactly when the grant has an instruction. A calibration does not change these checks.
 
 A known command (`Analysis::known_command`) is a command that the built-in packs know. Each segment of the command is known safe, or a built-in pack names its program and these conditions hold:

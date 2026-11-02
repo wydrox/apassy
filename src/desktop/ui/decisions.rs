@@ -2062,7 +2062,7 @@ fn draw_question(
     } else if !run.risk.is_empty() {
         run.risk.clone()
     } else {
-        "The bouncer did not decide this run, so it asks you.".to_owned()
+        "The bouncer gate needs your answer for this run.".to_owned()
     };
     group_label(ui, "Why you are asked");
     kit::section(ui, None, None, |s| {

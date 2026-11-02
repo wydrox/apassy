@@ -2628,12 +2628,19 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
         ),
         (
             ReasonKind::LowTaskMatch,
-            "The bouncer wasn't sure this fits your task.",
+            "The bouncer brain wasn't sure this fits your task.",
         ),
-        (ReasonKind::ModelUnavailable, "No bouncer is running."),
+        (
+            ReasonKind::ModelUnavailable,
+            "The bouncer brain is not running.",
+        ),
         (
             ReasonKind::ModelTimeout,
-            "The bouncer didn't answer in time.",
+            "The bouncer brain didn't answer in time.",
+        ),
+        (
+            ReasonKind::ModelUnsure,
+            "The bouncer brain wasn't sure this run is safe.",
         ),
         (
             ReasonKind::HookFlags,

@@ -17,7 +17,7 @@ idempotency_key are optional. Tracked operations retain value-free outcomes.
 
 The existing run policy checks agent visibility, restored and archived items,
 declarations, project/environment restrictions, Always ask, host task evidence,
-production allowances, model decisions and owner questions. Code uses retain the
+production allowances, bouncer brain answers checked by the bouncer gate, and owner questions. Code uses retain the
 explicit code-covering project-answer requirement. Browser delivery branches only
 after the same authorization recheck, before process environment creation. The
 internal browser-fill command is descriptive policy input and is never executed.
