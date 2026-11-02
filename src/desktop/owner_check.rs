@@ -1133,7 +1133,7 @@ impl OwnerRequest {
                 question_items(run)
             ),
             Self::ApproveAndRemember(run) => format!(
-                "Approve one run of agent \"{}\" and remember its pattern{}: {}. This adds one command-line teaching approval. Repeated approvals can activate this pattern at the model step; this is separate from a project allowance or evaluation permission. Hard checks still apply.",
+                "Approve one run of agent \"{}\" and remember its pattern{}: {}. This adds one command-line teaching approval. Repeated approvals can activate this pattern in the bouncer gate; this is separate from a project allowance or evaluation permission. Hard checks still apply.",
                 run.agent,
                 run.remember
                     .as_ref()
@@ -1146,13 +1146,13 @@ impl OwnerRequest {
                 run.command.join(" ")
             ),
             Self::ApplyCalibration { level } => format!(
-                "Set the task_match level of the bouncer to {level}%. Apassy replays all past decisions again first."
+                "Set the task_match level of the bouncer gate to {level}%. Apassy replays all past decisions again first."
             ),
             Self::PromoteModel { version, .. } => format!(
-                "Make the candidate model {version} the active model of the bouncer. Apassy checks its shadow numbers again first."
+                "Make the candidate brain {version} the active bouncer brain. Apassy checks its shadow numbers again first."
             ),
             Self::RollbackModel { from, to, .. } => {
-                format!("Roll back the bouncer model from {from} to {to}.")
+                format!("Roll back the bouncer brain from {from} to {to}.")
             }
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")

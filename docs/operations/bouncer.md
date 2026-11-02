@@ -36,7 +36,7 @@ Each real inference attempt has an absolute 10-second deadline for the whole HTT
 
 ### Install from Apassy
 
-You do not need Terminal for these commands. In Settings > Bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
+You do not need Terminal for these commands. In Settings > Bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install…":
 
 - Apassy runs the same `uv` commands: `uv venv --python 3.12 .venv` (only when `.venv/bin/python` is missing, with `--clear` when `.venv` exists without it), `uv pip install --python .venv/bin/python "laya[serve]==0.3.20"`, and `uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt`. The requirements come from `Apassy.app/Contents/Resources/tools/basemodel`, or from the repository when Apassy runs from `target/`.
 - The last step, "Downloading the model weights", runs `.venv/bin/python -B tools/basemodel/fetch_weights.py`. It downloads the pinned base weights (about 800 MB) into the Hugging Face cache of the user, so the first start of the server does not wait for them. Weights that are already there are not downloaded again. `-B`, and the scripts themselves, write no `__pycache__` next to the scripts: in `Apassy.app` it would break the code signature.
@@ -44,14 +44,14 @@ You do not need Terminal for these commands. In Settings > Bouncer, choose "With
 - Each command is an argument vector. No command goes through a shell. `uv` and the Python get only `HOME`, `PATH`, `TMPDIR`, the locale, the user, the proxy variables, and the `UV_`, `SSL_CERT_`, and `HF_` variables. With `HF_HOME` or `HF_HUB_CACHE`, the weights go where the server looks for them.
 - Apassy looks for `uv` in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, and then in `PATH`. Without `uv`, the section says "Install uv first: brew install uv". Apassy does not install Homebrew or `uv`.
 - The section shows the step ("step 2 of 4, Install Laya") and "Cancel install". Cancel stops `uv` or the Python and their child processes.
-- The output goes to `~/Library/Logs/Apassy/bouncer-install.log` (mode `0600`). A failed step shows the last lines of this log and "Open install log". "Install the model" then tries again.
-- If only the download of the weights fails (for example, a network or a proxy that blocks huggingface.co), the environment is still installed. The install says so, the server can start, and its first start downloads the weights. While the weights are not in the cache, the section shows "Install the model" again, to try the download again, and the command for Terminal.
+- The output goes to `~/Library/Logs/Apassy/bouncer-install.log` (mode `0600`). A failed step shows the last lines of this log and "Open install log". "Install…" then tries again.
+- If only the download of the weights fails (for example, a network or a proxy that blocks huggingface.co), the environment is still installed. The install says so, the server can start, and its first start downloads the weights. While the weights are not in the cache, the section shows "Install…" again, to try the download again, and the command for Terminal.
 - After the install, also after a failed download of the weights, "With Apassy" starts the server. "When a run needs it" starts it on the next run.
 - The checkpoint search does not change. See "Start command with the base model".
 
 ### Start from Apassy
 
-Settings > Bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
+Settings > Bouncer > "Start the bouncer brain" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
 - **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for successful readiness inference before its decision request. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
@@ -79,7 +79,7 @@ Apassy reads `~/Library/LaunchAgents` when it starts and then each minute. It re
 
 The note has the commands that remove it, for example `launchctl bootout gui/$(id -u)/com.wydrox.apassy.bouncer` and `rm ~/Library/LaunchAgents/com.wydrox.apassy.bouncer.plist`. Apassy never changes or removes a LaunchAgent.
 
-The status row shows what is missing: the start script, the Laya environment, or a free port. For a missing environment it shows "Install the model" (see "Install from Apassy") and the install commands above with the paths of this Mac. Until the server runs, every run waits for you.
+The status row shows what is missing: the start script, the Laya environment, or a free port. For a missing environment it shows "Install…" (see "Install from Apassy") and the install commands above with the paths of this Mac. Until the server runs, every run waits for you.
 
 The setting is in `bouncer.json` in the Apassy data directory, mode `0600`. It is not in the vault, so each Mac has its own. The fields are `start` (`with_apassy`, `when_needed`, `external`, or `off`), `idle_minutes`, and an optional `url`. The `url` must be a loopback `http://` address. `APASSY_BOUNCER_URL` wins over the file. A missing or damaged file gives `when_needed` and 30 minutes (ADR 0024; before, `external`). A change in Settings needs no owner check: a model that does not run only makes runs wait for you.
 
@@ -148,8 +148,8 @@ The broker no longer offers evaluation setup and Decisions hides its compatibili
 panel. The authenticated `ApproveAndEvaluate` machinery is retained, without a new
 UI offer. Relay and iPhone wire contracts do not change.
 
-Settings > Bouncer shows **Model ready** only after successful inference readiness,
-and **Model not ready** otherwise. **Today** shows model allowances, owner
+Settings > Bouncer shows **Brain ready** only after successful inference readiness,
+and **Brain not ready** otherwise. **Today** shows model allowances, owner
 questions, and failures for the owner's local calendar day from the existing decision log. Both day boundaries use the system timezone, including daylight saving changes. Failed includes model
 or readiness failure and unanswered/invalidated questions; it can overlap asked.
 A denial by the owner is not by itself a failure. Patterns and remembered answers

@@ -533,10 +533,10 @@ impl OwnerAction {
             }
             Self::ChangeTokenLifetime => "change the agent token lifetime".to_owned(),
             Self::ChangeCalibration { .. } => {
-                "change the task_match level of the bouncer".to_owned()
+                "change the task_match level of the bouncer gate".to_owned()
             }
-            Self::PromoteModel { .. } => "promote a new model for the bouncer".to_owned(),
-            Self::RollbackModel { .. } => "roll back the model of the bouncer".to_owned(),
+            Self::PromoteModel { .. } => "promote a new bouncer brain".to_owned(),
+            Self::RollbackModel { .. } => "roll back the bouncer brain".to_owned(),
             Self::OpenCliSession => "start a command-line session".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "bind 1 environment variable".to_owned(),
