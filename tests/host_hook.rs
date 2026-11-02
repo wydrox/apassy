@@ -341,7 +341,9 @@ fn owner_approves(vault: &SharedVault, approvals: &ApprovalQueue, pending: &Pend
 
 #[test]
 fn approval_card_shows_the_source_and_the_difference() {
-    let fx = fixture(ExecMode::Ask, SHORT);
+    // The run waits until the owner answers. The answer needs a passphrase check, which
+    // can take longer than SHORT on a busy machine.
+    let fx = fixture(ExecMode::Ask, Duration::from_secs(30));
     let transcript = claude_transcript(&fx, SESSION, PROMPT);
     hook(&fx, &claude_input(&fx, SESSION, &transcript, PROMPT));
     let approvals = Arc::clone(fx.broker.approvals());

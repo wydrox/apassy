@@ -14,3 +14,7 @@
 # The promo renders and their tools: the sources are in git, the output is not.
 design/promo/**/node_modules/
 design/promo/**/out/
+
+# Python bytecode from running the CI and release scripts
+__pycache__/
+*.pyc

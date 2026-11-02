@@ -2514,6 +2514,17 @@ fn fresh_biometry_probe_recovers_and_ignores_old_dialogs() {
         app.owner.check.as_ref().unwrap().running.is_some(),
         "Touch ID starts automatically"
     );
+    // Let the worker thread end first. Under cargo-nextest the process exits when the
+    // test returns, and a worker still inside the vault code then crashes it.
+    let (_, task, _) = app.owner.check.as_ref().unwrap().running.as_ref().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while matches!(task.poll(), crate::desktop::owner_check::TaskPoll::Waiting) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Touch ID worker ends"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     app.close_owner_check(None);
 }
 

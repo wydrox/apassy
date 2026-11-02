@@ -148,13 +148,9 @@ jobs:
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
 
-      # The vault core of the iPhone app (ADR 0023) is a workspace member, outside the
-      # default members above. Its tests drive the JSON calls end to end with the fake
-      # relay, built for macOS; the iPhone slices need Xcode (ios/README.md).
-      - name: Run the iPhone vault core tests
-        run: |
-          cargo clippy --offline --locked -p apassy-core --all-targets -- -D warnings
-          cargo test --offline --locked -p apassy-core
+      # The vault core of the iPhone app (ios/ApassyCore) has no macOS code, so the
+      # linux job lints it and the relay job tests it. The iPhone slices need Xcode
+      # (ios/README.md).
 
       - name: Run P0 Node model tests
         run: node --test design/walkthrough/model.test.mjs
@@ -217,6 +213,12 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --offline --locked --all-features --all-targets -- -D warnings
 
+      # The relay (ADR 0037) and the vault core of the iPhone app (ADR 0023) are
+      # workspace members outside the default members above. Both use the apassy
+      # library with the `vault` feature only. The relay job runs their tests.
+      - name: Run Clippy on the relay and the iPhone vault core
+        run: cargo clippy --offline --locked -p apassy-relay -p apassy-core --all-targets -- -D warnings
+
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
 
@@ -235,12 +237,21 @@ jobs:
       - name: Check the rule packs and provider files with the loaders
         run: cargo run --offline --locked --features vault --bin apassy-packs -- validate packs/*.json packs/providers/*.json
 
-  # The relay crate (ADR 0037): lint, tests, and the end-to-end script with the real
-  # binaries. Formatting is checked by the macOS job (`cargo fmt --all`).
+  # The tests of the relay crate (ADR 0037) and of the vault core of the iPhone app
+  # (ADR 0023), and the relay end-to-end script with the real binaries. Both crates
+  # use the apassy library with the `vault` feature only, so one build serves both.
+  # Two jobs build the same targets and each runs one slice of the tests; the first
+  # also runs the doc tests and the end-to-end script. Both use one cache key.
+  # The linux job runs their Clippy, the macOS job checks the format (`cargo fmt --all`).
   relay:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    name: relay (${{ matrix.slice }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2]
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
@@ -249,7 +260,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust 1.97.0
-        run: rustup toolchain install 1.97.0 --profile minimal --component clippy
+        run: rustup toolchain install 1.97.0 --profile minimal
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -258,12 +269,27 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch Cargo dependencies
         run: cargo fetch --locked
-      - name: Run Clippy on the relay
-        run: cargo clippy --offline --locked -p apassy-relay --all-targets -- -D warnings
-      - name: Run the relay tests
-        run: cargo test --offline --locked -p apassy-relay --no-fail-fast
+      - name: Install cargo-nextest 0.9.150
+        run: bash scripts/ci-install-nextest.sh
+      - name: Run the relay and iPhone vault core tests
+        env:
+          NEXTEST_TEST_THREADS: "8"
+          SLICE: ${{ matrix.slice }}
+        run: >-
+          cargo nextest run --profile ci --offline --locked -p apassy-relay -p apassy-core
+          --partition "slice:$SLICE/2"
+      # nextest does not run doc tests.
+      - name: Run the relay and iPhone vault core doc tests
+        if: matrix.slice == 1
+        run: cargo test --offline --locked -p apassy-relay -p apassy-core --doc
       - name: Run the relay end-to-end script
+        if: matrix.slice == 1
         run: bash crates/apassy-relay/scripts/e2e.sh
+      # A test or the script that leaves a process running delays the end of the job:
+      # the runner then stops each leftover process. List them for the log.
+      - name: List leftover processes
+        if: always()
+        run: ps -eo pid,ppid,pgid,etimes,args --sort=pid | awk '$5 !~ /^\[/'
 
   relay-worker:
     needs: reuse-pr
@@ -322,6 +348,11 @@ jobs:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ steps.audit-cache.outputs.cache-primary-key }}
 
+  # The Rust tests of the apassy package run with cargo-nextest: each test in its own
+  # process, several at a time (.config/nextest.toml). Linux splits the tests into
+  # four slices and macOS into two; `--partition slice:K/N` gives each test to
+  # exactly one slice of its OS. The tests use the processors of the runner fully,
+  # so a slice takes about 1/N of the CPU time of the suite.
   tests:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
@@ -331,33 +362,44 @@ jobs:
       fail-fast: false
       matrix:
         # A draft pull request runs the Linux groups only. A ready pull request
-        # runs five macOS jobs (three test groups, macos, extension): the standard
-        # five-runner macOS limit. Linux keeps four test groups.
+        # runs four macOS jobs (two test groups, macos, extension), and a push to
+        # main five (release-binaries): within the five-runner macOS limit.
         os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-24.04"]' || '["macos-15", "ubuntu-24.04"]') }}
         shard: [0, 1, 2, 3]
         exclude:
           - os: macos-15
+            shard: 2
+          - os: macos-15
             shard: 3
     env:
-      TEST_SHARD_COUNT: ${{ matrix.os == 'macos-15' && 3 || 4 }}
+      TEST_SHARD_COUNT: ${{ matrix.os == 'macos-15' && 2 || 4 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust 1.97.0
         run: rustup toolchain install 1.97.0 --profile minimal
+      # The keys of the earlier serial groups (three on macOS, four on Linux): their
+      # caches hold the same dependencies, built with the same features.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: dev-tests-${{ env.TEST_SHARD_COUNT }}-${{ matrix.shard }}
+          key: dev-tests-${{ matrix.os == 'macos-15' && '3' || '4' }}-${{ matrix.shard }}
           cache-bin: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch Cargo dependencies
         run: cargo fetch --locked
-      - name: Run serial test group
+      - name: Install cargo-nextest 0.9.150
+        run: bash scripts/ci-install-nextest.sh
+      # Many tests wait (for a timeout, a child process, or a socket), so each runner
+      # runs twice as many tests as it has processors. Slices count from 1.
+      - name: Run test group
         env:
           TEST_SHARD: ${{ matrix.shard }}
-        run: python3 scripts/ci-test-shard.py --shard "$TEST_SHARD" --shard-count "$TEST_SHARD_COUNT"
+          NEXTEST_TEST_THREADS: ${{ matrix.os == 'macos-15' && '6' || '8' }}
+        run: >-
+          cargo nextest run --profile ci --offline --locked --all-features --all-targets
+          --partition "slice:$((TEST_SHARD + 1))/$TEST_SHARD_COUNT"
 
   release-binaries:
     # No signing credentials enter this job. Its artifact is eligible for Release

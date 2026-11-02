@@ -29,3 +29,10 @@
 - A draft run skips the macOS test groups because the account has five macOS
   runners for all runs. A green draft run is not a green PR: merge only after the
   run of the ready PR succeeds.
+- CI runs the Rust tests with cargo-nextest (`.config/nextest.toml`): each test in
+  its own process, several at a time. Run them the same way:
+  `cargo nextest run --all-features --all-targets` and
+  `cargo nextest run -p apassy-relay -p apassy-core`; nextest skips doc tests, so
+  also run `cargo test --features vault --doc`. A test that uses a fixed port, a
+  fixed path, or the Keychain must not run beside other tests: give it a free port
+  and a temporary directory, or put it in the `serial` test group with the reason.
