@@ -81,7 +81,7 @@ pub fn run(
     if let Err(status) = check_args(args) {
         return status;
     }
-    let gate: Gate<'_> = &super::caller::check_browser_parent;
+    let gate: Gate<'_> = &super::caller::check_browser_parent_for_app;
     loop {
         let message = match read_frame(&mut input) {
             Ok(Some(message)) => message,
@@ -113,7 +113,7 @@ pub fn serve(
         input,
         output,
         socket,
-        &super::caller::check_browser_parent,
+        &super::caller::check_browser_parent_for_app,
     )
 }
 

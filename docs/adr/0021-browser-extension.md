@@ -1,5 +1,17 @@
 # ADR 0021 — The browser extension: fill a login on a website, after Touch ID for each fill
 
+## 2026-11-02 — Explicit unsafe-profile permission
+
+CDP clients can read pages and drive browser controls, including the extension popup. Therefore the popup can only request permission: Allow / Dismiss and the standard owner check happen in Apassy, brought forward. The global owner-check window applies only after the owner clicks Allow in the native app. Password behavior and normal passkey/code owner checks remain in force.
+
+The signed guard reports `unsafe-switch <compact JSON>\n` with exit 2 after verifying and rechecking the complete process chain. JSON is at most 1024 bytes and contains `bundle_id`, `team_id`, canonical absolute `profile_dir`, `debugging` (decimal port, `pipe`, or `none`), and `unsafe_switches` (names only). Unknown fields, invalid or oversized identities fail closed. Exit 0 remains exactly `ok\n`. Ambiguous profile/transport arguments, unresolvable paths and dynamic port 0 cannot obtain grants. The host forwards authenticated unsafe requests; the app independently verifies the socket peer and owns all decisions.
+
+Bypasses live only in app memory: once is consumed by the next passkey/code operation; five minutes expires 300 seconds after approval. Vault epoch or owner-window generation changes revoke them, including Mac lock/sleep, and app shutdown discards them. Exact equality includes bundle, signing team, profile root, port/pipe and switch names. Helium on port **9223** can never authorize the same or another person's Helium on **9222**. No wildcard, browser-wide or port-wide approval exists.
+
+Agent-fill profile trust is a separate durable setting, stored with the protected native helper in the device-only, non-synchronizing Keychain access group, like owner frequency. Only Apassy exposes adding, after an owner check; the extension cannot add trust. Remove needs no check. Missing, malformed or unavailable protected storage denies agent trust. Trust alone never grants an owner passkey or code bypass.
+
+Residual risk: during a bypass a CDP client can trigger covered operations (subject to normal owner checks/window), observe page data and read filled codes. A trusted agent profile permits deliberate credential exposure to that controlled browser. Directory/port identity does not identify individual CDP clients; replacing a browser process with another signed instance using the exact profile and switches retains identity. Switch values, URLs, environment, profile files and vault contents are excluded from guard output. The canonical profile path itself is local metadata and can include the Mac account name.
+
 Date: 2026-10-06.
 Status: ACCEPTED in scope by the owner on 2026-10-06 ("czy możesz stworzyć chromium extension jak 1password?"). The owner set the rule for secrets: "agenci i automatyczne użycie nigdy nie widzi hasła. wyjątkiem jest użycie przez użytkownika (człowieka) czy to pokazanie sekretu w aplikacji czy wstawianie sekretów - Touch ID lub hasło przy każdym wypełnieniu". The other choices below are proposals; the open decisions are D1 to D6 in the last section.
 

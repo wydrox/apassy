@@ -121,6 +121,7 @@ function localError(code) {
 }
 
 function messageOf(answer) {
+  if (answer?.code === "unsafe_browser") return "Other programs can control this browser. Open the Apassy popup and choose Allow once…; confirm in Apassy.";
   return (answer && typeof answer.message === "string" && answer.message) ||
     MESSAGES[answer && answer.code] || MESSAGES.host_failed;
 }
@@ -593,6 +594,12 @@ async function handleMessage(message) {
   const bad = () => ({ ok: false, code: "bad_request", message: MESSAGES.bad_request });
   const onPage = message && Number.isInteger(message.tabId) && typeof message.url === "string";
   switch (message && message.type) {
+    case "bypass_status":
+    case "bypass_end":
+      return ask({ cmd: message.type });
+    case "bypass_request":
+      if (!["once", "five_minutes"].includes(message.scope)) return bad();
+      return ask({ cmd: "bypass_request", scope: message.scope });
     case "state":
       return state();
     case "fill": {
@@ -1305,7 +1312,7 @@ async function deliverPasskey(session, answer) {
   if (!expect) return;
   const reply = await checkPasskeyAnswer(expect, answer);
   if (reply.kind !== "result") {
-    if (answer && answer.ok === false && answer.code === "unsupported" && answer.message &&
+    if (answer && answer.ok === false && ["unsupported", "unsafe_browser"].includes(answer.code) && answer.message &&
         !session.done && session.open && await tabStillOn(session.peer)) {
       await showFailure(messageOf(answer));
     }

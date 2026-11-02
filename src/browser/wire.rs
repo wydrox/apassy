@@ -91,6 +91,9 @@ fn is_zero(value: &u32) -> bool {
 /// A checked request. Debug output hides the password of a save.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
+    BypassStatus,
+    BypassRequest(super::bypass::BypassScope),
+    BypassEnd,
     Status,
     /// Bring the window to the front.
     Show,
@@ -259,6 +262,25 @@ impl Request {
         // `Request` keeps its fields, so the old commands parse as before.
         if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(line) {
             match cmd.as_str() {
+                "bypass_status" | "bypass_request" | "bypass_end" => {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Packet {
+                        v: u32,
+                        cmd: String,
+                        scope: Option<super::bypass::BypassScope>,
+                    }
+                    let p: Packet = serde_json::from_slice(line).map_err(|_| invalid())?;
+                    if p.v != 1 {
+                        return Err(invalid());
+                    }
+                    return match (p.cmd.as_str(), p.scope) {
+                        ("bypass_status", None) => Ok(Command::BypassStatus),
+                        ("bypass_end", None) => Ok(Command::BypassEnd),
+                        ("bypass_request", Some(scope)) => Ok(Command::BypassRequest(scope)),
+                        _ => Err(invalid()),
+                    };
+                }
                 "suggestions" => {
                     let packet: SuggestionsPacket =
                         serde_json::from_slice(line).map_err(|_| invalid())?;
@@ -727,6 +749,10 @@ impl Response {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Data {
+    Bypass {
+        identity: Option<super::trust::ProfileIdentity>,
+        remaining: Option<u64>,
+    },
     #[default]
     None,
     Status {
@@ -796,6 +822,14 @@ pub enum Data {
 impl std::fmt::Debug for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Bypass {
+                identity,
+                remaining,
+            } => f
+                .debug_struct("Bypass")
+                .field("identity", identity)
+                .field("remaining", remaining)
+                .finish(),
             Self::None => f.write_str("None"),
             Self::Status { vault, version } => f
                 .debug_struct("Status")
@@ -889,6 +923,22 @@ pub struct LoginRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bypass_requests_never_carry_approval_or_identity() {
+        assert_eq!(
+            Request::parse(br#"{"v":1,"cmd":"bypass_request","scope":"once"}"#).unwrap(),
+            Command::BypassRequest(super::super::bypass::BypassScope::Once)
+        );
+        for packet in [
+            r#"{"v":1,"cmd":"bypass_request","scope":"forever"}"#,
+            r#"{"v":1,"cmd":"bypass_request","scope":"once","approved":true}"#,
+            r#"{"v":1,"cmd":"bypass_request","scope":"once","identity":{}}"#,
+            r#"{"v":1,"cmd":"bypass_end","scope":"once"}"#,
+        ] {
+            assert!(Request::parse(packet.as_bytes()).is_err());
+        }
+    }
 
     fn parse(text: &str) -> Result<Command, WireError> {
         Request::parse(text.as_bytes())

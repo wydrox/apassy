@@ -23,7 +23,8 @@
 //! Every failure refuses the request: a missing or unsigned guard, a guard that does
 //! not answer `ok` within the time limit, a source build. Debug builds may name another
 //! guard with [`GUARD_ENV`]; release builds have no override.
-//! Only status 2 with `unsafe-switch\n` names a refusal category. The process
+//! Status 2 can report a bounded unsafe profile identity; malformed output refuses.
+//! The process
 //! that set the switch already knows it; this reveals nothing about the vault.
 
 use std::io::Read;
@@ -85,6 +86,34 @@ pub fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
     run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy)))
 }
 
+/// Verify the signed chain while retaining an unsafe browser's exact identity.
+pub fn peer_identity(
+    stream: &UnixStream,
+) -> Result<Option<super::trust::ProfileIdentity>, WireError> {
+    let copy = stream.try_clone().map_err(|_| refused())?;
+    match run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy))) {
+        Ok(()) => Ok(None),
+        Err(e) => unsafe_identity(&e).map(Some).ok_or(e),
+    }
+}
+
+pub fn unsafe_identity(error: &WireError) -> Option<super::trust::ProfileIdentity> {
+    if error.code != "unsafe_browser" {
+        return None;
+    }
+    serde_json::from_str::<super::trust::ProfileIdentity>(&error.message)
+        .ok()
+        .filter(|p| p.valid())
+}
+
+/// The host still authenticates the chain; only Apassy may grant a bypass.
+pub fn check_browser_parent_for_app() -> Result<(), WireError> {
+    match check_browser_parent() {
+        Err(e) if unsafe_identity(&e).is_some() => Ok(()),
+        result => result,
+    }
+}
+
 /// Generic refusal: only the unsafe-switch category is disclosed separately.
 fn refused() -> WireError {
     WireError::new(
@@ -119,6 +148,25 @@ fn run_guard(check: Check, stdin: Stdio) -> Result<(), WireError> {
 fn parse_answer(answer: Option<(Option<i32>, Vec<u8>)>) -> Result<(), WireError> {
     match answer {
         Some((Some(0), output)) if output == GUARD_OK => Ok(()),
+        Some((Some(2), output))
+            if output.len() <= 1039
+                && output.starts_with(b"unsafe-switch ")
+                && output.ends_with(b"\n") =>
+        {
+            let json = &output[14..output.len() - 1];
+            if json.len() > 1024 {
+                return Err(refused());
+            }
+            let identity: super::trust::ProfileIdentity =
+                serde_json::from_slice(json).map_err(|_| refused())?;
+            if !identity.valid() {
+                return Err(refused());
+            }
+            Err(WireError::new(
+                "unsafe_browser",
+                String::from_utf8(json.to_vec()).map_err(|_| refused())?,
+            ))
+        }
         Some((Some(2), output)) if output == b"unsafe-switch\n" => Err(WireError::new(
             "unsupported",
             "This browser was started with remote debugging or a test extension, so other programs can control it. Apassy doesn't fill passkeys or codes there. Quit the browser and open it normally.",
@@ -188,7 +236,7 @@ fn verify_guard(path: &Path) -> Result<(), WireError> {
     }
 }
 
-/// Wait for `child` until `timeout`. Returns its exit code and at most 64 bytes of its
+/// Wait for `child` until `timeout`. Returns its exit code and at most 1040 bytes of its
 /// standard output, or `None` when it did not exit in time (it is then killed).
 fn finish(mut child: Child, timeout: Duration) -> Option<(Option<i32>, Vec<u8>)> {
     let start = Instant::now();
@@ -206,7 +254,7 @@ fn finish(mut child: Child, timeout: Duration) -> Option<(Option<i32>, Vec<u8>)>
     let mut output = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         // The child exited, so the pipe ends; a larger answer is not `ok`.
-        stdout.take(64).read_to_end(&mut output).ok()?;
+        stdout.take(1040).read_to_end(&mut output).ok()?;
     }
     Some((status.code(), output))
 }
@@ -214,6 +262,28 @@ fn finish(mut child: Child, timeout: Duration) -> Option<(Option<i32>, Vec<u8>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_identity_wire_is_strict() {
+        let json = r#"{"bundle_id":"net.imput.helium","team_id":"S4Q33XPHB4","profile_dir":"/tmp/owner","debugging":"9223","unsafe_switches":["remote-debugging-port"]}"#;
+        let parse = |json: &str| {
+            parse_answer(Some((
+                Some(2),
+                format!("unsafe-switch {json}\n").into_bytes(),
+            )))
+            .unwrap_err()
+        };
+        assert_eq!(unsafe_identity(&parse(json)).unwrap().debugging, "9223");
+        assert_eq!(
+            parse(&format!("{}{}", " ".repeat(1024), json)).message,
+            refused().message
+        );
+        assert_eq!(
+            parse(&json.replace("\"bundle_id\"", "\"unknown\"")).message,
+            refused().message
+        );
+        assert_eq!(parse(&json.replace("9223", "0")).message, refused().message);
+    }
 
     #[test]
     fn answers_disclose_only_the_exact_unsafe_switch_category() {

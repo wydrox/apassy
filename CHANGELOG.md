@@ -4,6 +4,11 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Added
+
+- **Browser extension:** Request permission in Apassy to allow passkeys and codes once or for five minutes in an exactly identified remote-debugging profile. Show remaining time and End now in the popup.
+- Protected, device-local browser profile trust list for agent fills, with owner approval to add and removal in Browser settings. A grant for one debugging port never covers another.
+
 ## [0.5.12] - 2026-11-02
 
 ### Fixed

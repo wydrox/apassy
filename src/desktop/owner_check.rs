@@ -226,6 +226,10 @@ pub struct PasskeyRequest {
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
+    BrowserDebugging {
+        identity: crate::browser::trust::ProfileIdentity,
+        scope: Option<crate::browser::bypass::BypassScope>,
+    },
     RemoveOlderIphone {
         device: crate::vault::TrustedDevice,
         team: String,
@@ -638,6 +642,10 @@ impl OwnerRequest {
             Self::RegisterSetupAgent { name } => {
                 OwnerAction::RegisterSetupAgent { name: name.clone() }
             }
+            Self::BrowserDebugging { identity, scope } => OwnerAction::BrowserDebugging {
+                identity: identity.clone(),
+                scope: *scope,
+            },
             Self::ChangeOwnerFrequency { old, new } => OwnerAction::ChangeOwnerFrequency {
                 old: *old,
                 new: *new,
@@ -970,6 +978,7 @@ impl OwnerRequest {
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
             Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
+            Self::BrowserDebugging { identity, scope } => format!("{} asks to {}. Other programs can control this browser while this is on.", identity.description(), match scope { Some(crate::browser::bypass::BypassScope::Once) => "allow passkeys and codes once", Some(crate::browser::bypass::BypassScope::FiveMinutes) => "allow passkeys and codes for 5 minutes", None => "trust this profile for agent fills with remote debugging" }),
             Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
             Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line. A fresh owner check is required because a command-line session can be inherited by an agent.", if *copy { "Copy" } else { "Show" }),
@@ -1814,6 +1823,20 @@ impl DesktopApp {
         let approvals = self.approvals();
         let session = &mut self.owner_ui.session;
         match request {
+            OwnerRequest::BrowserDebugging { identity, scope } => {
+                let action = OwnerAction::BrowserDebugging { identity: identity.clone(), scope };
+                if !session.epoch().is_some_and(|epoch| proof.check(&action, &epoch).is_ok()) { self.set_err("The owner check changed."); return; }
+                if let Some(scope) = scope {
+                    self.browser.bypass = Some(crate::browser::bypass::RemoteDebuggingBypass::approved(identity, scope, Instant::now()));
+                    self.browser.bypass_epoch = session.epoch();
+                    self.browser.bypass_generation = session.owner_window.generation();
+                    self.set_ok("Browser bypass approved.");
+                } else {
+                    self.browser.trusted_profiles = None;
+                    let Some(epoch) = session.epoch() else { return; };
+                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok("Profile trusted on this Mac."), Err(e) => self.set_err(e) }
+                }
+            }
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),
             OwnerRequest::ExportDecisions => self.complete_fresh_export(proof),
             OwnerRequest::RegisterAgent { name } => self.complete_fresh_agent(&name, false, proof),
@@ -2810,6 +2833,7 @@ impl DesktopApp {
     /// Lock the vault. Waiting runs end and stay in the inbox. Typed secrets and their
     /// undo history are erased (key-memory review F1, F3).
     pub(crate) fn lock_vault(&mut self, ctx: Option<&egui::Context>) {
+        self.browser.bypass = None;
         super::ui::invalidate_notifications(self);
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
