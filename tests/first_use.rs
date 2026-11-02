@@ -529,16 +529,6 @@ fn first_use_of_staging_reaches_the_model_without_permission() {
         "changed script"
     );
     assert_eq!(model_calls(&fx), 5, "each script run is evaluated again");
-    // Another project asks without the model.
-    let other = fx.dir.path().join("other");
-    std::fs::create_dir_all(other.join(".git")).expect("other project");
-    let other = std::fs::canonicalize(other).expect("canonical");
-    let handle = argv_later_at(&fx, &other, &["git", "commit", "-m", "synthetic"]);
-    let run = waiting(&fx);
-    assert!(run.question.why.contains("is declared for the project"));
-    assert!(fx.broker.approvals().deny(run.id));
-    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
-    assert_eq!(model_calls(&fx), 5, "another project");
 
     // ADR 0025 §3: a development key of a known provider that goes to its hosts goes to
     // the model under the development/low-risk baseline, and every use still requires a
@@ -582,6 +572,27 @@ fn first_use_of_staging_reaches_the_model_without_permission() {
     );
     let text = format!("{first:?} {second:?}");
     assert!(!text.contains(SECRET));
+
+    // Back to the staging/medium declaration: another project asks without the model. It
+    // runs last, because its denial records a pattern.
+    with_vault(&fx, |v| {
+        v.save_declaration(
+            fx.item_id,
+            &declaration(Environment::Staging, RiskLevel::Medium),
+            Some("sentry"),
+            None,
+        )
+    })
+    .expect("staging declaration");
+    let other = fx.dir.path().join("other");
+    std::fs::create_dir_all(other.join(".git")).expect("other project");
+    let other = std::fs::canonicalize(other).expect("canonical");
+    let handle = argv_later_at(&fx, &other, &["git", "commit", "-m", "synthetic"]);
+    let run = waiting(&fx);
+    assert!(run.question.why.contains("is declared for the project"));
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
+    assert_eq!(model_calls(&fx), 7, "another project");
 }
 
 #[test]
