@@ -8,6 +8,8 @@ Routes (HTTP/1.1, JSON; every route except `GET /health` needs
   `shadow_heads` (SHA-256 of a head file). The answer names the head set that
   answered (`heads`) and, with `shadow_heads`, carries `shadow`.
 - `GET`, `PUT`, `DELETE /v1/heads/<sha256>` and `DELETE /v1/owner`: head sets.
+  The routes that write (`PUT`, both `DELETE`) are served only when the server has
+  a token: without `LAYA_API_KEY` they answer 403 `no_token` and change nothing.
 
 The app replaces laya-serve's `create_app` (laya 0.3.20): laya's `/v1/systemone`
 cannot pass `heads` to the router, so the route, its guardrails, the single
@@ -47,6 +49,11 @@ MAX_STATE_CHARS = 50000
 MAX_BODY_BYTES = 2 * 1024 * 1024
 
 _FROM_ENV = object()
+
+
+def log_hash(value):
+    """The first 8 hex of a well-formed hash for a log line; never other request data."""
+    return value[:8] if isinstance(value, str) and heads_cache.HASH_RE.match(value) else "-"
 
 
 def auth_ok(api_key, authorization):
@@ -118,6 +125,13 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
 
     def refused(error):
         return HTTPException(status_code=error.status, detail=error.detail())
+
+    def require_write_token(authorization):
+        # Without a token anyone on the address could store or delete head sets.
+        require_auth(authorization)
+        if api_key is None:
+            raise refused(heads_cache.HeadsError(
+                403, "no_token", "this server has no token, so it does not serve the routes that write"))
 
     @app.get("/health")
     def health():
@@ -205,7 +219,7 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
     async def put_heads(sha: str, request: Request,
                         authorization: Optional[str] = Header(default=None),
                         manifest_header: Optional[str] = Header(default=None, alias="Apassy-Manifest")):
-        require_auth(authorization)
+        require_write_token(authorization)
         started = time.perf_counter()
         status, size, upload = 500, 0, None
         try:
@@ -215,6 +229,8 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
             if declared_length_over(request, max_upload):
                 raise heads_cache.HeadsError(413, "too_large", "the head file is larger than %d bytes"
                                              % max_upload)
+            # Refuse a new head set before its body when the heads folder is full.
+            cache.check_room(sha)
             # Stream to a temporary file in the heads folder and hash on the way: the
             # body is never held in memory, and the rename into place is atomic.
             out, upload = cache.new_upload()
@@ -229,6 +245,8 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
                                                      % max_upload)
                     digest.update(chunk)
                     out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
             heads_cache.check_body(sha, digest.hexdigest(), size, manifest)
             heads_cache.check_head_file(upload, cache.expected_shapes)
             created, model = cache.store(sha, upload, raw, manifest)
@@ -245,22 +263,22 @@ def create_app(router, cache, api_key=_FROM_ENV, max_upload=heads_cache.MAX_UPLO
                 except FileNotFoundError:
                     pass
             LOG.info("heads put status=%d heads=%s bytes=%d latency_ms=%.0f",
-                     status, sha[:8], size, (time.perf_counter() - started) * 1000.0)
+                     status, log_hash(sha), size, (time.perf_counter() - started) * 1000.0)
 
     @app.delete("/v1/heads/{sha}")
     def delete_heads(sha: str, authorization: Optional[str] = Header(default=None)):
-        require_auth(authorization)
+        require_write_token(authorization)
         try:
             cache.delete(heads_cache.check_hash(sha))
         except heads_cache.HeadsError as error:
-            LOG.info("heads delete status=%d heads=%s", error.status, sha[:8])
+            LOG.info("heads delete status=%d heads=%s", error.status, log_hash(sha))
             raise refused(error) from None
-        LOG.info("heads delete status=204 heads=%s", sha[:8])
+        LOG.info("heads delete status=204 heads=%s", log_hash(sha))
         return Response(status_code=204)
 
     @app.delete("/v1/owner")
     def delete_owner(authorization: Optional[str] = Header(default=None)):
-        require_auth(authorization)
+        require_write_token(authorization)
         removed = cache.delete_all()
         LOG.info("owner delete status=204 files=%d", removed)
         return Response(status_code=204)

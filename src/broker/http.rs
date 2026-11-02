@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
-/// Largest response that the client reads, headers included.
+/// Largest response that the client reads, headers and chunk framing included.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_HOST_BYTES: usize = 253;
 
@@ -273,6 +273,12 @@ pub fn post_json_loopback(
 /// destination needs `tls`; without it the call is a protocol failure. The
 /// client sends no body byte before the handshake and the certificate check
 /// succeed. When the time limit ends, the failure is [`HttpFailure::Timeout`].
+/// The client reads the whole response, headers included, at most 64 KiB
+/// ([`MAX_RESPONSE_BYTES`]); a larger one is [`HttpFailure::TooLarge`].
+///
+/// On macOS the platform certificate check can, in rare cases, take longer
+/// than the deadline (it may fetch issuer or revocation data). The result is
+/// then a failure (`Tls` or `Timeout`), never a success after the deadline.
 pub fn post_json(
     destination: &DestinationUrl,
     path: &str,
@@ -333,6 +339,12 @@ fn post_json_with(
 
 /// Send one GET request with no bearer token, for a health route such as
 /// `/health`. The time limit and the TLS rules are the same as in [`post_json`].
+/// The client reads the whole response, headers included, at most 64 KiB
+/// ([`MAX_RESPONSE_BYTES`]); a larger one is [`HttpFailure::TooLarge`].
+///
+/// On macOS the platform certificate check can, in rare cases, take longer
+/// than the deadline (it may fetch issuer or revocation data). The result is
+/// then a failure (`Tls` or `Timeout`), never a success after the deadline.
 pub fn get_health(
     destination: &DestinationUrl,
     path: &str,
@@ -433,6 +445,11 @@ fn send_before(
 ) -> Result<HttpResponse, HttpFailure> {
     match destination {
         DestinationUrl::Loopback { addr, .. } => {
+            // The fields are public. Plain http:// never leaves this computer,
+            // also for a value that does not come from `parse_destination`.
+            if !addr.ip().is_loopback() {
+                return Err(HttpFailure::Protocol);
+            }
             let stream = connect_before(&[*addr], deadline)?;
             let mut stream = DeadlineStream { stream, deadline };
             exchange(&mut stream, request)
@@ -446,7 +463,10 @@ fn send_before(
                 .map_err(|_| HttpFailure::Tls)?;
             let mut stream = StreamOwned::new(conn, DeadlineStream { stream, deadline });
             // Finish the handshake before any request byte. A failed check sends
-            // no token and no body.
+            // no token and no body. On macOS the certificate check inside
+            // `complete_io` can, in rare cases, take longer than the deadline (it
+            // may fetch issuer or revocation data). The next socket operation
+            // then fails, so the result is never a success after the deadline.
             while stream.conn.is_handshaking() {
                 stream
                     .conn
@@ -991,8 +1011,75 @@ mod tests {
         }
     }
 
+    /// The server side of the socket. It keeps a copy of every byte that it
+    /// reads, before TLS decryption.
+    struct RecordingStream {
+        stream: TcpStream,
+        raw: Vec<u8>,
+    }
+
+    impl Read for RecordingStream {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let read = self.stream.read(buffer)?;
+            self.raw.extend_from_slice(&buffer[..read]);
+            Ok(read)
+        }
+    }
+
+    impl Write for RecordingStream {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.stream.write(buffer)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.stream.flush()
+        }
+    }
+
+    /// The bytes that one TLS server connection received.
+    struct ServerSeen {
+        /// The request after TLS decryption.
+        plaintext: Vec<u8>,
+        /// Every byte that arrived on the socket, before TLS decryption.
+        raw: Vec<u8>,
+    }
+
     /// Accept one TLS connection and read one request. Then write `answer`, or,
-    /// without an answer, stall until `release`. Returns the request plaintext.
+    /// without an answer, stall until `release`.
+    fn serve_one_tls_request(
+        listener: std::net::TcpListener,
+        config: Arc<rustls::ServerConfig>,
+        answer: Option<Vec<u8>>,
+        release: mpsc::Receiver<()>,
+    ) -> ServerSeen {
+        let (tcp, _) = listener.accept().expect("accept");
+        tcp.set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        let conn = rustls::ServerConnection::new(config).expect("server connection");
+        let recording = RecordingStream {
+            stream: tcp,
+            raw: Vec::new(),
+        };
+        let mut tls = StreamOwned::new(conn, recording);
+        let plaintext = read_request(&mut tls);
+        match answer {
+            Some(answer) => {
+                let _ = tls.write_all(&answer);
+                let _ = tls.flush();
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+            }
+            None => {
+                let _ = release.recv_timeout(Duration::from_secs(10));
+            }
+        }
+        ServerSeen {
+            plaintext,
+            raw: std::mem::take(&mut tls.sock.raw),
+        }
+    }
+
+    /// [`serve_one_tls_request`] on a server thread. Returns the request plaintext.
     fn answer_one_tls_request(
         listener: std::net::TcpListener,
         config: Arc<rustls::ServerConfig>,
@@ -1000,25 +1087,14 @@ mod tests {
         release: mpsc::Receiver<()>,
     ) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
-            let (tcp, _) = listener.accept().expect("accept");
-            tcp.set_read_timeout(Some(Duration::from_secs(10)))
-                .expect("read timeout");
-            let conn = rustls::ServerConnection::new(config).expect("server connection");
-            let mut tls = StreamOwned::new(conn, tcp);
-            let seen = read_request(&mut tls);
-            match answer {
-                Some(answer) => {
-                    let _ = tls.write_all(&answer);
-                    let _ = tls.flush();
-                    tls.conn.send_close_notify();
-                    let _ = tls.conn.complete_io(&mut tls.sock);
-                }
-                None => {
-                    let _ = release.recv_timeout(Duration::from_secs(10));
-                }
-            }
-            seen
+            serve_one_tls_request(listener, config, answer, release).plaintext
         })
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 
     fn localhost_https(listener: &std::net::TcpListener) -> DestinationUrl {
@@ -1094,6 +1170,63 @@ mod tests {
     }
 
     #[test]
+    fn a_fragmented_tls_response_still_meets_the_deadline() {
+        let pki = test_tls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let destination = localhost_https(&listener);
+        let config = Arc::clone(&pki.config);
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().expect("accept");
+            tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let conn = rustls::ServerConnection::new(config).expect("server connection");
+            let mut tls = StreamOwned::new(conn, tcp);
+            let seen = read_request(&mut tls);
+            // Each piece is its own TLS record. Every piece arrives before the
+            // previous one is late, but the whole response does not arrive
+            // before the deadline. The absolute deadline must still stop the client.
+            for piece in [
+                b"HTTP/1.1 200 OK\r\n".as_slice(),
+                b"Content-Length: 2\r\n",
+                b"\r\n",
+                b"{",
+                b"}",
+            ] {
+                std::thread::sleep(Duration::from_millis(400));
+                if tls.write_all(piece).and_then(|()| tls.flush()).is_err() {
+                    break;
+                }
+            }
+            seen
+        });
+        let timeout = Duration::from_millis(1500);
+        let began = Instant::now();
+        let result = post_json_with(
+            &destination,
+            "/v1/score",
+            br#"{"synthetic":true}"#,
+            Some("synthetic-model-key"),
+            timeout,
+            Some(&pki.client),
+            resolve_to_this_computer,
+        );
+        let elapsed = began.elapsed();
+        let seen = String::from_utf8(server.join().expect("server")).expect("text");
+        assert!(
+            seen.ends_with(r#"{"synthetic":true}"#),
+            "the handshake finished and the request arrived: {seen:?}"
+        );
+        assert_eq!(
+            result.expect_err("a fragmented response must exceed the total budget"),
+            HttpFailure::Timeout
+        );
+        assert!(
+            elapsed < timeout + Duration::from_secs(1),
+            "the deadline applies to all TLS reads: {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn a_slow_name_lookup_fails_at_the_deadline() {
         let pki = test_tls();
         let destination = DestinationUrl::Https {
@@ -1134,7 +1267,9 @@ mod tests {
     #[test]
     fn a_wrong_server_name_sends_no_byte_of_the_body() {
         let pki = test_tls();
-        let body = br#"{"synthetic-marker":"not-for-a-wrong-server"}"#;
+        let marker = b"synthetic-marker-not-for-a-wrong-server";
+        let body = br#"{"synthetic-marker-not-for-a-wrong-server":true}"#;
+        let bearer = "synthetic-model-key";
         // The certificate is for `localhost`; the destination asks for another
         // name. Then a client without the test root asks for the right name.
         let platform = TlsClient::platform().expect("platform TLS");
@@ -1148,24 +1283,37 @@ mod tests {
                 port: listener.local_addr().expect("addr").port(),
             };
             let (_release, held) = mpsc::channel();
-            let server = answer_one_tls_request(
-                listener,
-                Arc::clone(&pki.config),
-                Some(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()),
-                held,
-            );
+            let config = Arc::clone(&pki.config);
+            let server = std::thread::spawn(move || {
+                serve_one_tls_request(
+                    listener,
+                    config,
+                    Some(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()),
+                    held,
+                )
+            });
             let result = post_json_with(
                 &destination,
                 "/v1/score",
                 body,
-                Some("synthetic-model-key"),
+                Some(bearer),
                 Duration::from_secs(5),
                 Some(client),
                 resolve_to_this_computer,
             );
             assert_eq!(result.unwrap_err(), HttpFailure::Tls, "{host}");
             let seen = server.join().expect("server");
-            assert!(seen.is_empty(), "{host}: no request byte arrived");
+            assert!(seen.plaintext.is_empty(), "{host}: no request byte arrived");
+            // The check is on the raw socket bytes too, not only on what TLS
+            // decrypted. The client hello arrived, so the recording works.
+            assert!(!seen.raw.is_empty(), "{host}: the handshake bytes arrived");
+            for secret in [marker.as_slice(), bearer.as_bytes()] {
+                assert!(
+                    !contains(&seen.raw, secret),
+                    "{host}: {:?} is not on the socket",
+                    String::from_utf8_lossy(secret)
+                );
+            }
         }
     }
 
@@ -1190,6 +1338,133 @@ mod tests {
         );
         assert_eq!(result.unwrap_err(), HttpFailure::TooLarge);
         server.join().expect("server");
+    }
+
+    #[test]
+    fn a_chunked_response_over_tls_is_decoded_and_capped() {
+        let pki = test_tls();
+        let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let mut chunked = head.to_vec();
+        chunked.extend_from_slice(b"4\r\n{\"a\"\r\n3;x=1\r\n:1}\r\n0\r\n\r\n");
+        // Every chunk is under the cap; all of them together are over it.
+        let mut many = head.to_vec();
+        while many.len() <= MAX_RESPONSE_BYTES {
+            many.extend_from_slice(b"1000\r\n");
+            many.resize(many.len() + 0x1000, b'a');
+            many.extend_from_slice(b"\r\n");
+        }
+        many.extend_from_slice(b"0\r\n\r\n");
+        // One chunk that says that it is larger than the cap.
+        let mut one_large = head.to_vec();
+        one_large.extend_from_slice(format!("{:x}\r\n", MAX_RESPONSE_BYTES + 1).as_bytes());
+        for (name, answer, expected) in [
+            ("decoded", chunked, Ok(br#"{"a":1}"#.to_vec())),
+            ("many chunks", many, Err(HttpFailure::TooLarge)),
+            ("one large chunk", one_large, Err(HttpFailure::TooLarge)),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let destination = localhost_https(&listener);
+            let (_release, held) = mpsc::channel();
+            let server =
+                answer_one_tls_request(listener, Arc::clone(&pki.config), Some(answer), held);
+            let result = post_json_with(
+                &destination,
+                "/v1/score",
+                b"{}",
+                None,
+                Duration::from_secs(5),
+                Some(&pki.client),
+                resolve_to_this_computer,
+            )
+            .map(|response| {
+                assert_eq!(response.status, 200, "{name}");
+                response.body
+            });
+            assert_eq!(result, expected, "{name}");
+            server.join().expect("server");
+        }
+    }
+
+    #[test]
+    fn an_https_plain_http_mix_is_protocol() {
+        // An https:// destination without TLS settings fails before the name
+        // lookup and before any connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let destination = localhost_https(&listener);
+        let began = Instant::now();
+        assert_eq!(
+            post_json_with(
+                &destination,
+                "/v1/score",
+                b"{}",
+                Some("synthetic-model-key"),
+                Duration::from_secs(5),
+                None,
+                resolve_slowly,
+            )
+            .unwrap_err(),
+            HttpFailure::Protocol
+        );
+        assert_eq!(
+            get_health_with(
+                &destination,
+                "/health",
+                Duration::from_secs(5),
+                None,
+                resolve_slowly
+            )
+            .unwrap_err(),
+            HttpFailure::Protocol
+        );
+        // The slow lookup takes 3 s, so a quick failure did no lookup.
+        assert!(began.elapsed() < Duration::from_secs(1), "no name lookup");
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "no connection arrived"
+        );
+
+        // Plain http:// off this computer cannot be built from a URL: the
+        // loopback check in `parse_destination` refuses it.
+        for url in [
+            "http://10.0.0.1:80",
+            "http://bouncer.example.invalid:80",
+            "http://[2001:db8::1]:80",
+        ] {
+            assert_eq!(
+                parse_destination(url),
+                Err("Plain http:// is permitted only on this computer. Use https://."),
+                "{url}"
+            );
+        }
+
+        // The fields are public. A value built by hand with an address off this
+        // computer is a protocol failure with no connection attempt.
+        let off_this_computer = DestinationUrl::Loopback {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 80),
+            host_header: "192.0.2.1:80".to_owned(),
+        };
+        let began = Instant::now();
+        assert_eq!(
+            post_json_loopback(
+                &off_this_computer,
+                "/v1/score",
+                b"{}",
+                None,
+                Duration::from_secs(5)
+            )
+            .unwrap_err(),
+            HttpFailure::Protocol
+        );
+        assert_eq!(
+            get_health(&off_this_computer, "/health", Duration::from_secs(5), None).unwrap_err(),
+            HttpFailure::Protocol
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "no connection attempt"
+        );
     }
 
     #[test]

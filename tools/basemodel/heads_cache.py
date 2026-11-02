@@ -9,7 +9,10 @@ is the SHA-256 of that file.
 - Uploaded head sets are files in the heads folder (`<sha>.safetensors` and
   `<sha>.json`, mode 0600, folder mode 0700). They load on first use. At most
   `limit` uploaded sets stay loaded (least recently used first out); an evicted set
-  loads again from its file.
+  loads again from its file. At most `max_stored` uploaded sets are stored; a new
+  upload past that answers 409 `heads_full`.
+- An answer never has a number that is not finite, and with its shadow it stays
+  under `MAX_ANSWER_BYTES` (`answer`).
 
 This module has no torch or FastAPI import: the loader that builds a head module is
 given by `serve.py`, so the tests run with fake head objects.
@@ -18,6 +21,8 @@ given by `serve.py`, so the tests run with fake head objects.
 import base64
 import binascii
 import json
+import math
+import numbers
 import os
 import re
 import struct
@@ -38,10 +43,13 @@ import common  # noqa: E402
 sys.dont_write_bytecode = _WRITE_BYTECODE
 
 DEFAULT_CACHE_LIMIT = 4
+DEFAULT_STORED_LIMIT = 16
 MAX_UPLOAD_BYTES = 160 * 1024 * 1024
 MAX_MANIFEST_HEADER_BYTES = 16 * 1024
 # A safetensors header of the head file is a few KiB; refuse anything absurd.
 MAX_SAFETENSORS_HEADER_BYTES = 1024 * 1024
+# The client reads at most 64 KiB of a response, headers included; keep room for them.
+MAX_ANSWER_BYTES = 60 * 1024
 
 HASH_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 STORED_RE = re.compile(r"\A[0-9a-f]{64}\.(?:safetensors|json)\Z")
@@ -65,8 +73,14 @@ class HeadsError(Exception):
 
 
 class UnknownHeads(HeadsError):
+    # The hash stays out of the message: a message never has request data.
     def __init__(self, sha, status=404):
-        super().__init__(status, "unknown_heads", "no head set %s on this server" % sha)
+        super().__init__(status, "unknown_heads", "the head set is not on this server")
+        self.sha = sha
+
+
+class NonFiniteAnswer(RuntimeError):
+    """The active head set gave NaN or infinity. Not a ValueError: the app answers its 500."""
 
 
 def bad_heads(message):
@@ -120,7 +134,7 @@ def decode_manifest_header(value):
     try:
         raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
         manifest = json.loads(raw.decode("utf-8"))
-    except (binascii.Error, ValueError):
+    except (binascii.Error, ValueError, TypeError, RecursionError):
         raise bad_heads("the Apassy-Manifest header is not a JSON manifest") from None
     if not isinstance(manifest, dict):
         raise bad_heads("the manifest is not a JSON object")
@@ -162,27 +176,58 @@ def check_body(sha, body_sha, body_size, manifest):
         raise bad_heads("the body size does not match manifest checkpoint.size_bytes")
 
 
+def _byte_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def check_head_file(path, expected_shapes=None):
-    """Read the safetensors header (no torch): only head tensors, and the model's shapes."""
+    """Read the safetensors header (no torch): only F32 head tensors, the model's shapes,
+    and data offsets that cover the data section exactly, without gaps or overlaps."""
+    not_safetensors = "the body is not a safetensors file"
     try:
         with open(path, "rb") as f:
+            file_size = os.fstat(f.fileno()).st_size
             prefix = f.read(8)
             if len(prefix) < 8:
-                raise bad_heads("the body is not a safetensors file")
+                raise bad_heads(not_safetensors)
             (length,) = struct.unpack("<Q", prefix)
-            if not 0 < length <= MAX_SAFETENSORS_HEADER_BYTES:
-                raise bad_heads("the body is not a safetensors file")
+            if not 0 < length <= min(MAX_SAFETENSORS_HEADER_BYTES, file_size - 8):
+                raise bad_heads(not_safetensors)
             header = json.loads(f.read(length).decode("utf-8"))
-    except (OSError, ValueError):
-        raise bad_heads("the body is not a safetensors file") from None
+    except (OSError, ValueError, TypeError, RecursionError, struct.error):
+        raise bad_heads(not_safetensors) from None
     if not isinstance(header, dict):
-        raise bad_heads("the body is not a safetensors file")
+        raise bad_heads(not_safetensors)
     tensors = {k: v for k, v in header.items() if k != "__metadata__"}
+    spans = []
     for key, value in tensors.items():
         if not key.startswith(common.TRAINED_PREFIXES):
             raise bad_heads("the head file has a tensor that is not a head tensor")
-        if not isinstance(value, dict) or not isinstance(value.get("shape"), list):
-            raise bad_heads("the body is not a safetensors file")
+        if not isinstance(value, dict):
+            raise bad_heads(not_safetensors)
+        if value.get("dtype") != "F32":
+            raise bad_heads("the head file has a tensor that is not F32")
+        shape, offsets = value.get("shape"), value.get("data_offsets")
+        if not isinstance(shape, list) or not all(_byte_count(d) for d in shape):
+            raise bad_heads(not_safetensors)
+        if (not isinstance(offsets, list) or len(offsets) != 2
+                or not all(_byte_count(o) for o in offsets)):
+            raise bad_heads(not_safetensors)
+        n = 4
+        for dim in shape:
+            n *= dim
+        if offsets[1] - offsets[0] != n:
+            raise bad_heads(not_safetensors)
+        spans.append((offsets[0], offsets[1]))
+    # The tensors fill the data section in order: each starts where the last one ended,
+    # and the last one ends at the end of the file.
+    end = 0
+    for start, stop in sorted(spans):
+        if start != end:
+            raise bad_heads(not_safetensors)
+        end = stop
+    if 8 + length + end != file_size:
+        raise bad_heads(not_safetensors)
     if expected_shapes is not None:
         if set(tensors) != set(expected_shapes):
             raise bad_heads("the head file does not fit the model of this server")
@@ -191,19 +236,31 @@ def check_head_file(path, expected_shapes=None):
                 raise bad_heads("the head file does not fit the model of this server")
 
 
+def fsync_dir(path):
+    """Make the renames in a folder durable."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 # ------------------------------------------------------------------ the cache
 class HeadSetCache:
     """Head sets by SHA-256. Thread-safe: the inference thread loads, the routes store and delete."""
 
     def __init__(self, default, heads_dir, base, loader, limit=DEFAULT_CACHE_LIMIT,
-                 expected_shapes=None, stock_available=True, log=None):
+                 expected_shapes=None, stock_available=True, log=None, max_stored=DEFAULT_STORED_LIMIT):
         if int(limit) < 1:
             raise ValueError("the head-set cache needs a limit of at least 1")
+        if int(max_stored) < 1:
+            raise ValueError("the heads folder needs a limit of at least 1 head set")
         self.default = default
         self.heads_dir = os.path.abspath(heads_dir)
         self.base = {"revision": base["revision"], "weights_sha256": base["weights_sha256"]}
         self.loader = loader
         self.limit = int(limit)
+        self.max_stored = int(max_stored)
         self.expected_shapes = expected_shapes
         self.stock_available = stock_available
         self.log = log
@@ -230,7 +287,7 @@ class HeadSetCache:
         try:
             with open(meta, encoding="utf-8") as f:
                 manifest = json.load(f)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         if not os.path.isfile(weights) or not isinstance(manifest, dict):
             return None
@@ -242,6 +299,24 @@ class HeadSetCache:
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+
+    def _stored_count(self):
+        try:
+            names = os.listdir(self.heads_dir)
+        except OSError:
+            return 0
+        return sum(1 for name in names if name.endswith(".json") and STORED_RE.match(name))
+
+    def _check_room(self, sha):
+        if sha == self.default.sha or self._stored_manifest(sha) is not None:
+            return
+        if self._stored_count() >= self.max_stored:
+            raise HeadsError(409, "heads_full", "this server stores no more head sets; delete one first")
+
+    def check_room(self, sha):
+        """Raise 409 `heads_full` when `sha` is new and the heads folder is full."""
+        with self._lock:
+            self._check_room(sha)
 
     def _remove_stale_uploads(self):
         try:
@@ -299,16 +374,15 @@ class HeadSetCache:
             with self._lock:
                 self._remove_files(sha)
             raise UnknownHeads(sha)
-        with self._lock:
-            # Make room first: never hold more than `limit` uploaded sets plus this one.
-            while len(self._loaded) >= self.limit:
-                self._loaded.popitem(last=False)
+        # Load first, evict after: a load that fails keeps the loaded sets as they are.
         try:
             module = self.loader(weights)
         except FileNotFoundError:
             raise UnknownHeads(sha) from None
         except ValueError:
-            self._note("heads %s: stored file does not fit the model; removed", sha[:8])
+            # The loader raises ValueError for a file that does not open or does not fit
+            # (serve.py maps SafetensorError to it). Remove it: else every request fails.
+            self._note("heads %s: stored file does not open or fit the model; removed", sha[:8])
             with self._lock:
                 self._remove_files(sha)
             raise UnknownHeads(sha) from None
@@ -331,7 +405,8 @@ class HeadSetCache:
         return os.fdopen(fd, "wb"), path
 
     def store(self, sha, upload, manifest_raw, manifest):
-        """Move a checked upload into place. Return (created, model). Takes over `upload`."""
+        """Move a checked upload into place. Return (created, model). Takes over `upload`
+        unless it raises `heads_full` (then the caller removes it)."""
         weights, meta = self._paths(sha)
         with self._lock:
             existing = self.default.model if sha == self.default.sha else None
@@ -342,17 +417,25 @@ class HeadSetCache:
             if existing is not None:
                 os.unlink(upload)
                 return False, existing
-            os.chmod(upload, 0o600)
-            os.replace(upload, weights)
-            fd, tmp = tempfile.mkstemp(prefix=UPLOAD_PREFIX, suffix=".json.tmp", dir=self.heads_dir)
+            self._check_room(sha)
+            tmp, placed = None, False
             try:
+                # The manifest is ready before the head file moves: no head file without it.
+                fd, tmp = tempfile.mkstemp(prefix=UPLOAD_PREFIX, suffix=".json.tmp", dir=self.heads_dir)
                 with os.fdopen(fd, "wb") as f:
                     f.write(manifest_raw)
                     f.flush()
                     os.fsync(f.fileno())
+                os.chmod(upload, 0o600)
+                os.replace(upload, weights)
+                placed = True
                 os.replace(tmp, meta)
+                tmp = None
+                fsync_dir(self.heads_dir)
             except BaseException:
-                for path in (tmp, weights):
+                for path in (tmp, weights if placed else upload):
+                    if path is None:
+                        continue
                     try:
                         os.unlink(path)
                     except FileNotFoundError:
@@ -390,12 +473,36 @@ class HeadSetCache:
 
 
 # ------------------------------------------------------------------ one request
+def all_finite(value):
+    """True if no number in `value` (nested dicts, lists and tuples) is NaN or infinite."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+        elif (isinstance(item, numbers.Real) and not isinstance(item, numbers.Integral)
+              and not math.isfinite(item)):
+            return False
+    return True
+
+
+def encoded_size(result):
+    """The size of `result` as FastAPI's JSONResponse writes it."""
+    return len(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=None,
+                          separators=(",", ":")).encode("utf-8"))
+
+
 def answer(cache, infer, heads=None, shadow_heads=None):
     """Answer one `/v1/systemone` request with the active and the optional shadow head set.
 
     `infer(active, shadow)` runs the model and returns `(result, shadow_answers)`, where
     `shadow_answers` is a dict, or an exception when the shadow failed. The shadow never
-    makes the request fail and never changes the active answer.
+    makes the request fail and never changes the active answer. A shadow with a number
+    that is not finite, or that makes the answer larger than `MAX_ANSWER_BYTES`, becomes
+    `shadow_failed`; an active answer with a number that is not finite raises
+    `NonFiniteAnswer` (a 500 without request data).
     """
     active_sha = cache.default_sha if heads is None else check_hash(heads)
     shadow_sha = None if shadow_heads is None else check_hash(shadow_heads)
@@ -412,11 +519,20 @@ def answer(cache, infer, heads=None, shadow_heads=None):
         except Exception:  # noqa: BLE001 -- a shadow failure only marks the shadow
             shadow_error = "shadow_failed"
     result, shadow_answers = infer(active, shadow)
+    if not all_finite(result):
+        raise NonFiniteAnswer("the active head set gave a number that is not finite")
     result["model"] = active.model
     result["heads"] = active.sha
     if shadow_sha is not None:
-        if shadow is not None and isinstance(shadow_answers, dict):
+        failed = {"heads": shadow_sha, "error": shadow_error or "shadow_failed"}
+        if shadow is not None and isinstance(shadow_answers, dict) and all_finite(shadow_answers):
             result["shadow"] = {"heads": shadow.sha, "model": shadow.model, "answers": shadow_answers}
+            try:
+                fits = encoded_size(result) <= MAX_ANSWER_BYTES
+            except (TypeError, ValueError, RecursionError):
+                fits = False
+            if not fits:
+                result["shadow"] = failed
         else:
-            result["shadow"] = {"heads": shadow_sha, "error": shadow_error or "shadow_failed"}
+            result["shadow"] = failed
     return result

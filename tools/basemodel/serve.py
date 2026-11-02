@@ -21,17 +21,24 @@ routes (`app.py`). Without `heads`, a request gets the checkpoint above, as befo
 
 Environment: `LAYA_HOST` (default 127.0.0.1), `LAYA_PORT` (default 8770),
 `LAYA_DEVICE`, `LAYA_API_KEY` (as in laya-serve), `APASSY_HEADS_DIR` (uploaded head
-sets; default `<folder of the checkpoint>/heads`), `APASSY_HEADS_CACHE` (loaded
-uploaded head sets, default 4).
+sets; default `$APASSY_LAYA_DIR/heads`, else
+`~/Library/Application Support/Apassy/laya/heads`; never inside a `.app` bundle),
+`APASSY_HEADS_CACHE` (loaded uploaded head sets, default 4), `APASSY_HEADS_MAX`
+(stored uploaded head sets, default 16).
+
+The server refuses to start on an address other than loopback without
+`LAYA_API_KEY`, and serves the head routes that write only with a token.
 
 Run inside the Laya virtual environment:
   .venv/bin/python tools/basemodel/serve.py --checkpoint <file> [--manifest <file>]
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
+import pathlib
 import sys
 import re
 import warnings
@@ -159,60 +166,21 @@ class HeadSelection:
         self.shadow_error = None
 
 
-def build_router(checkpoint, manifest_path=None, device=None, heads_dir=None,
-                 cache_limit=heads_cache.DEFAULT_CACHE_LIMIT):
+def on_device(module, device):
+    """Move an uploaded head set to `device` if it is elsewhere.
+
+    After laya's GPU-to-CPU fallback, `agent.model.to(cpu)` moved the encoder, the
+    default and the stock heads, but not the uploaded head sets.
+    """
+    if module is not None and module.scorer[-1].weight.device != device:
+        module.to(device)
+    return module
+
+
+def make_multi_heads(tuned, stock):
+    """The model that laya runs: `tuned` (a DecisionModel), the head sets of a request
+    (`.request`, a HeadSelection), and the `stock` heads (or None) for some rows."""
     import torch
-    from laya.agent import Agent
-    from laya.common import DecisionModel
-    from laya.router import RouteDecision, Router
-
-    manifest, _ = read_manifest(checkpoint, manifest_path)
-    base = common.base_dir()
-    digest = verify(checkpoint, manifest, base)
-    version = "%s+%s" % (manifest.get("name", common.MODEL_NAME), digest[:8])
-    zero_shot = set(manifest.get("serve", {}).get("zero_shot_questions", []))
-
-    with warnings.catch_warnings(record=True) as diagnostics:
-        warnings.simplefilter("always", RuntimeWarning)
-        agent = Agent(base, device=device)
-    for diagnostic in diagnostics:
-        warnings.warn(temperature_diagnostic(diagnostic.message), diagnostic.category, stacklevel=2)
-    tuned = agent.model
-    head_layers = agent.cfg.get("head_layers", 2)
-    n_act = len(agent.cfg.get("act_costs", {})) + 1
-    stock = None
-    if zero_shot:
-        # A second head set with the stock weights. It shares the encoder module.
-        stock = DecisionModel(tuned.encoder, head_layers, n_act)
-        stock.load_state_dict(tuned.state_dict(), strict=True)
-        stock.to(agent.device).eval()
-    expected_shapes = {k: list(v.shape) for k, v in tuned.state_dict().items()
-                       if k.startswith(common.TRAINED_PREFIXES)}
-    tensors, _meta = common.load_checkpoint(checkpoint)
-    common.apply_heads(tuned, tensors)
-    del tensors
-    tuned.eval()
-
-    def load_head_set(path):
-        """An uploaded head set: a DecisionModel on the one encoder, fp32 heads, eval mode.
-
-        Built like `stock`; the untrained parts (`act_head`, `temperature`) come from the
-        base checkpoint, the trained parts from the file (`common.apply_heads`).
-        """
-        heads, _ = common.load_checkpoint(path)
-        model = DecisionModel(tuned.encoder, head_layers, n_act)
-        untrained = {k: v for k, v in tuned.state_dict().items()
-                     if not k.startswith("encoder.") and not k.startswith(common.TRAINED_PREFIXES)}
-        model.load_state_dict(untrained, strict=False)
-        common.apply_heads(model, heads)
-        return model.to(agent.device).eval()
-
-    def on_device(module, device):
-        # After laya's GPU-to-CPU fallback, `agent.model.to(cpu)` moved the encoder, the
-        # default and the stock heads, but not the uploaded head sets.
-        if module is not None and module.scorer[-1].weight.device != device:
-            module.to(device)
-        return module
 
     class MultiHeads(torch.nn.Module):
         """The default model, the head sets of a request, and the stock heads for some rows.
@@ -292,30 +260,85 @@ def build_router(checkpoint, manifest_path=None, device=None, heads_dir=None,
                     request.shadow_error = error
             return logits, act
 
-    dual = MultiHeads()
+    return MultiHeads()
+
+
+def shadow_answers(agent, request, questions):
+    """Decode the stashed shadow outputs of `request` with laya's own answer decoder."""
+    if not questions:
+        return {}
+    if request.shadow_out is None:
+        raise request.shadow_error or RuntimeError("no shadow output")
+    logits, act, markers = request.shadow_out
+    ids = list(questions.keys())
+    internal = {qid: agent._to_internal(questions[qid]) for qid in ids}
+    # `_decode_answers` reads only the number of markers of each row.
+    items = [{"markers": range(k)} for k in markers]
+    return agent._decode_answers(logits, act, items, ids, internal, 0)
+
+
+def build_router(checkpoint, manifest_path=None, device=None, heads_dir=None,
+                 cache_limit=heads_cache.DEFAULT_CACHE_LIMIT, max_stored=heads_cache.DEFAULT_STORED_LIMIT):
+    import torch
+    from laya.agent import Agent
+    from laya.common import DecisionModel
+    from laya.router import RouteDecision, Router
+    from safetensors import SafetensorError
+
+    manifest, _ = read_manifest(checkpoint, manifest_path)
+    base = common.base_dir()
+    digest = verify(checkpoint, manifest, base)
+    version = "%s+%s" % (manifest.get("name", common.MODEL_NAME), digest[:8])
+    zero_shot = set(manifest.get("serve", {}).get("zero_shot_questions", []))
+
+    with warnings.catch_warnings(record=True) as diagnostics:
+        warnings.simplefilter("always", RuntimeWarning)
+        agent = Agent(base, device=device)
+    for diagnostic in diagnostics:
+        warnings.warn(temperature_diagnostic(diagnostic.message), diagnostic.category, stacklevel=2)
+    tuned = agent.model
+    head_layers = agent.cfg.get("head_layers", 2)
+    n_act = len(agent.cfg.get("act_costs", {})) + 1
+    stock = None
+    if zero_shot:
+        # A second head set with the stock weights. It shares the encoder module.
+        stock = DecisionModel(tuned.encoder, head_layers, n_act)
+        stock.load_state_dict(tuned.state_dict(), strict=True)
+        stock.to(agent.device).eval()
+    expected_shapes = {k: list(v.shape) for k, v in tuned.state_dict().items()
+                       if k.startswith(common.TRAINED_PREFIXES)}
+    tensors, _meta = common.load_checkpoint(checkpoint)
+    common.apply_heads(tuned, tensors)
+    del tensors
+    tuned.eval()
+
+    def load_head_set(path):
+        """An uploaded head set: a DecisionModel on the one encoder, fp32 heads, eval mode.
+
+        Built like `stock`; the untrained parts (`act_head`, `temperature`) come from the
+        base checkpoint, the trained parts from the file (`common.apply_heads`).
+        """
+        try:
+            heads, _ = common.load_checkpoint(path)
+        except SafetensorError:
+            raise ValueError("the stored head file does not open") from None
+        model = DecisionModel(tuned.encoder, head_layers, n_act)
+        untrained = {k: v for k, v in tuned.state_dict().items()
+                     if not k.startswith("encoder.") and not k.startswith(common.TRAINED_PREFIXES)}
+        model.load_state_dict(untrained, strict=False)
+        common.apply_heads(model, heads)
+        return model.to(agent.device).eval()
+
+    dual = make_multi_heads(tuned, stock)
     agent.model = dual
     on_mps = fp16_encoder_on_mps(agent, dual)
 
     default_set = heads_cache.HeadSet(digest, version, tuned, zero_shot,
                                       manifest["checkpoint"]["size_bytes"], default=True)
     cache = heads_cache.HeadSetCache(
-        default_set,
-        heads_dir or os.path.join(os.path.dirname(os.path.abspath(checkpoint)), "heads"),
-        manifest["base"], load_head_set, limit=cache_limit, expected_shapes=expected_shapes,
-        stock_available=stock is not None, log=brain_app.LOG)
-
-    def shadow_answers(request, questions):
-        """Decode the stashed shadow outputs with laya's own answer decoder."""
-        if not questions:
-            return {}
-        if request.shadow_out is None:
-            raise request.shadow_error or RuntimeError("no shadow output")
-        logits, act, markers = request.shadow_out
-        ids = list(questions.keys())
-        internal = {qid: agent._to_internal(questions[qid]) for qid in ids}
-        # `_decode_answers` reads only the number of markers of each row.
-        items = [{"markers": range(k)} for k in markers]
-        return agent._decode_answers(logits, act, items, ids, internal, 0)
+        default_set, resolve_heads_dir(heads_dir), manifest["base"], load_head_set,
+        limit=cache_limit, expected_shapes=expected_shapes, stock_available=stock is not None,
+        log=brain_app.LOG, max_stored=max_stored)
 
     class BaseRouter(Router):
         """Every request goes to the fine-tuned English checkpoint."""
@@ -351,7 +374,7 @@ def build_router(checkpoint, manifest_path=None, device=None, heads_dir=None,
                 answers = None
                 if shadow is not None:
                     try:
-                        answers = shadow_answers(request, questions)
+                        answers = shadow_answers(agent, request, questions)
                     except Exception as error:  # noqa: BLE001 -- the shadow never fails the request
                         answers = error
             finally:
@@ -364,17 +387,59 @@ def build_router(checkpoint, manifest_path=None, device=None, heads_dir=None,
     return BaseRouter(), version, sorted(zero_shot)
 
 
-def cache_limit_from_env():
-    raw = os.environ.get("APASSY_HEADS_CACHE", "").strip()
+def limit_from_env(name, default):
+    raw = os.environ.get(name, "").strip()
     if not raw:
-        return heads_cache.DEFAULT_CACHE_LIMIT
+        return default
     try:
         limit = int(raw)
     except ValueError:
         limit = 0
     if limit < 1:
-        raise SystemExit("serve: invalid APASSY_HEADS_CACHE %r: must be an integer >= 1" % raw)
+        raise SystemExit("serve: invalid %s %r: must be an integer >= 1" % (name, raw))
     return limit
+
+
+def cache_limit_from_env():
+    return limit_from_env("APASSY_HEADS_CACHE", heads_cache.DEFAULT_CACHE_LIMIT)
+
+
+def resolve_heads_dir(explicit=None, environ=None, home=None):
+    """The heads folder: `explicit`, `APASSY_HEADS_DIR`, `$APASSY_LAYA_DIR/heads`, or
+    `~/Library/Application Support/Apassy/laya/heads`. Never inside a `.app` bundle:
+    a file written there breaks the code signature of the app."""
+    environ = os.environ if environ is None else environ
+    path = explicit or environ.get("APASSY_HEADS_DIR") or None
+    if path is None:
+        laya_dir = environ.get("APASSY_LAYA_DIR") or os.path.join(
+            home or os.path.expanduser("~"), "Library", "Application Support", "Apassy", "laya")
+        path = os.path.join(laya_dir, "heads")
+    path = os.path.abspath(os.path.expanduser(path))
+    for candidate in (path, os.path.realpath(path)):
+        if any(part.lower().endswith(".app") for part in pathlib.PurePath(candidate).parts):
+            raise SystemExit("serve: the heads folder %s is inside an app bundle; set APASSY_HEADS_DIR "
+                             "to a data folder" % path)
+    return path
+
+
+def is_loopback(host):
+    host = (host or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def bind_problem(host, api_key):
+    """Why the server must not start on `host` with `api_key`, or None."""
+    if api_key or is_loopback(host):
+        return None
+    return ("serve: LAYA_HOST %s is not a loopback address and LAYA_API_KEY is not set; "
+            "set a token or listen on 127.0.0.1" % host)
 
 
 def main():
@@ -389,12 +454,18 @@ def main():
     from laya.serve import _resolve_port
 
     os.environ.setdefault("LAYA_PORT", "8770")
+    host = os.environ.get("LAYA_HOST", "127.0.0.1")
+    # Before the model loads: these refusals cost nothing.
+    problem = bind_problem(host, os.environ.get("LAYA_API_KEY") or None)
+    if problem is not None:
+        raise SystemExit(problem)
     limit = cache_limit_from_env()
-    heads_dir = os.environ.get("APASSY_HEADS_DIR") or None
+    max_stored = limit_from_env("APASSY_HEADS_MAX", heads_cache.DEFAULT_STORED_LIMIT)
+    heads_dir = resolve_heads_dir()
     router, version, zero_shot = build_router(args.checkpoint, args.manifest or None,
                                               os.environ.get("LAYA_DEVICE") or None,
-                                              heads_dir=heads_dir, cache_limit=limit)
-    host = os.environ.get("LAYA_HOST", "127.0.0.1")
+                                              heads_dir=heads_dir, cache_limit=limit,
+                                              max_stored=max_stored)
     log_level = os.environ.get("LAYA_LOG_LEVEL", "warning")
     # Counts, latency, status and head hashes only (app.py); never a state or an answer.
     handler = logging.StreamHandler()
@@ -402,9 +473,10 @@ def main():
     brain_app.LOG.addHandler(handler)
     brain_app.LOG.setLevel(getattr(logging, log_level.upper(), logging.WARNING))
     brain_app.LOG.propagate = False
-    print("apassy base model %s on %s:%s (zero-shot questions: %s; head sets: %s, %d loaded at most)" % (
-        version, host, os.environ["LAYA_PORT"], ", ".join(zero_shot) or "none",
-        router.cache.heads_dir, router.cache.limit), flush=True)
+    print("apassy base model %s on %s:%s (zero-shot questions: %s; head sets: %s, %d loaded and "
+          "%d stored at most)" % (
+              version, host, os.environ["LAYA_PORT"], ", ".join(zero_shot) or "none",
+              router.cache.heads_dir, router.cache.limit, router.cache.max_stored), flush=True)
     # h11 refuses a request head over 16 KiB with its own 400; allow more, so the
     # 16 KiB limit of the Apassy-Manifest header answers 413 (app.py).
     uvicorn.run(brain_app.create_app(router, router.cache), host=host, port=_resolve_port(),

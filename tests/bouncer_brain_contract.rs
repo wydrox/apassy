@@ -21,10 +21,13 @@ const ANSWER_SHADOW_UNKNOWN: &str =
 const ERROR_UNKNOWN_HEADS: &str =
     include_str!("fixtures/bouncer-brain-v1/error-unknown-heads.json");
 const ERROR_BAD_HEADS: &str = include_str!("fixtures/bouncer-brain-v1/error-bad-heads.json");
+const ERROR_NO_TOKEN: &str = include_str!("fixtures/bouncer-brain-v1/error-no-token.json");
 const HEADS_INFO: &str = include_str!("fixtures/bouncer-brain-v1/heads-info.json");
 const MANIFEST: &str = include_str!("fixtures/bouncer-brain-v1/manifest.json");
 
-const FIXTURES: [(&str, &str); 9] = [
+const CONTRACT: &str = include_str!("../docs/contracts/bouncer-brain-v1.md");
+
+const FIXTURES: [(&str, &str); 10] = [
     ("request.json", REQUEST),
     ("request-with-shadow.json", REQUEST_WITH_SHADOW),
     ("answer.json", ANSWER),
@@ -32,14 +35,42 @@ const FIXTURES: [(&str, &str); 9] = [
     ("answer-shadow-unknown.json", ANSWER_SHADOW_UNKNOWN),
     ("error-unknown-heads.json", ERROR_UNKNOWN_HEADS),
     ("error-bad-heads.json", ERROR_BAD_HEADS),
+    ("error-no-token.json", ERROR_NO_TOKEN),
     ("heads-info.json", HEADS_INFO),
     ("manifest.json", MANIFEST),
 ];
 
-/// Section 8: a response body of `POST /v1/systemone` is at most 64 KiB.
+const ERRORS: [(&str, &str, &str); 3] = [
+    (
+        "error-unknown-heads.json",
+        ERROR_UNKNOWN_HEADS,
+        "unknown_heads",
+    ),
+    ("error-bad-heads.json", ERROR_BAD_HEADS, "bad_heads"),
+    ("error-no-token.json", ERROR_NO_TOKEN, "no_token"),
+];
+
+/// The code table of section 1.
+const CODES: [&str; 8] = [
+    "unknown_heads",
+    "bad_heads",
+    "default_heads",
+    "input_too_long",
+    "too_large",
+    "no_token",
+    "heads_full",
+    "shadow_failed",
+];
+/// Section 3.2: the codes of `shadow.error`.
+const SHADOW_ERRORS: [&str; 2] = ["unknown_heads", "shadow_failed"];
+
+/// Section 8: the whole response of `POST /v1/systemone`, headers included, is at most
+/// 64 KiB, so its body is too.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// `vault::MAX_MODEL_VERSION`.
 const MAX_MODEL_VERSION: usize = 64;
+/// Section 3.2: `<name>+<8 hex>` fits `MAX_MODEL_VERSION`.
+const MAX_MODEL_NAME: usize = 55;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,7 +165,29 @@ fn is_sha256(text: &str) -> bool {
     is_lower_hex(text, 64)
 }
 
-/// `<name>+<first 8 hex of heads>`, with the characters of `bouncer::valid_model_version`.
+/// Section 3.2: a letter or digit first, then letters, digits, `.`, `_` and `-`, at most
+/// `MAX_MODEL_NAME` characters.
+fn is_model_name(name: &str) -> bool {
+    name.len() <= MAX_MODEL_NAME
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A run of 64 hex characters: a hash that a `message` must not repeat.
+fn has_sha256_run(text: &str) -> bool {
+    let mut run = 0;
+    text.bytes().any(|b| {
+        run = if b.is_ascii_hexdigit() { run + 1 } else { 0 };
+        run >= 64
+    })
+}
+
+/// `<name>+<first 8 hex of heads>`, with the name rule of section 3.2.
 fn assert_model_names_heads(model: &str, heads: &str) {
     assert!(is_sha256(heads), "heads {heads:?} is not 64 lowercase hex");
     assert!(
@@ -145,11 +198,8 @@ fn assert_model_names_heads(model: &str, heads: &str) {
         .rsplit_once('+')
         .unwrap_or_else(|| panic!("model {model:?} has no `+<8 hex>`"));
     assert!(
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
-        "model name {name:?} has other characters"
+        is_model_name(name),
+        "model name {name:?} breaks the name rule"
     );
     assert!(
         is_lower_hex(short, 8),
@@ -246,7 +296,9 @@ fn every_bouncer_brain_fixture_matches_the_contract() {
                         assert_model_names_heads(model, &shadow.heads);
                         assert_answers_cover(name, answers, asked);
                     }
-                    (None, None, Some(error)) => assert_eq!(error, "unknown_heads", "{name}"),
+                    (None, None, Some(error)) => {
+                        assert!(SHADOW_ERRORS.contains(&error.as_str()), "{name}: {error}")
+                    }
                     other => panic!("{name}: shadow is neither answers nor an error: {other:?}"),
                 }
             }
@@ -271,13 +323,81 @@ fn the_client_request_rejects_a_field_outside_the_contract() {
 }
 
 #[test]
-fn an_unknown_or_malformed_head_set_has_its_error_code() {
-    let unknown: ErrorBody = parse("error-unknown-heads.json", ERROR_UNKNOWN_HEADS);
-    assert_eq!(unknown.detail.code, "unknown_heads");
-    assert!(!unknown.detail.message.is_empty());
-    let bad: ErrorBody = parse("error-bad-heads.json", ERROR_BAD_HEADS);
-    assert_eq!(bad.detail.code, "bad_heads");
-    assert!(!bad.detail.message.is_empty());
+fn a_null_head_hash_counts_as_absent() {
+    let mut value: Value = parse("request-with-shadow.json", REQUEST_WITH_SHADOW);
+    value["heads"] = Value::Null;
+    value["shadow_heads"] = Value::Null;
+    let request: Request = serde_json::from_value(value).expect("null hashes parse");
+    assert!(request.heads.is_none() && request.shadow_heads.is_none());
+    assert_request("request-with-shadow.json with null hashes", &request);
+}
+
+#[test]
+fn every_error_fixture_has_a_code_of_the_table() {
+    for code in CODES {
+        assert!(
+            CONTRACT.contains(&format!("| `{code}` |")),
+            "the code table has no row for {code}"
+        );
+    }
+    for (name, text, code) in ERRORS {
+        let body: ErrorBody = parse(name, text);
+        assert_eq!(body.detail.code, code, "{name}");
+        assert!(CODES.contains(&body.detail.code.as_str()), "{name}");
+        assert!(!body.detail.message.is_empty(), "{name}: no message");
+    }
+    for error in SHADOW_ERRORS {
+        assert!(CODES.contains(&error), "{error} is not in the code table");
+    }
+}
+
+#[test]
+fn no_error_message_repeats_a_hash() {
+    let hash = "a1b2c3d4e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718";
+    assert!(has_sha256_run(&format!("no head set {hash}")));
+    assert!(!has_sha256_run(&hash[..63]));
+    for (name, text, _) in ERRORS {
+        let body: ErrorBody = parse(name, text);
+        assert!(
+            !has_sha256_run(&body.detail.message),
+            "{name}: the message repeats a hash"
+        );
+    }
+}
+
+#[test]
+fn a_model_name_follows_the_name_rule() {
+    assert_eq!(MAX_MODEL_NAME + 1 + 8, MAX_MODEL_VERSION);
+    let longest = "n".repeat(MAX_MODEL_NAME);
+    let too_long = "n".repeat(MAX_MODEL_NAME + 1);
+    for name in ["a", "9", "apassy-local-v1", "v1.2_rc-3", longest.as_str()] {
+        assert!(is_model_name(name), "{name:?} is a valid name");
+    }
+    for name in [
+        "",
+        "-a",
+        ".a",
+        "_a",
+        "a b",
+        "a+b",
+        "a/b",
+        "\u{e9}t\u{e9}",
+        too_long.as_str(),
+    ] {
+        assert!(!is_model_name(name), "{name:?} is not a valid name");
+    }
+}
+
+#[test]
+fn a_non_finite_number_is_not_an_answer() {
+    for word in ["NaN", "Infinity", "-Infinity"] {
+        let text = ANSWER.replacen("\"noul\": 0.91", &format!("\"noul\": {word}"), 1);
+        assert_ne!(text, ANSWER);
+        assert!(
+            serde_json::from_str::<Answer>(&text).is_err(),
+            "noul {word} parses"
+        );
+    }
 }
 
 #[test]
