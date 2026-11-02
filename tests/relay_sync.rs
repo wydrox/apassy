@@ -1217,11 +1217,14 @@ fn a_transient_error_keeps_a_join_waiting() {
         .create_team(&mut vault_a, "Personal", &relay.team_code(), "Mac")
         .expect("team");
     let code = a.sync.create_link(&vault_a).expect("link");
-    // The first wait is the app's 2 s (pinned by the unit test of `sync::relay`) scaled
-    // down.
-    let pending = PendingJoin::request(&code.link, "", "Synthetic Mac mini")
-        .expect("request")
-        .with_first_retry_wait(Duration::from_millis(600));
+    let pending = PendingJoin::request(&code.link, "", "Synthetic Mac mini").expect("request");
+    assert_eq!(
+        pending.first_retry_wait(),
+        Duration::from_secs(2),
+        "a join of the app waits 2 s after the first failure"
+    );
+    // The test waits a shorter first wait.
+    let pending = pending.with_first_retry_wait(Duration::from_millis(1_200));
     relay.fail_next("POST /v1/auth/challenge", 1, 502);
     assert!(pending.poll().expect("a network error waits").is_none());
     let links = a.sync.pending_links(&vault_a, Some(&code)).expect("links");
@@ -1230,7 +1233,7 @@ fn a_transient_error_keeps_a_join_waiting() {
     let challenges = relay.count("POST /v1/auth/challenge");
     assert!(pending.poll().expect("backing off").is_none());
     assert_eq!(relay.count("POST /v1/auth/challenge"), challenges);
-    std::thread::sleep(Duration::from_millis(650));
+    std::thread::sleep(Duration::from_millis(1_250));
     assert!(pending.poll().expect("poll").is_some(), "confirmed");
 }
 

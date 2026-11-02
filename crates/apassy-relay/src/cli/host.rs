@@ -478,10 +478,11 @@ impl DialogAsker {
     }
 
     /// A fake dialog program of a test can take a shorter duration than the five
-    /// seconds of a real dialog.
+    /// seconds of a real dialog, but at least one second.
+    #[doc(hidden)]
     #[must_use]
     pub fn with_minimum_seconds(mut self, secs: u64) -> Self {
-        self.min_secs = secs;
+        self.min_secs = secs.max(1);
         self
     }
 }
@@ -1128,6 +1129,8 @@ mod tests {
             DialogAsker::with_program("/usr/bin/true", DialogKind::Zenity).min_secs,
             5
         );
+        let fake = DialogAsker::with_program("/usr/bin/true", DialogKind::Zenity);
+        assert_eq!(fake.with_minimum_seconds(0).min_secs, 1, "never below 1 s");
     }
 
     fn entry(n: u64, environment: &str) -> KeyEntry {

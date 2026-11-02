@@ -85,11 +85,6 @@ impl Hold {
         }
     }
 
-    /// How many requests came to the gate so far.
-    pub fn entered(&self) -> usize {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).0
-    }
-
     /// Wait until a request waits at the gate (at most 30 s).
     pub fn wait_entered(&self) {
         let end = Instant::now() + Duration::from_secs(30);
@@ -437,11 +432,6 @@ impl FakeRelay {
             .holds
             .push((prefix.to_owned(), Arc::clone(&hold)));
         hold
-    }
-
-    /// Forget every [`FakeRelay::delay`]: the relay answers at once again.
-    pub fn clear_delays(&self) {
-        lock(&self.shared.0).delays.clear();
     }
 
     /// Fail the next `count` requests that start with `prefix` with `status`: 502 is a

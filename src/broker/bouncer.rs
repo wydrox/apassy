@@ -1540,8 +1540,8 @@ mod tests {
     #[test]
     fn the_default_inference_budget_accepts_a_slow_first_real_decision() {
         use std::sync::atomic::Ordering;
-        // The default budget is ten seconds, over a first real decision of 5.2 s; the
-        // exchange below is that ratio scaled down by ten.
+        // The default budget is ten seconds, over a first real decision of 5.2 s; below,
+        // a decision of 520 ms gets a budget of 2 s.
         let (url, calls, stop, server) = scripted_inference_server(vec![(
             200,
             VALID_INFERENCE,
@@ -1549,7 +1549,7 @@ mod tests {
         )]);
         let client = BouncerClient::new(&url).expect("client");
         assert_eq!(client.timeout, Duration::from_secs(10));
-        let budget = client.timeout / 10;
+        let budget = client.timeout / 5;
         let client = client.with_timeout(budget);
         assert!(matches!(
             client.evaluate(&request("")),

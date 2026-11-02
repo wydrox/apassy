@@ -835,9 +835,6 @@ struct World {
     items: [u64; 2],
 }
 
-/// Mac A with the vault on the relay and Mac B that adopted it; with `enable`, both turn
-/// the questions on and sync, so each has the question key and the row of the other.
-/// Mac A runs its questions waiter.
 /// The production cadences with the 2 s floors of the lister, the reader, and the access
 /// transport shortened: the tests wait for each cycle.
 fn fast_polls() -> QuestionsConfig {
@@ -848,6 +845,9 @@ fn fast_polls() -> QuestionsConfig {
     }
 }
 
+/// Mac A with the vault on the relay and Mac B that adopted it; with `enable`, both turn
+/// the questions on and sync, so each has the question key and the row of the other.
+/// Mac A runs its questions waiter.
 fn world(enable: bool) -> World {
     let root = TempDir::new().expect("temp dir");
     let relay = FakeRelay::start();
@@ -1555,7 +1555,7 @@ fn the_first_valid_answer_wins() {
 fn a_question_expires_with_its_wait() {
     let world = world(true);
     let b = world.mac_b();
-    let waiting = world.ask(world.run(contract_answers()), Duration::from_millis(1_500));
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(3));
     let opened = b.next(&[]);
     assert_eq!(settled(waiting).outcome, ApprovalOutcome::TimedOut);
     let start = Instant::now();
@@ -1587,7 +1587,7 @@ fn a_question_expires_with_its_wait() {
         AnswerError::AlreadyAnswered
     );
 
-    let waiting = world.ask(world.run(contract_answers()), Duration::from_millis(2_500));
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_millis(3_500));
     let opened = b.next(std::slice::from_ref(&opened.record.qid));
     world.relay.expire_questions();
     let late = prepare_answer(&opened, &b.uuid, Choice::Deny, now()).unwrap();

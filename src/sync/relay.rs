@@ -2521,6 +2521,12 @@ impl PendingJoin {
         self
     }
 
+    /// The first wait after a failure that can pass: 2 s unless a test changed it.
+    #[doc(hidden)]
+    pub fn first_retry_wait(&self) -> Duration {
+        self.retry_first
+    }
+
     /// Ask the relay whether the other Mac confirmed (every 5 s, section 7.2 step 4).
     /// `None` while it waits; the device after a confirmation;
     /// `Relay(JoinRefused)` after a refusal or the expiry. A failure that can pass by
