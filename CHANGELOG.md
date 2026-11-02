@@ -12,6 +12,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - Let the bouncer use agent-stated tasks when no verified hook task is available, with visible provenance.
 - Permit declared read-only production credentials after model and policy checks; production write/admin still asks the owner.
 - Simplify owner questions to allow or dismiss, add guarded environment-and-allow actions and refusal comments, and show a floating question queue.
+- Keep v1 remote question cards so old iPhones keep working; accept new signed allow/classify/dismiss answer choices, including bounded refusal comments, alongside legacy kinds. Card v2 publication stays off.
 
 ## [0.5.12] - 2026-11-02
 

@@ -36,6 +36,161 @@ const DEFAULT: Vec2 = Vec2::new(1180.0, 800.0);
 const SMALLEST: Vec2 = Vec2::new(900.0, 600.0);
 const WIDE: Vec2 = Vec2::new(1800.0, 1400.0);
 
+use crate::sync as relay_api;
+#[path = "../../../tests/common/fake_relay.rs"]
+mod fake_relay;
+
+/// Exercise the actual UI send, encrypted relay, signature gate, and asking queue.
+#[test]
+fn remote_classify_and_comment_buttons_settle_the_asking_mac() {
+    use crate::questions::{QuestionsConfig, QuestionsWorker};
+    use crate::relay::membership::enable_questions;
+    use crate::sync::{PendingJoin, RelayConfig, RelaySync};
+    use crate::vault::Environment;
+    use std::time::Instant;
+
+    let dir = TempDir::new().unwrap();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut asker, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut asker, &dir);
+    let sender_dir = TempDir::new().unwrap();
+    let (mut sender, _) = unlocked_app_with_item(&sender_dir);
+    let a_data = dir.path().join("relay-a");
+    let b_data = sender_dir.path().join("relay-b");
+    std::fs::create_dir_all(&a_data).unwrap();
+    std::fs::create_dir_all(&b_data).unwrap();
+    let a_shared = asker.owner_ui.session.shared_vault();
+    let b_shared = sender.owner_ui.session.shared_vault();
+    let a_path = a_shared
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .path()
+        .to_path_buf();
+    let a_sync = RelaySync::new(RelayConfig::in_data_dir(
+        &a_data, &a_path, &relay.url, "vault",
+    ));
+    let b_sync = RelaySync::new(RelayConfig::in_data_dir(
+        &b_data,
+        &b_data.join("vault.db"),
+        &relay.url,
+        "vault",
+    ));
+    {
+        let mut guard = a_shared.lock().unwrap();
+        let a = guard.as_mut().unwrap();
+        a_sync
+            .create_team(a, "Personal", &relay.team_code(), "Asking Mac")
+            .unwrap();
+        let code = a_sync.create_link(a).unwrap();
+        let pending = PendingJoin::request(&code.link, "", "Answering Mac").unwrap();
+        let links = a_sync.pending_links(a, Some(&code)).unwrap();
+        a_sync.confirm_link(a, &links[0]).unwrap();
+        let joined = pending.poll().unwrap().unwrap();
+        let download = joined.download(&b_data.join("sync")).unwrap();
+        let (mut b, _) = b_sync.adopt(&joined, &download, PASS).unwrap();
+        b.unlock(PASS).unwrap();
+        enable_questions(a, "Asking Mac").unwrap();
+        a_sync.sync(a).unwrap();
+        b_sync.sync(&mut b).unwrap();
+        enable_questions(&mut b, "Answering Mac").unwrap();
+        b_sync.sync(&mut b).unwrap();
+        a_sync.sync(a).unwrap();
+        *b_shared.lock().unwrap() = Some(b);
+    }
+    let config = QuestionsConfig {
+        tick: Duration::from_millis(25),
+        ..Default::default()
+    };
+    asker.owner.questions = Some(QuestionsWorker::start(
+        Arc::clone(&queue),
+        Arc::clone(&a_shared),
+        asker.owner_gate(),
+        config.clone(),
+    ));
+    sender.owner.questions = Some(QuestionsWorker::start(
+        Arc::new(ApprovalQueue::new()),
+        b_shared,
+        sender.owner_gate(),
+        config,
+    ));
+    let ctx = egui::Context::default();
+    for answer in [
+        Answer::Development {
+            item_id,
+            name: "Guarded key".into(),
+        },
+        Answer::MarkProduction {
+            item_id,
+            name: "Guarded key".into(),
+        },
+        Answer::DenyWithComment(" Stop\n here ".into()),
+    ] {
+        let mut unknown = item(item_id, "Guarded key");
+        unknown.unconfirmed = true;
+        let template = run(
+            "Synthetic agent",
+            question(vec![unknown], &[AnswerKind::CorrectEnvironment]),
+        );
+        let (waiter, pending) = ask(&asker, &queue, 1, template);
+        let start = Instant::now();
+        let remote = loop {
+            if let Some(remote) = sender
+                .owner
+                .questions
+                .as_ref()
+                .unwrap()
+                .view()
+                .remote
+                .into_iter()
+                .find(|remote| remote.question.run.id == pending.id)
+            {
+                break remote;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "remote question did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        decisions::apply_remote(&mut sender, &ctx, &remote, answer.clone());
+        if !matches!(answer, Answer::DenyWithComment(_)) {
+            assert!(
+                sender.owner.check.is_some(),
+                "both classifications require the owner"
+            );
+            assert!(
+                queue.pending().contains(&pending),
+                "no approval before owner authentication"
+            );
+            sender
+                .confirm_owner_now(OwnerCheck::passphrase(PASS))
+                .unwrap();
+        } else {
+            assert!(sender.owner.check.is_none());
+        }
+        sender.settle_remote_answers_for_test();
+        let settled = waiter.join().unwrap().unwrap();
+        assert!(!queue.pending().contains(&pending));
+        match answer {
+            Answer::Development { .. } => {
+                assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+                assert_eq!(settled.classification, Some(Environment::Development));
+            }
+            Answer::MarkProduction { .. } => {
+                assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+                assert_eq!(settled.classification, Some(Environment::Production));
+            }
+            _ => {
+                assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+                assert_eq!(settled.refusal_comment.as_deref(), Some("Stop here"));
+                assert!(settled.classification.is_none());
+            }
+        }
+    }
+}
+
 type Waiter = JoinHandle<Result<Settled, QuestionRefusal>>;
 
 fn project(label: &str) -> Project {
@@ -1904,7 +2059,7 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
 /// Each answer on the bar is the answer kind of the card (section 9.1).
 #[test]
 fn the_answers_of_the_bar_map_to_the_answer_kinds() {
-    use crate::questions::{Choice, RemoteEnvironment};
+    use crate::questions::Choice;
     let pending = run(
         "claude-code",
         question(
@@ -1915,6 +2070,12 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
     let key = "/synthetic/acme-billing".to_owned();
     let cases = [
         (Answer::Deny, Choice::Deny),
+        (
+            Answer::DenyWithComment(" No\n ".into()),
+            Choice::DenyWithComment {
+                comment: "No".into(),
+            },
+        ),
         (Answer::Once, Choice::ApproveOnce),
         (
             Answer::InProject(ActionKind::Read),
@@ -1935,20 +2096,14 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
                 item_id: 7,
                 name: "Guarded key".to_owned(),
             },
-            Choice::CorrectEnvironment {
-                item_id: 7,
-                environment: RemoteEnvironment::Development,
-            },
+            Choice::ApproveAsDevelopment,
         ),
         (
             Answer::MarkProduction {
                 item_id: 7,
                 name: "Guarded key".to_owned(),
             },
-            Choice::CorrectEnvironment {
-                item_id: 7,
-                environment: RemoteEnvironment::Production,
-            },
+            Choice::ApproveAsProduction,
         ),
         (Answer::Never, Choice::NeverForAgent),
         (Answer::AlwaysAsk, Choice::AlwaysAskForAgent),
@@ -1963,6 +2118,7 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
                 | Answer::InProject(_)
                 | Answer::Production(_)
                 | Answer::Development { .. }
+                | Answer::MarkProduction { .. }
         );
         assert_eq!(mapped.needs_owner_check(), approving, "{answer:?}");
     }

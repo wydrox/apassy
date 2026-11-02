@@ -1341,6 +1341,10 @@ impl OwnerRequest {
 /// The words of a remote answer for the owner check dialog.
 fn choice_words(choice: &Choice) -> String {
     match choice {
+        Choice::Approve => "Allow".to_owned(),
+        Choice::ApproveAsDevelopment => "Allow as dev".to_owned(),
+        Choice::ApproveAsProduction => "Allow as prod".to_owned(),
+        Choice::DenyWithComment { .. } => "Dismiss with comment".to_owned(),
         Choice::ApproveOnce => "Allow Once".to_owned(),
         Choice::ApproveInProject { action, .. } => format!("Allow {}", action_words(*action)),
         Choice::AllowProduction { action, .. } => {

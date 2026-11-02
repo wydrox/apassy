@@ -2232,7 +2232,10 @@ pub(super) fn remote_choice(run: &PendingRun, answer: &Answer) -> Option<Choice>
     Some(match answer {
         Answer::Deny => Choice::Deny,
         Answer::Once => Choice::ApproveOnce,
-        Answer::Evaluate { .. } | Answer::DenyWithComment(_) => return None,
+        Answer::Evaluate { .. } => return None,
+        Answer::DenyWithComment(comment) => Choice::DenyWithComment {
+            comment: crate::broker::approvals::refusal_comment(comment),
+        },
         Answer::InProject(action) => Choice::ApproveInProject {
             action: *action,
             project_key: project_key()?,
@@ -2241,14 +2244,8 @@ pub(super) fn remote_choice(run: &PendingRun, answer: &Answer) -> Option<Choice>
             action: *action,
             project_key: project_key()?,
         },
-        Answer::Development { item_id, .. } => Choice::CorrectEnvironment {
-            item_id: *item_id,
-            environment: RemoteEnvironment::Development,
-        },
-        Answer::MarkProduction { item_id, .. } => Choice::CorrectEnvironment {
-            item_id: *item_id,
-            environment: RemoteEnvironment::Production,
-        },
+        Answer::Development { .. } => Choice::ApproveAsDevelopment,
+        Answer::MarkProduction { .. } => Choice::ApproveAsProduction,
         Answer::Never => Choice::NeverForAgent,
         Answer::AlwaysAsk => Choice::AlwaysAskForAgent,
         Answer::Disconnect => Choice::Disconnect,
@@ -2273,6 +2270,15 @@ pub(super) fn apply_remote(
         app.set_err("This question has no project. Use Allow Once.");
         return;
     };
+    if !choice.valid_for(&run.question)
+        || remote.question.record.expires_at
+            <= std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_secs())
+    {
+        app.set_err("This question no longer offers this answer.");
+        return;
+    }
     if choice.needs_owner_check() {
         let Some(action) = remote_owner_action(&remote.question, &choice) else {
             app.set_err("This question does not offer this answer.");

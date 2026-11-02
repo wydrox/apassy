@@ -241,6 +241,11 @@ pub enum OwnerAction {
     },
     /// Approve one waiting run, exactly as the owner saw it.
     ApproveRun(PendingRun),
+    /// Remote classification binds the entire run and chosen environment to the proof.
+    ClassifyRemoteRun {
+        run: PendingRun,
+        environment: crate::vault::Environment,
+    },
     /// Development clicked locally for this exact pending question and item.
     QuestionDevelopment {
         run_id: u64,
@@ -475,6 +480,10 @@ impl OwnerAction {
                 passkey_caller(origin.as_ref())
             ),
             Self::ApproveRun(run) => format!("approve a run of agent \"{}\"", short_name(run)),
+            Self::ClassifyRemoteRun { run, environment } => format!(
+                "classify as {environment:?} and approve a run of agent \"{}\"",
+                short_name(run)
+            ),
             Self::ApproveAndRemember(run) => {
                 format!(
                     "approve and remember a run of agent \"{}\"",
@@ -740,6 +749,16 @@ pub enum CheckMethod {
 
 /// The check that the owner does now.
 pub enum OwnerCheck {
+    /// Current answer kinds, verified against their exact action and pending run.
+    RemoteChoice {
+        device_uuid: String,
+        team_id: String,
+        qid: String,
+        time: u64,
+        signature: Vec<u8>,
+        run: Box<PendingRun>,
+        choice: Choice,
+    },
     /// Touch ID through the native helper.
     TouchId,
     /// The master passphrase. The buffer is erased on drop.
@@ -788,7 +807,9 @@ impl OwnerCheck {
             Self::TouchId => CheckMethod::TouchId,
             Self::Passphrase(_) => CheckMethod::Passphrase,
             Self::Companion { .. } => CheckMethod::Companion,
-            Self::Remote { .. } | Self::RemoteAction { .. } => CheckMethod::Remote,
+            Self::Remote { .. } | Self::RemoteChoice { .. } | Self::RemoteAction { .. } => {
+                CheckMethod::Remote
+            }
         }
     }
 }
@@ -797,6 +818,7 @@ impl fmt::Debug for OwnerCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TouchId => f.write_str("OwnerCheck::TouchId"),
+            Self::RemoteChoice { .. } => f.write_str("OwnerCheck::RemoteChoice([redacted])"),
             Self::Passphrase(_) => f.write_str("OwnerCheck::Passphrase([redacted])"),
             Self::Companion {
                 device_id, time, ..
@@ -1188,6 +1210,48 @@ impl OwnerGate {
         // (relay-feed-v1 section 9.5 step 10), not at its check.
         let counted = !matches!(check, OwnerCheck::RemoteAction { .. });
         match check {
+            OwnerCheck::RemoteChoice {
+                device_uuid,
+                team_id,
+                qid,
+                time,
+                signature,
+                run,
+                choice,
+            } => {
+                if !matches!(
+                    choice,
+                    Choice::Approve | Choice::ApproveAsDevelopment | Choice::ApproveAsProduction
+                ) || !choice.valid_for(&run.question)
+                    || crate::questions::answer::local_action(&run, &choice).as_ref()
+                        != Some(&action)
+                {
+                    return Err(OwnerAuthError::RemoteUnsupported);
+                }
+                let device = {
+                    let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+                    match guard.as_ref() {
+                        Some(vault) if !vault.is_locked() && vault.epoch() == epoch => vault
+                            .trusted_device(&device_uuid)
+                            .map_err(|e| OwnerAuthError::Other(e.to_string()))?,
+                        _ => return Err(OwnerAuthError::SessionChanged),
+                    }
+                }
+                .ok_or(OwnerAuthError::RemoteRejected)?;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |t| t.as_secs());
+                verify_remote_answer(
+                    &device,
+                    &team_id,
+                    &qid,
+                    &choice,
+                    &question_digest_v2_hex(&run),
+                    time,
+                    &signature,
+                    now,
+                )?;
+            }
             OwnerCheck::TouchId => {
                 let Some(helper) = &self.touch_id else {
                     return Err(OwnerAuthError::TouchIdUnavailable {
