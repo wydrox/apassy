@@ -566,17 +566,32 @@ pub enum Choice {
 
 impl Choice {
     pub fn for_card_with_comment(
-        kind: &str, action: Option<&str>, project_key: Option<&str>, item_id: Option<&str>,
-        environment: Option<&str>, comment: Option<&str>, card: &Card,
+        kind: &str,
+        action: Option<&str>,
+        project_key: Option<&str>,
+        item_id: Option<&str>,
+        environment: Option<&str>,
+        comment: Option<&str>,
+        card: &Card,
     ) -> Result<Self, &'static str> {
         if kind == "deny_with_comment" {
-            if action.is_some() || project_key.is_some() || item_id.is_some() || environment.is_some() {
+            if action.is_some()
+                || project_key.is_some()
+                || item_id.is_some()
+                || environment.is_some()
+            {
                 return Err("This answer takes no other fields.");
             }
             let comment = normalize_comment(comment.ok_or("Enter a comment.")?);
-            return Ok(if comment.is_empty() { Self::Deny } else { Self::DenyWithComment { comment } });
+            return Ok(if comment.is_empty() {
+                Self::Deny
+            } else {
+                Self::DenyWithComment { comment }
+            });
         }
-        if comment.is_some() { return Err("This answer takes no comment."); }
+        if comment.is_some() {
+            return Err("This answer takes no comment.");
+        }
         Self::for_card(kind, action, project_key, item_id, environment, card)
     }
 
@@ -602,11 +617,18 @@ impl Choice {
     /// the relay key of the device.
     pub fn needs_face_id(&self) -> bool {
         match self {
-            Self::Approve | Self::ApproveAsDevelopment | Self::ApproveAsProduction | Self::ApproveOnce | Self::ApproveInProject { .. } | Self::AllowProduction { .. } => {
-                true
-            }
+            Self::Approve
+            | Self::ApproveAsDevelopment
+            | Self::ApproveAsProduction
+            | Self::ApproveOnce
+            | Self::ApproveInProject { .. }
+            | Self::AllowProduction { .. } => true,
             Self::CorrectEnvironment { environment, .. } => environment == "development",
-            Self::Deny | Self::DenyWithComment { .. } | Self::NeverForAgent | Self::AlwaysAskForAgent | Self::Disconnect => false,
+            Self::Deny
+            | Self::DenyWithComment { .. }
+            | Self::NeverForAgent
+            | Self::AlwaysAskForAgent
+            | Self::Disconnect => false,
         }
     }
 
@@ -614,7 +636,9 @@ impl Choice {
     /// character (section 9.3).
     pub fn line(&self) -> Option<String> {
         let line = match self {
-            Self::DenyWithComment { comment } => format!("deny_with_comment:{}", encode_b64u(comment.as_bytes())),
+            Self::DenyWithComment { comment } => {
+                format!("deny_with_comment:{}", encode_b64u(comment.as_bytes()))
+            }
             Self::ApproveInProject {
                 action,
                 project_key,
@@ -668,8 +692,12 @@ impl Choice {
         };
         let choice = match kind {
             "approve" if !question.items.iter().any(|item| item.unconfirmed) => Self::Approve,
-            "approve_as_development" if question.items.iter().any(|item| item.unconfirmed) => Self::ApproveAsDevelopment,
-            "approve_as_production" if question.items.iter().any(|item| item.unconfirmed) => Self::ApproveAsProduction,
+            "approve_as_development" if question.items.iter().any(|item| item.unconfirmed) => {
+                Self::ApproveAsDevelopment
+            }
+            "approve_as_production" if question.items.iter().any(|item| item.unconfirmed) => {
+                Self::ApproveAsProduction
+            }
             "approve_once" => plain("once", Self::ApproveOnce)?,
             "approve_in_project" => {
                 let (action, project_key) = project("in_project")?;
@@ -732,9 +760,13 @@ impl Choice {
 }
 
 pub fn normalize_comment(comment: &str) -> String {
-    comment.chars()
+    comment
+        .chars()
         .filter(|ch| !ch.is_control() && *ch != '\u{2028}' && *ch != '\u{2029}')
-        .take(500).collect::<String>().trim().to_owned()
+        .take(500)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 /// The answer string (section 9.3). `None` when the choice cannot be signed.
@@ -813,7 +845,10 @@ pub fn answer_plaintext(
         qid,
         by,
         kind: choice.kind(),
-        comment: match choice { Choice::DenyWithComment { comment } => Some(comment.as_str()), _ => None },
+        comment: match choice {
+            Choice::DenyWithComment { comment } => Some(comment.as_str()),
+            _ => None,
+        },
         action,
         project_key,
         item_id,
@@ -941,13 +976,29 @@ mod tests {
             (Choice::ApproveAsDevelopment, "approve_as_development"),
             (Choice::ApproveAsProduction, "approve_as_production"),
             (Choice::Deny, "deny"),
-            (Choice::DenyWithComment { comment: "No".into() }, "deny_with_comment:Tm8"),
+            (
+                Choice::DenyWithComment {
+                    comment: "No".into(),
+                },
+                "deny_with_comment:Tm8",
+            ),
         ] {
-            let expected = format!("apassy-question-answer-v1\n{ANSWERING}\n{TEAM}\n{QID}\n{line}\n{DIGEST}\n1790000030");
-            let signed = answer_string(ANSWERING, TEAM, QID, &choice, DIGEST, 1_790_000_030).unwrap();
+            let expected = format!(
+                "apassy-question-answer-v1\n{ANSWERING}\n{TEAM}\n{QID}\n{line}\n{DIGEST}\n1790000030"
+            );
+            let signed =
+                answer_string(ANSWERING, TEAM, QID, &choice, DIGEST, 1_790_000_030).unwrap();
             assert_eq!(signed.as_bytes(), expected.as_bytes());
             assert!(!signed.ends_with('\n'));
-            let wire: Value = serde_json::from_slice(&answer_plaintext(QID, ANSWERING, &choice, DIGEST, 1_790_000_030, "DER")).unwrap();
+            let wire: Value = serde_json::from_slice(&answer_plaintext(
+                QID,
+                ANSWERING,
+                &choice,
+                DIGEST,
+                1_790_000_030,
+                "DER",
+            ))
+            .unwrap();
             let mut expected_wire = serde_json::json!({
                 "v": 1, "qid": QID, "by": ANSWERING, "kind": choice.kind(),
                 "digest": DIGEST, "time": 1_790_000_030u64, "signature": "DER"
@@ -968,18 +1019,52 @@ mod tests {
         for kind in ["approve_as_development", "approve_as_production"] {
             assert!(Choice::for_card(kind, None, None, None, None, &card).is_ok());
         }
-        for item in &mut card.question.items { item.unconfirmed = false; }
+        for item in &mut card.question.items {
+            item.unconfirmed = false;
+        }
         assert!(Choice::for_card("approve", None, None, None, None, &card).is_ok());
         assert!(Choice::for_card("approve_as_production", None, None, None, None, &card).is_err());
-        let comment = Choice::for_card_with_comment("deny_with_comment", None, None, None, None, Some(" \tN\0o\n\u{0085}\u{2028}\u{2029} "), &card).unwrap();
+        let comment = Choice::for_card_with_comment(
+            "deny_with_comment",
+            None,
+            None,
+            None,
+            None,
+            Some(" \tN\0o\n\u{0085}\u{2028}\u{2029} "),
+            &card,
+        )
+        .unwrap();
         assert_eq!(comment.line().as_deref(), Some("deny_with_comment:Tm8"));
         assert_eq!(normalize_comment("\u{2003}No\u{00a0}"), "No");
-        assert_eq!(normalize_comment("\u{200b}No\u{200b}"), "\u{200b}No\u{200b}");
-        assert_eq!(normalize_comment(&format!(" {}", "a".repeat(500))), "a".repeat(499));
+        assert_eq!(
+            normalize_comment("\u{200b}No\u{200b}"),
+            "\u{200b}No\u{200b}"
+        );
+        assert_eq!(
+            normalize_comment(&format!(" {}", "a".repeat(500))),
+            "a".repeat(499)
+        );
         assert_eq!(normalize_comment(&"😀".repeat(501)), "😀".repeat(500));
-        assert_eq!(Choice::for_card_with_comment("deny_with_comment", None, None, None, None, Some(" \n\u{2028}"), &card), Ok(Choice::Deny));
-        assert!(Choice::for_card_with_comment("deny", None, None, None, None, Some("No"), &card).is_err());
-        assert!(Choice::for_card_with_comment("deny_with_comment", None, None, None, None, None, &card).is_err());
+        assert_eq!(
+            Choice::for_card_with_comment(
+                "deny_with_comment",
+                None,
+                None,
+                None,
+                None,
+                Some(" \n\u{2028}"),
+                &card
+            ),
+            Ok(Choice::Deny)
+        );
+        assert!(
+            Choice::for_card_with_comment("deny", None, None, None, None, Some("No"), &card)
+                .is_err()
+        );
+        assert!(
+            Choice::for_card_with_comment("deny_with_comment", None, None, None, None, None, &card)
+                .is_err()
+        );
     }
 
     fn nonce(first: u8) -> [u8; 12] {
