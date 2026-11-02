@@ -8,6 +8,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
 - Staged updates install when the vault locks, or right away with Restart to update.
+- Make the Touch ID frequency global for all owner actions, including revealing secrets, production approvals, settings and pairing. Replace heartbeat-gap revocation with synchronous lifecycle-helper state checks; lock, sleep, session changes and helper loss still end the window.
 
 ## [0.5.12] - 2026-11-02
 
