@@ -201,6 +201,30 @@ fn registration_and_assertion_verify_and_wrong_inputs_fail() {
     let mut vault = vault(&dir, "v.db");
     let created = create(&mut vault, RP, "Example");
     let point = verify_registration(RP, &created);
+    // The backup flags are the ones the provider sets, and backup eligibility never
+    // changes. macOS refused 0x4d (UP, UV, BE, AT) from the credential provider:
+    // "AuthData is missing a required flag". The registration now has BS too.
+    assert_eq!(created.authenticator_data[32], 0x5d, "registration flags");
+    assert_ne!(created.authenticator_data[32], 0x4d);
+    for n in 0..3 {
+        let assertion = vault
+            .sign_passkey(created.item_id, RP, &created.credential_id, &HASH)
+            .unwrap();
+        assert_eq!(
+            assertion.authenticator_data[32], 0x1d,
+            "assertion {n}: flags"
+        );
+        // A relying party fails an assertion whose BE differs from the registration.
+        assert_eq!(
+            assertion.authenticator_data[32] & 0x08,
+            created.authenticator_data[32] & 0x08,
+            "assertion {n}: BE as at the registration"
+        );
+        assert!(
+            verify_assertion(RP, &point, &HASH, &assertion),
+            "assertion {n} verifies"
+        );
+    }
     let other = create(&mut vault, "other.example", "Other");
     let other_point = verify_registration("other.example", &other);
     assert_ne!(created.credential_id, other.credential_id);
@@ -253,30 +277,6 @@ fn registration_and_assertion_verify_and_wrong_inputs_fail() {
     );
     assert!(vault.passkeys(RP, &[vec![9; 32]]).unwrap().is_empty());
     assert_eq!(vault.all_passkeys().unwrap().len(), 2);
-}
-
-#[test]
-fn backup_flags_are_the_provider_set_and_backup_eligibility_never_changes() {
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir, "v.db");
-    let created = create(&mut vault, RP, "Example");
-    let point = verify_registration(RP, &created);
-    // macOS refused 0x4d (UP, UV, BE, AT) from the credential provider: "AuthData is
-    // missing a required flag". The registration now has BS too.
-    assert_eq!(created.authenticator_data[32], 0x5d);
-    assert_ne!(created.authenticator_data[32], 0x4d);
-    for _ in 0..3 {
-        let assertion = vault
-            .sign_passkey(created.item_id, RP, &created.credential_id, &HASH)
-            .unwrap();
-        assert_eq!(assertion.authenticator_data[32], 0x1d);
-        // A relying party fails an assertion whose BE differs from the registration.
-        assert_eq!(
-            assertion.authenticator_data[32] & 0x08,
-            created.authenticator_data[32] & 0x08
-        );
-        assert!(verify_assertion(RP, &point, &HASH, &assertion));
-    }
 }
 
 #[test]
