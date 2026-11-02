@@ -32,3 +32,10 @@ The history is clean of secrets. It is imported with its history (`git filter-re
   (`sk_test_51SyntheticCanaryValue0123456789` and its placeholder) for a real key. Both get
   underscores (`sk_test_Synthetic_Canary_Value_0123456789`), which keeps the tests' `Canary` checks. `.github/workflows/health.yml` and
 `deploy/vps/` monitor and run production; they stay in the archived private repository.
+
+## Follow-up: relay 0.5.13
+
+Relay 0.5.13 (`86cd728`, merged as `5fbb834`) was a version-only release in the private repository.
+Its two commits were imported with the same three filter-repo passes, which rewrite the earlier
+history to the same commits, so only the two new commits merged. They hold no VPS address, and
+gitleaks reports nothing in them.
