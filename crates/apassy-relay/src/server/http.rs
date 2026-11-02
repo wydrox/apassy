@@ -138,6 +138,38 @@ fn pick(method: &str, choices: &[(&str, Need, Endpoint)]) -> RelayResult<Routed>
 }
 
 /// Resolves a method and a path to the auth need and the endpoint.
+impl Endpoint {
+    /// The endpoints of shared team vaults and their runs: runs, MCP, access, the host
+    /// lane, and new collections, policies, items, grants, and team agents. A relay with
+    /// `team_vaults` off refuses them (ADR 0036, D8). Lists, archives, and revocations
+    /// stay, so a team can see and clean up what it has.
+    pub fn is_team_vault_use(&self) -> bool {
+        use Endpoint::*;
+        matches!(
+            self,
+            Mcp | Access
+                | RunCreate
+                | RunGet(_)
+                | HostRequests
+                | HostRelease(_)
+                | HostDeny(_)
+                | CollectionCreate
+                | PolicyPut(_)
+                | ItemCreate
+                | GrantCreate
+                | AgentCreate
+        )
+    }
+}
+
+/// The answer of a relay with `team_vaults` off to a team-vault request or the proxy.
+fn team_vaults_retired() -> RelayError {
+    RelayError::new(
+        codes::TEAM_VAULTS_RETIRED,
+        "Shared team vaults, agent runs, and the proxy are off on this relay. A team runs them on its own Apassy node (ADR 0036).",
+    )
+}
+
 pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
     use Endpoint::*;
     let not_found = || RelayError::new(codes::NOT_FOUND, "No such path.");
@@ -835,6 +867,10 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         );
         return;
     }
+    if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
+        respond_error(request, &team_vaults_retired());
+        return;
+    }
     if path.starts_with(paths::PROXY_PREFIX) {
         // Parse only: the proxy still validates and finds the session itself.
         let core = path
@@ -865,6 +901,11 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             return;
         }
     };
+    // A relay-wide setting, the same for every caller: refuse before any token check.
+    if !hub.config.team_vaults && endpoint.is_team_vault_use() {
+        respond_error(request, &team_vaults_retired());
+        return;
+    }
     // Edge endpoints choose a team only from their contract body or code.
     if matches!(
         endpoint,

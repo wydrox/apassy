@@ -14,6 +14,7 @@
 //! | `APASSY_RELAY_PUSH_URL` | The Worker's push route, such as `https://apassy-relay.wyderka.cc/internal/push` | none: push is off |
 //! | `APASSY_RELAY_PUSH_TOPIC` | The bundle id of the iPhone app, such as `com.wydrox.apassy.companion` | none: push is off |
 //! | `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` | The secret the relay sends to the push route as `X-Apassy-Push` (the Worker's `PUSH_SECRET`); at least 32 bytes | none: push is off |
+//! | `APASSY_RELAY_TEAM_VAULTS` | `1`: shared team vaults, runs, MCP, and the proxy (way B); `0`: refuse them with 410 `team_vaults_retired`, keep devices, relay sync, questions, feed, and push (ADR 0036, D8). The hosted image sets `0` | `1` |
 //! | `APASSY_RELAY_QUESTIONS_TO_APPROVERS` | `1`: take questions with `to: "approvers"`; `0`: refuse them with 403 `not_routed` (until shared vaults) | `0` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams (`POST /v1/connect`) the whole relay makes in 24 hours, 0 to 100000; over it 503 `busy`; `0` turns Connect off | `50` |
 //! | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once (active or suspended), 0 to 1000000; at it `POST /v1/connect` is 503 `busy`; `0` turns Connect off | `100` |
@@ -234,6 +235,10 @@ pub struct RelayConfig {
     pub backup_dir: PathBuf,
     /// The push trigger (docs/SPEC.md section 25.6). `None`: push is off.
     pub push: Option<PushConfig>,
+    /// Shared team vaults, runs, MCP, and the proxy are served (`APASSY_RELAY_TEAM_VAULTS`).
+    /// Off on the hosted relay (ADR 0036, D8): those requests are 410 `team_vaults_retired`,
+    /// and devices, relay sync, questions, feed, and push go on. A user's own node keeps it on.
+    pub team_vaults: bool,
     /// Questions with `to: "approvers"` are taken (`APASSY_RELAY_QUESTIONS_TO_APPROVERS`).
     /// Off until shared vaults (integrator decision 1): such a post is 403 `not_routed`.
     pub questions_to_approvers: bool,
@@ -378,6 +383,13 @@ impl RelayConfig {
                 lookup("APASSY_RELAY_BACKUP_DIR").unwrap_or_else(|| "/backups".to_string()),
             ),
             push: push_from(&lookup)?,
+            team_vaults: match lookup("APASSY_RELAY_TEAM_VAULTS").as_deref() {
+                None | Some("1") => true,
+                Some("0") => false,
+                Some(_) => {
+                    return Err(RelayError::invalid("APASSY_RELAY_TEAM_VAULTS is 0 or 1."));
+                }
+            },
             questions_to_approvers: match lookup("APASSY_RELAY_QUESTIONS_TO_APPROVERS").as_deref() {
                 None | Some("0") => false,
                 Some("1") => true,
@@ -703,6 +715,13 @@ mod tests {
         };
         assert!(with(&[]).unwrap().push.is_none());
         assert!(!with(&[]).unwrap().questions_to_approvers);
+        assert!(with(&[]).unwrap().team_vaults);
+        let vaults = |value: &'static str| {
+            with(&[("APASSY_RELAY_TEAM_VAULTS", value)]).map(|config| config.team_vaults)
+        };
+        assert!(!vaults("0").unwrap());
+        assert!(vaults("1").unwrap());
+        assert!(vaults("off").is_err());
         let approvers = |value: &'static str| {
             with(&[("APASSY_RELAY_QUESTIONS_TO_APPROVERS", value)])
                 .map(|config| config.questions_to_approvers)

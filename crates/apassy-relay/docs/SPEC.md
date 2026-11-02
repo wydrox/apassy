@@ -130,6 +130,7 @@ From `src/config.rs` (`RelayConfig::from_env`):
 | `APASSY_RELAY_KEY` / `_FILE` | the master key: it opens `relay.db`, which holds the random key of each team file; at least 16 bytes | required |
 | `APASSY_RELAY_SESSION_TTL` | session lifetime, 60 to 3600 s | 900 |
 | `APASSY_RELAY_APPROVAL_TIMEOUT` | wait for the owner's host to decide a run, 30 to 86400 s | 600 |
+| `APASSY_RELAY_TEAM_VAULTS` | `1`: shared team vaults, runs, MCP, and the proxy (way B). `0`: refuse `/p/…`, MCP, `/v1/access`, `/v1/runs`, the host lane, and new collections, policies, items, grants, and team agents with 410 `team_vaults_retired` before any token check; devices, joins, links, relay sync, questions, feed, push, Connect, lists, archives, and revocations go on (ADR 0036, D8). The hosted image sets `0`; any other value stops the start | `1` |
 | `APASSY_RELAY_CONNECT_TEAMS_PER_DAY` | Connect teams of the whole relay in 24 hours (section 26), 0 to 100000; `0` turns `POST /v1/connect` off | 50 |
 | `APASSY_RELAY_CONNECT_TEAMS_MAX` | Connect teams the relay holds at once, active or suspended (section 26), 0 to 1000000; `0` turns `POST /v1/connect` off | 100 |
 | `APASSY_RELAY_CONNECT_LONG_POLLS` | long polls of all Connect teams together (`Limits::connect_long_polls`, section 26.4), 0 to 1024; `0`: every Connect poll answers at once | 96 |

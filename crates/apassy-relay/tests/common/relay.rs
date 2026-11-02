@@ -160,6 +160,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         limits: Default::default(),
         backup_dir: dir.join("backups"),
         push: None,
+        team_vaults: true,
         questions_to_approvers: false,
         connect_teams_per_day: 200,
         connect_teams_max: 1000,

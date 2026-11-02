@@ -71,13 +71,13 @@ The public host name, the bundle id, and the GitHub org are already public and c
    owner's confirmation first.
 3. **Bridge.** Until the new image ships, suspend the affected teams with `admin suspend`. This is
    reversible with `admin resume`.
-4. **Code.** Add the setting `APASSY_RELAY_TEAM_VAULTS=off`, which is the default in new images. It
+4. **Code.** Add the setting `APASSY_RELAY_TEAM_VAULTS` (`1` by default for a user's own node; the hosted image sets `0`). With `0`, it
    refuses `/p/…`, run sessions, the host release endpoints, team MCP, and creating items,
    collections, grants, and team agents, with `410 team_vaults_retired`. It keeps devices, joins,
    links, relay sync, questions, feed, access requests, push, and Connect. Tests cover each refused
    route and each kept route. It lands in the moved crate (1A), so it ships in the first release
-   from this repository.
-5. **CLI.** `apassy-team` prints what is off and that a team's own node comes in stage 4.
+   from this repository. Done in PR #66 (`tests/server_team_vaults.rs`).
+5. **CLI.** `apassy-team` prints the relay's message for `team_vaults_retired`: what is off, and that a team runs on its own node.
 6. **Data.** Team files stay encrypted on the relay for the stage 4 export. Deleting them is a
    separate step that needs the owner's confirmation.
 

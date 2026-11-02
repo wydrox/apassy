@@ -24,6 +24,11 @@ non-merge commits). No value is in this report.
 
 ## Decision (D1)
 
-The history is clean of secrets. It is imported with its history, with the VPS addresses replaced by
-documentation addresses (`git filter-repo --replace-text`). `.github/workflows/health.yml` and
+The history is clean of secrets. It is imported with its history (`git filter-repo --replace-text`):
+
+- The VPS addresses become public example addresses (Quad9 ranges), because two tests need a
+  public, non-documentation address.
+- GitHub push protection took one synthetic Stripe canary in the audit tests
+  (`sk_test_51SyntheticCanaryValue0123456789` and its placeholder) for a real key. Both get
+  underscores (`sk_test_Synthetic_Canary_Value_0123456789`), which keeps the tests' `Canary` checks. `.github/workflows/health.yml` and
 `deploy/vps/` monitor and run production; they stay in the archived private repository.

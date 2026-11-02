@@ -454,6 +454,7 @@ mod tests {
             limits: Default::default(),
             backup_dir: dir.path().join("backups"),
             push: None,
+            team_vaults: true,
             questions_to_approvers: false,
             connect_teams_per_day: 200,
             connect_teams_max: 1000,

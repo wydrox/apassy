@@ -105,6 +105,11 @@ pub mod codes {
     pub const ACTION_SETTLED: &str = "action_settled";
     /// A settle after the action's `expires_at`.
     pub const ACTION_EXPIRED: &str = "action_expired";
+    // Shared team vaults turned off on this relay (ADR 0036, D8).
+    /// A run, MCP, the proxy, a host release, or a new collection, item, grant, or team
+    /// agent on a relay with `APASSY_RELAY_TEAM_VAULTS=0`. 410: the feature is gone here,
+    /// and a retry does not help.
+    pub const TEAM_VAULTS_RETIRED: &str = "team_vaults_retired";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -147,6 +152,7 @@ pub fn status_of(code: &str) -> u16 {
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
         | CONNECT_KEY_USED | SEQ_NOT_NEWER | ACTION_SETTLED | ACTION_EXPIRED => 409,
+        TEAM_VAULTS_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
         RATE_LIMITED => 429,

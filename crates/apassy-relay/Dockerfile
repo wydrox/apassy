@@ -24,7 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && mkdir -p /data && chown 10001:10001 /data && chmod 0700 /data
 COPY --from=build /src/target/release/apassy-relay /src/target/release/apassy-team /usr/local/bin/
 USER 10001:10001
-ENV APASSY_RELAY_DATA=/data APASSY_RELAY_LISTEN=0.0.0.0:8080
+# The hosted relay serves no shared team vaults or proxy (ADR 0036, D8). A user's own
+# node keeps the default, 1.
+ENV APASSY_RELAY_DATA=/data APASSY_RELAY_LISTEN=0.0.0.0:8080 APASSY_RELAY_TEAM_VAULTS=0
 VOLUME ["/data"]
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/apassy-relay"]
