@@ -102,7 +102,8 @@ jobs:
           python-version: '3.12'
 
       # Manual dispatch uses the same successful-CI gate as automatic releases.
-      # A PR, foreign repository, failed run, or different attempt is ineligible.
+      # A PR, foreign repository, failed latest run, or stale event is ineligible.
+      # The artifact may come from a successful job in an earlier attempt.
       - name: Verify the source CI run
         id: ci
         env:
@@ -223,7 +224,7 @@ jobs:
         if: steps.head.outputs.publish == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ${{ steps.ci.outputs.artifact_name }}
+          artifact-ids: ${{ steps.ci.outputs.artifact_id }}
           run-id: ${{ steps.ci.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/apassy-release
@@ -233,7 +234,7 @@ jobs:
         if: steps.head.outputs.publish == 'true'
         env:
           CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
-          CI_RUN_ATTEMPT: ${{ steps.ci.outputs.run_attempt }}
+          CI_RUN_ATTEMPT: ${{ steps.ci.outputs.artifact_attempt }}
         run: |
           python3 scripts/ci-release-artifact.py verify \
             --directory "$RUNNER_TEMP/apassy-release" --commit "$COMMIT" \

@@ -79,6 +79,11 @@ class ArtifactTests(unittest.TestCase):
         for name in artifact.BINARIES:
             self.assertEqual(stat.S_IMODE((self.directory / name).stat().st_mode), 0o755)
 
+    def test_partial_rerun_verifies_producing_attempt_exactly(self):
+        # CI attempt 3 carries forward the successful artifact from attempt 2.
+        self.assert_rejected_without_env(run_attempt="3")
+        self.assertEqual(self.verify(run_attempt="2")["run_attempt"], "2")
+
     def test_tampered_binary_is_rejected(self):
         path = self.directory / "apassy-hook"
         path.write_bytes(path.read_bytes() + b"tampered")

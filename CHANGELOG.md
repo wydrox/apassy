@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- Release uses the verified successful `release-binaries` artifact after a partial CI rerun, even when that job ran in an earlier attempt.
+
 ## [0.5.13] - 2026-11-02
 
 ### Added
