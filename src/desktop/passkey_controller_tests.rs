@@ -2459,7 +2459,10 @@ fn owner_window_browser_fill_skips_prompt_inside_and_prompts_outside() {
     ] {
         app.owner_ui.session.owner_window.observe(true);
         let answer = ask_gesture(&mut app, &ctx, command);
-        assert!(app.owner.check.is_none(), "browser mutation inside the window");
+        assert!(
+            app.owner.check.is_none(),
+            "browser mutation inside the window"
+        );
         let response = now(&answer);
         assert!(response.ok, "{}", response.message);
     }
@@ -2479,7 +2482,10 @@ fn owner_window_browser_fill_skips_prompt_inside_and_prompts_outside() {
         &ctx,
         Command::PasskeyCreate(create_request("new@example.com", &[], &[-7])),
     );
-    assert!(app.owner.check.is_none(), "passkey create inside the window");
+    assert!(
+        app.owner.check.is_none(),
+        "passkey create inside the window"
+    );
     assert!(now(&answer).ok, "passkey create inside the window");
 }
 

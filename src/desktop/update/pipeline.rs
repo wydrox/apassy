@@ -735,7 +735,10 @@ pub(crate) mod tests {
             !fake.calls().contains(&"download".to_owned()),
             "same version, other build: no download"
         );
-        assert!(files(&dir).is_empty(), "same version, other build: no files");
+        assert!(
+            files(&dir).is_empty(),
+            "same version, other build: no files"
+        );
 
         // A higher version installs also from an app without the build identity keys.
         let temp = tempfile::TempDir::new().expect("temp dir");

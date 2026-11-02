@@ -1581,7 +1581,10 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
     super::open_settings(&mut b, super::SettingsSection::Vault);
     let text = settled_frames(&mut b);
     for expected in ["Sync now", "Add a device…", "Devices…"] {
-        assert!(text.contains(expected), "before the removal: {expected}: {text}");
+        assert!(
+            text.contains(expected),
+            "before the removal: {expected}: {text}"
+        );
     }
     let device_b = b
         .vault_list
@@ -1624,7 +1627,10 @@ fn turn_off_of_a_removed_or_last_mac_says_what_happened() {
     assert!(text.contains("Add a device to “Personal”"), "{text}");
     assert!(text.contains("Removed from the relay."), "{text}");
     for gone in ["Check again", "New link", "Copy link", "/link#apassy_lnk_"] {
-        assert!(!text.contains(gone), "removed, Add a device: {gone}: {text}");
+        assert!(
+            !text.contains(gone),
+            "removed, Add a device: {gone}: {text}"
+        );
     }
     assert!(text.contains("Done"), "{text}");
     b.ui.sheet = None;
@@ -1980,7 +1986,10 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
     let _ = frames_in(&ctx, &mut a, vec![enter]);
     a.relay_settle_for_test();
     assert!(a.is_relay(&id), "relay sync stays on: {}", a.status_text);
-    assert!(a.ui.sheet.is_none(), "pointer Turn off: Return pressed Cancel");
+    assert!(
+        a.ui.sheet.is_none(),
+        "pointer Turn off: Return pressed Cancel"
+    );
 
     // A keyboard user. Mac B answers the questions of the vault: its trusted device has
     // its number in the sync team.

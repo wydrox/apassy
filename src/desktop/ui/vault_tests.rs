@@ -1705,7 +1705,10 @@ fn the_development_key_question_and_its_answers() {
     };
     let first_before = declaration(&app, first);
     let second_before = declaration(&app, second);
-    assert!(first_before.project.is_empty(), "a pasted item has no project");
+    assert!(
+        first_before.project.is_empty(),
+        "a pasted item has no project"
+    );
     assert!(
         second_before.project.is_empty(),
         "a pasted item has no project"

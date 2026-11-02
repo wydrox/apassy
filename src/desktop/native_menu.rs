@@ -373,7 +373,10 @@ mod tests {
         let ctx = egui::Context::default();
         let queued = request(&app, &ctx, Command::Copy);
         dispatch(&mut app, &ctx, queued);
-        assert!(app.owner.check.is_none(), "copy without text focus: owner check");
+        assert!(
+            app.owner.check.is_none(),
+            "copy without text focus: owner check"
+        );
         assert!(
             ctx.input(|input| input.events.is_empty()),
             "copy without text focus: input events"
@@ -407,7 +410,10 @@ mod tests {
             .unlock("native-menu-test-pass")
             .unwrap();
         dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.sheet.is_none(), "new credential after lock and unlock");
+        assert!(
+            app.ui.sheet.is_none(),
+            "new credential after lock and unlock"
+        );
         let queued = request(&app, &ctx, Command::MoveItems);
         app.selected_item_id = None;
         dispatch(&mut app, &ctx, queued);
@@ -640,7 +646,10 @@ mod tests {
         ctx.memory_mut(|memory| memory.surrender_focus(text_id));
         let queued = request(&app, &ctx, Command::Undo);
         dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.move_undo.is_empty(), "unfocused undo undoes the move");
+        assert!(
+            app.ui.move_undo.is_empty(),
+            "unfocused undo undoes the move"
+        );
         assert!(
             !app.owner_ui
                 .session

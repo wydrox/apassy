@@ -549,8 +549,16 @@ fn a_shown_code_does_not_change_the_generic_show_of_the_password() {
     app.close_owner_check(None);
     app.owner_ui.session.hide(item_id).expect("hide");
     window.idle(&mut app);
-    assert!(window.text.contains("Show code"), "after hide: {}", window.text);
-    assert!(window.text.contains(MASKED_CODE), "after hide: {}", window.text);
+    assert!(
+        window.text.contains("Show code"),
+        "after hide: {}",
+        window.text
+    );
+    assert!(
+        window.text.contains(MASKED_CODE),
+        "after hide: {}",
+        window.text
+    );
     assert!(
         !shows_any_current_digits(&window.text),
         "after hide: {}",
