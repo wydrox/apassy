@@ -106,6 +106,8 @@ def no_duplicate_keys(pairs):
 
 def verify(directory, commit, run_id, run_attempt, date=None, github_env=None):
     check_host()
+    # run_attempt is the API-resolved producing attempt, which may precede the
+    # latest successful CI attempt after a partial rerun. Match it exactly.
     expected = identity(commit, run_id, run_attempt, date)
     directory = check_directory(directory)
     require({entry.name for entry in directory.iterdir()} == {*BINARIES, MANIFEST},
