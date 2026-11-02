@@ -87,6 +87,10 @@ fn a_normal_repository_is_a_project_with_its_folder_name() {
     assert_eq!(p.key, root.join(".git").to_string_lossy());
     assert_eq!(p.label, "shop");
     assert_eq!(p.root, root);
+    // Two repositories have two keys.
+    let a = repo(&f.home, "a");
+    let b = repo(&f.home, "b");
+    assert_ne!(project(&a, &f.home).key, project(&b, &f.home).key);
 }
 
 #[test]
@@ -117,14 +121,6 @@ fn worktrees_share_one_key_with_the_main_folder() {
         assert_eq!(project(&sub, &f.home), p);
     }
     assert_ne!(project(&wt1, &f.home).root, project(&wt2, &f.home).root);
-}
-
-#[test]
-fn two_repositories_have_two_keys() {
-    let f = fixture();
-    let a = repo(&f.home, "a");
-    let b = repo(&f.home, "b");
-    assert_ne!(project(&a, &f.home).key, project(&b, &f.home).key);
 }
 
 #[test]

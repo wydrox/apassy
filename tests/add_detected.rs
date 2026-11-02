@@ -435,41 +435,11 @@ fn an_agent_origin_is_accepted_and_a_locked_vault_refuses() {
     );
 }
 
-#[test]
-fn signing_providers_get_the_real_value_and_keep_their_hosts() {
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let secret = format!("AWS_SECRET_ACCESS_KEY={}", fake("", 40));
-    let access = fake("AKIA", 12);
-    let gcp_key = fake("AIza", 35);
-    let gcp_json = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
-    let cases = [
-        (secret.as_str(), "aws"),
-        (access.as_str(), "aws"),
-        (gcp_key.as_str(), "gcp"),
-        (gcp_json, "gcp"),
-    ];
-    for (text, provider) in cases {
-        let detected = one(text);
-        assert_eq!(detected.provider.as_deref(), Some(provider), "{text}");
-        // The detection still lists the hosts for the bouncer.
-        assert!(!detected.hosts.is_empty(), "{text}");
-        let summary = vault.add_detected(&detected, None, None).expect("add");
-        let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
-        assert_eq!(binding.delivery, EnvDelivery::Value, "{text}");
-        let stored = vault.declaration_provider(summary.id).unwrap();
-        assert_eq!(stored.as_deref(), Some(provider));
-        assert!(
-            !apassy::vault::providers::known_hosts(provider).is_empty(),
-            "the provider keeps its hosts"
-        );
-    }
-}
-
 /// Providers whose main command-line tools do not trust the certificate of the run or
 /// do not speak HTTPS with the secret (`gh`, `git`, the Stripe CLI, the Supabase CLI,
 /// `pscale`) get the real value (docs/operations/agent-path.md §8b). The known hosts stay
 /// recorded for the bouncer. Cloudflare keeps the placeholder: Wrangler works with it.
+/// Signing providers (AWS, Google Cloud) also get the real value and keep their hosts.
 #[test]
 fn providers_of_cli_tools_get_the_real_value() {
     let dir = TempDir::new().unwrap();
@@ -512,6 +482,32 @@ fn providers_of_cli_tools_get_the_real_value() {
         assert!(
             matches!(binding.delivery, EnvDelivery::Placeholder(_)),
             "{text}"
+        );
+    }
+    // Signing providers get the real value and keep their hosts.
+    let secret = format!("AWS_SECRET_ACCESS_KEY={}", fake("", 40));
+    let access = fake("AKIA", 12);
+    let gcp_key = fake("AIza", 35);
+    let gcp_json = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
+    let cases = [
+        (secret.as_str(), "aws"),
+        (access.as_str(), "aws"),
+        (gcp_key.as_str(), "gcp"),
+        (gcp_json, "gcp"),
+    ];
+    for (text, provider) in cases {
+        let detected = one(text);
+        assert_eq!(detected.provider.as_deref(), Some(provider), "{text}");
+        // The detection still lists the hosts for the bouncer.
+        assert!(!detected.hosts.is_empty(), "{text}");
+        let summary = vault.add_detected(&detected, None, None).expect("add");
+        let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
+        assert_eq!(binding.delivery, EnvDelivery::Value, "{text}");
+        let stored = vault.declaration_provider(summary.id).unwrap();
+        assert_eq!(stored.as_deref(), Some(provider));
+        assert!(
+            !apassy::vault::providers::known_hosts(provider).is_empty(),
+            "the provider keeps its hosts"
         );
     }
 }
