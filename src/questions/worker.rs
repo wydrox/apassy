@@ -1651,7 +1651,12 @@ impl Shared {
         // 6. A team production question counts an approval of an approver only.
         let approving = matches!(
             choice,
-            Choice::ApproveOnce | Choice::ApproveInProject { .. } | Choice::AllowProduction { .. }
+            Choice::Approve
+                | Choice::ApproveAsDevelopment
+                | Choice::ApproveAsProduction
+                | Choice::ApproveOnce
+                | Choice::ApproveInProject { .. }
+                | Choice::AllowProduction { .. }
         );
         if reading.to == TO_APPROVERS
             && approving
@@ -1666,13 +1671,28 @@ impl Shared {
             };
             let correction_of =
                 matches!(choice, Choice::CorrectEnvironment { .. }).then(|| Box::new(run.clone()));
-            let check = OwnerCheck::Remote {
-                device_uuid: body.by.clone(),
-                team_id: active.team_id.clone(),
-                qid: reading.qid.clone(),
-                time: body.time,
-                signature,
-                correction_of,
+            let check = if matches!(
+                choice,
+                Choice::Approve | Choice::ApproveAsDevelopment | Choice::ApproveAsProduction
+            ) {
+                OwnerCheck::RemoteChoice {
+                    device_uuid: body.by.clone(),
+                    team_id: active.team_id.clone(),
+                    qid: reading.qid.clone(),
+                    time: body.time,
+                    signature,
+                    run: Box::new(run.clone()),
+                    choice: choice.clone(),
+                }
+            } else {
+                OwnerCheck::Remote {
+                    device_uuid: body.by.clone(),
+                    team_id: active.team_id.clone(),
+                    qid: reading.qid.clone(),
+                    time: body.time,
+                    signature,
+                    correction_of,
+                }
             };
             match self.gate.authorize(action, check) {
                 Ok(proof) => Some(proof),
@@ -1743,7 +1763,38 @@ impl Shared {
             kind,
         };
         match choice {
-            Choice::ApproveOnce
+            Choice::ApproveAsDevelopment | Choice::ApproveAsProduction => {
+                let environment = if matches!(choice, Choice::ApproveAsDevelopment) {
+                    Environment::Development
+                } else {
+                    Environment::Production
+                };
+                let Some(item) = run.question.items.iter().find(|item| item.unconfirmed) else {
+                    return Verdict::Ended;
+                };
+                let Some(proof) = proof else {
+                    return Verdict::Ended;
+                };
+                // Same exact-run, item, epoch and deadline guard as the Mac buttons.
+                // The broker persists only after checking the original authorization baseline.
+                if self
+                    .queue
+                    .classify_and_approve(run, environment, item.item_id, proof)
+                {
+                    settled(SettleOutcome::Approved)
+                } else {
+                    Verdict::Ended
+                }
+            }
+            Choice::DenyWithComment { ref comment } => {
+                if self.queue.deny_with_comment(run.id, comment) {
+                    settled(SettleOutcome::Denied)
+                } else {
+                    Verdict::Ended
+                }
+            }
+            Choice::Approve
+            | Choice::ApproveOnce
             | Choice::ApproveInProject { .. }
             | Choice::AllowProduction { .. } => {
                 let Some(proof) = proof else {

@@ -997,7 +997,6 @@ impl ApprovalQueue {
         true
     }
 
-    #[cfg(feature = "desktop")]
     pub(crate) fn classify_and_approve(
         &self,
         run: &PendingRun,
@@ -1477,6 +1476,80 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+
+    #[test]
+    fn classification_requires_the_exact_live_pending_question() {
+        for environment in [
+            crate::vault::Environment::Development,
+            crate::vault::Environment::Production,
+        ] {
+            for end in [
+                "happy",
+                "changed",
+                "expired",
+                "removed",
+                "wrong-item",
+                "wrong-epoch",
+            ] {
+                let queue = Arc::new(ApprovalQueue::new());
+                let mut template = run();
+                template.question.items.push(QuestionItem {
+                    item_id: 7,
+                    unconfirmed: true,
+                    ..Default::default()
+                });
+                let q = Arc::clone(&queue);
+                let waiter = std::thread::spawn(move || {
+                    q.wait_for_question(
+                        template,
+                        1,
+                        [1; 32],
+                        [0; 32],
+                        Duration::from_secs(5),
+                        || true,
+                    )
+                });
+                let id = wait_until_pending(&queue);
+                let pending = queue.pending()[0].clone();
+                let item_id = if end == "wrong-item" { 8 } else { 7 };
+                let proof = OwnerProof::issue_for_test(
+                    OwnerAction::QuestionDevelopment {
+                        run_id: id,
+                        item_id,
+                    },
+                    if end == "wrong-epoch" {
+                        [2; 32]
+                    } else {
+                        [1; 32]
+                    },
+                    Instant::now(),
+                );
+                match end {
+                    "changed" => queue.state().pending[0].purpose.push_str("changed"),
+                    "expired" => {
+                        queue.state().questions.get_mut(&id).unwrap().deadline = Instant::now()
+                    }
+                    "removed" => {
+                        queue.deny(id);
+                    }
+                    _ => {}
+                }
+                assert_eq!(
+                    queue.classify_and_approve(&pending, environment, item_id, proof),
+                    end == "happy",
+                    "{end}"
+                );
+                if end != "happy" {
+                    queue.deny(id);
+                }
+                let settled = waiter.join().unwrap().unwrap();
+                assert_eq!(
+                    settled.classification,
+                    (end == "happy").then_some(environment)
+                );
+            }
+        }
+    }
 
     #[test]
     fn dismissal_comment_is_bounded_plain_text_and_only_a_denial() {

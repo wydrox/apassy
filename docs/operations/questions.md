@@ -1,5 +1,113 @@
 # Questions through the relay
 
+## Remote owner prompt contract (2026-11-02)
+
+New command-question cards use **card `v: 2`**. The iPhone decoder in
+`ios/ApassyCore/src/core/questions/envelope.rs` uses `exact()` to reject extra
+fields and versions other than 1; it does not ignore new fields. Older phones
+therefore show Update Apassy for these cards. Updating that decoder and the Swift
+UI is a separate task. The Mac still reads card v1 and accepts every old answer
+kind. Answer/settle/envelope versions, encryption AAD, routes and digest v2 remain
+unchanged. This extension applies to command approvals, not access-request cards.
+
+Card v2 keeps every v1 field and adds this required root object:
+
+```json
+{
+  "v": 2,
+  "owner_prompt": {
+    "agent_stated_task": "Deploy the requested change",
+    "purpose": "Run the migration",
+    "task_provenance": "agent-stated",
+    "reason_headline": "Why the owner is asked",
+    "environment_known": false,
+    "allowed_answer_kinds": ["deny", "deny_with_comment", "approve_as_development", "approve_as_production"]
+  }
+}
+```
+
+The example omits the unchanged root fields `qid`, `asker`, `created_at`, `run`,
+`question`, `digest`. `run.user_request` is the effective task; `run.agent_request`
+is the differing agent task when a verified hook replaced it. The display field
+`owner_prompt.agent_stated_task` uses `run.agent_request` when nonempty, otherwise
+`run.user_request`. Purpose is also retained as `run.purpose`. Provenance is
+`hook` or `agent-stated` (sources beginning `from the agent`, or empty, are
+agent-stated). Headline is `ReasonKind::headline()`. Environment is known exactly
+when no question item is `unconfirmed`. These display fields are sealed but do
+not change digest v2. Clients must continue to compute digest v2 from the original
+v1 fields, including `question.valid_answers`; do not add `owner_prompt` to it.
+
+`owner_prompt.allowed_answer_kinds` contains `deny` and `deny_with_comment`
+always. Known environments add `approve` when `question.valid_answers` contains
+`once`. Unknown environments instead add `approve_as_development` and
+`approve_as_production` when `question.valid_answers` contains
+`correct_environment`. The receiving Mac derives this offer from its live pending
+question, rather than trusting an answer or a display field. New unoffered kinds
+are refused. The original `question.valid_answers` remains the legacy offer list.
+
+Answer plaintext JSON has exactly `v` (1), `qid`, `by` (trusted-device UUID),
+`kind`, `digest` (unchanged lowercase digest v2), `time` (Unix seconds integer),
+and `signature` (unpadded base64url DER ECDSA P-256/SHA-256). For
+`deny_with_comment` only, it also requires `comment` (JSON string). No other
+extra fields are allowed for the five current kinds:
+
+| `kind` | Effect | iPhone signing key |
+| --- | --- | --- |
+| `approve` | Approve known-environment run once | Secure Enclave `answer_key` |
+| `approve_as_development` | Classify unknown items development and approve once | `answer_key` |
+| `approve_as_production` | Classify unknown items production and approve once | `answer_key` |
+| `deny` | Dismiss | `sign_key` |
+| `deny_with_comment` | Dismiss and return comment to agent | `sign_key` |
+
+Both classify answers take no item/environment field: they classify every unknown
+item of the exact signed pending run. They use the same queue guard as the Mac
+buttons (exact pending run, unconfirmed item, proof/session, live deadline).
+The broker writes classifications only after its final unchanged-authorization
+check, through the same persistence path as local buttons. A comment carries no
+authority and is returned only on the denial path.
+
+Normalize comments **before signing**: remove Unicode control scalars (`Cc`),
+U+2028 and U+2029; take the first 500 Unicode scalar values; then trim Unicode
+whitespace at both ends. No Unicode composition normalization or markup parsing
+is performed. Empty normalized strings are permitted. The Mac rejects a wire
+comment that differs from this normalized result, including one over 500 scalars.
+Render as plain text. The exact signed UTF-8 message is seven LF-separated lines,
+with no trailing LF:
+
+```text
+apassy-question-answer-v1
+<by>
+<team_id>
+<qid>
+<choice>
+<digest>
+<time>
+```
+
+For `approve`, `approve_as_development`, `approve_as_production`, and `deny`,
+`<choice>` is exactly the kind string. For `deny_with_comment` it is
+`deny_with_comment:<unpadded-base64url-of-normalized-comment-UTF8>`.
+For example, comment `No` produces `deny_with_comment:Tm8`. Changing comment
+bytes invalidates the signature. A Mac uses its `sign_key` for all answers,
+with an owner check for each approving answer. Device/team/qid/digest bindings,
+the +/-60 second signature window, ordered replay protection, relay routing and
+first-winner settlement remain in force.
+
+Legacy mappings are intentionally compatible: `approve_once` is a one-run
+approval (also accepted on an unknown environment, without classification);
+`approve_in_project` and `allow_production` retain their offered project/action
+remembering behavior, closest to Allow with the secondary remember option;
+`correct_environment` retains the old per-item correction without settling or
+approving (development requires the answer key, production the sign key).
+`never_for_agent`, `always_ask_for_agent`, and `disconnect` remain stricter
+denials with their existing restrictions. `deny` is unchanged. Legacy kinds
+still require their original offers and extra fields. Their signed choice lines
+remain `approve_once`, `approve_in_project:<action>:<project_key>`,
+`allow_production:<action>:<project_key>`,
+`correct_environment:<development|production>:<item_id>`, `never_for_agent`,
+`always_ask_for_agent`, and `disconnect`, respectively. No legacy kind accepts a
+comment, and no legacy signature is reinterpreted as a classification-and-allow.
+
 Stage 5 of [ADR 0025](../adr/0025-low-friction-access.md) (§3d, §3e), contract [relay-questions-v1](../contracts/relay-questions-v1.md). The app side is `src/questions/`, `src/vault/questions.rs`, `src/relay/membership.rs`, the question digest v2 in `src/companion/digest.rs`, and `OwnerCheck::Remote` in `src/broker/approvals/owner_auth.rs`. The window side is Settings > Devices (`src/desktop/ui/settings.rs`, `src/desktop/ui/sync/questions.rs`, and "Add a device…" in `src/desktop/ui/sync/relay.rs`) and Decisions (`src/desktop/ui/decisions.rs`).
 
 ## What it does

@@ -6,6 +6,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Changed
 
+- Add versioned remote owner cards and signed allow/classify/dismiss answers, including bounded refusal comments, while accepting legacy answer kinds.
 - Let the bouncer use agent-stated tasks when no verified hook task is available, with visible provenance.
 - Permit declared read-only production credentials after model and policy checks; production write/admin still asks the owner.
 - Simplify owner questions to allow or dismiss, add guarded environment-and-allow actions and refusal comments, and show a floating question queue.

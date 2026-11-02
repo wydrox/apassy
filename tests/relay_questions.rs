@@ -43,7 +43,8 @@ use apassy::relay::membership::{
 };
 use apassy::sync::{DeviceKey, PendingJoin, RelayConfig, RelaySync, decode_b64u, encode_b64u};
 use apassy::vault::{
-    Field, ItemDraft, QuestionKey, SecretValue, TrustedDevice, TrustedDeviceKind, Vault,
+    Environment, Field, ItemDraft, QuestionKey, SecretValue, TrustedDevice, TrustedDeviceKind,
+    Vault,
 };
 use fake_relay::FakeRelay;
 use tempfile::TempDir;
@@ -536,7 +537,10 @@ fn the_contract_test_vectors_reproduce_exactly() {
     );
 
     // The card.
-    let card = Card::from_run(QID, ASKER_UUID, "MacBook Pro", 1_790_000_000, &run);
+    let mut card = Card::from_run(QID, ASKER_UUID, "MacBook Pro", 1_790_000_000, &run);
+    // Preserve the published v1 encryption vector; new publications use card v2.
+    card.v = 1;
+    card.owner_prompt = None;
     assert_eq!(card.digest, digest);
     let plaintext = card.to_plaintext().expect("card");
     assert_eq!(plaintext.len(), 1138);
@@ -1781,6 +1785,113 @@ fn no_request_body_holds_a_command_an_item_name_or_a_secret() {
 }
 
 // ---- The questions of the other Macs on this Mac (section 13). ----
+
+#[test]
+fn current_remote_kinds_settle_with_signed_comments_and_guarded_classification() {
+    for choice in [
+        Choice::Approve,
+        Choice::ApproveAsDevelopment,
+        Choice::ApproveAsProduction,
+        Choice::Deny,
+        Choice::DenyWithComment {
+            comment: "Stop here: é".into(),
+        },
+    ] {
+        let world = world(true);
+        let phone = world.iphone();
+        let mut run = world.run(contract_answers());
+        if matches!(choice, Choice::Approve) {
+            for item in &mut run.question.items {
+                item.unconfirmed = false;
+            }
+        }
+        let waiting = world.ask(run, Duration::from_secs(60));
+        let opened = phone.next(&[]);
+        assert_eq!(opened.card.v, 2);
+        let prompt = opened.card.owner_prompt.as_ref().unwrap();
+        assert!(
+            prompt
+                .allowed_answer_kinds
+                .iter()
+                .any(|kind| kind == choice.kind())
+        );
+        assert_eq!(prompt.purpose, opened.run.purpose);
+        let prepared = prepare_answer(&opened, PHONE_UUID, choice.clone(), now()).unwrap();
+        let signature = if choice.needs_owner_check() {
+            answer_key().sign(prepared.text.as_bytes()).unwrap()
+        } else {
+            phone.sign(prepared.text.as_bytes())
+        };
+        send_answer(&phone.client, &opened, &prepared, &signature, &phone.keys).unwrap();
+        let ended = settled(waiting);
+        match choice {
+            Choice::ApproveAsDevelopment => {
+                assert_eq!(ended.classification, Some(Environment::Development))
+            }
+            Choice::ApproveAsProduction => {
+                assert_eq!(ended.classification, Some(Environment::Production))
+            }
+            Choice::DenyWithComment { comment } => {
+                assert_eq!(ended.outcome, ApprovalOutcome::Denied);
+                assert_eq!(ended.refusal_comment, Some(comment));
+                assert!(ended.classification.is_none());
+                assert!(ended.method.is_none());
+            }
+            Choice::Deny => assert_eq!(ended.outcome, ApprovalOutcome::Denied),
+            _ => assert_eq!(ended.outcome, ApprovalOutcome::Approved),
+        }
+        // Classification is deferred to the broker, never written by the receiver.
+    }
+}
+
+#[test]
+fn changed_comment_and_unoffered_current_kind_do_not_settle() {
+    let world = world(true);
+    let phone = world.iphone();
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let opened = phone.next(&[]);
+    let original = prepare_answer(
+        &opened,
+        PHONE_UUID,
+        Choice::DenyWithComment {
+            comment: "No".into(),
+        },
+        now(),
+    )
+    .unwrap();
+    let signature = phone.sign(original.text.as_bytes());
+    let mut forged = original;
+    forged.choice = Choice::DenyWithComment {
+        comment: "Changed".into(),
+    };
+    send_answer(&phone.client, &opened, &forged, &signature, &phone.keys).unwrap();
+    assert!(world.wait_refused(1)[0].contains("signature does not verify"));
+    assert!(prepare_answer(&opened, PHONE_UUID, Choice::Approve, now()).is_err());
+    let mut unoffered = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
+    unoffered.choice = Choice::Approve;
+    unoffered.text = answer_string(
+        PHONE_UUID,
+        &world.team,
+        &opened.record.qid,
+        &unoffered.choice,
+        &opened.card.digest,
+        unoffered.time,
+    )
+    .unwrap();
+    let signature = answer_key().sign(unoffered.text.as_bytes()).unwrap();
+    send_answer(&phone.client, &opened, &unoffered, &signature, &phone.keys).unwrap();
+    assert!(world.wait_refused(2)[1].contains("does not offer"));
+    let deny = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
+    send_answer(
+        &phone.client,
+        &opened,
+        &deny,
+        &phone.sign(deny.text.as_bytes()),
+        &phone.keys,
+    )
+    .unwrap();
+    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
+}
 
 /// Post as B without starting another lister: every questions GET belongs to A.
 fn post_question_from_b(world: &World) -> apassy::questions::client::Posted {
