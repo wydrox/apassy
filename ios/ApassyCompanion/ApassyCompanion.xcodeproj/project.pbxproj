@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		EA7D550C67E149539CA2D001 /* DismissCommentSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7D550C67E149539CA2D002 /* DismissCommentSheet.swift */; };
 		00DA596667674069A3E69886 /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEF0032D16E75A0003ECAA5C /* InboxView.swift */; };
 		0506ED95D4D2BD5CFC0B9311 /* PushRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47ED2073D0F7DC0E0A74B8F /* PushRegistrar.swift */; };
 		08D0DB40140EFF9FAB34D4FE /* ConnectUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95E9C2176924E5C4BE987027 /* ConnectUITests.swift */; };
@@ -148,6 +149,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		EA7D550C67E149539CA2D002 /* DismissCommentSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DismissCommentSheet.swift; sourceTree = "<group>"; };
 		09431E87D7B3F006155FFB5D /* RunSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunSnapshot.swift; sourceTree = "<group>"; };
 		0BC42EE11D63D65DD187A2A1 /* AutoFillViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillViews.swift; sourceTree = "<group>"; };
 		0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExchangeView.swift; sourceTree = "<group>"; };
@@ -338,6 +340,7 @@
 				CBD8CEAA508FFCEBC5F4F219 /* DecisionsPreview.swift */,
 				6AFC29EB97BB7769CEAF312E /* DecisionsView.swift */,
 				5A6EE7B6B6FCC35CF8BBADC9 /* QuestionDetailView.swift */,
+				EA7D550C67E149539CA2D002 /* DismissCommentSheet.swift */,
 				8D29B62E8AF8DDAFE2239142 /* RequestHistoryDetailView.swift */,
 				1C45E3AEB02B0FC5FE152638 /* RequestHistoryPresentation.swift */,
 				CCB7ED356B066B16E77B1DA1 /* RequestsAccessRow.swift */,
@@ -744,6 +747,7 @@
 				0506ED95D4D2BD5CFC0B9311 /* PushRegistrar.swift in Sources */,
 				9D61512DB9ED24163C2C70E4 /* QRScannerView.swift in Sources */,
 				DD77775A3DCE062B41B54759 /* QuestionDetailView.swift in Sources */,
+				EA7D550C67E149539CA2D001 /* DismissCommentSheet.swift in Sources */,
 				62C2AD2281BED22FAE979FF1 /* QuestionsModel.swift in Sources */,
 				70BCDFCE0250E53ADA078BC0 /* QuestionsView.swift in Sources */,
 				30F9B448A66FE1F9D585A005 /* RequestActionsModel.swift in Sources */,
@@ -859,7 +863,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LM_SKIP_METADATA_EXTRACTION = YES;
-				MARKETING_VERSION = 0.5.11;
+				MARKETING_VERSION = 0.5.13;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1044,7 +1048,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LM_SKIP_METADATA_EXTRACTION = YES;
-				MARKETING_VERSION = 0.5.11;
+				MARKETING_VERSION = 0.5.13;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

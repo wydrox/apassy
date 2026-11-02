@@ -10,6 +10,7 @@ import Observation
 final class VaultModel {
     /// What the app does around the model, without UIKit, so tests can pass their own.
     struct Hooks {
+        var endFaceIDWindow: @MainActor () -> Void = {}
         /// Put a value on the pasteboard: `SecureClipboard.copy` with the setting.
         var copy: @MainActor (_ value: String, _ secret: Bool) -> Void = { _, _ in }
         /// Replace the AutoFill identities of a vault: logins, passkeys, and one-time passwords
@@ -326,6 +327,7 @@ final class VaultModel {
 
     /// Lock the vault and drop everything read from it.
     func lock() async {
+        hooks.endFaceIDWindow()
         questions?.vaultDidLock()
         agents?.vaultDidLock()
         stopSync()

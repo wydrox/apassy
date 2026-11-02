@@ -470,7 +470,7 @@ struct EveryVaultQuestionsTests {
         #expect(sent.map(\.vaultID) == [Self.work.id, Self.personalID])
         #expect(sent[0].signature == Data("signed by com.wydrox.apassy.questions.\(Self.work.team)".utf8))
         #expect(sent[1].signature == nil)
-        #expect(model.deliveries[fixture.work.qid] == .sent(.allowProduction))
+        #expect(model.deliveries[fixture.work.qid] == .sent(.approveAsDevelopment))
     }
 
     @Test("a generic notification refreshes all open vaults without selecting a question")

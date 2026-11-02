@@ -30,90 +30,33 @@ protocol PushPermission: AnyObject {
     func observeOpens(_ handler: @escaping @MainActor () -> Void)
 }
 
-/// The buttons of a question, as on the Mac (ADR 0026): Deny · Allow Once · the main answer, and
-/// a "⋯" menu with the stricter answers and the environment of an item.
+/// Current owner choices derived from the authenticated v1 item facts.
 struct AnswerBar: Equatable {
     struct Choice: Equatable, Identifiable {
         let answer: RemoteAnswer
         let label: String
-        /// Red: Disconnect in the menu, and the production answer in the bar.
+        /// Dismissal actions use the destructive role.
         var destructive = false
 
         var id: String { "\(answer.kind.rawValue)-\(answer.itemID ?? "")-\(answer.environment?.rawValue ?? "")" }
     }
 
     var deny: Choice
-    var allowOnce: Choice?
-    /// "Allow Deploy in shop", "Allow production: Deploy in shop" (red, as on the Mac, so it never
-    /// looks like the project answer), or "Development".
+    var secondaryApproval: Choice?
+    /// First approval; the second approval is present for unknown environments.
     var primary: Choice?
     var menu: [Choice]
 
-    /// A project name in a button, at most 24 characters.
-    static func short(_ text: String) -> String {
-        guard text.count > 24 else { return text }
-        return String(text.prefix(23)) + "…"
-    }
-
-    /// The bar of `card`. The main answer is production first, then the project answer, then the
-    /// correction of a credential that is production only by default (as `primary` on the Mac).
+    /// Unknown item facts take precedence over confirmed production items.
     static func make(for card: QuestionCard) -> AnswerBar {
-        let question = card.question
-        let offered = Set(question.validAnswers)
-        let action = question.action
-        let project = question.project.map { short($0.label) }
-        let unconfirmed = question.items.filter(\.unconfirmed)
-        let corrects = offered.contains("correct_environment") && !unconfirmed.isEmpty
-        var primary: Choice?
-        if let project, offered.contains("production:\(action.rawValue)") {
-            primary = Choice(
-                answer: RemoteAnswer(kind: .allowProduction),
-                label: "Allow production: \(action.label) in \(project)", destructive: true)
-        } else if let project, offered.contains("in_project:\(action.rawValue)") {
-            primary = Choice(answer: RemoteAnswer(kind: .approveInProject), label: "Allow \(action.label) in \(project)")
-        }
-        var menu: [Choice] = []
-        for item in corrects ? unconfirmed : [] {
-            let suffix = unconfirmed.count > 1 ? ": \(item.name)" : ""
-            let development = Choice(
-                answer: RemoteAnswer(kind: .correctEnvironment, itemID: item.itemID, environment: .development),
-                label: "Development\(suffix)")
-            if primary == nil {
-                primary = development
-            } else {
-                menu.append(development)
-            }
-            menu.append(
-                Choice(
-                    answer: RemoteAnswer(kind: .correctEnvironment, itemID: item.itemID, environment: .production),
-                    label: "Production\(suffix)"))
-        }
-        if offered.contains("never_for_agent") {
-            menu.append(Choice(answer: RemoteAnswer(kind: .neverForAgent), label: "Not for this agent"))
-        }
-        if offered.contains("always_ask_for_agent") {
-            menu.append(Choice(answer: RemoteAnswer(kind: .alwaysAskForAgent), label: "Always ask for this agent"))
-        }
-        if offered.contains("disconnect") {
-            menu.append(Choice(answer: RemoteAnswer(kind: .disconnect), label: "Disconnect", destructive: true))
-        }
+        let unknown = card.question.items.contains(where: \.unconfirmed)
         return AnswerBar(
-            deny: Choice(answer: RemoteAnswer(kind: .deny), label: "Deny", destructive: true),
-            allowOnce: offered.contains("once")
-                ? Choice(answer: RemoteAnswer(kind: .approveOnce), label: "Allow Once") : nil,
-            primary: primary, menu: menu)
+            deny: Choice(answer: RemoteAnswer(kind: .deny), label: "Dismiss", destructive: true),
+            secondaryApproval: unknown ? Choice(answer: RemoteAnswer(kind: .approveAsProduction), label: "Allow as prod") : nil,
+            primary: Choice(answer: RemoteAnswer(kind: unknown ? .approveAsDevelopment : .approve), label: unknown ? "Allow as dev" : "Allow"),
+            menu: [Choice(answer: RemoteAnswer(kind: .denyWithComment), label: "Dismiss with comment", destructive: true)])
     }
 
-    /// The line under the bar: what the main answer remembers.
-    static func note(_ primary: Choice?, _ card: QuestionCard) -> String? {
-        guard let primary, let project = card.question.project?.label else { return nil }
-        switch primary.answer.kind {
-        case .approveInProject: return "Remembered for all agents in \(project)"
-        case .allowProduction: return "Remembered for all agents in \(project), production included"
-        case .correctEnvironment: return "Remembered for this credential"
-        default: return nil
-        }
-    }
 }
 
 /// How a question ended, or what this iPhone did with it: it takes the place of the answer bar.
@@ -748,7 +691,11 @@ final class QuestionsModel {
 
     private static func offeredChoice(_ answer: RemoteAnswer, card: QuestionCard) -> AnswerBar.Choice? {
         let bar = AnswerBar.make(for: card)
-        return ([bar.deny] + [bar.allowOnce, bar.primary].compactMap { $0 } + bar.menu)
+        if answer.kind == .denyWithComment {
+            guard answer.comment != nil, answer.itemID == nil, answer.environment == nil else { return nil }
+            return AnswerBar.Choice(answer: answer, label: "Dismiss with comment", destructive: true)
+        }
+        return ([bar.deny] + [bar.secondaryApproval, bar.primary].compactMap { $0 } + bar.menu)
             .first { $0.answer == answer }
     }
 

@@ -44,6 +44,9 @@ async function answer(request) {
   const s = scenario();
   if (!request || request.v !== 1) return fail("bad_version");
   switch (request.cmd) {
+    case "agent_wait":
+      await sleep(50000);
+      return ok({ type: "agent_wait", pending: false });
     case "status":
       return ok({ type: "status", vault: s.vault || "unlocked", version: "0.0.0-test" });
     case "logins": {

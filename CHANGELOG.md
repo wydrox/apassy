@@ -8,10 +8,48 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - Touch ID prompts appear in an Apassy panel instead of the macOS dialog.
 
+## [0.5.13] - 2026-11-02
+
+### Added
+
+- Add `apassy_fill_in_browser` for agent website logins, with broker authorization, saved-site binding, and status-only responses.
+- **Browser extension:** Deliver agent fills to one matching focused tab, require device-local trust for the exact remote-debugging instance, disclose agent page access in owner questions, and clear agent-filled passwords when a show-password toggle makes them visible.
+- **Browser extension:** Request permission in Apassy to allow passkeys and codes once or for five minutes in an exactly identified remote-debugging profile. Show remaining time and End now in the popup.
+- Protected, device-local browser profile trust list for agent fills, with owner approval to add and removal in Browser settings. A grant for one debugging port never covers another.
+
+### Changed
+
+- **iPhone:** Match Mac owner choices for known and unknown environments, with signed dismissal comments returned to the agent.
+- **iPhone:** Add a device-local “Ask for Face ID” setting shared by approvals and vault actions in the app. Every time remains the default; AutoFill still authenticates every fill.
+- The app names the two parts of the bouncer. The bouncer brain is the model: it answers questions about a command and decides nothing by itself. The bouncer gate is the fixed checks and the decision. Settings > Bouncer, Learning, and the owner checks use these names.
+- The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
+- Staged updates install when the vault locks, or right away with Restart to update.
+- Make the Touch ID frequency global for all owner actions, including revealing secrets, production approvals, settings and pairing. Replace heartbeat-gap revocation with synchronous lifecycle-helper state checks; lock, sleep, session changes and helper loss still end the window.
+- Let the bouncer brain use agent-stated tasks when no verified hook task is available, with visible provenance.
+- Permit declared read-only production credentials after the bouncer gate checks the brain's answers and its policy; production write/admin still asks the owner.
+- Simplify owner questions to allow or dismiss, add guarded environment-and-allow actions and refusal comments, and show a floating question queue.
+- Keep v1 remote question cards so old iPhones keep working; accept new signed allow/classify/dismiss answer choices, including bounded refusal comments, alongside legacy kinds. Card v2 publication stays off.
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. iPhones on TestFlight 0.5.10 keep receiving the same question cards and answers; TestFlight 0.5.13 adds the new answer buttons and the Face ID window.
+- Coordinated release: macOS, iOS (TestFlight), browser extension (Chrome Web Store), relay, Linux CLI and website move to 0.5.13 together. The extension reaches browsers after Chrome Web Store review. The relay and Linux CLI have no protocol or schema change.
+
+### Fixed
+
+- The bouncer brain, the local model, uses about half the memory on Apple Silicon: 1.8 GB idle, before 3.4 GB and more. Its answers do not change.
+
+## [0.5.12] - 2026-11-02
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.
 - Show privacy-safe bouncer route counts and top reasons since app start. Log route outcomes without request data.
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. Macs on 0.5.11 and the iPhone on TestFlight 0.5.10 keep syncing; no TestFlight update is needed.
+- The Mac download and in-app auto-update publish with this release. The Chrome Web Store extension update follows separately (0.5.10 is in review). Relay stays at 0.5.9.
 
 ## [0.5.11] - 2026-11-02
 
@@ -580,7 +618,9 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.13...HEAD
+[0.5.13]: https://github.com/wydrox/apassy/compare/v0.5.12...v0.5.13
+[0.5.12]: https://github.com/wydrox/apassy/compare/v0.5.11...v0.5.12
 [0.5.0]: https://github.com/wydrox/apassy/releases/tag/v0.5.0
 [0.4.1]: https://github.com/wydrox/apassy/releases/tag/v0.4.1
 [0.3.6]: https://github.com/wydrox/apassy/releases/tag/v0.3.6

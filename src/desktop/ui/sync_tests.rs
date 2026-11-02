@@ -24,10 +24,7 @@ use crate::desktop::{DesktopApp, ItemDraft};
 use crate::sync::SyncFolder;
 use crate::vault::{ActivityDecision, NewActivity};
 
-/// The fake relay reads the app's sync module under this name.
-use crate::sync as relay_api;
-#[path = "../../../tests/common/fake_relay.rs"]
-mod fake_relay;
+use crate::desktop::fake_relay;
 
 const PASS: &str = "sync-ui-pass-ok";
 const NEW_PASS: &str = "sync-ui-pass-new";
@@ -3622,4 +3619,22 @@ fn connect_onboarding_checks_the_owner_then_continues_to_iphone_pairing() {
             .iter()
             .any(|line| line.contains("/v1/teams") || line.contains("/v1/sync"))
     );
+}
+
+#[test]
+fn late_touch_id_result_after_passphrase_unlock_is_silent() {
+    let folders = folders();
+    let (mut app, _) = two_macs(&folders);
+    lock(&mut app);
+    unlock(&mut app, PASS);
+    let status = app.status_text.clone();
+    let ctx = egui::Context::default();
+    app.finish_touch_id_unlock(Ok(Zeroizing::new("stale synthetic key".to_owned())), &ctx);
+    assert!(!app.owner_ui.session.is_locked());
+    assert_eq!(app.status_text, status);
+    app.finish_touch_id_unlock(
+        Err(crate::desktop::unlock::TouchIdUnlockError::NotSetUp),
+        &ctx,
+    );
+    assert_eq!(app.status_text, status);
 }

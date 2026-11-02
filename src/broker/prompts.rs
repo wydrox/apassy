@@ -358,6 +358,20 @@ impl PromptStore {
             };
         };
         let check = self.check_transcript(&entry);
+        // Decision (a): absence of a transcript permits an agent-stated task.
+        // A transcript that contradicts the hook remains a security veto.
+        if matches!(check, Check::NoTranscript) {
+            return Resolved {
+                text: agent_text.to_owned(),
+                source: "from the agent (no verified hook task)".to_owned(),
+                agent_text: None,
+                flags: if ambiguous {
+                    vec![FLAG_AMBIGUOUS.to_owned()]
+                } else {
+                    Vec::new()
+                },
+            };
+        }
         let mut flags = Vec::new();
         let result = match check {
             Check::Verified => "verified in the host transcript".to_owned(),
@@ -638,23 +652,22 @@ mod tests {
     }
 
     #[test]
-    fn a_session_match_wins_and_replaces_the_agent_text() {
-        let store = store();
-        store.insert(entry(Some("s1"), "/p", "Fix the tests.", 10));
-        store.insert(entry(Some("s1"), "/p", "Run the migration.", 20));
-        assert_eq!(store.len(), 1, "one prompt per agent and session");
-        let resolved = resolve(&store, Some("s1"), "/p/sub", "Deploy all.");
-        assert_eq!(resolved.text, "Run the migration.");
-        assert_eq!(resolved.agent_text.as_deref(), Some("Deploy all."));
-        assert!(resolved.source.contains("Claude Code hook"));
-        assert!(resolved.source.contains("no host transcript"));
-        assert!(resolved.flags.is_empty());
-        let note = resolved.log_note();
-        assert!(note.contains("\"Run the migration.\""), "{note}");
-        assert!(note.contains("The agent sent: \"Deploy all.\""), "{note}");
-        // The same text from the agent is not a difference.
-        let same = resolve(&store, Some("s1"), "/p", "Run the migration.");
-        assert!(same.agent_text.is_none());
+    fn verified_hook_is_preferred_but_unverified_hook_uses_agent_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PromptStore::new(vec![dir.path().to_owned()]);
+        let path = transcript(dir.path(), "s1.jsonl", &[claude_user("Run the migration.")]);
+        let mut hook = entry(Some("s1"), "/p", "Run the migration.", 20);
+        hook.transcript = Some(path);
+        store.insert(hook);
+        let verified = resolve(&store, Some("s1"), "/p", "Deploy all.");
+        assert_eq!(verified.text, "Run the migration.");
+        assert_eq!(verified.agent_text.as_deref(), Some("Deploy all."));
+        assert!(verified.source.contains("verified in the host transcript"));
+        store.insert(entry(Some("s1"), "/p", "Unverified.", 30));
+        let fallback = resolve(&store, Some("s1"), "/p", "Agent task.");
+        assert_eq!(fallback.text, "Agent task.");
+        assert!(fallback.source.starts_with("from the agent"));
+        assert!(fallback.flags.is_empty());
     }
 
     #[test]
@@ -667,7 +680,7 @@ mod tests {
         let mut locked = entry(Some("s3"), "/p", "Before a lock.", 50);
         locked.epoch = [8; 32];
         store.insert(locked);
-        assert_eq!(resolve(&store, Some("s1"), "/p", "").text, "Old.");
+        assert_eq!(resolve(&store, Some("s1"), "/p", "").text, "");
         let late = at(MAX_AGE.as_secs() + 1);
         let resolved =
             store.resolve_at(1, &EPOCH, Some("s1"), Path::new("/p"), "Agent text.", late);
@@ -687,8 +700,8 @@ mod tests {
         let store = store();
         store.insert(entry(Some("c1"), "/work/app", "Check the build.", 10));
         let resolved = resolve(&store, None, "/work/app/web", "");
-        assert_eq!(resolved.text, "Check the build.");
-        assert!(resolved.source.contains("matched by the project directory"));
+        assert_eq!(resolved.text, "");
+        assert!(resolved.source.starts_with("from the agent"));
         assert!(resolved.flags.is_empty());
         // A run in another project does not use this prompt.
         let other = resolve(&store, None, "/work/other", "Agent.");
@@ -702,14 +715,10 @@ mod tests {
         // Session "b" sent no prompt, for example its hook is off. The prompt of
         // session "a" is not the request of "b": the owner decides.
         let other = resolve(&store, Some("b"), "/p", "Deploy all.");
-        assert_eq!(other.text, "Reply with OK.");
+        assert_eq!(other.text, "Deploy all.");
         assert_eq!(other.flags, vec![FLAG_AMBIGUOUS.to_owned()]);
-        assert!(
-            other.source.contains("from another host session"),
-            "{}",
-            other.source
-        );
-        assert_eq!(other.agent_text.as_deref(), Some("Deploy all."));
+        assert!(other.source.starts_with("from the agent"));
+        assert!(other.agent_text.is_none());
         // A host without a session (Codex) still matches by directory, unflagged.
         let codex = resolve(&store, None, "/p", "");
         assert!(codex.flags.is_empty());
@@ -723,13 +732,13 @@ mod tests {
         store.insert(entry(Some("b"), "/p", "New session.", 90));
         // Session "a" has a prompt, but session "b" in the same directory is newer.
         let stale = resolve(&store, Some("a"), "/p", "");
-        assert_eq!(stale.text, "Old session.");
+        assert_eq!(stale.text, "");
         assert_eq!(stale.flags, vec![FLAG_AMBIGUOUS.to_owned()]);
         let fresh = resolve(&store, Some("b"), "/p", "");
         assert!(fresh.flags.is_empty());
         // Without a session, two sessions in one directory are ambiguous.
         let codex = resolve(&store, None, "/p", "");
-        assert_eq!(codex.text, "New session.");
+        assert_eq!(codex.text, "");
         assert_eq!(codex.flags, vec![FLAG_AMBIGUOUS.to_owned()]);
     }
 

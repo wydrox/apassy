@@ -63,6 +63,10 @@ class ExtensionPackageTests(unittest.TestCase):
         self.manifest["permissions"].remove("storage")
         self.assert_rejected("unexpected permissions")
 
+    def test_history_permission_is_rejected(self):
+        self.manifest["permissions"].append("webNavigation")
+        self.assert_rejected("unexpected permissions")
+
     def test_broader_optional_host_permission_is_rejected(self):
         self.manifest["optional_host_permissions"].append("http://*/*")
         self.assert_rejected("unexpected optional host permissions")

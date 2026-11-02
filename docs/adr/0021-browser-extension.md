@@ -1,5 +1,28 @@
 # ADR 0021 — The browser extension: fill a login on a website, after Touch ID for each fill
 
+## 2026-11-02 — Explicit unsafe-instance permission
+
+Agent fills follow [ADR 0036](0036-agent-fills-through-the-extension.md). Their
+guarded polls carry the exact native-host guard identity into the bound target.
+Only `bypass::authorize_agent_fill` and device-local instance trust can authorize
+an unsafe instance; once and five-minute owner passkey/code grants cannot.
+Trusted unsafe fills remain marked remotely readable for bouncer routing and
+the owner question, with trust checked again before secret delivery.
+
+CDP clients can read pages and drive browser controls, including the extension popup. Therefore the popup can only request permission: Allow / Dismiss and the standard owner check happen in Apassy, brought forward. The global owner-check window applies only after the owner clicks Allow in the native app. Password behavior and normal passkey/code owner checks remain in force.
+
+The signed guard reports `unsafe-switch <compact JSON>\n` with exit 2 after verifying and rechecking the complete process chain. JSON is at most 1024 bytes and contains `bundle_id`, `team_id`, canonical absolute `profile_dir`, `debugging` (decimal port, `pipe`, or `none`), and `unsafe_switches` (names only). Unknown fields, invalid or oversized identities fail closed. Exit 0 remains exactly `ok\n`. Ambiguous profile/transport arguments, unresolvable paths and dynamic port 0 cannot obtain grants. The host forwards authenticated unsafe requests; the app independently verifies the socket peer and owns all decisions.
+
+The identity names a browser INSTANCE, covering all profiles in that process: a CDP client controls all of them. `InstanceIdentity::user_data_root` retains the serialized key `profile_dir` for storage/wire compatibility. The prompt and Settings say “instance (data folder …, remote debugging on port …) — all its profiles”.
+
+Identity parsing follows Chromium's POSIX `base::CommandLine`: case-sensitive names, only equals-separated values, parsing ends at `--`, and the last duplicate wins. We conservatively refuse conflicting duplicates, case variants, extra dash prefixes and valueless identity switches instead of guessing. See [Chromium implementation](https://github.com/chromium/chromium/blob/main/base/command_line.cc). Unsafe-switch detection remains separate and deliberately detects ignored variants too. Data folders expand tilde, resolve relative paths against the kernel-reported browser cwd (refused when unavailable), and use realpath without case folding.
+
+Bypasses authorize ONLY owner extension passkey and one-time-code actions. They live only in app memory: Once consumes the exact refused command with its random extension nonce and the same native-messaging connection. The host inserts connection provenance and rejects client-supplied provenance. The app keeps a bounded, five-minute refusal registry and compares the complete parsed command before consuming Once. The extension retains the original packet and native port through permission and retry; cancellation/deadlines close them. Five minutes expires 300 seconds after approval and covers owner passkeys/codes across all profiles in this instance, as stated in the prompt. Vault epoch or owner-window generation changes revoke grants, including Mac lock/sleep, and app shutdown discards them. Exact equality includes bundle, signing team, canonical user-data root, port/pipe and switch names. Helium on port **9223** can never authorize Helium on **9222**. There are no wildcard or port-wide grants.
+
+Agent-fill instance trust is a separate durable setting, stored with the protected native helper in the device-only, non-synchronizing Keychain access group, like owner frequency. Only Apassy exposes adding, after an owner check; the extension cannot add trust. Remove needs no check. Missing, malformed or unavailable protected storage denies agent trust. Trust alone never grants an owner passkey or code bypass. The public API for #62 is `browser::bypass::authorize_agent_fill(&InstanceIdentity) -> bool`; it consults ONLY `trust::trusted_for_agent_fill`, with no bypass argument or fallback.
+
+Residual risk: during a bypass a CDP client can trigger covered operations (subject to normal owner checks/window), observe page data and read filled codes. A trusted agent profile permits deliberate credential exposure to that controlled browser. Directory/port identity does not identify individual CDP clients; replacing a browser process with another signed instance using the exact profile and switches retains identity. Switch values, URLs, environment, profile files and vault contents are excluded from guard output. The canonical profile path itself is local metadata and can include the Mac account name.
+
 Date: 2026-10-06.
 Status: ACCEPTED in scope by the owner on 2026-10-06 ("czy możesz stworzyć chromium extension jak 1password?"). The owner set the rule for secrets: "agenci i automatyczne użycie nigdy nie widzi hasła. wyjątkiem jest użycie przez użytkownika (człowieka) czy to pokazanie sekretu w aplikacji czy wstawianie sekretów - Touch ID lub hasło przy każdym wypełnieniu". The other choices below are proposals; the open decisions are D1 to D6 in the last section.
 

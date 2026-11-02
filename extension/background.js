@@ -16,6 +16,128 @@
 
 importScripts("fill.js");
 
+// Agent delivery is separate from owner gestures. Native caller guards authenticate
+// each poll; no value travels over MCP.
+const agentInstance = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+let agentLoopRunning = false;
+const agentReceipts = new Map();
+const agentGenerations = new Map();
+let agentLastTab;
+function invalidateAgentTab(tabId) {
+  agentGenerations.set(tabId, crypto.randomUUID());
+}
+chrome.tabs.onUpdated?.addListener((tabId, change) => {
+  if (change.status === "loading" || change.url) invalidateAgentTab(tabId);
+});
+chrome.tabs.onActivated?.addListener(({ tabId }) => invalidateAgentTab(tabId));
+chrome.tabs.onRemoved?.addListener(tabId => {
+  invalidateAgentTab(tabId);
+  agentGenerations.delete(tabId);
+  for (const [id, entry] of agentReceipts) if (entry.tab_id === tabId) agentReceipts.delete(id);
+});
+async function agentDocument(tab) {
+  if (!tab) return null;
+  // Chrome 120+ returns the browser-owned document ID without a history permission.
+  // This probe carries no credentials; delivery below targets only this document.
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, frameIds: [0] },
+    func: () => location.href,
+  });
+  const frame = results?.[0];
+  if (results?.length !== 1 || frame?.frameId !== 0 ||
+      typeof frame.documentId !== "string" || !frame.documentId || frame.result !== tab.url) return null;
+  if (!agentGenerations.has(tab.id)) agentGenerations.set(tab.id, crypto.randomUUID());
+  return { window_id: tab.windowId, tab_id: tab.id, frame_id: 0,
+    document_id: frame.documentId, generation: agentGenerations.get(tab.id) };
+}
+function sameAgentDocument(a, b) {
+  return a && b && ["window_id", "tab_id", "frame_id", "document_id", "generation"].every(key => a[key] === b[key]);
+}
+async function agentDocumentActive(document) {
+  const window = await chrome.windows.getLastFocused();
+  if (!window.focused || window.id !== document.window_id) return false;
+  const [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
+  return tab?.id === document.tab_id && sameAgentDocument(document, await agentDocument(tab));
+}
+async function pollAgentFill(receipt = null, filled = [], exposed = false) {
+  let url = "";
+  let tab;
+  try {
+    const window = await chrome.windows.getLastFocused();
+    if (window.focused) [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
+    if (tab) agentLastTab = tab;
+    else if (agentLastTab) {
+      try { tab = await chrome.tabs.get(agentLastTab.id); } catch (_) { tab = agentLastTab; }
+    }
+    url = tab && tab.url || "";
+    let document = null;
+    try { document = await agentDocument(tab); } catch (_) { /* closed document */ }
+    const focused = Boolean(window.focused && tab?.active && tab.windowId === window.id);
+    const answer = await ask({ cmd: "agent_poll", instance: agentInstance, url, document, focused, receipt, filled, exposed });
+    if (answer && !answer.ok && answer.code === "unsupported" && /remote debugging/.test(answer.message || "")) {
+      await ask({ cmd: "agent_blocked", instance: agentInstance, url });
+    }
+    const data = answer && answer.data;
+    if (!answer?.ok || (data?.type === "agent_wait" && !data.pending)) return true;
+    if (!data || data.type !== "agent_fill") return;
+    answer.data = null;
+    let actual = [];
+    try {
+      if (!sameAgentDocument(document, data.document) || !await agentDocumentActive(data.document) || !await tabOn(data.document.tab_id, data.origin)) return;
+      agentReceipts.set(data.receipt, { ...data.document, origin: data.origin });
+      const target = { tabId: data.document.tab_id, documentIds: [data.document.document_id] };
+      const results = await chrome.scripting.executeScript({ target, func: fillLogin, args: [data.origin, data.username, data.password, "login", data.receipt] });
+      const result = results && results[0] && results[0].result;
+      if (result && result.username) actual.push("username");
+      if (result && result.password) actual.push("password");
+      if (data.code && await agentDocumentActive(data.document)) {
+        const codes = await chrome.scripting.executeScript({ target, func: fillOneTimeCode, args: [data.origin, data.code, true] });
+        if (codes && codes[0] && codes[0].result && codes[0].result.ok) actual.push("code");
+      }
+    } finally {
+      data.username = ""; data.password = ""; data.code = "";
+      await ask({ cmd: "agent_poll", instance: agentInstance, url: "", document: null, focused: false, receipt: data.receipt, filled: actual });
+      return true;
+    }
+  } catch (_) { /* Unavailable or untrusted browser: no delivery. */ }
+}
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (!message || message.type !== "apassy_agent_visibility" || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
+  const saved = agentReceipts.get(message.receipt);
+  if (saved && saved.tab_id === sender.tab.id && saved.document_id === sender.documentId && originOf(sender.url) === saved.origin) {
+    void pollAgentFill(message.receipt, [], true);
+  }
+  return false;
+});
+const agentDelay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function runAgentWaitLoop() {
+  if (agentLoopRunning || !chrome.windows) return;
+  agentLoopRunning = true;
+  let backoff = 5000;
+  try {
+    for (;;) {
+      const answer = await ask({ cmd: "agent_wait", instance: agentInstance });
+      if (!answer?.ok || answer.data?.type !== "agent_wait" || typeof answer.data.pending !== "boolean") {
+        await agentDelay(backoff);
+        backoff = backoff === 5000 ? 10000 : backoff === 10000 ? 30000 : 60000;
+        continue;
+      }
+      backoff = 5000;
+      if (!answer.data.pending) continue;
+      const end = Date.now() + 60000;
+      do {
+        if (await pollAgentFill() === true) break;
+        await agentDelay(1000);
+      } while (Date.now() < end);
+    }
+  } finally { agentLoopRunning = false; }
+}
+chrome.runtime.onStartup?.addListener(() => { void runAgentWaitLoop(); });
+chrome.runtime.onInstalled?.addListener(() => { void runAgentWaitLoop(); });
+// Start after this worker has initialized its wire constants and request state.
+setTimeout(() => { void runAgentWaitLoop(); }, 0);
+self.apassyAgentFillTest = { pollAgentFill };
+
 const HOST = "com.wydrox.apassy";
 const WIRE_VERSION = 1;
 // The host waits up to 240 s for the app (an owner check waits up to 180 s).
@@ -63,6 +185,53 @@ const READ_FAILED = "Apassy could not read this page.";
 const CREATED = "Filled. The new login is in Apassy. Submit the form on the page.";
 const NEW_LENGTH = { min: 12, max: 64 };
 
+// Refused operations retain their own native port and exact packet until retry,
+// cancellation, navigation or deadline. Never move a grant to another request.
+const refusedOwnerRequests = new Map();
+async function requestDebuggingBypass(scope) {
+  const pending = [...refusedOwnerRequests.values()].at(-1);
+  if (!pending) return { ok: false, message: "Start the passkey or code request first, then request permission here." };
+  // Codes have no request ID: bind their refused packet on this connection
+  // only after the owner clicks Allow once (before requesting approval).
+  if (pending.needsBinding) {
+    pending.port.postMessage({ v: WIRE_VERSION, ...pending.wire });
+    pending.needsBinding = false;
+  }
+  pending.port.postMessage({ v: WIRE_VERSION, cmd: "bypass_request", scope, bypass_nonce: pending.wire.bypass_nonce });
+  pending.approving = true;
+  return { ok: true, message: "Confirm this exact request in Apassy. It will retry on its original connection." };
+}
+
+function holdRefusedOwnerRequest(port, wire, answer) {
+  const pending = refusedOwnerRequests.get(wire.bypass_nonce);
+  if (pending?.approving) {
+    if (answer?.code === "unsafe_browser") return true;
+    if (answer?.data?.type === "bypass" && answer.data.remaining != null) {
+      pending.approving = false;
+      port.postMessage({ v: WIRE_VERSION, ...wire });
+    } else {
+      pending.timer = setTimeout(() => {
+        if (refusedOwnerRequests.get(wire.bypass_nonce) === pending)
+          port.postMessage({ v: WIRE_VERSION, cmd: "bypass_status" });
+      }, 500);
+    }
+    return true;
+  }
+  if (answer?.code !== "unsafe_browser") return false;
+  if (pending) return true;
+  const needsBinding = wire.cmd === "fill_code" && !wire.bypass_nonce;
+  wire.bypass_nonce ??= wire.rid || crypto.randomUUID();
+  refusedOwnerRequests.set(wire.bypass_nonce, { port, wire, approving: false, needsBinding });
+  showFailure(messageOf(answer));
+  return true;
+}
+
+function forgetRefused(wire) {
+  const pending = refusedOwnerRequests.get(wire?.bypass_nonce);
+  if (pending) clearTimeout(pending.timer);
+  refusedOwnerRequests.delete(wire?.bypass_nonce);
+}
+
 // One native port per request. The open port keeps this service worker alive
 // while the app waits for Touch ID.
 // Probe each trusted action rather than caching across an app downgrade/reconnect.
@@ -88,6 +257,8 @@ async function ask(request) {
 }
 
 function askNative(request) {
+  const ownerRequest = ["fill_code", "passkey_get", "passkey_create"].includes(request.cmd);
+
   return new Promise((resolve) => {
     let done = false;
     let port;
@@ -96,6 +267,7 @@ function askNative(request) {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      forgetRefused(request);
       try { port.disconnect(); } catch (_) { /* already closed */ }
       resolve(answer);
     };
@@ -105,7 +277,10 @@ function askNative(request) {
       resolve(localError("host_missing"));
       return;
     }
-    port.onMessage.addListener((answer) => finish(answer));
+    port.onMessage.addListener((answer) => {
+      if (ownerRequest && holdRefusedOwnerRequest(port, request, answer)) return;
+      finish(answer);
+    });
     port.onDisconnect.addListener(() => {
       const error = chrome.runtime.lastError;
       const text = error && error.message ? error.message : "";
@@ -121,6 +296,7 @@ function localError(code) {
 }
 
 function messageOf(answer) {
+  if (answer?.code === "unsafe_browser") return "Other programs can control this browser. Open the Apassy popup and choose Allow once…; confirm in Apassy.";
   return (answer && typeof answer.message === "string" && answer.message) ||
     MESSAGES[answer && answer.code] || MESSAGES.host_failed;
 }
@@ -468,9 +644,9 @@ async function fillCode(tabId, url, item, trustedGesture = false) {
 // fields that starts at the marked field (a code split into digits). Nothing
 // else: no password field, no guess, no pasteboard. It returns a count, never
 // the code.
-function fillOneTimeCode(origin, code) {
+function fillOneTimeCode(origin, code, agentFill = false) {
   const result = { ok: false, reason: "no_fields", fields: 0 };
-  if (location.origin !== origin) {
+  if (location.origin !== origin || (agentFill && !document.hasFocus())) {
     result.reason = "origin";
     return result;
   }
@@ -593,6 +769,12 @@ async function handleMessage(message) {
   const bad = () => ({ ok: false, code: "bad_request", message: MESSAGES.bad_request });
   const onPage = message && Number.isInteger(message.tabId) && typeof message.url === "string";
   switch (message && message.type) {
+    case "bypass_status":
+    case "bypass_end":
+      return ask({ cmd: message.type });
+    case "bypass_request":
+      if (!["once", "five_minutes"].includes(message.scope)) return bad();
+      return requestDebuggingBypass(message.scope);
     case "state":
       return state();
     case "fill": {
@@ -1170,6 +1352,7 @@ function endPasskey(session, reply) {
 }
 
 function closeNative(session) {
+  forgetRefused(session.bypassWire);
   const native = session.native;
   session.native = null;
   if (native) {
@@ -1243,7 +1426,7 @@ async function startPasskey(session, message) {
   const wire = wireRequest(request, peer.origin, clientData, rid);
   // Only the isolated bridge can attest a browser user activation. Page data
   // never carries a window, deadline, secret, or reusable approval.
-  if (message.trustedGesture === true && request.op === "get") wire.trusted_gesture = true;
+  if (message.trustedGesture === true) wire.trusted_gesture = true;
   session.expect = {
     op: request.op,
     rid,
@@ -1264,6 +1447,7 @@ async function startPasskey(session, message) {
     return;
   }
   session.native = native;
+  session.bypassWire = wire;
   // Negotiate on this session's port: cancellation and the request deadline
   // cover status as well as the owner check. Never cache across app reconnects.
   let awaitingStatus = Object.hasOwn(wire, "trusted_gesture");
@@ -1280,6 +1464,7 @@ async function startPasskey(session, message) {
       }).catch(() => endPasskey(session, NOT_ALLOWED));
       return;
     }
+    if (holdRefusedOwnerRequest(native, wire, answer)) return;
     // One answer per passkey request: the host is done.
     closeNative(session);
     for (const timer of session.timers) clearTimeout(timer);
@@ -1305,7 +1490,7 @@ async function deliverPasskey(session, answer) {
   if (!expect) return;
   const reply = await checkPasskeyAnswer(expect, answer);
   if (reply.kind !== "result") {
-    if (answer && answer.ok === false && answer.code === "unsupported" && answer.message &&
+    if (answer && answer.ok === false && ["unsupported", "unsafe_browser"].includes(answer.code) && answer.message &&
         !session.done && session.open && await tabStillOn(session.peer)) {
       await showFailure(messageOf(answer));
     }

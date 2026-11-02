@@ -47,6 +47,7 @@ let maxAgentNameCharacters = 40
 /// The event types of goal item N1, and the notice of a vault that does not
 /// sync. The raw value is the wire name.
 enum NotificationEvent: String {
+    case updateReady = "update_ready"
     case approvalWaiting = "approval_waiting"
     case requestBlocked = "request_blocked"
     case suggestion = "suggestion"
@@ -90,6 +91,8 @@ struct NotificationInput {
 func preview(_ input: NotificationInput) -> (title: String, body: String) {
     let agent = input.agent
     switch input.event {
+    case .updateReady:
+        return ("Update ready", "Apassy \(agent) is ready. Restart to update.")
     case .approvalWaiting:
         return ("Approval waiting", "Agent \"\(agent)\" waits for your decision. Open Apassy to review.")
     case .suggestion:

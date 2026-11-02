@@ -9,6 +9,7 @@ struct RequestsWaitingRow: View {
     let now: Date
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var tapGuard = AnswerGuard()
+    @State private var commentQuestion: RemoteQuestion?
 
     private var actions: RequestListActions { model.listActions(for: question, now: now) }
     private var delivery: QuestionsModel.Delivery? { model.delivery(for: question) }
@@ -37,6 +38,9 @@ struct RequestsWaitingRow: View {
                     if let card = question.card {
                         Text("\(card.question.action.label) · \(Decisions.environment(card.question.items))")
                             .font(.subheadline.weight(.medium))
+                        if card.question.items.contains(where: { $0.production && !$0.unconfirmed }) {
+                            DecisionTag(text: "Production", tint: .red)
+                        }
                         if card.question.items.count > 1 {
                             Text(card.question.items.map(\.name).joined(separator: ", "))
                                 .font(.subheadline).foregroundStyle(.secondary)
@@ -80,26 +84,36 @@ struct RequestsWaitingRow: View {
                 }
                 let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading)) : AnyLayout(HStackLayout())
                 layout {
-                    Button("Deny", role: .destructive, action: deny)
+                    Button("Dismiss", role: .destructive, action: deny)
                         .frame(maxWidth: .infinity, minHeight: 44).disabled(!actions.canDeny)
-                        .accessibilityLabel("Deny \(question.credentialTitle)")
-                    if actions.canAllowOnce {
-                        Button("Allow Once", action: allowOnce)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .accessibilityLabel("Allow \(question.credentialTitle) once")
-                    } else {
-                        NavigationLink("Review", value: DecisionRoute.question(question.requestIdentity))
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .accessibilityLabel("Review \(question.credentialTitle)")
+                        .accessibilityLabel("Dismiss \(question.credentialTitle)")
+                    if let card = question.card {
+                        let bar = AnswerBar.make(for: card)
+                        ForEach([bar.primary, bar.secondaryApproval].compactMap { $0 }) { choice in
+                            Button(choice.label) { send(choice) }
+                                .buttonStyle(.borderedProminent)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .disabled(!actions.canDeny)
+                        }
                     }
                 }
                 .buttonStyle(.bordered)
+                Button("Dismiss with comment", role: .destructive) {
+                    guard tapGuard.accepts(now: .now), actions.canDeny else { return }
+                    commentQuestion = question
+                }
+                .disabled(!actions.canDeny)
             }
         }
         .padding(.vertical, 4)
         .onAppear { tapGuard.arm(now: .now) }
         .onChange(of: question.card) { _, _ in tapGuard.arm(now: .now) }
         .onChange(of: status) { _, value in announce(value) }
+        .sheet(item: $commentQuestion) { snapshot in
+            DismissCommentSheet { answer in
+                Task { await model.send(.init(answer: answer, label: "Dismiss with comment", destructive: true), for: snapshot) }
+            }
+        }
     }
 
     private var receiptSymbol: String {
@@ -115,9 +129,8 @@ struct RequestsWaitingRow: View {
         Task { await model.send(AnswerBar.make(for: card).deny, for: question) }
     }
 
-    private func allowOnce() {
-        guard tapGuard.accepts(now: .now), actions.canAllowOnce,
-            let card = question.card, let choice = AnswerBar.make(for: card).allowOnce else { return }
+    private func send(_ choice: AnswerBar.Choice) {
+        guard tapGuard.accepts(now: .now), actions.canDeny else { return }
         Task { await model.send(choice, for: question) }
     }
 

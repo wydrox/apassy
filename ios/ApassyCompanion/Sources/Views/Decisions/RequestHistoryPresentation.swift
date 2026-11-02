@@ -32,10 +32,12 @@ enum RequestHistoryPresentation {
 
     static func scope(_ kind: String?) -> String {
         switch kind {
-        case "approve_once": "This request only"
+        case "approve", "approve_once": "This request only"
+        case "approve_as_development": "This request only, classified as development"
+        case "approve_as_production": "This request only, classified as production"
         case "approve_in_project": "All agents in this project"
         case "allow_production": "All agents in this project, production included"
-        case "deny": "Denied this request"
+        case "deny", "deny_with_comment": "Dismissed this request"
         case "never_for_agent": "Not for this agent"
         case "always_ask_for_agent": "Always ask for this agent"
         case "correct_environment": "Credential environment correction"

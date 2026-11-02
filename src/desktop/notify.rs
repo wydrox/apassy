@@ -214,6 +214,7 @@ pub struct CenterView {
 /// checked against the current unlocked vault and the current waiting items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationDestination {
+    Update(String),
     Event {
         key: EventKey,
         vault_path: PathBuf,
@@ -286,6 +287,10 @@ impl RoutingState {
 }
 
 enum Job {
+    UpdateReady {
+        version: String,
+        route: String,
+    },
     Notify {
         key: EventKey,
         agent: String,
@@ -461,6 +466,34 @@ impl NotificationCenter {
         }
     }
 
+    pub(crate) fn update_ready(&self, version: &str) {
+        let mut random = [0u8; 32];
+        if getrandom::fill(&mut random).is_err() {
+            return;
+        }
+        let route: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        self.shared
+            .routing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .routes
+            .insert(
+                route.clone(),
+                NotificationDestination::Update(version.to_owned()),
+            );
+        if let Some(jobs) = self
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            let _ = jobs.send(Job::UpdateReady {
+                version: version.to_owned(),
+                route,
+            });
+        }
+    }
+
     /// Run `hook` too when a run starts to wait: the questions waiter
     /// (`crate::questions::QuestionsWorker::waker`) then posts it through the relay at once.
     pub fn set_question_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
@@ -512,6 +545,9 @@ impl NotificationCenter {
         &self,
         destination: &NotificationDestination,
     ) -> NotificationDestination {
+        if matches!(destination, NotificationDestination::Update(_)) {
+            return destination.clone();
+        }
         let NotificationDestination::Event {
             key,
             vault_path,
@@ -962,6 +998,12 @@ fn send_loop(shared: &Shared, helper: &NativeHelper, jobs: &Receiver<Job>) {
                         view.channel = channel;
                     }
                 });
+            }
+            Job::UpdateReady { version, route } => {
+                let _ = Notification::new("update-ready", &version, NotificationEvent::UpdateReady)
+                    .and_then(|notification| {
+                        helper.notify_routed(&notification, Some(&route), None)
+                    });
             }
             Job::SyncStuck { id, vault, reason } => {
                 let result = Notification::sync_stuck(&id, &vault, reason)

@@ -1,20 +1,24 @@
 import Foundation
 import LocalAuthentication
 import Security
+import ApassyCompanionKit
 
-/// `PassphraseStore` in the keychain. Each read makes a new `LAContext`, so a Face ID
-/// match is never reused for a second read.
+/// `PassphraseStore` in the keychain. Default (including AutoFill): fresh contexts.
+/// The app explicitly supplies its shared window.
 public struct KeychainPassphraseStore: PassphraseStore {
     private let service: String
     private let accessGroup: String?
+    private let window: FaceIDWindow?
+    var usesAppWindow: Bool { window != nil }
 
     /// - Parameters:
     ///   - service: the keychain service; tests pass their own.
     ///   - accessGroup: the shared group of the app and the extension
     ///     (`SharedContainer.keychainGroup`); nil uses the default group.
-    public init(service: String = "com.wydrox.apassy.vault-passphrase", accessGroup: String? = SharedContainer.keychainGroup) {
+    public init(service: String = "com.wydrox.apassy.vault-passphrase", accessGroup: String? = SharedContainer.keychainGroup, window: FaceIDWindow? = nil) {
         self.service = service
         self.accessGroup = accessGroup
+        self.window = window
     }
 
     private func query(_ vaultID: String) -> [String: Any] {
@@ -58,6 +62,15 @@ public struct KeychainPassphraseStore: PassphraseStore {
     }
 
     public func read(vaultID: String, reason: String) async throws -> String {
+        if let window {
+            let lease = try await authenticate(window, reason: reason)
+            do {
+                let result = try await copy(vaultID, context: Context(lease.context))
+                guard lease.isValid else { throw VaultError(.locked, "The Face ID window ended.") }
+                lease.end()
+                return result
+            } catch { lease.end(failed: true); throw error }
+        }
         let context = LAContext()
         context.localizedReason = reason
         context.localizedFallbackTitle = "Enter Passphrase"
@@ -105,6 +118,10 @@ public struct KeychainPassphraseStore: PassphraseStore {
     }
 
     public func readSession(reason: String) async throws -> any PassphraseReads {
+        if let window {
+            let lease = try await authenticate(window, reason: reason)
+            return KeychainReads(store: self, context: Context(lease.context), lease: lease)
+        }
         let context = LAContext()
         // No passphrase fallback: a vault that Face ID does not open shows its Unlock row.
         context.localizedFallbackTitle = ""
@@ -124,6 +141,11 @@ public struct KeychainPassphraseStore: PassphraseStore {
     public func remove(vaultID: String) {
         SecItemDelete(query(vaultID) as CFDictionary)
     }
+
+    private func authenticate(_ window: FaceIDWindow, reason: String) async throws -> FaceIDLease {
+        do { return try await window.authenticate(reason: reason) }
+        catch { throw VaultError(.cancelled, "Face ID did not unlock the vault.") }
+    }
 }
 
 /// The reads of one evaluated `LAContext` (`KeychainPassphraseStore.readSession`).
@@ -131,19 +153,27 @@ private final class KeychainReads: PassphraseReads, @unchecked Sendable {
     private let store: KeychainPassphraseStore
     private let lock = NSLock()
     private var context: KeychainPassphraseStore.Context?
+    private let lease: FaceIDLease?
 
-    init(store: KeychainPassphraseStore, context: KeychainPassphraseStore.Context) {
+    init(store: KeychainPassphraseStore, context: KeychainPassphraseStore.Context, lease: FaceIDLease? = nil) {
         self.store = store
         self.context = context
+        self.lease = lease
     }
 
-    deinit { context?.context.invalidate() }
+    deinit { end() }
 
     func read(vaultID: String) async throws -> String {
         guard let context = lock.withLock({ self.context }) else {
             throw VaultError(.locked, "Face ID did not unlock the vault.")
         }
-        return try await store.copy(vaultID, context: context)
+        do {
+            if let lease, !lease.isValid { throw VaultError(.locked, "The Face ID window ended.") }
+            let value = try await store.copy(vaultID, context: context)
+            if let lease, !lease.isValid { throw VaultError(.locked, "The Face ID window ended.") }
+            return value
+        }
+        catch { lease?.end(failed: true); throw error }
     }
 
     func end() {
@@ -151,14 +181,15 @@ private final class KeychainReads: PassphraseReads, @unchecked Sendable {
             defer { self.context = nil }
             return self.context
         }
-        context?.context.invalidate()
+        if let lease { lease.end() } else { context?.context.invalidate() }
     }
 }
 
-/// `OwnerCheck` with LocalAuthentication: biometry only (no device passcode), a new
-/// context for each check.
+/// Biometry only. Defaults to a fresh context; the app opts into its window.
 public struct BiometricOwnerCheck: OwnerCheck {
-    public init() {}
+    private let window: FaceIDWindow?
+    var usesAppWindow: Bool { window != nil }
+    public init(window: FaceIDWindow? = nil) { self.window = window }
 
     public var biometry: Biometry {
         let context = LAContext()
@@ -173,6 +204,14 @@ public struct BiometricOwnerCheck: OwnerCheck {
     }
 
     public func confirm(reason: String) async -> Bool {
+        if let window {
+            do {
+                let lease = try await window.authenticate(reason: reason)
+                let valid = lease.isValid
+                lease.end()
+                return valid
+            } catch { return false }
+        }
         let context = LAContext()
         context.localizedFallbackTitle = "Enter Passphrase"
         var error: NSError?

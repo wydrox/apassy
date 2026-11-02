@@ -5,7 +5,7 @@
 //! - Security: Touch ID and the passphrase.
 //! - Devices: this Mac, the iPhones, the other Macs, and the relay for the questions
 //!   (ADR 0025 §3e).
-//! - Bouncer: the model with its actions, and calibration and learning.
+//! - Bouncer: the bouncer brain with its actions, and calibration and learning.
 //! - Tools: the command line and the browser extension.
 //! - Updates: the updater, the version, and the keyboard shortcuts.
 //!
@@ -115,7 +115,7 @@ pub(super) fn status_line(app: &DesktopApp, section: SettingsSection) -> String 
         }
         SettingsSection::Bouncer => app.model_server.as_ref().map_or_else(
             || "Every run waits for you".to_owned(),
-            |server| format!("Model: {}", model_server_words(&server.status()).0),
+            |server| format!("Brain: {}", model_server_words(&server.status()).0),
         ),
         SettingsSection::Tools => {
             if super::cli_tools::installed() {
@@ -584,7 +584,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             )
             .inner
         });
-        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills and saves, passkey sign-ins, Allow Once, and Development on agent questions until this time is up. The window ends when your Mac locks or sleeps, not when the display turns off.");
+        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps.");
     });
     if let Some(note) = &app.owner.frequency_note {
         rows::footnote(ui, note);
@@ -861,7 +861,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let server = app.model_server.clone();
     let status = server.as_ref().map(|server| server.status());
     let mut action = None;
-    rows::group(ui, Some("Model"), |g| {
+    rows::group(ui, Some("Bouncer brain"), |g| {
         if let Some(status) = &status {
             action = model_server_rows(g, status);
         }
@@ -873,9 +873,9 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             "Bouncer",
             Some(kit::text(
                 if ready {
-                    "Model ready"
+                    "Brain ready"
                 } else {
-                    "Model not ready"
+                    "Brain not ready"
                 },
                 Font::Body,
             )),
@@ -884,7 +884,11 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let routes = crate::broker::route_diagnostics::snapshot();
         g.note_row(routes.summary());
         for (reason, count) in routes.top_reasons() {
-            g.note_row(format!("{} {count}", reason.headline()));
+            g.line(
+                reason.headline(),
+                Some(kit::text(count.to_string(), Font::Body)),
+                |_| {},
+            );
         }
         let shared = app.owner_ui.session.shared_vault();
         let guard = shared
@@ -899,14 +903,14 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         "Today",
                         Some(kit::text(
                             format!(
-                                "{} decided by the bouncer · {} asked you · {} failed",
+                                "{} decided by the bouncer gate · {} asked you · {} failed",
                                 counts.by_model, counts.asked, counts.failed
                             ),
                             Font::Body,
                         )),
                         |_| {},
                     );
-                    g.note_row("Failed: model or readiness errors, or questions left unanswered. These can also count as asked.");
+                    g.note_row("Failed: bouncer brain or readiness errors, or questions left unanswered. These can also count as asked.");
                 }
                 None => g.tone_row(
                     "Today's bouncer counts are unavailable.",
@@ -933,7 +937,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(ModelAction::Settings(settings)) => {
             let off = settings.start == StartMode::Off;
             match server.set_settings(settings) {
-                Ok(()) if off => app.set_note("The bouncer is off. Every run waits for you."),
+                Ok(()) if off => app.set_note("The bouncer brain is off. Every run waits for you."),
                 Ok(()) => {}
                 Err(err) => app.set_err(format!("Apassy cannot save the bouncer setting: {err}")),
             }
@@ -952,7 +956,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(ModelAction::OpenLog(log)) => {
             if !log.is_file() {
                 app.set_note(
-                    "There is no log yet. Apassy writes it when it starts the model server.",
+                    "There is no log yet. Apassy writes it when it starts the bouncer brain.",
                 );
             } else if let Err(err) = open_file(&log) {
                 app.set_err(format!("Apassy cannot open {} ({err}).", log.display()));
@@ -971,7 +975,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 fn broker_rows(app: &DesktopApp, g: &mut rows::Group<'_>) {
     match &app.broker {
         BrokerState::Running(handle) if handle.bouncer_url().is_none() => g.tone_row(
-            "The broker has no bouncer address. Every run waits for you.",
+            "Apassy has no address for the bouncer brain. Every run waits for you.",
             Tone::Warning.text(),
         ),
         BrokerState::Failed(message) => g.tone_row(
@@ -1004,7 +1008,7 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
     let model_note = |model: &Option<String>| {
         let mut note = model
             .as_ref()
-            .map_or_else(String::new, |model| format!("Model: {model}."));
+            .map_or_else(String::new, |model| format!("Brain: {model}."));
         if zero_shot {
             if !note.is_empty() {
                 note.push(' ');
@@ -1017,13 +1021,13 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
         ServerState::Off => (
             "Off".to_owned(),
             Tone::Warning,
-            Some("The broker asks no model. Every run waits for you.".to_owned()),
+            Some("Apassy asks no bouncer brain. Every run waits for you.".to_owned()),
         ),
         ServerState::External { up: None, .. } => (
             "Checking".to_owned(),
             Tone::Neutral,
             Some(format!(
-                "Apassy does not start or stop the model. It asks {url}."
+                "Apassy does not start or stop the bouncer brain. It asks {url}."
             )),
         ),
         ServerState::External {
@@ -1033,8 +1037,8 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             "Ready".to_owned(),
             Tone::Good,
             Some(model.as_ref().map_or_else(
-                || format!("The model at {url} answers."),
-                |model| format!("Model: {model} at {url}."),
+                || format!("The bouncer brain at {url} answers."),
+                |model| format!("Brain: {model} at {url}."),
             )),
         ),
         ServerState::External {
@@ -1052,7 +1056,7 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             "Cannot start".to_owned(),
             Tone::Warning,
             Some(
-                "Something that the model needs is missing. Until then, every run waits for you."
+                "Something that the bouncer brain needs is missing. Until then, every run waits for you."
                     .to_owned(),
             ),
         ),
@@ -1060,7 +1064,7 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             "Not running".to_owned(),
             Tone::Neutral,
             Some(if status.settings.start == StartMode::WhenNeeded {
-                "The next run that needs the model starts it.".to_owned()
+                "The next run that needs the bouncer brain starts it.".to_owned()
             } else {
                 "Until it runs, every run waits for you.".to_owned()
             }),
@@ -1071,14 +1075,14 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
             "Starting (downloading the model weights, first start only)".to_owned(),
             Tone::Neutral,
             Some(
-                "The model server downloads the Laya base weights from Hugging Face. This can take several minutes. Until it answers, every run waits for you."
+                "The bouncer brain downloads the Laya base weights from Hugging Face. This can take several minutes. Until it answers, every run waits for you."
                     .to_owned(),
             ),
         ),
         ServerState::Starting { since } => (
             format!("Starting ({} s)", since.elapsed().as_secs()),
             Tone::Neutral,
-            Some("The first start loads the model. This can take a minute.".to_owned()),
+            Some("The first start loads the bouncer brain. This can take a minute.".to_owned()),
         ),
         ServerState::Running { model, outside } => (
             "Ready".to_owned(),
@@ -1101,12 +1105,12 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
 }
 
 /// The install commands of `docs/operations/bouncer.md` section 1, with the paths of
-/// this Mac. The menu of the "Model" row copies them.
+/// this Mac. The menu of the "Bouncer brain" row copies them.
 pub(super) fn install_commands(status: &Status) -> String {
     let dir = shell_word(&status.laya_dir.to_string_lossy());
     let mut commands =
         format!("D={dir}\nmkdir -p \"$D\" && chmod 700 \"$(dirname \"$D\")\" && cd \"$D\"");
-    // The same `uv venv` as "Install the model": none with a Python, `--clear` for a
+    // The same `uv venv` as "Install the bouncer brain": none with a Python, `--clear` for a
     // `.venv` without one.
     if let Some(args) = status.venv_args {
         commands.push_str("\nuv ");
@@ -1119,7 +1123,7 @@ pub(super) fn install_commands(status: &Status) -> String {
             "\nuv pip install --python .venv/bin/python -r {}",
             shell_word(&requirements.to_string_lossy())
         ));
-        // The base weights, as the last step of "Install the model".
+        // The base weights, as the last step of "Install the bouncer brain".
         commands.push('\n');
         commands.push_str(&fetch_command(tools));
     }
@@ -1135,7 +1139,7 @@ fn fetch_command(tools: &std::path::Path) -> String {
     )
 }
 
-/// The "Model" row, how the model starts, and the notes of an install or a problem.
+/// The "Bouncer brain" row, how the bouncer brain starts, and the notes of an install or a problem.
 fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAction> {
     let mut action = None;
     let current = status.settings.start;
@@ -1147,7 +1151,7 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
         ServerState::Starting { .. } | ServerState::Running { .. }
     );
     g.line_note(
-        "Model",
+        "Bouncer brain",
         Some(kit::text(words, Font::Body).color(tone.text())),
         note.as_deref().map(rows::note),
         |ui| {
@@ -1208,7 +1212,7 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
     if status.url_from_env {
         g.note_row("APASSY_BOUNCER_URL sets the address. It wins over the setting.");
     }
-    g.field("Start the model", |ui| {
+    g.field("Start the bouncer brain", |ui| {
         let mut mode = current;
         let options: Vec<(StartMode, String)> = StartMode::ALL
             .iter()
@@ -1255,7 +1259,7 @@ fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
     action
 }
 
-/// What the "Model" row offers for the install of the Laya environment.
+/// What the "Bouncer brain" row offers for the install of the Laya environment.
 #[derive(Default)]
 struct InstallOffer {
     /// The install runs: "Cancel install".
@@ -1284,9 +1288,9 @@ fn install_offer(status: &Status) -> InstallOffer {
         } => {
             let seconds = since.elapsed().as_secs();
             let progress = if *of == 0 {
-                format!("Installing the model: preparing ({seconds} s).")
+                format!("Installing the bouncer brain: preparing ({seconds} s).")
             } else {
-                format!("Installing the model: step {step} of {of}, {label} ({seconds} s).")
+                format!("Installing the bouncer brain: step {step} of {of}, {label} ({seconds} s).")
             };
             let what = if *label == FETCH_LABEL {
                 "It downloads the Laya base weights (about 800 MB)."
@@ -1304,7 +1308,7 @@ fn install_offer(status: &Status) -> InstallOffer {
         }
         InstallState::Done if status.venv_ready => {
             offer.note = Some(format!(
-                "The model is installed in {}.",
+                "The bouncer brain is installed in {}.",
                 status.laya_dir.display()
             ));
         }
@@ -1382,12 +1386,12 @@ fn launch_agent_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAc
         };
         let text = match conflict {
             AgentConflict::MissingModel(model) => format!(
-                "The LaunchAgent {} starts the bouncer with APASSY_BASE_MODEL {}. That file does not exist, so the start fails.",
+                "The LaunchAgent {} starts the bouncer brain with APASSY_BASE_MODEL {}. That file does not exist, so the start fails.",
                 agent.label,
                 model.display()
             ),
             AgentConflict::Mode(mode) => format!(
-                "The LaunchAgent {} also starts the bouncer. With \"{}\", Apassy starts and stops the model itself.",
+                "The LaunchAgent {} also starts the bouncer brain. With \"{}\", Apassy starts and stops the bouncer brain itself.",
                 agent.label,
                 mode.label()
             ),

@@ -225,8 +225,8 @@ pub fn promotion_refusal(agreement: &CandidateAgreement) -> Option<String> {
 fn vault_message(error: &VaultError) -> String {
     match error.kind() {
         VaultErrorKind::Locked => "The vault is locked.".to_owned(),
-        VaultErrorKind::NotFound => "The vault has no such model record.".to_owned(),
-        _ => "The vault did not change the model.".to_owned(),
+        VaultErrorKind::NotFound => "The vault has no such brain record.".to_owned(),
+        _ => "The vault did not change the bouncer brain.".to_owned(),
     }
 }
 
@@ -243,7 +243,7 @@ pub fn promote(
     let candidate: CandidateRecord = vault
         .candidate(candidate_id)
         .map_err(|error| vault_message(&error))?
-        .ok_or_else(|| "The vault has no such candidate model.".to_owned())?;
+        .ok_or_else(|| "The vault has no such candidate brain.".to_owned())?;
     proof
         .check(
             &OwnerAction::PromoteModel {
@@ -288,7 +288,7 @@ pub fn roll_back(
         .roll_back_model(activation_id, now)
         .map_err(|error| match error.kind() {
             VaultErrorKind::InvalidInput | VaultErrorKind::NotFound => {
-                "Not rolled back. The newest model change is not this promotion.".to_owned()
+                "Not rolled back. The newest brain change is not this promotion.".to_owned()
             }
             _ => vault_message(&error),
         })

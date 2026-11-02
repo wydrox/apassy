@@ -17,12 +17,7 @@ use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, Place};
 
-/// The fake relay reads the app's sync module under this name.
-use crate::sync as relay_api;
-/// The sync tests load the same file for their own use.
-#[allow(clippy::duplicate_mod)]
-#[path = "../../../tests/common/fake_relay.rs"]
-mod fake_relay;
+use crate::desktop::fake_relay;
 
 /// The default window, a tall one that shows each group of a section, and the smallest
 /// window ([`super::super::MIN_WINDOW`]).
@@ -176,7 +171,11 @@ fn cases() -> [(
         ),
         (
             SettingsSection::Bouncer,
-            &["Model", "Calibration and learning"],
+            &[
+                "Bouncer brain",
+                "Calibration and learning",
+                "decided by the bouncer gate",
+            ],
             &[
                 "Back up now…",
                 "Asked you",
@@ -777,15 +776,16 @@ fn security_owner_frequency_defaults_every_time_and_names_covered_actions() {
     app.place = Place::Settings;
     app.ui.settings_section = SettingsSection::Security;
     let (text, _) = frames(&mut app, TALL);
+    // The 2026-11-02 owner decision covers all manual actions globally.
     for expected in [
         "Lock after inactivity",
         "Never",
         "Agents can't use your credentials while the vault is locked.",
         "How often to ask for Touch ID",
         "Every time",
-        "Allow Once, and Development on agent questions",
+        "After you confirm with Touch ID or your passphrase",
+        "Apassy doesn't ask again for anything until this time is up",
         "Mac locks or sleeps",
-        "not when the display turns off",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }

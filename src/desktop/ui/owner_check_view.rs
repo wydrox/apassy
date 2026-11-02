@@ -14,6 +14,44 @@ const VARIABLES_HEIGHT: f32 = 200.0;
 /// The list of accounts scrolls when it is taller than this.
 const ACCOUNTS_HEIGHT: f32 = 220.0;
 
+/// The same exact local question in Decisions and the floating prompt. Neither
+/// surface can grant authority without the owner's global verification gate.
+pub(super) fn browser_question(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let Some(dialog) = app.owner.check.as_ref() else {
+        return;
+    };
+    if !matches!(dialog.request, OwnerRequest::BrowserDebugging { .. }) {
+        return;
+    }
+    ui.strong("Browser debugging permission");
+    ui.label(dialog.request.describe());
+    let running = dialog.running.is_some() || app.owner.check_probe.is_some();
+    let message = dialog.message.clone();
+    let mut allow = false;
+    let mut dismiss = false;
+    ui.horizontal(|ui| {
+        allow = ui
+            .add_enabled(!running, egui::Button::new("Allow"))
+            .clicked();
+        dismiss = ui.button("Dismiss").clicked();
+    });
+    if running {
+        ui.label("Complete the owner check in Apassy.");
+    }
+    if let Some(message) = message {
+        ui.label(message);
+    }
+    if dismiss {
+        app.close_owner_check(Some(ui.ctx()));
+    } else if allow {
+        app.start_local_owner(
+            crate::broker::approvals::LocalWindowSource::BrowserDebuggingClick,
+            true,
+            ui.ctx(),
+        );
+    }
+}
+
 /// The accounts of a passkey request with more than one account. The owner chooses one
 /// before any check starts.
 struct AccountChoice {
@@ -67,6 +105,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     };
     let action = dialog.request.describe();
+    let debugging = matches!(dialog.request, OwnerRequest::BrowserDebugging { .. });
     let copy_item_name = match &dialog.request {
         OwnerRequest::CopyField { item_id, .. } => app
             .owner_ui
@@ -195,10 +234,21 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             },
             |ui| {
                 passphrase |= ui
-                    .add_enabled_ui(idle, |ui| kit::button(ui, "Confirm", Style::Prominent))
+                    .add_enabled_ui(idle, |ui| {
+                        kit::button(
+                            ui,
+                            if debugging { "Allow" } else { "Confirm" },
+                            Style::Prominent,
+                        )
+                    })
                     .inner
                     .clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::button(
+                    ui,
+                    if debugging { "Dismiss" } else { "Cancel" },
+                    Style::Bordered,
+                )
+                .clicked();
             },
         );
     });
@@ -225,6 +275,21 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
                 )
             };
             app.start_local_owner(source, eligible, ctx);
+        }
+    } else if debugging && passphrase && ready {
+        let has_passphrase = app
+            .owner
+            .check
+            .as_ref()
+            .is_some_and(|d| !d.passphrase.is_empty());
+        if has_passphrase {
+            app.start_passphrase_check(ctx);
+        } else {
+            app.start_local_owner(
+                crate::broker::approvals::LocalWindowSource::BrowserDebuggingClick,
+                true,
+                ctx,
+            );
         }
     } else if touch_id && ready {
         app.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));

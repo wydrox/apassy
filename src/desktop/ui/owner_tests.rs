@@ -569,11 +569,13 @@ fn allow_once_needs_the_owner_check() {
     app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("UI agent wants to use DEMO_KEY"), "{text}");
-    assert!(text.contains("Allow Once"), "{text}");
+    assert!(text.lines().any(|line| line.trim() == "Allow"), "{text}");
+    assert!(text.contains("Dismiss with comment"), "{text}");
+    assert!(!text.contains("Allow Once"), "{text}");
     assert!(text.contains("A notification is not an approval"), "{text}");
     assert_eq!(approvals.pending(), vec![run.clone()]);
 
-    // "Allow Once" opens the owner check. The run still waits.
+    // "Allow" opens the owner check outside a verified window. The run still waits.
     app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(&ctx));
     assert!(app_frame(&ctx, &mut app).contains("Approve one run of agent"));
     assert_eq!(approvals.pending(), vec![run.clone()]);
@@ -942,7 +944,9 @@ fn approve_and_remember_and_calibration_need_the_owner_check() {
     };
     assert_eq!(level(), None);
     app.ask_owner(OwnerRequest::ApplyCalibration { level: 70 }, Some(&ctx));
-    assert!(app_frame(&ctx, &mut app).contains("Set the task_match level of the bouncer to 70%"));
+    assert!(
+        app_frame(&ctx, &mut app).contains("Set the task_match level of the bouncer gate to 70%")
+    );
     confirm_with(&mut app, &ctx, WRONG);
     assert_eq!(level(), None, "a wrong passphrase changes nothing");
     confirm_with(&mut app, &ctx, PASS);

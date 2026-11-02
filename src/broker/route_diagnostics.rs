@@ -36,6 +36,7 @@ pub enum ReasonKind {
     ModelUnsure,
     AccessCheck,
     Connector,
+    BrowserFill,
     ModelAllowed,
     RememberedAnswer,
     RememberedPattern,
@@ -44,9 +45,9 @@ impl ReasonKind {
     pub fn headline(self) -> &'static str {
         match self {
             Self::MissingTask => "The agent didn't say what you asked it to do.",
-            Self::LowTaskMatch => "The bouncer wasn't sure this fits your task.",
-            Self::ModelUnavailable => "No bouncer is running.",
-            Self::ModelTimeout => "The bouncer didn't answer in time.",
+            Self::LowTaskMatch => "The bouncer brain wasn't sure this fits your task.",
+            Self::ModelUnavailable => "The bouncer brain is not running.",
+            Self::ModelTimeout => "The bouncer brain didn't answer in time.",
             Self::HookUnverified => "The agent task could not be verified in the host transcript.",
             Self::HookAmbiguous => "More than one agent session could be the source of this task.",
             Self::HookFlags => "The command or task context needs your review.",
@@ -58,10 +59,11 @@ impl ReasonKind {
             Self::MissingDeclaration => "This credential has no declaration.",
             Self::UnfitAnswer => "Your earlier answer doesn't cover this run.",
             Self::OneTimeCode => "This run needs a one-time code.",
-            Self::ModelUnsure => "The bouncer wasn't sure this run is safe.",
+            Self::ModelUnsure => "The bouncer brain wasn't sure this run is safe.",
             Self::AccessCheck => "This request didn't pass the access checks.",
             Self::Connector => "This connector operation needs your approval.",
-            Self::ModelAllowed => "The bouncer allowed this run.",
+            Self::BrowserFill => "The agent wants to fill a credential in your browser.",
+            Self::ModelAllowed => "The bouncer gate allowed this run.",
             Self::RememberedAnswer => "Your earlier answer covers this run.",
             Self::RememberedPattern => "An approved pattern covers this run.",
             Self::Other => "This request needs your approval.",
@@ -150,7 +152,7 @@ impl Counters {
             }
         }
         format!(
-            "Since Apassy started: decided by the bouncer {} (allowed {allowed}, refused {refused}); asked you {asked}",
+            "Since Apassy started: decided by the bouncer gate {} (allowed {allowed}, refused {refused}); asked you {asked}",
             allowed + refused
         )
     }
@@ -265,7 +267,10 @@ mod tests {
         assert_eq!(counts.outcomes.len(), 2);
         assert_eq!(counts.outcomes[&event], 1);
         assert_eq!(counts.outcomes[&attempted], 1);
-        assert!(counts.summary().ends_with("asked you 2"));
+        assert_eq!(
+            counts.summary(),
+            "Since Apassy started: decided by the bouncer gate 0 (allowed 0, refused 0); asked you 2"
+        );
         assert_eq!(
             counts.top_reasons(),
             vec![(ReasonKind::ModelUnavailable, 2)]

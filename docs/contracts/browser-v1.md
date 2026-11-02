@@ -273,3 +273,47 @@ So a browser that Playwright or another automation tool starts (it adds `--remot
 ### 9.5 Cancellation
 
 The extension opens one native port per request, and disconnects it when the page cancels, navigates, closes, sends a new request, or passes the deadline (at most 180 s). The host reads its input in a thread while it waits for the app. When the input ends, the host shuts down the socket at once (`shutdown`, not a timeout) and exits with status 0 without an answer; a broken frame, or more than 4 waiting messages, does the same with status 1. The app sees the hang-up, closes the owner dialog, and signs nothing. A late approval signs nothing.
+
+### 9.6 Agent browser fill
+
+Idle workers send only
+`{"v":1,"cmd":"agent_wait","instance":"<32 hex characters>"}`.
+The guarded native host forwards this strict packet without page, URL, tab,
+document or credential data. The app holds one wait per instance; a replacement
+answers the old wait with pending false. After about 50 seconds it answers
+`{"ok":true,"code":"ok","message":"Agent wait completed","data":{"type":"agent_wait","pending":false}}`.
+An authenticated agent fill request wakes waiting instances with the same envelope
+and `pending:true`, so they can discover which instance serves its site. This
+signal authorizes no delivery and reveals no requested site or credential.
+
+Only pending true starts targeted polls, at one-second intervals for at most
+60 seconds. Each instance consumes a discovery signal once; delivery readiness
+can issue a fresh signal after the owner check. A completed fill or ended demand
+returns the worker to waiting. Idle host processes restart roughly once per
+50 seconds rather than once per second, and idle traffic contains no URLs.
+Errors back off for 5, 10, 30, then 60 seconds; a successful wait resets backoff.
+The singleton loop starts on worker evaluation, runtime startup and installation,
+without an interval keeping the worker alive. Suspension may end a wait; the
+next worker evaluation starts a fresh instance and wait.
+
+
+`agent_poll` sends `instance`, `url`, `document`, `focused`, optional `receipt`,
+`filled` field names and `exposed`. The document contains `window_id`, `tab_id`,
+`frame_id` (always zero), the browser's `document_id`, and a random
+`generation` changed on tab loading, URL updates or tab activation. A secret-free
+`chrome.scripting.executeScript` probe of frame 0 obtains the browser-owned
+`InjectionResult.documentId`; the probe must report the selected tab URL and frame. No
+`webNavigation` permission is required. Credential delivery targets that exact
+document ID, and the active document is probed again before delivery. The extension requires
+Chrome 120 or later and refuses agent delivery without a browser document ID.
+Approval and the `agent_fill` ticket bind to this document within that extension
+instance. The response repeats `document` alongside the receipt, origin and secret
+fields. Injection uses `documentIds`, with another focus and identity check.
+
+Empty polls preserve the bound target. While unfocused, the extension checks the
+selected document's continued existence without choosing a different tab. After
+approval, delivery waits up to 60 seconds for a fresh focused poll of that document.
+A changed target refuses with "The login page changed. Ask again." The agent
+receives status only. Visibility observation and value-free exposure reports last
+for the filled value's lifetime, without a two-minute expiry. Remote-debugging
+browsers require the same device-local trusted-instance rule on the actual poll and fill.

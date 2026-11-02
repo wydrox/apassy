@@ -53,6 +53,25 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.13 coordinated release
+
+The owner approved a coordinated 0.5.13 release of all six components on 2026-11-02:
+macOS (global Touch ID window, bouncer owner prompt, remote answer kinds, update
+restart, remote-debugging bypass, agent browser fills), iOS on TestFlight (Face ID
+window, new answer buttons), the browser extension on the Chrome Web Store, the relay
+and the Linux CLI (version alignment, no protocol or schema change), and the website.
+The vault schema stays at 23. Run the version checker with the relay release checkout
+before publication, and report the release complete only when all six are live.
+
+## 0.5.12 staged app release
+
+The owner approved the bouncer reason headline and privacy-safe route counters for
+0.5.12. Merging the release PR publishes the Mac download and in-app auto-update.
+The vault schema stays at 23: Macs on 0.5.11 and the iPhone on TestFlight 0.5.10
+keep syncing. No TestFlight update is needed. Relay stays at 0.5.9. The Chrome
+Web Store extension update follows separately (0.5.10 is in review); this is not
+yet a completed six-component release.
+
 ## 0.5.11 staged app release
 
 The owner approved the owner window fixes and browser refusal explanations for
@@ -133,7 +152,7 @@ The release workflow first runs the job `ready` on `ubuntu-24.04`, then the job 
 
 1. It checks that the commit is still the head of `main`. CI runs finish in any order, and an older commit must not replace a newer image.
 2. It verifies the successful CI run through the GitHub API. The run must be a push to `main` in this repository for the same commit. It downloads that run's unsigned binary artifact and checks its commit, build date, run ID, attempt, version, architecture, and file hashes. Only then can it import the Developer ID certificate into a temporary keychain. The signing job does not compile Rust.
-3. If the bucket has `models/apassy-base-v1.safetensors`, it downloads the checkpoint. `scripts/build-app.sh` checks it against `tools/basemodel/manifest.json`. Without it, the app ships without the base model, and the run shows a warning.
+3. If the bucket has `models/apassy-base-v1.safetensors`, it downloads the bouncer brain checkpoint. `scripts/build-app.sh` checks it against `tools/basemodel/manifest.json`. Without it, the app ships without the bouncer brain checkpoint, and the run shows a warning.
 4. It selects Xcode 26.3 (`/Applications/Xcode_26.3.app`, macOS SDK 26.2). See [Xcode and SDK](#xcode-and-sdk).
 5. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
 6. It decodes the two provider profiles `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` into private files, and sets `APASSY_REQUIRE_PROVIDER=1`. See [AutoFill provider profiles](#autofill-provider-profiles).
@@ -312,7 +331,7 @@ The release workflow stops with a list of the missing secrets. `MACOS_AUTOFILL_P
 ### 4. First run
 
 1. Actions > Site > "Run workflow" on `main`. This makes the bucket and deploys the site.
-2. Optional: upload the base model once. Use the checkpoint with the SHA-256 in `tools/basemodel/manifest.json`:
+2. Optional: upload the bouncer brain checkpoint once. Use the checkpoint with the SHA-256 in `tools/basemodel/manifest.json`:
 
    ```
    cd site && npx wrangler login

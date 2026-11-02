@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "bad_heads",
+    "message": "heads must be 64 lowercase hex characters"
+  }
+}

@@ -2,7 +2,7 @@
 
 Date: 2026-09-26. Goal item: [B8](../goal.md). Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md). Study: [fine-tune.md](fine-tune.md).
 
-The bouncer asks the local Laya model yes/no questions about each command (see [bouncer.md](bouncer.md)). The base model `apassy-base-v1` is Laya with new decision heads. The heads are fine-tuned on synthetic commands from many stacks. No owner data is in the training set.
+The base model is the bouncer brain that Apassy ships. The bouncer gate asks it yes/no questions about each command (see [bouncer.md](bouncer.md), Words). The base model `apassy-base-v1` is Laya with new decision heads. The heads are fine-tuned on synthetic commands from many stacks. No owner data is in the training set.
 
 `apassy-base-v1+83224960` is the default model of the bouncer. It passed the blind test of B2 and B8 on held-out v4 with policy `apassy-bouncer-v7` (0 violations and 0 critical cases run in 3 runs, 91 of 120 normal cases without a prompt); see [heldout-v4.md](../evaluation/heldout-v4.md), Results.
 
@@ -149,6 +149,9 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
 - The router sends every request to the English checkpoint. Laya's language routing cannot select another checkpoint.
 - Each answer has `"model": "apassy-base-v1+83224960"`. The stock server answers `"model": "laya-rl-agent"`.
 - Questions in `serve.zero_shot_questions` get the answer of the stock heads. The encoder runs once. The server computes both head sets on the same encoder states and takes the stock row for these questions. With `leak` in the list, the served `leak` answers equal the stock answers (section 6.3 shows the same numbers).
+- On an Apple GPU (MPS), the server keeps the encoder in fp16, the precision stored in the base checkpoint. Laya 0.3.20 loads it as fp32 and casts it to fp16 in each request. The heads stay fp32, and every request runs under fp16 autocast. After each request, the server frees the cached GPU buffers. Measurement on an M4 Mac with 16 GB (bouncer requests with 5 or 6 questions, 3 to 220 words): memory footprint 4.2 GB after 80 requests before; 1.8 GB idle and up to 2.9 GB during 300 requests after. All 440 answers of the 80 requests were equal to 4 decimal places, and the median latency was 0.49 s, before 0.60 s. Test: `tests/basemodel/test_mps_memory.py`.
+- Head sets (ADR 0035, contract [bouncer-brain-v1](../contracts/bouncer-brain-v1.md)): the server holds one encoder and a cache of head sets. A request can name its head set with `heads` and a shadow head set with `shadow_heads`; both are answered from one encoder pass. Without `heads`, the default head set answers as before. `PUT /v1/heads/<sha256>` stores a head set after the checks of the contract, `DELETE /v1/heads/<sha256>` and `DELETE /v1/owner` remove uploaded head sets. Environment: `APASSY_HEADS_DIR` (default `$APASSY_LAYA_DIR/heads`, never inside `Apassy.app`), `APASSY_HEADS_CACHE` (loaded uploaded sets, default 4), `APASSY_HEADS_MAX` (stored sets, default 16).
+- Token rules: the routes that write need `LAYA_API_KEY`; without it they answer 403 `no_token`. The server refuses to start on an address other than loopback without `LAYA_API_KEY`. Tailscale gives reachability only. The server logs no state, question, answer or token. Tests: `tests/basemodel/test_heads_cache.py`, `test_heads_routes.py`, `test_multi_heads.py`; CI runs the ones that need no torch.
 
 The activity log records the model version. `BouncerVerdict::Scored` has a `model` field from the answer. The summary in the decision note ends with `Model: <version>`, for example:
 

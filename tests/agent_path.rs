@@ -765,7 +765,13 @@ fn mcp_adapter_process_round_trip() {
     }));
     assert_eq!(init["result"]["serverInfo"]["name"], "apassy");
     let tools = mcp.request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-    assert_eq!(tools["result"]["tools"].as_array().map(Vec::len), Some(12));
+    let tools = tools["result"]["tools"].as_array().expect("tool list");
+    assert_eq!(tools.len(), 13);
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["name"] == "apassy_fill_in_browser")
+    );
 
     let reply = mcp.request(&json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",

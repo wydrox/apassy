@@ -306,8 +306,9 @@ final class RootModel {
     private func makeVault() throws -> VaultModel {
         let service = try makeService()
         let settings = settings
-        let gate = OwnerGate(check: PromptTrackingOwnerCheck(inner: BiometricOwnerCheck()), service: service)
+        let gate = OwnerGate(check: PromptTrackingOwnerCheck(inner: BiometricOwnerCheck(window: .app)), service: service)
         var hooks = VaultModel.Hooks()
+        hooks.endFaceIDWindow = { FaceIDWindow.app.end() }
         hooks.copy = { value, secret in
             SecureClipboard.copy(value, secret: secret, seconds: settings.clearAfter.seconds)
             Toast.shared.show(secret ? "Copied. Clears in \(settings.clearAfter.label)." : "Copied")
@@ -318,7 +319,7 @@ final class RootModel {
         hooks.beginBackgroundWork = { BackgroundWork.begin($0) }
         return VaultModel(
             service: service, settings: settings, gate: gate,
-            passphraseStore: PromptTrackingPassphraseStore(inner: KeychainPassphraseStore()), hooks: hooks)
+            passphraseStore: PromptTrackingPassphraseStore(inner: KeychainPassphraseStore(window: .app)), hooks: hooks)
     }
 
     private func makeService() throws -> any VaultService {

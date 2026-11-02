@@ -12,7 +12,9 @@ use serde_json::{Map, Value, json};
 
 use super::http::{self, DestinationUrl, parse_destination};
 use super::shell_risk::Analysis;
-use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, valid_model_version};
+use crate::vault::{
+    CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, Scope, valid_model_version,
+};
 
 /// Version of the question set and the decision policy. Change it when either changes.
 /// Version 3 adds the production rule (ADR 0010). Version 4 adds remembered patterns and
@@ -23,7 +25,8 @@ use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, val
 /// command does not break the owner instruction of the grant, and a known write
 /// (`Analysis::known_write`) is never a certain read. Version 8 routes by default
 /// and requires 80% task match for default classifications (ADR 0031).
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v8";
+/// Version 9 permits declared read-only production with mandatory task and leak checks.
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v9";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
@@ -491,7 +494,7 @@ pub fn owner_required(context: &DecisionContext<'_>) -> Option<String> {
         .declarations
         .iter()
         .flatten()
-        .any(Declaration::is_production);
+        .any(|d| d.is_production() && d.scope != Scope::ReadOnly);
     production.then(|| {
         "Production credential: the owner approves every run with it (ADR 0010).".to_owned()
     })
@@ -695,8 +698,13 @@ fn model_step(
     //   veto, and the base model answered 0.25 to 0.53 for commands that broke the rule
     //   (held-out v3).
     let mut needed: Vec<(&str, bool, f64)> = Vec::new();
+    let production = context
+        .declarations
+        .iter()
+        .flatten()
+        .any(Declaration::is_production);
     let task_level = thresholds.task_match_level();
-    if default_source || (!known_safe && !certain_read) {
+    if production || default_source || (!known_safe && !certain_read) {
         needed.push((
             "task_match",
             true,
@@ -706,6 +714,11 @@ fn model_step(
                 task_level
             },
         ));
+    }
+    if production {
+        for name in ["leak", "destroy"] {
+            needed.push((name, false, MIN_CONFIDENCE));
+        }
     }
     if sensitive && !known_safe {
         needed.push(("writes", false, MIN_CONFIDENCE));
@@ -1133,10 +1146,67 @@ mod tests {
         assert!(!run(&safe, &high_risk, &low_writes_unmatched).ask_owner);
     }
 
+    #[test]
+    fn production_read_only_requires_model_task_match_and_clean_flags() {
+        let analysis = Analysis {
+            known_safe: true,
+            ..Analysis::default()
+        };
+        let mut d = declaration(Environment::Production).unwrap();
+        d.scope = Scope::ReadOnly;
+        let declarations = [Some(d)];
+        let context = DecisionContext {
+            analysis: &analysis,
+            declarations: &declarations,
+            has_user_request: true,
+        };
+        let clean = verdict(&[
+            ("task_match", 0.95),
+            ("writes", 0.0),
+            ("leak", 0.0),
+            ("destroy", 0.0),
+            ("rule_break", 0.0),
+        ]);
+        assert!(!decide(&clean, &context).ask_owner);
+        assert!(owner_required(&context).is_none());
+        for (name, value) in [
+            ("task_match", 0.1),
+            ("leak", 0.95),
+            ("destroy", 0.95),
+            ("rule_break", 0.95),
+        ] {
+            let bad = verdict(&[
+                (
+                    "task_match",
+                    if name == "task_match" { value } else { 0.95 },
+                ),
+                ("leak", if name == "leak" { value } else { 0.0 }),
+                ("destroy", if name == "destroy" { value } else { 0.0 }),
+                ("rule_break", if name == "rule_break" { value } else { 0.0 }),
+            ]);
+            assert!(decide(&bad, &context).ask_owner, "{name}");
+        }
+        assert!(decide(&BouncerVerdict::Unavailable("offline".into()), &context).ask_owner);
+        for scope in [Scope::ReadWrite, Scope::Admin] {
+            let mut declarations = declarations.clone();
+            declarations[0].as_mut().unwrap().scope = scope;
+            assert!(
+                decide(
+                    &clean,
+                    &DecisionContext {
+                        declarations: &declarations,
+                        ..context.clone()
+                    }
+                )
+                .ask_owner
+            );
+        }
+    }
+
     /// ADR 0010: a production declaration always waits for the owner. Known safe and
     /// read-only commands and a fully certain model verdict do not change this.
     #[test]
-    fn production_always_asks_the_owner() {
+    fn production_write_scopes_always_ask_the_owner() {
         let certain = verdict(&[
             ("task_match", 1.0),
             ("writes", 0.0),
@@ -1157,7 +1227,7 @@ mod tests {
             project: "odealo".to_owned(),
             environment: Environment::Production,
             risk: RiskLevel::Low,
-            scope: Scope::ReadOnly,
+            scope: Scope::ReadWrite,
             reversibility: Reversibility::Reversible,
         };
         let sets: [&[Option<Declaration>]; 3] = [

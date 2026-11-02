@@ -93,7 +93,7 @@ pub fn open_question(
             Unreadable::CouldNotRead
         }
     })?;
-    if card.v != VERSION {
+    if !matches!(card.v, VERSION | 2) || (card.v == 2 && card.owner_prompt.is_none()) {
         return Err(Unreadable::Update);
     }
     if card.qid != record.qid {
@@ -285,6 +285,17 @@ pub fn send_answer(
 pub fn local_action(run: &PendingRun, choice: &Choice) -> Option<OwnerAction> {
     let project = || run.question.project.clone();
     match choice {
+        Choice::Approve => Some(OwnerAction::ApproveRun(run.clone())),
+        Choice::ApproveAsDevelopment | Choice::ApproveAsProduction => {
+            Some(OwnerAction::ClassifyRemoteRun {
+                run: run.clone(),
+                environment: if matches!(choice, Choice::ApproveAsDevelopment) {
+                    crate::vault::Environment::Development
+                } else {
+                    crate::vault::Environment::Production
+                },
+            })
+        }
         Choice::ApproveOnce => Some(OwnerAction::ApproveRun(run.clone())),
         Choice::ApproveInProject { action, .. } => Some(OwnerAction::ApproveInProject {
             run: run.clone(),

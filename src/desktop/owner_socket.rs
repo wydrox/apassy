@@ -113,6 +113,7 @@ pub(crate) type WireEnvelope<W> = Envelope<<W as LineWire>::Request, <W as LineW
 
 /// The running owner socket. Drop stops the accept loop and removes the socket file.
 pub(crate) struct OwnerSocket {
+    active: Arc<AtomicUsize>,
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -127,6 +128,9 @@ impl std::fmt::Debug for OwnerSocket {
 }
 
 impl OwnerSocket {
+    pub(crate) fn update_busy(&self) -> bool {
+        self.active.load(Ordering::SeqCst) != 0
+    }
     pub(crate) fn socket_path(&self) -> &Path {
         &self.socket
     }
@@ -170,12 +174,15 @@ pub(crate) fn start_line<W: LineWire>(
     let (sender, inbox) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let active = Arc::new(AtomicUsize::new(0));
+    let thread_active = Arc::clone(&active);
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let thread = thread::Builder::new()
         .name(format!("apassy-{}-socket", W::NAME))
-        .spawn(move || accept_loop::<W>(&listener, &sender, &wake, &thread_stop))?;
+        .spawn(move || accept_loop::<W>(&listener, &sender, &wake, &thread_stop, &thread_active))?;
     Ok((
         OwnerSocket {
+            active,
             socket: socket.to_path_buf(),
             stop,
             thread: Some(thread),
@@ -189,8 +196,8 @@ fn accept_loop<W: LineWire>(
     sender: &Sender<WireEnvelope<W>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
     stop: &AtomicBool,
+    active: &Arc<AtomicUsize>,
 ) {
-    let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -210,7 +217,7 @@ fn accept_loop<W: LineWire>(
         }
         let sender = sender.clone();
         let wake = Arc::clone(wake);
-        let slot = Arc::clone(&active);
+        let slot = Arc::clone(active);
         let spawned = thread::Builder::new()
             .name(format!("apassy-{}-conn", W::NAME))
             .spawn(move || {
