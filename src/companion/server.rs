@@ -34,7 +34,7 @@ use super::control::{ControllerParts, PairingController};
 use super::crypto::certificate_pin;
 use super::handler::{self, Shared};
 use super::http::{self, ReadFailure, Response, Timed};
-use super::limits::Connections;
+use super::limits::{Connections, DEVICE_PER_MINUTE, RateLimiter, UNSIGNED_PER_MINUTE};
 use super::pairing::{Clock, Pairing};
 use super::wire::MAX_DEVICE_NAME_CHARS;
 use crate::broker::SharedVault;
@@ -80,6 +80,26 @@ pub struct CompanionOptions {
     /// Hosts for the pairing link instead of the found ones. The development server
     /// names `127.0.0.1`. A link may name a loopback host only with `allow_local_peers`.
     pub link_hosts: Option<Vec<String>>,
+    /// The rate budgets. The defaults are the ones in the contract; tests use small ones.
+    pub budgets: Budgets,
+}
+
+/// The requests per minute that the listener answers (contract section 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    /// Answers to requests without a valid signature, per IP address: 30.
+    pub unsigned_per_minute: usize,
+    /// Requests of one paired device: 120.
+    pub device_per_minute: usize,
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Self {
+            unsigned_per_minute: UNSIGNED_PER_MINUTE,
+            device_per_minute: DEVICE_PER_MINUTE,
+        }
+    }
 }
 
 impl CompanionOptions {
@@ -106,6 +126,7 @@ impl CompanionOptions {
             timeouts: Timeouts::default(),
             pairing_clock: None,
             link_hosts: None,
+            budgets: Budgets::default(),
         }
     }
 }
@@ -270,6 +291,8 @@ pub fn start(options: CompanionOptions) -> io::Result<CompanionHandle> {
     shared.mac_name.clone_from(&mac_name);
     shared.app_version = options.app_version;
     shared.approval_timeout = options.approval_timeout;
+    shared.unsigned = RateLimiter::new(options.budgets.unsigned_per_minute);
+    shared.devices = RateLimiter::new(options.budgets.device_per_minute);
 
     let stop = Arc::new(AtomicBool::new(false));
     let connections = Connections::new();

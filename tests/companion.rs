@@ -24,7 +24,9 @@ use apassy::companion::crypto::{
 use apassy::companion::digest::run_digest_hex;
 use apassy::companion::pairing::{CodeError, ManualClock, pair_proof};
 use apassy::companion::wire::decode_fixed;
-use apassy::companion::{CompanionHandle, CompanionOptions, ConfirmError, OpenPairingError, start};
+use apassy::companion::{
+    Budgets, CompanionHandle, CompanionOptions, ConfirmError, OpenPairingError, start,
+};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{ActivityDecision, Field, ItemDraft, NewActivity, SecretValue};
 use companion_support::{DEVICE, Fixture, PASS, PhoneKey, fixture, run};
@@ -2394,20 +2396,53 @@ fn at_most_four_connections_from_one_address() {
 
 // ----- rates -----
 
+/// The unsigned budget of an address in the rate tests: the contract's 30 (pinned by
+/// `the_app_options_have_the_budgets_of_the_contract`) scaled down.
+const UNSIGNED: usize = 4;
+/// The budget of a paired device in the rate tests: the contract's 120, scaled down.
+const PER_DEVICE: usize = 5;
+
+fn small_budgets(options: &mut CompanionOptions) {
+    options.budgets = Budgets {
+        unsigned_per_minute: UNSIGNED,
+        device_per_minute: PER_DEVICE,
+    };
+}
+
+#[test]
+fn the_app_options_have_the_budgets_of_the_contract() {
+    let vault: apassy::broker::SharedVault = Arc::new(Mutex::new(None));
+    let options = CompanionOptions::new(
+        Arc::clone(&vault),
+        Arc::new(ApprovalQueue::new()),
+        apassy::broker::approvals::OwnerGate::new(vault, None),
+        "Test Mac",
+        "0.0.0-test",
+        Duration::from_secs(120),
+    );
+    assert_eq!(
+        options.budgets,
+        Budgets {
+            unsigned_per_minute: 30,
+            device_per_minute: 120,
+        }
+    );
+}
+
 #[test]
 fn unsigned_requests_are_limited_per_address_and_a_correct_poll_and_a_paired_phone_are_not() {
-    let env = env();
+    let env = env_with(small_budgets);
     let phone = Phone::paired(&env, OTHER_DEVICE);
     let controller = env.handle.pairing().clone();
     let secret = env.open_window();
     let pairing_phone = Phone::new(DEVICE);
     let proof = pairing_phone.proof("Test iPhone", &secret);
     // A paired phone with valid signatures does not use the budget of the address.
-    for n in 0..40 {
+    for n in 0..2 * UNSIGNED {
         let reply = env.get(&phone, "/v1/status");
         assert_eq!(reply.status, 200, "request {n}: {}", reply.body);
     }
-    // The pair request has no signature: it is the first of 30.
+    // The pair request has no signature: it is the first of the budget.
     assert_eq!(
         env.send(&json_post(
             "/v1/pair",
@@ -2417,12 +2452,12 @@ fn unsigned_requests_are_limited_per_address_and_a_correct_poll_and_a_paired_pho
         200
     );
     // Polls with the right proof are not counted.
-    for _ in 0..40 {
+    for _ in 0..2 * UNSIGNED {
         assert_eq!(env.pair_status(&pairing_phone, &proof).status, 200);
     }
-    // Wrong polls are counted: 29 more answers, then 429.
+    // Wrong polls are counted: the rest of the budget, then 429.
     let wrong = b64u(&[5u8; 32]);
-    for n in 0..29 {
+    for n in 0..UNSIGNED - 1 {
         assert_eq!(
             env.pair_status(&pairing_phone, &wrong).status,
             404,
@@ -2461,10 +2496,10 @@ fn unsigned_requests_are_limited_per_address_and_a_correct_poll_and_a_paired_pho
 
 #[test]
 fn an_address_past_its_unsigned_budget_costs_no_vault_work() {
-    let env = env();
+    let env = env_with(small_budgets);
     let phone = Phone::paired(&env, DEVICE);
-    // A bad signature is an unsigned answer: 30 of them use the budget.
-    for n in 0..30 {
+    // A bad signature is an unsigned answer: the budget of them uses it up.
+    for n in 0..UNSIGNED {
         let bad = env.signed(
             &phone,
             "GET",
@@ -2513,11 +2548,11 @@ fn an_address_past_its_unsigned_budget_costs_no_vault_work() {
 }
 
 #[test]
-fn a_paired_device_gets_120_requests_per_minute() {
-    let env = env();
+fn a_paired_device_gets_its_budget_of_requests_per_minute() {
+    let env = env_with(small_budgets);
     let phone = Phone::paired(&env, DEVICE);
     let other = Phone::paired(&env, OTHER_DEVICE);
-    for n in 0..120 {
+    for n in 0..PER_DEVICE {
         let reply = env.get(&phone, "/v1/status");
         assert_eq!(reply.status, 200, "request {n}: {}", reply.body);
     }
@@ -2528,7 +2563,8 @@ fn a_paired_device_gets_120_requests_per_minute() {
     );
     // Another device has its own count.
     assert_eq!(env.get(&other, "/v1/status").status, 200);
-    // An unsigned answer is not counted against a device: the address still has its 30.
+    // An unsigned answer is not counted against a device: the address still has its
+    // budget.
     assert_eq!(
         env.send(&http_request("GET", "/v1/nothing", &[], b""))
             .status,
@@ -2538,9 +2574,9 @@ fn a_paired_device_gets_120_requests_per_minute() {
 
 #[test]
 fn a_request_refused_for_the_device_rate_records_no_nonce_and_no_last_seen() {
-    let env = env();
+    let env = env_with(small_budgets);
     let phone = Phone::paired(&env, DEVICE);
-    for n in 0..120 {
+    for n in 0..PER_DEVICE {
         let reply = env.get(&phone, "/v1/status");
         assert_eq!(reply.status, 200, "request {n}: {}", reply.body);
     }

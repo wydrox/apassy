@@ -36,4 +36,4 @@ pub mod server;
 pub mod wire;
 
 pub use control::{ConfirmError, OpenPairingError, PairingController, PairingInvite};
-pub use server::{CompanionHandle, CompanionOptions, Timeouts, start};
+pub use server::{Budgets, CompanionHandle, CompanionOptions, Timeouts, start};
