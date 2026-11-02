@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "name": "apassy-local-v1",
+  "version": "apassy-local-v1+a1b2c3d4",
+  "checkpoint": {
+    "file": "candidate.safetensors",
+    "sha256": "a1b2c3d4e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718",
+    "size_bytes": 104996060,
+    "format": "safetensors, float32 head tensors: head., type_emb., scorer."
+  },
+  "base": {
+    "repo": "convaiinnovations/laya",
+    "revision": "ba5e0000ba5e0000ba5e0000ba5e0000ba5e0000",
+    "weights_file": "model.safetensors",
+    "weights_sha256": "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e",
+    "package": "laya[serve]==0.3.20"
+  },
+  "serve": {
+    "zero_shot_questions": [
+      "leak"
+    ]
+  },
+  "init": {
+    "version": "apassy-base-v1+c0ffee00",
+    "sha256": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
+  },
+  "training": {
+    "method": "local heads-only fine-tune on owner decisions (goal B9), teacher rows keep the other answers",
+    "config": {
+      "epochs": 4,
+      "batch": 32,
+      "lr": 0.0001,
+      "weight_decay": 0.01,
+      "warmup": 20,
+      "seed": 7,
+      "limit": 0,
+      "max_steps": 0
+    },
+    "best_epoch": 4,
+    "train_examples": 540,
+    "val_examples": 60,
+    "teacher_rows": 1200,
+    "train_seconds": 312.4,
+    "encoder_cache_seconds": 488.1,
+    "peak_mps_driver_gb": 3.1,
+    "ac_power": true,
+    "versions": {
+      "torch": "2.14.0",
+      "laya": "0.3.20",
+      "transformers": "5.17.0"
+    },
+    "examples": {
+      "lines": 420,
+      "owner_decisions": 340,
+      "owner_approvals": 300,
+      "owner_denials": 40,
+      "without_user_request": 12,
+      "flagged_denials": 4,
+      "conflicts": 2,
+      "task_match_yes": 296,
+      "task_match_no": 36,
+      "destroy_yes": 8,
+      "keep": 1200,
+      "denial_weight": 3,
+      "train": 540,
+      "val": 60
+    },
+    "val_metrics": {
+      "task_match": {
+        "n": 60,
+        "accuracy": 0.9,
+        "nll": 0.3,
+        "brier": 0.08,
+        "ece": 0.04,
+        "mean_p_yes": 0.8,
+        "mean_p_no": 0.15
+      },
+      "writes": {
+        "n": 60,
+        "accuracy": 0.9,
+        "nll": 0.3,
+        "brier": 0.08,
+        "ece": 0.04,
+        "mean_p_yes": 0.8,
+        "mean_p_no": 0.15
+      },
+      "all_nll": 0.3
+    }
+  }
+}

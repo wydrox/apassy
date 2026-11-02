@@ -1,0 +1,6 @@
+{
+  "detail": {
+    "code": "no_token",
+    "message": "this server has no token, so it does not accept writes"
+  }
+}
