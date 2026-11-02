@@ -35,4 +35,7 @@ targets:
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    dependencies:
+      - sdk: AppKit.framework
+      - sdk: LocalAuthenticationEmbeddedUI.framework
     scheme: {}

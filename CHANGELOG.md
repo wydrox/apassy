@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Touch ID prompts appear in an Apassy panel instead of the macOS dialog.
+
 ## [0.5.13] - 2026-11-02
 
 ### Added

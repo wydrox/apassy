@@ -66,6 +66,11 @@ struct Request {
         return Request(cmd: cmd, fields: fields)
     }
 
+    func authenticationTitle() throws -> String {
+        guard fields["title"] != nil else { return "Confirm with Touch ID" }
+        return try text("title", min: 1, max: 60)
+    }
+
     func string(_ name: String) throws -> String {
         guard let value = fields[name] as? String else {
             throw HelperError(.invalidRequest, "The field \"\(name)\" must be a string.")
