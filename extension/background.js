@@ -26,12 +26,9 @@ let agentLastTab;
 function invalidateAgentTab(tabId) {
   agentGenerations.set(tabId, crypto.randomUUID());
 }
-chrome.webNavigation?.onCommitted.addListener(details => {
-  if (details.frameId === 0) invalidateAgentTab(details.tabId);
+chrome.tabs.onUpdated?.addListener((tabId, change) => {
+  if (change.status === "loading" || change.url) invalidateAgentTab(tabId);
 });
-for (const event of [chrome.webNavigation?.onHistoryStateUpdated, chrome.webNavigation?.onReferenceFragmentUpdated]) {
-  event?.addListener(details => { if (details.frameId === 0) invalidateAgentTab(details.tabId); });
-}
 chrome.tabs.onActivated?.addListener(({ tabId }) => invalidateAgentTab(tabId));
 chrome.tabs.onRemoved?.addListener(tabId => {
   invalidateAgentTab(tabId);
@@ -40,8 +37,15 @@ chrome.tabs.onRemoved?.addListener(tabId => {
 });
 async function agentDocument(tab) {
   if (!tab) return null;
-  const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 });
-  if (!frame?.documentId || frame.documentLifecycle !== "active") return null;
+  // Chrome 120+ returns the browser-owned document ID without a history permission.
+  // This probe carries no credentials; delivery below targets only this document.
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, frameIds: [0] },
+    func: () => location.href,
+  });
+  const frame = results?.[0];
+  if (results?.length !== 1 || frame?.frameId !== 0 ||
+      typeof frame.documentId !== "string" || !frame.documentId || frame.result !== tab.url) return null;
   if (!agentGenerations.has(tab.id)) agentGenerations.set(tab.id, crypto.randomUUID());
   return { window_id: tab.windowId, tab_id: tab.id, frame_id: 0,
     document_id: frame.documentId, generation: agentGenerations.get(tab.id) };

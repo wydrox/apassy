@@ -12,8 +12,42 @@ function agentBackground() {
     if (!bg.tabs.has(id)) throw new Error("Tab closed");
     return { id, url: bg.tabs.get(id), active: true, windowId: 1 };
   };
-  bg.chrome.webNavigation = { getFrame: async () => ({ documentId: "DOC-1", documentLifecycle: "active" }) };
+  bg.documentId = "DOC-1";
+  bg.probes = [];
+  bg.probe = details => {
+    bg.probes.push(details);
+    assert.deepEqual(Array.from(details.target.frameIds), [0]);
+    assert.equal(details.args, undefined, "probe carries no credentials");
+    if (!bg.tabs.has(details.target.tabId)) throw new Error("Tab closed");
+    return [{ frameId: 0, documentId: bg.documentId, result: bg.tabs.get(details.target.tabId) }];
+  };
+  bg.chrome.scripting.executeScript = async details => bg.probe(details);
   return bg;
+}
+
+for (const result of [[], [{ frameId: 0, result: "https://example.com/login" }],
+  [{ frameId: 1, documentId: "DOC-1", result: "https://example.com/login" }],
+  [{ frameId: 0, documentId: "DOC-1", result: "https://example.com/changed" }]]) {
+  test(`invalid document probe fails closed: ${JSON.stringify(result)}`, async () => {
+    const bg = agentBackground();
+    bg.tabs.set(5, "https://example.com/login");
+    bg.chrome.windows = { getLastFocused: async () => ({ id: 1, focused: true }) };
+    let deliveries = 0;
+    bg.chrome.scripting.executeScript = async details => {
+      if (details.target.frameIds) return result;
+      deliveries++;
+      return [];
+    };
+    bg.setHost((request, { port }) => {
+      assert.equal(request.document, null);
+      port.postMessage({ ok: true, data: request.receipt ? { type: "none" } : {
+        type: "agent_fill", receipt: "ticket", origin: "https://example.com",
+        document: request.document, username: "", password: "synthetic-password", code: "",
+      } });
+    });
+    await bg.context.apassyAgentFillTest.pollAgentFill();
+    assert.equal(deliveries, 0);
+  });
 }
 
 test("agent fill sends only a field acknowledgement back to the host", async () => {
@@ -22,6 +56,7 @@ test("agent fill sends only a field acknowledgement back to the host", async () 
   bg.chrome.windows = { getLastFocused: async () => ({ id: 1, focused: true }) };
   const scripts = [];
   bg.chrome.scripting.executeScript = async (details) => {
+    if (details.target.frameIds) return bg.probe(details);
     scripts.push(details);
     return [{ result: { ok: true, username: true, password: true } }];
   };
@@ -36,6 +71,7 @@ test("agent fill sends only a field acknowledgement back to the host", async () 
   });
   await bg.context.apassyAgentFillTest.pollAgentFill();
   assert.equal(scripts.length, 1);
+  assert.equal(bg.probes.length, 2, "probe before polling and recheck before delivery");
   assert.deepEqual(Array.from(scripts[0].target.documentIds), ["DOC-1"]);
   assert.deepEqual(Array.from(packets[1].filled), ["username", "password"]);
   assert.equal(JSON.stringify(packets).includes("synthetic-password"), false);
@@ -46,7 +82,10 @@ test("a changed origin gets no page injection", async () => {
   bg.tabs.set(5, "https://evil.example/login");
   bg.chrome.windows = { getLastFocused: async () => ({ id: 1, focused: true }) };
   let injections = 0;
-  bg.chrome.scripting.executeScript = async () => { injections++; return []; };
+  bg.chrome.scripting.executeScript = async details => {
+    if (details.target.frameIds) return bg.probe(details);
+    injections++; return [];
+  };
   const packets = [];
   bg.setHost((request, { port }) => {
     packets.push(request);
@@ -61,13 +100,16 @@ test("a changed origin gets no page injection", async () => {
   assert.deepEqual(Array.from(packets[1].filled), []);
 });
 
-for (const changed of ["window_id", "tab_id", "document_id", "generation"]) {
+for (const changed of ["window_id", "tab_id", "frame_id", "document_id", "generation"]) {
   test(`a changed ${changed} gets no injection, even on the same origin`, async () => {
     const bg = agentBackground();
     bg.tabs.set(5, "https://example.com/login");
     bg.chrome.windows = { getLastFocused: async () => ({ id: 1, focused: true }) };
     let injections = 0;
-    bg.chrome.scripting.executeScript = async () => { injections++; return []; };
+    bg.chrome.scripting.executeScript = async details => {
+      if (details.target.frameIds) return bg.probe(details);
+      injections++; return [];
+    };
     bg.setHost((request, { port }) => {
       const document = { ...request.document };
       document[changed] = typeof document[changed] === "number" ? 99 : "changed";
@@ -96,17 +138,22 @@ test("focusing Apassy retains the selected document in an unfocused poll", async
   assert.equal(packets[1].url, packets[0].url);
 });
 
-for (const change of ["navigation", "close", "focus"]) {
+for (const change of ["navigation", "history", "activation", "close", "focus"]) {
   test(`${change} while the host answers refuses the bound delivery`, async () => {
     const bg = agentBackground();
     bg.tabs.set(5, "https://example.com/login");
     let focused = true;
     bg.chrome.windows = { getLastFocused: async () => ({ id: 1, focused }) };
     let injections = 0;
-    bg.chrome.scripting.executeScript = async () => { injections++; return []; };
+    bg.chrome.scripting.executeScript = async details => {
+      if (details.target.frameIds) return bg.probe(details);
+      injections++; return [];
+    };
     bg.setHost((request, { port }) => {
       if (!request.receipt) {
-        if (change === "navigation") bg.chrome.webNavigation.getFrame = async () => ({ documentId: "DOC-2", documentLifecycle: "active" });
+        if (change === "navigation") bg.documentId = "DOC-2";
+        if (change === "history") bg.chrome.tabs.onUpdated.fire(5, { url: "https://example.com/login#changed" });
+        if (change === "activation") bg.chrome.tabs.onActivated.fire({ tabId: 5 });
         if (change === "close") bg.tabs.delete(5);
         if (change === "focus") focused = false;
       }

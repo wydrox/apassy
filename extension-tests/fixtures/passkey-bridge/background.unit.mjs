@@ -665,7 +665,7 @@ test("turning off ends an open passkey request", async () => {
 test("the manifest asks for the passkey site access only as optional", async () => {
   const manifest = loadBackground().chrome.runtime.getManifest();
   assert.deepEqual(manifest.optional_host_permissions, ["https://*/*", "http://localhost/*"]);
-  assert.deepEqual(manifest.permissions, ["nativeMessaging", "activeTab", "scripting", "webNavigation", "storage"]);
+  assert.deepEqual(manifest.permissions, ["nativeMessaging", "activeTab", "scripting", "storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.content_scripts, undefined);
   assert.ok(!JSON.stringify(manifest).includes("webAuthenticationProxy"));

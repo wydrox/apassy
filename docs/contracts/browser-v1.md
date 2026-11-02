@@ -278,8 +278,12 @@ The extension opens one native port per request, and disconnects it when the pag
 
 `agent_poll` sends `instance`, `url`, `document`, `focused`, optional `receipt`,
 `filled` field names and `exposed`. The document contains `window_id`, `tab_id`,
-`frame_id` (always zero), `document_id` from `webNavigation.getFrame`, and a random
-`generation` changed on navigation or tab activation. The extension requires
+`frame_id` (always zero), the browser's `document_id`, and a random
+`generation` changed on tab loading, URL updates or tab activation. A secret-free
+`chrome.scripting.executeScript` probe of frame 0 obtains the browser-owned
+`InjectionResult.documentId`; the probe must report the selected tab URL and frame. No
+`webNavigation` permission is required. Credential delivery targets that exact
+document ID, and the active document is probed again before delivery. The extension requires
 Chrome 120 or later and refuses agent delivery without a browser document ID.
 Approval and the `agent_fill` ticket bind to this document within that extension
 instance. The response repeats `document` alongside the receipt, origin and secret

@@ -176,6 +176,7 @@ export function loadBackground({ permissions = [] } = {}) {
     tabs: {
       sendMessage: async () => {},
       onRemoved: event(),
+      onActivated: event(),
       onUpdated: event(),
       get: async (id) => {
         if (!tabs.has(id)) throw new Error("No tab with id");

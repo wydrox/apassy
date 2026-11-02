@@ -608,8 +608,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
 }
 
 /// The card says who wants what: the credential with its production cap, the action, the
-/// project, the hosts, the command, and why the owner is asked. The bar has Deny, Allow
-/// Once, and the answer that the question offers. No value shows.
+/// project, the hosts, the command, and why the owner is asked. The bar offers Allow,
+/// Dismiss, Dismiss with comment, and an optional project checkbox. No value shows.
 #[test]
 fn the_detail_shows_the_facts_the_command_and_why() {
     let dir = TempDir::new().expect("temp dir");
@@ -645,11 +645,17 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "This is a production key, and there is no production rule for reading in acme-billing yet.",
         "Dismiss",
         "Allow",
+        "Dismiss with comment",
         "Remember for this project",
+        "What the agent says you asked",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(text.contains("Show the last payouts."), "{text}");
+    assert!(
+        text.find(decisions::question_headline(&pending.question)) < text.find("Credential"),
+        "the reason headline precedes the credential facts: {text}"
+    );
     assert!(!text.contains("ui-owner-token-canary"), "{text}");
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
@@ -663,7 +669,7 @@ fn the_detail_shows_the_facts_the_command_and_why() {
     let (waiter, pending) = ask(&app, &queue, 1, changed);
     let (text, _) = frames(&mut app, WIDE, 3);
     for expected in [
-        "Request",
+        "What the agent says you asked",
         "\"Show the last payouts.\" (from the agent)",
         "The agent sent a different request: \"Delete the old payouts.\"",
     ] {
@@ -710,7 +716,8 @@ fn agent_avatars_have_the_colors_of_the_mockup() {
     assert_ne!(agent_color("Aider"), green);
 }
 
-/// "Allow ACTION in PROJECT" opens the owner check. A wrong passphrase approves nothing.
+/// "Allow" with "Remember for this project" opens the owner check outside the window.
+/// A wrong passphrase approves nothing.
 /// After the check the question ends with the answer that the broker remembers for every
 /// agent in the project. The next question is selected.
 #[test]
@@ -727,11 +734,9 @@ fn allow_in_project_needs_the_owner_check_and_selects_the_next_question() {
     let (other_waiter, second) = ask(&app, &queue, 2, run("Codex", offered));
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    assert!(text.contains("Allow Read in acme-billing"), "{text}");
-    assert!(
-        text.contains("All agents in acme-billing · from the next matching use."),
-        "{text}"
-    );
+    assert!(text.lines().any(|line| line.trim() == "Allow"), "{text}");
+    assert!(text.contains("Remember for this project"), "{text}");
+    assert!(!text.contains("Allow Read in acme-billing"), "{text}");
     assert_eq!(decisions::selected(&app), Some(first.id));
 
     let ctx = egui::Context::default();
@@ -856,9 +861,12 @@ fn stricter_answers_need_no_owner_check() {
             question(vec![item(item_id, "Guarded key")], &[]),
         ),
     );
+    app.place = Place::Decisions;
+    // Enter the view and select its row before opening transient detail state.
+    frames(&mut app, DEFAULT, 3);
+    decisions::select_key(&mut app, Key::Run(pending.id));
     decisions::apply(&mut app, &ctx, &pending, Answer::Disconnect);
     assert!(decisions::disconnecting(&app));
-    app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
     assert!(text.contains("Disconnect UI agent?"), "{text}");
     assert!(app.owner.check.is_none());
@@ -2533,6 +2541,10 @@ fn durable_and_evaluation_answers_reuse_global_window_only_while_valid() {
                 },
             };
             let production = matches!(answer, Answer::Production(_));
+            // A production allowance is offered only for a production credential.
+            // Otherwise ApprovalQueue::answer_choice correctly refuses NotProduction.
+            let mut credential = item(item_id, "Synthetic");
+            credential.production = production;
             let (waiter, pending) = ask_with_evaluation(
                 &app,
                 &queue,
@@ -2540,11 +2552,12 @@ fn durable_and_evaluation_answers_reuse_global_window_only_while_valid() {
                 run(
                     "Synthetic",
                     question(
-                        vec![item(item_id, "Synthetic")],
-                        &[
-                            AnswerKind::InProject(ActionKind::Read),
-                            AnswerKind::Production(ActionKind::Read),
-                        ],
+                        vec![credential],
+                        &[if production {
+                            AnswerKind::Production(ActionKind::Read)
+                        } else {
+                            AnswerKind::InProject(ActionKind::Read)
+                        }],
                     ),
                 ),
                 (choice == 2).then_some(offer.clone()),
@@ -2567,7 +2580,11 @@ fn durable_and_evaluation_answers_reuse_global_window_only_while_valid() {
             decisions::apply(&mut app, &egui::Context::default(), &pending, answer);
             if policy == OwnerFrequency::UntilLock && !revoke {
                 assert!(app.owner.check.is_none(), "global verification is reused");
-                assert!(!queue.pending().iter().any(|r| r.id == pending.id));
+                assert!(
+                    !queue.pending().iter().any(|r| r.id == pending.id),
+                    "choice {choice} must settle: {}",
+                    app.status_text
+                );
                 let settled = waiter.join().unwrap().unwrap();
                 assert_eq!(settled.outcome, ApprovalOutcome::Approved);
                 if choice != 2 {

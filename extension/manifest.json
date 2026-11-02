@@ -9,7 +9,6 @@
     "nativeMessaging",
     "activeTab",
     "scripting",
-    "webNavigation",
     "storage"
   ],
   "optional_host_permissions": [
