@@ -1,0 +1,81 @@
+name: CI
+
+'on':
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Install pinned advisory scanner (CI only)
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check RustSec advisories
+        run: cargo audit --deny warnings
+      - name: Verify advisory gate rejects a vulnerable fixture
+        run: bash scripts/test-advisory-gate.sh
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run Rust tests
+        run: cargo test --locked --no-fail-fast
+      - name: Check transport resources in isolation
+        run: cargo test --locked --test server_http repeated_connection_bursts_release_threads_and_file_descriptors -- --ignored --exact --nocapture
+      - name: Run end-to-end checks
+        run: bash scripts/e2e.sh
+
+  worker:
+    name: Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: deploy/worker
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: deploy/worker/package-lock.json
+      - name: Run Worker tests
+        run: node --test 'test/*.test.ts'
+      - name: Install typecheck dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check Worker types
+        run: npx tsc -p tsconfig.json

@@ -1,0 +1,156 @@
+# GitHub builds release artifacts; never build on the production VPS or in a local VM.
+# Push image-* on the exact tested release commit. Deployment remains a separate step.
+name: Image
+
+on:
+  push:
+    tags: ["image-*"]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: |
+          version="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          tag="apassy-relay:release-$version"
+          immutable="apassy-relay:sha-$GITHUB_SHA"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "IMMUTABLE_TAG=$immutable" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          docker build --platform linux/amd64 \
+            --build-arg "APASSY_RELEASE_VERSION=$version" \
+            --build-arg "APASSY_RELEASE_COMMIT=$GITHUB_SHA" \
+            -t "$tag" -t "$immutable" .
+          test "$(docker run --rm "$tag" --version)" = "apassy-relay $version"
+      - name: Save and identify the image
+        run: |
+          docker save "$TAG" "$IMMUTABLE_TAG" | gzip -9 > relay-image.tar.gz
+          sha256sum relay-image.tar.gz | tee relay-image.tar.gz.sha256
+          docker image inspect "$TAG" --format '{{.Id}} {{.Architecture}}' | tee relay-image.id
+          docker image inspect "$TAG" > relay-image.inspect.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          image = json.loads(Path("relay-image.inspect.json").read_text())[0]
+          labels = image["Config"]["Labels"]
+          assert image["Architecture"] == "amd64"
+          assert labels["org.opencontainers.image.version"] == os.environ["VERSION"]
+          assert labels["org.opencontainers.image.revision"] == os.environ["GITHUB_SHA"]
+          Path("relay-image.release.json").write_text(json.dumps({
+              "version": os.environ["VERSION"], "commit": os.environ["GITHUB_SHA"],
+              "tag": os.environ["TAG"], "immutable_tag": os.environ["IMMUTABLE_TAG"],
+              "image_id": image["Id"], "architecture": image["Architecture"],
+          }, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-image
+          path: |
+            relay-image.tar.gz
+            relay-image.tar.gz.sha256
+            relay-image.id
+            relay-image.inspect.json
+            relay-image.release.json
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Debian 11 glibc 2.31 is the oldest supported Linux runtime. Do not export
+    # the CLI from the trixie relay image: that raises its glibc requirement.
+    container:
+      image: rust:1.97.0-bullseye@sha256:08d3da459cca408754c8071b1f74ed334c40a149e7fa6a150bceb11e2ee924c5
+    env:
+      CARGO_INCREMENTAL: "0"
+      APASSY_RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install artifact inspection tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends binutils file python3
+      - name: Build and verify the Linux CLI
+        run: |
+          test "$(uname -m)" = x86_64
+          cargo build --release --locked --bin apassy-team
+          mkdir -p dist
+          cp target/release/apassy-team dist/apassy-team-linux-x86_64
+          strip dist/apassy-team-linux-x86_64
+          version="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          test "$(dist/apassy-team-linux-x86_64 --version)" = "apassy-team $version"
+          file dist/apassy-team-linux-x86_64 | tee dist/file.txt
+          ldd dist/apassy-team-linux-x86_64 | tee dist/ldd.txt
+          readelf --version-info dist/apassy-team-linux-x86_64 > dist/glibc-symbols.txt
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          symbols = Path("dist/glibc-symbols.txt").read_text()
+          versions = {tuple(map(int, match.split("."))) for match in re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", symbols)}
+          assert versions, "No GLIBC version requirements found"
+          assert max(versions) <= (2, 31), f"Requires GLIBC {max(versions)}, newer than 2.31"
+          version = re.search(r'^version = "([^"]+)"', Path("Cargo.toml").read_text(), re.M).group(1)
+          artifact = Path("dist/apassy-team-linux-x86_64")
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          Path("dist/SHA256SUMS-linux").write_text(f"{digest}  {artifact.name}\n")
+          Path("dist/release-linux.json").write_text(json.dumps({
+              "version": version, "commit": os.environ["APASSY_RELEASE_COMMIT"],
+              "filename": artifact.name, "sha256": digest, "platform": "linux-x86_64",
+              "glibc_max": ".".join(map(str, max(versions))),
+          }, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apassy-team-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  darwin-cli:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      APASSY_RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Build and verify the Apple silicon CLI
+        run: |
+          test "$(uname -m)" = arm64
+          cargo build --release --locked --bin apassy-team
+          mkdir -p dist
+          cp target/release/apassy-team dist/apassy-team-darwin-arm64
+          strip -x dist/apassy-team-darwin-arm64
+          codesign --force --sign - dist/apassy-team-darwin-arm64
+          codesign --verify --strict dist/apassy-team-darwin-arm64
+          version="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          test "$(dist/apassy-team-darwin-arm64 --version)" = "apassy-team $version"
+          file dist/apassy-team-darwin-arm64 | tee dist/file.txt
+          test "$(lipo -archs dist/apassy-team-darwin-arm64)" = arm64
+          otool -L dist/apassy-team-darwin-arm64 | tee dist/libraries.txt
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          version = re.search(r'^version = "([^"]+)"', Path("Cargo.toml").read_text(), re.M).group(1)
+          artifact = Path("dist/apassy-team-darwin-arm64")
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          Path("dist/SHA256SUMS-darwin").write_text(f"{digest}  {artifact.name}\n")
+          Path("dist/release-darwin.json").write_text(json.dumps({
+              "version": version, "commit": os.environ["APASSY_RELEASE_COMMIT"],
+              "filename": artifact.name, "sha256": digest, "platform": "darwin-arm64",
+          }, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apassy-team-darwin-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
