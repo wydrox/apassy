@@ -1,0 +1,22 @@
+# The build context of crates/apassy-relay/Dockerfile is the repository root. Only the
+# files that `cargo build -p apassy-relay` reads go in: the workspace manifests and
+# lock, the Cargo settings, the core crate (its sources, rule packs, sandbox profiles,
+# and the test and example targets that its manifest names), the iOS core member, and
+# this crate. rust-toolchain.toml stays out: the image already has Rust 1.97.0.
+*
+!Cargo.toml
+!Cargo.lock
+!.cargo/config.toml
+!src/
+!packs/
+!sandbox/
+!tests/
+!examples/
+!benches/
+!ios/ApassyCore/Cargo.toml
+!ios/ApassyCore/src/
+!crates/apassy-relay/Cargo.toml
+!crates/apassy-relay/src/
+!crates/apassy-relay/vendor/
+!crates/apassy-relay/examples/
+!crates/apassy-relay/tests/

@@ -1,0 +1,7 @@
+import fs from 'node:fs';import {worker,delay} from './cdp.mjs';
+const S=JSON.parse(fs.readFileSync('/tmp/apassy-ext-audit-state.json')),w=await worker(),path=S.profile+'/NativeMessagingHosts/com.wydrox.apassy.json',original=fs.readFileSync(path,'utf8');
+const probe=()=>w.eval(`new Promise(r=>{const p=chrome.runtime.connectNative('com.wydrox.apassy');p.onMessage.addListener(a=>{r({answer:a});p.disconnect()});p.onDisconnect.addListener(()=>r({nativeError:chrome.runtime.lastError?.message||null}));p.postMessage({v:1,cmd:'status'})})`);
+const rows=[];
+try{rows.push({name:'real-host-scratch-app',...await probe()});let deny=JSON.parse(original);deny.allowed_origins=['chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/'];fs.writeFileSync(path,JSON.stringify(deny));rows.push({name:'profile-local-denial',...await probe(),mapped:await w.eval('self.apassyHandle({type:"state"})')});fs.writeFileSync(path,original);rows.push({name:'restored-host',...await probe()});process.kill(S.backendPid,'SIGTERM');await delay(150);rows.push({name:'scratch-app-stopped',...await probe(),mapped:await w.eval('self.apassyHandle({type:"state"})')});
+}finally{fs.writeFileSync(path,original);fs.writeFileSync(S.out+'/native-diagnostics.json',JSON.stringify({rows,workerEvents:w.events.filter(e=>['Runtime.exceptionThrown','Runtime.consoleAPICalled','Log.entryAdded'].includes(e.method))},null,2));w.close();}
+console.log(JSON.stringify(rows.map(({mapped,...x})=>({...x,mappedState:mapped?.state})),null,2));

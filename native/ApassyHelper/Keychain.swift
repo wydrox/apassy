@@ -157,6 +157,7 @@ func handleKeychainStore(_ request: Request) throws -> Fields {
 func handleKeychainRead(_ request: Request) throws -> Fields {
     let account = try request.identifier("account")
     let reason = try request.text("reason", min: 1, max: 200)
+    let title = try request.authenticationTitle()
     let group = try requireAccessGroup()
     guard let attributes = try findAttributes(group: group, account: account) else {
         throw HelperError(.notFound, "No Apassy unlock key is in the keychain.")
@@ -170,12 +171,46 @@ func handleKeychainRead(_ request: Request) throws -> Fields {
     let context = LAContext()
     context.localizedReason = reason
     context.localizedFallbackTitle = ""
+    var acError: Unmanaged<CFError>?
+    guard let access = SecAccessControlCreateWithFlags(nil,
+        kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .biometryCurrentSet, &acError) else {
+        throw HelperError(.internalError, "The helper could not create the unlock access control.")
+    }
+    var embedded = false
+    if let outcome = evaluateInAuthPanel(context: context, title: title, reason: reason, evaluate: { reply in
+        context.evaluateAccessControl(access, operation: .useItem, localizedReason: reason, reply: reply)
+    }) {
+        try requireAuthPanelSuccess(outcome)
+        embedded = true
+    }
     var query = baseQuery(group: group, account: account)
     query[kSecReturnData as String] = true
     query[kSecMatchLimit as String] = kSecMatchLimitOne
-    query[kSecUseAuthenticationContext as String] = context
+    var readContext = context
+    if embedded {
+        // Reuse the evaluated context without allowing another authentication UI.
+        context.interactionNotAllowed = true
+    } else {
+        context.invalidate()
+        readContext = LAContext()
+        readContext.localizedReason = reason
+        readContext.localizedFallbackTitle = ""
+    }
+    query[kSecUseAuthenticationContext as String] = readContext
     var result: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    var status = SecItemCopyMatching(query as CFDictionary, &result)
+    if embedded && (status == errSecInteractionNotAllowed || status == errSecAuthFailed) {
+        // Some OS/keychain combinations do not accept a pre-evaluated equivalent
+        // access control. Retry the unchanged system-dialog path, never bypass ACLs.
+        logAuthPanelFallback("keychain rejected pre-evaluated context")
+        context.invalidate()
+        let systemContext = LAContext()
+        systemContext.localizedReason = reason
+        systemContext.localizedFallbackTitle = ""
+        query[kSecUseAuthenticationContext as String] = systemContext
+        result = nil
+        status = SecItemCopyMatching(query as CFDictionary, &result)
+    }
     if status == errSecItemNotFound, (try? findAttributes(group: group, account: account)) != nil {
         // The item is present but its access control no longer matches.
         throw HelperError(.biometryChanged, "The keychain item is no longer valid for the current fingerprints. Unlock with the passphrase and set up Touch ID again.")

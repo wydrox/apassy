@@ -158,7 +158,7 @@ pub fn read_unlock_key(
     vault_path: &Path,
 ) -> Result<Zeroizing<String>, TouchIdUnlockError> {
     let account = vault_unlock_account(vault_path);
-    let secret = match helper.keychain_read(&account, UNLOCK_REASON) {
+    let secret = match helper.keychain_read_titled(&account, UNLOCK_REASON, "Unlock Apassy") {
         Ok(secret) => secret,
         Err(err) => {
             return Err(match err.code() {

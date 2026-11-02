@@ -92,6 +92,31 @@ def module(name):
     return SHARDS.Target("test", "it", name)
 
 
+# Listed library tests: modules of several depths, a module nested in a listed module,
+# a module whose path contains another module path, and a test at the crate root.
+LIB_TESTS = [
+    "agent::mcp::tests::bounded",
+    "crate_root_test",
+    "desktop::ui::sync_tests::joins",
+    "desktop::ui::sync_tests::nested::inner",
+    "desktop::ui::sync_tests::responsive",
+    "owner_vault::merge::merges",
+    "vault::merge::merges",
+]
+
+
+def split_targets():
+    return SHARDS.split_library(targets(), LIB_TESTS)
+
+
+def library(name, tests=0):
+    return SHARDS.Target("lib", "apassy", name, tests=tests)
+
+
+def library_names(command):
+    return command[command.index("--exact") + 1:]
+
+
 class TestTargetPartition(unittest.TestCase):
     def test_all_target_kinds_and_modules_form_a_disjoint_complete_partition(self):
         units = targets()
@@ -103,7 +128,6 @@ class TestTargetPartition(unittest.TestCase):
                 self.assertEqual(set(flattened), set(units))
                 self.assertEqual(len(flattened), len(set(flattened)))
                 self.assertTrue(all(groups))
-                self.assertEqual(groups[0], [SHARDS.Target("lib", "apassy")])
         self.assertEqual({target.kind for target in units}, {"lib", "bin", "test", "example", "bench"})
 
     def test_the_module_program_is_split_into_its_modules(self):
@@ -160,7 +184,7 @@ class TestTargetPartition(unittest.TestCase):
         data["packages"][0]["targets"][0]["kind"] = ["rlib", "cdylib"]
         units = SHARDS.discover_targets(data, read=read)
         self.assertEqual(sum(target.kind == "lib" for target in units), 1)
-        self.assertEqual(SHARDS.assign_shards(units)[0][0].flags, ["--lib"])
+        self.assertEqual(next(t for t in units if t.kind == "lib").flags, ["--lib"])
 
     def test_bad_metadata_fails_instead_of_omitting_a_target(self):
         for data in [
@@ -185,6 +209,97 @@ class TestTargetPartition(unittest.TestCase):
                 SHARDS.assign_shards(units)
         with self.assertRaises(ValueError):
             SHARDS.cargo_commands([], targets())
+
+
+class TestLibrarySplit(unittest.TestCase):
+    def test_the_library_becomes_one_unit_for_each_module(self):
+        units = split_targets()
+        self.assertNotIn(SHARDS.Target("lib", "apassy"), units)
+        modules = {target.module: target.tests for target in units if target.kind == "lib"}
+        self.assertEqual(modules, {
+            "agent::mcp::tests": 1,
+            "crate": 1,
+            "desktop::ui::sync_tests": 2,
+            "desktop::ui::sync_tests::nested": 1,
+            "owner_vault::merge": 1,
+            "vault::merge": 1,
+        })
+        self.assertEqual(
+            {target for target in units if target.kind != "lib"},
+            {target for target in targets() if target.kind != "lib"},
+        )
+
+    def test_exact_names_run_each_library_test_in_one_group(self):
+        units = split_targets()
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count):
+                groups = SHARDS.assign_shards(units, shard_count)
+                SHARDS.check_partition(groups, units, {}, LIB_TESTS)
+                names = []
+                for group in groups:
+                    for command in SHARDS.cargo_commands(group, units, LIB_TESTS):
+                        if "--exact" in command:
+                            self.assertEqual(command[:7], SHARDS.CARGO_TEST + ["--lib", "--"])
+                            self.assertIn("--test-threads=1", command)
+                            names.extend(library_names(command))
+                        else:
+                            self.assertNotIn("--lib", command)
+                self.assertEqual(sorted(names), LIB_TESTS)
+
+    def test_measured_library_modules_spread_over_the_groups(self):
+        units = split_targets()
+        heavy = library("desktop::ui::sync_tests")
+        self.assertEqual(heavy.seconds, SHARDS.ESTIMATED_SECONDS[heavy.key])
+        self.assertGreater(heavy.seconds, 60)
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count):
+                groups = SHARDS.assign_shards(units, shard_count)
+                holders = {i for i, group in enumerate(groups) for t in group if t.kind == "lib"}
+                self.assertGreater(len(holders), 1)
+
+    def test_an_unmeasured_library_module_is_estimated_by_its_test_count(self):
+        self.assertNotIn(library("future::module").key, SHARDS.ESTIMATED_SECONDS)
+        self.assertEqual(library("future::module", tests=10).seconds, 10 * SHARDS.LIBRARY_SECONDS_PER_TEST)
+        self.assertEqual(library("future::module", tests=1).seconds, 1.0)
+        self.assertEqual(library("future::module", tests=1), library("future::module", tests=9))
+
+    def test_a_test_is_in_the_module_of_its_path(self):
+        self.assertEqual(SHARDS.module_of("a::b::test"), "a::b")
+        self.assertEqual(SHARDS.module_of("root_test"), "crate")
+
+    def test_bad_library_lists_fail(self):
+        for tests in [[], ["a::t", "a::t"]]:
+            with self.subTest(tests=tests), self.assertRaises(ValueError):
+                SHARDS.split_library(targets(), tests)
+        without = [target for target in targets() if target.kind != "lib"]
+        with self.assertRaises(ValueError):
+            SHARDS.split_library(without, LIB_TESTS)
+
+    def test_a_listed_library_test_outside_the_groups_fails(self):
+        units = split_targets()
+        groups = SHARDS.assign_shards(units, 3)
+        with self.assertRaises(ValueError):
+            SHARDS.check_partition(groups, units, {}, LIB_TESTS + ["new_module::test"])
+
+    def test_a_library_module_that_selects_no_test_fails(self):
+        with self.assertRaises(ValueError):
+            SHARDS.cargo_commands([library("removed")], split_targets(), LIB_TESTS)
+
+    def test_the_log_counts_exact_names(self):
+        command = SHARDS.CARGO_TEST + ["--lib", "--", "--test-threads=1", "--exact", "a::x", "b::y"]
+        self.assertEqual(
+            SHARDS.describe(command),
+            "cargo test --offline --locked --all-features --lib -- --test-threads=1 --exact <2 tests by name>",
+        )
+        self.assertEqual(SHARDS.describe(["cargo", "test", "a b"]), "cargo test 'a b'")
+
+    def test_the_weights_file_is_valid_and_rejects_bad_entries(self):
+        self.assertTrue(SHARDS.read_weights())
+        for data in [{}, {"seconds": []}, {"seconds": {"lib": 1}}, {"seconds": {"lib:x": -1}},
+                     {"seconds": {"lib:x": True}}, {"seconds": {"lib:x": "1"}}]:
+            with self.subTest(data=data), patch.object(SHARDS.Path, "read_text", return_value=json.dumps(data)):
+                with self.assertRaises(ValueError):
+                    SHARDS.read_weights()
 
 
 class TestCommands(unittest.TestCase):
@@ -273,68 +388,104 @@ class TestCommandLine(unittest.TestCase):
         tests = "".join(f"{name}::case: test\n" for name in IT_MODULES)
         return subprocess.CompletedProcess([], 0, stdout=tests)
 
+    def library_result(self):
+        tests = "".join(f"{name}: test\n" for name in LIB_TESTS) + f"\n{len(LIB_TESTS)} tests, 0 benchmarks\n"
+        return subprocess.CompletedProcess([], 0, stdout=tests)
+
     def groups(self, shard_count):
-        return SHARDS.assign_shards(targets(), shard_count)
+        return SHARDS.assign_shards(split_targets(), shard_count)
 
-    def test_list_only_reads_metadata(self):
-        code, run = self.run_main(["--list"], [self.metadata_result()])
-        self.assertEqual(code, 0)
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args.args[0], ["cargo", "metadata", "--offline", "--locked", "--all-features", "--no-deps", "--format-version", "1"])
+    def commands(self, shard_count, shard):
+        return SHARDS.cargo_commands(self.groups(shard_count)[shard], split_targets(), LIB_TESTS)
 
-    def test_list_check_lists_the_module_program(self):
-        code, run = self.run_main(["--list", "--check"], [self.metadata_result(), self.list_result()])
+    def test_list_reads_metadata_and_the_library_tests(self):
+        code, run = self.run_main(["--list"], [self.metadata_result(), self.library_result()])
         self.assertEqual(code, 0)
         self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["cargo", "metadata", "--offline", "--locked", "--all-features", "--no-deps", "--format-version", "1"])
+        self.assertEqual(run.call_args.args[0], SHARDS.LIBRARY_LIST_COMMAND)
+
+    def test_list_check_lists_the_module_program(self):
+        code, run = self.run_main(
+            ["--list", "--check"], [self.metadata_result(), self.library_result(), self.list_result()]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_count, 3)
         self.assertEqual(run.call_args.args[0], SHARDS.list_command("it"))
 
     def test_list_check_fails_on_a_test_outside_the_modules(self):
         listed = subprocess.CompletedProcess([], 0, stdout="top_level: test\n")
-        code, _run = self.run_main(["--list", "--check"], [self.metadata_result(), listed])
+        code, _run = self.run_main(["--list", "--check"], [self.metadata_result(), self.library_result(), listed])
         self.assertEqual(code, 1)
 
     def test_list_uses_selected_shard_count(self):
         for shard_count in (3, 4):
             with self.subTest(shard_count=shard_count), contextlib.redirect_stdout(io.StringIO()) as output:
                 with patch.object(SHARDS, "read_text", side_effect=read), \
-                        patch.object(SHARDS.subprocess, "run", return_value=self.metadata_result()) as run:
+                        patch.object(SHARDS.subprocess, "run", side_effect=[self.metadata_result(), self.library_result()]) as run:
                     code = SHARDS.main(["--list", "--shard-count", str(shard_count)])
                 self.assertEqual(code, 0)
-                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_count, 2)
                 self.assertEqual(output.getvalue().count("Group "), shard_count)
 
-    def test_library_group_runs_without_a_test_list(self):
-        code, run = self.run_main(["--shard", "0"], [self.metadata_result(), subprocess.CompletedProcess([], 0)])
-        self.assertEqual(code, 0)
-        self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args.args[0], SHARDS.CARGO_TEST + ["--lib", "--", "--test-threads=1"])
+    def test_each_group_lists_then_runs_its_commands(self):
+        for shard_count in (3, 4):
+            exact = 0
+            for shard in range(shard_count):
+                with self.subTest(shard_count=shard_count, shard=shard):
+                    expected = self.commands(shard_count, shard)
+                    programs = SHARDS.module_programs(self.groups(shard_count)[shard])
+                    code, run = self.run_main(
+                        ["--shard", str(shard), "--shard-count", str(shard_count)],
+                        [self.metadata_result(), self.library_result()]
+                        + [self.list_result() for _ in programs]
+                        + [subprocess.CompletedProcess([], 0) for _ in expected],
+                    )
+                    self.assertEqual(code, 0)
+                    calls = [call.args[0] for call in run.call_args_list]
+                    self.assertEqual(calls[1], SHARDS.LIBRARY_LIST_COMMAND)
+                    self.assertEqual(calls[2:2 + len(programs)], [SHARDS.list_command(p) for p in programs])
+                    self.assertEqual(calls[2 + len(programs):], expected)
+                    exact += sum("--exact" in command for command in expected)
+            self.assertGreater(exact, 1)
 
     def test_test_failure_exit_code_is_preserved_and_later_commands_run(self):
         for shard_count in (3, 4):
             with self.subTest(shard_count=shard_count):
                 shard = next(
-                    index for index, group in enumerate(self.groups(shard_count))
-                    if len(SHARDS.cargo_commands(group, targets())) == 2
+                    index for index in range(shard_count) if len(self.commands(shard_count, index)) >= 2
                 )
-                expected = SHARDS.cargo_commands(self.groups(shard_count)[shard], targets())
+                expected = self.commands(shard_count, shard)
+                programs = SHARDS.module_programs(self.groups(shard_count)[shard])
                 code, run = self.run_main(
                     ["--shard", str(shard), "--shard-count", str(shard_count)],
-                    [
-                        self.metadata_result(),
-                        self.list_result(),
-                        subprocess.CompletedProcess([], 101),
-                        subprocess.CompletedProcess([], 0),
-                    ],
+                    [self.metadata_result(), self.library_result()]
+                    + [self.list_result() for _ in programs]
+                    + [subprocess.CompletedProcess([], 101)]
+                    + [subprocess.CompletedProcess([], 0) for _ in expected[1:]],
                 )
                 self.assertEqual(code, 101)
-                self.assertEqual(run.call_count, 4)
-                self.assertEqual(run.call_args_list[1].args[0], SHARDS.list_command("it"))
-                self.assertEqual([call.args[0] for call in run.call_args_list[2:]], expected)
+                self.assertEqual(run.call_count, 2 + len(programs) + len(expected))
+                self.assertEqual([call.args[0] for call in run.call_args_list[2 + len(programs):]], expected)
                 self.assertEqual(run.call_args.kwargs["cwd"], SHARDS.ROOT)
 
     def test_a_broken_partition_does_not_run_tests(self):
         listed = subprocess.CompletedProcess([], 0, stdout="top_level: test\n")
-        code, run = self.run_main(["--shard", "1"], [self.metadata_result(), listed])
+        shard = next(index for index in range(4) if SHARDS.module_programs(self.groups(4)[index]))
+        code, run = self.run_main(["--shard", str(shard)], [self.metadata_result(), self.library_result(), listed])
+        self.assertEqual(code, 1)
+        self.assertEqual(run.call_count, 3)
+
+    def test_library_list_failure_exit_code_is_preserved(self):
+        code, run = self.run_main(
+            ["--shard", "0"], [self.metadata_result(), subprocess.CalledProcessError(101, ["cargo", "test"])]
+        )
+        self.assertEqual(code, 101)
+        self.assertEqual(run.call_count, 2)
+
+    def test_an_empty_library_list_does_not_run_tests(self):
+        empty = subprocess.CompletedProcess([], 0, stdout="0 tests, 0 benchmarks\n")
+        code, run = self.run_main(["--shard", "0"], [self.metadata_result(), empty])
         self.assertEqual(code, 1)
         self.assertEqual(run.call_count, 2)
 

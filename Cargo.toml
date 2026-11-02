@@ -1,6 +1,6 @@
 [package]
 name = "apassy"
-version = "0.5.13"
+version = "0.5.14"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -11,7 +11,7 @@ description = "A personal credential manager with controlled agent access"
 autotests = false
 
 [workspace]
-members = [".", "ios/ApassyCore"]
+members = [".", "ios/ApassyCore", "crates/apassy-relay"]
 default-members = ["."]
 
 [features]

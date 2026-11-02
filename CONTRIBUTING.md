@@ -104,6 +104,7 @@ Use one feature set for everyday commands, `--all-features`, the set that CI tes
 ## Pull requests
 
 - One change per pull request. A pack and a code change are two pull requests.
+- Open the pull request as a draft while you still push to it, and mark it ready when it is complete. A draft run skips the macOS test groups; the ready event runs the full suite ([CI duration](docs/operations/release.md#ci-duration-and-binary-artifacts)).
 - The description says what changes for the owner and why. For a pack: the tool, the entries, and the replay counts.
 - Update the document that describes the changed behavior in the same pull request. A document that says something the code does not do is a bug.
 - A maintainer reviews within two weeks. Apassy has one maintainer, so a large pull request without an issue first may wait.

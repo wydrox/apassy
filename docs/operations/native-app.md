@@ -220,11 +220,11 @@ A message is English text for logs. It never contains a secret. Code must use `e
 | Command | Request fields | Success fields | Runs in | Prompt |
 | --- | --- | --- | --- | --- |
 | `ping` | none | `protocol` (1), `helper_version`, `bundle_id` (or null); the helpers also `keychain_access_group` (or null) and `biometry` (`available` or an error code) | all | no |
-| `authenticate` | `reason` (1 to 200 characters) | none | `apassy-helper` | Touch ID |
+| `authenticate` | `reason` (1 to 200 characters), optional `title` (1 to 60 characters) | none | `apassy-helper` | Touch ID |
 | `clipboard_write` | `secret_b64` (standard base64 of UTF-8, at most 65536 decoded bytes), `owner` (caller-generated random 128-bit marker as 32 lowercase hex characters) | `owner` (the same marker), `change_count` (pasteboard write identity); no value | `apassy-helper` | none; the desktop must obtain a fresh exact-field owner proof first |
 | `clipboard_clear` | `owner`, optional `change_count` from that write; owner-only is for lost-acknowledgement cleanup | none | `apassy-helper` | no |
 | `keychain_store` | `account`, `secret_b64` (standard base64, 1 to 4096 bytes) | `access_group` | keychain helper | no |
-| `keychain_read` | `account`, `reason` | `secret_b64` | keychain helper | Touch ID |
+| `keychain_read` | `account`, `reason`, optional `title` | `secret_b64` | keychain helper | Touch ID |
 | `keychain_delete` | `account` | `deleted` (bool) | keychain helper | no |
 | `keychain_exists` | `account` | `exists`, `biometry_changed` (bool) | keychain helper | no |
 | `ubiquity_status` | `path` (absolute, at most 1024 bytes, no control characters), `download` (bool, optional) | `ubiquitous` (bool); for an iCloud file also `status` (`current`, `downloaded`, `not_downloaded`, or `unknown`), `downloading`, `download_error`, and `download_requested` (bool). A file that is not there: `not_found`. | `apassy-helper` | no |
@@ -266,6 +266,43 @@ Error codes:
 | `notifications_denied` | Notifications are not allowed, or the owner has not decided yet | Delivery failure. Keep the event in the inbox. Read `notify_status` for the next step. |
 | `caller_not_allowed` | The parent process of the helper or the notifier is not the signed Apassy app that contains it | Do not retry. Touch ID, the keychain, and notifications are not available to this caller. In the app, this means a broken or changed bundle. |
 | `internal` | Unexpected helper error | Show the message |
+
+Touch ID presentation: a non-activating, floating Apassy `NSPanel` embeds
+Apple's `LAAuthenticationView` using the same `LAContext` as the evaluation.
+The reason is visible above the fingerprint. The optional `title` is plain text,
+1 to 60 characters with no control characters, validated like `reason`. Omission
+uses "Confirm with Touch ID". Rust supplies fixed templates only: vault unlock
+uses "Unlock Apassy" and owner checks use action-kind headings. Request parsing
+already tolerates unknown fields, so this additive field keeps protocol 1 and
+the existing Rust ping equality check. Older helpers ignore the title.
+
+The stdin reader runs on a background thread with a one-request handshake.
+Handlers remain sequential on main, preserving lifecycle observers and all
+non-UI commands. Only panel requests initialize an accessory `NSApplication`
+(no Dock icon or menu bar) and run its event loop until completion. The panel
+is visible before evaluation starts. EOF exits after the current response;
+Rust cancellation still kills and reaps the process, removing its windows.
+Cancel/Esc invalidates the context and returns `cancelled`; Use Passphrase
+invalidates it and returns `fallback`. Return has no default action. The panel
+contains no passphrase field; passphrase entry remains in the main app.
+
+For keychain reads the existing biometric-state checks run first. The panel
+pre-evaluates an equivalent `SecAccessControl` (`whenPasscodeSetThisDeviceOnly`,
+`biometryCurrentSet`, `.useItem`), then reads with that context and authentication
+UI disabled through `context.interactionNotAllowed = true` on the pre-evaluated
+context, the replacement for the deprecated `kSecUseAuthenticationUI` query key.
+If the keychain rejects this context with `errSecAuthFailed` or
+`errSecInteractionNotAllowed`, it retries the previous system-dialog read with
+a fresh context. Biometric ACLs and existing error mapping remain in force.
+No-GUI sessions, failed application/panel setup, unavailable embedded UI, and
+non-interactive embedded evaluation retain the old system-dialog path. Fallback
+reasons go to `os_log` (`com.wydrox.apassy`, `touch-id-panel`) without request data.
+The current deployment target is macOS 15 and the embedded UI framework is linked
+strongly; macOS 12 guards do not constitute support for older macOS.
+
+`scripts/touch-id-panel-preview.sh OUT.png [title] [reason]` builds a temporary
+preview from the shared panel file, shows and renders it, and exits without
+policy evaluation or keychain access. This is screenshot evidence only.
 
 Touch ID policy: `authenticate` uses `LAPolicy.deviceOwnerAuthenticationWithBiometrics`. The macOS login password is not a fallback. The fallback button is "Use Apassy Passphrase" and gives `fallback`.
 
