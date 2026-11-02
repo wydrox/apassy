@@ -1,7 +1,9 @@
 # ADR 0035 — The owner chooses who hosts and who trains the bouncer brain
 
 Date: 2026-11-02.
-Status: PROPOSED. Direction from the owner on 2026-11-02: "The user has the choice:
+Status: ACCEPTED by the owner on 2026-11-02, with the implementation plan
+[implementation-plan-0035.md](../design/implementation-plan-0035.md) ("start with the plan").
+Direction from the owner on 2026-11-02: "The user has the choice:
 trains it themselves or delegates; hosts it themselves or delegates." The owner
 answered the open decisions on the same day (last section).
 Fits the draft [ADR 0036](0036-own-relay-open-source.md): all of Apassy is open

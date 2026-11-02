@@ -1,6 +1,6 @@
 # Implementation plan — who hosts and trains the bouncer brain (ADR 0035)
 
-Date: 2026-11-02. Status: plan proposed together with ADR 0035 (PROPOSED). No hosting or training code, schema change, release version, server, or payment change belongs to this PR. The PR changes only names in the docs and in app texts.
+Date: 2026-11-02. Status: accepted with ADR 0035 on 2026-11-02; wave 1 started. No hosting or training code, schema change, release version, server, or payment change belongs to this PR. The PR changes only names in the docs and in app texts.
 Decision: [ADR 0035](../adr/0035-bouncer-hosting-and-training-choice.md). Words: [bouncer.md](../operations/bouncer.md), Words. Related: [ADR 0018](../adr/0018-local-bouncer-shared-vault-relay.md), [ADR 0019](../adr/0019-relay-teams-and-accounts.md) section 5, [fine-tune.md](../operations/fine-tune.md) sections 6–13, [plan 0033](implementation-plan-0033.md) (format).
 Base inspected: branch `docs/adr-0035-bouncer-operators` at `80826eb8`, vault schema 23 (`src/vault/mod.rs:1277`), release 0.5.12.
 
