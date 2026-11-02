@@ -1,0 +1,37 @@
+# cargo-nextest settings (https://nexte.st/docs/configuration/). CI installs the
+# pinned version with scripts/ci-install-nextest.sh.
+#
+# nextest runs each test in its own process. So the tests no longer share the
+# process-wide state of the crate (the active rule packs, the live-wait registry,
+# the relay rate limits, the sync workers), and they can run at the same time.
+# A test that shares a resource outside its process (a fixed port, a fixed path, an
+# environment-dependent location, the Keychain) runs in a test group below.
+nextest-version = { recommended = "0.9.150" }
+
+[store]
+dir = "target/nextest"
+
+[test-groups]
+# One test at a time.
+serial = { max-threads = 1 }
+
+[profile.default]
+# A slow test is reported after a minute and stopped after five. The slowest test
+# takes about one minute (relay_feed::a_feed_rate_answer_makes_the_mac_wait_a_minute).
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# On macOS, the native helper tests build the real Swift helper and notifier with
+# `swiftc -o` into fixed paths under CARGO_TARGET_TMPDIR (`native-real`,
+# `native-release`, `notifier-real`, `notifier-release`), and write fixed wrapper
+# scripts there (tests/native_helper.rs, `build_swift` and `dev_wrapper`). Two test
+# processes at once would write a program while another runs it.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'binary_id(apassy::it) & test(/^native_helper::/)'
+test-group = "serial"
+
+[profile.ci]
+# Run every test, and show the output of each failure when it fails and at the end.
+fail-fast = false
+failure-output = "immediate-final"
+final-status-level = "slow"
