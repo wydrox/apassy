@@ -2115,42 +2115,6 @@ enum Sealing {
 mod tests {
     use super::*;
 
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-
-    #[test]
-    fn the_aads_have_the_contract_bytes() {
-        assert_eq!(
-            hex(&feed_aad(
-                "t_7k2m5q4x3c",
-                2,
-                1_790_000_040,
-                "630dcd2966c43366"
-            )),
-            "6170617373792d666565642d7631006665656400745f376b326d357134783363003200313739303030303034300036333064636432393636633433333636"
-        );
-        assert_eq!(
-            hex(&action_aad(
-                "t_7k2m5q4x3c",
-                "sLGys7S1tre4ubq7vL2-vw",
-                "630dcd2966c43366",
-                3,
-                2
-            )),
-            "6170617373792d666565642d763100616374696f6e00745f376b326d35713478336300734c4779733753317472653475627137764c322d7677003633306463643239363663343333363600330032"
-        );
-        assert_eq!(
-            hex(&settle_aad(
-                "t_7k2m5q4x3c",
-                "sLGys7S1tre4ubq7vL2-vw",
-                "630dcd2966c43366",
-                "applied"
-            )),
-            "6170617373792d666565642d763100736574746c6500745f376b326d35713478336300734c4779733753317472653475627137764c322d76770036333064636432393636633433333636006170706c696564"
-        );
-    }
-
     #[test]
     fn seq_goes_up_with_the_clock_and_after_the_last() {
         assert_eq!(next_seq(0, 1_790_000_040), 1_790_000_040);

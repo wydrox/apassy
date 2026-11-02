@@ -9,33 +9,16 @@ use tempfile::TempDir;
 
 const PASS: &str = "automatic-access-synthetic-pass";
 
+/// An OTP setup key never goes to a process: not by the automatic choice (labels and URIs
+/// in any case and spacing), not by a retained explicit binding, and not through the
+/// catalog, an access request, or a process grant.
 #[test]
 fn automatic_process_binding_does_not_choose_an_otp_setup_key() {
     let (_dir, mut vault) = fixture();
-    for (name, value) in [
-        ("x_4f6e652d74696d652070617373776f7264", "GEZDGNBVGY3TQOJQ"),
-        (
-            "x_526567696f6e",
-            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
-        ),
-    ] {
-        let item = add(
-            &mut vault,
-            CredentialKind::Custom,
-            vec![field(name, value, true)],
-        );
-        assert!(
-            vault.process_binding(item).unwrap().is_none(),
-            "OTP seeds never enter a process; generated codes have a separate selector"
-        );
-    }
-}
-
-#[test]
-fn automatic_process_binding_ignores_otp_labels_uris_case_and_leading_whitespace() {
-    let (_dir, mut vault) = fixture();
     let uri = "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ";
     for (name, value) in [
+        ("x_4f6e652d74696d652070617373776f7264", "GEZDGNBVGY3TQOJQ"),
+        ("x_526567696f6e", uri),
         // Labels of a one-time password, in any case and spacing.
         ("x_4f5450", "GEZDGNBVGY3TQOJQ"),
         ("x_544f5450203220", "GEZDGNBVGY3TQOJQ"),
@@ -52,9 +35,109 @@ fn automatic_process_binding_ignores_otp_labels_uris_case_and_leading_whitespace
         );
         assert!(
             vault.process_binding(item).unwrap().is_none(),
-            "{name} {value}"
+            "{name} {value}: OTP seeds never enter a process; generated codes have a separate selector"
         );
     }
+
+    // An explicit OTP seed binding is retained but not delivered to agents.
+    let name = "x_4f6e652d74696d652070617373776f7264";
+    let item = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field(name, "GEZDGNBVGY3TQOJQ", true)],
+    );
+    vault
+        .set_env_binding(item, "FIXTURE_OTP_SETUP", name)
+        .unwrap();
+    let binding = vault.env_binding(item).unwrap().unwrap();
+    assert_eq!(binding.field, name);
+    assert_eq!(binding.env_name, "FIXTURE_OTP_SETUP");
+    assert!(vault.process_binding(item).unwrap().is_none());
+    assert_eq!(vault.code_field(item).unwrap().as_deref(), Some(name));
+
+    // An OTP-only item never grants seed access, even after an explicit binding.
+    let otp = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field(name, "GEZDGNBVGY3TQOJQ", true)],
+    );
+    let token = add(
+        &mut vault,
+        CredentialKind::ApiKey,
+        vec![field(
+            "token",
+            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
+            true,
+        )],
+    );
+    let (agent, _) = vault.register_agent("Synthetic agent").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    for item in [otp, token] {
+        assert!(vault.process_binding(item).unwrap().is_none());
+        let entry = vault
+            .catalog()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.item_id == item)
+            .unwrap();
+        assert!(!entry.can_use_in_process);
+        // The setup key itself is never listed as a visible detail.
+        assert!(
+            entry
+                .details
+                .iter()
+                .all(|(_, value)| !value.contains("otpauth"))
+        );
+        assert_eq!(
+            vault
+                .request_access(agent.id, item, "Use the test service", "/tmp")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+        assert_eq!(
+            vault
+                .set_exec_grant(agent.id, item, "/tmp", ExecMode::Ask)
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+    }
+    // The owner still sees the item, so a field can be selected.
+    assert!(
+        vault
+            .agent_credentials()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.0 == otp)
+    );
+    // Legacy metadata can still name the seed; ADR 0034 never delivers it.
+    vault.set_env_binding(otp, "", name).unwrap();
+    let entry = vault
+        .catalog()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.item_id == otp)
+        .unwrap();
+    assert!(!entry.can_use_in_process);
+    assert_eq!(vault.code_field(otp).unwrap().as_deref(), Some(name));
+    assert_eq!(
+        vault
+            .request_access(agent.id, otp, "Use the test service", "/tmp")
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    assert_eq!(
+        vault
+            .set_exec_grant(agent.id, otp, "/tmp", ExecMode::Ask)
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    // Clearing the legacy choice still cannot expose the seed.
+    vault.clear_env_binding(otp).unwrap();
+    assert!(vault.process_binding(otp).unwrap().is_none());
 }
 
 #[test]
@@ -176,113 +259,6 @@ fn a_passkey_field_never_goes_to_a_process() {
         vault.process_binding(item).unwrap().unwrap().field,
         "api_secret"
     );
-}
-
-#[test]
-fn an_explicit_otp_seed_binding_is_retained_but_not_delivered_to_agents() {
-    let (_dir, mut vault) = fixture();
-    let name = "x_4f6e652d74696d652070617373776f7264";
-    let item = add(
-        &mut vault,
-        CredentialKind::Custom,
-        vec![field(name, "GEZDGNBVGY3TQOJQ", true)],
-    );
-    vault
-        .set_env_binding(item, "FIXTURE_OTP_SETUP", name)
-        .unwrap();
-    let binding = vault.env_binding(item).unwrap().unwrap();
-    assert_eq!(binding.field, name);
-    assert_eq!(binding.env_name, "FIXTURE_OTP_SETUP");
-    assert!(vault.process_binding(item).unwrap().is_none());
-    assert_eq!(vault.code_field(item).unwrap().as_deref(), Some(name));
-}
-
-#[test]
-fn an_otp_only_item_never_grants_seed_access_even_after_explicit_binding() {
-    let (_dir, mut vault) = fixture();
-    let name = "x_4f6e652d74696d652070617373776f7264";
-    let otp = add(
-        &mut vault,
-        CredentialKind::Custom,
-        vec![field(name, "GEZDGNBVGY3TQOJQ", true)],
-    );
-    let token = add(
-        &mut vault,
-        CredentialKind::ApiKey,
-        vec![field(
-            "token",
-            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
-            true,
-        )],
-    );
-    let (agent, _) = vault.register_agent("Synthetic agent").unwrap();
-    vault.set_agent_sees_all(agent.id, true).unwrap();
-    for item in [otp, token] {
-        assert!(vault.process_binding(item).unwrap().is_none());
-        let entry = vault
-            .catalog()
-            .unwrap()
-            .into_iter()
-            .find(|entry| entry.item_id == item)
-            .unwrap();
-        assert!(!entry.can_use_in_process);
-        // The setup key itself is never listed as a visible detail.
-        assert!(
-            entry
-                .details
-                .iter()
-                .all(|(_, value)| !value.contains("otpauth"))
-        );
-        assert_eq!(
-            vault
-                .request_access(agent.id, item, "Use the test service", "/tmp")
-                .unwrap_err()
-                .kind(),
-            VaultErrorKind::InvalidInput
-        );
-        assert_eq!(
-            vault
-                .set_exec_grant(agent.id, item, "/tmp", ExecMode::Ask)
-                .unwrap_err()
-                .kind(),
-            VaultErrorKind::InvalidInput
-        );
-    }
-    // The owner still sees the item, so a field can be selected.
-    assert!(
-        vault
-            .agent_credentials()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.0 == otp)
-    );
-    // Legacy metadata can still name the seed; ADR 0034 never delivers it.
-    vault.set_env_binding(otp, "", name).unwrap();
-    let entry = vault
-        .catalog()
-        .unwrap()
-        .into_iter()
-        .find(|entry| entry.item_id == otp)
-        .unwrap();
-    assert!(!entry.can_use_in_process);
-    assert_eq!(vault.code_field(otp).unwrap().as_deref(), Some(name));
-    assert_eq!(
-        vault
-            .request_access(agent.id, otp, "Use the test service", "/tmp")
-            .unwrap_err()
-            .kind(),
-        VaultErrorKind::InvalidInput
-    );
-    assert_eq!(
-        vault
-            .set_exec_grant(agent.id, otp, "/tmp", ExecMode::Ask)
-            .unwrap_err()
-            .kind(),
-        VaultErrorKind::InvalidInput
-    );
-    // Clearing the legacy choice still cannot expose the seed.
-    vault.clear_env_binding(otp).unwrap();
-    assert!(vault.process_binding(otp).unwrap().is_none());
 }
 
 #[test]

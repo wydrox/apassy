@@ -77,7 +77,10 @@ for (const query of ["", "?transform=manual"]) {
   });
 }
 
-for (const code of ["not_running", "bad_request", "bad_version"]) {
+// One app error is enough in the real browser: the code only selects the fallback, and
+// fixtures/passkey-bridge/background.unit.mjs checks the fallback for every such code
+// (bad_request and bad_version included).
+for (const code of ["not_running"]) {
   test(`the app returns ${code} before owner approval: the browser does the request`, async ({ ph }) => {
     await turnOn(ph);
     ph.setScenario({ passkey: { error: code } });

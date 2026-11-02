@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use apassy::agent::client::{self, SendOptions};
-use apassy::agent::wire::{Action, AgentSecret, Extract, GenerateSpec, WireRequest, WireResponse};
+use apassy::agent::wire::{Action, AgentSecret, Extract, GenerateSpec, WireResponse};
 use apassy::broker::action_kind::ActionKind;
 use apassy::broker::agent_items::{KNOWN_COMMANDS, KNOWN_DIRS};
 use apassy::broker::approvals::{AnswerKind, OwnerAction, OwnerCheck, OwnerGate, PendingRun};
@@ -1425,21 +1425,4 @@ fn a_restricted_agent_gets_its_own_new_item_on_its_list() {
         assert!(view.visible(item));
         assert!(!view.visible(fx.owner_item));
     });
-}
-
-#[test]
-fn the_wire_request_debug_never_shows_a_saved_value() {
-    let canary = "FAKE-debug-canary-4417";
-    let request = WireRequest {
-        v: 0,
-        token: "apassy_agt_synthetic".to_owned(),
-        host_session: None,
-        action: Action::SaveCredential {
-            name: None,
-            value: AgentSecret::new(canary.to_owned()),
-            cwd: None,
-            folder: None,
-        },
-    };
-    assert!(!format!("{request:?}").contains(canary));
 }

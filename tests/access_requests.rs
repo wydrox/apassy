@@ -173,48 +173,8 @@ fn fixture() -> Fixture {
 #[test]
 fn access_consent_does_not_answer_the_bouncer_and_failed_run_never_refunds_it() {
     let f = fixture();
-    f.allow();
-    let ctx = f.ctx.clone();
-    let request = f.run();
-    let task = std::thread::spawn(move || handle(&ctx, &request));
-    f.answer_execution();
-    let result = task.join().unwrap();
-    assert!(result.ok, "{result:?}");
-    assert_eq!(result.result.unwrap()["exit_code"], 17);
-    assert_eq!(f.status()["permit"], "consumed");
-    let retry = handle(&f.ctx, &f.run());
-    assert_eq!(retry.error.unwrap().code, "access_once_unavailable");
-}
-#[test]
-fn an_identical_inflight_retry_cannot_join_and_cancellation_fences_the_waiting_run() {
-    let f = fixture();
-    f.allow();
-    let ctx = f.ctx.clone();
-    let request = f.run();
-    let task = std::thread::spawn(move || handle(&ctx, &request));
-    let start = Instant::now();
-    while f.status()["permit"] != "consumed" {
-        assert!(start.elapsed() < Duration::from_secs(3));
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let retry = handle(&f.ctx, &f.run());
-    assert_eq!(retry.error.unwrap().code, "access_once_unavailable");
-    assert!(
-        handle(
-            &f.ctx,
-            &f.request(Action::CancelAccessRequest { request_id: f.id })
-        )
-        .ok
-    );
-    assert_eq!(
-        task.join().unwrap().error.unwrap().code,
-        "access_once_unavailable"
-    );
-    assert_eq!(f.status()["state"], "allowed_once");
-}
-#[test]
-fn status_and_cancel_neither_create_nor_expose_another_agents_request() {
-    let f = fixture();
+    // While the request is open, status and cancel of another agent neither create nor
+    // expose it.
     let count = f
         .ctx
         .vault
@@ -267,4 +227,42 @@ fn status_and_cancel_neither_create_nor_expose_another_agents_request() {
         count
     );
     assert_eq!(f.status()["state"], json!("open"));
+    f.allow();
+    let ctx = f.ctx.clone();
+    let request = f.run();
+    let task = std::thread::spawn(move || handle(&ctx, &request));
+    f.answer_execution();
+    let result = task.join().unwrap();
+    assert!(result.ok, "{result:?}");
+    assert_eq!(result.result.unwrap()["exit_code"], 17);
+    assert_eq!(f.status()["permit"], "consumed");
+    let retry = handle(&f.ctx, &f.run());
+    assert_eq!(retry.error.unwrap().code, "access_once_unavailable");
+}
+#[test]
+fn an_identical_inflight_retry_cannot_join_and_cancellation_fences_the_waiting_run() {
+    let f = fixture();
+    f.allow();
+    let ctx = f.ctx.clone();
+    let request = f.run();
+    let task = std::thread::spawn(move || handle(&ctx, &request));
+    let start = Instant::now();
+    while f.status()["permit"] != "consumed" {
+        assert!(start.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let retry = handle(&f.ctx, &f.run());
+    assert_eq!(retry.error.unwrap().code, "access_once_unavailable");
+    assert!(
+        handle(
+            &f.ctx,
+            &f.request(Action::CancelAccessRequest { request_id: f.id })
+        )
+        .ok
+    );
+    assert_eq!(
+        task.join().unwrap().error.unwrap().code,
+        "access_once_unavailable"
+    );
+    assert_eq!(f.status()["state"], "allowed_once");
 }

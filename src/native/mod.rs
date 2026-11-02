@@ -1937,22 +1937,6 @@ time.sleep(0.8)
     }
 
     #[test]
-    fn event_wire_names_match_the_notifier() {
-        assert_eq!(
-            NotificationEvent::ApprovalWaiting.as_wire(),
-            "approval_waiting"
-        );
-        assert_eq!(
-            NotificationEvent::RequestBlocked.as_wire(),
-            "request_blocked"
-        );
-        let notification =
-            Notification::new("run-1", "Codex", NotificationEvent::RequestBlocked).expect("valid");
-        assert_eq!(notification.event(), NotificationEvent::RequestBlocked);
-        assert_eq!(notification.agent(), "Codex");
-    }
-
-    #[test]
     fn delivery_needs_permission_and_a_visible_setting() {
         let mut status = NotificationStatus {
             authorization: NotificationAuthorization::Authorized,

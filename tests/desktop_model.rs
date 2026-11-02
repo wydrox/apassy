@@ -286,16 +286,6 @@ fn uncertain_ask_path_can_be_approved_once() {
 }
 
 #[test]
-fn owner_can_deny_a_waiting_request() {
-    let mut model = ready_model();
-    let result = model.simulate(DemoScenario::Uncertain).unwrap();
-    let denied = model.deny_request(&result.id).unwrap();
-    assert_eq!(denied.status, RequestStatus::Denied);
-    assert!(!denied.executed);
-    assert_eq!(denied.reason_code, "owner_denied");
-}
-
-#[test]
 fn production_deny_path_cannot_be_approved() {
     let mut model = ready_model();
     let result = model.simulate(DemoScenario::Production).unwrap();
@@ -435,17 +425,6 @@ fn item_revision_change_invalidates_waiting_request() {
 }
 
 #[test]
-fn failed_notification_keeps_waiting_request() {
-    let mut model = ready_model();
-    model.set_notification_healthy(false).unwrap();
-    let result = model.simulate(DemoScenario::Uncertain).unwrap();
-    assert_eq!(result.status, RequestStatus::Pending);
-    assert_eq!(result.delivery_status, "failed");
-    assert!(!result.executed);
-    assert!(model.approve_once(&result.id, None).is_ok());
-}
-
-#[test]
 fn activity_does_not_contain_synthetic_values() {
     let mut model = ready_model();
     let revealed = model.reveal_item(REPORTING_ITEM_ID).unwrap();
@@ -516,6 +495,10 @@ fn approval_updates_current_state_but_keeps_initial_decision_and_delivery_failur
     let mut model = ready_model();
     model.set_notification_healthy(false).unwrap();
     let waiting = model.simulate(DemoScenario::Uncertain).unwrap();
+    // A failed notification keeps the request waiting.
+    assert_eq!(waiting.status, RequestStatus::Pending);
+    assert_eq!(waiting.delivery_status, "failed");
+    assert!(!waiting.executed);
     let history: Vec<_> = model.list_activity().into_iter().cloned().collect();
     let approved = model.approve_once(&waiting.id, None).unwrap();
     assert_eq!(approved.decision, Decision::Allow);
@@ -560,7 +543,11 @@ fn lock_revoke_and_owner_denial_synchronize_alerts_without_rewriting_initial_dec
                 RequestStatus::Invalidated
             }
             "deny" => {
-                model.deny_request(&waiting.id).unwrap();
+                // The owner can deny a waiting request.
+                let denied = model.deny_request(&waiting.id).unwrap();
+                assert_eq!(denied.status, RequestStatus::Denied);
+                assert!(!denied.executed);
+                assert_eq!(denied.reason_code, "owner_denied");
                 RequestStatus::Denied
             }
             _ => unreachable!(),

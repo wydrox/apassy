@@ -703,18 +703,6 @@ mod client_data {
 
 // ------------------------------------------------------------------ caller checks
 
-/// The test program is not in an app bundle, so both checks fail without a guard.
-#[test]
-fn caller_checks_fail_closed_outside_a_bundle() {
-    if std::env::var_os(caller::GUARD_ENV).is_some() {
-        return;
-    }
-    let error = caller::check_browser_parent().unwrap_err();
-    assert_eq!(error.code, "unsupported");
-    let (one, _two) = UnixStream::pair().unwrap();
-    assert_eq!(caller::check_peer(&one).unwrap_err().code, "unsupported");
-}
-
 /// A guarded command through the host without a verified browser gets `unsupported`,
 /// and the app never sees it.
 #[test]

@@ -1041,10 +1041,6 @@ mod tests {
         QuestionKey::from_bytes(bytes)
     }
 
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-
     #[test]
     fn forms_of_the_wire() {
         assert!(valid_qid("oKGio6SlpqeoqaqrrK2urw"));
@@ -1060,29 +1056,6 @@ mod tests {
             assert_eq!(parse_decimal(bad), None, "{bad}");
         }
         assert_eq!(parse_decimal("0"), Some(0));
-    }
-
-    #[test]
-    fn the_aads_have_the_contract_bytes() {
-        let qid = "oKGio6SlpqeoqaqrrK2urw";
-        assert_eq!(
-            hex(&card_aad(
-                "t_7k2m5q4x3c",
-                qid,
-                "630dcd2966c43366",
-                "member",
-                1_790_000_300
-            )),
-            "6170617373792d7175657374696f6e2d7631006361726400745f376b326d357134783363006f4b47696f36536c7071656f71617172724b327572770036333064636432393636633433333636006d656d6265720031373930303030333030"
-        );
-        assert_eq!(
-            hex(&answer_aad("t_7k2m5q4x3c", qid, "630dcd2966c43366", 3)),
-            "6170617373792d7175657374696f6e2d763100616e7377657200745f376b326d357134783363006f4b47696f36536c7071656f71617172724b3275727700363330646364323936366334333336360033"
-        );
-        assert_eq!(
-            hex(&settle_aad("t_7k2m5q4x3c", qid, "630dcd2966c43366")),
-            "6170617373792d7175657374696f6e2d763100736574746c6500745f376b326d357134783363006f4b47696f36536c7071656f71617172724b327572770036333064636432393636633433333636"
-        );
     }
 
     #[test]

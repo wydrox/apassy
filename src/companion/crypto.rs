@@ -323,10 +323,7 @@ abababababababababababababababababababababababababababababababab
         );
         assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
         assert_eq!(hex(&[]), "");
-    }
-
-    #[test]
-    fn body_hash_of_the_vector_body() {
+        // The body hash of the vector body.
         assert_eq!(
             sha256_hex(br#"{"remember":false}"#),
             "c21638494d6f31b1eb753c01dc27df1491cafaa42e908bf82eaede49134884c3"
@@ -346,12 +343,8 @@ abababababababababababababababababababababababababababababababab
     }
 
     #[test]
-    fn the_pair_string_matches_the_vector() {
-        assert_eq!(vector_pair_string(), EXPECTED_PAIR_STRING);
-    }
-
-    #[test]
     fn the_pair_proof_matches_the_vector() {
+        assert_eq!(vector_pair_string(), EXPECTED_PAIR_STRING);
         let secret = bytes(SECRET);
         let proof = hmac_sha256(&secret, vector_pair_string().as_bytes());
         assert_eq!(encode_url(&proof), PROOF);

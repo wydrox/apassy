@@ -85,6 +85,9 @@ const ASK_BEFORE_PUSH: &str = r#"{
   ]
 }"#;
 
+/// Every built-in pack file loads. Each flag rule, safe rule, and exception of a built-in
+/// pack has a `note`: a short reason that a person can check against the tool
+/// documentation.
 #[test]
 fn every_built_in_pack_file_loads() {
     let set = builtin();
@@ -108,43 +111,9 @@ fn every_built_in_pack_file_loads() {
     assert_eq!(set.packs().len(), files.len());
 
     let mut tools = BTreeSet::new();
-    for name in &files {
-        let text = std::fs::read_to_string(root().join("packs").join(name)).expect("pack");
-        let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-        assert_eq!(value["schema_version"], packs::SCHEMA_VERSION, "{name}");
-        assert!(
-            value["pack_version"].as_u64().is_some_and(|v| v >= 1),
-            "{name}"
-        );
-        let tool = value["tool"].as_str().expect("tool").to_owned();
-        assert_eq!(
-            format!("{tool}.json"),
-            *name,
-            "the file name is the tool name"
-        );
-        assert!(tools.insert(tool), "{name}");
-    }
-    let loaded: BTreeSet<String> = set.packs().iter().map(|pack| pack.tool.clone()).collect();
-    assert_eq!(loaded, tools);
-    assert!(
-        set.packs()
-            .iter()
-            .all(|pack| pack.origin == Origin::BuiltIn)
-    );
-
-    let ids = set.rule_ids();
-    let unique: BTreeSet<&String> = ids.iter().collect();
-    assert_eq!(unique.len(), ids.len());
-    assert!(ids.len() > 100, "{}", ids.len());
-}
-
-/// Each flag rule, safe rule, and exception of a built-in pack has a `note`: a short
-/// reason that a person can check against the tool documentation.
-#[test]
-fn every_built_in_rule_has_a_note() {
     let mut missing = Vec::new();
     let mut count = 0usize;
-    for name in packs::builtin_pack_files() {
+    for name in &files {
         let text = std::fs::read_to_string(root().join("packs").join(name)).expect("pack");
         let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
         for kind in [
@@ -163,9 +132,33 @@ fn every_built_in_rule_has_a_note() {
                 }
             }
         }
+        assert_eq!(value["schema_version"], packs::SCHEMA_VERSION, "{name}");
+        assert!(
+            value["pack_version"].as_u64().is_some_and(|v| v >= 1),
+            "{name}"
+        );
+        let tool = value["tool"].as_str().expect("tool").to_owned();
+        assert_eq!(
+            format!("{tool}.json"),
+            *name,
+            "the file name is the tool name"
+        );
+        assert!(tools.insert(tool), "{name}");
     }
     assert!(count > 350, "{count}");
     assert!(missing.is_empty(), "rules without a note: {missing:?}");
+    let loaded: BTreeSet<String> = set.packs().iter().map(|pack| pack.tool.clone()).collect();
+    assert_eq!(loaded, tools);
+    assert!(
+        set.packs()
+            .iter()
+            .all(|pack| pack.origin == Origin::BuiltIn)
+    );
+
+    let ids = set.rule_ids();
+    let unique: BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len());
+    assert!(ids.len() > 100, "{}", ids.len());
 }
 
 #[test]

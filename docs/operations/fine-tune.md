@@ -300,7 +300,7 @@ count. See [learning](learning.md), section 5.
 
 | What must hold | Test |
 | --- | --- |
-| A candidate that answers the opposite of the active model changes no decision | `shadow_answers_never_change_a_decision` (`tests/shadow_mode.rs`): the same four decisions with and without the candidate, 3 candidate calls (the request with a rule flag skips it), and the rows give 2 owner decisions, 1 agreement, and 1 allowed denial |
+| A candidate that answers the opposite of the active model changes no decision | `a_candidate_that_is_down_slow_or_another_version_changes_nothing` (`tests/shadow_mode.rs`), first part: the same four decisions with and without the candidate, 3 candidate calls (the request with a rule flag skips it), and the rows give 2 owner decisions, 1 agreement, and 1 allowed denial |
 | A candidate that is down, answers with another version, or is slow changes nothing | `a_candidate_that_is_down_slow_or_another_version_changes_nothing`: the same decisions, "no answer" rows, and a run that ends before a held candidate answer |
 | The candidate decides with the broker policy | `candidate_answer_uses_the_broker_policy` (`src/broker/shadow.rs`) |
 

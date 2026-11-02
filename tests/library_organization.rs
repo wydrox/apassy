@@ -62,10 +62,93 @@ fn create_in_chosen_folder_is_atomic_when_destination_was_deleted() {
     assert!(vault.search("Must stay unsaved").unwrap().is_empty());
 }
 
+/// One vault for the folder moves of the library: the identity search (first, while the
+/// vault holds only its three items), twenty exact ids that move and undo, invalid
+/// batches, a stale undo, and an undo after a delete. Each case has its own folders and
+/// items.
 #[test]
 fn twenty_exact_ids_move_and_undo_without_changing_authority_or_existing_history() {
     let dir = TempDir::new().unwrap();
     let mut vault = vault(&dir);
+    // Identity search finds a visible email, domain and host, but never a secret or a
+    // custom field. It ends with the vault locked.
+    {
+        let login = vault
+            .add(ItemDraft {
+                title: "Personal account".to_owned(),
+                kind: CredentialKind::Login,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![
+                    field("username", "person@identity.example", false),
+                    field("website", "https://portal.lookup.example/login", false),
+                    field("password", "SYNTH-identity-secret", true),
+                    field("x_custom", "SYNTH-custom-visible", false),
+                ],
+            })
+            .unwrap();
+        let host = vault
+            .add(ItemDraft {
+                fields: vec![
+                    field("token", "SYNTH-host-token", true),
+                    field("host", "db.lookup.example", false),
+                ],
+                ..api("Host account")
+            })
+            .unwrap();
+        let hidden = vault
+            .add(ItemDraft {
+                fields: vec![
+                    field("token", "SYNTH-other-token", true),
+                    field("username", "hidden-identity@example.invalid", true),
+                ],
+                ..api("Hidden identity")
+            })
+            .unwrap();
+        assert_eq!(
+            vault.search_identities("PERSON@IDENTITY.EXAMPLE").unwrap()[0].id,
+            login.id
+        );
+        assert_eq!(
+            vault.search_identities("portal.lookup.example").unwrap()[0].id,
+            login.id
+        );
+        assert_eq!(
+            vault.search_identities("db.lookup.example").unwrap()[0].id,
+            host.id
+        );
+        for excluded in [
+            "SYNTH-identity-secret",
+            "SYNTH-host-token",
+            "SYNTH-custom-visible",
+            "hidden-identity@example.invalid",
+            "' OR 1=1 --",
+        ] {
+            assert!(
+                vault.search_identities(excluded).unwrap().is_empty(),
+                "matched {excluded}"
+            );
+        }
+        assert!(
+            vault.search("person@identity.example").unwrap().is_empty(),
+            "legacy metadata API keeps its contract"
+        );
+        assert_eq!(vault.search_identities("").unwrap().len(), 3);
+        assert_eq!(
+            vault.details(hidden.id).unwrap().summary.revision,
+            hidden.revision
+        );
+        vault.lock().unwrap();
+        assert_eq!(
+            vault
+                .search_identities("lookup.example")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::Locked
+        );
+    }
+    vault.unlock(PASS).unwrap();
+
     let a = vault.create_folder(None, "A").unwrap();
     let b = vault.create_folder(None, "B").unwrap();
     let ids: Vec<_> = (0..20)
@@ -121,66 +204,85 @@ fn twenty_exact_ids_move_and_undo_without_changing_authority_or_existing_history
         vault.undo_item_folder_moves(&moves).unwrap_err().kind(),
         VaultErrorKind::Conflict
     );
-}
 
-#[test]
-fn invalid_batch_ids_or_destination_never_partially_move_items() {
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let b = vault.create_folder(None, "B").unwrap();
-    let first = vault.add(api("First")).unwrap().id;
-    let second = vault.add(api("Second")).unwrap().id;
-    let events = vault.item_events(first, MAX_ITEM_EVENTS).unwrap();
-    for (ids, folder, expected) in [
-        (
-            vec![first, 999_999],
-            Some(b.uuid.as_str()),
-            VaultErrorKind::NotFound,
-        ),
-        (
-            vec![first, first],
-            Some(b.uuid.as_str()),
-            VaultErrorKind::InvalidInput,
-        ),
-        (
-            vec![first, second],
-            Some("missing-folder"),
-            VaultErrorKind::NotFound,
-        ),
-        (
-            vec![first, u64::MAX],
-            Some(b.uuid.as_str()),
-            VaultErrorKind::InvalidInput,
-        ),
-    ] {
-        assert_eq!(
-            vault.move_items_to_folder(&ids, folder).unwrap_err().kind(),
-            expected
-        );
-        assert_eq!(vault.item_folder(first).unwrap(), None);
-        assert_eq!(vault.item_folder(second).unwrap(), None);
-        assert_eq!(vault.item_events(first, MAX_ITEM_EVENTS).unwrap(), events);
+    // Invalid batch ids or an invalid destination never partially move items.
+    {
+        let b = vault.create_folder(None, "Batch B").unwrap();
+        let first = vault.add(api("First")).unwrap().id;
+        let second = vault.add(api("Second")).unwrap().id;
+        let events = vault.item_events(first, MAX_ITEM_EVENTS).unwrap();
+        for (ids, folder, expected) in [
+            (
+                vec![first, 999_999],
+                Some(b.uuid.as_str()),
+                VaultErrorKind::NotFound,
+            ),
+            (
+                vec![first, first],
+                Some(b.uuid.as_str()),
+                VaultErrorKind::InvalidInput,
+            ),
+            (
+                vec![first, second],
+                Some("missing-folder"),
+                VaultErrorKind::NotFound,
+            ),
+            (
+                vec![first, u64::MAX],
+                Some(b.uuid.as_str()),
+                VaultErrorKind::InvalidInput,
+            ),
+        ] {
+            assert_eq!(
+                vault.move_items_to_folder(&ids, folder).unwrap_err().kind(),
+                expected
+            );
+            assert_eq!(vault.item_folder(first).unwrap(), None);
+            assert_eq!(vault.item_folder(second).unwrap(), None);
+            assert_eq!(vault.item_events(first, MAX_ITEM_EVENTS).unwrap(), events);
+        }
     }
-}
 
-#[test]
-fn stale_undo_rejects_later_moves_even_when_the_item_returns_to_destination() {
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let b = vault.create_folder(None, "B").unwrap();
-    let c = vault.create_folder(None, "C").unwrap();
-    let ids = [
-        vault.add(api("First")).unwrap().id,
-        vault.add(api("Second")).unwrap().id,
-    ];
-    let moves = vault.move_items_to_folder(&ids, Some(&b.uuid)).unwrap();
-    vault.set_item_folder(ids[1], Some(&c.uuid)).unwrap();
-    vault.set_item_folder(ids[1], Some(&b.uuid)).unwrap();
-    assert_eq!(
-        vault.undo_item_folder_moves(&moves).unwrap_err().kind(),
-        VaultErrorKind::Conflict
-    );
-    assert_eq!(vault.items_in_folder(Some(&b.uuid), false).unwrap(), ids);
+    // A stale undo rejects later moves, even when the item returns to the destination.
+    {
+        let b = vault.create_folder(None, "Stale B").unwrap();
+        let c = vault.create_folder(None, "Stale C").unwrap();
+        let ids = [
+            vault.add(api("First")).unwrap().id,
+            vault.add(api("Second")).unwrap().id,
+        ];
+        let moves = vault.move_items_to_folder(&ids, Some(&b.uuid)).unwrap();
+        vault.set_item_folder(ids[1], Some(&c.uuid)).unwrap();
+        vault.set_item_folder(ids[1], Some(&b.uuid)).unwrap();
+        assert_eq!(
+            vault.undo_item_folder_moves(&moves).unwrap_err().kind(),
+            VaultErrorKind::Conflict
+        );
+        assert_eq!(vault.items_in_folder(Some(&b.uuid), false).unwrap(), ids);
+    }
+
+    // Undo rejects a deleted item or destination without restoring other items.
+    {
+        let b = vault.create_folder(None, "Deleted B").unwrap();
+        let first = vault.add(api("First")).unwrap();
+        let second = vault.add(api("Second")).unwrap();
+        let moves = vault
+            .move_items_to_folder(&[first.id, second.id], Some(&b.uuid))
+            .unwrap();
+        vault.delete(second.id, second.revision).unwrap();
+        assert_eq!(
+            vault.undo_item_folder_moves(&moves).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+        assert_eq!(vault.item_folder(first.id).unwrap(), Some(b.uuid.clone()));
+        let receipt = vault.move_items_to_folder(&[first.id], None).unwrap();
+        vault.delete_folder(&b.uuid).unwrap();
+        assert_eq!(
+            vault.undo_item_folder_moves(&receipt).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+        assert_eq!(vault.item_folder(first.id).unwrap(), None);
+    }
 }
 
 #[test]
@@ -211,110 +313,6 @@ fn undo_with_deleted_original_folder_or_another_session_changes_nothing() {
         VaultErrorKind::Conflict
     );
     assert_eq!(vault.items_in_folder(None, false).unwrap(), ids);
-}
-
-#[test]
-fn undo_rejects_a_deleted_item_or_destination_without_restoring_other_items() {
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let b = vault.create_folder(None, "B").unwrap();
-    let first = vault.add(api("First")).unwrap();
-    let second = vault.add(api("Second")).unwrap();
-    let moves = vault
-        .move_items_to_folder(&[first.id, second.id], Some(&b.uuid))
-        .unwrap();
-    vault.delete(second.id, second.revision).unwrap();
-    assert_eq!(
-        vault.undo_item_folder_moves(&moves).unwrap_err().kind(),
-        VaultErrorKind::NotFound
-    );
-    assert_eq!(vault.item_folder(first.id).unwrap(), Some(b.uuid.clone()));
-    let receipt = vault.move_items_to_folder(&[first.id], None).unwrap();
-    vault.delete_folder(&b.uuid).unwrap();
-    assert_eq!(
-        vault.undo_item_folder_moves(&receipt).unwrap_err().kind(),
-        VaultErrorKind::NotFound
-    );
-    assert_eq!(vault.item_folder(first.id).unwrap(), None);
-}
-
-#[test]
-fn identity_search_finds_visible_email_domain_and_host_but_never_secret_or_custom_fields() {
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let login = vault
-        .add(ItemDraft {
-            title: "Personal account".to_owned(),
-            kind: CredentialKind::Login,
-            notes: String::new(),
-            tags: vec![],
-            fields: vec![
-                field("username", "person@identity.example", false),
-                field("website", "https://portal.lookup.example/login", false),
-                field("password", "SYNTH-identity-secret", true),
-                field("x_custom", "SYNTH-custom-visible", false),
-            ],
-        })
-        .unwrap();
-    let host = vault
-        .add(ItemDraft {
-            fields: vec![
-                field("token", "SYNTH-host-token", true),
-                field("host", "db.lookup.example", false),
-            ],
-            ..api("Host account")
-        })
-        .unwrap();
-    let hidden = vault
-        .add(ItemDraft {
-            fields: vec![
-                field("token", "SYNTH-other-token", true),
-                field("username", "hidden-identity@example.invalid", true),
-            ],
-            ..api("Hidden identity")
-        })
-        .unwrap();
-    assert_eq!(
-        vault.search_identities("PERSON@IDENTITY.EXAMPLE").unwrap()[0].id,
-        login.id
-    );
-    assert_eq!(
-        vault.search_identities("portal.lookup.example").unwrap()[0].id,
-        login.id
-    );
-    assert_eq!(
-        vault.search_identities("db.lookup.example").unwrap()[0].id,
-        host.id
-    );
-    for excluded in [
-        "SYNTH-identity-secret",
-        "SYNTH-host-token",
-        "SYNTH-custom-visible",
-        "hidden-identity@example.invalid",
-        "' OR 1=1 --",
-    ] {
-        assert!(
-            vault.search_identities(excluded).unwrap().is_empty(),
-            "matched {excluded}"
-        );
-    }
-    assert!(
-        vault.search("person@identity.example").unwrap().is_empty(),
-        "legacy metadata API keeps its contract"
-    );
-    assert_eq!(vault.search_identities("").unwrap().len(), 3);
-    assert_eq!(
-        vault.details(hidden.id).unwrap().summary.revision,
-        hidden.revision
-    );
-    vault.lock().unwrap();
-    assert_eq!(
-        vault
-            .search_identities("lookup.example")
-            .unwrap_err()
-            .kind(),
-        VaultErrorKind::Locked
-    );
 }
 
 #[cfg(feature = "desktop")]

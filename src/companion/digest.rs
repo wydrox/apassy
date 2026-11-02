@@ -212,19 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_is_stable_and_has_64_hex_characters() {
-        let digest = run_digest_hex(&base());
-        assert_eq!(digest.len(), 64);
-        assert!(
-            digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        );
-        assert_eq!(digest, run_digest_hex(&base().clone()));
-        assert_eq!(hex(&run_digest(&base())), digest);
-    }
-
-    #[test]
     fn every_field_changes_the_digest() {
         let original = run_digest(&base());
         let variants: Vec<(&str, PendingRun)> = vec![
@@ -422,10 +409,7 @@ mod tests {
             ..base()
         };
         assert_ne!(run_digest(&moved_out), run_digest(&moved_in));
-    }
-
-    #[test]
-    fn an_empty_offer_pattern_differs_from_no_offer() {
+        // An empty offer pattern differs from no offer.
         let none = PendingRun {
             remember: None,
             ..base()
@@ -528,6 +512,16 @@ mod tests {
             run_digest_hex(&base()),
             "f9eaafb74648d988f9d086cd06f21f1f5f9a2429fa30e23ffa3a9d167dab4245"
         );
+        // The digest is stable and has 64 lowercase hex characters.
+        let digest = run_digest_hex(&base());
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_eq!(digest, run_digest_hex(&base().clone()));
+        assert_eq!(hex(&run_digest(&base())), digest);
         assert_eq!(
             question_digest_v2_hex(&asked()),
             "f3b3231d5e65efa3edf428f34bb446d0b6d81ac964256e973c2ebf1d517f267d"
