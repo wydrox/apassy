@@ -38,8 +38,11 @@ const CONNECT_JOBS: usize = QUEUE / 2;
 /// The jobs of one Connect team in the queue at once.
 const CONNECT_TEAM_JOBS: usize = 2;
 const _: () = assert!(CONNECT_JOBS < QUEUE && CONNECT_TEAM_JOBS < CONNECT_JOBS);
-/// One call to the Worker, from the connection to the last byte of the answer.
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// One call to the Worker, from the connection to the last byte of the answer
+/// (`PushConfig::timeout`).
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+/// The unit of the retry backoff (`PushConfig::backoff_unit`).
+pub(crate) const BACKOFF_UNIT: Duration = Duration::from_secs(1);
 /// The largest answer of the Worker that is read.
 const MAX_ANSWER_BYTES: u64 = 256 * 1024;
 /// Seconds between two `push_failed` rows of one device, and two `push_dropped` rows
@@ -343,7 +346,7 @@ fn run(config: &PushConfig, queue: &SharedSchedule, stop: &AtomicBool) {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
-        .timeout_global(Some(TIMEOUT))
+        .timeout_global(Some(config.timeout))
         .build()
         .into();
     let mut last_failed = HashMap::new();
@@ -357,10 +360,8 @@ fn run(config: &PushConfig, queue: &SharedSchedule, stop: &AtomicBool) {
         job.targets = send_job(config, &agent, &job, &mut last_failed);
         job.attempt = job.attempt.saturating_add(1);
         let now = crate::now_unix();
-        // Exponential backoff (1..60 seconds) plus 0..2 seconds of per-team jitter.
         let jitter = job.team.as_str().bytes().map(u64::from).sum::<u64>() % 3;
-        job.due = Instant::now()
-            + Duration::from_secs((1u64 << job.attempt.saturating_sub(1).min(6)).min(60) + jitter);
+        job.due = Instant::now() + retry_delay(config.backoff_unit, job.attempt, jitter);
         queue
             .0
             .lock()
@@ -368,6 +369,12 @@ fn run(config: &PushConfig, queue: &SharedSchedule, stop: &AtomicBool) {
             .finish(job, now);
         queue.1.notify_all();
     }
+}
+
+/// Exponential backoff (1..60 units) plus 0..2 units of per-team jitter.
+fn retry_delay(unit: Duration, attempt: u32, jitter: u64) -> Duration {
+    let units = (1u64 << attempt.saturating_sub(1).min(6)).min(60) + jitter;
+    unit.saturating_mul(u32::try_from(units).unwrap_or(u32::MAX))
 }
 
 fn transient(status: u16) -> bool {
@@ -434,7 +441,7 @@ fn call_worker(
     }
     let request = agent
         .configure_request(request)
-        .timeout_global(Some(TIMEOUT.min(Duration::from_secs(remaining))))
+        .timeout_global(Some(config.timeout.min(Duration::from_secs(remaining))))
         .build();
     let Ok(mut response) = agent.run(request) else {
         return (0, None);
@@ -568,6 +575,23 @@ fn mark_failed(store: &Store, target: &PushTarget, now: u64) -> RelayResult<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_push_deadlines_are_those_of_the_spec() {
+        let config = PushConfig::new(
+            "https://worker.example/internal/push".into(),
+            "com.example.apassy".into(),
+            crate::secret::SecretString::new("p".repeat(40)),
+        );
+        assert_eq!(config.timeout, Duration::from_secs(10));
+        assert_eq!(config.backoff_unit, Duration::from_secs(1));
+        let unit = config.backoff_unit;
+        assert_eq!(retry_delay(unit, 1, 0), Duration::from_secs(1));
+        assert_eq!(retry_delay(unit, 2, 2), Duration::from_secs(4));
+        assert_eq!(retry_delay(unit, 4, 1), Duration::from_secs(9));
+        assert_eq!(retry_delay(unit, 7, 0), Duration::from_secs(60));
+        assert_eq!(retry_delay(unit, 40, 2), Duration::from_secs(62));
+    }
 
     #[test]
     fn scheduler_is_fair_bounded_and_retains_retry_seats() {

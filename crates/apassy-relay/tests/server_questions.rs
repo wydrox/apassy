@@ -1057,10 +1057,20 @@ impl MockWorker {
     }
 
     fn config(&self) -> PushConfig {
+        PushConfig::new(
+            self.url.clone(),
+            TOPIC.to_string(),
+            SecretString::new(PUSH_SECRET.to_string()),
+        )
+    }
+
+    /// [`MockWorker::config`] with a call `timeout` and a backoff `unit` instead of the
+    /// relay's 10 s and 1 s (pinned by the unit test of `server::push`).
+    fn config_with(&self, timeout: Duration, unit: Duration) -> PushConfig {
         PushConfig {
-            url: self.url.clone(),
-            topic: TOPIC.to_string(),
-            secret: SecretString::new(PUSH_SECRET.to_string()),
+            timeout,
+            backoff_unit: unit,
+            ..self.config()
         }
     }
 
@@ -1770,10 +1780,13 @@ fn the_request_time_of_a_question_call_is_taken_after_its_body() {
 
 #[test]
 fn push_retries_worker_and_apns_transient_failures_with_backoff() {
+    // Retries come 1, 2, 4 units after a call (plus up to 2 units of jitter); the unit
+    // is longer than the moment that `calls` waits for a wrong extra call.
+    let unit = Duration::from_millis(300);
     for status in [429, 503] {
         let worker = MockWorker::start();
         worker.status.store(status, Ordering::Relaxed);
-        let push = worker.config();
+        let push = worker.config_with(Duration::from_secs(10), unit);
         let mut relay = start_with(
             |config| config.push = Some(push),
             UpstreamOptions::default(),
@@ -1785,10 +1798,7 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
         let began = Instant::now();
         ask(&relay, &mac, &qid(70), "member");
         assert_eq!(worker.calls(2).len(), 2, "HTTP {status} must retry");
-        assert!(
-            began.elapsed() >= Duration::from_secs(1),
-            "retry has backoff"
-        );
+        assert!(began.elapsed() >= unit, "retry has backoff");
         worker.status.store(200, Ordering::Relaxed);
         worker
             .answers
@@ -1802,7 +1812,7 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
         worker.answers.lock().unwrap().clear();
         assert!(worker.calls(4).len() >= 4);
         let calls = worker.calls.lock().unwrap().len();
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(unit * 10 / 3);
         assert_eq!(
             worker.calls.lock().unwrap().len(),
             calls,
@@ -1814,7 +1824,9 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
 #[test]
 fn a_slow_team_cannot_block_another_teams_push_and_timeout_is_retried() {
     let worker = MockWorker::start();
-    let push = worker.config();
+    // The hanging call times out after 4 s instead of 10 s: still longer than the
+    // second team needs to post its question.
+    let push = worker.config_with(Duration::from_secs(4), Duration::from_millis(300));
     let mut relay = start_with(
         |config| config.push = Some(push),
         UpstreamOptions::default(),
