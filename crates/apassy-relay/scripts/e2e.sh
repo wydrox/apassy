@@ -42,7 +42,8 @@ fail() {
 
 step "Build"
 cargo build --quiet --bin apassy-relay --bin apassy-team --example e2e_relay
-BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug"
+# The workspace target directory (the relay is a member of the workspace at ../..).
+BIN="${CARGO_TARGET_DIR:-$(cd "$ROOT/../.." && pwd)/target}/debug"
 RELAY_BIN="$BIN/apassy-relay"
 TEAM_BIN="$BIN/apassy-team"
 E2E_BIN="$BIN/examples/e2e_relay"

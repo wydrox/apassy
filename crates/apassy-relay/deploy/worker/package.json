@@ -1,10 +1,10 @@
 {
   "name": "apassy-relay-edge",
-  "version": "0.5.9",
+  "version": "0.5.12",
   "private": true,
   "type": "module",
   "description": "The edge Worker of apassy-relay: forwards to the relay and adds the edge secret.",
-  "license": "FSL-1.1-ALv2",
+  "license": "Apache-2.0",
   "scripts": {
     "test": "node --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",

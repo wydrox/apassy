@@ -224,6 +224,61 @@ jobs:
       - name: Check the rule packs and provider files with the loaders
         run: cargo run --offline --locked --features vault --bin apassy-packs -- validate packs/*.json packs/providers/*.json
 
+  # The relay crate (ADR 0036): lint, tests, and the end-to-end script with the real
+  # binaries. Formatting is checked by the macOS job (`cargo fmt --all`).
+  relay:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-relay
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+      - name: Run Clippy on the relay
+        run: cargo clippy --offline --locked -p apassy-relay --all-targets -- -D warnings
+      - name: Run the relay tests
+        run: cargo test --offline --locked -p apassy-relay --no-fail-fast
+      - name: Run the relay end-to-end script
+        run: bash crates/apassy-relay/scripts/e2e.sh
+
+  relay-worker:
+    needs: reuse-pr
+    if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: crates/apassy-relay/deploy/worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crates/apassy-relay/deploy/worker/package-lock.json
+      - name: Run Worker tests
+        run: node --test 'test/*.test.ts'
+      - name: Install typecheck dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check Worker types
+        run: npx tsc -p tsconfig.json
+
   audit:
     needs: reuse-pr
     if: always() && !cancelled() && needs.reuse-pr.outputs.reuse != 'true'

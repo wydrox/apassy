@@ -30,3 +30,16 @@ The relay regression tests exercise this path dependency directly. This is a
 bounded local mitigation of the published reports, not an upstream release or a
 complete HTTP parser audit. See `docs/HTTP-SECURITY.md` for source links, incompatible
 fork decision, remaining exposure and rollout effects.
+
+## Lints (2026-11-02)
+
+Since ADR 0036 the relay is a crate of the `wydrox/apassy` workspace, and Cargo makes this path
+dependency a workspace member (`workspace.exclude` does not apply to path dependencies). Two
+changes to `Cargo.toml` follow:
+
+- `[lints.clippy] all = "allow"`: Clippy lints members with the workspace's `-D warnings`. This copy
+  keeps the upstream style; the patch itself is reviewed as relay code.
+- The TLS features (`ssl`, `ssl-openssl`, `ssl-rustls`) are empty, and their optional dependencies
+  (openssl, rustls 0.20 with ring 0.16, rustls-pemfile, zeroize) and the dev-dependencies are
+  removed. A member locks every optional and dev dependency, and these old versions carry
+  advisories. The relay never enabled them. Enabling a TLS feature now fails to compile.

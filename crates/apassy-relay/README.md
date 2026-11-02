@@ -19,7 +19,7 @@ This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 
 
 ## License
 
-The relay is under the Functional Source License, Version 1.1, with the Apache-2.0 future license (FSL-1.1-ALv2). Each version becomes Apache-2.0 two years after its release. See [LICENSE](LICENSE). The core crate, `apassy`, is Apache-2.0.
+The relay is Apache-2.0, like the rest of this repository (see the [LICENSE](../../LICENSE) at the root). Versions up to 0.5.9 were published under FSL-1.1-ALv2 in the private `wydrox/apassy-relay` repository; on 2026-11-02 the copyright holder relicensed the whole history under Apache-2.0 and moved it here ([ADR 0036](../../docs/adr/0036-own-relay-open-source.md)).
 
 ## Quick start
 

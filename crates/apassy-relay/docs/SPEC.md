@@ -69,7 +69,7 @@ upstream API hosts (api.stripe.com, api.openai.com, ...)
 
 ## 4. Crate layout and ownership
 
-One crate, `apassy-relay`, license `FSL-1.1-ALv2` (FSL-1.1 with the Apache-2.0 future license). Rust 1.97.0, edition 2024, `#![forbid(unsafe_code)]`, clippy `all = "warn"`.
+One crate, `apassy-relay`, license `Apache-2.0`, a member of the `wydrox/apassy` workspace (ADR 0036). Rust 1.97.0, edition 2024, `#![forbid(unsafe_code)]`, clippy `all = "warn"`.
 
 | Path | What | Owner |
 | --- | --- | --- |

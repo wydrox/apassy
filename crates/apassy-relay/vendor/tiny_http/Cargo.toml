@@ -43,40 +43,19 @@ version = "1.0.2"
 [dependencies.log]
 version = "0.4.4"
 
-[dependencies.openssl]
-version = "0.10"
-optional = true
-
-[dependencies.rustls]
-version = "0.20"
-optional = true
-
-[dependencies.rustls-pemfile]
-version = "0.2.1"
-optional = true
-
-[dependencies.zeroize]
-version = "1"
-optional = true
-
-[dev-dependencies.fdlimit]
-version = "0.1"
-
-[dev-dependencies.rustc-serialize]
-version = "0.3"
-
-[dev-dependencies.sha1]
-version = "0.6.0"
-
+# Apassy (APASSY-PATCH.md): the TLS features and their optional dependencies (openssl,
+# rustls 0.20, rustls-pemfile, zeroize) and the dev-dependencies are removed. The relay
+# serves plain HTTP behind its TLS front and never enables them, and as a member of the
+# wydrox/apassy workspace this crate would otherwise lock all of them. The feature names
+# stay, empty, so the upstream `cfg(feature = ...)` code keeps compiling out.
 [features]
 default = []
-ssl = ["ssl-openssl"]
-ssl-openssl = [
-    "openssl",
-    "zeroize",
-]
-ssl-rustls = [
-    "rustls",
-    "rustls-pemfile",
-    "zeroize",
-]
+ssl = []
+ssl-openssl = []
+ssl-rustls = []
+
+# Apassy: vendored third-party code (APASSY-PATCH.md). The relay workspace lints its
+# own crates with `-D warnings`; this copy keeps upstream style, so Clippy is off here.
+[lints.clippy]
+all = "allow"
+

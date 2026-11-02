@@ -1,5 +1,11 @@
 # Running apassy-relay
 
+> Since ADR 0036 the relay is the crate `crates/apassy-relay` of `wydrox/apassy`. The production
+> deployment files (`deploy/vps/`) and the health monitor stay in the archived private
+> repository `wydrox/apassy-relay`, with the server addresses; references to them below
+> point there. Images and the downloadable CLIs build from this workspace with
+> `.github/workflows/relay-image.yml` (tag `image-*`).
+
 ## Current release runbook: GitHub artifacts only
 
 This is the only current release procedure. Sections 19–21 describe feature and

@@ -1,6 +1,8 @@
-# GitHub builds release artifacts; never build on the production VPS or in a local VM.
-# Push image-* on the exact tested release commit. Deployment remains a separate step.
-name: Image
+# The relay image and both downloadable team CLIs (ADR 0036: the relay is the crate
+# crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
+# the production VPS or in a local VM. Push image-* on the exact tested release commit.
+# Deployment remains a separate step.
+name: Relay image
 
 on:
   push:
@@ -14,10 +16,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build the image
         run: |
-          version="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          version="$(awk -F '\"' '/^version = / {print $2; exit}' crates/apassy-relay/Cargo.toml)"
           tag="apassy-relay:release-$version"
           immutable="apassy-relay:sha-$GITHUB_SHA"
           echo "TAG=$tag" >> "$GITHUB_ENV"
@@ -26,7 +30,7 @@ jobs:
           docker build --platform linux/amd64 \
             --build-arg "APASSY_RELEASE_VERSION=$version" \
             --build-arg "APASSY_RELEASE_COMMIT=$GITHUB_SHA" \
-            -t "$tag" -t "$immutable" .
+            -f crates/apassy-relay/Dockerfile -t "$tag" -t "$immutable" .
           test "$(docker run --rm "$tag" --version)" = "apassy-relay $version"
       - name: Save and identify the image
         run: |
@@ -48,7 +52,7 @@ jobs:
               "image_id": image["Id"], "architecture": image["Architecture"],
           }, indent=2) + "\n")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: relay-image
           path: |
@@ -71,7 +75,9 @@ jobs:
       CARGO_INCREMENTAL: "0"
       APASSY_RELEASE_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install artifact inspection tools
         run: |
           apt-get update
@@ -79,11 +85,11 @@ jobs:
       - name: Build and verify the Linux CLI
         run: |
           test "$(uname -m)" = x86_64
-          cargo build --release --locked --bin apassy-team
+          cargo build --release --locked -p apassy-relay --bin apassy-team
           mkdir -p dist
           cp target/release/apassy-team dist/apassy-team-linux-x86_64
           strip dist/apassy-team-linux-x86_64
-          version="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          version="$(awk -F '\"' '/^version = / {print $2; exit}' crates/apassy-relay/Cargo.toml)"
           test "$(dist/apassy-team-linux-x86_64 --version)" = "apassy-team $version"
           file dist/apassy-team-linux-x86_64 | tee dist/file.txt
           ldd dist/apassy-team-linux-x86_64 | tee dist/ldd.txt
@@ -95,7 +101,7 @@ jobs:
           versions = {tuple(map(int, match.split("."))) for match in re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", symbols)}
           assert versions, "No GLIBC version requirements found"
           assert max(versions) <= (2, 31), f"Requires GLIBC {max(versions)}, newer than 2.31"
-          version = re.search(r'^version = "([^"]+)"', Path("Cargo.toml").read_text(), re.M).group(1)
+          version = re.search(r'^version = "([^"]+)"', Path("crates/apassy-relay/Cargo.toml").read_text(), re.M).group(1)
           artifact = Path("dist/apassy-team-linux-x86_64")
           digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
           Path("dist/SHA256SUMS-linux").write_text(f"{digest}  {artifact.name}\n")
@@ -105,7 +111,7 @@ jobs:
               "glibc_max": ".".join(map(str, max(versions))),
           }, indent=2) + "\n")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apassy-team-linux-x86_64
           path: dist/
@@ -119,19 +125,21 @@ jobs:
       CARGO_INCREMENTAL: "0"
       APASSY_RELEASE_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
       - name: Build and verify the Apple silicon CLI
         run: |
           test "$(uname -m)" = arm64
-          cargo build --release --locked --bin apassy-team
+          cargo build --release --locked -p apassy-relay --bin apassy-team
           mkdir -p dist
           cp target/release/apassy-team dist/apassy-team-darwin-arm64
           strip -x dist/apassy-team-darwin-arm64
           codesign --force --sign - dist/apassy-team-darwin-arm64
           codesign --verify --strict dist/apassy-team-darwin-arm64
-          version="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          version="$(awk -F '\"' '/^version = / {print $2; exit}' crates/apassy-relay/Cargo.toml)"
           test "$(dist/apassy-team-darwin-arm64 --version)" = "apassy-team $version"
           file dist/apassy-team-darwin-arm64 | tee dist/file.txt
           test "$(lipo -archs dist/apassy-team-darwin-arm64)" = arm64
@@ -139,7 +147,7 @@ jobs:
           python3 - <<'PY'
           import hashlib, json, os, re
           from pathlib import Path
-          version = re.search(r'^version = "([^"]+)"', Path("Cargo.toml").read_text(), re.M).group(1)
+          version = re.search(r'^version = "([^"]+)"', Path("crates/apassy-relay/Cargo.toml").read_text(), re.M).group(1)
           artifact = Path("dist/apassy-team-darwin-arm64")
           digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
           Path("dist/SHA256SUMS-darwin").write_text(f"{digest}  {artifact.name}\n")
@@ -148,7 +156,7 @@ jobs:
               "filename": artifact.name, "sha256": digest, "platform": "darwin-arm64",
           }, indent=2) + "\n")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apassy-team-darwin-arm64
           path: dist/

@@ -23,18 +23,19 @@ artifact/source, and current-`main` checks still apply.
 Update it together with both app/core Cargo manifests and their lockfile, iOS
 `MARKETING_VERSION`, extension manifest, and the dated changelog. The website keeps
 deriving `VERSION` from the first dated changelog section; its npm package has no
-separate product version. In the separate relay checkout, update the relay Cargo
-package and lockfile: both `apassy-relay` and the Linux `apassy-team` binary inherit
-that package version.
+separate product version. The relay is the crate `crates/apassy-relay` of this
+workspace (ADR 0036): update its Cargo package (the workspace `Cargo.lock` follows)
+and the edge Worker package in `crates/apassy-relay/deploy/worker`. Both
+`apassy-relay` and the Linux `apassy-team` binary inherit the crate version.
 
-Before publication, use Python 3.12 to check both exact release checkouts:
+Before publication, use Python 3.12 to check the exact release commit:
 
 ```sh
-python3 scripts/check-release-versions.py --relay-checkout ../apassy-relay-release-055 --require-relay
+python3 scripts/check-release-versions.py
 ```
 
-CI checks the source files in this repository. Without `--relay-checkout`, the
-checker explicitly reports that the relay and Linux CLI were not checked. The
+CI runs the same check on every change, the relay and the Linux CLI included. The
+old `--relay-checkout` option now fails with a message. The
 existing eligibility helper remains separate: populated `Unreleased` entries still
 skip production signing and deployment without failing that helper. Neither source
 consistency nor eligibility proves that any component was published.
