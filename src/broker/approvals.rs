@@ -2151,11 +2151,14 @@ mod tests {
         let id = wait_until_pending(&queue);
         assert!(queue.deny(id));
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Denied);
+        // Every way that a wait ends drops its start time.
+        assert!(queue.state().waiting_since.is_empty(), "denied");
 
         assert_eq!(
             queue.wait_for(run(), Duration::from_millis(20), || true),
             ApprovalOutcome::TimedOut
         );
+        assert!(queue.state().waiting_since.is_empty(), "timed out");
         assert!(queue.pending().is_empty());
     }
 
@@ -2200,8 +2203,12 @@ mod tests {
         };
         let id = wait_until_pending(&queue);
         let proof = proof_for(&queue, id);
+        assert_eq!(queue.pending_with_age().len(), 1);
         queue.invalidate_all();
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);
+        // The invalidation drops the start time of the wait.
+        assert!(queue.state().waiting_since.is_empty(), "invalidated");
+        assert!(queue.pending_with_age().is_empty());
         assert!(queue.pending().is_empty());
         assert_eq!(
             queue.approve(proof),
@@ -2288,6 +2295,8 @@ mod tests {
             ApprovalOutcome::Invalidated
         );
         assert!(started.elapsed() < Duration::from_secs(2));
+        // The invalid session drops the start time of the wait.
+        assert!(queue.state().waiting_since.is_empty(), "invalid session");
         assert!(queue.pending().is_empty());
     }
 
@@ -2321,38 +2330,6 @@ mod tests {
             queue.state().waiting_since.is_empty(),
             "the age is dropped when the run settles"
         );
-    }
-
-    /// Every way that a wait ends drops its start time: a denial, a timeout, an invalid
-    /// session, and an invalidation of the queue.
-    #[test]
-    fn the_start_time_is_dropped_when_a_run_ends() {
-        let queue = Arc::new(ApprovalQueue::new());
-        let waiter = start_waiter(&queue);
-        let id = wait_until_pending(&queue);
-        assert!(queue.deny(id));
-        waiter.join().expect("join");
-        assert!(queue.state().waiting_since.is_empty(), "denied");
-
-        assert_eq!(
-            queue.wait_for(run(), Duration::from_millis(20), || true),
-            ApprovalOutcome::TimedOut
-        );
-        assert!(queue.state().waiting_since.is_empty(), "timed out");
-
-        assert_eq!(
-            queue.wait_for(run(), Duration::from_secs(5), || false),
-            ApprovalOutcome::Invalidated
-        );
-        assert!(queue.state().waiting_since.is_empty(), "invalid session");
-
-        let waiter = start_waiter(&queue);
-        wait_until_pending(&queue);
-        assert_eq!(queue.pending_with_age().len(), 1);
-        queue.invalidate_all();
-        assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);
-        assert!(queue.state().waiting_since.is_empty(), "invalidated");
-        assert!(queue.pending_with_age().is_empty());
     }
 
     /// ADR 0025: one waiting question per agent. Only the same run of the same agent in

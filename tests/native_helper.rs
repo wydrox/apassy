@@ -523,6 +523,20 @@ fn notification_preview_has_only_agent_name_and_event_type() {
         blocked.body(),
         "Apassy blocked a request from agent \"Codex\"."
     );
+    // The event wire names match the notifier, and a notification keeps its event and
+    // agent.
+    assert_eq!(
+        NotificationEvent::ApprovalWaiting.as_wire(),
+        "approval_waiting"
+    );
+    assert_eq!(
+        NotificationEvent::RequestBlocked.as_wire(),
+        "request_blocked"
+    );
+    let notification =
+        Notification::new("run-1", "Codex", NotificationEvent::RequestBlocked).expect("valid");
+    assert_eq!(notification.event(), NotificationEvent::RequestBlocked);
+    assert_eq!(notification.agent(), "Codex");
 
     for (id, name) in [
         ("event-1", ""),

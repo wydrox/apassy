@@ -584,6 +584,40 @@ fn cancellation_before_submission_is_fenced_and_binds_the_retry_key() {
             .unwrap()
             .is_empty()
     );
+
+    // A cancelled retry id cannot replace an existing key binding: after a call with
+    // another key ran, a cancel of a new id and a retry with that id get the original.
+    let action = Action::GenerateCredential {
+        name: "Synthetic original receipt".into(),
+        length: None,
+        alphabet: None,
+        cwd: Some(fx.dir.path().display().to_string()),
+        folder: None,
+    };
+    let original = "ffffffffffffffffffffffffffffffff";
+    let retry = "00000000000000000000000000000004";
+    let send = |action| client::send(fx.broker.socket_path(), &fx.token, action).unwrap();
+    let tracked = |id: &str| Action::Tracked {
+        operation_id: id.into(),
+        idempotency_key: Some("original-key".into()),
+        action: Box::new(action.clone()),
+    };
+    assert!(send(tracked(original)).ok);
+    assert!(
+        send(Action::CancelOperation {
+            operation_id: retry.into()
+        })
+        .ok
+    );
+    let response = send(tracked(retry));
+    assert_eq!(response.operation_id.as_deref(), Some(original));
+    assert_eq!(response.result.unwrap()["outcome"]["ok"], true);
+    assert_eq!(
+        send(tracked("00000000000000000000000000000005"))
+            .operation_id
+            .as_deref(),
+        Some(original)
+    );
 }
 
 #[test]
@@ -717,42 +751,6 @@ fn stdin_eof_drains_a_short_mutation_before_cancelling_remaining_waits() {
     assert_eq!(reply["isError"], false, "{reply}");
     assert!(reply["structuredContent"]["result"]["item_id"].is_u64());
     assert!(fx.broker.approvals().pending().is_empty());
-}
-
-#[test]
-fn a_cancelled_retry_id_cannot_replace_an_existing_key_binding() {
-    let fx = Fixture::new();
-    let action = Action::GenerateCredential {
-        name: "Synthetic original receipt".into(),
-        length: None,
-        alphabet: None,
-        cwd: Some(fx.dir.path().display().to_string()),
-        folder: None,
-    };
-    let original = "ffffffffffffffffffffffffffffffff";
-    let retry = "00000000000000000000000000000001";
-    let send = |action| client::send(fx.broker.socket_path(), &fx.token, action).unwrap();
-    let tracked = |id: &str| Action::Tracked {
-        operation_id: id.into(),
-        idempotency_key: Some("original-key".into()),
-        action: Box::new(action.clone()),
-    };
-    assert!(send(tracked(original)).ok);
-    assert!(
-        send(Action::CancelOperation {
-            operation_id: retry.into()
-        })
-        .ok
-    );
-    let response = send(tracked(retry));
-    assert_eq!(response.operation_id.as_deref(), Some(original));
-    assert_eq!(response.result.unwrap()["outcome"]["ok"], true);
-    assert_eq!(
-        send(tracked("00000000000000000000000000000002"))
-            .operation_id
-            .as_deref(),
-        Some(original)
-    );
 }
 
 #[test]

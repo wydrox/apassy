@@ -282,12 +282,6 @@ mod tests {
     }
 
     #[test]
-    fn the_store_page_is_the_page_of_the_extension_id() {
-        assert!(STORE_URL.starts_with("https://chromewebstore.google.com/detail/"));
-        assert!(STORE_URL.ends_with(super::super::wire::EXTENSION_ID));
-    }
-
-    #[test]
     fn the_manifest_allows_only_the_extension() {
         let text = manifest(Path::new(
             "/Applications/Apassy.app/Contents/MacOS/apassy-browser-host",
@@ -303,6 +297,9 @@ mod tests {
             value["allowed_origins"],
             serde_json::json!(["chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/"])
         );
+        // The store page is the page of the extension ID.
+        assert!(STORE_URL.starts_with("https://chromewebstore.google.com/detail/"));
+        assert!(STORE_URL.ends_with(super::super::wire::EXTENSION_ID));
     }
 
     #[test]

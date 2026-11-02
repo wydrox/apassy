@@ -5465,8 +5465,17 @@ mod tests {
         );
     }
 
+    fn analysis_of(line: &str) -> Analysis {
+        analyze(&command_line_to_argv(line), "Do the work.", &secrets())
+    }
+
+    /// Dev round 3, the known safe audit: known safe means no remote write, no secret
+    /// output, no data loss, and no project code except a test, build, check, format, or
+    /// local server contract. A command list is known safe only when every part is.
     #[test]
-    fn safe_commands() {
+    fn the_known_safe_audit_of_dev_round_3() {
+        // The baseline: common test, lint, build, and status commands are known safe
+        // without a flag, also as a command list.
         for cmd in [
             "npm test",
             "npm run lint",
@@ -5480,17 +5489,6 @@ mod tests {
         }
         let a = analyze(&shell("npm test && npm run lint"), "Check.", &secrets());
         assert!(a.known_safe, "{a:?}");
-    }
-
-    fn analysis_of(line: &str) -> Analysis {
-        analyze(&command_line_to_argv(line), "Do the work.", &secrets())
-    }
-
-    /// Dev round 3, the known safe audit: known safe means no remote write, no secret
-    /// output, no data loss, and no project code except a test, build, check, format, or
-    /// local server contract. A command list is known safe only when every part is.
-    #[test]
-    fn the_known_safe_audit_of_dev_round_3() {
         // Project code with any effect: `run` verbs of language tools and build tools.
         for line in [
             "cargo run --bin seed-demo-data",
