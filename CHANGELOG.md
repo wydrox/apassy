@@ -4,12 +4,19 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-11-02
+
 ### Fixed
 
 - Development on agent questions follows the owner check window after each local click. Other sensitive and durable actions still ask.
 - Display sleep keeps the window open. Mac lock and system sleep still end it. Keep lifecycle heartbeats active and check Touch ID availability again for each fresh check.
 - Add privacy-safe owner window diagnostics.
 - **Browser extension:** Explain passkey and code refusals when the browser was started with remote debugging or a test extension.
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. Macs on 0.5.10 and the iPhone on TestFlight 0.5.10 keep syncing; no TestFlight update is needed.
+- The Mac download and in-app auto-update publish with this release. The Chrome Web Store extension update follows separately (0.5.10 is in review). Relay stays at 0.5.9.
 
 ## [0.5.10] - 2026-11-01
 
