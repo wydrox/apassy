@@ -72,7 +72,7 @@ const MAX_PAGES: usize = 16;
 /// After a `403 feed_rate` the core reads no feed of that team for this long: the relay
 /// counts the read budget per minute of its clock, so a full minute always passes its
 /// next minute, whatever the clocks say (section 10.2).
-const FEED_RATE_PAUSE: Duration = Duration::from_secs(60);
+pub(super) const FEED_RATE_PAUSE: Duration = Duration::from_secs(60);
 /// The step of a pause of a long poll: a lock or another context's news ends it at once.
 const PAUSE_STEP: Duration = Duration::from_millis(200);
 /// The actions of this process that a context remembers for `feed_action_wait`.
@@ -1438,7 +1438,7 @@ impl Core {
                 Err(RelayCallError::Relay { status: 403, code }) if code == "feed_rate" => {
                     let mut state = guard(&self.questions);
                     state.context_mut(vault_id, member)?.feed.rate_until =
-                        Some(Instant::now() + FEED_RATE_PAUSE);
+                        Some(Instant::now() + self.feed_rate_pause);
                     wait = deadline.saturating_duration_since(Instant::now());
                     continue;
                 }
@@ -2184,6 +2184,15 @@ mod tests {
     //! The test vectors of contract relay-feed-v1, section 17.
 
     use super::*;
+
+    #[test]
+    fn the_feed_rate_pause_is_a_minute() {
+        assert_eq!(FEED_RATE_PAUSE, Duration::from_secs(60));
+        let dir = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({"data_dir": dir.path(), "role": "app"});
+        let core = Core::new(&config.to_string()).unwrap();
+        assert_eq!(core.feed_rate_pause, Duration::from_secs(60));
+    }
 
     const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const TEAM: &str = "t_7k2m5q4x3c";

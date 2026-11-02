@@ -71,9 +71,15 @@ fn answer_key() -> DeviceKey {
     DeviceKey::from_raw(&unhex(ANSWER_PRIVATE), &decode_b64u(ANSWER_PUBLIC).unwrap()).unwrap()
 }
 
+/// The pause after a `403 feed_rate`: the app's minute (pinned by the core's unit test)
+/// scaled down.
+const FEED_RATE_PAUSE: Duration = Duration::from_secs(4);
+
 fn core(dir: &Path) -> Core {
     let config = json!({"data_dir": dir, "device_name": "Test iPhone", "role": "app"});
-    Core::new(&config.to_string()).expect("core")
+    Core::new(&config.to_string())
+        .expect("core")
+        .with_feed_rate_pause(FEED_RATE_PAUSE)
 }
 
 fn call(core: &Core, request: Value) -> Value {
@@ -1217,7 +1223,7 @@ fn a_feed_rate_answer_pauses_the_feed_reads_for_a_minute() {
     assert!(started.elapsed() >= Duration::from_secs(2));
     assert_eq!(reads(), after, "no read during the pause");
 
-    // After the minute the long poll reads again and brings the new feed.
+    // After the pause the long poll reads again and brings the new feed.
     loop {
         assert!(
             refused.elapsed() < Duration::from_secs(90),
@@ -1227,7 +1233,7 @@ fn a_feed_rate_answer_pauses_the_feed_reads_for_a_minute() {
             break;
         }
     }
-    assert!(refused.elapsed() >= Duration::from_secs(59));
+    assert!(refused.elapsed() >= FEED_RATE_PAUSE - Duration::from_secs(1));
     assert_eq!(reads(), after + 1);
     let mac = &macs(&setup.phone)[0];
     assert_eq!(mac["seq"], seq + 1);
