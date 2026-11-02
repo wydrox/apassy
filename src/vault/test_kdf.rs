@@ -7,12 +7,13 @@
 //!
 //! - The build has debug assertions. Without them, [`REDUCED_KDF_ITER`] is the SQLCipher
 //!   4 default, so a `--release` build never reduces the KDF.
-//! - A directory above the file has a name that starts with [`TEST_DIR_PREFIX`], the
-//!   prefix of `tempfile::TempDir`. A vault in the data directory of the app, or in a
-//!   test directory with another prefix, keeps 256,000 iterations.
+//! - A directory above the file has the exact name of a default `tempfile::TempDir`:
+//!   [`TEST_DIR_PREFIX`] and six letters or digits. A vault in the data directory of the
+//!   app, or in a directory such as `.tmpl` or `.tmp-backup`, keeps 256,000 iterations.
 //!
-//! The open check (`verify_cipher_defaults`) requires the count of the path: a test
-//! vault refuses the SQLCipher 4 default, and any other vault refuses the reduced count.
+//! The connection of a vault gets the count of its path. A file encrypted with another
+//! count does not decrypt: the first read fails its HMAC check, and the vault reports a
+//! wrong key or a damaged file (`verify_readable_schema`).
 
 use std::fs::File;
 use std::io::Read;
@@ -36,6 +37,15 @@ const _: () = assert!(cfg!(debug_assertions) || REDUCED_KDF_ITER == SQLCIPHER4_K
 
 /// The name prefix of a `tempfile::TempDir` (`tempfile::tempdir()`).
 pub const TEST_DIR_PREFIX: &str = ".tmp";
+/// The random letters and digits after the prefix of a default `tempfile::TempDir`.
+const TEST_DIR_RANDOM_LEN: usize = 6;
+
+/// Whether `name` is the name of a default `tempfile::TempDir`, such as `.tmpAbC123`.
+fn is_tempfile_dir_name(name: &str) -> bool {
+    name.strip_prefix(TEST_DIR_PREFIX).is_some_and(|random| {
+        random.len() == TEST_DIR_RANDOM_LEN && random.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
 
 /// The SQLCipher salt at the start of a vault file, and the AES-256 key size.
 const SALT_BYTES: usize = 16;
@@ -46,7 +56,7 @@ pub fn kdf_iter_for(path: &Path) -> i64 {
     let in_test_dir = path.ancestors().skip(1).any(|dir| {
         dir.file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(TEST_DIR_PREFIX))
+            .is_some_and(is_tempfile_dir_name)
     });
     if in_test_dir {
         REDUCED_KDF_ITER
@@ -157,6 +167,14 @@ mod tests {
         for path in [
             "/Users/owner/Library/Application Support/Apassy/vault.db",
             "/tmp/apassy-real-kdf-AbC123/vault.db",
+            // Only the exact name of a default TempDir counts.
+            "/Users/owner/.tmpl/vault.db",
+            "/Users/owner/.tmp-backup/vault.db",
+            "/Users/owner/.tmpdata/vault.db",
+            "/tmp/.tmpAbC12/vault.db",
+            "/tmp/.tmpAbC1234/vault.db",
+            "/tmp/.tmpAbC-12/vault.db",
+            "/tmp/.tmp/vault.db",
             // The file name itself does not count, only a directory above it.
             "/tmp/.tmpAbC123",
             "vault.db",
@@ -219,13 +237,17 @@ mod tests {
     }
 
     /// Every shipped artifact comes from a release build that names its features. None
-    /// names this feature or `--all-features`, and no profile turns on debug assertions.
+    /// names this feature or `--all-features`, and nothing turns on debug assertions.
+    /// The test reads every workflow, every script, the manifests, the Cargo config and
+    /// the relay Dockerfile, so a new build command is checked too.
     #[test]
     fn no_shipped_build_enables_the_reduced_kdf() {
+        use std::path::PathBuf;
+
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap();
+        let read = |name: &Path| std::fs::read_to_string(root.join(name)).unwrap();
         let feature = "insecure-test-kdf";
-        let manifest = read("Cargo.toml");
+        let manifest = read(Path::new("Cargo.toml"));
         let uses: Vec<&str> = manifest
             .lines()
             .map(str::trim)
@@ -233,18 +255,64 @@ mod tests {
             .collect();
         assert_eq!(uses, [format!("{feature} = []")], "{uses:?}");
         for name in [
+            "ios/ApassyCore/Cargo.toml",
+            "crates/apassy-relay/Cargo.toml",
+        ] {
+            assert!(!read(Path::new(name)).contains(feature), "{name}");
+        }
+
+        let mut files: Vec<PathBuf> = [
             "Cargo.toml",
             "ios/ApassyCore/Cargo.toml",
             "crates/apassy-relay/Cargo.toml",
             ".cargo/config.toml",
-        ] {
-            assert!(!read(name).contains("debug-assertions"), "{name}");
+            "crates/apassy-relay/Dockerfile",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        for dir in [".github/workflows", "scripts"] {
+            for entry in std::fs::read_dir(root.join(dir)).unwrap() {
+                let path = entry.unwrap().path();
+                if matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("yml" | "yaml" | "sh")
+                ) {
+                    files.push(path.strip_prefix(root).unwrap().to_path_buf());
+                }
+            }
         }
-        for name in [
-            "ios/ApassyCore/Cargo.toml",
-            "crates/apassy-relay/Cargo.toml",
-        ] {
-            assert!(!read(name).contains(feature), "{name}");
+
+        let mut release_builds = Vec::new();
+        for name in &files {
+            // A command continued with a backslash is one command.
+            let text = read(name).replace("\\\n", " ");
+            // A profile, an environment variable (CARGO_PROFILE_*_DEBUG_ASSERTIONS) or
+            // RUSTFLAGS (-C debug-assertions) that turns on debug assertions.
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                !lower.contains("debug-assertions") && !lower.contains("debug_assertions"),
+                "{}",
+                name.display()
+            );
+            for line in text.lines() {
+                let release = line.contains("--release") || line.contains("--profile");
+                // `cargo b` is the alias `build --all-features` (.cargo/config.toml).
+                assert!(
+                    !(release && line.contains("cargo b ")),
+                    "{}: {line}",
+                    name.display()
+                );
+                // `build-ios-core.sh` passes `--profile "$profile"`, release by default.
+                if release && line.contains("cargo build") {
+                    assert!(
+                        !line.contains("--all-features") && !line.contains(feature),
+                        "{}: {line}",
+                        name.display()
+                    );
+                    release_builds.push(name.clone());
+                }
+            }
         }
         for name in [
             ".github/workflows/ci.yml",
@@ -252,23 +320,12 @@ mod tests {
             "crates/apassy-relay/Dockerfile",
             "scripts/build-app.sh",
             "scripts/build-ios-core.sh",
+            "scripts/screenshots.sh",
         ] {
-            let text = read(name);
-            // `build-ios-core.sh` passes `--profile "$profile"`, release by default.
-            let builds: Vec<&str> = text
-                .lines()
-                .filter(|line| {
-                    line.contains("cargo build")
-                        && (line.contains("--release") || line.contains("--profile"))
-                })
-                .collect();
-            assert!(!builds.is_empty(), "{name} has no release cargo build");
-            for line in builds {
-                assert!(
-                    !line.contains("--all-features") && !line.contains(feature),
-                    "{name}: {line}"
-                );
-            }
+            assert!(
+                release_builds.contains(&PathBuf::from(name)),
+                "{name} has no release cargo build"
+            );
         }
     }
 }
