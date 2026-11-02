@@ -1,4 +1,4 @@
-# ADR 0035 — Touch ID in an Apassy panel
+# ADR 0038 — Touch ID in an Apassy panel
 
 Date: 2026-11-02. Status: implemented, runtime validation pending.
 
