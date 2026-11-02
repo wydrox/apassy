@@ -54,6 +54,15 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.14 coordinated release
+
+0.5.14 collects the Touch ID panel (#54), the relay as a crate of this workspace
+(#66, ADR 0037) and the CI queueing changes (#68) into one release of all six
+components. The vault schema stays at 23. It is the first relay built from this
+repository: build the image and both team CLIs with `relay-image.yml` (tag
+`image-release-0.5.14`), and deploy it only after the owner approves the exact image
+and backup. The hosted image sets `APASSY_RELAY_TEAM_VAULTS=0`.
+
 ## 0.5.13 coordinated release
 
 The owner approved a coordinated 0.5.13 release of all six components on 2026-11-02:
@@ -307,7 +316,8 @@ The site workflow also runs the eligibility helper before deployment. An ineligi
 
 ## Relay releases
 
-Use the separate relay repository's current `docs/OPERATIONS.md`. Build images
+Use `crates/apassy-relay/docs/OPERATIONS.md` (ADR 0037; the production deployment
+files stay in the archived private `wydrox/apassy-relay`). Build images
 and CLI artifacts in GitHub CI; never build or run development/test containers
 on the production VPS. Production deployment requires separate owner approval of
 the exact image and backup. Historical schema-17 vault and schema-4 relay deploy

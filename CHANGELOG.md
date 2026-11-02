@@ -4,9 +4,18 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-11-02
+
 ### Changed
 
 - Touch ID prompts appear in an Apassy panel instead of the macOS dialog.
+- **Relay:** The relay is open source under Apache-2.0 and is part of this repository (`crates/apassy-relay`). Its image and the Linux team CLI build here.
+- **Relay:** The hosted relay no longer serves shared team vaults. It refuses the proxy, MCP, access requests, runs, the host lane and new team-vault content with `410 team_vaults_retired`. Relay sync, questions, the feed and push keep working. A relay that you run yourself keeps team vaults on by default (`APASSY_RELAY_TEAM_VAULTS=1`).
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. The Touch ID helper protocol stays at version 1.
+- Coordinated release: macOS, iOS (TestFlight), browser extension (Chrome Web Store), relay, Linux CLI and website move to 0.5.14 together. This is the first relay built from this repository. Relay team schema 6 and directory schema 1003 do not change.
 
 ## [0.5.13] - 2026-11-02
 
@@ -618,7 +627,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.13...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.14...HEAD
+[0.5.14]: https://github.com/wydrox/apassy/compare/v0.5.13...v0.5.14
 [0.5.13]: https://github.com/wydrox/apassy/compare/v0.5.12...v0.5.13
 [0.5.12]: https://github.com/wydrox/apassy/compare/v0.5.11...v0.5.12
 [0.5.0]: https://github.com/wydrox/apassy/releases/tag/v0.5.0
