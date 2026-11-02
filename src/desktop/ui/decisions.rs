@@ -181,6 +181,7 @@ impl State {
 struct EvaluationDraft {
     run_id: u64,
     offer: EvaluationOffer,
+    #[cfg(test)]
     confirmations: Vec<EvaluationConfirmation>,
 }
 
@@ -188,6 +189,7 @@ impl EvaluationDraft {
     fn new(run_id: u64, offer: EvaluationOffer) -> Self {
         Self {
             run_id,
+            #[cfg(test)]
             confirmations: offer
                 .items
                 .iter()
@@ -1875,7 +1877,7 @@ fn credential_row(app: &DesktopApp, section: &mut kit::Section<'_>, item: &Quest
                 if item.production {
                     kit::cap(ui, "Production", true);
                 } else if item.unconfirmed {
-                    kit::cap(ui, "Production by default", false);
+                    kit::cap(ui, "Environment unknown", false);
                 }
                 if item.always_ask {
                     kit::cap(ui, "Always ask", false);
