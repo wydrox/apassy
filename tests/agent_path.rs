@@ -581,7 +581,7 @@ fn age_tokens(fx: &Fixture, days: i64) {
     with_vault(fx, |vault| vault.lock().expect("lock"));
     let conn =
         rusqlite::Connection::open(fx.dir.path().join("vault").join("vault.db")).expect("raw open");
-    conn.pragma_update(None, "key", PASS).expect("key");
+    crate::common::key_raw(&conn, PASS).expect("key");
     conn.execute(
         "UPDATE agent SET token_issued_at = token_issued_at - ?1",
         [days * 86_400],

@@ -140,7 +140,7 @@ fn hash_value(ctx: &mut digest::Context, value: ValueRef<'_>) {
 
 fn open_raw(path: &Path, passphrase: &str) -> Connection {
     let conn = Connection::open(path).unwrap();
-    conn.pragma_update(None, "key", passphrase).unwrap();
+    crate::common::key_raw(&conn, passphrase).unwrap();
     conn
 }
 

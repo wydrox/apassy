@@ -140,3 +140,25 @@ A draft pull request skips the macOS test groups ([CI duration](release.md#ci-du
 Each command runs after `cargo fetch --locked`, with `--offline --locked`. `scripts/ci-install-nextest.sh` installs the pinned cargo-nextest. The nextest settings, the `ci` profile, and the `serial` test group are in `.config/nextest.toml`.
 
 A configured workflow is not a remotely executed check.
+
+## Test vault KDF
+
+The vault keys its file with SQLCipher 4 defaults: PBKDF2-HMAC-SHA512 with 256,000 iterations.
+Each create, unlock, owner check, and copy check derives the key one time, about 0.3 s on a CI runner.
+To make the tests faster, the test-only feature `insecure-test-kdf` lowers this count to 2 for test vaults (`src/vault/test_kdf.rs`).
+CI tests with `--all-features`, so CI uses the lower count.
+
+The lower count applies only when all of these conditions are true:
+
+- The build has the feature. No shipped build names it. The macOS app, the release binaries of CI, the iPhone core, the relay, and the Linux CLI are built with named features or with `-p`.
+- The build has debug assertions. In a build without debug assertions, `REDUCED_KDF_ITER` is 256,000, and a constant assertion checks it. Every shipped artifact is a `--release` build.
+- A directory above the vault file has the exact name of a default `tempfile::TempDir`: `.tmp` and six letters or digits, such as `.tmpAbC123`. A vault in the data directory of the app, or in a directory such as `.tmpl` or `.tmp-backup`, keeps 256,000 iterations, also in a `cargo r` debug build with `--all-features`. Do not keep real secrets in a vault that a debug build with `--all-features` created inside such a temporary directory.
+
+The connection of a vault gets the count of its path, and `verify_cipher_defaults` checks that setting of the connection. In a build without the feature, the check compares with the constant 256,000, and the code for the lower count is not compiled. The check cannot see the count of the file itself. A file encrypted with another count does not decrypt: its first read fails the HMAC check (`verify_readable_schema`), and the vault reports a wrong passphrase or a damaged file.
+So a file with the lower count does not open in a shipped app.
+
+`no_shipped_build_enables_the_reduced_kdf` reads the manifests, the Cargo config, the relay Dockerfile, every workflow and every script, with backslash-continued commands joined. It fails if a release build names the feature or `--all-features`, if a release build uses the `cargo b` alias (`build --all-features`), or if any of these files turns on debug assertions (a profile, `CARGO_PROFILE_*_DEBUG_ASSERTIONS`, or `-C debug-assertions`). It also requires the known release builds, `screenshots.sh` included.
+
+These tests keep the real values: `sqlcipher_probe` uses plain SQLCipher connections, and `vault_migration`, the two file checks of `vault_passphrase`, and the cipher-defaults unit tests use directories with the `apassy-real-kdf-` prefix.
+A test that opens a vault file with its own SQLCipher connection calls `common::key_raw` (or `test_kdf::match_vault_kdf` in the library) after the key.
+Do not use a test vault of the lower count for real secrets: the passphrase is its only protection.

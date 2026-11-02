@@ -536,8 +536,7 @@ fn assert_debug_omits(label: &str, debug: &str, canaries: &[&str]) {
 
 fn inject_unsupported_schema(path: &Path, passphrase: &str) {
     let conn = rusqlite::Connection::open(path).expect("open a closed vault file with rusqlite");
-    conn.pragma_update(None, "key", passphrase)
-        .expect("apply passphrase before schema injection");
+    crate::common::key_raw(&conn, passphrase).expect("apply passphrase before schema injection");
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
         row.get::<_, i64>(0)
     })

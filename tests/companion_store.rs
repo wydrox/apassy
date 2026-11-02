@@ -608,7 +608,7 @@ fn sync_export_removes_companion_keys_and_merge_keeps_each_mac_pairing() {
     let pushed = mac_a.dir.path().join("pushed.db");
     mac_a.with(|v| v.write_sync_copy(&pushed, "Mac A").unwrap());
     let conn = rusqlite::Connection::open(&pushed).unwrap();
-    conn.pragma_update(None, "key", PASS).unwrap();
+    crate::common::key_raw(&conn, PASS).unwrap();
     for table in ["companion_device", "companion_certificate"] {
         let rows: i64 = conn
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
