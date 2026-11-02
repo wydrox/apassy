@@ -397,6 +397,28 @@ fn a_fitting_owner_answer_cannot_supply_a_missing_user_request() {
 }
 
 #[test]
+fn agent_stated_task_requires_nonempty_user_request_without_a_hook() {
+    // Owner decision (a): purpose alone cannot supply the agent-stated task.
+    let fx = fixture_with(
+        Some(declaration(Environment::Development, RiskLevel::Low)),
+        true,
+        Duration::from_millis(30),
+    );
+    for request in [None, Some(""), Some("  ")] {
+        let response = custom_run(&fx, &["true"], request, "Check status.");
+        assert_eq!(code(&response), "approval_timeout");
+        assert!(
+            response
+                .error
+                .unwrap()
+                .message
+                .contains("did not send the user request")
+        );
+    }
+    assert_eq!(model_calls(&fx), 0);
+}
+
+#[test]
 fn an_agent_that_does_not_see_all_credentials_gets_not_granted_and_an_empty_catalog() {
     let fx = fixture_with(
         Some(declaration(Environment::Development, RiskLevel::Low)),
@@ -434,14 +456,17 @@ fn first_use_of_staging_reaches_the_model_without_permission() {
 }
 
 #[test]
-fn default_source_dev_staging_and_unconfirmed_production_reach_the_model() {
+fn default_source_dev_staging_and_read_only_production_reach_the_model() {
     use apassy::vault::{DeclarationSource, DeclarationSources};
     for environment in [
         Environment::Development,
         Environment::Staging,
         Environment::Production,
     ] {
-        let fx = fixture(Some(declaration(environment, RiskLevel::Low)));
+        // Owner decision (b): production may reach the model only with read-only scope.
+        let mut declared = declaration(environment, RiskLevel::Low);
+        declared.scope = Scope::ReadOnly;
+        let fx = fixture(Some(declared));
         with_vault(&fx, |v| {
             v.set_declaration_sources(
                 fx.item_id,
@@ -472,10 +497,53 @@ fn default_source_dev_staging_and_unconfirmed_production_reach_the_model() {
 }
 
 #[test]
+fn production_write_and_admin_scopes_ask_even_for_a_read_command() {
+    use apassy::vault::{DeclarationSource, DeclarationSources};
+    // Owner decision (b): command analysis cannot weaken the credential scope,
+    // including when production is a default rather than an owner confirmation.
+    for scope in [Scope::ReadWrite, Scope::Admin] {
+        for source in [DeclarationSource::Owner, DeclarationSource::Default] {
+            let mut declared = declaration(Environment::Production, RiskLevel::Low);
+            declared.scope = scope;
+            let fx = fixture_with(Some(declared), true, Duration::from_millis(30));
+            with_vault(&fx, |v| {
+                v.set_declaration_sources(
+                    fx.item_id,
+                    &DeclarationSources {
+                        environment: source,
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
+            let response = custom_run(
+                &fx,
+                &["git", "status", "--short"],
+                Some("Check status."),
+                "Check status.",
+            );
+            assert_eq!(code(&response), "approval_timeout");
+            assert!(
+                response
+                    .error
+                    .unwrap()
+                    .message
+                    .contains("write or admin scope")
+            );
+            assert_eq!(model_calls(&fx), 0);
+        }
+    }
+}
+
+#[test]
 fn default_classification_needs_eighty_percent_even_for_a_safe_command() {
     use apassy::vault::{DeclarationSource, DeclarationSources};
+    // Owner decision (b): use read-only production to exercise model confidence;
+    // a write-scoped credential must ask before inference regardless of confidence.
+    let mut declared = declaration(Environment::Production, RiskLevel::High);
+    declared.scope = Scope::ReadOnly;
     let fx = fixture_model(
-        Some(declaration(Environment::Production, RiskLevel::High)),
+        Some(declared),
         true,
         Duration::from_secs(10),
         common::fake_bouncer(&[("task_match", 0.79)]),

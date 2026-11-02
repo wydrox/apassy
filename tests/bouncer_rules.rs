@@ -1066,17 +1066,23 @@ fn live_laya_broker_path() {
 }
 
 #[test]
-fn first_use_unconfirmed_classification_is_allowed_by_model_without_question() {
+fn first_use_read_only_production_is_allowed_with_owner_or_default_source() {
     use apassy::vault::{DeclarationSource, DeclarationSources};
     let model = common::fake_bouncer(&[("task_match", 0.85), ("writes", 0.01)]);
     let fx = fixture_declared(
         Some(&model.url),
         Declaration {
+            // Owner decision (b): a default source does not waive production scope.
+            scope: Scope::ReadOnly,
             environment: Environment::Production,
             risk: RiskLevel::Low,
             ..model_declaration()
         },
     );
+    // Owner decision (b) applies to confirmed production as well as default sources.
+    let confirmed = run(&fx, &["echo", "done"], "Run the project checks.");
+    assert!(confirmed.ok, "{confirmed:?}");
+    assert_eq!(confirmed.result.unwrap()["decided_by"], "Bouncer allowed");
     {
         let mut guard = fx.vault.lock().unwrap();
         let vault = guard.as_mut().unwrap();
@@ -1096,5 +1102,5 @@ fn first_use_unconfirmed_classification_is_allowed_by_model_without_question() {
     assert!(response.ok, "{response:?}");
     assert_eq!(response.result.unwrap()["decided_by"], "Bouncer allowed");
     assert!(fx.broker.approvals().pending().is_empty());
-    assert_eq!(model.bodies.lock().unwrap().len(), 1);
+    assert_eq!(model.bodies.lock().unwrap().len(), 2);
 }

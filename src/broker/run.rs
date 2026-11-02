@@ -415,6 +415,14 @@ fn hard_rules(
             },
         ));
     }
+    // Decision (a) still requires the agent to state a task. Report this even
+    // when a production write guard or a remembered answer also applies.
+    if !run.has_user_request {
+        why.push((
+            "The agent did not send the user request.".to_owned(),
+            ReasonKind::MissingTask,
+        ));
+    }
     if let Some((host, name)) = foreign_db_host(checked, run) {
         why.push((format!(
             "The command connects to the database host {host}, which is not a host of \"{name}\"."
@@ -533,13 +541,6 @@ fn route<F: FnMut() -> Result<(), String>>(
         return Route::Ask(
             "The folder is not a project (the root, the home folder, or a parent of it), so Apassy remembers nothing there.".to_owned(),
         ReasonKind::NotProject);
-    }
-    // Required context is a hard veto, including when an execution answer fits.
-    if !run.has_user_request {
-        return Route::Ask(
-            "The agent did not send the user request.".to_owned(),
-            ReasonKind::MissingTask,
-        );
     }
     if let Some(index) = checked.declarations.iter().position(Option::is_none) {
         return Route::Ask(
