@@ -84,7 +84,12 @@ struct PromptTrackingKeys: CompanionKeys {
     func signApproval(_ message: Data, reason: String) async throws -> Data {
         await PrivacyCover.shared.beginSystemPrompt()
         do {
-            let signature = try await inner.signApproval(message, reason: reason)
+            let signature: Data
+            if inner.isSecureEnclave {
+                signature = try await inner.signAccessApproval(message, reason: reason, authentication: ApprovalAuthentication(window: .app))
+            } else {
+                signature = try await inner.signApproval(message, reason: reason)
+            }
             await PrivacyCover.shared.endSystemPrompt()
             return signature
         } catch {

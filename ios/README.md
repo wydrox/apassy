@@ -321,3 +321,23 @@ The app declares `ITSAppUsesNonExemptEncryption = NO` (ADR 0023, section 8), so 
 On the Mac, Settings > Devices > Get approvals on your iPhone creates a questions-only Connect connection. No operator code, paid sync, or account is required. Open the same vault from iCloud Drive on the iPhone, then Requests > Connect this iPhone; scan the Mac's code, compare the safety words and confirm on the Mac. Keep the Mac's pairing screen open while it sends the connection keys. The iPhone then offers Request Notifications and Open Requests. A reinstall needs a new code and confirmation; remove the previous iPhone in the Mac's Devices list.
 
 Simulator UI fixtures accept `-ApassyConnectLink <synthetic link>` only together with `-ApassyPreviewVault`; the preview service simulates confirmation. These screenshots prove layout, not relay delivery, Face ID, or APNs. Local fake-relay Rust integration tests exercise the actual confirmed key transfer.
+
+## App-wide Face ID window (2026-11-02)
+
+The iPhone follows the global Mac owner-check decision: Settings > Security > Ask for
+Face ID offers Every time (default), 1 minute, 5 minutes, 15 minutes, 1 hour, or
+Until the iPhone locks. A change requires fresh biometry and is stored in the app's
+device-only keychain, outside the synced vault and shared AutoFill settings.
+
+Approval signatures, vault unlock, reveal and copy explicitly use one evaluated
+`LAContext`. Key access controls remain unchanged (`biometryCurrentSet`, and
+`privateKeyUsage` for the approval key). The system can still refuse an operation
+or demand authentication. AutoFill receives no window and keeps fresh authentication
+per fill. The context is invalidated on expiry, protected-data unavailability,
+termination, setting change, enrollment change, and vault lock. Backgrounding alone
+does not end it; an actual vault lock, including Lock after Immediately, does.
+
+Residual risk: anyone holding the unlocked iPhone during the chosen window can
+approve agent requests and see secrets in the app. Secure Enclave reuse of a
+previously evaluated context across keys requires physical-device validation;
+source inspection and unit tests cannot establish that iOS suppresses every prompt.

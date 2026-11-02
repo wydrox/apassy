@@ -11,8 +11,8 @@
     /// P-256 keys in the Secure Enclave.
     ///
     /// The request key needs no biometry. The approval key is bound to the current biometric set,
-    /// with no passcode fallback: each signature asks for Face ID or Touch ID, in a new
-    /// authentication context, with no reuse.
+    /// with no passcode fallback. The caller may explicitly lease the app's evaluated context;
+    /// without a window provider each signature uses a fresh context.
     ///
     /// The keychain holds only each key's `dataRepresentation`, an encrypted blob that only this
     /// Secure Enclave can use.
@@ -134,7 +134,8 @@
         }
 
         public func signAccessApproval(_ message: Data, reason: String, authentication: ApprovalAuthentication) async throws -> Data {
-            defer { authentication.cancel() }
+            defer { authentication.finish() }
+            try await authentication.prepare(reason: reason)
             try authentication.requireFaceID(reason: reason)
             let blob = approvalBlob
             let service = service
@@ -147,6 +148,7 @@
                         guard !authentication.isCancelled else { throw CompanionKeyError.cancelled }
                         continuation.resume(returning: signature)
                     } catch {
+                        authentication.cancel()
                         let stored = try? KeychainItems.load(service: service, account: Self.enrollmentAccount)
                         continuation.resume(throwing: CompanionKeyError.classifyAuthFailure(
                             CompanionKeyError.map(error), enrolledState: stored, currentState: Self.enrollmentState()))

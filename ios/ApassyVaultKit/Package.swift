@@ -17,8 +17,9 @@ let package = Package(
         .library(name: "ApassyVaultKit", targets: ["ApassyVaultKit"]),
         .library(name: "ApassyVaultCore", targets: ["ApassyVaultCore"]),
     ],
+    dependencies: [.package(path: "../ApassyCompanionKit")],
     targets: [
-        .target(name: "ApassyVaultKit", swiftSettings: strict),
+        .target(name: "ApassyVaultKit", dependencies: [.product(name: "ApassyCompanionKit", package: "ApassyCompanionKit")], swiftSettings: strict),
         .binaryTarget(name: "ApassyCoreFFI", path: "../ApassyCore/build/ApassyCore.xcframework"),
         .target(
             name: "ApassyVaultCore",
