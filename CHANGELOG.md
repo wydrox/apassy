@@ -8,10 +8,17 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
 
+## [0.5.12] - 2026-11-02
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.
 - Show privacy-safe bouncer route counts and top reasons since app start. Log route outcomes without request data.
+
+### Upgrade notes
+
+- No vault schema change: schema stays at 23. Macs on 0.5.11 and the iPhone on TestFlight 0.5.10 keep syncing; no TestFlight update is needed.
+- The Mac download and in-app auto-update publish with this release. The Chrome Web Store extension update follows separately (0.5.10 is in review). Relay stays at 0.5.9.
 
 ## [0.5.11] - 2026-11-02
 
@@ -580,7 +587,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.12...HEAD
+[0.5.12]: https://github.com/wydrox/apassy/compare/v0.5.11...v0.5.12
 [0.5.0]: https://github.com/wydrox/apassy/releases/tag/v0.5.0
 [0.4.1]: https://github.com/wydrox/apassy/releases/tag/v0.4.1
 [0.3.6]: https://github.com/wydrox/apassy/releases/tag/v0.3.6
