@@ -1218,15 +1218,22 @@ fn a_transient_error_keeps_a_join_waiting() {
         .expect("team");
     let code = a.sync.create_link(&vault_a).expect("link");
     let pending = PendingJoin::request(&code.link, "", "Synthetic Mac mini").expect("request");
+    assert_eq!(
+        pending.first_retry_wait(),
+        Duration::from_secs(2),
+        "a join of the app waits 2 s after the first failure"
+    );
+    // The test waits a shorter first wait.
+    let pending = pending.with_first_retry_wait(Duration::from_millis(1_200));
     relay.fail_next("POST /v1/auth/challenge", 1, 502);
     assert!(pending.poll().expect("a network error waits").is_none());
     let links = a.sync.pending_links(&vault_a, Some(&code)).expect("links");
     a.sync.confirm_link(&vault_a, &links[0]).expect("confirm");
-    // The next poll waits 2 seconds before it asks the relay again.
+    // The next poll waits before it asks the relay again.
     let challenges = relay.count("POST /v1/auth/challenge");
     assert!(pending.poll().expect("backing off").is_none());
     assert_eq!(relay.count("POST /v1/auth/challenge"), challenges);
-    std::thread::sleep(Duration::from_millis(2100));
+    std::thread::sleep(Duration::from_millis(1_250));
     assert!(pending.poll().expect("poll").is_some(), "confirmed");
 }
 
@@ -1363,13 +1370,15 @@ fn a_failed_sync_after_a_new_passphrase_keeps_the_new_passphrase() {
         b.sync.sync(&mut vault_b).unwrap_err(),
         SyncError::NeedsPassphrase
     );
-    relay.delay("GET /v1/sync/snapshot", Duration::from_millis(1200));
+    let download = relay.hold("GET /v1/sync/snapshot", Duration::from_millis(1200));
     let taken = std::thread::scope(|scope| {
         let relay = &relay;
+        let download = &download;
         scope.spawn(move || {
             // During the download for the check: the next head request fails.
-            std::thread::sleep(Duration::from_millis(600));
+            download.wait_entered();
             relay.fail_next("GET /v1/sync/head", 1, 500);
+            download.release();
         });
         b.sync.take_new_passphrase(&mut vault_b, NEW)
     });
@@ -1810,18 +1819,16 @@ fn a_sync_that_waits_during_a_pause_does_not_run() {
     vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
     vault_a.add(item("Gamma", "SYNTH-gamma")).expect("add");
     a.sync.sync(&mut vault_a).expect("push version 2");
-    relay.delay("GET /v1/sync/snapshot", Duration::from_secs(2));
-    let downloads = relay.count("GET /v1/sync/snapshot");
+    let download = relay.hold("GET /v1/sync/snapshot", Duration::from_secs(2));
     let slot = Mutex::new(Some(vault_b));
     let (owner, worker, puts) = std::thread::scope(|scope| {
         let owner = scope.spawn(|| b.sync.sync_shared(&slot, |_| true));
-        while relay.count("GET /v1/sync/snapshot") == downloads {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        download.wait_entered();
         let worker = scope.spawn(|| b.sync.sync_shared(&slot, |_| true));
         std::thread::sleep(Duration::from_millis(200));
         let puts = relay.count("PUT /v1/sync/snapshot");
         b.sync.pause();
+        download.release();
         (
             owner.join().expect("owner"),
             worker.join().expect("worker"),

@@ -259,6 +259,24 @@ pub struct PushConfig {
     pub topic: String,
     /// Sent as `X-Apassy-Push`. Never logged.
     pub secret: SecretString,
+    /// One call to the Worker, from the connection to the last byte of the answer: 10 s.
+    pub timeout: Duration,
+    /// The unit of the retry backoff (1, 2, 4 … 60 units, plus 0..2 units of jitter):
+    /// one second.
+    pub backoff_unit: Duration,
+}
+
+impl PushConfig {
+    /// The push settings of the relay with the deadlines of docs/SPEC.md section 25.6.
+    pub fn new(url: String, topic: String, secret: SecretString) -> Self {
+        Self {
+            url,
+            topic,
+            secret,
+            timeout: crate::server::push::TIMEOUT,
+            backoff_unit: crate::server::push::BACKOFF_UNIT,
+        }
+    }
 }
 
 impl RelayConfig {
@@ -432,7 +450,7 @@ fn push_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<Option<Pus
             "The push secret must have at least {MIN_PUSH_SECRET_BYTES} bytes."
         )));
     }
-    Ok(Some(PushConfig { url, topic, secret }))
+    Ok(Some(PushConfig::new(url, topic, secret)))
 }
 
 /// An `https://` URL, or an `http://` URL to a loopback address (tests). The secret

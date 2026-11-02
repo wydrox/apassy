@@ -63,7 +63,7 @@ fn model_declaration() -> Declaration {
 }
 
 /// The owner waits this long in most tests: each question ends at once.
-const SHORT: Duration = Duration::from_millis(400);
+const SHORT: Duration = Duration::from_millis(150);
 
 fn fixture(bouncer: Option<&str>) -> Fixture {
     build(bouncer, model_declaration(), None, SHORT)

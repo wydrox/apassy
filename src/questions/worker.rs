@@ -133,6 +133,17 @@ pub struct QuestionsConfig {
     pub feed_every: Duration,
     /// A new feed this often while nothing changes: 15 minutes.
     pub feed_beat: Duration,
+    /// The shortest cycle of the lister and the reader with more than one open question:
+    /// 2 s.
+    pub short_poll_every: Duration,
+    /// How long the access transport waits before it checks an access request again: 2 s.
+    pub access_every: Duration,
+    /// After a `403 feed_rate` of the read-back the feed waits this long: 60 s, a whole
+    /// minute of the relay's clock.
+    pub feed_rate_wait: Duration,
+    /// The first wait after an early empty answer of the action long poll: 5 s, doubling
+    /// to 60 s.
+    pub feed_early_wait: Duration,
 }
 
 impl Default for QuestionsConfig {
@@ -144,6 +155,10 @@ impl Default for QuestionsConfig {
             feed: true,
             feed_every: Duration::from_secs(10),
             feed_beat: Duration::from_secs(15 * 60),
+            short_poll_every: SHORT_POLL_EVERY,
+            access_every: super::access_worker::ACCESS_EVERY,
+            feed_rate_wait: super::feed::FEED_RATE_WAIT,
+            feed_early_wait: super::feed::EARLY_WAIT_FIRST,
         }
     }
 }
@@ -1414,7 +1429,7 @@ impl Shared {
                             .answers(&reading.qid, reading.last_answer, Duration::ZERO);
                     self.take_answers(&active, reading, result);
                 }
-                self.sleep(SHORT_POLL_EVERY);
+                self.sleep(self.config.short_poll_every);
             }
         }
     }
@@ -2030,7 +2045,7 @@ impl Shared {
             let wait = if remote.pending.is_empty() {
                 MAX_WAIT
             } else {
-                SHORT_POLL_EVERY
+                self.config.short_poll_every
             };
             (remote.since, remote.generation, wait)
         };
@@ -2085,8 +2100,9 @@ impl Shared {
             self.publish_remote();
         }
         // A relay may return immediately even for a long poll. Bound retry frequency.
-        if started.elapsed() < SHORT_POLL_EVERY {
-            self.sleep(SHORT_POLL_EVERY.saturating_sub(started.elapsed()));
+        let every = self.config.short_poll_every;
+        if started.elapsed() < every {
+            self.sleep(every.saturating_sub(started.elapsed()));
         }
     }
 }
@@ -2157,6 +2173,19 @@ fn feed_actions(shared: &Shared) {
 #[cfg(test)]
 mod receive_tests {
     use super::*;
+
+    #[test]
+    fn the_default_cadences_are_the_production_ones() {
+        let config = QuestionsConfig::default();
+        assert_eq!(config.question_wait, Duration::from_secs(300));
+        assert_eq!(config.tick, Duration::from_millis(250));
+        assert_eq!(config.feed_every, Duration::from_secs(10));
+        assert_eq!(config.feed_beat, Duration::from_secs(15 * 60));
+        assert_eq!(config.short_poll_every, Duration::from_secs(2));
+        assert_eq!(config.access_every, Duration::from_secs(2));
+        assert_eq!(config.feed_rate_wait, Duration::from_secs(60));
+        assert_eq!(config.feed_early_wait, Duration::from_secs(5));
+    }
 
     fn sealed_record(seq: u64, now: u64) -> QuestionRecord {
         QuestionRecord {

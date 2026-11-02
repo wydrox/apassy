@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::relay_api::{
     HeadFields, NO_PREVIOUS, decode_b64u, encode_b64u, safety_words, sha256_hex,
@@ -44,6 +44,68 @@ use serde_json::{Value, json};
 pub const SYNC_BYTES: u64 = 67_108_864;
 
 type Hook = Box<dyn FnOnce() + Send>;
+
+/// A gate of [`FakeRelay::hold`]: requests that start with its prefix wait at the gate
+/// until the test releases it, or at most for its bound.
+pub struct Hold {
+    state: Mutex<(usize, bool)>,
+    changed: Condvar,
+    most: Duration,
+}
+
+impl Hold {
+    fn new(most: Duration) -> Self {
+        Self {
+            state: Mutex::new((0, false)),
+            changed: Condvar::new(),
+            most,
+        }
+    }
+
+    fn is_released(&self) -> bool {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).1
+    }
+
+    /// A request waits here: until the release, or at most the bound of the hold.
+    fn pass(&self) {
+        let end = Instant::now() + self.most;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 += 1;
+        self.changed.notify_all();
+        while !state.1 {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Wait until a request waits at the gate (at most 30 s).
+    pub fn wait_entered(&self) {
+        let end = Instant::now() + Duration::from_secs(30);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while state.0 == 0 {
+            let left = end.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "no request came to the hold");
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Open the gate: the waiting requests and every later one go on.
+    pub fn release(&self) {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+        self.changed.notify_all();
+    }
+}
 
 /// The failure of a scripted `403 feed_rate` ([`FakeRelay::rate_feed_reads`]): no real
 /// status, so `fail_next` keeps its plain statuses.
@@ -211,6 +273,8 @@ struct Relay {
     stopped: bool,
     /// Requests that start with the prefix wait this long before the answer.
     delays: Vec<(String, Duration)>,
+    /// Requests that start with the prefix wait at the gate before the answer.
+    holds: Vec<(String, Arc<Hold>)>,
     /// The next requests that start with the prefix fail with this status.
     failures: Vec<(String, usize, u16)>,
     /// A long poll answers at once, as a second poll of one device does.
@@ -358,6 +422,16 @@ impl FakeRelay {
     /// `delay`: a slow transfer.
     pub fn delay(&self, prefix: &str, delay: Duration) {
         lock(&self.shared.0).delays.push((prefix.to_owned(), delay));
+    }
+
+    /// Hold each request that starts with `prefix` before the answer until the returned
+    /// gate is released, or at most `most`: a slow transfer that the test ends.
+    pub fn hold(&self, prefix: &str, most: Duration) -> Arc<Hold> {
+        let hold = Arc::new(Hold::new(most));
+        lock(&self.shared.0)
+            .holds
+            .push((prefix.to_owned(), Arc::clone(&hold)));
+        hold
     }
 
     /// Fail the next `count` requests that start with `prefix` with `status`: 502 is a
@@ -855,7 +929,7 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
         return;
     };
     let line = format!("{} {}", request.method, request.path);
-    let (delay, failure, lost) = {
+    let (delay, hold, failure, lost) = {
         let mut relay = lock(&shared.0);
         relay.log.push(line.clone());
         if !request.body.is_empty() {
@@ -874,6 +948,11 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
             .iter()
             .find(|(prefix, _)| line.starts_with(prefix.as_str()))
             .map(|(_, delay)| *delay);
+        let hold = relay
+            .holds
+            .iter()
+            .find(|(prefix, hold)| line.starts_with(prefix.as_str()) && !hold.is_released())
+            .map(|(_, hold)| Arc::clone(hold));
         let mut failure = relay
             .failures
             .iter_mut()
@@ -886,8 +965,11 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
             relay.feed_rate_next -= 1;
             failure = Some(FEED_RATE);
         }
-        (delay, failure, lost)
+        (delay, hold, failure, lost)
     };
+    if let Some(hold) = hold {
+        hold.pass();
+    }
     if let Some(delay) = delay {
         std::thread::sleep(delay);
     }

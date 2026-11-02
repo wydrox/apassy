@@ -1102,6 +1102,20 @@ fn a_feed_list_pages_at_one_mebibyte_of_text() {
     );
 }
 
+/// Run `reads` from a cleared table of feed reads until one run starts and ends in the
+/// same minute of the relay clock (the budget is per minute): at most three runs.
+fn within_one_minute<T>(core: &Core, mut reads: impl FnMut() -> T) -> T {
+    for _ in 0..3 {
+        let minute = now_unix() / 60;
+        core.feed_reads.lock().unwrap().clear();
+        let result = reads();
+        if now_unix() / 60 == minute {
+            return result;
+        }
+    }
+    panic!("the reads crossed a minute three times");
+}
+
 #[test]
 fn feed_reads_have_a_text_budget_per_device_and_minute() {
     let mut relay = start(UpstreamOptions::default());
@@ -1115,25 +1129,28 @@ fn feed_reads_have_a_text_budget_per_device_and_minute() {
     for device in &macs {
         assert_eq!(put(&relay, device, 1, &full).0, 200);
     }
-    // The budget is per minute of the relay clock: start early in a minute.
-    while now_unix() % 60 > 45 {
-        std::thread::sleep(Duration::from_millis(500));
-    }
     // Each read of everything gives three full feeds (1048578 characters). A read starts
     // only while its reserve of one whole page fits in the 16 MiB of the minute: 15 of
     // them, and the 16th read of the minute is 403 `feed_rate`, not a 429.
     let page = 3 * full.len() as u64;
     let reads = (feed::FEED_READ_TEXT_PER_MINUTE - feed::FEED_READ_RESERVE) / page + 1;
     assert_eq!(reads, 15);
-    for _ in 0..reads {
-        assert_eq!(feed_ids(&feeds(&relay, &phone, 0)).len(), 3);
-    }
-    let (status, value) = relay.call("GET", "/v1/feed?since=0", Some(&phone.token), None);
+    // The budget is per minute of the relay clock: reads that cross into the next
+    // minute are made again from a cleared table, within one minute.
+    let (lens, (status, value), waited) = within_one_minute(&core, || {
+        let lens: Vec<usize> = (0..reads)
+            .map(|_| feed_ids(&feeds(&relay, &phone, 0)).len())
+            .collect();
+        let refused = relay.call("GET", "/v1/feed?since=0", Some(&phone.token), None);
+        // Every feed read of the device waits for the next minute, also one that would
+        // give nothing.
+        let (waited, _) = relay.call("GET", "/v1/feed?since=3&wait=5", Some(&phone.token), None);
+        (lens, refused, waited)
+    });
+    assert_eq!(lens, vec![3; 15]);
     assert_eq!((status, code(&value)), (403, "feed_rate"), "{value}");
-    // Every feed read of the device waits for the next minute, also one that would
-    // give nothing; its other calls go on.
-    let (status, _) = relay.call("GET", "/v1/feed?since=3&wait=5", Some(&phone.token), None);
-    assert_eq!(status, 403);
+    assert_eq!(waited, 403);
+    // Its other calls go on.
     assert_eq!(relay.call("GET", "/v1/me", Some(&phone.token), None).0, 200);
     assert_eq!(
         relay
@@ -1164,21 +1181,21 @@ fn feed_reads_in_parallel_stay_within_the_budget() {
         let device = add_device(&relay, &mac, &format!("Mac {n}"));
         assert_eq!(put(&relay, &device, 1, &full).0, 200);
     }
-    while now_unix() % 60 > 45 {
-        std::thread::sleep(Duration::from_millis(500));
-    }
     // Forty reads of everything at once, from one device: the reserve before each read
     // and the cap of reads in flight keep the text given within the minute's budget.
     let relay = &relay;
-    let answers: Vec<(u16, Value)> = std::thread::scope(|scope| {
-        let threads: Vec<_> = (0..40)
-            .map(|_| {
-                scope.spawn(|| {
-                    relay.call("GET", "/v1/feed?since=0&wait=0", Some(&phone.token), None)
+    let core = core_of(relay, &mac);
+    let answers: Vec<(u16, Value)> = within_one_minute(&core, || {
+        std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..40)
+                .map(|_| {
+                    scope.spawn(|| {
+                        relay.call("GET", "/v1/feed?since=0&wait=0", Some(&phone.token), None)
+                    })
                 })
-            })
-            .collect();
-        threads.into_iter().map(|t| t.join().unwrap()).collect()
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        })
     });
     let given: u64 = answers
         .iter()
@@ -1201,7 +1218,6 @@ fn feed_reads_in_parallel_stay_within_the_budget() {
     assert!(passed <= 15, "{passed}");
     assert!(given <= feed::FEED_READ_TEXT_PER_MINUTE, "{given}");
     // Every read ended: the device's two seats in flight are free again.
-    let core = core_of(relay, &mac);
     core.feed_reads.lock().unwrap().clear();
     assert_eq!(feed_ids(&feeds(relay, &phone, 0)).len(), 3);
 }

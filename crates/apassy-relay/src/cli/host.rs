@@ -437,10 +437,15 @@ pub enum DialogKind {
     Zenity,
 }
 
+/// There is no valid dialog duration below five seconds.
+const DIALOG_MIN_SECS: u64 = 5;
+
 /// A native question. A missing GUI or program never permits a release.
 pub struct DialogAsker {
     program: Option<PathBuf>,
     kind: DialogKind,
+    /// The shortest dialog duration: [`DIALOG_MIN_SECS`].
+    min_secs: u64,
 }
 
 impl DialogAsker {
@@ -455,6 +460,7 @@ impl DialogAsker {
             Self {
                 program,
                 kind: DialogKind::Zenity,
+                min_secs: DIALOG_MIN_SECS,
             }
         }
     }
@@ -467,7 +473,17 @@ impl DialogAsker {
                 .is_absolute()
                 .then(|| path.as_ref().to_path_buf()),
             kind,
+            min_secs: DIALOG_MIN_SECS,
         }
+    }
+
+    /// A fake dialog program of a test can take a shorter duration than the five
+    /// seconds of a real dialog, but at least one second.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_minimum_seconds(mut self, secs: u64) -> Self {
+        self.min_secs = secs.max(1);
+        self
     }
 }
 
@@ -507,7 +523,7 @@ impl Asker for DialogAsker {
         let now = now_unix();
         let left = request.expires_at.saturating_sub(now);
         // There is no valid dialog duration below the minimum of five seconds.
-        if left < 5 {
+        if left < self.min_secs {
             return Answer::Expired;
         }
         let secs = left.min(i32::MAX as u64);
@@ -1104,6 +1120,18 @@ mod tests {
     use crate::secret::SecretString;
 
     const RELAY: &str = "https://relay.example.test";
+
+    #[test]
+    fn a_dialog_lasts_at_least_five_seconds() {
+        assert_eq!(DIALOG_MIN_SECS, 5);
+        assert_eq!(DialogAsker::new().min_secs, 5);
+        assert_eq!(
+            DialogAsker::with_program("/usr/bin/true", DialogKind::Zenity).min_secs,
+            5
+        );
+        let fake = DialogAsker::with_program("/usr/bin/true", DialogKind::Zenity);
+        assert_eq!(fake.with_minimum_seconds(0).min_secs, 1, "never below 1 s");
+    }
 
     fn entry(n: u64, environment: &str) -> KeyEntry {
         KeyEntry {

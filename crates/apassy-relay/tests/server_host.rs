@@ -854,7 +854,7 @@ fn a_run_past_its_expiry_is_not_listed_even_before_a_sweep() {
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team, &["git", "status"]);
     assert_eq!(relay.host_requests().len(), 1);
-    std::thread::sleep(Duration::from_millis(2600));
+    relay.edit_vault_live(&format!("UPDATE run SET expires_at = 1 WHERE id = {run}"));
     assert!(relay.host_requests().is_empty());
     assert_eq!(view(&relay, &team, run)["status"], "timed_out");
 }

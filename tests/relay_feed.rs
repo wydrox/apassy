@@ -648,6 +648,7 @@ fn config() -> QuestionsConfig {
         feed: true,
         feed_every: Duration::from_secs(1),
         feed_beat: Duration::from_secs(600),
+        ..QuestionsConfig::default()
     }
 }
 
@@ -671,6 +672,15 @@ struct Phone {
     key: QuestionKey,
     /// The name of the Mac's row in the iPhone's copy of the vault.
     mac_name: String,
+}
+
+/// [`config`] with a feed every 150 ms; the relay of the world takes one every 100 ms
+/// after [`World::fast_feeds`].
+fn fast_config() -> QuestionsConfig {
+    QuestionsConfig {
+        feed_every: Duration::from_millis(150),
+        ..config()
+    }
 }
 
 fn world() -> World {
@@ -708,6 +718,11 @@ fn world() -> World {
 impl World {
     fn with<T>(&self, f: impl FnOnce(&mut Vault) -> T) -> T {
         f(self.shared.lock().unwrap().as_mut().unwrap())
+    }
+
+    /// The relay takes a feed every 100 ms, for [`fast_config`].
+    fn fast_feeds(&self) {
+        self.relay.set_feed_every(Duration::from_millis(100));
     }
 
     fn start(&mut self, config: QuestionsConfig) {
@@ -1221,18 +1236,20 @@ fn seq_goes_up_across_restarts() {
 #[test]
 fn no_feed_without_a_live_iphone_or_while_the_vault_is_locked() {
     let mut world = world();
-    let mut beat = config();
-    beat.feed_beat = Duration::from_secs(1);
+    world.fast_feeds();
+    let mut beat = fast_config();
+    beat.feed_beat = Duration::from_millis(300);
     world.start(beat);
-    std::thread::sleep(Duration::from_secs(2));
+    // Each window is three beats.
+    std::thread::sleep(Duration::from_millis(900));
     assert_eq!(world.feed_puts(), 0, "no iPhone in the team");
     let phone = world.phone("Test iPhone", answer_key());
     phone.wait_feed(&world, "a feed with an iPhone", |_| true);
     // Locked: nothing goes, not even the beat.
     world.with(|vault| vault.lock().unwrap());
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(200));
     let before = world.feed_puts();
-    std::thread::sleep(Duration::from_millis(2_500));
+    std::thread::sleep(Duration::from_millis(900));
     assert_eq!(world.feed_puts(), before, "a locked Mac publishes nothing");
     world.with(|vault| vault.unlock(PASS).unwrap());
     wait_until("a feed after the unlock", || {
@@ -1242,9 +1259,9 @@ fn no_feed_without_a_live_iphone_or_while_the_vault_is_locked() {
     world.with(|vault| {
         assert!(vault.remove_trusted_device(&phone.uuid).unwrap());
     });
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(200));
     let before = world.feed_puts();
-    std::thread::sleep(Duration::from_millis(2_500));
+    std::thread::sleep(Duration::from_millis(900));
     assert_eq!(world.feed_puts(), before, "no live iPhone");
 }
 
@@ -1722,7 +1739,8 @@ fn bad_removals_are_refused_or_stale() {
     std::thread::sleep(Duration::from_millis(300));
     let locked = phone.removal(&world, &feed, &never);
     phone.send(&world, &locked, world.mac_id(), face_id);
-    std::thread::sleep(Duration::from_secs(2));
+    // A locked Mac looks for a session every second.
+    std::thread::sleep(Duration::from_millis(1_300));
     assert_eq!(
         world.relay.feed_action_state(&locked.action_id),
         Some(("open".to_owned(), None)),
@@ -1754,7 +1772,7 @@ fn bad_removals_are_refused_or_stale() {
             .unwrap();
     });
     world.relay.reopen_feed_action(&removal.action_id);
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(800));
     assert_eq!(settles(&removal.action_id), 1, "no second settle");
     assert_eq!(world.exceptions().len(), 1, "the row made again stays");
 }
@@ -2027,7 +2045,11 @@ fn the_activity_text_of_a_run_is_masked_with_every_item_before_the_cut() {
 fn a_flood_of_actions_that_do_not_open_leaves_activity_alone() {
     let mut world = world();
     let phone = world.phone("Test iPhone", answer_key());
-    world.start(config());
+    // The early wait is the production 5 s (`QuestionsConfig::default`) scaled down.
+    world.start(QuestionsConfig {
+        feed_early_wait: Duration::from_secs(2),
+        ..config()
+    });
     phone.wait_feed(&world, "a feed", |_| true);
     world.with(|vault| {
         for index in 0..5 {
@@ -2058,7 +2080,7 @@ fn a_flood_of_actions_that_do_not_open_leaves_activity_alone() {
             .count()
     };
     wait_until("the first answer", || (settled() >= 20).then_some(()));
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(500));
     assert_eq!(settled(), 20, "at most 20 of one answer, then a wait");
     wait_until("the second answer after the wait", || {
         (settled() >= 40).then_some(())
@@ -2116,7 +2138,7 @@ fn a_bad_copy_before_the_real_action_gets_the_only_settle() {
         (outcome.as_str(), settle.reason.as_str()),
         ("refused", "it could not be read")
     );
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(800));
     assert_eq!(
         world.relay.count(&format!(
             "POST /v1/feed/actions/{}/settle",
@@ -2202,17 +2224,20 @@ fn the_read_back_follows_more() {
 #[test]
 fn three_answers_seq_not_newer_make_the_mac_wait() {
     let mut world = world();
+    world.fast_feeds();
     let phone = world.phone("Test iPhone", answer_key());
-    world.start(config());
+    world.start(fast_config());
     phone.wait_feed(&world, "the first feed", |_| true);
-    std::thread::sleep(Duration::from_millis(1_200));
+    // Past the shortest time between two feeds of the Mac and of the relay.
+    std::thread::sleep(Duration::from_millis(200));
     world.relay.set_feed_not_newer(true);
     let before = world.feed_puts();
     world.with(|vault| vault.set_agent_note(world.agent, "A new note.").unwrap());
     wait_until("the first put", || {
         (world.feed_puts() > before).then_some(())
     });
-    std::thread::sleep(Duration::from_millis(1_500));
+    // The wait after three puts is the first retry wait: 2 s or more.
+    std::thread::sleep(Duration::from_millis(700));
     assert_eq!(world.feed_puts() - before, 3, "three puts, then a wait");
     world.relay.set_feed_not_newer(false);
     phone.wait_feed(&world, "the note after the wait", |feed| {
@@ -2235,13 +2260,20 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
             .count()
     };
     world.relay.rate_feed_reads(1);
-    let started = Instant::now();
-    world.start(config());
+    // The pause is the production minute (`QuestionsConfig::default`) scaled down, and
+    // longer than the first back-off of an ordinary failure (2 s).
+    let pause = Duration::from_secs(3);
+    world.start(QuestionsConfig {
+        feed_rate_wait: pause,
+        ..config()
+    });
     wait_until("the refused read-back", || {
         (reads(&world) == 1).then_some(())
     });
-    // A tick is 50 ms: a loop would have read about 60 times by now.
-    std::thread::sleep(Duration::from_secs(3));
+    // At most one poll of `wait_until` after the refused read.
+    let refused = Instant::now();
+    // A tick is 50 ms: a loop would have read about 16 times by now.
+    std::thread::sleep(Duration::from_millis(800));
     assert_eq!(reads(&world), 1, "one read, then the pause");
     assert_eq!(world.feed_puts(), 0, "no feed before the read-back worked");
     // The questions go on meanwhile.
@@ -2250,7 +2282,7 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
         let start = Instant::now();
         loop {
             if world.feed_puts() > 0 {
-                break started.elapsed();
+                break refused.elapsed();
             }
             assert!(
                 start.elapsed() < Duration::from_secs(90),
@@ -2259,7 +2291,7 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
             std::thread::sleep(Duration::from_millis(100));
         }
     };
-    assert!(put >= Duration::from_secs(60), "{put:?}");
+    assert!(put >= pause - Duration::from_millis(100), "{put:?}");
     assert_eq!(reads(&world), 2, "one read-back after the pause");
     phone.wait_feed(&world, "the feed after the pause", |_| true);
 }
@@ -2269,10 +2301,12 @@ fn a_feed_rate_answer_makes_the_mac_wait_a_minute() {
 #[test]
 fn a_seq_that_landed_with_other_bytes_is_published_again() {
     let mut world = world();
+    world.fast_feeds();
     let phone = world.phone("Test iPhone", answer_key());
-    world.start(config());
+    world.start(fast_config());
     let first = phone.wait_feed(&world, "the first feed", |_| true);
-    std::thread::sleep(Duration::from_millis(1_200));
+    // Past the shortest time between two feeds of the Mac and of the relay.
+    std::thread::sleep(Duration::from_millis(200));
     world.relay.lose_next_answers("PUT /v1/feed", 1);
     world.with(|vault| vault.set_agent_note(world.agent, "A new note.").unwrap());
     let landed = wait_until("the put whose answer was lost", || {

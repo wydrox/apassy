@@ -717,6 +717,23 @@ test("a password fill keeps the native request but targets one exact browser doc
   assert.equal(scripts.at(-1).args[2], "fill");
 });
 
+test("a failed fill with the popup closed shows a badge for ten seconds", async () => {
+  const bg = setup();
+  const message = "The fill was cancelled. Nothing was filled.";
+  loginHost(bg, { fill: { ok: false, code: "cancelled", message, data: { type: "none" } } });
+  bg.chrome.scripting.executeScript = async () => [{ documentId: "DOC-1", result: { ok: true, username: true, password: true } }];
+  const target = { tabId: 5, frameId: 0, documentId: "DOC-1", token: "11111111-1111-4111-8111-111111111111", url: `${ORIGIN}/login`, origin: ORIGIN };
+  const reply = await bg.handle({ type: "fill", tabId: 5, url: `${ORIGIN}/login`, item: 7, target });
+  assert.equal(reply.ok, false);
+  assert.equal(reply.code, "cancelled");
+  assert.equal(reply.message, message);
+  assert.deepEqual(bg.badge, { text: "!", title: `Apassy: ${message}` });
+  await bg.clock.advance(9_999);
+  assert.deepEqual(bg.badge, { text: "!", title: `Apassy: ${message}` });
+  await bg.clock.advance(1);
+  assert.deepEqual(bg.badge, { text: "", title: "Apassy" });
+});
+
 test("fill code: the request, the fill in frame 0 with the code, and a reply without the code", async () => {
   const bg = setup();
   loginHost(bg, { fill_code: (r) => ok({ type: "code", item: r.item, origin: ORIGIN, code: "246810", remaining: 17 }) });

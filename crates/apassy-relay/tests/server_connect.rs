@@ -1459,11 +1459,11 @@ fn audit_rows(relay: &TestRelay, team: &TeamId, action: &str) -> Vec<String> {
 fn receipts_and_push_tokens_write_audit_rows_only_when_they_change() {
     let relay = start_with(
         |config| {
-            config.push = Some(apassy_relay::config::PushConfig {
-                url: "http://127.0.0.1:9/internal/push".to_string(),
-                topic: "com.example.apassy".to_string(),
-                secret: apassy_relay::secret::SecretString::new("p".repeat(40)),
-            });
+            config.push = Some(apassy_relay::config::PushConfig::new(
+                "http://127.0.0.1:9/internal/push".to_string(),
+                "com.example.apassy".to_string(),
+                apassy_relay::secret::SecretString::new("p".repeat(40)),
+            ));
         },
         UpstreamOptions::default(),
     );

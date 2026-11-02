@@ -2307,6 +2307,8 @@ fn return_on_a_relay_alert_opened_with_the_pointer_cancels() {
 /// keeps the vault while the relay is slow, and shows what runs.
 #[test]
 fn relay_calls_of_the_owner_leave_the_window_responsive() {
+    // Each slow call waits at a hold of the relay until the checks of the window are
+    // done; a window that waits for the relay waits out SLOW and fails the QUICK check.
     const SLOW: Duration = Duration::from_millis(3000);
     const QUICK: Duration = Duration::from_millis(1800);
     let folders = folders();
@@ -2318,7 +2320,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     super::open_settings(&mut a, super::SettingsSection::Vault);
 
     // "Turn on" with a slow first upload.
-    relay.delay("PUT /v1/sync/snapshot", SLOW);
+    let upload = relay.hold("PUT /v1/sync/snapshot", SLOW);
     a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
     let started = Instant::now();
     a.relay_enable_new(&id, &relay.url, &relay.team_code(), "Synthetic MacBook")
@@ -2335,6 +2337,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
         "{text}"
     );
     assert_eq!(a.relay_jobs_for_test(), 1);
+    upload.release();
     a.relay_settle_for_test();
     assert!(a.ui.sheet.is_none(), "{}", a.status_text);
     assert!(
@@ -2345,7 +2348,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     assert_eq!(relay.version(), 1);
 
     // "Sync now" with a slow relay.
-    relay.delay("GET /v1/sync/head", SLOW);
+    let head = relay.hold("GET /v1/sync/head", SLOW);
     let started = Instant::now();
     a.sync_now();
     let text = frames(&mut a);
@@ -2356,13 +2359,14 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
         started.elapsed()
     );
     assert!(text.contains("Apassy syncs with the relay…"), "{text}");
+    head.release();
     a.relay_settle_for_test();
     assert_eq!(a.status_text, "Saved to the relay.");
     assert_eq!(relay.version(), 2, "the change made during the upload");
 
     // "Add a device…" and "Devices…" with a slow relay.
-    relay.delay("POST /v1/devices/links", SLOW);
-    relay.delay("GET /v1/devices", SLOW);
+    let links = relay.hold("POST /v1/devices/links", SLOW);
+    let devices = relay.hold("GET /v1/devices", SLOW);
     let started = Instant::now();
     a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
     let text = frames(&mut a);
@@ -2372,9 +2376,12 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
         started.elapsed()
     );
     assert!(text.contains("Apassy asks the relay for a link…"), "{text}");
+    links.release();
+    devices.release();
     a.relay_settle_for_test();
     assert!(a.relay_add_mac_link_for_test().is_some());
     a.ui.sheet = None;
+    let devices = relay.hold("GET /v1/devices", SLOW);
     let started = Instant::now();
     a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
     let text = frames(&mut a);
@@ -2387,6 +2394,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
         text.contains("Apassy asks the relay for the Macs…"),
         "{text}"
     );
+    devices.release();
     let text = settled_frames(&mut a);
     assert!(
         text.contains("Synthetic MacBook") && text.contains("This Mac"),
@@ -2813,7 +2821,7 @@ fn the_sync_setting_waits_while_relay_sync_turns_on() {
     create(&mut a, "Personal", PASS, None);
     add_item(&mut a, "Alpha", "SYNTH-alpha");
     let id = current_id(&a);
-    relay.delay("POST /v1/teams", Duration::from_millis(1500));
+    let teams = relay.hold("POST /v1/teams", Duration::from_millis(1500));
     a.relay_enable_new(&id, &relay.url, &relay.team_code(), "Synthetic MacBook")
         .expect("sent");
     let started = Instant::now();
@@ -2825,6 +2833,7 @@ fn the_sync_setting_waits_while_relay_sync_turns_on() {
             .is_err_and(|text| text.contains("turning on or off")),
         "{refused:?}"
     );
+    teams.release();
     a.relay_settle_for_test();
     assert!(a.is_relay(&id), "{}", a.status_text);
     add_item(&mut a, "Beta", "SYNTH-beta");
