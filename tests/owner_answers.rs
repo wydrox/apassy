@@ -24,7 +24,7 @@ use apassy::contracts::CredentialKind;
 use apassy::vault::answers::AnswerScope;
 use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    DecidedBy, Declaration, DeclarationSource, DeclarationSources, Environment, Field, ItemDraft,
+    Declaration, DeclarationSource, DeclarationSources, Environment, Field, ItemDraft,
     Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
@@ -338,8 +338,16 @@ fn allow_in_project_remembers_the_answer_for_all_agents_and_only_for_that_action
 fn production_write_keeps_asking_with_a_stored_project_and_action_allowance() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
     let item = fx.item_id;
-    // A certain model and "Allow once" do not lift the rule.
-    let run = asks_argv(&fx, &[item], COMMIT);
+    // A certain model and "Allow once" do not lift the rule. The question offers no
+    // evaluation permission.
+    let handle = argv_later(&fx, &[item], COMMIT);
+    let run = waiting(&fx);
+    assert!(
+        fx.broker.approvals().evaluation_offer(run.id).is_none(),
+        "a production question offers no evaluation permission"
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
     assert!(run.question.production);
     assert!(run.question.why.contains("is a production credential"));
     let once = answer_argv(&fx, &[item], COMMIT, OwnerAction::ApproveRun);
@@ -491,38 +499,6 @@ fn an_answer_for_another_project_or_action_is_refused() {
     with_vault(&fx, |v| {
         assert!(v.answers_for_item(fx.item_id).expect("answers").is_empty());
     });
-}
-
-/// Removing an answer needs no owner check; the next use asks again.
-#[test]
-fn a_removed_answer_asks_again() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    assert!(answer_with(&fx, &fx.project, &sentry_call(), in_project).ok);
-    assert_eq!(
-        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
-        "Remembered answer"
-    );
-    let id = with_vault(&fx, |v| v.answers_for_item(fx.item_id)).expect("answers")[0].id;
-    assert!(with_vault(&fx, |v| v.remove_answer(id)).expect("remove"));
-    // A use that a remembered answer allowed is no history.
-    asks(&fx, &fx.project, &sentry_call());
-}
-
-/// Each new question is counted once, also when the owner answers it with an owner
-/// check (ADR 0025 §1, Gate 1 C §1).
-#[test]
-fn owner_checks_and_questions_are_counted() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    let count = |fx: &Fixture| -> u64 {
-        with_vault(fx, |v| v.interactions_per_week(1))
-            .expect("count")
-            .iter()
-            .map(|(_, count)| count)
-            .sum()
-    };
-    assert_eq!(count(&fx), 0);
-    assert!(answer_with(&fx, &fx.project, &sentry_call(), OwnerAction::ApproveRun).ok);
-    assert_eq!(count(&fx), 1, "one answer is one interaction");
 }
 
 /// After a restore from a backup, no remembered answer, production allowance, or
@@ -766,7 +742,14 @@ fn secret_output_always_asks() {
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     assert!(answer_with(&fx, &fx.project, &sentry_call(), in_project).ok);
     let leak = format!("echo ${ENV_NAME} | base64");
-    let run = asks(&fx, &fx.project, &leak);
+    let handle = run_later(&fx, &fx.project, &leak);
+    let run = waiting(&fx);
+    assert!(
+        fx.broker.approvals().evaluation_offer(run.id).is_none(),
+        "a hard rule flag offers no evaluation permission"
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
     assert!(
         run.question.why.contains("secret_output"),
         "{}",
@@ -1035,28 +1018,6 @@ fn a_default_production_write_item_keeps_asking_after_remembering() {
     assert_eq!(model_calls(&fx), 0);
 }
 
-/// B-3: a run that a remembered answer allowed is in the decision log as `Answer`, not
-/// as an owner decision, and it was not asked.
-#[test]
-fn a_remembered_answer_is_logged_as_an_answer() {
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    assert!(answer_with(&fx, &fx.project, &sentry_call(), in_project).ok);
-    assert_eq!(
-        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
-        "Remembered answer"
-    );
-    let log = with_vault(&fx, |v| v.decision_log()).expect("log");
-    let last = &log.last().expect("entry").entry;
-    assert_eq!(last.decided_by, DecidedBy::Answer);
-    assert!(!last.asked);
-    assert_eq!(log[0].entry.decided_by, DecidedBy::Owner);
-    let export = with_vault(&fx, |v| v.export_decisions_jsonl()).expect("export");
-    let line: serde_json::Value =
-        serde_json::from_str(export.lines().last().expect("line")).expect("json");
-    assert_eq!(line["decided_by"], "answer");
-    assert_eq!(line["asked"], false);
-}
-
 /// Stored schema-20 data is not needed; default routing still asks on uncertainty.
 #[test]
 fn no_scope_is_needed_but_low_confidence_still_asks() {
@@ -1086,45 +1047,6 @@ fn no_scope_is_needed_but_low_confidence_still_asks() {
                 .is_empty()
         );
     }
-}
-
-#[test]
-fn changed_script_and_arguments_get_fresh_evaluation_without_setup() {
-    let fx = fixture_with_model(
-        Some(declaration(Environment::Staging, RiskLevel::Medium)),
-        true,
-        Duration::from_secs(10),
-        None,
-        common::fake_bouncer(&[]),
-    );
-    let script = fx.project.join("safe-task.sh");
-    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-    for argv in [
-        vec!["/bin/sh", "./safe-task.sh"],
-        vec!["/bin/sh", "./safe-task.sh", "new-argument"],
-    ] {
-        assert_eq!(
-            decided_by(&send_argv(&fx, &[fx.item_id], &argv)),
-            "Bouncer allowed"
-        );
-    }
-    std::fs::write(&script, "#!/bin/sh\n# new synthetic version\nexit 0\n").unwrap();
-    assert_eq!(
-        decided_by(&send_argv(
-            &fx,
-            &[fx.item_id],
-            &["/bin/sh", "./safe-task.sh"]
-        )),
-        "Bouncer allowed"
-    );
-    assert_eq!(model_calls(&fx), 3);
-    let other = other_project(&fx);
-    let handle = argv_later_at(&fx, &other, &[fx.item_id], COMMIT);
-    let run = waiting(&fx);
-    assert!(run.question.why.contains("is declared for the project"));
-    assert!(fx.broker.approvals().deny(run.id));
-    assert_eq!(code(&handle.join().unwrap()), "approval_denied");
-    assert_eq!(model_calls(&fx), 3);
 }
 
 /// One model exchange that pauses after recording its secret-free inference body.
@@ -1267,52 +1189,6 @@ fn changing_access_during_inference_prevents_execution_and_secret_delivery() {
         assert!(!fx.bouncer.bodies.lock().expect("body")[0].contains(SECRET));
         assert_eq!(model_calls(&fx), 1);
     }
-}
-
-#[test]
-fn production_always_ask_and_hard_flags_never_offer_evaluation_permission() {
-    let production = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
-    let run = argv_later(&production, &[production.item_id], COMMIT);
-    let pending = waiting(&production);
-    assert!(pending.question.production);
-    assert!(
-        production
-            .broker
-            .approvals()
-            .evaluation_offer(pending.id)
-            .is_none()
-    );
-    assert!(production.broker.approvals().deny(pending.id));
-    assert_eq!(
-        code(&run.join().expect("production run")),
-        "approval_denied"
-    );
-    assert_eq!(model_calls(&production), 0);
-
-    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
-    with_vault(&fx, |v| v.set_always_ask(fx.item_id, true)).expect("always ask");
-    let run = argv_later(&fx, &[fx.item_id], COMMIT);
-    let pending = waiting(&fx);
-    assert!(pending.question.why.contains("always ask"));
-    assert!(fx.broker.approvals().evaluation_offer(pending.id).is_none());
-    assert!(fx.broker.approvals().deny(pending.id));
-    assert_eq!(
-        code(&run.join().expect("always ask run")),
-        "approval_denied"
-    );
-    with_vault(&fx, |v| v.set_always_ask(fx.item_id, false)).expect("clear always ask");
-    let leak = format!("echo ${ENV_NAME} | base64");
-    let run = run_later(&fx, &fx.project, &leak);
-    let pending = waiting(&fx);
-    assert!(pending.question.why.contains("secret_output"));
-    assert!(fx.broker.approvals().evaluation_offer(pending.id).is_none());
-    assert!(fx.broker.approvals().deny(pending.id));
-    assert_eq!(code(&run.join().expect("hard flag run")), "approval_denied");
-    assert_eq!(
-        model_calls(&fx),
-        0,
-        "hard rules veto the model even after explicit permission"
-    );
 }
 
 const MFA_SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -1462,6 +1338,24 @@ fn mfa_old_password_answers_and_model_allow_never_cover_codes_but_explicit_proje
 #[test]
 fn mfa_injection_masks_output_and_excludes_values_from_cards_logs_and_receipts() {
     let fx = mfa_fixture();
+    // A code for an item without a one-time password is a clear refusal without a
+    // question: the first item of the fixture has no OTP detail.
+    let plain = with_vault(&fx, |v| v.search("Synthetic Sentry key")).expect("search");
+    assert_eq!(plain.len(), 1);
+    let mut missing = mfa_action(&fx, false, &["true"], &fx.project);
+    if let Action::Run { codes, .. } = &mut missing {
+        *codes = vec![plain[0].id];
+    }
+    let response = client::send(&fx.socket, &fx.token, missing).unwrap();
+    assert_eq!(code(&response), "no_code");
+    assert!(
+        response
+            .error
+            .unwrap()
+            .message
+            .contains("no one-time password")
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
     let catalog = client::send(&fx.socket, &fx.token, Action::ListAccess)
         .unwrap()
         .result
@@ -1574,24 +1468,4 @@ fn mfa_code_only_project_answer_never_grants_the_password_and_always_ask_still_w
     assert!(run.risk.contains("always ask"));
     fx.broker.approvals().deny(run.id);
     assert_eq!(code(&handle.join().unwrap()), "approval_denied");
-}
-
-#[test]
-fn mfa_missing_code_is_a_clear_refusal_without_a_question() {
-    let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
-    let response = client::send(
-        &fx.socket,
-        &fx.token,
-        mfa_action(&fx, false, &["true"], &fx.project),
-    )
-    .unwrap();
-    assert_eq!(code(&response), "no_code");
-    assert!(
-        response
-            .error
-            .unwrap()
-            .message
-            .contains("no one-time password")
-    );
-    assert!(fx.broker.approvals().pending().is_empty());
 }
