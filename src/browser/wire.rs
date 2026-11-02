@@ -269,9 +269,19 @@ impl Request {
                         v: u32,
                         cmd: String,
                         scope: Option<super::bypass::BypassScope>,
+                        bypass_nonce: Option<String>,
+                        host_connection: Option<String>,
                     }
                     let p: Packet = serde_json::from_slice(line).map_err(|_| invalid())?;
                     if p.v != 1 {
+                        return Err(invalid());
+                    }
+                    if p.cmd == "bypass_request" {
+                        if !matches!((&p.bypass_nonce, &p.host_connection), (Some(nonce), Some(connection)) if super::bypass::RequestBinding { nonce: nonce.clone(), connection: connection.clone() }.valid())
+                        {
+                            return Err(invalid());
+                        }
+                    } else if p.bypass_nonce.is_some() || p.host_connection.is_some() {
                         return Err(invalid());
                     }
                     return match (p.cmd.as_str(), p.scope) {
@@ -542,6 +552,10 @@ fn page_text(text: &str, max: usize) -> Result<(), WireError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyGetPacket {
+    #[serde(default, rename = "bypass_nonce")]
+    _bypass_nonce: Option<String>,
+    #[serde(default, rename = "host_connection")]
+    _host_connection: Option<String>,
     #[serde(default, rename = "trusted_gesture")]
     _trusted_gesture: bool,
     #[serde(default, rename = "owner_window_host")]
@@ -574,6 +588,10 @@ impl PasskeyGetPacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyCreatePacket {
+    #[serde(default, rename = "bypass_nonce")]
+    _bypass_nonce: Option<String>,
+    #[serde(default, rename = "host_connection")]
+    _host_connection: Option<String>,
     #[serde(default, rename = "trusted_gesture")]
     _trusted_gesture: bool,
     #[serde(default, rename = "owner_window_host")]
@@ -636,6 +654,10 @@ impl PasskeyCreatePacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FillCodePacket {
+    #[serde(default, rename = "bypass_nonce")]
+    _bypass_nonce: Option<String>,
+    #[serde(default, rename = "host_connection")]
+    _host_connection: Option<String>,
     #[serde(default, rename = "trusted_gesture")]
     _trusted_gesture: bool,
     #[serde(default, rename = "owner_window_host")]
@@ -750,7 +772,7 @@ impl Response {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Data {
     Bypass {
-        identity: Option<super::trust::ProfileIdentity>,
+        identity: Option<super::trust::InstanceIdentity>,
         remaining: Option<u64>,
     },
     #[default]
@@ -927,7 +949,7 @@ mod tests {
     #[test]
     fn bypass_requests_never_carry_approval_or_identity() {
         assert_eq!(
-            Request::parse(br#"{"v":1,"cmd":"bypass_request","scope":"once"}"#).unwrap(),
+            Request::parse(br#"{"v":1,"cmd":"bypass_request","scope":"once","bypass_nonce":"3b241101-e2bb-4255-8caf-4136c566a962","host_connection":"123-456"}"#).unwrap(),
             Command::BypassRequest(super::super::bypass::BypassScope::Once)
         );
         for packet in [

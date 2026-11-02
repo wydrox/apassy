@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Instant;
 
 use eframe::egui;
 use zeroize::{Zeroize, Zeroizing};
@@ -227,8 +228,10 @@ pub struct PasskeyRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
     BrowserDebugging {
-        identity: crate::browser::trust::ProfileIdentity,
+        request_label: String,
+        identity: crate::browser::trust::InstanceIdentity,
         scope: Option<crate::browser::bypass::BypassScope>,
+        binding: Option<crate::browser::bypass::RequestBinding>,
     },
     RemoveOlderIphone {
         device: crate::vault::TrustedDevice,
@@ -642,9 +645,15 @@ impl OwnerRequest {
             Self::RegisterSetupAgent { name } => {
                 OwnerAction::RegisterSetupAgent { name: name.clone() }
             }
-            Self::BrowserDebugging { identity, scope } => OwnerAction::BrowserDebugging {
+            Self::BrowserDebugging {
+                identity,
+                scope,
+                binding,
+                ..
+            } => OwnerAction::BrowserDebugging {
                 identity: identity.clone(),
                 scope: *scope,
+                binding: binding.clone(),
             },
             Self::ChangeOwnerFrequency { old, new } => OwnerAction::ChangeOwnerFrequency {
                 old: *old,
@@ -978,7 +987,7 @@ impl OwnerRequest {
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
             Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
-            Self::BrowserDebugging { identity, scope } => format!("{} asks to {}. Other programs can control this browser while this is on.", identity.description(), match scope { Some(crate::browser::bypass::BypassScope::Once) => "allow passkeys and codes once", Some(crate::browser::bypass::BypassScope::FiveMinutes) => "allow passkeys and codes for 5 minutes", None => "trust this profile for agent fills with remote debugging" }),
+            Self::BrowserDebugging { identity, scope, request_label, .. } => format!("{} asks to {}. Request: {}. Other programs can control all its profiles.", identity.description(), match scope { Some(crate::browser::bypass::BypassScope::Once) => "allow only the exact refused passkey or code request once", Some(crate::browser::bypass::BypassScope::FiveMinutes) => "allow owner passkeys and codes for 5 minutes across this instance", None => "trust this instance for agent fills with remote debugging" }, request_label),
             Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
             Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line. A fresh owner check is required because a command-line session can be inherited by an agent.", if *copy { "Copy" } else { "Show" }),
@@ -1823,18 +1832,19 @@ impl DesktopApp {
         let approvals = self.approvals();
         let session = &mut self.owner_ui.session;
         match request {
-            OwnerRequest::BrowserDebugging { identity, scope } => {
-                let action = OwnerAction::BrowserDebugging { identity: identity.clone(), scope };
+            OwnerRequest::BrowserDebugging { identity, scope, binding, .. } => {
+                let action = OwnerAction::BrowserDebugging { identity: identity.clone(), scope, binding: binding.clone() };
                 if !session.epoch().is_some_and(|epoch| proof.check(&action, &epoch).is_ok()) { self.set_err("The owner check changed."); return; }
                 if let Some(scope) = scope {
-                    self.browser.bypass = Some(crate::browser::bypass::RemoteDebuggingBypass::approved(identity, scope, Instant::now()));
+                    self.browser.bypass = Some(crate::browser::bypass::OwnerPasskeyCodeBypass::approved(identity, scope, Instant::now()));
+                    if let Some(grant) = &mut self.browser.bypass { grant.binding = binding; }
                     self.browser.bypass_epoch = session.epoch();
                     self.browser.bypass_generation = session.owner_window.generation();
                     self.set_ok("Browser bypass approved.");
                 } else {
-                    self.browser.trusted_profiles = None;
+                    self.browser.trusted_instances = None;
                     let Some(epoch) = session.epoch() else { return; };
-                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok("Profile trusted on this Mac."), Err(e) => self.set_err(e) }
+                    match crate::browser::trust::add(&identity, proof, epoch) { Ok(()) => self.set_ok("Instance trusted on this Mac."), Err(e) => self.set_err(e) }
                 }
             }
             OwnerRequest::BackupVault { path } => self.complete_fresh_backup(&path, proof),

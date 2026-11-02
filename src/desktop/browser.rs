@@ -61,7 +61,8 @@ pub(crate) struct BrowserWire;
 
 /// One request of the browser socket, with the hang-up state of its connection.
 pub(crate) struct BrowserRequest {
-    pub(crate) identity: std::sync::Mutex<Option<crate::browser::trust::ProfileIdentity>>,
+    binding: Option<crate::browser::bypass::RequestBinding>,
+    pub(crate) identity: std::sync::Mutex<Option<crate::browser::trust::InstanceIdentity>>,
     pub(crate) command: Command,
     pub(crate) trusted_gesture: bool,
     pub(crate) gone: PeerGone,
@@ -87,6 +88,20 @@ impl LineWire for BrowserWire {
     fn parse(line: &[u8]) -> Result<BrowserRequest, Response> {
         Request::parse(line)
             .map(|command| BrowserRequest {
+                binding: {
+                    #[derive(serde::Deserialize)]
+                    struct Binding {
+                        bypass_nonce: String,
+                        host_connection: String,
+                    }
+                    serde_json::from_slice::<Binding>(line)
+                        .ok()
+                        .map(|b| crate::browser::bypass::RequestBinding {
+                            nonce: b.bypass_nonce,
+                            connection: b.host_connection,
+                        })
+                        .filter(|b| b.valid())
+                },
                 identity: std::sync::Mutex::new(None),
                 trusted_gesture: {
                     #[derive(serde::Deserialize)]
@@ -141,10 +156,12 @@ impl LineWire for BrowserWire {
 /// The browser socket, and the values of a fill on their way to its ticket.
 #[derive(Default)]
 pub(crate) struct BrowserHost {
-    pub(crate) unsafe_profile: Option<crate::browser::trust::ProfileIdentity>,
-    pub(crate) trusted_profiles:
-        Option<Result<Vec<crate::browser::trust::ProfileIdentity>, String>>,
-    pub(crate) bypass: Option<crate::browser::bypass::RemoteDebuggingBypass>,
+    next_binding: Option<crate::browser::bypass::RequestBinding>,
+    refused: Vec<(crate::browser::bypass::RequestBinding, Command, Instant)>,
+    pub(crate) unsafe_instance: Option<crate::browser::trust::InstanceIdentity>,
+    pub(crate) trusted_instances:
+        Option<Result<Vec<crate::browser::trust::InstanceIdentity>, String>>,
+    pub(crate) bypass: Option<crate::browser::bypass::OwnerPasskeyCodeBypass>,
     pub(crate) bypass_epoch: Option<[u8; 32]>,
     pub(crate) bypass_generation: u64,
     next_debugging_deadline: Option<Instant>,
@@ -180,7 +197,9 @@ impl BrowserHost {
     /// Stop the socket. Waiting requests get "stopped".
     pub(crate) fn stop(&mut self) {
         self.bypass = None;
-        self.unsafe_profile = None;
+        self.refused.clear();
+        self.next_binding = None;
+        self.unsafe_instance = None;
         if let Some(mut socket) = self.socket.take() {
             socket.stop();
         }
@@ -337,14 +356,19 @@ impl DesktopApp {
         for Envelope { request, reply } in envelopes {
             self.browser.next_debugging_deadline = None;
             let BrowserRequest {
+                binding,
                 command,
                 gone,
                 trusted_gesture,
                 identity,
             } = request;
+            self.browser.next_binding = binding.clone();
+            self.browser
+                .refused
+                .retain(|(_, _, at)| at.elapsed() < Duration::from_secs(300));
             let identity = identity.into_inner().unwrap();
             if let Some(identity) = identity {
-                self.browser.unsafe_profile = Some(identity.clone());
+                self.browser.unsafe_instance = Some(identity.clone());
                 self.browser.next_debugging_deadline = if guarded(&command) {
                     self.browser.bypass.as_ref().and_then(|g| match g.scope {
                         crate::browser::bypass::Scope::Until(end) if g.identity == identity => {
@@ -356,12 +380,31 @@ impl DesktopApp {
                     None
                 };
                 if guarded(&command)
-                    && !crate::browser::bypass::consume(
-                        &mut self.browser.bypass,
-                        &identity,
-                        Instant::now(),
-                    )
+                    && !((self.browser.bypass.as_ref().is_some_and(|g| {
+                        matches!(g.scope, crate::browser::bypass::Scope::Until(_))
+                    }) || self
+                        .browser
+                        .refused
+                        .iter()
+                        .any(|(b, c, _)| Some(b) == binding.as_ref() && c == &command))
+                        && crate::browser::bypass::consume(
+                            &mut self.browser.bypass,
+                            &identity,
+                            Instant::now(),
+                            &command,
+                            binding.as_ref(),
+                        ))
                 {
+                    if let Some(binding) = binding
+                        && !self.browser.refused.iter().any(|(b, _, _)| b == &binding)
+                    {
+                        if self.browser.refused.len() >= 4 {
+                            self.browser.refused.remove(0);
+                        }
+                        self.browser
+                            .refused
+                            .push((binding, command, Instant::now()));
+                    }
                     let _ = reply.send(Response::error("unsafe_browser", "This browser is controlled by other programs. Open Apassy's extension popup and choose Allow once… to request permission in Apassy."));
                     continue;
                 }
@@ -369,7 +412,7 @@ impl DesktopApp {
                 command,
                 Command::BypassStatus | Command::BypassRequest(_) | Command::BypassEnd
             ) {
-                self.browser.unsafe_profile = None;
+                self.browser.unsafe_instance = None;
             }
             self.handle_browser_verified(
                 Envelope {
@@ -420,7 +463,7 @@ impl DesktopApp {
         ticket.trusted_gesture = trusted_gesture;
         match request {
             Command::BypassStatus => {
-                let identity = self.browser.unsafe_profile.clone();
+                let identity = self.browser.unsafe_instance.clone();
                 let remaining = identity.as_ref().and_then(|id| {
                     self.browser
                         .bypass
@@ -440,7 +483,7 @@ impl DesktopApp {
                     .browser
                     .bypass
                     .as_ref()
-                    .is_some_and(|g| Some(&g.identity) == self.browser.unsafe_profile.as_ref())
+                    .is_some_and(|g| Some(&g.identity) == self.browser.unsafe_instance.as_ref())
                 {
                     self.browser.bypass = None;
                     if self
@@ -455,7 +498,31 @@ impl DesktopApp {
                 ticket.send(Response::ok("Bypass ended", Data::None));
             }
             Command::BypassRequest(scope) => {
-                if let Some(identity) = self.browser.unsafe_profile.clone() {
+                let binding = self
+                    .browser
+                    .next_binding
+                    .take()
+                    .filter(|b| self.browser.refused.iter().any(|(old, _, _)| old == b));
+                let Some(binding) = binding else {
+                    ticket.send(Response::error(
+                        "bad_request",
+                        "Retry the exact refused request from its open extension connection.",
+                    ));
+                    return;
+                };
+                let request_label = self
+                    .browser
+                    .refused
+                    .iter()
+                    .find(|(old, _, _)| old == &binding)
+                    .map(|(_, command, _)| match command {
+                        Command::PasskeyGet(r) => format!("Passkey sign-in at {}", r.origin),
+                        Command::PasskeyCreate(r) => format!("Create passkey at {}", r.origin),
+                        Command::FillCode { url, .. } => format!("Fill one-time code at {url}"),
+                        _ => "Unsupported request".into(),
+                    })
+                    .unwrap_or_default();
+                if let Some(identity) = self.browser.unsafe_instance.clone() {
                     if self.owner.check.is_some() {
                         ticket.send(Response::error(
                             "busy",
@@ -464,8 +531,10 @@ impl DesktopApp {
                     } else {
                         self.prepare_owner(
                             OwnerRequest::BrowserDebugging {
+                                request_label,
                                 identity,
                                 scope: Some(scope),
+                                binding: Some(binding),
                             },
                             Some(ctx),
                             false,
@@ -1434,14 +1503,14 @@ mod owner_window_delivery_tests {
     #[test]
     fn lifecycle_revocation_discards_debugging_grants() {
         let mut app = DesktopApp::new();
-        let identity = crate::browser::trust::ProfileIdentity {
+        let identity = crate::browser::trust::InstanceIdentity {
             bundle_id: "net.imput.helium".into(),
             team_id: "S4Q33XPHB4".into(),
-            profile_dir: "/tmp/synthetic".into(),
+            user_data_root: "/tmp/synthetic".into(),
             debugging: "9223".into(),
             unsafe_switches: vec!["remote-debugging-port".into()],
         };
-        app.browser.bypass = Some(crate::browser::bypass::RemoteDebuggingBypass::approved(
+        app.browser.bypass = Some(crate::browser::bypass::OwnerPasskeyCodeBypass::approved(
             identity,
             crate::browser::bypass::BypassScope::FiveMinutes,
             Instant::now(),

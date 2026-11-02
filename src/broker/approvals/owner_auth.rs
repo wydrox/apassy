@@ -90,8 +90,9 @@ const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerAction {
     BrowserDebugging {
-        identity: crate::browser::trust::ProfileIdentity,
+        identity: crate::browser::trust::InstanceIdentity,
         scope: Option<crate::browser::bypass::BypassScope>,
+        binding: Option<crate::browser::bypass::RequestBinding>,
     },
     RemoveOlderIphone {
         device: TrustedDevice,
@@ -418,7 +419,7 @@ impl OwnerAction {
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
-            Self::BrowserDebugging { .. } => "allow this exact browser debugging profile".into(),
+            Self::BrowserDebugging { .. } => "allow this exact browser debugging instance".into(),
             Self::RemoveOlderIphone { .. } => "remove the older paired iPhone".into(),
             Self::AllowAccessOnce { .. } => "allow one scoped access attempt".to_owned(),
             Self::GrantAccessRequest { .. } => "grant access for this exact request".to_owned(),

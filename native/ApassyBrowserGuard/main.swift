@@ -180,37 +180,77 @@ func checkBrowser(_ browser: pid_t) throws -> Checked {
     guard let again = auditToken(of: browser), same(again, token) else { throw Refused(reason: "browser changed") }
     var identity: Data? = nil
     if unsafeSwitch(in: arguments) != nil {
-        identity = try profileIdentity(arguments, known: allowed)
+        identity = try instanceIdentity(arguments, known: allowed, cwd: browserWorkingDirectory(browser))
     }
     return Checked(pid: browser, token: token, identity: identity)
 }
 
 /// Only bounded switch names, never arbitrary argument values or environment.
-func profileIdentity(_ arguments: [String], known: KnownBrowser) throws -> Data {
-    func value(_ key: String) throws -> String? {
-        let matches = arguments.enumerated().filter {
-            $0.element.hasPrefix("-") && $0.element.drop { $0 == "-" }.prefix { $0 != "=" }.lowercased() == key
-        }
-        guard matches.count <= 1 else { throw Refused(reason: "ambiguous profile switch") }
-        guard let match = matches.first else { return nil }
-        if let eq = match.element.firstIndex(of: "=") { return String(match.element[match.element.index(after: eq)...]) }
-        guard match.offset + 1 < arguments.count else { throw Refused(reason: "missing switch value") }
-        return arguments[match.offset + 1]
-    }
+func instanceIdentity(_ arguments: [String], known: KnownBrowser, cwd: String? = nil) throws -> Data {
+    let switches = try effectiveIdentitySwitches(arguments)
+    func value(_ key: String) -> String? { switches[key] }
     let defaults = ["net.imput.helium": "net.imput.helium", "com.google.Chrome": "Google/Chrome"]
     guard let root = defaults[known.identifier] else { throw Refused(reason: "unknown profile root") }
-    let requested = try value("user-data-dir") ?? (NSHomeDirectory() + "/Library/Application Support/" + root)
+    var requested = ((value("user-data-dir") ?? (NSHomeDirectory() + "/Library/Application Support/" + root)) as NSString).expandingTildeInPath
+    if !requested.hasPrefix("/") {
+        guard let cwd, cwd.hasPrefix("/") else { throw Refused(reason: "relative data folder without browser cwd") }
+        requested = (cwd as NSString).appendingPathComponent(requested)
+    }
     guard requested.hasPrefix("/"), let canonical = realPath(requested), canonical.utf8.count <= 700 else { throw Refused(reason: "profile cannot be canonicalized") }
     let names = arguments.compactMap { unsafeSwitch(in: [$0]) }
     guard names.count <= 16 else { throw Refused(reason: "too many switches") }
-    let port = try value("remote-debugging-port")
-    let pipe = names.contains("remote-debugging-pipe")
+    let port = value("remote-debugging-port")
+    let pipe = switches["remote-debugging-pipe"] != nil
     guard !(pipe && port != nil) else { throw Refused(reason: "ambiguous debugging transport") }
     var debugging = pipe ? "pipe" : "none"
     if let port { guard let number = UInt16(port), number > 0, String(number) == port else { throw Refused(reason: "dynamic or invalid debugging port") }; debugging = port }
     let data = try JSONSerialization.data(withJSONObject: ["bundle_id": known.identifier, "team_id": known.team, "profile_dir": canonical, "debugging": debugging, "unsafe_switches": names], options: [.sortedKeys])
     guard data.count <= 1024 else { throw Refused(reason: "identity too long") }
     return data
+}
+
+/// Read the browser's cwd from the kernel, never the guard's working directory.
+func browserWorkingDirectory(_ browser: pid_t) -> String? {
+    var info = proc_vnodepathinfo()
+    let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+    guard proc_pidinfo(browser, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+    return withUnsafeBytes(of: &info.pvi_cdir.vip_path) { bytes in
+        guard let end = bytes.firstIndex(of: 0), end > 0 else { return nil }
+        return String(bytes: bytes[..<end], encoding: .utf8)
+    }
+}
+
+/// base::CommandLine on POSIX reads case-sensitive -name/--name switches,
+/// values only after '=', stops at '--', and keeps the last duplicate value.
+/// Refuse ambiguous identity spellings and conflicting duplicates instead of
+/// guessing. Detection in unsafeSwitch deliberately remains more conservative.
+func effectiveIdentitySwitches(_ arguments: [String]) throws -> [String: String] {
+    guard let executable = arguments.first, !executable.isEmpty, !executable.hasPrefix("-") else {
+        throw Refused(reason: "ambiguous executable argument")
+    }
+    let keys = ["user-data-dir", "remote-debugging-port", "remote-debugging-pipe"]
+    var result: [String: String] = [:]
+    for raw in arguments.dropFirst() {
+        // base::CommandLine trims ASCII whitespace around every argv element.
+        let argument = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\u{000B}\u{000C}"))
+        if argument == "--" { break }
+        guard argument.hasPrefix("-") else { continue }
+        let parts = argument.drop { $0 == "-" }.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first, keys.contains(first.lowercased()) else { continue }
+        let key = String(first)
+        guard keys.contains(key), argument.hasPrefix("--\(key)") || argument.hasPrefix("-\(key)") else {
+            throw Refused(reason: "ambiguous identity switch")
+        }
+        let prefix = argument.prefix { $0 != "=" }
+        guard prefix == "-\(key)" || prefix == "--\(key)" else { throw Refused(reason: "ambiguous identity switch") }
+        guard key == "remote-debugging-pipe" || (parts.count == 2 && !parts[1].isEmpty) else {
+            throw Refused(reason: "identity switch requires an equals value")
+        }
+        let value = parts.count == 2 ? String(parts[1]) : ""
+        if let old = result[key], old != value { throw Refused(reason: "conflicting identity switches") }
+        result[key] = value
+    }
+    return result
 }
 
 /// The arguments of the process `pid` have no unsafe switch. The token is read
@@ -322,7 +362,9 @@ func parseProcessArguments(_ bytes: [UInt8]) throws -> [String] {
 /// The guard also strips more dashes, ignores case, and checks the arguments
 /// after `--`, so it refuses more than Chromium reads.
 func unsafeSwitch(in arguments: [String]) -> String? {
-    for argument in arguments where argument.hasPrefix("-") {
+    for raw in arguments {
+        let argument = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\u{000B}\u{000C}"))
+        guard argument.hasPrefix("-") else { continue }
         let name = argument.drop { $0 == "-" }.prefix { $0 != "=" }.lowercased()
         if unsafeSwitches.contains(name) || unsafeSwitchPrefixes.contains(where: { name.hasPrefix($0) }) {
             return name
@@ -494,6 +536,22 @@ func runSelfTest(_ arguments: [String]) -> Int32? {
     }
     do {
         switch arguments[1] {
+        case "selftest-instance":
+            let input = FileHandle.standardInput.readData(ofLength: maxArgumentBytes + 1)
+            guard input.count <= maxArgumentBytes,
+                  let vector = try JSONSerialization.jsonObject(with: input) as? [String]
+            else { throw Refused(reason: "invalid test vector") }
+            let identity = try instanceIdentity(vector, known: KnownBrowser(identifier: "net.imput.helium", team: "S4Q33XPHB4"), cwd: arguments[2] == "-" ? nil : arguments[2])
+            FileHandle.standardOutput.write(identity)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        case "selftest-identity":
+            let input = FileHandle.standardInput.readData(ofLength: maxArgumentBytes + 1)
+            guard input.count <= maxArgumentBytes,
+                  let vector = try JSONSerialization.jsonObject(with: input) as? [String]
+            else { throw Refused(reason: "invalid test vector") }
+            let switches = try effectiveIdentitySwitches(vector)
+            FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: switches, options: [.sortedKeys]))
+            FileHandle.standardOutput.write(Data("\n".utf8))
         case "selftest-parse":
             // A synthetic KERN_PROCARGS2 buffer from standard input.
             let input = FileHandle.standardInput.readData(ofLength: maxArgumentBuffer + 1)

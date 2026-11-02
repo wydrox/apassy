@@ -896,6 +896,135 @@ fn build_guard(name: &str, flags: &[&str]) -> Option<PathBuf> {
     }
 }
 
+#[test]
+fn instance_switch_identity_uses_chromium_effective_arguments() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let Some(guard) = build_guard(
+        "identity-switches",
+        &["-D", "APASSY_BROWSER_GUARD_SELFTEST"],
+    ) else {
+        return;
+    };
+    for (args, expected) in [
+        (
+            vec!["browser", " \t--user-data-dir=/a\r\n"],
+            Some(serde_json::json!({"user-data-dir":"/a"})),
+        ),
+        (
+            vec!["browser", " \t--\r\n", "--user-data-dir=/trusted"],
+            Some(serde_json::json!({})),
+        ),
+        (
+            vec!["browser", "--", "--user-data-dir=/trusted"],
+            Some(serde_json::json!({})),
+        ),
+        (
+            vec![
+                "browser",
+                "--user-data-dir=/first",
+                "--",
+                "--user-data-dir=/trusted",
+            ],
+            Some(serde_json::json!({"user-data-dir":"/first"})),
+        ),
+        (vec!["browser", "--User-Data-Dir=/trusted"], None),
+        (vec!["browser", "--user-data-dir", "/trusted"], None),
+        (vec!["browser", "--user-data-dir="], None),
+        (vec!["browser", "---user-data-dir=/trusted"], None),
+        (
+            vec!["browser", "--user-data-dir=/a", "--user-data-dir=/b"],
+            None,
+        ),
+        (
+            vec!["browser", "--user-data-dir=/a", "-user-data-dir=/a"],
+            Some(serde_json::json!({"user-data-dir":"/a"})),
+        ),
+        (vec!["browser", "--remote-debugging-port", "9223"], None),
+        (
+            vec![
+                "browser",
+                "--remote-debugging-port=9223",
+                "--remote-debugging-port=9222",
+            ],
+            None,
+        ),
+        (
+            vec![
+                "browser",
+                "--remote-debugging-pipe",
+                "--",
+                "--remote-debugging-port=9223",
+            ],
+            Some(serde_json::json!({"remote-debugging-pipe":""})),
+        ),
+    ] {
+        let mut child = Command::new(&guard)
+            .args(["selftest-identity", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&args).unwrap())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        if let Some(expected) = expected {
+            assert!(result.status.success(), "{args:?}");
+            let line = result.stdout.split(|b| *b == b'\n').next().unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(line).unwrap(),
+                expected,
+                "{args:?}"
+            );
+        } else {
+            assert!(!result.status.success(), "{args:?}");
+        }
+    }
+    for (path, cwd, expected) in [
+        ("/tmp", "-", Some(std::fs::canonicalize("/tmp").unwrap())),
+        ("tmp", "/", Some(std::fs::canonicalize("/tmp").unwrap())),
+        ("tmp", "-", None),
+        (
+            "~",
+            "-",
+            Some(std::fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap()),
+        ),
+    ] {
+        let mut child = Command::new(&guard)
+            .args(["selftest-instance", cwd])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let args = [
+            "browser",
+            &format!("--user-data-dir={path}"),
+            "--remote-debugging-port=9223",
+        ];
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&args).unwrap())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        if let Some(expected) = expected {
+            assert!(result.status.success());
+            let json: serde_json::Value =
+                serde_json::from_slice(result.stdout.split(|b| *b == b'\n').next().unwrap())
+                    .unwrap();
+            assert_eq!(json["profile_dir"], expected.to_str().unwrap());
+        } else {
+            assert!(!result.status.success());
+        }
+    }
+}
+
 fn run_guard(guard: &Path, check: &str, stdin: Stdio) -> (i32, Vec<u8>) {
     let output = Command::new(guard)
         .arg(check)

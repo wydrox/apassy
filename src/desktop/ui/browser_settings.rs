@@ -44,15 +44,17 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
     let bundle = Install::current();
-    ui.label("Profiles agents may fill in with remote debugging");
-    if let Some(identity) = app.browser.unsafe_profile.clone() {
+    ui.label("Browser instances agents may fill in with remote debugging (all profiles)");
+    if let Some(identity) = app.browser.unsafe_instance.clone() {
         ui.horizontal(|ui| {
             ui.label(identity.description());
-            if ui.button("Trust this profile…").clicked() {
+            if ui.button("Trust this instance…").clicked() {
                 app.prepare_owner(
                     crate::desktop::owner_check::OwnerRequest::BrowserDebugging {
+                        request_label: "Agent fills in all profiles of this instance".into(),
                         identity,
                         scope: None,
+                        binding: None,
                     },
                     Some(ui.ctx()),
                     false,
@@ -62,7 +64,7 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     let profiles = app
         .browser
-        .trusted_profiles
+        .trusted_instances
         .get_or_insert_with(crate::browser::trust::profiles)
         .clone();
     match profiles {
@@ -74,7 +76,7 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         if let Err(e) = crate::browser::trust::remove(&identity) {
                             app.set_err(e);
                         }
-                        app.browser.trusted_profiles = None;
+                        app.browser.trusted_instances = None;
                     }
                 });
             }

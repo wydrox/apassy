@@ -23,7 +23,7 @@ async function refreshBypass() {
   const active = data.remaining !== null && data.remaining !== undefined;
   document.getElementById("bypass-end").hidden = !active;
   document.getElementById("debugging-note").textContent = active
-    ? (data.remaining === 0 ? "Allowed for the next passkey or code operation." : `Allowed for ${Math.floor(data.remaining / 60)}:${String(data.remaining % 60).padStart(2, "0")}.`)
+    ? (data.remaining === 0 ? "Allowed for the exact refused request on its original connection." : `Owner passkeys and codes allowed across all profiles of this instance for ${Math.floor(data.remaining / 60)}:${String(data.remaining % 60).padStart(2, "0")}.`)
     : "Remote debugging is on. Other programs can control this browser. Permission is confirmed in Apassy.";
 }
 for (const [id, scope] of [["bypass-once", "once"], ["bypass-five", "five_minutes"]]) {

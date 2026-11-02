@@ -89,7 +89,7 @@ pub fn check_peer(stream: &UnixStream) -> Result<(), WireError> {
 /// Verify the signed chain while retaining an unsafe browser's exact identity.
 pub fn peer_identity(
     stream: &UnixStream,
-) -> Result<Option<super::trust::ProfileIdentity>, WireError> {
+) -> Result<Option<super::trust::InstanceIdentity>, WireError> {
     let copy = stream.try_clone().map_err(|_| refused())?;
     match run_guard(Check::SocketPeer, Stdio::from(OwnedFd::from(copy))) {
         Ok(()) => Ok(None),
@@ -97,11 +97,11 @@ pub fn peer_identity(
     }
 }
 
-pub fn unsafe_identity(error: &WireError) -> Option<super::trust::ProfileIdentity> {
+pub fn unsafe_identity(error: &WireError) -> Option<super::trust::InstanceIdentity> {
     if error.code != "unsafe_browser" {
         return None;
     }
-    serde_json::from_str::<super::trust::ProfileIdentity>(&error.message)
+    serde_json::from_str::<super::trust::InstanceIdentity>(&error.message)
         .ok()
         .filter(|p| p.valid())
 }
@@ -157,7 +157,7 @@ fn parse_answer(answer: Option<(Option<i32>, Vec<u8>)>) -> Result<(), WireError>
             if json.len() > 1024 {
                 return Err(refused());
             }
-            let identity: super::trust::ProfileIdentity =
+            let identity: super::trust::InstanceIdentity =
                 serde_json::from_slice(json).map_err(|_| refused())?;
             if !identity.valid() {
                 return Err(refused());

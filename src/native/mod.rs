@@ -1136,13 +1136,13 @@ impl NativeHelper {
     #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn browser_trust_read(
         &self,
-    ) -> Result<Vec<crate::browser::trust::ProfileIdentity>, NativeError> {
+    ) -> Result<Vec<crate::browser::trust::InstanceIdentity>, NativeError> {
         let fields = self.call(
             &self.keychain_helper,
             request("browser_trust_read"),
             self.timeouts.quick,
         )?;
-        let profiles: Vec<crate::browser::trust::ProfileIdentity> =
+        let profiles: Vec<crate::browser::trust::InstanceIdentity> =
             serde_json::from_str(str_field(&fields, "profiles")?)
                 .map_err(|_| NativeError::Protocol("invalid browser trust store".into()))?;
         if profiles.len() > 32 || profiles.iter().any(|p| !p.valid()) {
@@ -1153,7 +1153,7 @@ impl NativeHelper {
     #[cfg(all(feature = "vault", feature = "desktop"))]
     pub(crate) fn browser_trust_write(
         &self,
-        profiles: &[crate::browser::trust::ProfileIdentity],
+        profiles: &[crate::browser::trust::InstanceIdentity],
     ) -> Result<(), NativeError> {
         if profiles.len() > 32 || profiles.iter().any(|p| !p.valid()) {
             return Err(NativeError::Protocol("invalid browser identity".into()));
@@ -1941,10 +1941,10 @@ mod owner_policy_tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
         let helper = NativeHelper::with_paths(&file, &file);
         assert!(helper.browser_trust_read().unwrap().is_empty());
-        let id = crate::browser::trust::ProfileIdentity {
+        let id = crate::browser::trust::InstanceIdentity {
             bundle_id: "net.imput.helium".into(),
             team_id: "S4Q33XPHB4".into(),
-            profile_dir: "/tmp/synthetic".into(),
+            user_data_root: "/tmp/synthetic".into(),
             debugging: "9223".into(),
             unsafe_switches: vec!["remote-debugging-port".into()],
         };
