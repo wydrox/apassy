@@ -1182,7 +1182,10 @@ fn questions_through_the_relay_are_off_by_default() {
 
 /// Mac A asks, Mac B answers "Allow once" after its owner check, and the run goes on with
 /// a remote check. B reads the settle; a replay is refused by the relay, and the same
-/// envelope in a new question does not open and is logged.
+/// envelope in a new question does not open and is logged. Then an iPhone signs an
+/// approval with its answer key (the same approval signed with its relay key does not
+/// count), and the relay never gets a command, a credential name, a variable, or a
+/// secret value: every JSON body of the whole round trip, sync included, is free of them.
 #[test]
 fn two_macs_round_trip() {
     let world = world(true);
@@ -1309,16 +1312,16 @@ fn two_macs_round_trip() {
     )
     .unwrap();
     assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
-}
+    // Two answers took effect: B's approval and B's deny.
+    world.wait_answered(2);
 
-/// An iPhone signs an approval with its answer key; the same approval signed with its
-/// relay key does not count.
-#[test]
-fn an_iphone_approves_with_its_answer_key() {
-    let world = world(true);
+    // An iPhone approves with its answer key; the same approval signed with its relay
+    // key does not count.
     let phone = world.iphone();
+    // The questions above may still be open on the relay until their settle is there.
+    let mut seen = vec![opened.record.qid.clone(), second.record.qid.clone()];
     let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
-    let opened = phone.next(&[]);
+    let opened = phone.next(&seen);
     let choice = Choice::AllowProduction {
         action: ActionKind::Deploy,
         project_key: "/tmp/synthetic-shop/.git".to_owned(),
@@ -1333,31 +1336,128 @@ fn an_iphone_approves_with_its_answer_key() {
         &phone.keys,
     )
     .expect("the relay takes it");
-    let lines = world.wait_refused(1);
+    // Activity is newest first; the replay above is the first refused line.
+    let lines = world.wait_refused(2);
     assert_eq!(
         lines[0],
-        "An answer from Test iPhone did not count: its signature does not verify."
+        "An answer from Test iPhone did not count: its signature does not verify.",
+        "{lines:?}"
     );
     let good = prepare_answer(&opened, PHONE_UUID, choice, now()).unwrap();
     let signature = answer_key().sign(good.text.as_bytes()).unwrap();
     send_answer(&phone.client, &opened, &good, &signature, &phone.keys).expect("sent");
     let ended = settled(waiting);
-    assert_eq!(ended.outcome, ApprovalOutcome::Approved);
+    assert_eq!(
+        ended.outcome,
+        ApprovalOutcome::Approved,
+        "the answer-key approval of the iPhone"
+    );
     assert_eq!(ended.method, Some(CheckMethod::Remote));
     let answer = ended.answer.expect("a production allowance to remember");
     assert!(answer.production);
     assert_eq!(answer.action, ActionKind::Deploy);
-    let view = world.wait_answered(1);
+    let view = world.wait_answered(3);
     let last = view.answered.last().expect("answered");
     assert_eq!(last.device_name, "Test iPhone");
     assert_eq!(last.device_kind, TrustedDeviceKind::Iphone);
     assert_eq!(last.kind, "allow_production");
+
+    // No request body holds a command, an item name, or a secret: a correction and an
+    // answer from each device, then every JSON body of the whole round trip.
+    seen.push(opened.record.qid.clone());
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let opened = b.next(&seen);
+    let correct = prepare_answer(
+        &opened,
+        &b.uuid,
+        Choice::CorrectEnvironment {
+            item_id: world.items[1],
+            environment: RemoteEnvironment::Production,
+        },
+        now(),
+    )
+    .unwrap();
+    send_answer(
+        &b.client,
+        &opened,
+        &correct,
+        &b.sign(correct.text.as_bytes()),
+        &b.keys,
+    )
+    .unwrap();
+    let opened_phone = phone.next(&seen);
+    let approve = prepare_answer(&opened_phone, PHONE_UUID, Choice::ApproveOnce, now()).unwrap();
+    let signature = answer_key().sign(approve.text.as_bytes()).unwrap();
+    send_answer(
+        &phone.client,
+        &opened_phone,
+        &approve,
+        &signature,
+        &phone.keys,
+    )
+    .unwrap();
+    assert_eq!(
+        settled(waiting).outcome,
+        ApprovalOutcome::Approved,
+        "the approval after a correction"
+    );
+    let bodies: Vec<String> = world
+        .relay
+        .request_bodies()
+        .into_iter()
+        .filter(|body| body.starts_with('{'))
+        .collect();
+    assert!(
+        bodies.iter().any(|body| body.contains("\"ciphertext\"")),
+        "the questions went through the relay"
+    );
+    let forbidden = [
+        "npm",
+        "migrate",
+        "synthetic-shop",
+        "Shop database",
+        "API token",
+        "DATABASE_URL",
+        "API_TOKEN",
+        "claude-code",
+        "production credential",
+        SHOP_SECRET,
+        API_SECRET,
+        "SYNTH-",
+    ];
+    for body in &bodies {
+        // A random nonce, key, or signature can hold a short word such as "npm" by
+        // chance. The words are looked for in the body without those values.
+        let plain = without_random_values(body);
+        for word in forbidden {
+            assert!(!plain.contains(word), "{word} in {body}");
+        }
+        // Nor the secret values as b64u.
+        for word in [SHOP_SECRET, API_SECRET] {
+            assert!(
+                !body.contains(&encode_b64u(word.as_bytes())),
+                "{word} in {body}"
+            );
+        }
+    }
+    let keys: BTreeSet<String> = bodies
+        .iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .filter_map(|value| {
+            value
+                .as_object()
+                .map(|map| map.keys().cloned().collect::<Vec<_>>())
+        })
+        .flatten()
+        .collect();
+    assert!(keys.contains("ciphertext") && keys.contains("key_id"));
 }
 
 /// An invalid signature, an answer that the question does not offer, a stale digest,
 /// another team, and an old answer are refused, each with an Activity line without
 /// values; a valid stricter answer then ends the question. A device has at most 3
-/// answers to a question on the relay, so three devices answer.
+/// answers to a question on the relay, so three devices answer. In a second question, a
+/// changed comment and a current kind that the question does not offer do not settle.
 #[test]
 fn invalid_answers_are_refused_and_logged() {
     let world = world(true);
@@ -1497,6 +1597,81 @@ fn invalid_answers_are_refused_and_logged() {
     let view = world.wait_answered(1);
     assert_eq!(view.answered[0].kind, "never_for_agent");
     assert_eq!(view.refused.len(), 6);
+
+    // A second question: a changed comment and an unoffered current kind do not settle.
+    // The six refused lines above stay in Activity, so the counts go on from 6.
+    let seen = [opened.record.qid.clone()];
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let opened = phone.next(&seen);
+    let original = prepare_answer(
+        &opened,
+        PHONE_UUID,
+        Choice::DenyWithComment {
+            comment: "No".into(),
+        },
+        now(),
+    )
+    .unwrap();
+    let signature = phone.sign(original.text.as_bytes());
+    let mut forged = original;
+    forged.choice = Choice::DenyWithComment {
+        comment: "Changed".into(),
+    };
+    send_answer(&phone.client, &opened, &forged, &signature, &phone.keys).unwrap();
+    let lines = world.wait_refused(7);
+    assert!(
+        lines[0].contains("signature does not verify"),
+        "the changed comment: {lines:?}"
+    );
+    assert_eq!(world.queue.pending().len(), 1, "the run still waits");
+    assert!(
+        !waiting.is_finished(),
+        "the changed comment must not settle"
+    );
+    assert_eq!(
+        prepare_answer(&opened, PHONE_UUID, Choice::Approve, now()).unwrap_err(),
+        AnswerError::NotOffered
+    );
+    let mut unoffered = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
+    unoffered.choice = Choice::Approve;
+    unoffered.text = answer_string(
+        PHONE_UUID,
+        &world.team,
+        &opened.record.qid,
+        &unoffered.choice,
+        &opened.card.digest,
+        unoffered.time,
+    )
+    .unwrap();
+    let signature = answer_key().sign(unoffered.text.as_bytes()).unwrap();
+    send_answer(&phone.client, &opened, &unoffered, &signature, &phone.keys).unwrap();
+    // Activity is newest first: the two lines of this question are the first two.
+    let lines = world.wait_refused(8);
+    let mut reasons: Vec<&str> = lines[..2]
+        .iter()
+        .map(|line| line.split(" did not count: ").nth(1).unwrap_or(line))
+        .collect();
+    reasons.sort_unstable();
+    assert_eq!(
+        reasons,
+        [
+            "its signature does not verify.",
+            "the question does not offer this answer.",
+        ],
+        "{lines:?}"
+    );
+    assert_eq!(world.queue.pending().len(), 1, "the run still waits");
+    assert!(!waiting.is_finished(), "the unoffered kind must not settle");
+    let deny = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
+    send_answer(
+        &phone.client,
+        &opened,
+        &deny,
+        &phone.sign(deny.text.as_bytes()),
+        &phone.keys,
+    )
+    .unwrap();
+    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
 }
 
 /// Two valid answers arrive before the asker reads them: the first one counts, and the
@@ -1616,7 +1791,8 @@ fn a_question_expires_with_its_wait() {
 
 /// Removing a device writes a new question key: the next question uses it, and a device
 /// with the old key only cannot read it. A question posted before keeps its key, so its
-/// answers still open. The removed device's answers do not count.
+/// answers still open. The removed device's answers do not count. "Remove" revokes the
+/// device on the relay too: its calls fail from then on.
 #[test]
 fn removing_a_device_rotates_the_question_key() {
     let world = world(true);
@@ -1628,7 +1804,20 @@ fn removing_a_device_rotates_the_question_key() {
     assert_eq!(first.record.key_id, old_key);
     let phone_first = phone.next(&[]);
     // The owner removes the iPhone on Mac A.
-    assert!(world.with_a(|vault| vault.remove_trusted_device_and_rotate(PHONE_UUID).unwrap()));
+    let (membership, phone_id) = world.with_a(|vault| {
+        let membership = questions_membership(vault).unwrap().unwrap();
+        let id = vault
+            .trusted_device(PHONE_UUID)
+            .unwrap()
+            .unwrap()
+            .relay_devices[&world.team];
+        assert!(vault.remove_trusted_device_and_rotate(PHONE_UUID).unwrap());
+        (membership, id)
+    });
+    assert!(
+        phone.client.list(0, Duration::ZERO).is_ok(),
+        "the removed iPhone still lists until the relay revokes it"
+    );
     let new_key = world.with_a(|vault| vault.question_key().unwrap().unwrap().key_id());
     assert_ne!(new_key, old_key);
     // The removed iPhone's approval does not count.
@@ -1704,98 +1893,20 @@ fn removing_a_device_rotates_the_question_key() {
     )
     .unwrap();
     assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
-}
 
-/// The relay never gets a command, a credential name, a variable, or a secret value:
-/// every JSON body of a whole round trip, sync included, is free of them.
-#[test]
-fn no_request_body_holds_a_command_an_item_name_or_a_secret() {
-    let world = world(true);
-    let phone = world.iphone();
-    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
-    let b = world.mac_b();
-    let opened = b.next(&[]);
-    // A correction and an answer from each device.
-    let correct = prepare_answer(
-        &opened,
-        &b.uuid,
-        Choice::CorrectEnvironment {
-            item_id: world.items[1],
-            environment: RemoteEnvironment::Production,
-        },
-        now(),
-    )
-    .unwrap();
-    send_answer(
-        &b.client,
-        &opened,
-        &correct,
-        &b.sign(correct.text.as_bytes()),
-        &b.keys,
-    )
-    .unwrap();
-    let opened_phone = phone.next(&[]);
-    let approve = prepare_answer(&opened_phone, PHONE_UUID, Choice::ApproveOnce, now()).unwrap();
-    let signature = answer_key().sign(approve.text.as_bytes()).unwrap();
-    send_answer(
-        &phone.client,
-        &opened_phone,
-        &approve,
-        &signature,
-        &phone.keys,
-    )
-    .unwrap();
-    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Approved);
-    let bodies: Vec<String> = world
-        .relay
-        .request_bodies()
-        .into_iter()
-        .filter(|body| body.starts_with('{'))
-        .collect();
+    // "Remove" revokes the device on the relay too: its calls fail from then on.
+    QuestionsClient::from_membership(&membership)
+        .unwrap()
+        .remove_device(phone_id)
+        .expect("revoked");
     assert!(
-        bodies.iter().any(|body| body.contains("\"ciphertext\"")),
-        "the questions went through the relay"
+        !world.relay.devices().contains(&phone_id),
+        "the relay holds the removed iPhone no more"
     );
-    let forbidden = [
-        "npm",
-        "migrate",
-        "synthetic-shop",
-        "Shop database",
-        "API token",
-        "DATABASE_URL",
-        "API_TOKEN",
-        "claude-code",
-        "production credential",
-        SHOP_SECRET,
-        API_SECRET,
-        "SYNTH-",
-    ];
-    for body in &bodies {
-        // A random nonce, key, or signature can hold a short word such as "npm" by
-        // chance. The words are looked for in the body without those values.
-        let plain = without_random_values(body);
-        for word in forbidden {
-            assert!(!plain.contains(word), "{word} in {body}");
-        }
-        // Nor the secret values as b64u.
-        for word in [SHOP_SECRET, API_SECRET] {
-            assert!(
-                !body.contains(&encode_b64u(word.as_bytes())),
-                "{word} in {body}"
-            );
-        }
-    }
-    let keys: BTreeSet<String> = bodies
-        .iter()
-        .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
-        .filter_map(|value| {
-            value
-                .as_object()
-                .map(|map| map.keys().cloned().collect::<Vec<_>>())
-        })
-        .flatten()
-        .collect();
-    assert!(keys.contains("ciphertext") && keys.contains("key_id"));
+    assert!(matches!(
+        phone.client.list(0, Duration::ZERO),
+        Err(QuestionsError::Removed)
+    ));
 }
 
 // ---- The questions of the other Macs on this Mac (section 13). ----
@@ -1854,79 +1965,6 @@ fn current_remote_kinds_settle_with_signed_comments_and_guarded_classification()
         }
         // Classification is deferred to the broker, never written by the receiver.
     }
-}
-
-#[test]
-fn changed_comment_and_unoffered_current_kind_do_not_settle() {
-    let world = world(true);
-    let phone = world.iphone();
-    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
-    let opened = phone.next(&[]);
-    let original = prepare_answer(
-        &opened,
-        PHONE_UUID,
-        Choice::DenyWithComment {
-            comment: "No".into(),
-        },
-        now(),
-    )
-    .unwrap();
-    let signature = phone.sign(original.text.as_bytes());
-    let mut forged = original;
-    forged.choice = Choice::DenyWithComment {
-        comment: "Changed".into(),
-    };
-    send_answer(&phone.client, &opened, &forged, &signature, &phone.keys).unwrap();
-    assert!(world.wait_refused(1)[0].contains("signature does not verify"));
-    assert_eq!(world.queue.pending().len(), 1, "the run still waits");
-    assert!(
-        !waiting.is_finished(),
-        "the changed comment must not settle"
-    );
-    assert_eq!(
-        prepare_answer(&opened, PHONE_UUID, Choice::Approve, now()).unwrap_err(),
-        AnswerError::NotOffered
-    );
-    let mut unoffered = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
-    unoffered.choice = Choice::Approve;
-    unoffered.text = answer_string(
-        PHONE_UUID,
-        &world.team,
-        &opened.record.qid,
-        &unoffered.choice,
-        &opened.card.digest,
-        unoffered.time,
-    )
-    .unwrap();
-    let signature = answer_key().sign(unoffered.text.as_bytes()).unwrap();
-    send_answer(&phone.client, &opened, &unoffered, &signature, &phone.keys).unwrap();
-    // Activity is newest first: the earlier signature refusal is at index 1.
-    let lines = world.wait_refused(2);
-    let mut reasons: Vec<&str> = lines
-        .iter()
-        .map(|line| line.split(" did not count: ").nth(1).unwrap_or(line))
-        .collect();
-    reasons.sort_unstable();
-    assert_eq!(
-        reasons,
-        [
-            "its signature does not verify.",
-            "the question does not offer this answer.",
-        ],
-        "{lines:?}"
-    );
-    assert_eq!(world.queue.pending().len(), 1, "the run still waits");
-    assert!(!waiting.is_finished(), "the unoffered kind must not settle");
-    let deny = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
-    send_answer(
-        &phone.client,
-        &opened,
-        &deny,
-        &phone.sign(deny.text.as_bytes()),
-        &phone.keys,
-    )
-    .unwrap();
-    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
 }
 
 /// Post as B without starting another lister: every questions GET belongs to A.
@@ -2473,33 +2511,6 @@ fn a_removed_mac_does_not_register_again() {
             .count()
     });
     assert_eq!(live_b, 0, "Mac A has no live row of B");
-}
-
-/// "Remove" revokes the device on the relay too: its calls fail from then on.
-#[test]
-fn a_removed_device_is_revoked_on_the_relay() {
-    let world = world(true);
-    let phone = world.iphone();
-    let (membership, phone_id) = world.with_a(|vault| {
-        let membership = questions_membership(vault).unwrap().unwrap();
-        let id = vault
-            .trusted_device(PHONE_UUID)
-            .unwrap()
-            .unwrap()
-            .relay_devices[&world.team];
-        assert!(vault.remove_trusted_device_and_rotate(PHONE_UUID).unwrap());
-        (membership, id)
-    });
-    assert!(phone.client.list(0, Duration::ZERO).is_ok());
-    QuestionsClient::from_membership(&membership)
-        .unwrap()
-        .remove_device(phone_id)
-        .expect("revoked");
-    assert!(!world.relay.devices().contains(&phone_id));
-    assert!(matches!(
-        phone.client.list(0, Duration::ZERO),
-        Err(QuestionsError::Removed)
-    ));
 }
 
 /// The asking Mac's settled environment of `item`, as the declaration says.
