@@ -4,12 +4,14 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-## [0.5.11] - 2026-11-02
-
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.
 - Show privacy-safe bouncer route counts and top reasons since app start. Log route outcomes without request data.
+
+## [0.5.11] - 2026-11-02
+
+### Fixed
 
 - Development on agent questions follows the owner check window after each local click. Other sensitive and durable actions still ask.
 - Display sleep keeps the window open. Mac lock and system sleep still end it. Keep lifecycle heartbeats active and check Touch ID availability again for each fresh check.
