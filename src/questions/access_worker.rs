@@ -22,6 +22,9 @@ struct Attempt {
 // The carrier has ten slots per asking device. Keep nine for the eight
 // concurrent broker operations and one Connect handoff, even before they wait.
 const MAX_ACCESS_IN_FLIGHT: usize = 1;
+/// How long the transport waits before it checks an access request again
+/// (`QuestionsConfig::access_every`).
+pub(super) const ACCESS_EVERY: Duration = Duration::from_secs(2);
 
 pub(super) fn run(shared: &Shared) {
     let mut attempts: BTreeMap<String, Attempt> = BTreeMap::new();
@@ -258,7 +261,7 @@ pub(super) fn run(shared: &Shared) {
                     }
                 }
             }
-            a.next = Instant::now() + Duration::from_secs(2);
+            a.next = Instant::now() + shared.config.access_every;
         }
         shared.sleep(Duration::from_millis(250));
     }
