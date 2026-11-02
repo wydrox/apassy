@@ -224,7 +224,7 @@ jobs:
       - name: Check the rule packs and provider files with the loaders
         run: cargo run --offline --locked --features vault --bin apassy-packs -- validate packs/*.json packs/providers/*.json
 
-  # The relay crate (ADR 0036): lint, tests, and the end-to-end script with the real
+  # The relay crate (ADR 0037): lint, tests, and the end-to-end script with the real
   # binaries. Formatting is checked by the macOS job (`cargo fmt --all`).
   relay:
     needs: reuse-pr

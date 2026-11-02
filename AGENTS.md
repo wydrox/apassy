@@ -7,7 +7,7 @@
 - Update `release-versions.json`, app/core Cargo manifests and lockfile, iOS
   `MARKETING_VERSION`, extension manifest, and dated changelog together. The website
   derives its version from the changelog. The relay is the crate `crates/apassy-relay`
-  of this workspace (ADR 0036); its package version, with the edge Worker package,
+  of this workspace (ADR 0037); its package version, with the edge Worker package,
   also versions the Linux CLI. Its own rules are in `crates/apassy-relay/AGENTS.md`.
 - Run `python3 scripts/check-release-versions.py` with Python 3.12 before publication.
   Local source checks do not prove publication.

@@ -1,10 +1,10 @@
 # apassy-relay: release rules for this crate
 
-The release policy of the whole product is in the root [AGENTS.md](../../AGENTS.md). Since ADR 0036
+The release policy of the whole product is in the root [AGENTS.md](../../AGENTS.md). Since ADR 0037
 the relay is a member of this workspace; these rules add what is particular to it.
 
 - The relay is the `relay` surface (server and edge Worker), and `apassy-team` is the `linux-cli`
-  surface, until ADR 0036 stage 3 replaces it with the Linux node.
+  surface, until ADR 0037 stage 3 replaces it with the Linux node.
 - Keep `crates/apassy-relay/Cargo.toml`, its entry in the workspace `Cargo.lock`, the edge Worker
   package and its lock metadata, both downloadable team CLIs, the relay image label, and public
   release metadata at the shared release version. Do not renumber pinned dependencies, schema

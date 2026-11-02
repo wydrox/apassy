@@ -56,7 +56,7 @@ def check(root):
         "iOS core package": package_version(root / "ios/ApassyCore/Cargo.toml"),
         "iOS core Cargo.lock": locked_version(root / "Cargo.lock", "apassy-core"),
         "browser extension": json.loads((root / "extension/manifest.json").read_text())["version"],
-        # The relay and the Linux CLI are one crate of this workspace (ADR 0036).
+        # The relay and the Linux CLI are one crate of this workspace (ADR 0037).
         "relay and Linux CLI package": package_version(root / RELAY / "Cargo.toml"),
         "relay and Linux CLI Cargo.lock": locked_version(root / "Cargo.lock", "apassy-relay"),
         "relay edge Worker package": json.loads(
@@ -90,7 +90,7 @@ def main():
     if args.relay_checkout is not None:
         print(
             "Release version check failed: the relay is crates/apassy-relay in this repository "
-            "(ADR 0036); drop --relay-checkout.",
+            "(ADR 0037); drop --relay-checkout.",
             file=sys.stderr,
         )
         return 1

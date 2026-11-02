@@ -1,4 +1,4 @@
-# Relay history scan before publication (ADR 0036, stage 0)
+# Relay history scan before publication (ADR 0037, stage 0)
 
 Date: 2026-11-02. Repository: `wydrox/apassy-relay`, every ref (144 commits; gitleaks scanned 124
 non-merge commits). No value is in this report.

@@ -105,7 +105,7 @@ pub mod codes {
     pub const ACTION_SETTLED: &str = "action_settled";
     /// A settle after the action's `expires_at`.
     pub const ACTION_EXPIRED: &str = "action_expired";
-    // Shared team vaults turned off on this relay (ADR 0036, D8).
+    // Shared team vaults turned off on this relay (ADR 0037, D8).
     /// A run, MCP, the proxy, a host release, or a new collection, item, grant, or team
     /// agent on a relay with `APASSY_RELAY_TEAM_VAULTS=0`. 410: the feature is gone here,
     /// and a retry does not help.

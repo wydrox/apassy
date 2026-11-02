@@ -1,6 +1,6 @@
-# Implementation plan — your own relay, build path (ADR 0036)
+# Implementation plan — your own relay, build path (ADR 0037)
 
-Date: 2026-11-02. Status: PLAN, accepted with ADR 0036. Stages 0 and 1 started 2026-11-02. Decision: [ADR 0036](../adr/0036-own-relay-open-source.md).
+Date: 2026-11-02. Status: PLAN, accepted with ADR 0037. Stages 0 and 1 started 2026-11-02. Decision: [ADR 0037](../adr/0037-own-relay-open-source.md).
 
 ## Outcome and constraints
 
@@ -8,7 +8,7 @@ Apassy works with no Apassy-run server holding a key that opens a value. Every M
 is a node with its own relay server. The iPhone, other devices, and team members reach a node over
 Tailscale with a pinned certificate. The relay is Apache-2.0 in this repository.
 
-- **No TEE on the build path.** TEE features are the enterprise track (ADR 0036, E1 to E4). Until
+- **No TEE on the build path.** TEE features are the enterprise track (ADR 0037, E1 to E4). Until
   then no Apassy-run server does the way B swap.
 - **The wire contracts stay.** relay-questions-v1, relay-feed-v1, relay-access-request-v1,
   relay-sync-v1, and the ADR 0019 device identity move to a new origin. They do not change shape.
@@ -43,7 +43,7 @@ Read-only inventory of `apassy-relay` (`main`), this repository (`feat/touch-id-
 
 ## Stage 0 — Prepare (S)
 
-**0A Trust model.** Write `docs/security/trust-model.md` from ADR 0036, "Who sees what after this".
+**0A Trust model.** Write `docs/security/trust-model.md` from ADR 0037, "Who sees what after this".
 
 **0B History scan.** Run gitleaks on every ref of `apassy-relay`, and `/usr/bin/grep -E` (not ugrep) for
 the token prefixes (`apassy_acc_`, `apassy_tagt_`, `apassy_ses_`, `apassy_lnk_`), private-key blocks,
@@ -60,7 +60,7 @@ import one squashed commit.
 
 The public host name, the bundle id, and the GitHub org are already public and can stay.
 
-**0D Decisions.** All accepted on 2026-11-02 (ADR 0036, the table at the end).
+**0D Decisions.** All accepted on 2026-11-02 (ADR 0037, the table at the end).
 
 **0E Turn off shared team vaults and way B on the hosted relay (D8, now).**
 

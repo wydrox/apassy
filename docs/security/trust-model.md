@@ -1,6 +1,6 @@
 # Trust model
 
-Date: 2026-11-02. Decision: [ADR 0036](../adr/0036-own-relay-open-source.md). This page says who can see
+Date: 2026-11-02. Decision: [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see
 what. Update it in the same change as any code that changes an answer here.
 
 ## The rule
@@ -30,13 +30,13 @@ Apache-2.0 and builds from this repository.
 - A device administrator can read what that device opens: the vault while unlocked, and in way A the
   value of a run.
 - A team host operator (or root on that host) can read the members' way B traffic. The enterprise
-  track (a confidential VM, ADR 0036 section 11) is for teams whose members must not trust the host.
+  track (a confidential VM, ADR 0037 section 11) is for teams whose members must not trust the host.
 - Physical attacks on a confidential VM's memory are out of scope of SEV-SNP and TDX (TEE.fail,
   2025).
 - Tailscale Funnel, when a user turns it on, exposes the node's agent endpoints to the internet,
   behind agent tokens.
 
-## The hosted relay today (until ADR 0036 stage 7)
+## The hosted relay today (until ADR 0037 stage 7)
 
 | Function | State on 2026-11-02 | Sees |
 | --- | --- | --- |

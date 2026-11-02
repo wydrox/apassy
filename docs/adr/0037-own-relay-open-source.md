@@ -1,4 +1,4 @@
-# ADR 0036 — Your own relay: every Mac and Linux node serves itself, and all of Apassy is open source
+# ADR 0037 — Your own relay: every Mac and Linux node serves itself, and all of Apassy is open source
 
 Date: 2026-11-02.
 Status: ACCEPTED by the owner on 2026-11-02 (all decisions D1 to D14, in the table at the end). TEE
@@ -381,7 +381,7 @@ The build path needs no TEE. The TEE features are an enterprise track that comes
 Until then, no Apassy-run server does the way B swap: a cloud agent that goes through Connect needs
 a machine of the user that is online. Each stage ships as a normal release of all six components at
 one version (AGENTS.md). Sizes are rough: S is days, M is one to two weeks, L is three weeks or
-more. Work units, files, and checks: [implementation plan](../design/implementation-plan-0036.md).
+more. Work units, files, and checks: [implementation plan](../design/implementation-plan-0037.md).
 
 ### Build path
 

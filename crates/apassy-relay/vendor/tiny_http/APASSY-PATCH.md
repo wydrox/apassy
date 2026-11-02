@@ -33,7 +33,7 @@ fork decision, remaining exposure and rollout effects.
 
 ## Lints (2026-11-02)
 
-Since ADR 0036 the relay is a crate of the `wydrox/apassy` workspace, and Cargo makes this path
+Since ADR 0037 the relay is a crate of the `wydrox/apassy` workspace, and Cargo makes this path
 dependency a workspace member (`workspace.exclude` does not apply to path dependencies). Two
 changes to `Cargo.toml` follow:
 

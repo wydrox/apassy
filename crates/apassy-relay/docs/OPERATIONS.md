@@ -1,6 +1,6 @@
 # Running apassy-relay
 
-> Since ADR 0036 the relay is the crate `crates/apassy-relay` of `wydrox/apassy`. The production
+> Since ADR 0037 the relay is the crate `crates/apassy-relay` of `wydrox/apassy`. The production
 > deployment files (`deploy/vps/`) and the health monitor stay in the archived private
 > repository `wydrox/apassy-relay`, with the server addresses; references to them below
 > point there. Images and the downloadable CLIs build from this workspace with

@@ -1,4 +1,4 @@
-# The relay image and both downloadable team CLIs (ADR 0036: the relay is the crate
+# The relay image and both downloadable team CLIs (ADR 0037: the relay is the crate
 # crates/apassy-relay of this workspace). GitHub builds release artifacts; never build on
 # the production VPS or in a local VM. Push image-* on the exact tested release commit.
 # Deployment remains a separate step.

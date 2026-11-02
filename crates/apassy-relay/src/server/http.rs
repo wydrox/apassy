@@ -141,7 +141,7 @@ fn pick(method: &str, choices: &[(&str, Need, Endpoint)]) -> RelayResult<Routed>
 impl Endpoint {
     /// The endpoints of shared team vaults and their runs: runs, MCP, access, the host
     /// lane, and new collections, policies, items, grants, and team agents. A relay with
-    /// `team_vaults` off refuses them (ADR 0036, D8). Lists, archives, and revocations
+    /// `team_vaults` off refuses them (ADR 0037, D8). Lists, archives, and revocations
     /// stay, so a team can see and clean up what it has.
     pub fn is_team_vault_use(&self) -> bool {
         use Endpoint::*;
@@ -166,7 +166,7 @@ impl Endpoint {
 fn team_vaults_retired() -> RelayError {
     RelayError::new(
         codes::TEAM_VAULTS_RETIRED,
-        "Shared team vaults, agent runs, and the proxy are off on this relay. A team runs them on its own Apassy node (ADR 0036).",
+        "Shared team vaults, agent runs, and the proxy are off on this relay. A team runs them on its own Apassy node (ADR 0037).",
     )
 }
 

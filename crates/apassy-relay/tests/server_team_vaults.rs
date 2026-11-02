@@ -1,4 +1,4 @@
-//! `APASSY_RELAY_TEAM_VAULTS=0` (ADR 0036, D8): the hosted relay refuses shared team
+//! `APASSY_RELAY_TEAM_VAULTS=0` (ADR 0037, D8): the hosted relay refuses shared team
 //! vaults, runs, MCP, and the proxy, and keeps devices, relay sync, questions, feed, and
 //! push.
 
