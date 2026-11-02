@@ -20,16 +20,19 @@ What never changes, in every combination:
 
 ## Dependency gates
 
-| Gate | Blocks | Unblocked by |
-| --- | --- | --- |
-| Open decision 3 (latency budget) | Final deadline constants in C; thresholds in K1 | Measurement K1, then owner decision. Until then C keeps 10 s per attempt, one retry on transport timeout |
-| Open decision 4 (Laya weights licence for a hosted service) | Publishing an image with baked weights (E2); H deployment | Owner reads the model card. Until then E2 fetches weights at first start into a volume |
-| Open decision 2 (where the Apassy service runs) | H deployment, I worker, K2/K3 | Memory/CPU measurement of `ottervibe` (ops plan, read-only), or a new EU server (owner buys) |
-| Open decision 6 (account for Free/Personal owners) | H sign-in, C credential kind for Apassy | Owner chooses device key + subscription or relay team; A reserves both forms |
-| Open decision 1 (plans and price) | Entitlement check in H, Stripe prices, website copy in J2 | Owner decision; Stripe changes need explicit confirmation |
-| Open decision 5 (shared base model) | Nothing in this plan | Out of scope |
+The owner answered the six open decisions of ADR 0035 on 2026-11-02 (ADR 0035, "Owner decisions"). What each answer means for the plan:
 
-Steps that cost money or touch production need explicit owner confirmation before they run: `devbox up arm` / `devbox up x86` for K (shared 12.50 EUR/month budget; `devbox down` after each session), any new EU server, any Stripe price or product, any deployment to the Contabo VPS `ottervibe`, any image publication outside GitHub artifacts.
+| Decision | Answer | Effect on the plan |
+| --- | --- | --- |
+| 1. Plans | Apassy hosting and training are part of the paid Apassy Connect, for Personal and Team; self-hosting is free and open source | H and I sit behind the Connect entitlement; J copy follows [ADR 0036](../adr/0036-own-relay-open-source.md) D3 |
+| 2. Location | Contabo VPS `ottervibe`, own compose project, hard limits (first: 2 vCPU / 3 GB inference, 2 vCPU / 4 GB one training job at low CPU priority) | H deploys there after K1 passes with the same limits on `devbox-x86`; no test on the VPS. VPS region must be confirmed as EU |
+| 3. Deadline | 20 s per attempt to a remote bouncer brain, one retry on transport timeout (at most 40 s); 10 s on this Mac | C adds a per-host deadline; K1 threshold p95 ≤ 20 s, target 10 s |
+| 4. License | Laya and ModernBERT-large weights are Apache-2.0 (model card at `55cf4c4`, tag `commercial-use`) | E2 may bake the weights into the image, with their license and notice files |
+| 5. Shared base model | Only with a separate opt-in and anonymization | Out of this plan; a separate ADR comes first |
+| 6. Account | The Apassy Connect account of ADR 0036 D3 | H sign-in waits for the Connect accounts of ADR 0036 stage 7; A defines the bouncer side with its own domain tag |
+| Connect content | The bouncer brain service is the one Connect service that reads content; opt-in with a consent screen | C/J1 consent screen; ADR 0036 "Who sees what" must list it |
+
+Steps that cost money or touch production need explicit owner confirmation at the time they run, also after the decisions above: `devbox up arm` / `devbox up x86` for K (shared 12.50 EUR/month budget; `devbox down` after each session), any new server, any Stripe price or product, each deployment to the Contabo VPS `ottervibe`, any image publication outside GitHub artifacts.
 
 ## Work units and ownership
 
@@ -70,7 +73,7 @@ One editor owns each shared file at a time. Paths are current unless labelled "p
 ### E — Container image and CI
 
 - Purpose: the image of ADR 0035 section 2 and a CI job that runs the Python tests.
-- Files: `.github/workflows/ci.yml` (E1: a new `basemodel-python` job on `ubuntu-24.04` with Python 3.12, `python3 -I -m unittest discover -s tests/basemodel -p 'test_*.py'`; the macOS job at `:98` already sets up Python at `:160-163`); proposed `tools/basemodel/Dockerfile` (python 3.12, `tools/basemodel/requirements.txt` pinned, `serve.py`, `local_train.py`, `common.py`, `manifest.json`; weights fetched by `fetch_weights.py` into a volume at first start, not baked, until decision 4); proposed `.github/workflows/bouncer-image.yml` modelled on the relay's `image.yml` (tag `bouncer-image-*`, `docker build`, `docker save | gzip`, SHA-256, artifact), with a matrix for arm64 and x86_64 (QEMU or an arm64 GitHub runner; verify availability first); CUDA variant later.
+- Files: `.github/workflows/ci.yml` (E1: a new `basemodel-python` job on `ubuntu-24.04` with Python 3.12, `python3 -I -m unittest discover -s tests/basemodel -p 'test_*.py'`; the macOS job at `:98` already sets up Python at `:160-163`); proposed `tools/basemodel/Dockerfile` (python 3.12, `tools/basemodel/requirements.txt` pinned, `serve.py`, `local_train.py`, `common.py`, `manifest.json`; the Apache-2.0 weights may be baked in, with their license and notice files (decision 4); a variant fetches them with `fetch_weights.py` into a volume at first start; proposed `.github/workflows/bouncer-image.yml` modelled on the relay's `image.yml` (tag `bouncer-image-*`, `docker build`, `docker save | gzip`, SHA-256, artifact), with a matrix for arm64 and x86_64 (QEMU or an arm64 GitHub runner; verify availability first); CUDA variant later.
 - Owner: E1 worker (sonnet, high) with the exact steps above; E2 ops (opus, high). Depends on D1 for a meaningful job. Images are built on GitHub only; local image tests run on `devbox-arm` / `devbox-x86` with `docker --context`, never on the Mac, never on `ottervibe`.
 - Acceptance: E1 job green on a push; E2 workflow produces two artifacts with checksums and `docker image inspect` reports the expected architecture; a container on a devbox answers `GET /health` and one request with the shipped `apassy-base-v1` heads (K1 measures it).
 
@@ -94,7 +97,8 @@ One editor owns each shared file at a time. Paths are current unless labelled "p
 
 - Purpose: many owners on one encoder, device-key sign-in, deletion, no request logging, EU.
 - Files: D2 code in `tools/basemodel/`; proposed `docs/operations/bouncer-service.md` (runbook: compose file, limits, deletion, metrics without request data); proposed `tools/basemodel/entitlements.py` (interface; first version a file allow-list until decision 1).
-- Owner: ops (opus, high) for deployment plan and compose; implementer (opus, high) for D2 code. Depends on D2, E2, decisions 2, 4, 6. Ops returns a plan; deployment runs only after the owner confirms the server and the cost. Judge panel: 2× opus + 1× fable (device-key auth, deletion).
+- Location: a separate compose project on `ottervibe` with hard limits (decision 2): first 2 vCPU / 3 GB for inference and 2 vCPU / 4 GB for one training job at low CPU priority. The limits protect mail, relay, pretix and MDmesh.
+- Owner: ops (opus, high) for deployment plan and compose; implementer (opus, high) for D2 code. Depends on D2, E2, K1, and the Connect accounts of ADR 0036 stage 7 (decision 6). Ops returns a plan; each deployment to `ottervibe` runs only after the owner confirms it. Judge panel: 2× opus + 1× fable (device-key auth, deletion).
 - Acceptance: `test_multi_owner.py` (owner A cannot read or delete owner B's head set; `DELETE /v1/owner` leaves no file, cache entry or job for the owner; a revoked key loses its token at once); a log capture of 100 requests contains no state text; K2/K3 thresholds met.
 
 ### I — Apassy training jobs
@@ -115,7 +119,7 @@ One editor owns each shared file at a time. Paths are current unless labelled "p
 ### K — Measurements
 
 - Purpose: the numbers of ADR 0035 Stages 1, 3 and 4.
-- K1 (stage 1): CPU latency of one request (5 or 6 questions, 512 tokens) on `devbox-arm` (CAX31) and `devbox-x86` (CX43) with the E2 image, p50/p95 over 50 requests, cold and warm; shadow on/off. Threshold for CPU hosting: p95 ≤ 5 s (half the 10 s attempt). Above it, hosting needs CUDA, and decision 3 is re-opened.
+- K1 (stage 1): CPU latency of one request (5 or 6 questions, 512 tokens) on `devbox-arm` (CAX31) and `devbox-x86` (CX43) with the E2 image, p50/p95 over 50 requests, cold and warm; shadow on/off. Run it also with the `ottervibe` limits of H (`docker run --cpus=2 --memory=3g`). Threshold: p95 ≤ 20 s (the remote deadline, decision 3), target 10 s. Above it, the service moves to a separate server or a GPU.
 - K2 (stage 3): memory per active owner ≤ 150 MB (RSS delta per cached head set) and 10 parallel owners with p95 ≤ 2× single-owner p95. K3: deletion test of H.
 - Owner: ops (opus, high). Each session needs the owner's go (cost); `devbox up arm|x86` through `apassy_run_with_secrets` with "devbox tailscale auth key", results in `docs/operations/bouncer-hosting.md`, `devbox down` at the end.
 
@@ -147,8 +151,8 @@ Waves (implementers run first; the panel runs after they return, so the count ne
 | 1b | E1 (worker), K0 = scanner map of PR #60 conflicts in `serve.py` | top-level agent reads CI | nothing |
 | 2 | C, F, E2 (ops) | panel 2× opus + 1× fable on C+F; 1× opus on E2 | A, B, D1 merged |
 | 3 | G, J1, K1 (ops, owner go) | 1× opus on G+J1; architect (fable) reads K1 numbers for decision 3 | wave 2 merged |
-| 4 | D2, H (ops plan + implementer), I | panel 2× opus + 1× fable on D2+H+I | decisions 2, 4, 6 |
-| 5 | J2, K2/K3 (ops, owner go), L | panel 2× opus + 1× fable on the combined diff | wave 4 merged, decision 1 for copy |
+| 4 | D2, H (ops plan + implementer), I | panel 2× opus + 1× fable on D2+H+I | K1 passed; Connect accounts (ADR 0036 stage 7) |
+| 5 | J2, K2/K3 (ops, owner go), L | panel 2× opus + 1× fable on the combined diff | wave 4 merged |
 
 Handoff format (every agent returns exactly this): `Unit`, `Base revision`, `Files changed` (absolute paths), `Interface` (types, functions, routes, schema), `Tests added` (names; "not run" or "cheap check run: <command>"), `Validation commands for the top-level agent` (exact), `Deviations from the plan`, `Open questions`, `Risks seen`. A judge returns, per acceptance criterion: PASS / FAIL / UNVERIFIED with `file:line` evidence, the counter-example it tried, and a severity.
 
@@ -158,7 +162,7 @@ Per AGENTS.md, shipping any unit bumps all six components together (iOS app, mac
 
 ## Risks and unknowns (verified in the code)
 
-- TLS trust for an own server: `TlsClient::platform` uses platform roots; a home server with a private CA cannot be used. Gap: pinning or a custom root is undecided (C/J1 copy must say "a public certificate").
+- TLS trust for an own server: `TlsClient::platform` uses platform roots; a home server with a private CA cannot be used. On a tailnet, a Tailscale Serve certificate (`*.ts.net`) is a public certificate and works; Tailscale is reachability only, so the bearer token stays required. Pinning a private CA stays undecided (C/J1 copy must say "a public certificate, for example Tailscale Serve").
 - `get` resolves DNS without a deadline (`http.rs:225`); B must bound it, or the 10 s attempt is not absolute.
 - `APASSY_BOUNCER_URL` wins over `bouncer.json` (`bouncer.rs:224-231`); a remote URL there would bypass consent. C refuses it.
 - `probe_health` returns `NoServer` for non-loopback (`bouncer.rs:255`) and `get` needs a bearer (`http.rs:205`); health over TLS needs B's `get_health`.
