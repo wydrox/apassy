@@ -9,6 +9,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - The app names the two parts of the bouncer. The bouncer brain is the model: it answers questions about a command and decides nothing by itself. The bouncer gate is the fixed checks and the decision. Settings > Bouncer, Learning, and the owner checks use these names.
 - The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
 
+### Fixed
+
+- The bouncer brain, the local model, uses about half the memory on Apple Silicon: 1.8 GB idle, before 3.4 GB and more. Its answers do not change.
+
 ## [0.5.12] - 2026-11-02
 
 ### Fixed
