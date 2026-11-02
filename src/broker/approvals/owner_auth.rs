@@ -1166,9 +1166,8 @@ impl OwnerGate {
                 proof.local_generation = Some((self.window.clone(), generation));
             }
         }
-        match &result {
-            Ok(proof) => self.window.seed(proof.epoch, proof.method, generation),
-            _ => {}
+        if let Ok(proof) = &result {
+            self.window.seed(proof.epoch, proof.method, generation);
         }
         result
     }
