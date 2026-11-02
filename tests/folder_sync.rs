@@ -284,10 +284,14 @@ fn concurrent_edits_converge_when_both_see_the_conflict() {
     assert_eq!(titles(&vault_a).len(), 2, "{:?}", titles(&vault_a));
 }
 
+/// Deletes propagate and a tombstone beats an old copy; then an old copy no longer undoes
+/// anything: a file rolled back to the first copy takes no edit back.
 #[test]
 fn deletes_propagate_and_a_tombstone_beats_an_old_copy() {
     let world = world();
     let (a, mut vault_a, b, mut vault_b) = two_macs(&world);
+    // The first copy of the folder, for the rollback at the end.
+    let old = fs::read(world.file()).expect("old");
     vault_a.add(item("Beta", "SYNTH-beta")).expect("add");
     a.sync.sync(&mut vault_a).expect("sync a");
     b.sync.sync(&mut vault_b).expect("sync b");
@@ -321,13 +325,9 @@ fn deletes_propagate_and_a_tombstone_beats_an_old_copy() {
     let merge = b.sync.sync(&mut vault_b).expect("sync b").merge;
     assert!(merge.is_none_or(|merge| merge.inserted == 0));
     assert_eq!(titles(&vault_b), vec!["Alpha"]);
-}
 
-#[test]
-fn an_old_copy_no_longer_undoes_anything() {
-    let world = world();
-    let (a, mut vault_a, b, mut vault_b) = two_macs(&world);
-    let old = fs::read(world.file()).expect("old");
+    // An old copy no longer undoes anything: the file goes back to the first copy after
+    // newer edits.
     edit(&mut vault_a, "Alpha", "SYNTH-newer");
     vault_a.add(item("Gamma", "SYNTH-gamma")).expect("add");
     a.sync.sync(&mut vault_a).expect("sync a");
@@ -338,7 +338,11 @@ fn an_old_copy_no_longer_undoes_anything() {
     assert_eq!(b.status(), FileStatus::Changed);
     let outcome = b.sync.sync(&mut vault_b).expect("sync b");
     let merge = outcome.merge.expect("merge");
-    assert_eq!((merge.updated, merge.deleted), (0, 0), "{merge:?}");
+    assert_eq!(
+        (merge.updated, merge.deleted),
+        (0, 0),
+        "the rollback takes nothing back: {merge:?}"
+    );
     assert!(
         merge.conflicts.is_empty(),
         "an old copy makes no conflict copy"

@@ -841,6 +841,28 @@ fn revision_conflict_and_invalid_update_are_atomic() {
         TOKEN_API
     );
 
+    // An update to a different category, with the right revision, is refused and
+    // changes nothing.
+    expect_err(
+        vault.update(added.id, revision, login_draft()),
+        VaultErrorKind::InvalidInput,
+    );
+    let after_category = expect_ok(vault.details(added.id));
+    assert_eq!(
+        after_category, before,
+        "a different category changes nothing"
+    );
+    assert_eq!(after_category.summary.kind, CredentialKind::ApiKey);
+    assert_eq!(after_category.summary.revision, revision);
+    assert_eq!(
+        expect_ok(vault.reveal(added.id, "token")).expose(),
+        before_secret.expose()
+    );
+    assert_eq!(
+        expect_ok(vault.reveal(added.id, "token")).expose(),
+        TOKEN_API
+    );
+
     let mut good = api_key_draft();
     good.title = "VL1-TITLE-api-key-edited".to_string();
     good.notes = "VL1-NOTES-api-key-edited".to_string();
@@ -1332,6 +1354,12 @@ fn backup_restore_passphrase_overwrite_and_source_bytes() {
     let (dir, path) = temp_pair("src.db");
     let mut vault = create_unlocked(&path, PASS);
     let items = add_all_kinds(&mut vault);
+    // The encrypted artifacts omit the credential and metadata canaries: the live file
+    // and its lock sidecar, the backup, the file after the vault closes, and the
+    // restored file and its sidecar.
+    let canaries = all_canaries();
+    assert_file_omits(&path, &canaries);
+    assert_omits_canaries(&lock_sidecar(&path), &canaries);
     let backup = dir.path().join("vault.bak");
     let existing = dir.path().join("existing.bak");
     fs::write(&existing, b"keep-backup").expect("write existing backup dest");
@@ -1347,10 +1375,13 @@ fn backup_restore_passphrase_overwrite_and_source_bytes() {
     expect_ok(vault.backup(&backup));
     assert!(vault.is_locked());
     expect_err(Vault::open(&path), VaultErrorKind::Busy);
-    assert_file_omits(&backup, &all_canaries());
+    assert_file_omits(&path, &canaries);
+    assert_file_omits(&backup, &canaries);
     assert_unix_mode_0600(&backup);
     let backup_bytes = fs::read(&backup).expect("read backup");
     drop(vault);
+    assert_file_omits(&path, &canaries);
+    assert_omits_canaries(&lock_sidecar(&path), &canaries);
 
     let mut source = expect_ok(Vault::open(&path));
     expect_ok(source.unlock(PASS));
@@ -1401,6 +1432,8 @@ fn backup_restore_passphrase_overwrite_and_source_bytes() {
         fs::read(&backup).expect("backup after success"),
         backup_bytes
     );
+    assert_file_omits(&dest, &canaries);
+    assert_omits_canaries(&lock_sidecar(&dest), &canaries);
     expect_ok(restored.unlock(PASS));
     assert_all_kinds(&restored, &items);
 }
@@ -1506,54 +1539,6 @@ fn exclusive_second_open_is_busy() {
     assert!(reopened.is_locked());
     expect_ok(reopened.unlock(PASS));
     expect_err(Vault::open(&path), VaultErrorKind::Busy);
-}
-
-#[test]
-fn encrypted_artifacts_omit_credential_and_metadata_canaries() {
-    let (dir, path) = temp_pair("canary.db");
-    let mut vault = create_unlocked(&path, PASS);
-    let items = add_all_kinds(&mut vault);
-    let canaries = all_canaries();
-    assert_file_omits(&path, &canaries);
-    assert_omits_canaries(&lock_sidecar(&path), &canaries);
-    let backup = dir.path().join("canary.bak");
-    expect_ok(vault.backup(&backup));
-    assert_file_omits(&path, &canaries);
-    assert_file_omits(&backup, &canaries);
-    drop(vault);
-    assert_file_omits(&path, &canaries);
-    assert_omits_canaries(&lock_sidecar(&path), &canaries);
-    let restored_path = dir.path().join("canary-restored.db");
-    let mut restored = expect_ok(Vault::restore(&backup, &restored_path, PASS));
-    assert_file_omits(&restored_path, &canaries);
-    assert_omits_canaries(&lock_sidecar(&restored_path), &canaries);
-    expect_ok(restored.unlock(PASS));
-    assert_all_kinds(&restored, &items);
-}
-
-#[test]
-fn update_refuses_different_category() {
-    let (_dir, path) = temp_pair("kind.db");
-    let mut vault = create_unlocked(&path, PASS);
-    let added = expect_ok(vault.add(api_key_draft()));
-    let before = expect_ok(vault.details(added.id));
-    let before_secret = expect_ok(vault.reveal(added.id, "token"));
-    expect_err(
-        vault.update(added.id, added.revision, login_draft()),
-        VaultErrorKind::InvalidInput,
-    );
-    let after = expect_ok(vault.details(added.id));
-    assert_eq!(after, before);
-    assert_eq!(after.summary.kind, CredentialKind::ApiKey);
-    assert_eq!(after.summary.revision, added.revision);
-    assert_eq!(
-        expect_ok(vault.reveal(added.id, "token")).expose(),
-        before_secret.expose()
-    );
-    assert_eq!(
-        expect_ok(vault.reveal(added.id, "token")).expose(),
-        TOKEN_API
-    );
 }
 
 #[test]

@@ -1265,75 +1265,6 @@ fn no_feed_without_a_live_iphone_or_while_the_vault_is_locked() {
     assert_eq!(world.feed_puts(), before, "no live iPhone");
 }
 
-#[test]
-fn a_face_id_removal_is_applied_settled_and_published() {
-    let mut world = world();
-    let [shop, api] = world.items;
-    world.with(|vault| {
-        vault
-            .add_agent_exception(world.agent, shop, ExceptionKind::Never)
-            .unwrap();
-        vault
-            .add_agent_exception(world.agent, api, ExceptionKind::Only)
-            .unwrap();
-    });
-    let phone = world.phone("Test iPhone", answer_key());
-    world.start(config());
-    // End to end: the iPhone reads and opens the feed with the contract's AAD.
-    let feed = phone.wait_feed(&world, "the exceptions", |feed| {
-        feed.agents
-            .first()
-            .is_some_and(|agent| agent.exceptions.len() == 2)
-    });
-    assert_eq!(feed.mac.device, world.me().uuid);
-    assert_eq!(feed.mac.name, "Synthetic MacBook");
-    assert_eq!(feed.agents[0].name, "Claude Code");
-    assert_eq!(feed.agents[0].host, "claude");
-    let never = feed.agents[0]
-        .exceptions
-        .iter()
-        .find(|exception| exception.kind == "never")
-        .unwrap()
-        .clone();
-    assert_eq!(never.item_title, "Shop database");
-    let removal = phone.removal(&world, &feed, &never);
-    phone.send(&world, &removal, world.mac_id(), |text| {
-        phone.answer.sign(text).unwrap()
-    });
-    let (outcome, settle) = phone.settle(&world, &removal.action_id);
-    assert_eq!(outcome, "applied");
-    assert_eq!(settle.reason, "");
-    let shown_at = settle.feed_seq.expect("the feed that shows the result");
-    assert!(shown_at > feed.seq);
-    assert!(
-        !world
-            .exceptions()
-            .iter()
-            .any(|exception| exception.kind == ExceptionKind::Never)
-    );
-    let after = phone.wait_feed(&world, "the feed without the row", |feed| {
-        feed.seq >= shown_at
-    });
-    assert_eq!(after.agents[0].exceptions.len(), 1);
-    assert!(world.activity().iter().any(|line| line
-        == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database"));
-
-    // An "only these items" row goes with the relay key of the iPhone, no Face ID. An
-    // iPhone of 0.5.2 sends it in v1, ids only: it takes authority away, so it applies,
-    // with a note in Activity.
-    let only = after.agents[0].exceptions[0].clone();
-    assert_eq!(only.kind, "only");
-    let removal = phone.removal_v1(&world, &after, &only);
-    phone.send(&world, &removal, world.mac_id(), |text| {
-        phone.client.sign(text).unwrap()
-    });
-    assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
-    assert!(world.exceptions().is_empty());
-    assert!(world.activity().iter().any(|line| line
-        == "Removed on Test iPhone: “Only these items” for Claude Code and API token. \
-            Test iPhone did not sign the names; update Apassy on it"));
-}
-
 /// Section 9.5 step 8a: a v1 action signs ids only. One that gives authority back
 /// (`never`, `always_ask`) is refused, with what to do, and the row stays; the gate makes
 /// no proof for it either.
@@ -1458,7 +1389,9 @@ fn the_names_are_those_of_the_vault_at_the_removal() {
 
 /// Section 9.3, v2: the feed of this Mac says that it checks the names (its plaintext
 /// ends in a line feed, which the strict reader of 0.5.2 skips), and a removal that signs
-/// the names the owner saw is applied for each kind, with no note in Activity.
+/// the names the owner saw is applied for each kind, with no note in Activity. A Face ID
+/// removal is applied, settled, and published; an iPhone of 0.5.2 removes an "only these
+/// items" row in v1, with a note in Activity.
 #[test]
 fn a_removal_that_signs_the_names_is_applied() {
     let mut world = world();
@@ -1473,11 +1406,16 @@ fn a_removal_that_signs_the_names_is_applied() {
     });
     let phone = world.phone("Test iPhone", answer_key());
     world.start(config());
+    // End to end: the iPhone reads and opens the feed with the contract's AAD.
     let feed = phone.wait_feed(&world, "the exceptions", |feed| {
         feed.agents
             .first()
             .is_some_and(|agent| agent.exceptions.len() == 2)
     });
+    assert_eq!(feed.mac.device, world.me().uuid);
+    assert_eq!(feed.mac.name, "Synthetic MacBook");
+    assert_eq!(feed.agents[0].name, "Claude Code");
+    assert_eq!(feed.agents[0].host, "claude");
     let stored = stored_plaintext(&world);
     assert!(Feed::checks_names(stored.as_bytes()), "the mark of v2");
     assert!(stored.ends_with("}\n") && !stored.ends_with("\n\n"));
@@ -1488,6 +1426,7 @@ fn a_removal_that_signs_the_names_is_applied() {
         .find(|exception| exception.kind == "never")
         .unwrap()
         .clone();
+    assert_eq!(never.item_title, "Shop database");
     let removal = phone.removal(&world, &feed, &never);
     assert_eq!(
         removal.names.as_deref(),
@@ -1504,23 +1443,73 @@ fn a_removal_that_signs_the_names_is_applied() {
     });
     let (outcome, settle) = phone.settle(&world, &removal.action_id);
     assert_eq!((outcome.as_str(), settle.reason.as_str()), ("applied", ""));
+    // The Face ID removal is settled with the feed that shows its result, and that
+    // feed is published.
+    let shown_at = settle.feed_seq.expect("the feed that shows the result");
+    assert!(shown_at > feed.seq, "the settle names a newer feed");
+    assert!(
+        !world
+            .exceptions()
+            .iter()
+            .any(|exception| exception.kind == ExceptionKind::Never)
+    );
+    let after = phone.wait_feed(&world, "the feed without the row", |feed| {
+        feed.seq >= shown_at
+    });
+    assert_eq!(
+        after.agents[0].exceptions.len(),
+        1,
+        "the published feed shows the removal"
+    );
     assert!(
         world.activity().iter().any(|line| line
             == "Removed on Test iPhone: “Not for this agent” for Claude Code and Shop database"),
         "{:?}",
         world.activity()
     );
-    // "Only these items": the same names, signed with the relay key.
-    let after = phone.wait_feed(&world, "the feed without the row", |feed| {
-        feed.agents[0].exceptions.len() == 1
-    });
+
+    // An "only these items" row goes with the relay key of the iPhone, no Face ID. An
+    // iPhone of 0.5.2 sends it in v1, ids only: it takes authority away, so it applies,
+    // with a note in Activity.
     let only = after.agents[0].exceptions[0].clone();
     assert_eq!(only.kind, "only");
-    let removal = phone.removal(&world, &after, &only);
+    let removal = phone.removal_v1(&world, &after, &only);
     phone.send(&world, &removal, world.mac_id(), |text| {
         phone.client.sign(text).unwrap()
     });
-    assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
+    let (outcome, settle) = phone.settle(&world, &removal.action_id);
+    assert_eq!(outcome, "applied", "the v1 removal of an \"only\" row");
+    assert!(world.exceptions().is_empty());
+    assert!(world.activity().iter().any(|line| line
+        == "Removed on Test iPhone: “Only these items” for Claude Code and API token. \
+            Test iPhone did not sign the names; update Apassy on it"));
+
+    // "Only these items" in v2: the same names, signed with the relay key. The row comes
+    // back first, and the iPhone removes it from a feed newer than the v1 removal.
+    let emptied = settle.feed_seq.unwrap_or(after.seq);
+    world.with(|vault| {
+        vault
+            .add_agent_exception(world.agent, api, ExceptionKind::Only)
+            .unwrap();
+    });
+    let again = phone.wait_feed(&world, "the feed with the row again", |feed| {
+        feed.seq > emptied
+            && feed
+                .agents
+                .first()
+                .is_some_and(|agent| agent.exceptions.len() == 1)
+    });
+    let only = again.agents[0].exceptions[0].clone();
+    assert_eq!(only.kind, "only");
+    let removal = phone.removal(&world, &again, &only);
+    phone.send(&world, &removal, world.mac_id(), |text| {
+        phone.client.sign(text).unwrap()
+    });
+    assert_eq!(
+        phone.settle(&world, &removal.action_id).0,
+        "applied",
+        "the v2 removal of an \"only\" row"
+    );
     assert!(world.exceptions().is_empty());
 }
 
