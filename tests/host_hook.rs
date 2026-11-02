@@ -546,9 +546,12 @@ fn the_hook_never_blocks_the_prompt() {
     let listener = UnixListener::bind(&silent).expect("bind");
     let holder = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
+        // Hold the connection without an answer until the hook closes it.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
         let mut buffer = [0u8; 256];
-        let _ = stream.read(&mut buffer);
-        std::thread::sleep(Duration::from_secs(3));
+        while stream.read(&mut buffer).is_ok_and(|read| read > 0) {}
     });
     let (output, elapsed) = hook_with(&silent, Some("apassy_agt_x"), input.as_bytes());
     assert!(check(&output, elapsed).contains("did not answer"));
