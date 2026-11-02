@@ -105,8 +105,8 @@ public final class FaceIDWindow: @unchecked Sendable {
                 item[kSecValueData as String] = data
                 item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
                 let added = SecItemAdd(item as CFDictionary, nil)
-                guard added == errSecSuccess else { throw CompanionKeyError.failed(code: added) }
-            } else if status != errSecSuccess { throw CompanionKeyError.failed(code: status) }
+                guard added == errSecSuccess else { throw CompanionKeyError.failed(code: Int(added)) }
+            } else if status != errSecSuccess { throw CompanionKeyError.failed(code: Int(status)) }
             state.configure(value)
         }
     }

@@ -15,11 +15,13 @@ struct FaceIDWindowTests {
         window.configure(.oneMinute)
         let (first, reused, generation) = window.acquire()
         #expect(!reused)
-        #expect(window.authenticated(first, generation: generation))
+        let accepted1 = window.authenticated(first, generation: generation)
+        #expect(accepted1)
         clock.now = 59
         let (second, reusedAgain, _) = window.acquire()
         #expect(first === second && reusedAgain)
-        #expect(window.authenticated(second, generation: generation))
+        let accepted2 = window.authenticated(second, generation: generation)
+        #expect(accepted2)
         clock.now = 60
         let (third, reusedExpired, _) = window.acquire()
         #expect(third !== first && !reusedExpired && first.invalidated)
@@ -29,7 +31,8 @@ struct FaceIDWindowTests {
         let clock = Clock()
         var window = state(clock)
         let (first, _, generation) = window.acquire()
-        #expect(window.authenticated(first, generation: generation))
+        let accepted3 = window.authenticated(first, generation: generation)
+        #expect(accepted3)
         let (second, reused, _) = window.acquire()
         #expect(first !== second && !reused)
     }
@@ -39,15 +42,19 @@ struct FaceIDWindowTests {
         var window = state(clock)
         window.configure(.untilLock)
         let (first, _, generation) = window.acquire()
-        #expect(window.authenticated(first, generation: generation))
+        let accepted4 = window.authenticated(first, generation: generation)
+        #expect(accepted4)
         window.end() // Runtime's protected-data / termination / vault-lock event.
         #expect(first.invalidated)
-        #expect(!window.authenticated(first, generation: generation))
+        let accepted5 = window.authenticated(first, generation: generation)
+        #expect(!accepted5)
         let (next, _, nextGeneration) = window.acquire()
-        #expect(window.authenticated(next, generation: nextGeneration))
+        let accepted6 = window.authenticated(next, generation: nextGeneration)
+        #expect(accepted6)
         window.configure(.fiveMinutes)
         #expect(next.invalidated)
-        #expect(!window.authenticated(next, generation: nextGeneration))
+        let accepted7 = window.authenticated(next, generation: nextGeneration)
+        #expect(!accepted7)
     }
 
     @Test func failedOrUnfinishedEvaluationDoesNotOpenWindow() {
@@ -68,7 +75,8 @@ struct FaceIDWindowTests {
         var window = state(clock)
         window.configure(.untilLock)
         let (first, _, generation) = window.acquire()
-        #expect(window.authenticated(first, generation: generation))
+        let accepted8 = window.authenticated(first, generation: generation)
+        #expect(accepted8)
         clock.now = 100_000
         // Background is deliberately not a state-machine event.
         let (again, reused, _) = window.acquire()
