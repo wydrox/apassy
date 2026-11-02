@@ -332,11 +332,10 @@ fn allow_in_project_remembers_the_answer_for_all_agents_and_only_for_that_action
     assert!(!format!("{uses:?} {answers:?}").contains(SECRET));
 }
 
-/// ADR 0010, ADR 0025 §3b: a production item waits at each run until the owner allows
-/// production for the project and the kind of action. Then only that runs, and only for
-/// a command whose kind the rules are certain of (Gate 1, A-1).
+/// Owner decision (b): production write scope asks on every run, even when an
+/// allowance is stored. The allowance still keeps its project and action boundaries.
 #[test]
-fn production_asks_until_allow_production_then_only_for_that_project_and_action() {
+fn production_write_keeps_asking_with_a_stored_project_and_action_allowance() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
     let item = fx.item_id;
     // A certain model and "Allow once" do not lift the rule.
@@ -358,9 +357,11 @@ fn production_asks_until_allow_production_then_only_for_that_project_and_action(
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].scope, AnswerScope::Production);
     assert_eq!(answers[0].action, ActionKind::Change);
-    assert_eq!(
-        decided_by(&send_argv(&fx, &[item], COMMIT)),
-        "Remembered answer"
+    assert!(
+        asks_argv(&fx, &[item], COMMIT)
+            .question
+            .why
+            .contains("write or admin scope")
     );
     // Another kind of action, an unsure kind, and another project still wait.
     let push = asks_argv(&fx, &[item], &["git", "push"]);
@@ -704,9 +705,12 @@ fn a_production_allowance_needs_a_certain_kind_of_action() {
     );
     owner(&fx, production(run)).expect("allowed");
     assert!(handle.join().expect("thread").ok);
-    assert_eq!(
-        decided_by(&send_argv(&fx, &[item], COMMIT)),
-        "Remembered answer"
+    // Owner decision (b): a stored production allowance cannot auto-allow writes.
+    assert!(
+        asks_argv(&fx, &[item], COMMIT)
+            .question
+            .why
+            .contains("write or admin scope")
     );
     let run = asks_argv(&fx, &[item], SHIP);
     assert_eq!(run.question.action, ActionKind::Change);
@@ -940,17 +944,24 @@ fn a_mixed_run_saves_the_project_answer() {
     assert_eq!(saved.0[0].scope, AnswerScope::Production);
     assert_eq!(saved.1.len(), 1);
     assert_eq!(saved.1[0].scope, AnswerScope::Project);
-    assert_eq!(
-        decided_by(&send_argv(&fx, &[prod, staging], COMMIT)),
-        "Remembered answer"
+    // Owner decision (b): remembering the staging answer does not bypass the
+    // production write guard. Both saved answers remain intact.
+    assert!(
+        asks_argv(&fx, &[prod, staging], COMMIT)
+            .question
+            .why
+            .contains("write or admin scope")
     );
+    with_vault(&fx, |v| {
+        assert_eq!(v.answers_for_item(prod).unwrap().len(), 1);
+        assert_eq!(v.answers_for_item(staging).unwrap().len(), 1);
+    });
 }
 
-/// C-F2: a production value without a signal is unconfirmed. Its first use in the project
-/// with a kind of action asks, offers a correction, and the answer is a normal project
-/// answer, not a production allowance.
+/// Owner decisions (b), (c): default production write scope keeps asking; the
+/// owner can correct its environment or explicitly remember a project answer.
 #[test]
-fn a_default_production_item_asks_once_then_remembers() {
+fn a_default_production_write_item_keeps_asking_after_remembering() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::High)));
     let item = fx.item_id;
     with_vault(&fx, |v| {
@@ -971,7 +982,7 @@ fn a_default_production_item_asks_once_then_remembers() {
     assert!(run.question.items[0].unconfirmed);
     assert!(!run.question.items[0].production);
     assert!(
-        run.question.why.contains("Bouncer unavailable"),
+        run.question.why.contains("write or admin scope"),
         "{}",
         run.question.why
     );
@@ -994,9 +1005,15 @@ fn a_default_production_item_asks_once_then_remembers() {
     let answers = with_vault(&fx, |v| v.answers_for_item(item)).expect("answers");
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].scope, AnswerScope::Project);
+    assert!(
+        asks_argv(&fx, &[item], COMMIT)
+            .question
+            .why
+            .contains("write or admin scope")
+    );
     assert_eq!(
-        decided_by(&send_argv(&fx, &[item], COMMIT)),
-        "Remembered answer"
+        with_vault(&fx, |v| v.answers_for_item(item)).unwrap().len(),
+        1
     );
     // A kind that the rules are not sure of still asks.
     asks_argv(&fx, &[item], SHIP);
@@ -1015,7 +1032,7 @@ fn a_default_production_item_asks_once_then_remembers() {
     })
     .expect("sources");
     assert!(asks_argv(&fx, &[item], COMMIT).question.production);
-    assert_eq!(model_calls(&fx), 1);
+    assert_eq!(model_calls(&fx), 0);
 }
 
 /// B-3: a run that a remembered answer allowed is in the decision log as `Answer`, not

@@ -358,7 +358,9 @@ impl PromptStore {
             };
         };
         let check = self.check_transcript(&entry);
-        if !matches!(check, Check::Verified) {
+        // Decision (a): absence of a transcript permits an agent-stated task.
+        // A transcript that contradicts the hook remains a security veto.
+        if matches!(check, Check::NoTranscript) {
             return Resolved {
                 text: agent_text.to_owned(),
                 source: "from the agent (no verified hook task)".to_owned(),
