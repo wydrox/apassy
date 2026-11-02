@@ -1117,39 +1117,6 @@ fn the_relay_setup_sheet_asks_for_the_address_the_team_code_and_the_name() {
     create(&mut a, "Personal", PASS, None);
     let id = current_id(&a);
     super::open_settings(&mut a, super::SettingsSection::Vault);
-
-    // The team code is a one-time secret: the field is masked, and its text goes after
-    // each try, also after a wrong code sent with Return. (First, in a sheet and an egui
-    // context of its own: Return takes the focus from the field.)
-    a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
-    let ctx = egui::Context::default();
-    let _ = frames_in(&ctx, &mut a, Vec::new());
-    let used = format!("apassy_tcd_{}", "0".repeat(64));
-    a.sync.relay.url_input = relay.url.clone();
-    a.sync.relay.team_code = used.clone();
-    let text = frames_in(&ctx, &mut a, Vec::new());
-    assert!(text.contains("Team code"), "{text}");
-    assert!(!text.contains(&used), "the code shows: {text}");
-    assert!(!text.contains("apassy_tcd_0"), "the code shows: {text}");
-    let enter = egui::Event::Key {
-        key: egui::Key::Enter,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: egui::Modifiers::NONE,
-    };
-    let _ = frames_in(&ctx, &mut a, vec![enter]);
-    a.relay_settle_for_test();
-    assert!(
-        a.status_text.contains("team code is wrong"),
-        "Return with a wrong code: {}",
-        a.status_text
-    );
-    assert!(a.sync.relay.team_code.is_empty(), "erased after the try");
-    // The steps below start again from a new sheet and no status.
-    a.ui.sheet = None;
-    a.status_text.clear();
-
     a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
     assert_eq!(a.sync.relay.url_input, crate::sync::DEFAULT_RELAY_URL);
     assert!(!a.sync.relay.device_input.is_empty(), "this Mac's name");
@@ -1938,6 +1905,43 @@ fn joining_a_relay_copy_under_another_passphrase_asks_for_it() {
     a.sync_now();
     a.relay_settle_for_test();
     assert_eq!(names(&a), vec!["Added while off", "Alpha", "Only on B"]);
+}
+
+/// The team code is a one-time secret: the field is masked, and its text goes after
+/// each try.
+#[test]
+fn the_team_code_field_is_masked_and_erased_after_each_try() {
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, None);
+    let id = current_id(&a);
+    super::open_settings(&mut a, super::SettingsSection::Vault);
+    a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
+    let ctx = egui::Context::default();
+    let _ = frames_in(&ctx, &mut a, Vec::new());
+    let used = format!("apassy_tcd_{}", "0".repeat(64));
+    a.sync.relay.url_input = relay.url.clone();
+    a.sync.relay.team_code = used.clone();
+    let text = frames_in(&ctx, &mut a, Vec::new());
+    assert!(text.contains("Team code"), "{text}");
+    assert!(!text.contains(&used), "the code shows: {text}");
+    assert!(!text.contains("apassy_tcd_0"), "the code shows: {text}");
+    let enter = egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let _ = frames_in(&ctx, &mut a, vec![enter]);
+    a.relay_settle_for_test();
+    assert!(
+        a.status_text.contains("team code is wrong"),
+        "{}",
+        a.status_text
+    );
+    assert!(a.sync.relay.team_code.is_empty(), "erased after the try");
 }
 
 /// "Remove" in "Devices…" asks first. Cancel has the focus for the keyboard, so Return
