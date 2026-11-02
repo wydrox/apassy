@@ -393,6 +393,7 @@ pub struct UbiquityStatus {
 /// Event types that can cause a notification (goal N1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationEvent {
+    UpdateReady,
     /// A run waits for the owner.
     ApprovalWaiting,
     /// A nonurgent declaration suggestion; no agent waits for it.
@@ -409,6 +410,7 @@ impl NotificationEvent {
     /// `native/ApassyNotify/Notify.swift`.
     pub fn as_wire(self) -> &'static str {
         match self {
+            Self::UpdateReady => "update_ready",
             Self::ApprovalWaiting => "approval_waiting",
             Self::RequestBlocked => "request_blocked",
             Self::Suggestion => "suggestion",
@@ -501,6 +503,10 @@ impl Notification {
         check_identifier(event_id, EVENT_ID_RULE)?;
         check_preview_name(agent_name)?;
         let (title, body) = match event {
+            NotificationEvent::UpdateReady => (
+                "Update ready",
+                format!("Apassy {agent_name} is ready. Restart to update."),
+            ),
             NotificationEvent::ApprovalWaiting => (
                 "Approval waiting",
                 format!("Agent \"{agent_name}\" waits for your decision. Open Apassy to review."),

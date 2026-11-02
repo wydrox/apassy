@@ -156,6 +156,15 @@ pub(crate) struct BrowserHost {
 }
 
 impl BrowserHost {
+    pub(crate) fn update_busy(&self) -> bool {
+        self.socket.as_ref().is_some_and(OwnerSocket::update_busy)
+            || self.filled.is_some()
+            || self.pending.is_some()
+            || self.saved.is_some()
+            || self.updated.is_some()
+            || self.code.is_some()
+            || self.passkey.is_some()
+    }
     #[cfg(test)]
     pub(crate) fn socket_path(&self) -> Option<&Path> {
         self.socket.as_ref().map(OwnerSocket::socket_path)

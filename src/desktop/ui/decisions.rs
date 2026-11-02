@@ -890,6 +890,11 @@ pub(super) fn route_notification(
 ) {
     use crate::desktop::inbox::EventKey;
     use crate::desktop::notify::NotificationDestination;
+    if matches!(destination, NotificationDestination::Update(_)) {
+        app.place = crate::desktop::Place::Settings;
+        app.ui.settings_section = super::SettingsSection::Updates;
+        return;
+    }
     app.ui.decisions.paste.erase();
     app.ui.decisions.forget_evaluation();
     app.ui.decisions.disconnect = None;
@@ -918,6 +923,7 @@ pub(super) fn route_notification(
             app.ui.decisions.show_activity = true;
             None
         }
+        NotificationDestination::Update(_) => None,
         NotificationDestination::Requests => {
             app.set_note("This request is no longer waiting. Review current requests or Activity.");
             None

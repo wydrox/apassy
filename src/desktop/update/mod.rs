@@ -39,6 +39,17 @@ pub(crate) use self::store::{InstallReport, Staged, StagedKind};
 
 /// Updates exist only for the published macOS app.
 pub(crate) const SUPPORTED: bool = cfg!(target_os = "macos");
+
+fn should_restart(
+    staged: bool,
+    auto_install: bool,
+    locked: bool,
+    agent_busy: bool,
+    owner_busy: bool,
+    request_busy: bool,
+) -> bool {
+    staged && auto_install && locked && !agent_busy && !owner_busy && !request_busy
+}
 /// The first check waits for the start of the window.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 /// The time between two automatic checks.
@@ -108,6 +119,7 @@ type Repaint = Arc<dyn Fn() + Send + Sync>;
 
 /// The updater of the desktop app.
 pub(crate) struct Updater {
+    attempted_while_locked: bool,
     shared: Arc<Shared>,
     /// `None` until [`Updater::start`]: tests and the smoke test keep it so.
     paths: Option<Paths>,
@@ -185,6 +197,7 @@ impl Updater {
             build: BuildIdentity::current(),
             running: false,
             installer_started: false,
+            attempted_while_locked: false,
             banner_hidden: None,
         }
     }
@@ -577,6 +590,61 @@ fn run_once(
 }
 
 impl DesktopApp {
+    pub(crate) fn poll_update_restart(&mut self, ctx: &egui::Context) {
+        let view = self.updates.view();
+        let staged = match &view.phase {
+            Phase::Ready(staged) if staged.kind == StagedKind::App => Some(staged),
+            _ => None,
+        };
+        let notified = self.updates.shared.lock().file.notified_version.clone();
+        if let Some(super::notify::NotificationDestination::Update(version)) =
+            &self.ui.notification_destination
+        {
+            let current = staged.is_some_and(|staged| &staged.version == version);
+            self.ui.notification_destination = None;
+            if current {
+                self.restart_to_update(ctx);
+                return;
+            }
+        }
+        if let Some(staged) = staged
+            && notified.as_ref() != Some(&staged.version)
+            && let Some(center) = &self.owner.notifications
+        {
+            center.update_ready(&staged.version);
+            self.updates
+                .change(|file| file.notified_version = Some(staged.version.clone()));
+        }
+        let locked = self.owner_ui.session.is_locked();
+        if !locked {
+            self.updates.attempted_while_locked = false;
+        }
+        let agent_busy = match &self.broker {
+            BrokerState::Running(handle) => handle.update_busy(),
+            _ => false,
+        };
+        let owner_busy = self.owner.check.is_some()
+            || self.owner_ui.fresh_token.is_some()
+            || self.learning.inspected.is_some()
+            || self.ui.sheet.is_some()
+            || self.pending_delete
+            || self.owner.unlock.unlocking.is_some()
+            || ctx.memory(|m| m.top_modal_layer()).is_some()
+            || egui::Popup::is_any_open(ctx);
+        if !self.updates.attempted_while_locked
+            && should_restart(
+                staged.is_some(),
+                view.auto_install,
+                locked,
+                agent_busy,
+                owner_busy,
+                self.cli.update_busy() || self.browser.update_busy() || self.platform.update_busy(),
+            )
+        {
+            self.updates.attempted_while_locked = true;
+            self.restart_to_update(ctx);
+        }
+    }
     /// Start the updater of the window. Tests and the smoke test do not call this.
     pub(crate) fn start_updates(&mut self, ctx: &egui::Context) {
         let repaint = ctx.clone();
@@ -628,6 +696,16 @@ impl DesktopApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restart_requires_every_safety_condition() {
+        for bits in 0u8..64 {
+            let b = |n| bits & (1 << n) != 0;
+            assert_eq!(
+                super::should_restart(b(0), b(1), b(2), b(3), b(4), b(5)),
+                bits == 7
+            );
+        }
+    }
     use super::manifest::tests::{COMMIT, manifest_json};
     use super::pipeline::tests::{Fake, TEAM, running};
     use super::*;

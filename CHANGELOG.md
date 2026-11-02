@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Staged updates install when the vault locks, or right away with Restart to update.
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.

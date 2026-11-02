@@ -54,6 +54,7 @@ pub(crate) struct UpdateFile {
     pub(crate) last_result: Option<String>,
     pub(crate) staged: Option<Staged>,
     pub(crate) last_install: Option<InstallReport>,
+    pub(crate) notified_version: Option<String>,
 }
 
 impl Default for UpdateFile {
@@ -65,6 +66,7 @@ impl Default for UpdateFile {
             last_result: None,
             staged: None,
             last_install: None,
+            notified_version: None,
         }
     }
 }
@@ -147,6 +149,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let path = dir.path().join("data").join("update.json");
         let file = UpdateFile {
+            notified_version: None,
             auto_check: false,
             auto_install: false,
             last_check: Some(1_790_593_085),

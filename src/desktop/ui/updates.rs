@@ -61,7 +61,7 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             None,
             &mut auto_install,
         )
-        .on_hover_text("A new version installs when you quit Apassy.");
+        .on_hover_text("A new version installs when the vault locks or you quit Apassy.");
         if let Some(report) = &view.last_install {
             let tone = if report.ok {
                 Tone::Good
@@ -173,7 +173,7 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
         } => kit::tone_note(ui, reason, Tone::Warning),
         Phase::Ready(staged) if staged.kind == StagedKind::App => {
             if view.auto_install {
-                kit::note(ui, "It installs when you quit Apassy.");
+                kit::note(ui, "It installs when the vault locks or you quit Apassy.");
             }
         }
         Phase::Ready(staged) => kit::note(ui, image_note(&staged.version)),
@@ -200,7 +200,7 @@ fn phase_button(view: &UpdateView) -> Option<(&'static str, Style, &'static str,
             Action::Download,
         )),
         Phase::Ready(staged) if staged.kind == StagedKind::App => Some((
-            "Restart now",
+            "Restart to update",
             Style::Prominent,
             "Apassy locks the vault, ends runs that wait for you, installs the new version, and opens it.",
             Action::Restart,
@@ -235,14 +235,16 @@ pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let Phase::Ready(staged) = &view.phase else {
         return;
     };
-    if app.updates.banner_hidden.as_ref() == Some(&staged.commit) {
+    if staged.kind == StagedKind::Image
+        && app.updates.banner_hidden.as_ref() == Some(&staged.commit)
+    {
         return;
     }
     let (title, message) = match staged.kind {
         StagedKind::App => (
             format!("Apassy {} is ready.", staged.version),
             if view.auto_install {
-                "It installs when you quit Apassy. Restart now to install it at once."
+                "It installs when the vault locks or you quit Apassy. Choose Restart to update to install it at once."
             } else {
                 "Restart Apassy to install it."
             }
@@ -258,13 +260,15 @@ pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let main = match staged.kind {
-                StagedKind::App => ("Restart now", Action::Restart),
+                StagedKind::App => ("Restart to update", Action::Restart),
                 StagedKind::Image => ("Open the disk image", Action::OpenImage),
             };
             if kit::small_button(ui, main.0, Style::Prominent).clicked() {
                 action = Some(main.1);
             }
-            if kit::small_button(ui, "Later", Style::Link).clicked() {
+            if staged.kind == StagedKind::Image
+                && kit::small_button(ui, "Later", Style::Link).clicked()
+            {
                 action = Some(Action::HideBanner);
             }
         });
@@ -443,7 +447,7 @@ mod tests {
                 },
                 "Open the download page",
             ),
-            (Phase::Ready(staged(StagedKind::App)), "Restart now"),
+            (Phase::Ready(staged(StagedKind::App)), "Restart to update"),
             (
                 Phase::Ready(staged(StagedKind::Image)),
                 "Open the disk image",
@@ -485,8 +489,11 @@ mod tests {
             app.place = place.clone();
             let text = draw(&mut app, size);
             assert!(text.contains("Apassy 0.3.1 is ready."), "{place:?}: {text}");
-            assert!(text.contains("Restart now"), "{text}");
-            assert!(text.contains("It installs when you quit Apassy."), "{text}");
+            assert!(text.contains("Restart to update"), "{text}");
+            assert!(
+                text.contains("It installs when the vault locks or you quit Apassy."),
+                "{text}"
+            );
             assert!(text.contains("Later"), "{text}");
         }
         app.updates.set_auto_install(false);
@@ -515,7 +522,7 @@ mod tests {
         assert!(text.contains("Apassy 0.3.2 is ready."), "{text}");
     }
 
-    /// Without a ready app, "Restart now" changes nothing: the vault stays open.
+    /// Without a ready app, "Restart to update" changes nothing: the vault stays open.
     #[test]
     fn restart_without_a_ready_version_keeps_the_vault_open() {
         let dir = tempfile::TempDir::new().expect("temp dir");
