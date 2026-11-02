@@ -24,10 +24,7 @@ use crate::desktop::{DesktopApp, ItemDraft};
 use crate::sync::SyncFolder;
 use crate::vault::{ActivityDecision, NewActivity};
 
-/// The fake relay reads the app's sync module under this name.
-use crate::sync as relay_api;
-#[path = "../../../tests/common/fake_relay.rs"]
-mod fake_relay;
+use crate::desktop::fake_relay;
 
 const PASS: &str = "sync-ui-pass-ok";
 const NEW_PASS: &str = "sync-ui-pass-new";

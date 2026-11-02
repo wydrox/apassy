@@ -1185,15 +1185,6 @@ impl Drop for SyncWorker {
     }
 }
 
-/// The fake relay of the tests reads the app's sync module under this name.
-#[cfg(test)]
-use crate::sync as relay_api;
-/// The headless app tests (`ui/sync_tests.rs`) load the same file for their own use.
-#[cfg(test)]
-#[allow(clippy::duplicate_mod)]
-#[path = "../../tests/common/fake_relay.rs"]
-mod fake_relay;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1501,7 +1492,7 @@ mod tests {
 
         use super::*;
         use crate::contracts::CredentialKind;
-        use crate::desktop::sync_worker::fake_relay::FakeRelay;
+        use crate::desktop::fake_relay::FakeRelay;
         use crate::sync::PendingJoin;
         use crate::vault::{Field, ItemDraft, SecretValue};
 

@@ -13,6 +13,17 @@ import { flush, loadBackground, senderFor } from "./mock-chrome.mjs";
 import { createSyntheticAuthenticator, fail, ok } from "./synthetic-authenticator.mjs";
 
 const ORIGIN = "https://login.example.com";
+
+test("bypass controls only send requests and never an approval or profile", async () => {
+  const bg = loadBackground();
+  const seen = [];
+  bg.setHost((wire, record) => { seen.push(wire); record.port.postMessage(ok({ type: "none" })); });
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once" })).ok, true);
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "five_minutes" })).ok, true);
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "forever" })).ok, false);
+  assert.deepEqual(seen.map(({ cmd, scope }) => ({ cmd, scope })), [{ cmd: "bypass_request", scope: "once" }, { cmd: "bypass_request", scope: "five_minutes" }]);
+  assert.ok(seen.every(wire => !("approved" in wire) && !("identity" in wire)));
+});
 const b64u = (bytes) => Buffer.from(bytes).toString("base64url");
 const b64 = (bytes) => Buffer.from(bytes).toString("base64");
 const sha256 = (data) => createHash("sha256").update(data).digest();

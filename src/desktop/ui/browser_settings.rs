@@ -44,6 +44,47 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
     let bundle = Install::current();
+    ui.label("Browser instances agents may fill in with remote debugging (all profiles)");
+    if let Some(identity) = app.browser.unsafe_instance.clone() {
+        ui.horizontal(|ui| {
+            ui.label(identity.description());
+            if ui.button("Trust this instance…").clicked() {
+                app.prepare_owner(
+                    crate::desktop::owner_check::OwnerRequest::BrowserDebugging {
+                        request_label: "Agent fills in all profiles of this instance".into(),
+                        identity,
+                        scope: None,
+                        binding: None,
+                    },
+                    Some(ui.ctx()),
+                    false,
+                );
+            }
+        });
+    }
+    let profiles = app
+        .browser
+        .trusted_instances
+        .get_or_insert_with(crate::browser::trust::profiles)
+        .clone();
+    match profiles {
+        Ok(profiles) => {
+            for identity in profiles {
+                ui.horizontal(|ui| {
+                    ui.label(identity.description());
+                    if ui.button("Remove").clicked() {
+                        if let Err(e) = crate::browser::trust::remove(&identity) {
+                            app.set_err(e);
+                        }
+                        app.browser.trusted_instances = None;
+                    }
+                });
+            }
+        }
+        Err(_) => {
+            ui.label("Protected device setting unavailable. Agent fills are refused.");
+        }
+    }
     let home = install::home();
     let mut action: Option<(Action, &'static Browser)> = None;
     rows::section(

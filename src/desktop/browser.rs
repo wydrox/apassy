@@ -61,6 +61,8 @@ pub(crate) struct BrowserWire;
 
 /// One request of the browser socket, with the hang-up state of its connection.
 pub(crate) struct BrowserRequest {
+    binding: Option<crate::browser::bypass::RequestBinding>,
+    pub(crate) identity: std::sync::Mutex<Option<crate::browser::trust::InstanceIdentity>>,
     pub(crate) command: Command,
     pub(crate) trusted_gesture: bool,
     pub(crate) gone: PeerGone,
@@ -71,7 +73,10 @@ pub(crate) struct BrowserRequest {
 fn guarded(command: &Command) -> bool {
     matches!(
         command,
-        Command::PasskeyGet(_) | Command::PasskeyCreate(_) | Command::FillCode { .. }
+        Command::AgentPoll { .. }
+            | Command::PasskeyGet(_)
+            | Command::PasskeyCreate(_)
+            | Command::FillCode { .. }
     )
 }
 
@@ -86,6 +91,21 @@ impl LineWire for BrowserWire {
     fn parse(line: &[u8]) -> Result<BrowserRequest, Response> {
         Request::parse(line)
             .map(|command| BrowserRequest {
+                binding: {
+                    #[derive(serde::Deserialize)]
+                    struct Binding {
+                        bypass_nonce: String,
+                        host_connection: String,
+                    }
+                    serde_json::from_slice::<Binding>(line)
+                        .ok()
+                        .map(|b| crate::browser::bypass::RequestBinding {
+                            nonce: b.bypass_nonce,
+                            connection: b.host_connection,
+                        })
+                        .filter(|b| b.valid())
+                },
+                identity: std::sync::Mutex::new(None),
                 trusted_gesture: {
                     #[derive(serde::Deserialize)]
                     struct Gesture {
@@ -110,8 +130,15 @@ impl LineWire for BrowserWire {
     /// A passkey or a code comes only from the signed Apassy host that the signed
     /// browser started. The check fails closed.
     fn check_peer(stream: &UnixStream, request: &BrowserRequest) -> Result<(), Response> {
-        if guarded(&request.command) || request.trusted_gesture {
-            crate::browser::caller::check_peer(stream).map_err(Response::from)?;
+        if guarded(&request.command)
+            || request.trusted_gesture
+            || matches!(
+                request.command,
+                Command::BypassStatus | Command::BypassRequest(_) | Command::BypassEnd
+            )
+        {
+            let identity = crate::browser::caller::peer_identity(stream).map_err(Response::from)?;
+            *request.identity.lock().unwrap() = identity;
         }
         Ok(())
     }
@@ -132,6 +159,15 @@ impl LineWire for BrowserWire {
 /// The browser socket, and the values of a fill on their way to its ticket.
 #[derive(Default)]
 pub(crate) struct BrowserHost {
+    next_binding: Option<crate::browser::bypass::RequestBinding>,
+    refused: Vec<(crate::browser::bypass::RequestBinding, Command, Instant)>,
+    pub(crate) unsafe_instance: Option<crate::browser::trust::InstanceIdentity>,
+    pub(crate) trusted_instances:
+        Option<Result<Vec<crate::browser::trust::InstanceIdentity>, String>>,
+    pub(crate) bypass: Option<crate::browser::bypass::OwnerPasskeyCodeBypass>,
+    pub(crate) bypass_epoch: Option<[u8; 32]>,
+    pub(crate) bypass_generation: u64,
+    next_debugging_deadline: Option<Instant>,
     socket: Option<OwnerSocket>,
     inbox: Option<Receiver<WireEnvelope<BrowserWire>>>,
     /// Why the browser socket did not start.
@@ -172,6 +208,10 @@ impl BrowserHost {
 
     /// Stop the socket. Waiting requests get "stopped".
     pub(crate) fn stop(&mut self) {
+        self.bypass = None;
+        self.refused.clear();
+        self.next_binding = None;
+        self.unsafe_instance = None;
         if let Some(mut socket) = self.socket.take() {
             socket.stop();
         }
@@ -314,6 +354,11 @@ impl DesktopApp {
     /// Answer the requests that wait. The app calls this each frame, also while the
     /// window is hidden.
     pub(crate) fn poll_browser(&mut self, ctx: &egui::Context) {
+        if self.browser.bypass_epoch != self.owner_ui.session.epoch()
+            || self.browser.bypass_generation != self.owner_ui.session.owner_window.generation()
+        {
+            self.browser.bypass = None;
+        }
         // A browser that hung up closes its dialog, also while the window is hidden.
         self.expire_browser_check(ctx);
         let Some(inbox) = &self.browser.inbox else {
@@ -321,11 +366,69 @@ impl DesktopApp {
         };
         let envelopes: Vec<WireEnvelope<BrowserWire>> = inbox.try_iter().collect();
         for Envelope { request, reply } in envelopes {
+            self.browser.next_debugging_deadline = None;
             let BrowserRequest {
+                binding,
                 command,
                 gone,
                 trusted_gesture,
+                identity,
             } = request;
+            self.browser.next_binding = binding.clone();
+            self.browser
+                .refused
+                .retain(|(_, _, at)| at.elapsed() < Duration::from_secs(300));
+            let identity = identity.into_inner().unwrap();
+            if let Some(identity) = identity.as_ref() {
+                self.browser.unsafe_instance = Some(identity.clone());
+                self.browser.next_debugging_deadline =
+                    if crate::browser::bypass::owner_operation(&command) {
+                        self.browser.bypass.as_ref().and_then(|g| match g.scope {
+                            crate::browser::bypass::Scope::Until(end)
+                                if &g.identity == identity =>
+                            {
+                                Some(end)
+                            }
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    };
+                if crate::browser::bypass::owner_operation(&command)
+                    && !((self.browser.bypass.as_ref().is_some_and(|g| {
+                        matches!(g.scope, crate::browser::bypass::Scope::Until(_))
+                    }) || self
+                        .browser
+                        .refused
+                        .iter()
+                        .any(|(b, c, _)| Some(b) == binding.as_ref() && c == &command))
+                        && crate::browser::bypass::consume(
+                            &mut self.browser.bypass,
+                            identity,
+                            Instant::now(),
+                            &command,
+                            binding.as_ref(),
+                        ))
+                {
+                    if let Some(binding) = binding
+                        && !self.browser.refused.iter().any(|(b, _, _)| b == &binding)
+                    {
+                        if self.browser.refused.len() >= 4 {
+                            self.browser.refused.remove(0);
+                        }
+                        self.browser
+                            .refused
+                            .push((binding, command, Instant::now()));
+                    }
+                    let _ = reply.send(Response::error("unsafe_browser", "This browser is controlled by other programs. Open Apassy's extension popup and choose Allow once… to request permission in Apassy."));
+                    continue;
+                }
+            } else if matches!(
+                command,
+                Command::BypassStatus | Command::BypassRequest(_) | Command::BypassEnd
+            ) {
+                self.browser.unsafe_instance = None;
+            }
             self.handle_browser_verified(
                 Envelope {
                     request: command,
@@ -333,6 +436,7 @@ impl DesktopApp {
                 },
                 Some(gone),
                 trusted_gesture,
+                identity,
                 ctx,
             );
         }
@@ -356,7 +460,7 @@ impl DesktopApp {
         gone: Option<PeerGone>,
         ctx: &egui::Context,
     ) {
-        self.handle_browser_verified(envelope, gone, false, ctx);
+        self.handle_browser_verified(envelope, gone, false, None, ctx);
     }
 
     pub(super) fn handle_browser_verified(
@@ -364,13 +468,135 @@ impl DesktopApp {
         envelope: Envelope<Command, Response>,
         gone: Option<PeerGone>,
         trusted_gesture: bool,
+        identity: Option<crate::browser::trust::InstanceIdentity>,
         ctx: &egui::Context,
     ) {
         let Envelope { request, reply } = envelope;
         self.browser.last_seen = Some(Instant::now());
         let mut ticket = BrowserTicket::new(reply, gone);
+        if let Some(end) = self.browser.next_debugging_deadline.take() {
+            ticket.deadline = ticket.deadline.min(end);
+        }
         ticket.trusted_gesture = trusted_gesture;
         match request {
+            Command::AgentBlocked { instance, url } => {
+                crate::broker::browser_fill::blocked(&instance, &url);
+                ticket.send(Response::ok(
+                    "Browser cannot receive agent fills",
+                    Data::None,
+                ));
+            }
+            Command::AgentPoll {
+                instance,
+                url,
+                document,
+                focused,
+                receipt,
+                filled,
+                exposed,
+            } => {
+                let answer = crate::broker::browser_fill::poll(
+                    &instance,
+                    identity,
+                    &url,
+                    document,
+                    focused,
+                    receipt.as_deref(),
+                    filled,
+                    exposed,
+                );
+                ticket.send(answer);
+            }
+            Command::BypassStatus => {
+                let identity = self.browser.unsafe_instance.clone();
+                let remaining = identity.as_ref().and_then(|id| {
+                    self.browser
+                        .bypass
+                        .as_ref()
+                        .and_then(|g| g.remaining(id, Instant::now()))
+                });
+                ticket.send(Response::ok(
+                    "Browser debugging status",
+                    Data::Bypass {
+                        identity,
+                        remaining,
+                    },
+                ));
+            }
+            Command::BypassEnd => {
+                if self
+                    .browser
+                    .bypass
+                    .as_ref()
+                    .is_some_and(|g| Some(&g.identity) == self.browser.unsafe_instance.as_ref())
+                {
+                    self.browser.bypass = None;
+                    if self
+                        .owner
+                        .check
+                        .as_ref()
+                        .is_some_and(|d| d.browser.is_some())
+                    {
+                        self.close_owner_check(Some(ctx));
+                    }
+                }
+                ticket.send(Response::ok("Bypass ended", Data::None));
+            }
+            Command::BypassRequest(scope) => {
+                let binding = self
+                    .browser
+                    .next_binding
+                    .take()
+                    .filter(|b| self.browser.refused.iter().any(|(old, _, _)| old == b));
+                let Some(binding) = binding else {
+                    ticket.send(Response::error(
+                        "bad_request",
+                        "Retry the exact refused request from its open extension connection.",
+                    ));
+                    return;
+                };
+                let request_label = self
+                    .browser
+                    .refused
+                    .iter()
+                    .find(|(old, _, _)| old == &binding)
+                    .map(|(_, command, _)| match command {
+                        Command::PasskeyGet(r) => format!("Passkey sign-in at {}", r.origin),
+                        Command::PasskeyCreate(r) => format!("Create passkey at {}", r.origin),
+                        Command::FillCode { url, .. } => format!("Fill one-time code at {url}"),
+                        _ => "Unsupported request".into(),
+                    })
+                    .unwrap_or_default();
+                if let Some(identity) = self.browser.unsafe_instance.clone() {
+                    if self.owner.check.is_some() {
+                        ticket.send(Response::error(
+                            "busy",
+                            "Finish the owner question in Apassy first.",
+                        ));
+                    } else {
+                        self.prepare_owner(
+                            OwnerRequest::BrowserDebugging {
+                                request_label,
+                                identity,
+                                scope: Some(scope),
+                                binding: Some(binding),
+                            },
+                            Some(ctx),
+                            false,
+                        );
+                        bring_to_front(ctx);
+                        ticket.send(Response::ok(
+                            "Answer Allow or Dismiss in Apassy.",
+                            Data::None,
+                        ));
+                    }
+                } else {
+                    ticket.send(Response::error(
+                        "unsupported",
+                        "This browser has no verified unsafe profile.",
+                    ));
+                }
+            }
             Command::Status => {
                 ticket.send(self.browser_status());
             }
@@ -1318,6 +1544,31 @@ impl DesktopApp {
 #[cfg(test)]
 mod owner_window_delivery_tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_revocation_discards_debugging_grants() {
+        let mut app = DesktopApp::new();
+        let identity = crate::browser::trust::InstanceIdentity {
+            bundle_id: "net.imput.helium".into(),
+            team_id: "S4Q33XPHB4".into(),
+            user_data_root: "/tmp/synthetic".into(),
+            debugging: "9223".into(),
+            unsafe_switches: vec!["remote-debugging-port".into()],
+        };
+        app.browser.bypass = Some(crate::browser::bypass::OwnerPasskeyCodeBypass::approved(
+            identity,
+            crate::browser::bypass::BypassScope::FiveMinutes,
+            Instant::now(),
+        ));
+        app.browser.bypass_epoch = app.owner_ui.session.epoch();
+        app.browser.bypass_generation = app.owner_ui.session.owner_window.generation();
+        app.owner_ui
+            .session
+            .owner_window
+            .invalidate_for("synthetic_mac_lock");
+        app.poll_browser(&egui::Context::default());
+        assert!(app.browser.bypass.is_none());
+    }
     #[test]
     fn owner_window_revocation_after_vault_read_refuses_browser_delivery() {
         use crate::broker::approvals::{CheckMethod, LocalWindowSource, OwnerFrequency};

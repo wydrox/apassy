@@ -709,11 +709,20 @@ fn known_state(
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    run_inner(ctx, token, request, false)
+    run_inner(ctx, token, request, false, None)
 }
 
 pub(super) fn evaluate(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    run_inner(ctx, token, request, true)
+    run_inner(ctx, token, request, true, None)
+}
+
+pub(super) fn fill_browser(
+    ctx: &BrokerContext,
+    token: &str,
+    request: &RunRequest<'_>,
+    fill: &super::browser_fill::Fill,
+) -> WireResponse {
+    run_inner(ctx, token, request, false, Some(fill))
 }
 
 fn run_inner(
@@ -721,6 +730,7 @@ fn run_inner(
     token: &str,
     request: &RunRequest<'_>,
     evaluation_only: bool,
+    browser_fill: Option<&super::browser_fill::Fill>,
 ) -> WireResponse {
     let mut diagnostic = Attempt::new();
     let items = request.all_items();
@@ -734,7 +744,7 @@ fn run_inner(
             Ok(agent) => agent,
             Err(response) => return response,
         };
-        match check(vault, &agent, request) {
+        match check_inner(vault, &agent, request, browser_fill) {
             Ok(checked) => (checked, label),
             Err((code, reason)) => {
                 record(
@@ -773,6 +783,9 @@ fn run_inner(
         &checked.env_names,
         &checked.provider_hosts,
     );
+    if browser_fill.is_some_and(|f| f.agent_can_read_page) {
+        analysis.flags.push("secret_output".to_owned());
+    }
     // Goal item B6: a user request from the host hook replaces the text from the agent.
     let resolved = ctx.prompts.resolve(
         checked.agent.id,
@@ -1151,7 +1164,29 @@ fn run_inner(
             command: request.command.to_vec(),
             cwd: checked.cwd.display().to_string(),
             env_names: checked.env_names.clone(),
-            purpose: request.purpose.trim().to_owned(),
+            purpose: browser_fill.map_or_else(
+                || request.purpose.trim().to_owned(),
+                |fill| {
+                    format!(
+                        "{} wants to fill {} on {} in the connected browser. {}{}",
+                        checked.agent.name,
+                        checked
+                            .facts
+                            .first()
+                            .map_or("credential", |f| f.name.as_str()),
+                        fill.site_label(),
+                        request.purpose.trim(),
+                        if fill.agent_can_read_page {
+                            format!(
+                                " {} can read this page through remote debugging.",
+                                checked.agent.name
+                            )
+                        } else {
+                            String::new()
+                        }
+                    )
+                },
+            ),
             risk: risk_note.clone(),
             user_request: user_request.to_owned(),
             request_source: resolved.source.clone(),
@@ -1164,7 +1199,11 @@ fn run_inner(
                 action,
                 production: production_waiting,
                 why: risk_note.clone(),
-                reason: reason_kind,
+                reason: if browser_fill.is_some() {
+                    ReasonKind::BrowserFill
+                } else {
+                    reason_kind
+                },
                 items: question_items,
                 valid_answers: valid,
             },
@@ -1387,7 +1426,7 @@ fn run_inner(
             );
             return WireResponse::failure(code, reason);
         }
-        let rechecked = match check(vault, &agent, request) {
+        let rechecked = match check_inner(vault, &agent, request, browser_fill) {
             Ok(rechecked) => rechecked,
             Err((code, reason)) => {
                 record(
@@ -1529,6 +1568,22 @@ fn run_inner(
         super::corrections::consider_items(vault, &items);
         if vault.is_locked() {
             return locked_response();
+        }
+        if let Some(fill) = browser_fill {
+            let response = fill.deliver(vault, &ctx.vault);
+            record(
+                vault,
+                &agent,
+                request,
+                &label,
+                if response.ok {
+                    ActivityDecision::Allow
+                } else {
+                    ActivityDecision::Deny
+                },
+                "Browser fill delivery requested; extension acknowledgement determines completion.",
+            );
+            return response;
         }
         match read_secrets(vault, request.items, request.codes) {
             Ok(secrets) => {
@@ -1744,10 +1799,20 @@ pub(super) fn foreign_project(declared: &str, project: Option<&Project>) -> Opti
     (!fits).then(|| declared.to_owned())
 }
 
+#[cfg(test)]
 fn check(
     vault: &Vault,
     agent: &AgentSummary,
     request: &RunRequest<'_>,
+) -> Result<Checked, (&'static str, String)> {
+    check_inner(vault, agent, request, None)
+}
+
+fn check_inner(
+    vault: &Vault,
+    agent: &AgentSummary,
+    request: &RunRequest<'_>,
+    browser_fill: Option<&super::browser_fill::Fill>,
 ) -> Result<Checked, (&'static str, String)> {
     request
         .validate()
@@ -1819,7 +1884,13 @@ fn check(
             None
         };
         let code_name = crate::vault::mfa::code_env_name(*item_id);
-        let binding = if !request.items.contains(item_id) {
+        if let Some(fill) = browser_fill {
+            fill.validate_site(vault)
+                .map_err(|reason| ("refused", reason))?;
+        }
+        let binding = if browser_fill.is_some() && request.items.contains(item_id) {
+            Some(EnvBinding { item_id: *item_id, env_name: format!("APASSY_BROWSER_{item_id}"), field: "password".to_owned(), delivery: EnvDelivery::Value })
+        } else if !request.items.contains(item_id) {
             Some(EnvBinding { item_id: *item_id, env_name: code_name.clone(), field: code_field.clone().expect("code-only item"), delivery: EnvDelivery::Value })
         } else { vault.process_binding(*item_id).map_err(|_| {
             ("broker_error", "The broker cannot read the process field.".to_owned())

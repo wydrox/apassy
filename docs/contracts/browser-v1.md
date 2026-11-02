@@ -273,3 +273,22 @@ So a browser that Playwright or another automation tool starts (it adds `--remot
 ### 9.5 Cancellation
 
 The extension opens one native port per request, and disconnects it when the page cancels, navigates, closes, sends a new request, or passes the deadline (at most 180 s). The host reads its input in a thread while it waits for the app. When the input ends, the host shuts down the socket at once (`shutdown`, not a timeout) and exits with status 0 without an answer; a broken frame, or more than 4 waiting messages, does the same with status 1. The app sees the hang-up, closes the owner dialog, and signs nothing. A late approval signs nothing.
+
+### 9.6 Agent browser fill
+
+`agent_poll` sends `instance`, `url`, `document`, `focused`, optional `receipt`,
+`filled` field names and `exposed`. The document contains `window_id`, `tab_id`,
+`frame_id` (always zero), `document_id` from `webNavigation.getFrame`, and a random
+`generation` changed on navigation or tab activation. The extension requires
+Chrome 120 or later and refuses agent delivery without a browser document ID.
+Approval and the `agent_fill` ticket bind to this document within that extension
+instance. The response repeats `document` alongside the receipt, origin and secret
+fields. Injection uses `documentIds`, with another focus and identity check.
+
+Empty polls preserve the bound target. While unfocused, the extension checks the
+selected document's continued existence without choosing a different tab. After
+approval, delivery waits up to 60 seconds for a fresh focused poll of that document.
+A changed target refuses with "The login page changed. Ask again." The agent
+receives status only. Visibility observation and value-free exposure reports last
+for the filled value's lifetime, without a two-minute expiry. Remote-debugging
+browsers remain refused.

@@ -1115,6 +1115,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     columns::list_toolbar(ui, "Decisions", &subtitle, |ui| {
         history = kit::small_button(ui, "Activity", Style::Bordered).clicked();
     });
+    super::owner_check_view::browser_question(app, ui);
     if history {
         app.ui.decisions.forget_evaluation();
         app.ui.decisions.selected = None;
@@ -3148,6 +3149,28 @@ fn prompt_queue(waiting: &[Waiting]) -> Option<(&Waiting, usize)> {
 }
 
 pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending: &[PendingRun]) {
+    if let Some(dialog) = app.owner.check.as_ref()
+        && matches!(dialog.request, OwnerRequest::BrowserDebugging { .. })
+    {
+        let identity = dialog.identity;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of(("browser-owner-question", identity)),
+            egui::ViewportBuilder::default()
+                .with_title("Apassy")
+                .with_inner_size([440.0, 320.0])
+                .with_always_on_top()
+                .with_active(false),
+            |ui, class| {
+                if class == egui::ViewportClass::EmbeddedWindow {
+                    return; // The main owner sheet already shows this question.
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    super::owner_check_view::browser_question(app, ui);
+                });
+            },
+        );
+        return;
+    }
     let waiting = waiting(app, pending);
     let Some((first, count)) = prompt_queue(&waiting) else {
         return;
@@ -3183,7 +3206,7 @@ pub(super) fn floating_prompt(app: &mut DesktopApp, ctx: &egui::Context, pending
                 format!("{} · on this Mac · 1 of {count}", run.agent),
                 Font::Body,
             ));
-            ui.strong(run.question.reason.headline());
+            ui.strong(question_headline(&run.question));
             egui::ScrollArea::vertical()
                 .max_height(145.0)
                 .show(ui, |ui| {

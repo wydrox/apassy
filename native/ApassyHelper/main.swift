@@ -32,6 +32,10 @@ func handle(_ request: Request) throws -> Fields {
         return try handleAutoLockPolicyWrite(request)
     case "owner_policy_read":
         return try handleOwnerPolicyRead()
+    case "browser_trust_read":
+        return try handleBrowserTrustRead()
+    case "browser_trust_write":
+        return try handleBrowserTrustWrite(request)
     case "owner_policy_write":
         return try handleOwnerPolicyWrite(request)
     case "owner_session_active":

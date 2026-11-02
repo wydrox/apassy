@@ -88,9 +88,36 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+/// Browser-issued top-frame identity, scoped by the extension instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserDocument {
+    pub window_id: i64,
+    pub tab_id: i64,
+    pub frame_id: u32,
+    pub document_id: String,
+    pub generation: String,
+}
+
 /// A checked request. Debug output hides the password of a save.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
+    AgentBlocked {
+        instance: String,
+        url: String,
+    },
+    AgentPoll {
+        instance: String,
+        url: String,
+        document: Option<BrowserDocument>,
+        focused: bool,
+        receipt: Option<String>,
+        filled: Vec<String>,
+        exposed: bool,
+    },
+    BypassStatus,
+    BypassRequest(super::bypass::BypassScope),
+    BypassEnd,
     Status,
     /// Bring the window to the front.
     Show,
@@ -144,6 +171,7 @@ pub enum Command {
 /// The commands that the host passes to the app only after the caller check
 /// ([`super::caller::check_browser_parent`]).
 pub const GUARDED_COMMANDS: &[&str] = &[
+    "agent_poll",
     "passkey_get",
     "passkey_create",
     "fill_code",
@@ -259,6 +287,90 @@ impl Request {
         // `Request` keeps its fields, so the old commands parse as before.
         if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(line) {
             match cmd.as_str() {
+                "agent_poll" | "agent_blocked" => {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Poll {
+                        v: u32,
+                        cmd: String,
+                        instance: String,
+                        url: String,
+                        document: Option<BrowserDocument>,
+                        #[serde(default)]
+                        focused: bool,
+                        receipt: Option<String>,
+                        #[serde(default)]
+                        filled: Vec<String>,
+                        #[serde(default)]
+                        exposed: bool,
+                    }
+                    let p: Poll = serde_json::from_slice(line).map_err(|_| invalid())?;
+                    if p.v != BROWSER_WIRE_VERSION
+                        || p.instance.len() != 32
+                        || !p.instance.bytes().all(|b| b.is_ascii_hexdigit())
+                        || p.url.len() > MAX_URL_BYTES
+                        || p.document.as_ref().is_some_and(|d| {
+                            d.window_id < 0
+                                || d.tab_id < 0
+                                || d.frame_id != 0
+                                || d.document_id.is_empty()
+                                || d.document_id.len() > 128
+                                || d.generation.is_empty()
+                                || d.generation.len() > 128
+                        })
+                        || p.receipt.as_ref().is_some_and(|r| r.len() > 64)
+                        || p.filled.len() > 3
+                        || p.filled
+                            .iter()
+                            .any(|f| !["username", "password", "code"].contains(&f.as_str()))
+                    {
+                        return Err(invalid());
+                    }
+                    if p.cmd == "agent_blocked" {
+                        return Ok(Command::AgentBlocked {
+                            instance: p.instance,
+                            url: p.url,
+                        });
+                    }
+                    return Ok(Command::AgentPoll {
+                        instance: p.instance,
+                        url: p.url,
+                        document: p.document,
+                        focused: p.focused,
+                        receipt: p.receipt,
+                        filled: p.filled,
+                        exposed: p.exposed,
+                    });
+                }
+                "bypass_status" | "bypass_request" | "bypass_end" => {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Packet {
+                        v: u32,
+                        cmd: String,
+                        scope: Option<super::bypass::BypassScope>,
+                        bypass_nonce: Option<String>,
+                        host_connection: Option<String>,
+                    }
+                    let p: Packet = serde_json::from_slice(line).map_err(|_| invalid())?;
+                    if p.v != 1 {
+                        return Err(invalid());
+                    }
+                    if p.cmd == "bypass_request" {
+                        if !matches!((&p.bypass_nonce, &p.host_connection), (Some(nonce), Some(connection)) if super::bypass::RequestBinding { nonce: nonce.clone(), connection: connection.clone() }.valid())
+                        {
+                            return Err(invalid());
+                        }
+                    } else if p.bypass_nonce.is_some() || p.host_connection.is_some() {
+                        return Err(invalid());
+                    }
+                    return match (p.cmd.as_str(), p.scope) {
+                        ("bypass_status", None) => Ok(Command::BypassStatus),
+                        ("bypass_end", None) => Ok(Command::BypassEnd),
+                        ("bypass_request", Some(scope)) => Ok(Command::BypassRequest(scope)),
+                        _ => Err(invalid()),
+                    };
+                }
                 "suggestions" => {
                     let packet: SuggestionsPacket =
                         serde_json::from_slice(line).map_err(|_| invalid())?;
@@ -520,6 +632,10 @@ fn page_text(text: &str, max: usize) -> Result<(), WireError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyGetPacket {
+    #[serde(default, rename = "bypass_nonce")]
+    _bypass_nonce: Option<String>,
+    #[serde(default, rename = "host_connection")]
+    _host_connection: Option<String>,
     #[serde(default, rename = "trusted_gesture")]
     _trusted_gesture: bool,
     #[serde(default, rename = "owner_window_host")]
@@ -552,6 +668,10 @@ impl PasskeyGetPacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyCreatePacket {
+    #[serde(default, rename = "bypass_nonce")]
+    _bypass_nonce: Option<String>,
+    #[serde(default, rename = "host_connection")]
+    _host_connection: Option<String>,
     #[serde(default, rename = "trusted_gesture")]
     _trusted_gesture: bool,
     #[serde(default, rename = "owner_window_host")]
@@ -614,6 +734,10 @@ impl PasskeyCreatePacket {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FillCodePacket {
+    #[serde(default, rename = "bypass_nonce")]
+    _bypass_nonce: Option<String>,
+    #[serde(default, rename = "host_connection")]
+    _host_connection: Option<String>,
     #[serde(default, rename = "trusted_gesture")]
     _trusted_gesture: bool,
     #[serde(default, rename = "owner_window_host")]
@@ -727,6 +851,18 @@ impl Response {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Data {
+    AgentFill {
+        receipt: String,
+        origin: String,
+        document: BrowserDocument,
+        username: SecretText,
+        password: SecretText,
+        code: SecretText,
+    },
+    Bypass {
+        identity: Option<super::trust::InstanceIdentity>,
+        remaining: Option<u64>,
+    },
     #[default]
     None,
     Status {
@@ -796,6 +932,15 @@ pub enum Data {
 impl std::fmt::Debug for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AgentFill { .. } => f.write_str("AgentFill([redacted])"),
+            Self::Bypass {
+                identity,
+                remaining,
+            } => f
+                .debug_struct("Bypass")
+                .field("identity", identity)
+                .field("remaining", remaining)
+                .finish(),
             Self::None => f.write_str("None"),
             Self::Status { vault, version } => f
                 .debug_struct("Status")
@@ -889,6 +1034,22 @@ pub struct LoginRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bypass_requests_never_carry_approval_or_identity() {
+        assert_eq!(
+            Request::parse(br#"{"v":1,"cmd":"bypass_request","scope":"once","bypass_nonce":"3b241101-e2bb-4255-8caf-4136c566a962","host_connection":"123-456"}"#).unwrap(),
+            Command::BypassRequest(super::super::bypass::BypassScope::Once)
+        );
+        for packet in [
+            r#"{"v":1,"cmd":"bypass_request","scope":"forever"}"#,
+            r#"{"v":1,"cmd":"bypass_request","scope":"once","approved":true}"#,
+            r#"{"v":1,"cmd":"bypass_request","scope":"once","identity":{}}"#,
+            r#"{"v":1,"cmd":"bypass_end","scope":"once"}"#,
+        ] {
+            assert!(Request::parse(packet.as_bytes()).is_err());
+        }
+    }
 
     fn parse(text: &str) -> Result<Command, WireError> {
         Request::parse(text.as_bytes())

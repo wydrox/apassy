@@ -3,6 +3,12 @@
 //! This module is a demo UI. It is not a secure vault, authenticated owner
 //! channel, or verified isolation boundary.
 
+#[cfg(all(test, feature = "vault"))]
+use crate::sync as relay_api;
+#[cfg(all(test, feature = "vault"))]
+#[path = "../../tests/common/fake_relay.rs"]
+pub(crate) mod fake_relay;
+
 #[cfg(feature = "vault")]
 pub(crate) mod auto_lock;
 /// The browser socket (ADR 0021).

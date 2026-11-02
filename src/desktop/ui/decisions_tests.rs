@@ -36,9 +36,7 @@ const DEFAULT: Vec2 = Vec2::new(1180.0, 800.0);
 const SMALLEST: Vec2 = Vec2::new(900.0, 600.0);
 const WIDE: Vec2 = Vec2::new(1800.0, 1400.0);
 
-use crate::sync as relay_api;
-#[path = "../../../tests/common/fake_relay.rs"]
-mod fake_relay;
+use crate::desktop::fake_relay;
 
 /// Exercise the actual UI send, encrypted relay, signature gate, and asking queue.
 #[test]
@@ -83,10 +81,10 @@ fn remote_classify_and_comment_buttons_settle_the_asking_mac() {
         a_sync
             .create_team(a, "Personal", &relay.team_code(), "Asking Mac")
             .unwrap();
-        let code = a_sync.create_link(a).unwrap();
+        let code = a_sync.create_link(&mut *a).unwrap();
         let pending = PendingJoin::request(&code.link, "", "Answering Mac").unwrap();
-        let links = a_sync.pending_links(a, Some(&code)).unwrap();
-        a_sync.confirm_link(a, &links[0]).unwrap();
+        let links = a_sync.pending_links(&mut *a, Some(&code)).unwrap();
+        a_sync.confirm_link(&mut *a, &links[0]).unwrap();
         let joined = pending.poll().unwrap().unwrap();
         let download = joined.download(&b_data.join("sync")).unwrap();
         let (mut b, _) = b_sync.adopt(&joined, &download, PASS).unwrap();
@@ -2625,6 +2623,10 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
             "The command or task context needs your review.",
         ),
         (ReasonKind::NotProject, "This folder isn't a project."),
+        (
+            ReasonKind::BrowserFill,
+            "The agent wants to fill a credential in your browser.",
+        ),
     ] {
         let dir = TempDir::new().unwrap();
         let (mut app, item_id) = unlocked_app_with_item(&dir);

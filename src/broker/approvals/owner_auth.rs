@@ -89,6 +89,11 @@ const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerAction {
+    BrowserDebugging {
+        identity: crate::browser::trust::InstanceIdentity,
+        scope: Option<crate::browser::bypass::BypassScope>,
+        binding: Option<crate::browser::bypass::RequestBinding>,
+    },
     RemoveOlderIphone {
         device: TrustedDevice,
         team: String,
@@ -419,6 +424,7 @@ impl OwnerAction {
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
+            Self::BrowserDebugging { .. } => "allow this exact browser debugging instance".into(),
             Self::RemoveOlderIphone { .. } => "remove the older paired iPhone".into(),
             Self::AllowAccessOnce { .. } => "allow one scoped access attempt".to_owned(),
             Self::GrantAccessRequest { .. } => "grant access for this exact request".to_owned(),
@@ -1771,6 +1777,39 @@ mod evaluation_tests {
 
     #[cfg(feature = "desktop")]
     #[test]
+    fn browser_debugging_approval_and_trust_use_the_global_owner_source() {
+        let identity = crate::browser::trust::InstanceIdentity {
+            bundle_id: "net.imput.helium".into(),
+            team_id: "S4Q33XPHB4".into(),
+            user_data_root: "/tmp/synthetic".into(),
+            debugging: "9223".into(),
+            unsafe_switches: vec!["remote-debugging-port".into()],
+        };
+        for scope in [
+            None,
+            Some(crate::browser::bypass::BypassScope::Once),
+            Some(crate::browser::bypass::BypassScope::FiveMinutes),
+        ] {
+            let action = OwnerAction::BrowserDebugging {
+                identity: identity.clone(),
+                scope,
+                binding: None,
+            };
+            assert!(LocalWindowSource::LocalOwner.permits(&action));
+            assert!(LocalWindowSource::BrowserDebuggingClick.permits(&action));
+            assert!(!LocalWindowSource::BrowserGesture.permits(&action));
+            assert!(matches!(
+                remote_choice(&action, None),
+                Err(OwnerAuthError::RemoteUnsupported)
+            ));
+        }
+        assert!(
+            !LocalWindowSource::BrowserDebuggingClick.permits(&OwnerAction::Reveal { item_id: 1 })
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
     fn question_development_source_and_proof_are_exact() {
         let action = OwnerAction::QuestionDevelopment {
             run_id: 11,
@@ -1916,6 +1955,7 @@ mod evaluation_tests {
 pub(crate) enum LocalWindowSource {
     /// An exact action selected in the local owner controller.
     LocalOwner,
+    BrowserDebuggingClick,
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
@@ -1926,6 +1966,7 @@ impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
             Self::LocalOwner => true,
+            Self::BrowserDebuggingClick => matches!(action, OwnerAction::BrowserDebugging { .. }),
             Self::BrowserGesture => matches!(
                 action,
                 OwnerAction::FillLogin { .. }

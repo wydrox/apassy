@@ -4,6 +4,21 @@ use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::{Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue};
 
 #[test]
+fn browser_login_does_not_claim_read_only_production_semantics() {
+    let command = vec![
+        "apassy-browser-fill".into(),
+        "https://example.com".into(),
+        "username,password".into(),
+    ];
+    let analysis = analyze_run(&command, "Log in", &[], &[]);
+    assert_ne!(classify(&command, &analysis), ActionKind::Read);
+    assert_ne!(
+        classify_certain(&command, &analysis),
+        Some(ActionKind::Read)
+    );
+}
+
+#[test]
 fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
     for declared_project in ["project", "foreign-project"] {
         let dir = tempfile::tempdir().unwrap();

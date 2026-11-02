@@ -17,12 +17,7 @@ use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, Place};
 
-/// The fake relay reads the app's sync module under this name.
-use crate::sync as relay_api;
-/// The sync tests load the same file for their own use.
-#[allow(clippy::duplicate_mod)]
-#[path = "../../../tests/common/fake_relay.rs"]
-mod fake_relay;
+use crate::desktop::fake_relay;
 
 /// The default window, a tall one that shows each group of a section, and the smallest
 /// window ([`super::super::MIN_WINDOW`]).
