@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -117,6 +117,9 @@ pub struct Core {
     /// Held while `unlock` or `questions_unlock` has a vault file open outside the vault
     /// mutex. Lock order: before every other mutex.
     opening: Mutex<()>,
+    /// The pause of the feed reads after a `403 feed_rate`: a minute
+    /// ([`Core::with_feed_rate_pause`] shortens it for tests).
+    feed_rate_pause: Duration,
 }
 
 /// What a close of the vault ends.
@@ -282,6 +285,7 @@ impl Core {
             icloud_pending: Mutex::new(None),
             questions: Mutex::new(questions),
             opening: Mutex::new(()),
+            feed_rate_pause: feed::FEED_RATE_PAUSE,
         };
         if core.role == Role::App {
             core.clear_unfinished_joins();
@@ -289,6 +293,15 @@ impl Core {
         }
         core.select_relay()?;
         Ok(core)
+    }
+
+    /// The core with another pause of the feed reads after a `403 feed_rate`, for tests
+    /// that cannot wait the minute of the app. The JSON config has no such setting.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_feed_rate_pause(mut self, pause: Duration) -> Self {
+        self.feed_rate_pause = pause;
+        self
     }
 
     /// One call (contract section 4): the answer as JSON.

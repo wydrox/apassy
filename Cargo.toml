@@ -19,6 +19,11 @@ default = []
 desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit", "dep:muda", "time?/local-offset"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:p256", "dep:flate2", "dep:ciborium", "dep:rustix"]
+# Tests only (docs/operations/checks.md, "Test vault KDF"): in a debug build, a vault
+# file in a `tempfile` directory uses 2 PBKDF2 iterations. CI tests with --all-features.
+# The release builds name their features, and a release build keeps 256,000 also
+# with this feature (src/vault/test_kdf.rs).
+insecure-test-kdf = []
 
 [dependencies]
 tracing = "=0.1.44"

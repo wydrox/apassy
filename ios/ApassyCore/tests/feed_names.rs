@@ -93,6 +93,12 @@ fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+/// The shortest time between two feeds of the Mac (the app's is 10 s) and of the relay
+/// (the relay's is 10 s), and how long a feed stays the same before a test reads it.
+const FEED_EVERY: Duration = Duration::from_millis(100);
+const RELAY_FEED_EVERY: Duration = Duration::from_millis(200);
+const QUIET: Duration = Duration::from_millis(500);
+
 /// The Mac: a vault on a relay sync team with the questions on, an agent "Claude Code"
 /// with a "Not for this agent" exception on "Shop database" and an "Only these items"
 /// row on "API token", and, once started, its questions waiter with the feed on.
@@ -162,8 +168,9 @@ impl Mac {
                 tick: Duration::from_millis(50),
                 device_name: MAC_NAME.to_owned(),
                 feed: true,
-                feed_every: Duration::from_secs(1),
+                feed_every: FEED_EVERY,
                 feed_beat: Duration::from_secs(600),
+                ..QuestionsConfig::default()
             },
         ));
     }
@@ -221,7 +228,7 @@ impl Mac {
     }
 
     /// The Mac's feed on the relay once its `seq` is above `above` and has not changed
-    /// for a second: its `seq` and its plaintext, opened with the question key.
+    /// for [`QUIET`]: its `seq` and its plaintext, opened with the question key.
     fn settled_feed(&self, relay: &FakeRelay, above: u64) -> (u64, Vec<u8>) {
         let id = self.device_id();
         let mut last = None;
@@ -236,7 +243,7 @@ impl Mac {
                 since = Instant::now();
                 return None;
             }
-            if since.elapsed() < Duration::from_secs(1) {
+            if since.elapsed() < QUIET {
                 return None;
             }
             let key = self.with(|vault| vault.question_key().unwrap().unwrap());
@@ -325,6 +332,7 @@ fn exception<'a>(mac: &'a Value, kind: &str) -> &'a Value {
 fn a_removal_with_the_names_the_owner_saw_applies_on_the_mac() {
     let root = TempDir::new().unwrap();
     let relay = FakeRelay::start();
+    relay.set_feed_every(RELAY_FEED_EVERY);
     let mut mac = Mac::new(root.path(), &relay);
     let iphone = phone(root.path());
     mac.add_iphone(&iphone);
@@ -375,6 +383,7 @@ fn a_removal_with_the_names_the_owner_saw_applies_on_the_mac() {
 fn a_planted_feed_with_false_names_is_refused_and_the_row_stays() {
     let root = TempDir::new().unwrap();
     let relay = FakeRelay::start();
+    relay.set_feed_every(RELAY_FEED_EVERY);
     let mut mac = Mac::new(root.path(), &relay);
     let iphone = phone(root.path());
     mac.add_iphone(&iphone);

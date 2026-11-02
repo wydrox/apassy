@@ -249,6 +249,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_budgets_of_the_contract_are_30_unsigned_and_120_per_device() {
+        assert_eq!(UNSIGNED_PER_MINUTE, 30);
+        assert_eq!(DEVICE_PER_MINUTE, 120);
+        let budgets = crate::companion::Budgets::default();
+        assert_eq!(budgets.unsigned_per_minute, 30);
+        assert_eq!(budgets.device_per_minute, 120);
+        assert_eq!(RateLimiter::<u8>::new(budgets.device_per_minute).limit, 120);
+    }
+
+    #[test]
     fn a_key_gets_its_limit_per_minute_and_then_a_refusal() {
         let limiter = RateLimiter::new(3);
         let start = Instant::now();

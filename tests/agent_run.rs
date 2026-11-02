@@ -331,9 +331,7 @@ fn duplicate_runtime_variable_names_stop_the_run_before_secret_use() {
             // Simulate an old synced binding. This database and passphrase belong
             // only to the synthetic temporary fixture, never to a live vault.
             let database = rusqlite::Connection::open(vault.path()).expect("synthetic database");
-            database
-                .pragma_update(None, "key", PASS)
-                .expect("synthetic key");
+            crate::common::key_raw(&database, PASS).expect("synthetic key");
             database
                 .execute(
                     "UPDATE env_binding SET env_name = ?1 WHERE item_id = ?2",

@@ -991,6 +991,8 @@ struct MockWorker {
     hang: Arc<AtomicBool>,
     status: Arc<AtomicU16>,
     stop: Arc<AtomicBool>,
+    /// When each call arrived, in the order of `calls`.
+    times: Arc<Mutex<Vec<Instant>>>,
 }
 
 impl MockWorker {
@@ -1004,6 +1006,8 @@ impl MockWorker {
         let status = Arc::new(AtomicU16::new(200));
         let http_status = status.clone();
         let (seen, set, slow, done) = (calls.clone(), answers.clone(), hang.clone(), stop.clone());
+        let times: Arc<Mutex<Vec<Instant>>> = Arc::default();
+        let arrived = times.clone();
         std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 let Ok(Some(mut request)) = server.recv_timeout(Duration::from_millis(100)) else {
@@ -1017,7 +1021,10 @@ impl MockWorker {
                 let mut text = String::new();
                 request.as_reader().read_to_string(&mut text).unwrap();
                 let body: Value = serde_json::from_str(&text).unwrap();
-                seen.lock().unwrap().push((secret, body.clone()));
+                let mut seen_calls = seen.lock().unwrap();
+                arrived.lock().unwrap().push(Instant::now());
+                seen_calls.push((secret, body.clone()));
+                drop(seen_calls);
                 let set = set.clone();
                 let slow = slow.load(Ordering::Relaxed);
                 let status = http_status.load(Ordering::Relaxed);
@@ -1053,14 +1060,25 @@ impl MockWorker {
             hang,
             status,
             stop,
+            times,
         }
     }
 
     fn config(&self) -> PushConfig {
+        PushConfig::new(
+            self.url.clone(),
+            TOPIC.to_string(),
+            SecretString::new(PUSH_SECRET.to_string()),
+        )
+    }
+
+    /// [`MockWorker::config`] with a call `timeout` and a backoff `unit` instead of the
+    /// relay's 10 s and 1 s (pinned by the unit test of `server::push`).
+    fn config_with(&self, timeout: Duration, unit: Duration) -> PushConfig {
         PushConfig {
-            url: self.url.clone(),
-            topic: TOPIC.to_string(),
-            secret: SecretString::new(PUSH_SECRET.to_string()),
+            timeout,
+            backoff_unit: unit,
+            ..self.config()
         }
     }
 
@@ -1770,10 +1788,13 @@ fn the_request_time_of_a_question_call_is_taken_after_its_body() {
 
 #[test]
 fn push_retries_worker_and_apns_transient_failures_with_backoff() {
+    // Retries come 1, 2, 4 units after a call (plus up to 2 units of jitter). Two units
+    // are about three times the moment that `calls` waits for a wrong extra call.
+    let unit = Duration::from_millis(500);
     for status in [429, 503] {
         let worker = MockWorker::start();
         worker.status.store(status, Ordering::Relaxed);
-        let push = worker.config();
+        let push = worker.config_with(Duration::from_secs(10), unit);
         let mut relay = start_with(
             |config| config.push = Some(push),
             UpstreamOptions::default(),
@@ -1782,13 +1803,10 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
         let phone = add_device(&relay, &mac, "iPhone");
         let token = token_of('a');
         assert_eq!(put_token(&relay, &phone, &token, "production").0, 200);
-        let began = Instant::now();
         ask(&relay, &mac, &qid(70), "member");
         assert_eq!(worker.calls(2).len(), 2, "HTTP {status} must retry");
-        assert!(
-            began.elapsed() >= Duration::from_secs(1),
-            "retry has backoff"
-        );
+        let times = worker.times.lock().unwrap().clone();
+        assert!(times[1] - times[0] >= unit, "retry has backoff");
         worker.status.store(200, Ordering::Relaxed);
         worker
             .answers
@@ -1802,7 +1820,7 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
         worker.answers.lock().unwrap().clear();
         assert!(worker.calls(4).len() >= 4);
         let calls = worker.calls.lock().unwrap().len();
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(unit * 10 / 3);
         assert_eq!(
             worker.calls.lock().unwrap().len(),
             calls,
@@ -1814,7 +1832,9 @@ fn push_retries_worker_and_apns_transient_failures_with_backoff() {
 #[test]
 fn a_slow_team_cannot_block_another_teams_push_and_timeout_is_retried() {
     let worker = MockWorker::start();
-    let push = worker.config();
+    // The hanging call times out after 4 s instead of 10 s: still longer than the
+    // second team needs to post its question, and twice the bound below.
+    let push = worker.config_with(Duration::from_secs(4), Duration::from_millis(300));
     let mut relay = start_with(
         |config| config.push = Some(push),
         UpstreamOptions::default(),
@@ -1834,7 +1854,7 @@ fn a_slow_team_cannot_block_another_teams_push_and_timeout_is_retried() {
     ask(&relay, &other, &qid(73), "member");
     let calls = worker.calls(2);
     assert!(
-        began.elapsed() < Duration::from_secs(5),
+        began.elapsed() < Duration::from_secs(2),
         "another team bypasses slow sender"
     );
     assert_eq!(calls[1].1["tokens"], json!([token_of('b')]));

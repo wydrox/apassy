@@ -87,19 +87,24 @@ The checks, as CI runs them ([development checks](docs/operations/checks.md)):
 ```
 cargo fmt --all -- --check
 cargo clippy --offline --locked --all-features --all-targets -- -D warnings
+cargo clippy --offline --locked -p apassy-relay -p apassy-core --all-targets -- -D warnings
 cargo check --offline --locked --features desktop --bin apassy
-cargo test --offline --locked --all-features --all-targets -- --test-threads=1
+cargo nextest run --offline --locked --all-features --all-targets
+cargo nextest run --offline --locked -p apassy-relay -p apassy-core
 cargo test --offline --locked --features vault --doc
+cargo test --offline --locked -p apassy-relay -p apassy-core --doc
 node --test design/walkthrough/model.test.mjs
 python3 tests/isolation/test_fixture_boundary.py
 git diff --check
 ```
 
+The tests run with [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`, or a release archive; CI uses 0.9.150). nextest runs each test in its own process and several tests at a time; it does not run doc tests, so the `--doc` commands stay. Without nextest, run the tests of one program in one process, one at a time: `cargo test --offline --locked --all-features --all-targets -- --test-threads=1`.
+
 The isolation tests need macOS and `sandbox-exec`. The evaluation harness needs the bouncer brain (the local model); see [bouncer](docs/operations/bouncer.md).
 
-The integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file. Run one area with a module filter: `cargo test --all-features --test it companion::`. A new test file needs a `mod` line in `tests/it.rs`. The tests share one process and run in parallel: a test that changes process-wide state (the current directory, an environment variable, the active rule set) runs in a child process of the program, as `rule_packs::a_rejected_local_directory_fails_closed` does.
+The integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file. Run one area with a module filter: `cargo nextest run --all-features --test it companion::`, or `cargo test --all-features --test it companion::`. A new test file needs a `mod` line in `tests/it.rs`. nextest gives each test its own process. `cargo test` runs the tests of one program in one process, in parallel: a test that changes process-wide state (the current directory, an environment variable, the active rule set) runs in a child process of the program, as `rule_packs::a_rejected_local_directory_fails_closed` does. A test that uses a resource outside its process (a fixed port, a fixed path, the Keychain) also conflicts with the tests that nextest runs at the same time: use a free port and a temporary directory, or add the test to the `serial` group in `.config/nextest.toml` with the reason.
 
-Use one feature set for everyday commands, `--all-features`, the set that CI tests with. Each other feature set builds another copy of the crate and of the dependencies whose features change, and `target/` keeps every copy. The aliases in `.cargo/config.toml` pass it: `cargo t`, `cargo b`, `cargo c`, `cargo r`, and `cargo clippy-all -- -D warnings`. `cargo test -p apassy-core` (the iPhone core) builds the library with `vault` only, a second copy: run it when you change `ios/ApassyCore` or what it uses.
+Use one feature set for everyday commands, `--all-features`, the set that CI tests with. Each other feature set builds another copy of the crate and of the dependencies whose features change, and `target/` keeps every copy. The aliases in `.cargo/config.toml` pass it: `cargo t`, `cargo b`, `cargo c`, `cargo r`, and `cargo clippy-all -- -D warnings`. `cargo nextest run -p apassy-relay -p apassy-core` (the relay and the iPhone core) builds the library with `vault` only, a second copy: run it when you change `crates/apassy-relay`, `ios/ApassyCore`, or what they use.
 
 ## Pull requests
 

@@ -69,3 +69,13 @@ pub fn fake_bouncer(overrides: &'static [(&'static str, f64)]) -> FakeBouncer {
     });
     FakeBouncer { url, bodies }
 }
+
+/// `PRAGMA key` on a raw SQLCipher connection to a vault file of a test, with the KDF
+/// that the vault uses for that file (`apassy::vault::test_kdf`).
+#[cfg(feature = "vault")]
+pub fn key_raw(conn: &rusqlite::Connection, passphrase: &str) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "key", passphrase)?;
+    #[cfg(feature = "insecure-test-kdf")]
+    apassy::vault::test_kdf::match_vault_kdf(conn)?;
+    Ok(())
+}

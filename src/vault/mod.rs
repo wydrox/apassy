@@ -42,6 +42,8 @@ mod schema20;
 pub use connect::PendingConnect;
 mod suggestions;
 mod sync;
+#[cfg(feature = "insecure-test-kdf")]
+pub mod test_kdf;
 mod trusted_device;
 mod types;
 pub mod usage;
@@ -947,6 +949,8 @@ fn apply_key(conn: &Connection, passphrase: &str) -> VaultResult<()> {
     harden_connection(conn)?;
     conn.execute_batch(&key_statement("key", passphrase))
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    #[cfg(feature = "insecure-test-kdf")]
+    test_kdf::match_vault_kdf(conn).map_err(|_| err(VaultErrorKind::Storage))?;
     // Keep temporary SQL storage in memory before schema or integrity reads,
     // including read-only validation during restore.
     conn.pragma_update(None, "temp_store", "MEMORY")
@@ -1043,8 +1047,12 @@ fn verify_cipher_defaults(conn: &Connection) -> VaultResult<()> {
     let use_hmac = require_pragma_i64(conn, "cipher_use_hmac")?;
     let plaintext_header_size = require_pragma_i64(conn, "cipher_plaintext_header_size")?;
     let provider = require_pragma_text(conn, "cipher_provider")?;
+    #[cfg(not(feature = "insecure-test-kdf"))]
+    let required_kdf_iter = SQLCIPHER4_KDF_ITER;
+    #[cfg(feature = "insecure-test-kdf")]
+    let required_kdf_iter = test_kdf::kdf_iter(conn);
     if page_size != SQLCIPHER4_PAGE_SIZE
-        || kdf_iter != SQLCIPHER4_KDF_ITER
+        || kdf_iter != required_kdf_iter
         || hmac_algorithm != SQLCIPHER4_HMAC
         || kdf_algorithm != SQLCIPHER4_KDF
         || use_hmac != 1
@@ -1946,7 +1954,11 @@ mod tests {
 
     #[test]
     fn unlocked_connection_has_memory_security_and_defensive_mode() {
-        let dir = TempDir::new().unwrap();
+        // Not a `.tmp` directory: the SQLCipher 4 KDF also in a test build (test_kdf).
+        let dir = tempfile::Builder::new()
+            .prefix("apassy-real-kdf-")
+            .tempdir()
+            .unwrap();
         let vault = unlocked(&dir, PASS);
         let conn = vault.conn_ref().unwrap();
         assert_eq!(
@@ -1963,6 +1975,7 @@ mod tests {
         );
         // The cipher settings stay the SQLCipher 4 values.
         verify_cipher_defaults(conn).unwrap();
+        assert_eq!(require_pragma_i64(conn, "kdf_iter").unwrap(), 256_000);
     }
 
     #[test]
@@ -1990,6 +2003,8 @@ mod tests {
         // rusqlite `pragma_update`, the earlier key path, derives the same key.
         let conn = Connection::open_with_flags(&vault.path, OPEN_READONLY).unwrap();
         conn.pragma_update(None, "key", quoted).unwrap();
+        #[cfg(feature = "insecure-test-kdf")]
+        test_kdf::match_vault_kdf(&conn).unwrap();
         let tables: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
             .unwrap();

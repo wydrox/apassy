@@ -124,6 +124,11 @@ pub fn computer_name() -> Option<String> {
 /// A thread reads the output while the command runs. A command that writes more than
 /// the pipe holds would block on its write if the caller waited for its exit first.
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    command_output_within(program, args, COMMAND_TIMEOUT)
+}
+
+/// [`command_output`] with the time limit `timeout`.
+fn command_output_within(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -146,7 +151,7 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
             .ok()
             .map(|_| bytes)
     });
-    let end = Instant::now() + COMMAND_TIMEOUT;
+    let end = Instant::now() + timeout;
     let exited_well = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
@@ -469,9 +474,12 @@ bridge0: flags=8863<UP> mtu 1500
     fn an_output_over_the_limit_or_a_command_that_hangs_gives_nothing() {
         let too_much = format!("head -c {} /dev/zero | tr '\\0' a", MAX_OUTPUT_BYTES + 1);
         assert_eq!(command_output("/bin/sh", &["-c", &too_much]), None);
+        // The time limit of the app (two seconds) scaled down.
+        assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(2));
+        let limit = Duration::from_millis(200);
         let begin = Instant::now();
-        assert_eq!(command_output("/bin/sleep", &["30"]), None);
-        assert!(begin.elapsed() < COMMAND_TIMEOUT + Duration::from_secs(2));
+        assert_eq!(command_output_within("/bin/sleep", &["30"], limit), None);
+        assert!(begin.elapsed() < limit + Duration::from_secs(2));
     }
 
     #[test]

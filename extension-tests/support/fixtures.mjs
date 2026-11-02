@@ -36,6 +36,9 @@ export const LOGINS = [
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Requests that the extension repeats on a timer. Harness.requests() without a
+// command leaves them out, so a test can expect an exact list of the others.
+const POLLS = new Set(["agent_wait", "bypass_status"]);
 
 // Writes the host manifest into the profile: Chromium reads user-level host
 // manifests from <user-data-dir>/NativeMessagingHosts.
@@ -105,7 +108,9 @@ class Harness {
     const file = path.join(this.mockDir, "requests.jsonl");
     if (!fs.existsSync(file)) return [];
     const all = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    return cmd ? all.filter((request) => request && request.cmd === cmd) : all.filter(request => request?.cmd !== "agent_wait");
+    // Without a command, leave out the polls: agent_wait, and bypass_status, which the
+    // popup sends when it opens and then every second (extension/popup.js).
+    return cmd ? all.filter((request) => request && request.cmd === cmd) : all.filter(request => !POLLS.has(request?.cmd));
   }
 
   removeHost() {

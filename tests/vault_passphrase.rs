@@ -162,6 +162,15 @@ fn companions(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A directory whose vault files keep the SQLCipher 4 KDF also in a test build: its name
+/// does not start with `.tmp` (`apassy::vault::test_kdf`). `raw_opens` uses the defaults.
+fn real_kdf_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("apassy-real-kdf-")
+        .tempdir()
+        .unwrap()
+}
+
 /// A raw SQLCipher connection with explicit settings. `None` keeps the SQLCipher 4 defaults.
 fn raw_opens(path: &Path, pass: &str, weaker: Option<&str>) -> bool {
     let conn = rusqlite::Connection::open(path).unwrap();
@@ -188,7 +197,7 @@ fn raw_opens(path: &Path, pass: &str, weaker: Option<&str>) -> bool {
 /// and the data stays. The SQLCipher 4 KDF and HMAC settings stay in effect.
 #[test]
 fn change_passphrase_rekeys_and_keeps_the_data() {
-    let dir = TempDir::new().unwrap();
+    let dir = real_kdf_dir();
     let path = dir.path().join("rekey.db");
     let mut vault = Vault::create(&path, PASS).unwrap();
     vault.unlock(PASS).unwrap();
@@ -315,7 +324,7 @@ fn failed_passphrase_change_keeps_the_old_passphrase() {
     // Without a check, SQLCipher answers "ok" and the file keeps the old key. The vault
     // takes the exclusive lock first, so the change stops before a page changes.
     let reader = rusqlite::Connection::open(&path).unwrap();
-    reader.pragma_update(None, "key", PASS).unwrap();
+    crate::common::key_raw(&reader, PASS).unwrap();
     reader.execute_batch("BEGIN").unwrap();
     let count: i64 = reader
         .query_row("SELECT count(*) FROM item", [], |row| row.get(0))
@@ -351,7 +360,7 @@ fn failed_passphrase_change_keeps_the_old_passphrase() {
 /// mode at unlock. No WAL file with pages of the old key stays after the change.
 #[test]
 fn wal_mode_file_changes_passphrase_without_a_wal_file() {
-    let dir = TempDir::new().unwrap();
+    let dir = real_kdf_dir();
     let path = dir.path().join("wal.db");
     {
         let mut vault = Vault::create(&path, PASS).unwrap();

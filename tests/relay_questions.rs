@@ -835,6 +835,16 @@ struct World {
     items: [u64; 2],
 }
 
+/// The production cadences with the 2 s floors of the lister, the reader, and the access
+/// transport shortened: the tests wait for each cycle.
+fn fast_polls() -> QuestionsConfig {
+    QuestionsConfig {
+        short_poll_every: Duration::from_millis(50),
+        access_every: Duration::from_millis(100),
+        ..QuestionsConfig::default()
+    }
+}
+
 /// Mac A with the vault on the relay and Mac B that adopted it; with `enable`, both turn
 /// the questions on and sync, so each has the question key and the row of the other.
 /// Mac A runs its questions waiter.
@@ -898,7 +908,7 @@ fn world(enable: bool) -> World {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic MacBook".to_owned(),
-            ..QuestionsConfig::default()
+            ..fast_polls()
         },
     );
     World {
@@ -1494,9 +1504,10 @@ fn invalid_answers_are_refused_and_logged() {
 #[test]
 fn the_first_valid_answer_wins() {
     let world = world(true);
-    world
+    // The asker's reads of the answers wait until both answers are on the relay.
+    let reads = world
         .relay
-        .delay("GET /v1/questions/", Duration::from_millis(2500));
+        .hold("GET /v1/questions/", Duration::from_millis(2500));
     let phone = world.iphone();
     let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
     let b = world.mac_b();
@@ -1522,6 +1533,7 @@ fn the_first_valid_answer_wins() {
     )
     .expect("both answers are on the relay");
     assert_eq!(world.relay.answer_count(&opened.record.qid), 2);
+    reads.release();
     let ended = settled(waiting);
     assert_eq!(
         ended.outcome,
@@ -1575,7 +1587,7 @@ fn a_question_expires_with_its_wait() {
         AnswerError::AlreadyAnswered
     );
 
-    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(4));
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_millis(3_500));
     let opened = b.next(std::slice::from_ref(&opened.record.qid));
     world.relay.expire_questions();
     let late = prepare_answer(&opened, &b.uuid, Choice::Deny, now()).unwrap();
@@ -2203,7 +2215,7 @@ fn a_question_of_mac_b_shows_on_mac_a_and_its_answers_reach_b() {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic Mac mini".to_owned(),
-            ..QuestionsConfig::default()
+            ..fast_polls()
         },
     );
     let agent_b = world.with_b(|vault| vault.register_agent("claude-code").expect("agent").0.id);
@@ -2424,7 +2436,7 @@ fn a_removed_mac_does_not_register_again() {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(20),
             device_name: "Synthetic Mac mini".to_owned(),
-            ..QuestionsConfig::default()
+            ..fast_polls()
         },
     );
     let start = Instant::now();
@@ -2787,7 +2799,7 @@ fn an_iphone_link_carries_its_answer_key_and_the_mac_writes_its_row() {
             question_wait: Duration::from_secs(300),
             tick: Duration::from_millis(50),
             device_name: "Synthetic MacBook".to_owned(),
-            ..QuestionsConfig::default()
+            ..fast_polls()
         },
     );
     let (agent, items, epoch) = {
@@ -2971,7 +2983,7 @@ fn mcp_cancellation_settles_the_iphone_relay_question() {
         QuestionsConfig {
             tick: Duration::from_millis(20),
             feed: false,
-            ..QuestionsConfig::default()
+            ..fast_polls()
         },
     );
     let socket = broker.socket_path().to_owned();

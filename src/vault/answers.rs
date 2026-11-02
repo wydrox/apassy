@@ -527,6 +527,8 @@ mod code_scope_tests {
         v.lock().unwrap();
         let conn = rusqlite::Connection::open(&file).unwrap();
         conn.pragma_update(None, "key", pass).unwrap();
+        #[cfg(feature = "insecure-test-kdf")]
+        crate::vault::test_kdf::match_vault_kdf(&conn).unwrap();
         conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values; UPDATE vault_meta SET schema_version=22; PRAGMA user_version=22;").unwrap();
         conn.close().unwrap();
         v.unlock(pass).unwrap();

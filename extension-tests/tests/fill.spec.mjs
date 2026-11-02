@@ -125,13 +125,12 @@ test("busy and no_match come back as the message of the app", async ({ h }) => {
   expect(reply.code).toBe("no_match");
 });
 
-test("a failed fill with the popup closed shows a badge for a short time", async ({ h }) => {
+// The badge goes after 10 s: background.unit.mjs checks that with a fake clock.
+test("a failed fill with the popup closed shows a badge", async ({ h }) => {
   await h.openGranted("/login");
   h.setScenario({ vault: "unlocked", logins: LOGINS, fill: { code: "cancelled" } });
   await fillFirst(h);
   expect(await h.badge()).toEqual({ text: "!", title: "Apassy: The fill was cancelled. Nothing was filled." });
-  await expect.poll(() => h.badge(), { timeout: 13_000, intervals: [1_000] })
-    .toEqual({ text: "", title: "Apassy" });
 });
 
 test("a page without login fields reports it", async ({ h }) => {

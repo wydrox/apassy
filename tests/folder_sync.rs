@@ -152,7 +152,7 @@ fn peek(path: &Path, passphrase: &str) -> (TempDir, rusqlite::Connection) {
     let copy = dir.path().join("peek.db");
     fs::copy(path, &copy).expect("copy");
     let conn = rusqlite::Connection::open(&copy).expect("open");
-    conn.pragma_update(None, "key", passphrase).expect("key");
+    crate::common::key_raw(&conn, passphrase).expect("key");
     (dir, conn)
 }
 
