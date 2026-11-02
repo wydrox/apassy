@@ -4,9 +4,13 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
+
 ### Fixed
 
-- The local bouncer model uses about half the memory on Apple Silicon: 1.8 GB idle, before 3.4 GB and more. Its answers do not change.
+- The bouncer brain, the local model, uses about half the memory on Apple Silicon: 1.8 GB idle, before 3.4 GB and more. Its answers do not change.
 
 ## [0.5.12] - 2026-11-02
 
