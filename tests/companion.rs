@@ -2402,6 +2402,11 @@ const UNSIGNED: usize = 4;
 /// The budget of a paired device in the rate tests: the contract's 120, scaled down.
 const PER_DEVICE: usize = 5;
 
+/// A small unsigned budget; a paired device keeps the contract's 120.
+fn small_unsigned_budget(options: &mut CompanionOptions) {
+    options.budgets.unsigned_per_minute = UNSIGNED;
+}
+
 fn small_budgets(options: &mut CompanionOptions) {
     options.budgets = Budgets {
         unsigned_per_minute: UNSIGNED,
@@ -2431,7 +2436,7 @@ fn the_app_options_have_the_budgets_of_the_contract() {
 
 #[test]
 fn unsigned_requests_are_limited_per_address_and_a_correct_poll_and_a_paired_phone_are_not() {
-    let env = env_with(small_budgets);
+    let env = env_with(small_unsigned_budget);
     let phone = Phone::paired(&env, OTHER_DEVICE);
     let controller = env.handle.pairing().clone();
     let secret = env.open_window();
@@ -2496,7 +2501,7 @@ fn unsigned_requests_are_limited_per_address_and_a_correct_poll_and_a_paired_pho
 
 #[test]
 fn an_address_past_its_unsigned_budget_costs_no_vault_work() {
-    let env = env_with(small_budgets);
+    let env = env_with(small_unsigned_budget);
     let phone = Phone::paired(&env, DEVICE);
     // A bad signature is an unsigned answer: the budget of them uses it up.
     for n in 0..UNSIGNED {
