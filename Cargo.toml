@@ -11,7 +11,7 @@ description = "A personal credential manager with controlled agent access"
 autotests = false
 
 [workspace]
-members = [".", "ios/ApassyCore"]
+members = [".", "ios/ApassyCore", "crates/apassy-relay"]
 default-members = ["."]
 
 [features]
