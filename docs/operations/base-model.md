@@ -149,6 +149,7 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
 - The router sends every request to the English checkpoint. Laya's language routing cannot select another checkpoint.
 - Each answer has `"model": "apassy-base-v1+83224960"`. The stock server answers `"model": "laya-rl-agent"`.
 - Questions in `serve.zero_shot_questions` get the answer of the stock heads. The encoder runs once. The server computes both head sets on the same encoder states and takes the stock row for these questions. With `leak` in the list, the served `leak` answers equal the stock answers (section 6.3 shows the same numbers).
+- On an Apple GPU (MPS), the server keeps the encoder in fp16, the precision stored in the base checkpoint. Laya 0.3.20 loads it as fp32 and casts it to fp16 in each request. The heads stay fp32, and every request runs under fp16 autocast. After each request, the server frees the cached GPU buffers. Measurement on an M4 Mac with 16 GB (bouncer requests with 5 or 6 questions, 3 to 220 words): memory footprint 4.2 GB after 80 requests before; 1.8 GB idle and up to 2.9 GB during 300 requests after. All 440 answers of the 80 requests were equal to 4 decimal places, and the median latency was 0.49 s, before 0.60 s. Test: `tests/basemodel/test_mps_memory.py`.
 
 The activity log records the model version. `BouncerVerdict::Scored` has a `model` field from the answer. The summary in the decision note ends with `Model: <version>`, for example:
 

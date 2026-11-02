@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- The local bouncer model uses about half the memory on Apple Silicon: 1.8 GB idle, before 3.4 GB and more. Its answers do not change.
+
 ## [0.5.12] - 2026-11-02
 
 ### Fixed
