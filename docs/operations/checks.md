@@ -132,7 +132,7 @@ A draft pull request skips the macOS test groups ([CI duration](release.md#ci-du
 
 - `macos` (`macos-15`): the extension version, `cargo fmt --all -- --check`, the Swift typecheck of the native helper, Clippy with all features, `cargo check --features desktop --bin apassy`, `cargo test --features vault --doc`, the Node model tests, the Python fixture, CI helper, bouncer brain, and release-version tests, and `git diff --check`.
 - `linux` (`ubuntu-24.04`): Clippy with all features, Clippy for the relay and the iPhone vault core, `cargo test --features vault --doc`, the Python fixture tests, and the rule packs and provider files two times: with the JSON Schemas in `packs/schema/`, and with `apassy-packs validate`.
-- `relay (1)` and `relay (2)` (`ubuntu-24.04`): one half each of `cargo nextest run --profile ci -p apassy-relay -p apassy-core --partition slice:K/2`; `relay (2)` also runs the doc tests of both crates and `crates/apassy-relay/scripts/e2e.sh`.
+- `relay (1)` and `relay (2)` (`ubuntu-24.04`): one half each of `cargo nextest run --profile ci -p apassy-relay -p apassy-core --partition slice:K/2`; `relay (1)` also runs the doc tests of both crates and `crates/apassy-relay/scripts/e2e.sh`.
 - `tests (OS, K)`, four groups on `ubuntu-24.04` and two on `macos-15`: `cargo nextest run --profile ci --offline --locked --all-features --all-targets --partition slice:K+1/N`.
 - `extension` (`macos-15`): the extension Node models and the Playwright tests in Helium.
 - `relay-worker`, `audit` (`cargo audit`), `reuse-pr`, and, on a push to `main` only, `release-binaries`.

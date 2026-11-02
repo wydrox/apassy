@@ -3140,14 +3140,19 @@ mod tests {
         }
     }
 
-    /// The process group of a fake server: the first PID in `pids`.
+    /// The process group of a fake server: the first PID in `pids`. The fake server
+    /// can create the file before it writes the PID, so wait for a whole PID.
     fn first_pid(pids: &Path) -> u32 {
-        fs::read_to_string(pids)
-            .expect("pids")
-            .split_whitespace()
-            .next()
-            .and_then(|pid| pid.parse().ok())
-            .expect("pid")
+        let read = || {
+            fs::read_to_string(pids)
+                .ok()?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        };
+        wait_until(Duration::from_secs(10), "pid", || read().is_some());
+        read().expect("pid")
     }
 
     /// A fake model server on `listener`: `GET /health` answers "ok", and a decision

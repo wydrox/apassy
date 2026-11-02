@@ -229,7 +229,7 @@ On macOS, the native helper tests (`it::native_helper::`) are in it: they build 
 nextest stops a test after five minutes.
 nextest does not run doc tests: the `linux` and `macos` jobs run `cargo test --features vault --doc`, and the `relay` job runs the doc tests of the relay and the iPhone vault core.
 
-The two `relay (K)` jobs test the relay crate and the iPhone vault core (`ios/ApassyCore`) with `cargo nextest run -p apassy-relay -p apassy-core --partition slice:K/2`; `relay (2)` also runs their doc tests and the relay end-to-end script.
+The two `relay (K)` jobs test the relay crate and the iPhone vault core (`ios/ApassyCore`) with `cargo nextest run -p apassy-relay -p apassy-core --partition slice:K/2`; `relay (1)` also runs their doc tests and the relay end-to-end script.
 Both crates use the apassy library with the `vault` feature only, so it and SQLCipher build once in each job, and both jobs share the cache key `dev-relay`.
 The `linux` job runs Clippy for both crates.
 The vault core has no macOS code; the `macos` job keeps the Swift and Xcode checks.

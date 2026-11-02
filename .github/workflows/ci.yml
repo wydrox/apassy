@@ -240,7 +240,7 @@ jobs:
   # The tests of the relay crate (ADR 0037) and of the vault core of the iPhone app
   # (ADR 0023), and the relay end-to-end script with the real binaries. Both crates
   # use the apassy library with the `vault` feature only, so one build serves both.
-  # Two jobs build the same targets and each runs one slice of the tests; the second
+  # Two jobs build the same targets and each runs one slice of the tests; the first
   # also runs the doc tests and the end-to-end script. Both use one cache key.
   # The linux job runs their Clippy, the macOS job checks the format (`cargo fmt --all`).
   relay:
@@ -280,11 +280,16 @@ jobs:
           --partition "slice:$SLICE/2"
       # nextest does not run doc tests.
       - name: Run the relay and iPhone vault core doc tests
-        if: matrix.slice == 2
+        if: matrix.slice == 1
         run: cargo test --offline --locked -p apassy-relay -p apassy-core --doc
       - name: Run the relay end-to-end script
-        if: matrix.slice == 2
+        if: matrix.slice == 1
         run: bash crates/apassy-relay/scripts/e2e.sh
+      # A test or the script that leaves a process running delays the end of the job:
+      # the runner then stops each leftover process. List them for the log.
+      - name: List leftover processes
+        if: always()
+        run: ps -eo pid,ppid,pgid,etimes,args --sort=pid | awk '$5 !~ /^\[/'
 
   relay-worker:
     needs: reuse-pr
