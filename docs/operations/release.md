@@ -209,26 +209,31 @@ Later step, not done yet: when every installed app runs 0.5.0 or later, one rele
 ## CI duration and binary artifacts
 
 CI runs the quality checks, advisory check, and test groups at the same time.
-macOS uses three test groups. Linux uses four.
+macOS and Linux each use two test groups.
 The account has five macOS runners, the [standard macOS concurrency limit](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners) for Free, Pro, and Team plans, shared by all runs and workflows.
-A run of a ready pull request uses five macOS jobs: `macos`, `extension`, and the three macOS test groups.
+A run of a ready pull request uses four macOS jobs: `macos`, `extension`, and the two macOS test groups.
 A run of a draft pull request uses two: it skips the macOS test groups, and so records no evidence for main (below).
-Only a push to `main` or a manual run builds the unsigned release binaries, the sixth macOS job.
+Only a push to `main` or a manual run builds the unsigned release binaries, the fifth macOS job.
 On 2026-11-02, fourteen pull request runs in one hour each queued their macOS jobs for 9 to 36 minutes, while their Linux jobs started at once.
 Open a pull request as a draft while you still push to it, and mark it ready (`gh pr ready`) when it is complete. The ready event runs the full suite.
 The existing `macos` and `linux` checks remain. Release waits for the complete CI workflow to succeed.
 
-`scripts/ci-test-shard.py` reads Cargo metadata to include every target, including new targets.
-The library is one unit for each module of its tests, and `tests/it.rs` one unit for each of its modules; every other target is one unit.
-Each group lists the library tests first and runs its library tests by exact name, so each test runs in exactly one group.
-The groups are balanced with the measured times in `scripts/ci-test-weights.json`.
-A library module without a measurement counts 0.7 seconds for each test.
-Each test process uses `--test-threads=1`.
-Use `python3 scripts/ci-test-shard.py --list --shard-count 3` to see the macOS groups; it builds and lists the library tests.
-Use `--shard-count 4` for Linux.
-When one group of a green run takes much longer than the others, measure again from that run's logs:
-`python3 scripts/ci-test-times.py RUN_ID > scripts/ci-test-weights.json`.
-Before this split, the library was one unit in group 0: 640 to 920 seconds on Linux, against 300 to 480 seconds for each other group.
+The test groups run the Rust tests of the apassy package with [cargo-nextest](https://nexte.st), version 0.9.150, which `scripts/ci-install-nextest.sh` installs after it checks the SHA-256 of the release archive.
+Each group runs `cargo nextest run --profile ci --offline --locked --all-features --all-targets --partition slice:K/2`.
+The slices take every target of the package from Cargo, and each test is in exactly one slice.
+nextest runs each test in its own process, so the tests do not share process-wide state (the active rule packs, the live-wait registry, the relay rate limits, the sync workers).
+A Linux group runs eight tests at a time and a macOS group six: twice the processors of the runner, because most tests wait for a timeout, a child process, or a socket.
+A test that uses a resource outside its process (a fixed port, a fixed path, an environment-dependent location, the Keychain) runs in the `serial` test group of `.config/nextest.toml`, one at a time.
+On macOS, the native helper tests (`it::native_helper::`) are in it: they build the Swift helper and notifier into fixed paths.
+nextest stops a test after five minutes.
+nextest does not run doc tests: the `linux` and `macos` jobs run `cargo test --features vault --doc`, and the `relay` job runs the doc tests of the relay and the iPhone vault core.
+
+The `relay` job tests the relay crate and the iPhone vault core (`ios/ApassyCore`) with one nextest run, `-p apassy-relay -p apassy-core`, then runs the relay end-to-end script.
+Both crates use the apassy library with the `vault` feature only, so it and SQLCipher build once.
+The `linux` job runs Clippy for both crates.
+The vault core has no macOS code; the `macos` job keeps the Swift and Xcode checks.
+
+Measured on 2026-11-02, before nextest (run `41513326199`), with cached dependencies: a Linux test group took 10.9 minutes (9.2 of them serial tests with `--test-threads=1`), the `relay` job 8 minutes, the `macos` job 5.6 minutes, and a macOS test group 12.5 minutes.
 
 Rust dependency caches separate the OS, architecture, compiler, Cargo configuration, lockfile, and job group.
 The release build has its own cache. Only pushes to `main` save these caches; pull requests only restore them.

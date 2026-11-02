@@ -67,8 +67,8 @@ cargo test --locked --all-features --test it sqlcipher_probe::
 Experimental passphrase vault, with temporary synthetic data only:
 
 ```
-cargo test --locked --offline --all-features --lib -- --test-threads=1
-cargo test --locked --offline --all-features --test it -- --test-threads=1 vault_lifecycle:: vault_passphrase::
+cargo nextest run --locked --offline --all-features --lib
+cargo nextest run --locked --offline --all-features --test it vault_lifecycle:: vault_passphrase::
 cargo test --offline --locked --features vault --doc
 cargo clippy --locked --offline --features vault --all-targets -- -D warnings
 ```
@@ -76,7 +76,7 @@ cargo clippy --locked --offline --features vault --all-targets -- -D warnings
 Owner vault and item views call this API when both `desktop` and `vault` are enabled. See [desktop vault integration](desktop-vault.md). The tests do not permit real-secret use.
 
 ```
-cargo test --locked --offline --all-features --test it owner_vault:: -- --test-threads=1
+cargo nextest run --locked --offline --all-features --test it owner_vault::
 ```
 
 P0 Node model:
@@ -123,30 +123,20 @@ It is not a full review of bundled SQLCipher or OpenSSL licenses.
 
 ## Configured CI
 
-The workflow `.github/workflows/ci.yml` has two jobs: `macos` on `macos-15` and `linux` on `ubuntu-24.04`.
+The workflow `.github/workflows/ci.yml` runs these jobs. A job name in backticks is its check name.
 Triggers are `push` to `main` and `pull_request`.
 A change only in `site/` or `design/` does not start the workflow.
 The workflow does not use secrets.
 The workflow does not publish, deploy, or comment on a pull request.
+A draft pull request skips the macOS test groups ([CI duration](release.md#ci-duration-and-binary-artifacts)).
 
-After you install the toolchain, the `macos` job runs these steps:
+- `macos` (`macos-15`): the extension version, `cargo fmt --all -- --check`, the Swift typecheck of the native helper, Clippy with all features, `cargo check --features desktop --bin apassy`, `cargo test --features vault --doc`, the Node model tests, the Python fixture, CI helper, bouncer brain, and release-version tests, and `git diff --check`.
+- `linux` (`ubuntu-24.04`): Clippy with all features, Clippy for the relay and the iPhone vault core, `cargo test --features vault --doc`, the Python fixture tests, and the rule packs and provider files two times: with the JSON Schemas in `packs/schema/`, and with `apassy-packs validate`.
+- `relay` (`ubuntu-24.04`): `cargo nextest run --profile ci -p apassy-relay -p apassy-core`, the doc tests of both crates, and `crates/apassy-relay/scripts/e2e.sh`.
+- `tests (OS, K)`, two groups on each of `ubuntu-24.04` and `macos-15`: `cargo nextest run --profile ci --offline --locked --all-features --all-targets --partition slice:K/2`.
+- `extension` (`macos-15`): the extension Node models and the Playwright tests in Helium.
+- `relay-worker`, `audit` (`cargo audit`), `reuse-pr`, and, on a push to `main` only, `release-binaries`.
 
-```
-cargo fetch --locked
-cargo install cargo-audit --version 0.22.2 --locked
-cargo audit
-cargo fmt --all -- --check
-cargo clippy --offline --locked --all-features --all-targets -- -D warnings
-cargo check --offline --locked --features desktop --bin apassy
-cargo test --offline --locked --all-features --all-targets -- --test-threads=1
-cargo test --offline --locked --features vault --doc
-node --test design/walkthrough/model.test.mjs
-python3 tests/isolation/test_fixture_boundary.py
-git diff --check
-```
-
-The `linux` job runs the same Clippy, Cargo tests, doc tests, and Python fixture tests.
-Then it checks the rule packs and the provider files two times: with the JSON Schemas in `packs/schema/`, and with `apassy-packs validate`.
-Format, advisories, the Node model tests, and whitespace do not depend on the system, so only the `macos` job runs them.
+Each command runs after `cargo fetch --locked`, with `--offline --locked`. `scripts/ci-install-nextest.sh` installs the pinned cargo-nextest. The nextest settings, the `ci` profile, and the `serial` test group are in `.config/nextest.toml`.
 
 A configured workflow is not a remotely executed check.
