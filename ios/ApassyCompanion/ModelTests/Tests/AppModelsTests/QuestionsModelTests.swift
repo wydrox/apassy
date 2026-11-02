@@ -260,53 +260,26 @@ struct QuestionsModelTests {
 
     // MARK: The answer bar (ADR 0026)
 
-    @Test("the bar of a production question: Allow production: ACTION in PROJECT first, in red, the rest in the menu")
-    func productionBar() {
-        let card = PreviewVaultService.sampleQuestion().card!
-        let bar = AnswerBar.make(for: card)
-        #expect(bar.primary?.label == "Allow production: Deploy in synthetic-shop")
-        #expect(bar.primary?.destructive == true)
-        #expect(bar.primary?.answer == RemoteAnswer(kind: .allowProduction))
-        #expect(AnswerBar.note(bar.primary, card) == "Remembered for all agents in synthetic-shop, production included")
-        #expect(bar.allowOnce?.answer.kind == .approveOnce)
-        #expect(bar.deny.answer.kind == .deny)
-        #expect(bar.menu.map(\.label) == [
-            "Development", "Production", "Not for this agent", "Always ask for this agent", "Disconnect",
-        ])
-        #expect(bar.menu[0].answer == RemoteAnswer(kind: .correctEnvironment, itemID: "9", environment: .development))
-        #expect(bar.menu.last?.destructive == true)
-    }
-
-    @Test("a project answer, a correction, and a question without a project")
-    func otherBars() {
-        let projectCard = Self.card(validAnswers: ["once", "in_project:deploy"])
-        let project = AnswerBar.make(for: projectCard)
-        #expect(project.primary?.label == "Allow Deploy in synthetic-shop")
-        #expect(project.primary?.destructive == false)
-        #expect(AnswerBar.note(project.primary, projectCard) == "Remembered for all agents in synthetic-shop")
-        #expect(project.menu.isEmpty)
-        var long = Self.card(validAnswers: ["once", "in_project:read"])
-        long.question.action = .read
-        long.question.project = .init(key: "/x/.git", label: "a-project-with-a-very-long-name")
-        #expect(AnswerBar.make(for: long).primary?.label == "Allow Read in a-project-with-a-very-l…")
-        #expect(AnswerBar.note(AnswerBar.make(for: long).primary, long)
-            == "Remembered for all agents in a-project-with-a-very-long-name")
-        let correction = AnswerBar.make(for: Self.card(validAnswers: ["correct_environment"]))
-        #expect(correction.primary?.label == "Development")
-        #expect(correction.allowOnce == nil)
-        #expect(correction.menu.map(\.label) == ["Production"])
-        let noProject = AnswerBar.make(for: Self.card(validAnswers: ["once", "in_project:deploy"], project: false))
-        #expect(noProject.primary == nil)
-        // Production offered, but no project to remember it in: no main answer, and no note.
-        let productionCard = Self.card(validAnswers: ["once", "production:deploy"], project: false)
-        let production = AnswerBar.make(for: productionCard)
-        #expect(production.primary == nil)
-        #expect(production.allowOnce?.answer.kind == .approveOnce)
-        #expect(production.menu.isEmpty)
-        #expect(AnswerBar.note(production.primary, productionCard) == nil)
-        let confirmed = AnswerBar.make(for: Self.card(validAnswers: ["correct_environment"], unconfirmed: false))
-        #expect(confirmed.primary == nil)
-        #expect(confirmed.menu.isEmpty)
+    @Test("v1 item facts determine current choices independently of legacy offers")
+    func currentButtonSets() {
+        for production in [false, true] {
+            for unknown in [false, true] {
+                var card = Self.card(validAnswers: [], unconfirmed: false)
+                card.question.production = !production
+                card.question.items = card.question.items.map {
+                    var item = $0; item.production = production; item.unconfirmed = unknown; return item
+                }
+                let bar = AnswerBar.make(for: card)
+                #expect(bar.primary?.answer.kind == (unknown ? .approveAsDevelopment : .approve))
+                #expect(bar.primary?.label == (unknown ? "Allow as dev" : "Allow"))
+                #expect(bar.secondaryApproval?.answer.kind == (unknown ? .approveAsProduction : nil))
+                #expect(bar.deny.label == "Dismiss")
+                #expect(bar.menu.map(\.answer.kind) == [.denyWithComment])
+            }
+        }
+        let mixed = AnswerBar.make(for: PreviewVaultService.sampleQuestion().card!)
+        #expect(mixed.primary?.answer.kind == .approveAsDevelopment)
+        #expect(mixed.secondaryApproval?.label == "Allow as prod")
     }
 
     @Test("the Face ID reason names the agent without control characters or quotes, and the answer")
@@ -319,6 +292,24 @@ struct QuestionsModelTests {
     }
 
     // MARK: States
+
+    @Test("dismissal comments send normalized bytes without Face ID; empty becomes deny")
+    func sendsNormalizedComment() async throws {
+        for (input, expectedKind, expectedComment) in [
+            (" N\no\u{2028} ", AnswerKind.denyWithComment, Optional("No")),
+            (" \n\u{2029}", AnswerKind.deny, nil),
+        ] {
+            let fixture = Fixture()
+            let question = await fixture.withQuestion()
+            let answer = RemoteAnswer(kind: .denyWithComment, comment: input)
+            await fixture.model.send(.init(answer: answer, label: "Dismiss with comment"), for: question)
+            let sent = try #require(await fixture.service.sentAnswers().first)
+            #expect(sent.answer.kind == expectedKind)
+            #expect(sent.answer.comment == expectedComment)
+            #expect(sent.signature == nil)
+            #expect(fixture.signer.reasons.isEmpty)
+        }
+    }
 
     @Test("off without a team; ready with one, and the answer key is registered once")
     func registersTheAnswerKeyOnce() async {
@@ -341,25 +332,24 @@ struct QuestionsModelTests {
         let bar = AnswerBar.make(for: question.card!)
         await fixture.model.send(bar.primary!, for: fixture.model.questions[0])
         #expect(fixture.signer.reasons == [
-            "answer a question of agent \"claude-code\": Allow production: Deploy in synthetic-shop"
+            "answer a question of agent \"claude-code\": Allow as dev"
         ])
         let sent = await fixture.service.sentAnswers()
-        #expect(sent.map(\.answer.kind) == [.allowProduction])
+        #expect(sent.map(\.answer.kind) == [.approveAsDevelopment])
         #expect(sent[0].signature == Data("signature".utf8))
-        #expect(fixture.model.delivery(for: question) == .sent(.allowProduction))
+        #expect(fixture.model.delivery(for: question) == .sent(.approveAsDevelopment))
         #expect(fixture.model.deliveryText(for: fixture.model.questions[0])
             == QuestionsModel.sentText)
     }
 
     @Test("Deny and the stricter answers go without Face ID")
     func stricterAnswersNeedNoFaceID() async throws {
-        for kind in [AnswerKind.deny, .disconnect, .correctEnvironment] {
+        for kind in [AnswerKind.deny, .denyWithComment] {
             let fixture = Fixture()
             let question = await fixture.withQuestion()
             let bar = AnswerBar.make(for: question.card!)
-            let choice = try #require(([bar.deny] + bar.menu).first {
-                $0.answer.kind == kind && (kind != .correctEnvironment || $0.answer.environment == .production)
-            })
+            let choice = kind == .deny ? bar.deny : AnswerBar.Choice(
+                answer: RemoteAnswer(kind: .denyWithComment, comment: "No"), label: "Dismiss with comment")
             await fixture.model.send(choice, for: question)
             #expect(fixture.signer.reasons.isEmpty)
             let sent = await fixture.service.sentAnswers()
@@ -373,7 +363,7 @@ struct QuestionsModelTests {
         let fixture = Fixture()
         let question = await fixture.withQuestion()
         fixture.signer.fail(with: .cancelled)
-        await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: fixture.model.questions[0])
+        await fixture.model.send(AnswerBar.make(for: question.card!).secondaryApproval!, for: fixture.model.questions[0])
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(fixture.model.delivery(for: question) == nil)
     }
@@ -383,7 +373,7 @@ struct QuestionsModelTests {
         let fixture = Fixture()
         let question = await fixture.withQuestion()
         fixture.signer.fail(with: .biometryChanged)
-        await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: fixture.model.questions[0])
+        await fixture.model.send(AnswerBar.make(for: question.card!).secondaryApproval!, for: fixture.model.questions[0])
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(fixture.signer.renewals == 1)
         #expect(await fixture.service.answerKeyRegistrations() == 1)
@@ -683,7 +673,7 @@ struct QuestionsModelTests {
         question.vaultID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
         question.vaultName = "Family"
         let bar = AnswerBar.make(for: try #require(question.card))
-        await fixture.model.send(try #require(bar.allowOnce), for: question)
+        await fixture.model.send(try #require(bar.secondaryApproval), for: question)
         #expect(fixture.signer.reasons.isEmpty, "no Face ID")
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(
@@ -703,11 +693,11 @@ struct QuestionsModelTests {
         let model = QuestionsModel(service: service, signer: signer, push: nil,
             deviceName: "Synthetic iPhone", retryInterval: .milliseconds(1))
         await model.refresh()
-        let sending = Task { await model.send(AnswerBar.make(for: question.card!).allowOnce!, for: question) }
+        let sending = Task { await model.send(AnswerBar.make(for: question.card!).secondaryApproval!, for: question) }
         await service.waitForPost()
         await model.refresh()
         let attempted = try #require(model.questions.first)
-        #expect(attempted.answered == .approveOnce)
+        #expect(attempted.answered == .approveAsProduction)
         await model.send(AnswerBar.make(for: question.card!).deny, for: attempted)
         #expect(await service.payloads.count == 1)
         await service.failFirstPost()
@@ -717,7 +707,7 @@ struct QuestionsModelTests {
         #expect(payloads.first == payloads.last)
         #expect(await service.preparations == 1)
         #expect(signer.reasons.count == 1)
-        #expect(model.delivery(for: question) == .sent(.approveOnce))
+        #expect(model.delivery(for: question) == .sent(.approveAsProduction))
     }
 
     @Test("a restored attempt without known acceptance never claims Answer sent")
@@ -773,7 +763,7 @@ struct QuestionsModelTests {
             await fixture.service.setQuestions(enabled: true, questions: [changed])
             await fixture.model.refresh()
         }
-        await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: question)
+        await fixture.model.send(AnswerBar.make(for: question.card!).secondaryApproval!, for: question)
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(fixture.model.receiptQuestions.count == 1)
         #expect(fixture.model.outcome(for: fixture.model.receiptQuestions[0])?.tone != .allowed)
@@ -784,7 +774,7 @@ struct QuestionsModelTests {
         let fixture = Fixture()
         let question = await fixture.withQuestion()
         fixture.signer.beforeSigning { await fixture.model.vaultDidLock() }
-        await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: question)
+        await fixture.model.send(AnswerBar.make(for: question.card!).secondaryApproval!, for: question)
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(fixture.model.questions.isEmpty)
         #expect(fixture.model.receiptQuestions.isEmpty)
@@ -798,8 +788,8 @@ struct QuestionsModelTests {
         let question = await fixture.withQuestion()
         let bar = AnswerBar.make(for: question.card!)
         fixture.signer.beforeSigning { await fixture.model.send(bar.deny, for: question) }
-        await fixture.model.send(bar.allowOnce!, for: question)
-        #expect(await fixture.service.sentAnswers().map(\.answer.kind) == [.approveOnce])
+        await fixture.model.send(bar.secondaryApproval!, for: question)
+        #expect(await fixture.service.sentAnswers().map(\.answer.kind) == [.approveAsProduction])
         #expect(fixture.model.receiptQuestions.count == 1)
         #expect(fixture.model.outcome(for: fixture.model.receiptQuestions[0])?.tone == .neutral)
     }

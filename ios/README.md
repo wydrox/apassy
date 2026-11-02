@@ -341,3 +341,15 @@ Residual risk: anyone holding the unlocked iPhone during the chosen window can
 approve agent requests and see secrets in the app. Secure Enclave reuse of a
 previously evaluated context across keys requires physical-device validation;
 source inspection and unit tests cannot establish that iOS suppresses every prompt.
+
+## Owner question answers
+
+Relay command cards remain v1. Any unconfirmed item offers Allow as dev / Allow as prod;
+otherwise Allow approves the request once. Dismiss and Dismiss with comment are always
+available. Comments remove control scalars and U+2028/U+2029, keep the first 500 scalars,
+then trim Unicode whitespace; empty comments send plain deny. The core signs the same
+normalized comment it encodes. Approvals use the answer key through the Face ID window;
+denials use the relay signing key. Legacy kinds remain decodable for older receipts but
+are no longer offered for relay command questions. Wi-Fi companion runs retain their
+legacy Allow Once / Allow and Remember / Deny controls because companion-v1 has no
+environment classification or comment answer fields; access requests are unchanged.

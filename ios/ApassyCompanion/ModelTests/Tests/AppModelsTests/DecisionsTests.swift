@@ -212,7 +212,7 @@ struct DecisionsTests {
         #expect(AgentName.display("claude-code") == "Claude Code")
         #expect(AgentName.display("my-agent") == "my-agent")
         let items = PreviewVaultService.sampleQuestion().card!.question.items
-        #expect(Decisions.environment(items) == "Production")
+        #expect(Decisions.environment(items) == "Production?")
         #expect(Decisions.environment([items[1]]) == "Production?")
         var development = items[1]
         development.unconfirmed = false
