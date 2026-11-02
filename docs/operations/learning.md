@@ -2,14 +2,14 @@
 
 Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [ADR 0025](../adr/0025-low-friction-access.md) (execution answers), and [ADR 0029](../adr/0029-bouncer-evaluation-permission.md) (explicit evaluation permission, section 3a). Goal items: B3, B5, B10, and the wait record of N3.
 
-Apassy learns from the owner decisions in two ways:
+Apassy learns from the owner decisions in two ways in the bouncer gate ([bouncer.md](bouncer.md), Words):
 
 - A remembered pattern lets a matching command run after 3 explicit "Approve and remember" approvals (ADR 0009 step 1). Ordinary "Allow once" and "Allow once and enable bouncer" do not add to this count.
 - A calibration lowers the `task_match` level of the model step when the decision log supports it (ADR 0009 step 3).
 
 Both act only at the model step. They never change a hard rule, the production rule (a production item without an owner allowance), a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
 
-A third way is a local fine-tune of the model (ADR 0009 step 5c, goal item B9). The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
+A third way is a local fine-tune of the bouncer brain (ADR 0009 step 5c, goal item B9). It changes only its decision heads. The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
 
 ## 1. Decision log
 

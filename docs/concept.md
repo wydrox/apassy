@@ -12,6 +12,11 @@ Status: design, not an implemented product. This revision supports the credentia
 | Rule | Your instructions about who can use a credential, where, when, and for what purpose. |
 | Bouncer | The gate that checks a request, permits it, asks you, or blocks it and explains why. |
 
+The bouncer has two parts:
+
+- The **bouncer gate** is the fixed part in Apassy: your rules, the rule packs, the production and host checks, and the thresholds. It decides whether a request runs, waits for you, or is blocked.
+- The **bouncer brain** is the local model. It answers questions about a request with a probability, for example "Is this command a normal step for the task?". It never sees a secret value and decides nothing by itself. The bouncer gate uses its answers.
+
 A connector is the technical component that lets Apassy use a credential with a service.
 The owner sees which uses it supports. The agent does not receive unrestricted access simply because the vault stores a compatible credential type.
 
@@ -46,7 +51,7 @@ Jev is the planned risk evaluator. Support for rule interpretation is not assume
 2. Resolve the credential reference and registered connector without exposing the vault inventory.
 3. Normalize the operation and bind its parameters, destination, rule version, and credential revision.
 4. Check explicit restrictions, expiry, revocation, operation support, and usage limits.
-5. If an explicit restriction fails, block the request before retrieving the credential or calling a model.
+5. If an explicit restriction fails, block the request before retrieving the credential or asking the bouncer brain.
 6. Evaluate the required contextual risks from permitted, minimal information.
 7. Permit, pause for approval, or block according to the decision table below.
 8. Recheck authority before execution and durably record the attempt, limits, and any consumed approval.
