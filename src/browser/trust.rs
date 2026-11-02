@@ -44,6 +44,16 @@ impl InstanceIdentity {
     }
 
     pub fn description(&self) -> String {
+        let browser = match self.bundle_id.as_str() {
+            "net.imput.helium" => "Helium",
+            "com.google.Chrome" => "Google Chrome",
+            other => other,
+        };
+        let transport = match self.debugging.as_str() {
+            "pipe" => "remote debugging via pipe".to_owned(),
+            "none" => "unsafe extension switches".to_owned(),
+            port => format!("remote debugging on port {port}"),
+        };
         let short = self
             .user_data_root
             .rsplit('/')
@@ -53,10 +63,7 @@ impl InstanceIdentity {
             .rev()
             .collect::<Vec<_>>()
             .join("/");
-        format!(
-            "{} instance (data folder …/{short}, remote debugging on port {}) — all its profiles",
-            self.bundle_id, self.debugging
-        )
+        format!("{browser} instance (data folder …/{short}, {transport}) — all its profiles")
     }
 }
 
