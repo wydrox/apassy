@@ -64,6 +64,7 @@
 //! Each refusal after step 2 and each result is stored in the activity log. Each decided
 //! use of each item is stored in the use log (`item_use`).
 
+use super::route_diagnostics::{Attempt, ReasonKind, RouteKind, TaskMatchBucket, VerdictKind};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -328,7 +329,7 @@ struct Known {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Route {
     /// The owner decides. The text says why, for the card.
-    Ask(String),
+    Ask(String, ReasonKind),
     /// A remembered answer of the owner.
     Answer,
     /// A remembered pattern.
@@ -385,19 +386,43 @@ fn hosts_within<'a>(hosts: &[String], allowed: impl Iterator<Item = &'a String> 
 }
 
 /// The security vetoes and hard rules of step 6.1. Each gives one sentence for the card.
-fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str) -> Vec<String> {
+fn hard_rules(
+    checked: &Checked,
+    run: &RunFacts<'_>,
+    known: &Known,
+    place: &str,
+) -> Vec<(String, ReasonKind)> {
     let mut why = Vec::new();
     if !run.analysis.flags.is_empty() {
-        why.push(format!("Rule flags: {}.", run.analysis.flags.join(", ")));
+        why.push((
+            format!("Rule flags: {}.", run.analysis.flags.join(", ")),
+            if run
+                .analysis
+                .flags
+                .iter()
+                .any(|flag| flag == super::prompts::FLAG_UNVERIFIED)
+            {
+                ReasonKind::HookUnverified
+            } else if run
+                .analysis
+                .flags
+                .iter()
+                .any(|flag| flag == super::prompts::FLAG_AMBIGUOUS)
+            {
+                ReasonKind::HookAmbiguous
+            } else {
+                ReasonKind::HookFlags
+            },
+        ));
     }
     if let Some((host, name)) = foreign_db_host(checked, run) {
-        why.push(format!(
+        why.push((format!(
             "The command connects to the database host {host}, which is not a host of \"{name}\"."
-        ));
+        ), ReasonKind::ForeignHost));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
         if facts.includes_code && !known.answer.get(index).copied().unwrap_or(false) {
-            why.push(format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name));
+            why.push((format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name), ReasonKind::OneTimeCode));
         }
         if facts.production && !known.answer.get(index).copied().unwrap_or(false) {
             let mut text = format!(
@@ -408,15 +433,18 @@ fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str)
             if let Some(Some(unfit)) = known.unfit.get(index) {
                 text.push_str(&format!(" The allowance does not cover this run: {unfit}."));
             }
-            why.push(text);
+            why.push((text, ReasonKind::Production));
         }
         if facts.standing == Standing::AlwaysAsk {
-            why.push(format!(
-                "\"{}\" is set to always ask for this agent.",
-                facts.name
+            why.push((
+                format!("\"{}\" is set to always ask for this agent.", facts.name),
+                ReasonKind::AlwaysAsk,
             ));
         } else if facts.always_ask {
-            why.push(format!("\"{}\" is set to always ask.", facts.name));
+            why.push((
+                format!("\"{}\" is set to always ask.", facts.name),
+                ReasonKind::AlwaysAsk,
+            ));
         }
     }
     why
@@ -466,28 +494,38 @@ fn route<F: FnMut() -> Result<(), String>>(
         |project| format!("\"{}\"", project.label),
     );
     let why = hard_rules(checked, run, known, &place);
-    if !why.is_empty() {
-        return Route::Ask(why.join(" "));
+    if let Some((_, reason)) = why.first() {
+        return Route::Ask(
+            why.iter()
+                .map(|(note, _)| note.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            *reason,
+        );
     }
     if let Err(reason) = ready.get() {
-        return Route::Ask(format!(
-            "No bouncer runs, so each run waits for you: {reason}"
-        ));
+        return Route::Ask(
+            format!("No bouncer runs, so each run waits for you: {reason}"),
+            ReasonKind::ModelUnavailable,
+        );
     }
     if checked.project.is_none() {
         return Route::Ask(
             "The folder is not a project (the root, the home folder, or a parent of it), so Apassy remembers nothing there.".to_owned(),
-        );
+        ReasonKind::NotProject);
     }
     // Required context is a hard veto, including when an execution answer fits.
     if !run.has_user_request {
-        return Route::Ask("The agent did not send the user request.".to_owned());
+        return Route::Ask(
+            "The agent did not send the user request.".to_owned(),
+            ReasonKind::MissingTask,
+        );
     }
     if let Some(index) = checked.declarations.iter().position(Option::is_none) {
-        return Route::Ask(format!(
-            "\"{}\" has no declaration.",
-            checked.facts[index].name
-        ));
+        return Route::Ask(
+            format!("\"{}\" has no declaration.", checked.facts[index].name),
+            ReasonKind::MissingDeclaration,
+        );
     }
     if !known.answer.is_empty() && known.answer.iter().all(|answer| *answer) {
         return Route::Answer;
@@ -496,11 +534,14 @@ fn route<F: FnMut() -> Result<(), String>>(
     // host (Gate 1, A-2), asks: the owner decides the difference, not the model.
     for (index, facts) in checked.facts.iter().enumerate() {
         if let Some(Some(unfit)) = known.unfit.get(index) {
-            return Route::Ask(format!(
-                "Your answer for \"{}\" in {place} for {} does not cover this run: {unfit}.",
-                facts.name,
-                action_words(run.action)
-            ));
+            return Route::Ask(
+                format!(
+                    "Your answer for \"{}\" in {place} for {} does not cover this run: {unfit}.",
+                    facts.name,
+                    action_words(run.action)
+                ),
+                ReasonKind::UnfitAnswer,
+            );
         }
     }
     // Every requested secret enters the process environment. A client may use it
@@ -516,10 +557,13 @@ fn route<F: FnMut() -> Result<(), String>>(
                     .any(|known| host_matches(host, known))
             })
         {
-            return Route::Ask(format!(
-                "The command goes to another host, {host}, which is not a host of \"{}\". You decide whether it may use this credential there.",
-                facts.name
-            ));
+            return Route::Ask(
+                format!(
+                    "The command goes to another host, {host}, which is not a host of \"{}\". You decide whether it may use this credential there.",
+                    facts.name
+                ),
+                ReasonKind::ForeignHost,
+            );
         }
     }
     // The item of another project (ADR 0025 §3): only the owner decides, and an answer
@@ -528,10 +572,13 @@ fn route<F: FnMut() -> Result<(), String>>(
         if let Some(declared) = &facts.foreign_project
             && !known.answer.get(index).copied().unwrap_or(false)
         {
-            return Route::Ask(format!(
-                "\"{}\" is declared for the project \"{declared}\", not for {place}.",
-                facts.name
-            ));
+            return Route::Ask(
+                format!(
+                    "\"{}\" is declared for the project \"{declared}\", not for {place}.",
+                    facts.name
+                ),
+                ReasonKind::ForeignProject,
+            );
         }
     }
     if run.pattern {
@@ -639,6 +686,7 @@ fn run_inner(
     request: &RunRequest<'_>,
     evaluation_only: bool,
 ) -> WireResponse {
+    let mut diagnostic = Attempt::new();
     let items = request.all_items();
     let (checked, label) = {
         let mut guard = lock(&ctx.vault);
@@ -874,6 +922,7 @@ fn run_inner(
     } else {
         None
     };
+    diagnostic.event.inference_attempted = route == Route::Model && models.active.is_some();
     let verdict = match (&route, &models.active) {
         (Route::Model, Some(bouncer)) => bouncer.evaluate(&bouncer_request),
         _ => BouncerVerdict::Unavailable("not asked".to_owned()),
@@ -890,19 +939,42 @@ fn run_inner(
             default_source,
         );
         if decision.ask_owner {
-            Route::Ask(decision.note)
+            Route::Ask(decision.note, decision.reason)
         } else {
             Route::Model
         }
     } else {
         route
     };
+    let (route_kind, reason_kind, verdict_kind) = match &route {
+        Route::Ask(_, reason) => (RouteKind::Owner, *reason, VerdictKind::Asked),
+        Route::Model => (
+            RouteKind::Bouncer,
+            ReasonKind::ModelAllowed,
+            VerdictKind::Allowed,
+        ),
+        Route::Answer => (
+            RouteKind::Answer,
+            ReasonKind::RememberedAnswer,
+            VerdictKind::Allowed,
+        ),
+        Route::Pattern => (
+            RouteKind::Pattern,
+            ReasonKind::RememberedPattern,
+            VerdictKind::Allowed,
+        ),
+    };
+    diagnostic.event.route = route_kind;
+    diagnostic.event.reason = reason_kind;
+    diagnostic.event.verdict = verdict_kind;
+    diagnostic.event.task_match = TaskMatchBucket::of(verdict.fact("task_match"));
+    diagnostic.finish_route();
     let project_text = checked
         .project
         .as_ref()
         .map_or_else(String::new, |project| project.label.clone());
     let risk_note = match &route {
-        Route::Ask(why) => why.clone(),
+        Route::Ask(why, _) => why.clone(),
         Route::Answer => format!(
             "Remembered answer of the owner: allow {} in \"{project_text}\".",
             action_words(action)
@@ -930,9 +1002,9 @@ fn run_inner(
     } else {
         format!("This run includes one-time codes. {risk_note}")
     };
-    let needs_approval = matches!(route, Route::Ask(_));
+    let needs_approval = matches!(route, Route::Ask(..));
     let (decided_by, mut use_decided_by) = match route {
-        Route::Ask(_) => ("Owner approved", UseDecidedBy::Owner),
+        Route::Ask(..) => ("Owner approved", UseDecidedBy::Owner),
         Route::Answer => ("Remembered answer", UseDecidedBy::Answer),
         Route::Pattern => ("Remembered pattern", UseDecidedBy::Pattern),
         Route::Model => ("Bouncer allowed", UseDecidedBy::Bouncer),
@@ -1054,6 +1126,7 @@ fn run_inner(
                 action,
                 production: production_waiting,
                 why: risk_note.clone(),
+                reason: reason_kind,
                 items: question_items,
                 valid_answers: valid,
             },

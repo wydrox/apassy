@@ -101,6 +101,7 @@ fn run(ids: [u64; 2]) -> PendingRun {
         agent_request: "Run the migration.".to_owned(),
         remember: None,
         question: QuestionInfo {
+            reason: Default::default(),
             id: 0,
             item_ids: ids.to_vec(),
             project: Some(Project {

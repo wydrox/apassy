@@ -60,6 +60,7 @@ fn question(items: Vec<QuestionItem>, extra: &[AnswerKind]) -> QuestionInfo {
     let mut valid_answers = base_answers();
     valid_answers.extend_from_slice(extra);
     QuestionInfo {
+        reason: Default::default(),
         id: 0,
         item_ids: items.iter().map(|item| item.item_id).collect(),
         project: Some(project("acme-billing")),
@@ -2448,4 +2449,57 @@ fn durable_and_evaluation_answers_still_ask_inside_window() {
     app.close_owner_check(None);
     queue.deny(pending.id);
     waiter.join().unwrap().unwrap();
+}
+
+#[test]
+fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
+    use crate::broker::route_diagnostics::ReasonKind;
+    for (reason, headline) in [
+        (
+            ReasonKind::MissingTask,
+            "The agent didn't say what you asked it to do.",
+        ),
+        (
+            ReasonKind::LowTaskMatch,
+            "The bouncer wasn't sure this fits your task.",
+        ),
+        (ReasonKind::ModelUnavailable, "No bouncer is running."),
+        (
+            ReasonKind::ModelTimeout,
+            "The bouncer didn't answer in time.",
+        ),
+        (
+            ReasonKind::HookFlags,
+            "The command or task context needs your review.",
+        ),
+        (ReasonKind::NotProject, "This folder isn't a project."),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (mut app, item_id) = unlocked_app_with_item(&dir);
+        let queue = queue_of(&mut app, &dir);
+        let mut credential = item(item_id, "Synthetic sandbox");
+        credential.unconfirmed = true;
+        let mut info = question(vec![credential], &[AnswerKind::CorrectEnvironment]);
+        info.reason = reason;
+        assert_eq!(decisions::question_headline(&info), headline);
+        assert_eq!(
+            decisions::classification_line(&info).as_deref(),
+            Some("Is Synthetic sandbox a development credential?")
+        );
+        let (waiter, pending) = ask(&app, &queue, 1, run("Synthetic agent", info));
+        app.place = Place::Decisions;
+        let (text, _) = frames(&mut app, WIDE, 3);
+        assert!(
+            text.find(headline).unwrap()
+                < text
+                    .find("Is Synthetic sandbox a development credential?")
+                    .unwrap(),
+            "{text}"
+        );
+        for label in ["Deny", "Allow Once", "Production", "Development"] {
+            assert!(text.contains(label), "{text}");
+        }
+        assert!(queue.deny(pending.id));
+        waiter.join().unwrap().unwrap();
+    }
 }

@@ -470,6 +470,7 @@ impl Card {
                 needed: offer.needed,
             }),
             question: QuestionInfo {
+                reason: Default::default(),
                 id: question_id,
                 item_ids,
                 project: self.question.project.as_ref().map(|project| Project {

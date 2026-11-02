@@ -4,6 +4,11 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent questions show why the owner must answer. Unconfirmed classification stays secondary.
+- Show privacy-safe bouncer route counts and top reasons since app start. Log route outcomes without request data.
+
 ## [0.5.11] - 2026-11-02
 
 ### Fixed

@@ -464,6 +464,7 @@ fn contract_run(id: u64, ids: [u64; 2], valid_answers: Vec<AnswerKind>) -> Pendi
         agent_request: "Run the migration.".to_owned(),
         remember: None,
         question: QuestionInfo {
+            reason: Default::default(),
             id,
             item_ids: ids.to_vec(),
             project: Some(Project {
