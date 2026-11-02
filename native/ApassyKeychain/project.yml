@@ -38,5 +38,4 @@ targets:
     dependencies:
       - sdk: AppKit.framework
       - sdk: LocalAuthenticationEmbeddedUI.framework
-        weak: true
     scheme: {}

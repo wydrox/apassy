@@ -6,7 +6,7 @@ if [[ $# -lt 1 || $# -gt 3 ]]; then
   exit 2
 fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PREVIEW_TMP="$(mktemp -d "${TMPDIR:-/tmp}/apassy-panel-preview.XXXXXX")"
+PREVIEW_TMP="$(mktemp -d "/tmp/apassy-panel-preview.XXXXXX")"
 trap 'rm -rf "$PREVIEW_TMP"' EXIT
 cat > "$PREVIEW_TMP/main.swift" <<'SWIFT'
 import AppKit
@@ -19,13 +19,14 @@ if #available(macOS 12.0, *) {
     let context = LAContext() // Intentionally never evaluated.
     let panel = AuthPanel(context: context, title: title, reason: reason)
     guard panel.showPanel(animated: false) else { exit(1) }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        guard let view = panel.contentView,
-              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        guard let data = bitmap.representation(using: .png, properties: [:]) else { exit(1) }
-        do { try data.write(to: URL(fileURLWithPath: CommandLine.arguments[1])) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        let capture = Process()
+        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        capture.arguments = ["-x", "-l", String(panel.windowNumber), CommandLine.arguments[1]]
+        do { try capture.run() }
         catch { exit(1) }
+        capture.waitUntilExit()
+        guard capture.terminationStatus == 0 else { exit(1) }
         panel.close()
         exit(0)
     }
@@ -35,7 +36,7 @@ if #available(macOS 12.0, *) {
 }
 SWIFT
 xcrun --sdk macosx swiftc -swift-version 5 -warnings-as-errors \
-  -target arm64-apple-macos15.0 -framework AppKit -weak_framework LocalAuthenticationEmbeddedUI \
+  -target arm64-apple-macos15.0 -framework AppKit -framework LocalAuthenticationEmbeddedUI \
   "$ROOT/native/ApassyHelper/AuthPanel.swift" "$PREVIEW_TMP/main.swift" \
   -o "$PREVIEW_TMP/preview"
 APASSY_PANEL_PREVIEW_ICON="$ROOT/packaging/AppIcon.icns" "$PREVIEW_TMP/preview" "$@"

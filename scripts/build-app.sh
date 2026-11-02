@@ -399,7 +399,7 @@ mkdir -p "$NATIVE_OUT"
 # override of the caller check.
 xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 5 -warnings-as-errors \
   -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
-  -framework AppKit -weak_framework LocalAuthenticationEmbeddedUI \
+  -framework AppKit -framework LocalAuthenticationEmbeddedUI \
   -o "$NATIVE_OUT/apassy-helper" native/ApassyHelper/*.swift
 if LC_ALL=C grep -aq "APASSY_HELPER_DEV_ANY_CALLER" "$NATIVE_OUT/apassy-helper"; then
   fail "the helper contains the development caller override"

@@ -76,24 +76,14 @@ final class AuthPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
-        let content = NSView()
+        let content = NSVisualEffectView()
+        content.material = .popover
+        content.blendingMode = .behindWindow
+        content.state = .active
         content.wantsLayer = true
         content.layer?.cornerRadius = 16
         content.layer?.masksToBounds = true
         contentView = content
-        // A semantic AppKit background updates with the effective appearance.
-        let background = NSVisualEffectView()
-        background.material = .windowBackground
-        background.blendingMode = .withinWindow
-        background.state = .active
-        background.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(background)
-        NSLayoutConstraint.activate([
-            background.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            background.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            background.topAnchor.constraint(equalTo: content.topAnchor),
-            background.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-        ])
         let icon = NSImageView()
         icon.image = apassyPanelIcon()
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -103,7 +93,14 @@ final class AuthPanel: NSPanel {
         let heading = NSTextField(wrappingLabelWithString: title)
         heading.font = .systemFont(ofSize: 17, weight: .semibold)
         heading.alignment = .center
-        let detail = NSTextField(wrappingLabelWithString: reason)
+        let sentence: String
+        if let first = reason.first {
+            let punctuation = reason.last.map { ".!?".contains($0) } ?? false
+            sentence = String(first).uppercased() + String(reason.dropFirst()) + (punctuation ? "" : ".")
+        } else {
+            sentence = reason
+        }
+        let detail = NSTextField(wrappingLabelWithString: sentence)
         detail.font = .systemFont(ofSize: 13)
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
@@ -152,6 +149,7 @@ final class AuthPanel: NSPanel {
         makeKey()
         contentView?.layoutSubtreeIfNeeded()
         displayIfNeeded()
+        invalidateShadow()
         if animated {
             NSAnimationContext.runAnimationGroup { animation in
                 animation.duration = 0.12

@@ -289,19 +289,16 @@ contains no passphrase field; passphrase entry remains in the main app.
 For keychain reads the existing biometric-state checks run first. The panel
 pre-evaluates an equivalent `SecAccessControl` (`whenPasscodeSetThisDeviceOnly`,
 `biometryCurrentSet`, `.useItem`), then reads with that context and authentication
-UI disabled. The query uses `kSecUseAuthenticationUIFail`'s ABI string
-`u_AuthUIF`, confirmed in Apple's
-[SecItemConstants.c](https://github.com/apple-oss-distributions/Security/blob/main/OSX/sec/Security/SecItemConstants.c),
-because the SDK deprecates the named constant under warnings-as-errors;
-`context.interactionNotAllowed = true` also enforces the current API equivalent.
+UI disabled through `context.interactionNotAllowed = true` on the pre-evaluated
+context, the replacement for the deprecated `kSecUseAuthenticationUI` query key.
 If the keychain rejects this context with `errSecAuthFailed` or
 `errSecInteractionNotAllowed`, it retries the previous system-dialog read with
 a fresh context. Biometric ACLs and existing error mapping remain in force.
 No-GUI sessions, failed application/panel setup, unavailable embedded UI, and
 non-interactive embedded evaluation retain the old system-dialog path. Fallback
 reasons go to `os_log` (`com.wydrox.apassy`, `touch-id-panel`) without request data.
-The current deployment target is macOS 15; macOS 12 guards and weak framework
-linkage do not constitute support for running this build on older macOS.
+The current deployment target is macOS 15 and the embedded UI framework is linked
+strongly; macOS 12 guards do not constitute support for older macOS.
 
 `scripts/touch-id-panel-preview.sh OUT.png [title] [reason]` builds a temporary
 preview from the shared panel file, shows and renders it, and exits without

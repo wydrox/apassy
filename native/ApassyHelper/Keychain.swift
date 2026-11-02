@@ -188,10 +188,7 @@ func handleKeychainRead(_ request: Request) throws -> Fields {
     query[kSecMatchLimit as String] = kSecMatchLimitOne
     var readContext = context
     if embedded {
-        // kSecUseAuthenticationUIFail is deprecated in the SDK. Its ABI value
-        // is u_AuthUIF (Apple Security/SecItemConstants.c); retain the requested
-        // query contract without a deprecation warning under warnings-as-errors.
-        query[kSecUseAuthenticationUI as String] = "u_AuthUIF" as CFString
+        // Reuse the evaluated context without allowing another authentication UI.
         context.interactionNotAllowed = true
     } else {
         context.invalidate()
@@ -211,7 +208,6 @@ func handleKeychainRead(_ request: Request) throws -> Fields {
         systemContext.localizedReason = reason
         systemContext.localizedFallbackTitle = ""
         query[kSecUseAuthenticationContext as String] = systemContext
-        query.removeValue(forKey: kSecUseAuthenticationUI as String)
         result = nil
         status = SecItemCopyMatching(query as CFDictionary, &result)
     }
