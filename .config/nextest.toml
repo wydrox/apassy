@@ -30,6 +30,37 @@ platform = 'cfg(target_os = "macos")'
 filter = 'binary_id(apassy::it) & test(/^native_helper::/)'
 test-group = "serial"
 
+# The slowest tests start first, so that none of them starts at the end of a group
+# and makes it longer (each took 20 s or more in CI run 41528533889). A test that is
+# not in the list only runs later.
+[[profile.default.overrides]]
+filter = """
+    test(=learning_replay::fixture_replay_learns_and_never_allows_a_denied_request)
+  | test(=relay_feed::a_feed_rate_answer_makes_the_mac_wait_a_minute)
+  | test(=analysis_replay::analysis_matches_golden_replay)
+  | test(=desktop::ui::decisions_tests::development_rechecks_the_question_after_vault_contention)
+  | test(=desktop::ui::decisions_tests::unconfirmed_question_headlines_show_blocking_reason_before_classification)
+  | test(=desktop::ui::decisions_tests::durable_and_evaluation_answers_reuse_global_window_only_while_valid)
+  | test(=desktop::ui::sync_tests::relay_calls_of_the_owner_leave_the_window_responsive)
+  | test(=desktop::ui::sync_tests::joining_a_relay_copy_under_another_passphrase_asks_for_it)
+  | test(=desktop::ui::keyboard_tests::saved_rows_scroll_into_view_once_from_a_previous_large_library_offset_without_taking_focus)
+  | test(=desktop::ui::keyboard_tests::a_dirty_edit_requires_confirmation_and_restores_focus)
+  | test(=desktop::ui::tests::every_place_draws_at_default_and_minimum_sizes)
+  | test(=desktop::ui::vault_tests::every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes)
+  | test(=vault::merge::audit_tests::review_delete_record_clock_table_and_new_identity)
+  | test(=vault::merge::schema17_tests::schema17_copies_keep_every_check_and_other_schemas_fail)
+  | test(=vault_migration::unlock_migrates_each_earlier_schema_version_to_the_current_one)
+  | test(=relay_questions::current_remote_kinds_settle_with_signed_comments_and_guarded_classification)
+  | test(=relay_questions::changed_answer_key_mapping_or_revocation_invalidates_a_prepared_remote_proof)
+  | test(=local_finetune::the_gate_opens_at_exactly_300_decisions_and_30_denials_on_ac_power)
+  | test(=first_use::hard_vetoes_ignore_a_permissive_model)
+  | test(=a_feed_rate_answer_pauses_the_feed_reads_for_a_minute)
+  | test(=push_retries_worker_and_apns_transient_failures_with_backoff)
+  | test(=definitive_429_allows_a_different_choice_immediately_and_after_restart)
+  | test(=a_planted_feed_with_false_names_is_refused_and_the_row_stays)
+"""
+priority = 50
+
 [profile.ci]
 # Run every test, and show the output of each failure when it fails and at the end.
 fail-fast = false
