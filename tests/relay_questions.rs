@@ -1866,7 +1866,15 @@ fn changed_comment_and_unoffered_current_kind_do_not_settle() {
     };
     send_answer(&phone.client, &opened, &forged, &signature, &phone.keys).unwrap();
     assert!(world.wait_refused(1)[0].contains("signature does not verify"));
-    assert!(prepare_answer(&opened, PHONE_UUID, Choice::Approve, now()).is_err());
+    assert_eq!(world.queue.pending().len(), 1, "the run still waits");
+    assert!(
+        !waiting.is_finished(),
+        "the changed comment must not settle"
+    );
+    assert_eq!(
+        prepare_answer(&opened, PHONE_UUID, Choice::Approve, now()).unwrap_err(),
+        AnswerError::NotOffered
+    );
     let mut unoffered = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
     unoffered.choice = Choice::Approve;
     unoffered.text = answer_string(
@@ -1880,7 +1888,23 @@ fn changed_comment_and_unoffered_current_kind_do_not_settle() {
     .unwrap();
     let signature = answer_key().sign(unoffered.text.as_bytes()).unwrap();
     send_answer(&phone.client, &opened, &unoffered, &signature, &phone.keys).unwrap();
-    assert!(world.wait_refused(2)[1].contains("does not offer"));
+    // Activity is newest first: the earlier signature refusal is at index 1.
+    let lines = world.wait_refused(2);
+    let mut reasons: Vec<&str> = lines
+        .iter()
+        .map(|line| line.split(" did not count: ").nth(1).unwrap_or(line))
+        .collect();
+    reasons.sort_unstable();
+    assert_eq!(
+        reasons,
+        [
+            "its signature does not verify.",
+            "the question does not offer this answer.",
+        ],
+        "{lines:?}"
+    );
+    assert_eq!(world.queue.pending().len(), 1, "the run still waits");
+    assert!(!waiting.is_finished(), "the unoffered kind must not settle");
     let deny = prepare_answer(&opened, PHONE_UUID, Choice::Deny, now()).unwrap();
     send_answer(
         &phone.client,
