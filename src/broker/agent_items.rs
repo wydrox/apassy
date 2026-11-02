@@ -1387,6 +1387,7 @@ fn ask_first(
         agent_request: purpose.to_owned(),
         remember: None,
         question: QuestionInfo {
+            reason: Default::default(),
             id: 0,
             item_ids: Vec::new(),
             project: caller.project.clone(),

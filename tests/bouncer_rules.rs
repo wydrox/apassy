@@ -1064,3 +1064,37 @@ fn live_laya_broker_path() {
     assert_eq!(code(&leak), "approval_timeout");
     eprintln!("leak reason: {}", last_reason(&fx));
 }
+
+#[test]
+fn first_use_unconfirmed_classification_is_allowed_by_model_without_question() {
+    use apassy::vault::{DeclarationSource, DeclarationSources};
+    let model = common::fake_bouncer(&[("task_match", 0.85), ("writes", 0.01)]);
+    let fx = fixture_declared(
+        Some(&model.url),
+        Declaration {
+            environment: Environment::Production,
+            risk: RiskLevel::Low,
+            ..model_declaration()
+        },
+    );
+    {
+        let mut guard = fx.vault.lock().unwrap();
+        let vault = guard.as_mut().unwrap();
+        vault
+            .set_declaration_sources(
+                fx.item_id,
+                &DeclarationSources {
+                    environment: DeclarationSource::Default,
+                    risk: DeclarationSource::Default,
+                    ..DeclarationSources::default()
+                },
+            )
+            .unwrap();
+        assert!(vault.answers_for_item(fx.item_id).unwrap().is_empty());
+    }
+    let response = run(&fx, &["echo", "done"], "Run the project checks.");
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.result.unwrap()["decided_by"], "Bouncer allowed");
+    assert!(fx.broker.approvals().pending().is_empty());
+    assert_eq!(model.bodies.lock().unwrap().len(), 1);
+}

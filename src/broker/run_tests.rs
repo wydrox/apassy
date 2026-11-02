@@ -101,7 +101,9 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
         if declared_project == "project" {
             assert_eq!(actual, Route::Model);
         } else {
-            assert!(matches!(actual, Route::Ask(ref reason) if reason.contains("foreign-project")));
+            assert!(
+                matches!(actual, Route::Ask(ref reason, _) if reason.contains("foreign-project"))
+            );
         }
         assert_eq!(vault.evaluation_scopes(item.id).unwrap().len(), 1);
         assert!(vault.answers_for_item(item.id).unwrap().is_empty());
@@ -116,7 +118,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
         let mut forbidden_model =
             Readiness::new(|| panic!("code veto must precede model readiness"));
         assert!(
-            matches!(route(&checked, &code_facts, &known_nothing(1), &mut forbidden_model), Route::Ask(ref why) if why.contains("one-time code"))
+            matches!(route(&checked, &code_facts, &known_nothing(1), &mut forbidden_model), Route::Ask(ref why, _) if why.contains("one-time code"))
         );
         checked.facts[0].includes_code = false;
 
@@ -128,7 +130,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
             unfit: vec![None],
         };
         assert!(
-            matches!(route(&checked, &code_facts, &known, &mut ready), Route::Ask(ref reason) if reason.contains("no declaration"))
+            matches!(route(&checked, &code_facts, &known, &mut ready), Route::Ask(ref reason, _) if reason.contains("no declaration"))
         );
     }
 }

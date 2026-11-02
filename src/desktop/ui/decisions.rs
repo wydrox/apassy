@@ -1944,9 +1944,6 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
             "Production allowance in {} · all agents · next matching use.",
             short(&project.label)
         ),
-        (Some(Primary::Correct), _) => unconfirmed(run).map_or_else(String::new, |item| {
-            format!("Is {} a development credential?", item.name)
-        }),
         _ => "Allow Once allows this run only.".to_owned(),
     };
     ui.horizontal(|ui| {
@@ -1959,7 +1956,7 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
             match (main, &main_label) {
                 (Some(Primary::Correct), Some(label)) => {
                     let item = unconfirmed(run);
-                    if bar_button(ui, label, Bar::Main).clicked()
+                    if bar_button(ui, label, Bar::Plain).clicked()
                         && let Some(item) = item
                     {
                         *answer = Some(Answer::Development {
@@ -1975,7 +1972,7 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
                             name: item.name.clone(),
                         });
                     }
-                    if bar_button(ui, "Allow Once", Bar::Plain).clicked() {
+                    if bar_button(ui, "Allow Once", Bar::Main).clicked() {
                         *answer = Some(Answer::Once);
                     }
                 }
@@ -2049,6 +2046,24 @@ fn item_tile(app: &DesktopApp, item_id: u64, name: &str) -> kit::Tile {
     super::credential_tile(kind, provider.as_deref().unwrap_or(&service), name)
 }
 
+/// Broker-owned enum takes precedence over credential classification and agent prose.
+pub(super) fn question_headline(question: &QuestionInfo) -> &str {
+    if question.reason == crate::broker::route_diagnostics::ReasonKind::Other
+        && !question.why.is_empty()
+    {
+        &question.why
+    } else {
+        question.reason.headline()
+    }
+}
+pub(super) fn classification_line(question: &QuestionInfo) -> Option<String> {
+    question
+        .items
+        .iter()
+        .find(|item| item.unconfirmed)
+        .map(|item| format!("Is {} a development credential?", item.name))
+}
+
 fn draw_question(
     app: &mut DesktopApp,
     ui: &mut egui::Ui,
@@ -2061,7 +2076,7 @@ fn draw_question(
     detail_header(
         ui,
         &Mark::Agent(run.agent.clone()),
-        &format!("{} wants to use {}", run.agent, item_names(run)),
+        question_headline(question),
         |ui| {
             ui.label(
                 kit::text(format!("{} · ", project_text(run)), Font::Body).color(kit::SECONDARY),
@@ -2070,6 +2085,15 @@ fn draw_question(
             ui.label(kit::text(" left to answer", Font::Body).color(kit::SECONDARY));
         },
     );
+    kit::paragraph(
+        ui,
+        format!("{} wants to use {}", run.agent, item_names(run)),
+        Font::Body,
+        kit::SECONDARY,
+    );
+    if let Some(classification) = classification_line(question) {
+        kit::paragraph(ui, classification, Font::Body, kit::SECONDARY);
+    }
     let mut notes = false;
     match remote {
         Some(remote) => {

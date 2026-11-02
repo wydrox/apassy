@@ -476,6 +476,7 @@ mod tests {
     /// The question of section 7.1 of the contract.
     fn question() -> QuestionInfo {
         QuestionInfo {
+            reason: Default::default(),
             id: 123_456_789_012_345,
             item_ids: vec![7, 9],
             project: Some(Project {

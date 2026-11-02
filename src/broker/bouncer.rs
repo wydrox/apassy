@@ -5,6 +5,7 @@
 //! Any failure gives [`BouncerVerdict::Unavailable`]. Unavailable is never an
 //! allowance.
 
+use super::route_diagnostics::ReasonKind;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -462,6 +463,7 @@ pub fn parse_answers(body: &[u8], asked: &[(&str, &str)]) -> BouncerVerdict {
 /// The bouncer decision for one request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
+    pub reason: ReasonKind,
     pub ask_owner: bool,
     /// Lowest certainty among the answers that the decision needed. `None` when the
     /// model did not decide.
@@ -584,6 +586,7 @@ pub fn decide_learned(
     }
     if let Some(pattern) = &learned.pattern {
         return Decision {
+            reason: ReasonKind::Other,
             ask_owner: false,
             confidence: None,
             note: format!(
@@ -611,6 +614,7 @@ pub(super) fn decide_routed(
 pub fn before_model(context: &DecisionContext<'_>) -> Option<Decision> {
     let ask = |note: String| {
         Some(Decision {
+            reason: ReasonKind::Other,
             ask_owner: true,
             confidence: None,
             note,
@@ -644,12 +648,20 @@ fn model_step(
     default_source: bool,
 ) -> Decision {
     let ask = |confidence, note: String| Decision {
+        reason: ReasonKind::ModelUnsure,
         ask_owner: true,
         confidence,
         note,
     };
     let BouncerVerdict::Scored { .. } = verdict else {
-        return ask(None, verdict.summary());
+        let mut decision = ask(None, verdict.summary());
+        decision.reason = if matches!(verdict, BouncerVerdict::Unavailable(reason) if reason.contains("timed out"))
+        {
+            ReasonKind::ModelTimeout
+        } else {
+            ReasonKind::ModelUnavailable
+        };
+        return decision;
     };
     let sensitive = context
         .declarations
@@ -702,6 +714,7 @@ fn model_step(
         needed.push(("rule_break", false, MIN_CONFIDENCE));
     }
     let mut failed = Vec::new();
+    let mut task_match_failed = false;
     let mut confidence: f64 = 1.0;
     for (name, want_true, level) in needed {
         let p = if name == "writes" && known_write {
@@ -715,6 +728,7 @@ fn model_step(
         if name == "writes" && known_write {
             failed.push("writes: a known write".to_owned());
         } else if support < level {
+            task_match_failed |= name == "task_match";
             failed.push(format!(
                 "{name} {}{:.0}% (needs {:.0}%)",
                 if want_true { "" } else { "not " },
@@ -756,6 +770,7 @@ fn model_step(
     };
     if failed.is_empty() {
         Decision {
+            reason: ReasonKind::Other,
             ask_owner: false,
             confidence: Some(confidence),
             note: format!(
@@ -770,14 +785,20 @@ fn model_step(
             ),
         }
     } else {
-        ask(
+        let mut decision = ask(
             Some(confidence),
             format!(
                 "Below the needed certainty: {}. {}{calibrated}{source_note}",
                 failed.join(", "),
                 verdict.summary()
             ),
-        )
+        );
+        decision.reason = if task_match_failed {
+            ReasonKind::LowTaskMatch
+        } else {
+            ReasonKind::ModelUnsure
+        };
+        decision
     }
 }
 

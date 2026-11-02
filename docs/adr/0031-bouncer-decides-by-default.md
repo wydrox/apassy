@@ -91,3 +91,26 @@ actual token budget before inference and rejects requests that would hide the
 command through truncation. Agent text claiming model-state fields or answers is
 an analysis flag, including in command arguments. These are bounded defenses; a
 classifier is not a proof that arbitrary adversarial prose cannot affect scores.
+
+## Owner-visible reasons and route counters, 2026-11-02
+
+Agent question cards lead with the broker's blocking reason. An unconfirmed
+classification appears below it as a secondary question. Deny and Allow Once
+remain the main run answers; classification answers and owner checks keep their
+existing meaning. Routing order, thresholds and vetoes do not change.
+
+Settings > Bouncer also shows process-lifetime route counters, including the top
+five reasons for asking the owner. These are separate from the encrypted log's
+calendar-day counts. A model response that needs the owner counts as asked, not
+as a model refusal. Connector fixed-profile decisions never count as inference.
+Counters reset on app restart and are available without reading the vault.
+
+Each process or connector request emits one info tracing event, including early
+access refusals. The existing narrow diagnostics sink accepts the route target.
+Its payload contains only route, reason, inference-attempted, verdict, latency
+bucket and task-match bucket. Counters retain the same closed payload. No item
+names, IDs, values, commands, prompts, paths, hosts or agent names are recorded.
+The observation ends at the route decision, before the owner wait or execution;
+it does not claim that a command succeeded. Retries count as separate requests.
+Legacy remote cards retain their existing broker explanation as the headline;
+the relay envelope and authentication contract do not change.

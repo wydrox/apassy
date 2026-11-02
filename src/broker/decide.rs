@@ -24,6 +24,7 @@
 //! Process runs (ADR 0006) have their own check order in [`super::run`].
 //! User prompts from host hooks (goal item B6) are in [`super::prompts`].
 
+use super::route_diagnostics::{Attempt, ReasonKind, RouteKind, VerdictKind};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -746,6 +747,7 @@ fn call(
     operation: &str,
     params: &BTreeMap<String, String>,
 ) -> WireResponse {
+    let mut diagnostic = Attempt::new();
     let vault = &ctx.vault;
     let (checked, model_set) = {
         let mut guard = lock(vault);
@@ -776,9 +778,34 @@ fn call(
         ));
     }
     let asked = !why.is_empty();
+    let reason = if checked.standing == Standing::AlwaysAsk || checked.always_ask {
+        ReasonKind::AlwaysAsk
+    } else if checked
+        .declaration
+        .as_ref()
+        .is_some_and(Declaration::is_production)
+    {
+        ReasonKind::Production
+    } else if asked {
+        ReasonKind::ModelUnavailable
+    } else {
+        ReasonKind::Connector
+    };
+    diagnostic.event.route = if asked {
+        RouteKind::Owner
+    } else {
+        RouteKind::Connector
+    };
+    diagnostic.event.reason = reason;
+    diagnostic.event.verdict = if asked {
+        VerdictKind::Asked
+    } else {
+        VerdictKind::Allowed
+    };
+    diagnostic.finish_route();
     let mut answered_on = "";
     if asked {
-        match ask_owner(ctx, &checked, item_id, params, &why.join(" ")) {
+        match ask_owner(ctx, &checked, item_id, params, &why.join(" "), reason) {
             Ok(on) => answered_on = on,
             Err(response) => return response,
         }
@@ -879,6 +906,7 @@ fn ask_owner(
     item_id: u64,
     params: &BTreeMap<String, String>,
     why: &str,
+    reason: ReasonKind,
 ) -> Result<&'static str, WireResponse> {
     let unconfirmed = checked
         .declaration
@@ -916,6 +944,7 @@ fn ask_owner(
         agent_request: String::new(),
         remember: None,
         question: QuestionInfo {
+            reason,
             id: 0,
             item_ids: vec![item_id],
             project: None,

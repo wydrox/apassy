@@ -7,7 +7,8 @@ impl Subscriber for OwnerDiagnostics {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         matches!(
             metadata.target(),
-            "apassy::broker::approvals::owner_window"
+            "apassy::broker::route"
+                | "apassy::broker::approvals::owner_window"
                 | "apassy::broker::approvals::owner_auth"
                 | "apassy::native::owner_lifecycle"
                 | "apassy::desktop::owner_check"
@@ -30,7 +31,17 @@ impl Subscriber for OwnerDiagnostics {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 if matches!(
                     field.name(),
-                    "message" | "reason" | "event" | "generation" | "heartbeat_age_ms" | "biometry"
+                    "message"
+                        | "reason"
+                        | "event"
+                        | "generation"
+                        | "heartbeat_age_ms"
+                        | "biometry"
+                        | "route"
+                        | "inference_attempted"
+                        | "verdict"
+                        | "latency"
+                        | "task_match"
                 ) {
                     use std::fmt::Write;
                     let _ = write!(self.0, " {}={value:?}", field.name());
@@ -39,7 +50,12 @@ impl Subscriber for OwnerDiagnostics {
         }
         let mut fields = SafeFields::default();
         event.record(&mut fields);
-        eprintln!("owner-window{}", fields.0);
+        let prefix = if event.metadata().target() == "apassy::broker::route" {
+            "bouncer-route"
+        } else {
+            "owner-window"
+        };
+        eprintln!("{prefix}{}", fields.0);
     }
 }
 pub(super) fn install() {

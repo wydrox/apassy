@@ -27,6 +27,7 @@ pub mod project;
 pub mod prompts;
 pub mod proxy;
 pub mod replay;
+pub mod route_diagnostics;
 mod run;
 pub mod server;
 pub mod shadow;

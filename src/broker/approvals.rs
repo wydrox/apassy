@@ -111,6 +111,7 @@ pub struct PendingRun {
 /// action, and why the owner is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionInfo {
+    pub reason: crate::broker::route_diagnostics::ReasonKind,
     /// The ID of the waiting run. The queue sets it.
     pub id: u64,
     pub item_ids: Vec<u64>,
@@ -133,6 +134,7 @@ pub struct QuestionInfo {
 impl Default for QuestionInfo {
     fn default() -> Self {
         Self {
+            reason: Default::default(),
             id: 0,
             item_ids: Vec::new(),
             project: None,
@@ -567,6 +569,7 @@ fn template_of(run: &PendingRun) -> PendingRun {
     template.risk.clear();
     template.remember = None;
     template.question.why.clear();
+    template.question.reason = Default::default();
     template
 }
 
