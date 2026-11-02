@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Make the Touch ID frequency global for all owner actions, including revealing secrets, production approvals, settings and pairing. Replace heartbeat-gap revocation with synchronous lifecycle-helper state checks; lock, sleep, session changes and helper loss still end the window.
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.

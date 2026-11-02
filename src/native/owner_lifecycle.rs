@@ -1,10 +1,18 @@
-//! Owned helper stream. Drop kills and reaps it; EOF, gaps, malformed data,
-//! inactive sessions, and missed heartbeats revoke all outstanding window proofs.
+//! Owned helper stream. EOF, malformed data, sequence gaps and inactive sessions
+//! revoke; scheduling gaps alone do not. Every reuse probes this same process.
 use super::{NativeError, NativeHelper};
 use crate::broker::approvals::owner_window::OwnerWindow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc,
+};
+use std::time::Duration;
+
+type Pending = Arc<Mutex<Option<(u64, mpsc::Sender<()>)>>>;
+static NEXT_HELPER: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct OwnerLifecycle {
     child: Arc<Mutex<Child>>,
@@ -46,6 +54,38 @@ impl OwnerLifecycle {
             }
         };
         let shared = Arc::new(Mutex::new(child));
+        let identity = NEXT_HELPER.fetch_add(1, Ordering::Relaxed);
+        let pending: Pending = Default::default();
+        let replies = pending.clone();
+        let sender = shared.clone();
+        let serial = Mutex::new(0u64);
+        let failed = AtomicBool::new(false);
+        window.set_probe(crate::broker::approvals::owner_window::LifecycleProbe(
+            Arc::new(move || {
+                // Serialize requests so a late reply can never satisfy a later probe.
+                let mut id = serial.lock().unwrap();
+                if failed.load(Ordering::Relaxed) {
+                    return false;
+                }
+                *id = id.checked_add(1).expect("lifecycle request exhausted");
+                let (tx, rx) = mpsc::channel();
+                *pending.lock().unwrap() = Some((*id, tx));
+                let sent = sender
+                    .lock()
+                    .unwrap()
+                    .stdin
+                    .as_mut()
+                    .is_some_and(|stdin| writeln!(stdin, "{{\"probe\":{}}}", *id).is_ok());
+                let ok = sent && rx.recv_timeout(Duration::from_millis(500)).is_ok();
+                // Stop sending after failure: a suspended helper must never fill its
+                // stdin pipe and turn the next write into an unbounded wait.
+                if !ok {
+                    failed.store(true, Ordering::Relaxed);
+                }
+                *pending.lock().unwrap() = None;
+                ok
+            }),
+        ));
         let observed = window.clone();
         let reader = std::thread::spawn(move || {
             let mut input = BufReader::new(stdout);
@@ -63,6 +103,29 @@ impl OwnerLifecycle {
                 }
                 if !apply_event(&bytes, &mut sequence, &observed) {
                     break;
+                }
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    let Some(counter) = v["lock_counter"].as_u64() else {
+                        break;
+                    };
+                    let Some(locked) = v["screen_locked"].as_bool() else {
+                        break;
+                    };
+                    observed.snapshot(
+                        identity,
+                        counter,
+                        v["active"].as_bool() == Some(true) && !locked,
+                    );
+                    if let Some(id) = v["probe"].as_u64() {
+                        let mut pending = replies.lock().unwrap();
+                        if pending
+                            .as_ref()
+                            .is_some_and(|(expected, _)| *expected == id)
+                            && let Some((_, tx)) = pending.take()
+                        {
+                            let _ = tx.send(());
+                        }
+                    }
                 }
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
                     && v.get("idle_seconds").is_some()

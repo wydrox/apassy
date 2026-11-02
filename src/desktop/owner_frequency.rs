@@ -14,19 +14,18 @@ impl DesktopApp {
         proof: OwnerProof,
     ) {
         let window = self.owner_ui.session.owner_window.clone();
-        // The setting action can never spend an existing window.
+        // The exact setting action may spend the global owner window.
         let valid = self.owner_ui.session.epoch().is_some_and(|epoch| {
             proof
                 .check(&OwnerAction::ChangeOwnerFrequency { old, new }, &epoch)
                 .is_ok()
         });
         if !valid || window.policy() != old {
-            window.invalidate();
             self.set_err("The owner check changed. Try changing the setting again.");
             return;
         }
-        window.configure(OwnerFrequency::EveryTime);
         let Some(helper) = self.owner.helper.clone() else {
+            window.configure(OwnerFrequency::EveryTime);
             self.set_err(
                 "This build cannot save a protected owner-check setting. Every time is active.",
             );
@@ -65,7 +64,7 @@ impl DesktopApp {
                 self.owner_ui.session.owner_window.configure(policy);
                 self.owner.frequency_note = None;
                 if writing {
-                    self.set_ok("Saved for this Mac. The next action needs a fresh check.");
+                    self.set_ok("Saved for this Mac.");
                 }
             }
             Err(_) => {

@@ -970,9 +970,9 @@ impl OwnerRequest {
             Self::ExportDecisions => "Export the decision log to the command line.".to_owned(),
             Self::RegisterSetupAgent { name } => format!("Connect {} and let it see all credential names without values? Its token goes to the command line; the bouncer decides each use.", page_text(name)),
             Self::RegisterAgent { name } => format!("Register {} and issue its agent token to the command line?",page_text(name)),
-            Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac? The next action needs a fresh check.", new.label()),
+            Self::ChangeOwnerFrequency { new, .. } => format!("Change how often Apassy asks for Touch ID to {} on this Mac?", new.label()),
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
-            Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line. A fresh owner check is required because a command-line session can be inherited by an agent.", if *copy { "Copy" } else { "Show" }),
+            Self::CliCode { copy, .. } => format!("{} the current one-time code for the command line.", if *copy { "Copy" } else { "Show" }),
             Self::ShowCode { field, .. } => format!(
                 "Show the code of \"{}\" for 30 seconds. The other secret values stay hidden.",
                 super::owner_store::field_label(field)
@@ -1281,7 +1281,7 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
-            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can show a current one-time code with apassy code after a fresh owner check for each request. Grants, approvals, and new tokens still ask you here.".to_owned(),
+            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. Owner actions, including showing one-time codes, follow your Touch ID frequency setting.".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "Bind 1 credential to the environment variable below. Programs get the real value.".to_owned(),
                 count => format!(
@@ -1653,6 +1653,21 @@ impl DesktopApp {
             .check
             .as_ref()
             .is_some_and(|dialog| dialog.request.starts_touch_id());
+        if start
+            && self
+                .owner
+                .check
+                .as_ref()
+                .is_some_and(|d| d.request.is_ready())
+            && let Some(proof) = self.owner_gate().reuse_local(
+                self.owner.check.as_ref().unwrap().request.action(),
+                crate::broker::approvals::LocalWindowSource::LocalOwner,
+            )
+        {
+            let dialog = self.owner.check.take().expect("checked dialog");
+            self.finish_owner_check(dialog, proof);
+            return;
+        }
         if start && starts {
             self.probe_owner_biometry(ctx.cloned());
         }
@@ -1741,9 +1756,6 @@ impl DesktopApp {
         if index >= accounts.len() || index == *chosen {
             return;
         }
-        if dialog.running.is_some() {
-            self.owner_ui.session.owner_window.invalidate();
-        }
         *chosen = index;
         dialog.identity = next_check_dialog_identity();
         dialog.running = None;
@@ -1792,10 +1804,6 @@ impl DesktopApp {
     pub(crate) fn close_owner_check(&mut self, ctx: Option<&egui::Context>) {
         self.owner.check_probe = None;
         if let Some(mut dialog) = self.owner.check.take() {
-            self.owner_ui
-                .session
-                .owner_window
-                .invalidate_for("check_cancelled");
             dialog.passphrase.zeroize();
         }
         if let Some(ctx) = ctx {
@@ -2387,7 +2395,6 @@ impl DesktopApp {
         }
         // A request without an account signs nothing, whatever proof it gets.
         if !request.is_ready() {
-            self.owner_ui.session.owner_window.invalidate();
             drop(proof);
             self.set_note("Choose an account first. Nothing was signed.");
             return;
@@ -2405,7 +2412,6 @@ impl DesktopApp {
                 })
                 .unwrap_or(false);
             if !live {
-                self.owner_ui.session.owner_window.invalidate();
                 drop(proof);
                 self.set_note(
                     "The request ended before the owner check finished. Nothing was signed or filled.",
@@ -2418,9 +2424,6 @@ impl DesktopApp {
         }
         let before = self.status_seq;
         self.complete_owner_request(request, proof);
-        if self.status_seq != before && matches!(self.status_kind, super::StatusKind::Error) {
-            self.owner_ui.session.owner_window.invalidate();
-        }
         if let Some(ticket) = origin {
             self.answer_cli_ticket(ticket, before);
         }
@@ -2540,9 +2543,6 @@ impl DesktopApp {
             )),
         };
         dialog.running = None;
-        if result.is_err() {
-            self.owner_ui.session.owner_window.invalidate();
-        }
         match result {
             Ok(proof) => {
                 let Some(dialog) = self.owner.check.take() else {
@@ -2634,7 +2634,6 @@ impl DesktopApp {
         let typed = Ephemeral::take(&mut self.owner.unlock.setup_passphrase).into_zeroizing();
         super::ui::forget_secret_field(ctx, super::ui::TOUCH_ID_SETUP_FIELD);
         let Some(helper) = self.owner.helper.clone() else {
-            self.owner_ui.session.owner_window.invalidate();
             self.set_err(unlock::HELPER_MISSING_NOTE);
             return;
         };
@@ -2663,9 +2662,6 @@ impl DesktopApp {
                     );
                 }
             });
-            if result.is_err() {
-                window.invalidate();
-            }
             result.map(|()| "Touch ID unlock is on. Touch ID can unlock this vault file now. The passphrase still works.".to_owned())
                 .map_err(|err| err.message())
         }));
@@ -2721,15 +2717,10 @@ impl DesktopApp {
             };
             if let Some(result) = result {
                 self.owner.unlock.changing = None;
-                let fresh = self.owner.unlock.fresh_setup.take();
+                self.owner.unlock.fresh_setup.take();
                 match result {
                     Ok(message) => self.set_ok(message),
-                    Err(message) => {
-                        if fresh.is_some() {
-                            self.owner_ui.session.owner_window.invalidate();
-                        }
-                        self.set_err(message);
-                    }
+                    Err(message) => self.set_err(message),
                 }
                 self.refresh_unlock_setting(Some(ctx));
             }

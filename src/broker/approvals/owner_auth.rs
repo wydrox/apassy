@@ -93,7 +93,7 @@ pub enum OwnerAction {
         device: TrustedDevice,
         team: String,
     },
-    /// Fresh local access consent; deliberately absent from the owner-window allowlist.
+    /// Local consent for one exact access request.
     AllowAccessOnce {
         request_id: u64,
         digest: String,
@@ -116,7 +116,7 @@ pub enum OwnerAction {
     RegisterSetupAgent {
         name: String,
     },
-    /// Change the protected, device-local owner-check frequency. Always fresh.
+    /// Change the protected, device-local owner-check frequency.
     ChangeOwnerFrequency {
         old: super::OwnerFrequency,
         new: super::OwnerFrequency,
@@ -125,14 +125,14 @@ pub enum OwnerAction {
     Reveal {
         item_id: u64,
     },
-    /// Always-fresh CLI code: the owner socket cannot attest an interactive owner.
+    /// CLI code under the owner's global verification window.
     /// Bound to the exact item, OTP field and show/copy action.
     CliCode {
         item_id: u64,
         field: String,
         copy: bool,
     },
-    /// UI code reveal always requires a fresh check.
+    /// UI code reveal uses the global owner check.
     ShowCode {
         item_id: u64,
         field: String,
@@ -1110,21 +1110,8 @@ impl OwnerGate {
             );
             return None;
         }
-        // Current OS state is checked outside the vault mutex, in addition to the
-        // revocation stream and its bounded heartbeat at proof consumption.
-        if self
-            .touch_id
-            .as_ref()
-            .is_some_and(|h| !h.owner_session_active())
-        {
-            tracing::info!(
-                reason = "session_inactive",
-                heartbeat_age_ms = self.window.heartbeat_age_ms(),
-                "owner window reuse refused"
-            );
-            self.window.observe(false);
-            return None;
-        }
+        // ticket() synchronously probes the same lifecycle helper that observed
+        // the seed. A separate helper cannot attest intervening lock events.
         let (_, epoch) = self.session().ok()?;
         let (fence, method) = self.window.ticket(epoch)?;
         let mut proof = OwnerProof::issue(action, method, epoch);
@@ -1180,17 +1167,7 @@ impl OwnerGate {
             }
         }
         match &result {
-            Ok(proof)
-                if !matches!(
-                    action,
-                    OwnerAction::AnswerRemoteQuestion { .. }
-                        | OwnerAction::ChangeOwnerFrequency { .. }
-                ) =>
-            {
-                self.window.seed(proof.epoch, proof.method, generation)
-            }
-            Err(OwnerAuthError::Cancelled) => self.window.invalidate_for("check_cancelled"),
-            Err(_) => self.window.invalidate_for("check_failed"),
+            Ok(proof) => self.window.seed(proof.epoch, proof.method, generation),
             _ => {}
         }
         result
@@ -1635,12 +1612,109 @@ mod evaluation_tests {
 
     #[cfg(feature = "desktop")]
     #[test]
+    fn global_owner_source_removes_sensitive_action_exclusions() {
+        for action in [
+            OwnerAction::AllowAccessOnce {
+                request_id: 1,
+                digest: "test".into(),
+            },
+            OwnerAction::BackupVault {
+                path: "/tmp/synthetic.backup".into(),
+            },
+            OwnerAction::ExportDecisions,
+            OwnerAction::RegisterAgent {
+                name: "Synthetic".into(),
+            },
+            OwnerAction::RegisterSetupAgent {
+                name: "Synthetic".into(),
+            },
+            OwnerAction::ChangeOwnerFrequency {
+                old: super::super::OwnerFrequency::EveryTime,
+                new: super::super::OwnerFrequency::OneHour,
+            },
+            OwnerAction::Reveal { item_id: 1 },
+            OwnerAction::CliCode {
+                item_id: 1,
+                field: "otp".into(),
+                copy: false,
+            },
+            OwnerAction::ShowCode {
+                item_id: 1,
+                field: "otp".into(),
+            },
+            OwnerAction::CopyCode {
+                item_id: 1,
+                field: "otp".into(),
+            },
+            OwnerAction::CopyField {
+                item_id: 1,
+                field: "password".into(),
+                revision: 1,
+            },
+            OwnerAction::RemovePasskey {
+                item_id: 1,
+                revision: 1,
+            },
+            OwnerAction::RemoveOwnerAnswer { answer_id: 1 },
+            OwnerAction::ChangeGrant {
+                agent_id: 1,
+                item_id: 1,
+            },
+            OwnerAction::ChangeGrants {
+                agent_id: 1,
+                item_ids: vec![1],
+            },
+            OwnerAction::ShowAllCredentials { agent_id: 1 },
+            OwnerAction::ChangeRule {
+                agent_id: 1,
+                item_id: 1,
+            },
+            OwnerAction::ChangeItemRules { item_id: 1 },
+            OwnerAction::RotateToken { agent_id: 1 },
+            OwnerAction::ConnectAgent {
+                agent_id: 1,
+                show_all: true,
+            },
+            OwnerAction::ChangeTokenLifetime,
+            OwnerAction::ChangeCalibration { level: 80 },
+            OwnerAction::PromoteModel {
+                candidate_id: 1,
+                version: "synthetic".into(),
+            },
+            OwnerAction::RollbackModel { activation_id: 1 },
+            OwnerAction::OpenCliSession,
+            OwnerAction::BindVariables {
+                variables: vec![(1, "KEY".into())],
+            },
+            OwnerAction::PairCompanion {
+                device_id: "synthetic".into(),
+                device_name: "Synthetic".into(),
+                request_key: vec![1; 65],
+                approval_key: vec![2; 65],
+            },
+            OwnerAction::ConfirmSyncDevice {
+                link_id: 1,
+                device_name: "Synthetic".into(),
+                public_key: vec![1; 65],
+            },
+            OwnerAction::EnableRelayQuestions {
+                relay_url: "https://example.invalid".into(),
+                team_id: None,
+            },
+        ] {
+            assert!(LocalWindowSource::LocalOwner.permits(&action), "{action:?}");
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
     fn question_development_source_and_proof_are_exact() {
         let action = OwnerAction::QuestionDevelopment {
             run_id: 11,
             item_id: 7,
         };
         assert!(LocalWindowSource::DevelopmentClick.permits(&action));
+        assert!(LocalWindowSource::LocalOwner.permits(&action));
         for source in [
             LocalWindowSource::AllowOnceClick,
             LocalWindowSource::BrowserGesture,
@@ -1744,6 +1818,7 @@ mod evaluation_tests {
                 action: ActionKind::Read,
             },
         ] {
+            assert!(LocalWindowSource::LocalOwner.permits(&sensitive));
             for source in [
                 LocalWindowSource::AllowOnceClick,
                 LocalWindowSource::DevelopmentClick,
@@ -1776,6 +1851,8 @@ mod evaluation_tests {
 #[derive(Clone, Copy)]
 #[cfg(feature = "desktop")]
 pub(crate) enum LocalWindowSource {
+    /// An exact action selected in the local owner controller.
+    LocalOwner,
     BrowserGesture,
     AutoFill,
     AllowOnceClick,
@@ -1785,6 +1862,7 @@ pub(crate) enum LocalWindowSource {
 impl LocalWindowSource {
     fn permits(self, action: &OwnerAction) -> bool {
         match self {
+            Self::LocalOwner => true,
             Self::BrowserGesture => matches!(
                 action,
                 OwnerAction::FillLogin { .. }
@@ -1792,6 +1870,10 @@ impl LocalWindowSource {
                     | OwnerAction::CreateLogin { .. }
                     | OwnerAction::UpdateLogin { .. }
                     | OwnerAction::FillCode { .. }
+                    | OwnerAction::CreatePasskey {
+                        origin: Some(_),
+                        ..
+                    }
                     | OwnerAction::SignPasskey {
                         origin: Some(_),
                         ..
@@ -1802,6 +1884,7 @@ impl LocalWindowSource {
                 OwnerAction::FillSystemLogin { .. }
                     | OwnerAction::FillSystemCode { .. }
                     | OwnerAction::SignPasskey { origin: None, .. }
+                    | OwnerAction::CreatePasskey { origin: None, .. }
             ),
             Self::AllowOnceClick => matches!(action, OwnerAction::ApproveRun(_)),
             Self::DevelopmentClick => matches!(action, OwnerAction::QuestionDevelopment { .. }),

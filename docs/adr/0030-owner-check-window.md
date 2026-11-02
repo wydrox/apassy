@@ -1,5 +1,63 @@
 # ADR 0030 — How often to ask for Touch ID
 
+## Superseding owner decision — 2026-11-02: global window
+
+This section supersedes every narrower scope and heartbeat rule below. The chosen
+frequency is GLOBAL: every `OwnerAction` selected by the local owner controller
+consults the same window. This includes reveals, secret and OTP copies, CLI owner
+requests, backups, exports, passkey creation/removal, all agent decisions and
+durable grants, production, settings, pairing, devices and token changes. Exact
+question clicks, account selection, site checks and proof binding still apply.
+The window never autonomously chooses an agent answer. Remote signatures do not
+seed it; a local action answering a remote question can use it. Changing the
+passphrase and enabling Touch ID unlock still need the actual passphrase as input.
+Every time keeps asking each time. Successful Touch ID and passphrase vault unlock
+already seed the window, so the first fill does not require a second confirmation.
+
+Only the absolute deadline, real screen lock, system sleep, session resignation
+(logout/fast user switch), vault lock (including auto-lock), app quit or lifecycle
+helper failure/restart end authority. Display sleep and scheduling/heartbeat gaps
+do not. Cancelled or failed actions do not clear a previously valid window.
+Changing frequency preserves the original verification timestamp, applying the new
+duration to it; failed protected-policy storage still falls back to Every time.
+Switching/restoring a vault locks/replaces the session and changes its epoch.
+
+The signed, parent-checked lifecycle helper numbers every message and maintains a
+monotonically increasing lock counter for explicit lock/sleep/session events.
+Rust assigns each spawned helper a distinct identity. Seeding stores that identity
+and counter. Before issuing, consuming or delivering a reused proof, Rust sends a
+numbered synchronous probe to that SAME helper and waits at most 500 ms for its
+matching response. Probes are serialized; late responses cannot satisfy later
+requests. A timeout disables reuse until the helper is restarted, preventing pipe
+backlog and unbounded writes. Fresh authentication remains available.
+
+The helper reads requests off-main and schedules replies on its notification run
+loop after explicitly draining pending default-mode run-loop sources, with
+synchronous notification callbacks. Pending distributed lock notifications therefore
+run before the response after suspension. The reply samples
+`CGSessionCopyCurrentDictionary` (console, login and screen-lock state) and the
+explicit `IOConsoleLocked` registry state; unknown state fails closed. Counter or
+helper identity changes, inactive/locked snapshots, malformed messages, sequence
+gaps, EOF and missing replies revoke reuse and force a fresh owner check. Existing
+explicit revocation events remain. Heartbeats supply idle sampling and diagnostics,
+not a timing-based authority lease.
+
+Security argument: delayed scheduling alone conveys no evidence of a lock. A
+fresh response from the same observer, with the same counter and a positively
+active/unlocked OS snapshot, attests continuity without relying on heartbeat
+cadence. An observer suspended across lock/unlock must process its queued lock
+events before replying; an observer unable to reply grants nothing. Unlock events
+never restore an old verification. Generation, vault epoch, exact action and
+absolute deadline are still checked at use and delivery.
+
+**Explicitly accepted residual risk:** anyone at the unlocked Mac within the
+window can act as the owner, including revealing/copying secrets, approving
+production access, pairing devices and changing settings. This includes synthetic
+UI input and an inherited CLI owner session. The owner explicitly chose this
+global policy. No physical Touch ID, App Nap, lock/sleep or signed-device
+acceptance is established by fixture tests; CI and isolated device acceptance
+remain required.
+
 Date: 2026-10-31. Status: owner-approved design; implementation proposed for review.
 Supersedes ADR 0021's every-fill rule for the opt-in modes below. Every time remains
 the default. The owner's final decisions supersede the narrower scope proposed in

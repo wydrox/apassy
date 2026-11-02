@@ -1659,7 +1659,7 @@ fn add_detects_and_adds_each_credential_of_a_paste() {
 }
 
 #[test]
-fn owner_window_backup_export_and_token_issue_stay_fresh() {
+fn owner_window_backup_export_and_token_issue_reuse() {
     use crate::broker::approvals::{CheckMethod, OwnerFrequency};
     let dir = TempDir::new().unwrap();
     let (mut app, _) = unlocked_app_with_item(&dir);
@@ -1683,13 +1683,10 @@ fn owner_window_backup_export_and_token_issue_stay_fresh() {
             window.generation(),
         );
         let answer = ask(&mut app, &ctx, Some(&token), command);
-        assert!(app.owner.check.is_some());
-        assert!(answer.try_recv().is_err());
-        app.close_owner_check(None);
-        assert!(!now(&answer).ok);
+        assert!(app.owner.check.is_none());
+        assert!(now(&answer).ok);
     }
-    assert!(!dir.path().join("fresh.backup").exists());
-    assert!(app.owner_ui.session.agents().unwrap().is_empty());
+    assert!(dir.path().join("fresh.backup").exists());
 }
 
 #[test]
@@ -1798,7 +1795,7 @@ fn raw_registration_proof_cannot_connect_the_full_catalog() {
 }
 
 #[test]
-fn cli_code_requires_fresh_checks_even_with_an_inherited_session_and_open_window() {
+fn cli_code_uses_global_window_after_owner_confirmation() {
     use crate::broker::approvals::{CheckMethod, OwnerFrequency};
     use crate::desktop::clipboard::{CodeClipboard, memory::MemoryBoard};
     let dir = TempDir::new().unwrap();
@@ -1883,16 +1880,8 @@ fn cli_code_requires_fresh_checks_even_with_an_inherited_session_and_open_window
             copy: true,
         },
     );
-    assert!(
-        copied.try_recv().is_err(),
-        "a bearer session is not owner provenance"
-    );
-    assert!(app.owner.check.is_some());
-    assert!(
-        board.text().is_none(),
-        "no code reaches the clipboard before approval"
-    );
-    app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+    assert!(app.owner.check.is_none());
+    assert!(board.text().is_some());
     let copied = now(&copied);
     assert!(copied.ok);
     assert!(app.owner.check.is_none());
@@ -1910,6 +1899,6 @@ fn cli_code_requires_fresh_checks_even_with_an_inherited_session_and_open_window
             copy: false,
         },
     );
-    assert!(fresh.try_recv().is_err());
-    assert!(app.owner.check.is_some());
+    assert!(now(&fresh).ok);
+    assert!(app.owner.check.is_none());
 }

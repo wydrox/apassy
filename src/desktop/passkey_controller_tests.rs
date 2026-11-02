@@ -2356,15 +2356,14 @@ fn owner_window_browser_mutations_and_codes_keep_their_exact_scope() {
         },
     );
     assert!(!now(&answer).ok);
-    // Registering a passkey remains a fresh check inside the same window.
+    // Registration shares the global window, retaining request/account binding.
     let answer = ask_gesture(
         &mut app,
         &ctx,
         Command::PasskeyCreate(create_request("new@example.com", &[], &[-7])),
     );
-    assert!(app.owner.check.is_some());
-    assert!(answer.try_recv().is_err());
-    app.close_owner_check(None);
+    assert!(app.owner.check.is_none());
+    assert!(now(&answer).ok);
 }
 #[test]
 fn owner_window_passkey_get_skips_prompt_and_sets_up_uv() {
@@ -2396,7 +2395,7 @@ fn owner_window_passkey_get_skips_prompt_and_sets_up_uv() {
     assert!(answer.try_recv().is_err());
 }
 #[test]
-fn owner_window_setting_change_and_reveal_stay_fresh() {
+fn owner_window_setting_change_and_reveal_reuse_locally() {
     use crate::broker::approvals::{LocalWindowSource, OwnerFrequency};
     let dir = TempDir::new().unwrap();
     let mut app = unlocked_app(&dir);
@@ -2409,6 +2408,11 @@ fn owner_window_setting_change_and_reveal_stay_fresh() {
             new: OwnerFrequency::OneHour,
         },
     ] {
+        assert!(
+            app.owner_gate()
+                .reuse_local(action.clone(), LocalWindowSource::LocalOwner)
+                .is_some()
+        );
         for source in [
             LocalWindowSource::BrowserGesture,
             LocalWindowSource::AutoFill,
@@ -2421,27 +2425,8 @@ fn owner_window_setting_change_and_reveal_stay_fresh() {
             );
         }
     }
-    app.ask_owner(
-        OwnerRequest::ChangeOwnerFrequency {
-            old: OwnerFrequency::FiveMinutes,
-            new: OwnerFrequency::OneHour,
-        },
-        None,
-    );
-    assert!(app.owner.check.is_some());
-    app.confirm_owner_now(OwnerCheck::passphrase("wrong-synthetic-passphrase"))
-        .unwrap_err();
-    assert_eq!(
-        app.owner_ui.session.owner_window.policy(),
-        OwnerFrequency::FiveMinutes
-    );
-    assert!(
-        app.owner_ui
-            .session
-            .owner_window
-            .ticket(app.owner_ui.session.epoch().unwrap())
-            .is_none()
-    );
+    app.ask_owner(OwnerRequest::Reveal { item_id: item }, None);
+    assert!(app.owner.check.is_none());
 }
 #[test]
 fn owner_window_proofs_are_exact_action_and_vault_bound() {

@@ -1243,7 +1243,7 @@ async function startPasskey(session, message) {
   const wire = wireRequest(request, peer.origin, clientData, rid);
   // Only the isolated bridge can attest a browser user activation. Page data
   // never carries a window, deadline, secret, or reusable approval.
-  if (message.trustedGesture === true && request.op === "get") wire.trusted_gesture = true;
+  if (message.trustedGesture === true) wire.trusted_gesture = true;
   session.expect = {
     op: request.op,
     rid,

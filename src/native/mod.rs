@@ -1183,18 +1183,6 @@ impl NativeHelper {
         }
         Ok(())
     }
-    #[cfg(all(feature = "vault", feature = "desktop"))]
-    pub(crate) fn owner_session_active(&self) -> bool {
-        self.call(
-            &self.helper,
-            request("owner_session_active"),
-            self.timeouts.quick,
-        )
-        .ok()
-        .and_then(|v| v.get("active").and_then(Value::as_bool))
-        .unwrap_or(false)
-    }
-
     /// Send one request and return the fields of a successful response.
     fn call(
         &self,
