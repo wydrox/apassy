@@ -533,14 +533,25 @@ pub(super) fn restore_now(app: &mut DesktopApp, ctx: &egui::Context) {
 }
 
 fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    mark(ui, Icon::Lock, egui::Color32::from_rgb(99, 99, 104));
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
+        ui.painter().rect_filled(
+            rect.translate(Vec2::new(0.0, 2.0)),
+            16,
+            egui::Color32::from_black_alpha(22),
+        );
+        kit::paint_app_logo(ui.painter(), rect);
+    });
+    ui.add_space(14.0);
     let file = app
         .owner_ui
         .session
         .location()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
+    let touch_id = touch_id_ready(app);
     let subtitle = match app.current_vault_name() {
+        Some(name) if touch_id => format!("Use Touch ID or type the passphrase of “{name}”."),
         Some(name) => format!("Type the passphrase of “{name}” to unlock it."),
         None => "Type your passphrase to unlock the vault.".to_owned(),
     };
@@ -548,6 +559,20 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
     vaults::start_notices(app, ui);
     super::sync::unlock_notices(app, ui);
     vaults::unlock_picker(app, ui);
+    let (focused, minimized) = ui
+        .ctx()
+        .input(|i| (i.viewport().focused, i.viewport().minimized));
+    if should_auto_start_touch_id(
+        touch_id_ready(app),
+        app.owner.unlock.unlocking.is_some(),
+        app.owner.check.is_some(),
+        focused,
+        minimized,
+        app.owner.unlock.auto_started,
+    ) {
+        app.owner.unlock.auto_started = true;
+        app.start_touch_id_unlock(ui.ctx());
+    }
     draw_unlock_card(app, ui);
     ui.add_space(14.0);
     ui.vertical_centered(|ui| {
@@ -577,6 +602,10 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
 /// The passphrase field, Unlock, and Touch ID when it is set up. The field takes the
 /// focus when nothing else has it.
 pub(super) fn draw_unlock_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let touch_id = touch_id_ready(app);
+    if touch_id {
+        touch_id_unlock(app, ui);
+    }
     let ctx = ui.ctx().clone();
     let mut submit = false;
     kit::section(ui, None, None, |s| {
@@ -596,10 +625,23 @@ pub(super) fn draw_unlock_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
             field.request_focus();
         }
     });
-    if kit::wide_button(ui, "Unlock", Style::Prominent).clicked() || submit {
+    if kit::wide_button(
+        ui,
+        "Unlock",
+        if touch_id {
+            Style::Bordered
+        } else {
+            Style::Prominent
+        },
+    )
+    .clicked()
+        || submit
+    {
         unlock_with_passphrase(app, &ctx);
     }
-    touch_id_unlock(app, ui);
+    if !touch_id {
+        touch_id_unlock(app, ui);
+    }
 }
 
 /// Unlock with the typed passphrase. The field and its undo history are erased first
@@ -612,6 +654,8 @@ pub(crate) fn unlock_with_passphrase(app: &mut DesktopApp, ctx: &egui::Context) 
     // Sync before the owner sees the list (ADR 0014). A sync problem does not stop the
     // unlock.
     let loaded = if result.is_ok() {
+        app.owner.unlock.unlocking = None;
+        app.owner.unlock.check_generation = None;
         app.place = Place::CREDENTIALS;
         app.sync_after_unlock()
     } else {
@@ -638,13 +682,21 @@ fn touch_id_unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let touch_id = setting.method == UnlockMethod::TouchId;
     if touch_id {
         ui.add_space(8.0);
-        if unlock.unlocking.is_some() {
-            kit::tone_note(
-                ui,
-                "Waiting for Touch ID. Touch the sensor, or cancel the macOS prompt.",
-                Tone::Warning,
-            );
-        } else if kit::wide_button(ui, "Unlock with Touch ID", Style::Bordered).clicked() {
+        let waiting = unlock.unlocking.is_some();
+        let response = ui
+            .add_enabled_ui(!waiting, |ui| {
+                kit::wide_button(
+                    ui,
+                    if waiting {
+                        "Waiting for Touch ID…"
+                    } else {
+                        "Unlock with Touch ID"
+                    },
+                    Style::Prominent,
+                )
+            })
+            .inner;
+        if response.clicked() {
             let ctx = ui.ctx().clone();
             app.start_touch_id_unlock(&ctx);
         }
@@ -665,4 +717,44 @@ fn enter_pressed(field: &egui::Response) -> bool {
         && field
             .ctx
             .input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter))
+}
+
+fn touch_id_ready(app: &DesktopApp) -> bool {
+    app.owner.unlock.reading.is_none()
+        && app.owner.unlock.path == app.owner_ui.session.vault_path()
+        && app
+            .owner
+            .unlock
+            .setting
+            .as_ref()
+            .is_some_and(|s| s.method == UnlockMethod::TouchId)
+}
+
+fn should_auto_start_touch_id(
+    ready: bool,
+    running: bool,
+    checking: bool,
+    focused: Option<bool>,
+    minimized: Option<bool>,
+    started: bool,
+) -> bool {
+    ready && !running && !checking && focused == Some(true) && minimized != Some(true) && !started
+}
+
+#[cfg(test)]
+mod touch_id_auto_tests {
+    use super::should_auto_start_touch_id as decide;
+    #[test]
+    fn auto_start_requires_every_condition_and_runs_only_once() {
+        assert!(decide(true, false, false, Some(true), Some(false), false));
+        assert!(!decide(false, false, false, Some(true), Some(false), false));
+        assert!(!decide(true, true, false, Some(true), Some(false), false));
+        assert!(!decide(true, false, true, Some(true), Some(false), false));
+        for focus in [None, Some(false)] {
+            assert!(!decide(true, false, false, focus, Some(false), false));
+        }
+        assert!(!decide(true, false, false, Some(true), Some(true), false));
+        // Cancel/failure clears the task, but does not clear the appearance latch.
+        assert!(!decide(true, false, false, Some(true), Some(false), true));
+    }
 }

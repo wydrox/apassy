@@ -1463,6 +1463,7 @@ fn next_check_dialog_identity() -> u64 {
 /// Touch ID unlock state for the open vault file.
 #[derive(Default)]
 pub(crate) struct UnlockState {
+    pub(crate) auto_started: bool,
     /// The vault file of `setting`.
     pub(crate) path: Option<PathBuf>,
     pub(crate) setting: Option<UnlockSetting>,
@@ -2596,6 +2597,11 @@ impl DesktopApp {
     pub(crate) fn refresh_unlock_setting(&mut self, ctx: Option<&egui::Context>) {
         let path = self.owner_ui.session.vault_path();
         let unlock = &mut self.owner.unlock;
+        if unlock.path != path {
+            unlock.auto_started = false;
+            unlock.unlocking = None;
+            unlock.check_generation = None;
+        }
         unlock.path.clone_from(&path);
         unlock.setting = None;
         unlock.reading = match (self.owner.helper.clone(), path) {
@@ -2753,6 +2759,11 @@ impl DesktopApp {
         result: Result<Zeroizing<String>, TouchIdUnlockError>,
         ctx: &egui::Context,
     ) {
+        if !self.owner_ui.session.is_locked() {
+            self.owner.unlock.check_generation = None;
+            drop(result); // Zeroizing erases a late key; errors are stale too.
+            return;
+        }
         let key = match result {
             Ok(key) => key,
             Err(err) => {
@@ -2810,6 +2821,9 @@ impl DesktopApp {
     /// Lock the vault. Waiting runs end and stay in the inbox. Typed secrets and their
     /// undo history are erased (key-memory review F1, F3).
     pub(crate) fn lock_vault(&mut self, ctx: Option<&egui::Context>) {
+        self.owner.unlock.auto_started = false;
+        self.owner.unlock.unlocking = None;
+        self.owner.unlock.check_generation = None;
         super::ui::invalidate_notifications(self);
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
