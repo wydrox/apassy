@@ -71,12 +71,35 @@ fn connect_persists_before_network_and_adopts_only_questions_after_restart() {
     assert!(!bodies.contains("key_pkcs8"));
 }
 
+/// One saved Connect attempt through its life: a short edge rate limit reports its
+/// retry-after and keeps the same key; a lost response on the live 0.5.8 relay keeps the
+/// key and explains that recovery is unavailable; once the relay supports recovery
+/// (F06), the same key recovers with a fresh possession proof.
 #[test]
-fn lost_response_on_live_058_keeps_the_key_and_explains_recovery_is_unavailable() {
+fn a_saved_connect_key_survives_a_rate_limit_and_a_lost_response_until_recovery() {
     let relay = FakeRelay::start();
     let dir = TempDir::new().unwrap();
     let mut vault = vault(&dir);
     let pending = prepare_connect(&mut vault, &relay.url, "Free", "Mac").unwrap();
+    // A short edge rate limit reports retry-after and keeps the same key.
+    relay.fail_next("POST /v1/connect", 1, 429);
+    assert_eq!(
+        create_connect(&pending).unwrap_err(),
+        ConnectError::TryLater(2)
+    );
+    assert_eq!(
+        vault.pending_connect().unwrap().unwrap().key_pkcs8,
+        pending.key_pkcs8,
+        "the rate limit keeps the same key"
+    );
+    assert!(ConnectError::TryLater(2).to_string().contains("2 seconds"));
+    assert!(
+        ConnectError::TryLater(2)
+            .to_string()
+            .contains("will be reused")
+    );
+    // A lost response on the live 0.5.8 relay keeps the key and explains that recovery
+    // is unavailable.
     relay.lose_next_answers("POST /v1/connect", 1);
     assert_eq!(create_connect(&pending).unwrap_err(), ConnectError::KeyUsed);
     vault.lock().unwrap();
@@ -90,25 +113,22 @@ fn lost_response_on_live_058_keeps_the_key_and_explains_recovery_is_unavailable(
             .to_string()
             .contains("Your key is saved")
     );
-}
-
-#[test]
-fn lost_response_recovers_with_fresh_possession_proof_when_f06_becomes_available() {
-    let relay = FakeRelay::start();
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let pending = prepare_connect(&mut vault, &relay.url, "Free", "Mac").unwrap();
-    relay.lose_next_answers("POST /v1/connect", 1);
-    assert_eq!(create_connect(&pending).unwrap_err(), ConnectError::KeyUsed);
-    // Same saved attempt, relay upgraded, app restarted: no rotation and no new team.
+    // Same saved attempt, relay upgraded (F06), app restarted: it recovers with a fresh
+    // possession proof, no rotation and no new team.
     relay.support_connect_recovery();
     vault.lock().unwrap();
     vault.unlock(PASS).unwrap();
     let retry = vault.pending_connect().unwrap().unwrap();
     let membership = create_connect(&retry).unwrap();
-    assert_eq!(pending.key_pkcs8, membership.key_pkcs8);
+    assert_eq!(
+        pending.key_pkcs8, membership.key_pkcs8,
+        "the recovered membership has the saved key"
+    );
     let bodies = relay.request_bodies();
-    assert!(bodies.iter().any(|body| body.contains("recovery_nonce")));
+    assert!(
+        bodies.iter().any(|body| body.contains("recovery_nonce")),
+        "the recovery sends a fresh possession proof"
+    );
     vault.keep_connect_result(&membership).unwrap();
     adopt_questions_team(&mut vault, &membership, "Mac").unwrap();
 }
@@ -282,29 +302,6 @@ fn confirmed_join_hands_keys_only_to_the_confirmed_device_and_preserves_revocati
         channel
             .seal(&mac, &membership.team_id, &link.public_key)
             .is_err()
-    );
-}
-
-#[test]
-fn a_short_edge_rate_limit_reports_retry_after_and_keeps_the_same_key() {
-    let relay = FakeRelay::start();
-    let dir = TempDir::new().unwrap();
-    let mut vault = vault(&dir);
-    let pending = prepare_connect(&mut vault, &relay.url, "Free", "Mac").unwrap();
-    relay.fail_next("POST /v1/connect", 1, 429);
-    assert_eq!(
-        create_connect(&pending).unwrap_err(),
-        ConnectError::TryLater(2)
-    );
-    assert_eq!(
-        vault.pending_connect().unwrap().unwrap().key_pkcs8,
-        pending.key_pkcs8
-    );
-    assert!(ConnectError::TryLater(2).to_string().contains("2 seconds"));
-    assert!(
-        ConnectError::TryLater(2)
-            .to_string()
-            .contains("will be reused")
     );
 }
 
