@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
+
 ### Fixed
 
 - Agent questions show why the owner must answer. Unconfirmed classification stays secondary.
