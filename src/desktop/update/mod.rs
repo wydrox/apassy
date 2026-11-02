@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn restart_requires_every_safety_condition() {
         for bits in 0u8..64 {
-            let b = |n| bits & (1 << n) != 0;
+            let b = |n: u8| bits & (1u8 << n) != 0;
             assert_eq!(
                 super::should_restart(b(0), b(1), b(2), b(3), b(4), b(5)),
                 bits == 7
