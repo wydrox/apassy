@@ -230,6 +230,13 @@ fn push_and_pull_between_two_macs() {
     let row_b = vault_b.relay_device().expect("row").expect("row");
     assert_ne!(row_a.device_id, row_b.device_id);
     assert_ne!(row_a.public_key, row_b.public_key);
+    // "Received by <Mac>": a Mac that merged a pulled version tells the relay.
+    let b_id = row_b.device_id;
+    assert_eq!(
+        relay.receipts().get(&b_id),
+        Some(&1),
+        "the adoption of version 1"
+    );
 
     vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
     assert!(b.sync.local_changed(&vault_b).expect("changed"));
@@ -241,6 +248,19 @@ fn push_and_pull_between_two_macs() {
     assert_eq!(pulled.merge.expect("merge").inserted, 1);
     assert_eq!(titles(&vault_a), ["Alpha", "Beta"]);
     assert_eq!(a.sync.state().unwrap().unwrap().last_remote_version, 2);
+    let a_id = row_a.device_id;
+    assert_eq!(
+        relay.receipts().get(&a_id),
+        Some(&2),
+        "the merge of the pulled version 2"
+    );
+    let receipts = a.sync.receipts(&vault_a).expect("receipts");
+    assert!(
+        receipts
+            .iter()
+            .any(|receipt| receipt.device_id == a_id && receipt.version == 2),
+        "the receipts list the merge of version 2"
+    );
 
     // The pushed copy never carries the device key of a Mac.
     let snapshot_heads = relay.heads();
@@ -249,6 +269,30 @@ fn push_and_pull_between_two_macs() {
         HeadFields::parse(&snapshot_heads[1].text).unwrap().previous,
         snapshot_heads[0].hash(),
         "the chain links"
+    );
+
+    // The receipts are read from the version that this Mac saw: the answer has no
+    // chain of older heads.
+    for n in 0..2 {
+        vault_a
+            .add(item(&format!("Item {n}"), "SYNTH-x"))
+            .expect("add");
+        a.sync.sync(&mut vault_a).expect("push");
+    }
+    let before = relay.log().len();
+    a.sync.receipts(&vault_a).expect("receipts");
+    let asked: Vec<String> = relay.log()[before..]
+        .iter()
+        .filter(|line| line.starts_with("GET /v1/sync/head"))
+        .cloned()
+        .collect();
+    assert_eq!(asked.len(), 1, "one head read for the receipts: {asked:?}");
+    let state = a.sync.state().unwrap().unwrap();
+    assert_eq!(state.last_remote_version, 4);
+    assert_eq!(
+        relay.last_since(),
+        Some(4),
+        "the receipts ask from the version this Mac saw"
     );
 }
 
@@ -281,8 +325,10 @@ fn a_wrong_passphrase_at_adoption_makes_no_file_and_the_download_stays() {
     assert_eq!(report.link.device_id, joined.device_id());
 }
 
+/// A push that loses one round to a push of the other Mac merges and pushes again, and
+/// nothing is lost; three lost rounds in a row leave the change for the next sync.
 #[test]
-fn a_412_merges_and_pushes_again_and_nothing_is_lost() {
+fn a_412_merges_and_pushes_again_and_three_lost_rounds_leave_the_change() {
     let Pair {
         _root,
         relay,
@@ -293,13 +339,14 @@ fn a_412_merges_and_pushes_again_and_nothing_is_lost() {
         ..
     } = pair();
     let vault_a = Arc::new(Mutex::new(vault_a));
+
+    // One lost round (412): it merges and pushes again, and nothing is lost.
     vault_a
         .lock()
         .unwrap()
         .add(item("From A", "SYNTH-a"))
         .expect("add");
     vault_b.add(item("From B", "SYNTH-b")).expect("add");
-
     // Mac A pushes while the push of Mac B is on its way: both push at version 1.
     let other = a.sync.clone();
     let other_vault = Arc::clone(&vault_a);
@@ -319,40 +366,29 @@ fn a_412_merges_and_pushes_again_and_nothing_is_lost() {
     );
     assert_eq!(relay.version(), 3);
     assert_eq!(titles(&vault_b), ["Alpha", "From A", "From B"]);
+    {
+        let mut vault_a = vault_a.lock().unwrap();
+        a.sync.sync(&mut vault_a).expect("pull");
+        assert_eq!(titles(&vault_a), ["Alpha", "From A", "From B"]);
+        assert_eq!(
+            vault_a
+                .reveal(
+                    vault_a
+                        .search("From B")
+                        .unwrap()
+                        .first()
+                        .expect("From B")
+                        .id,
+                    "token"
+                )
+                .unwrap()
+                .expose(),
+            "SYNTH-b"
+        );
+    }
 
-    let mut vault_a = vault_a.lock().unwrap();
-    a.sync.sync(&mut vault_a).expect("pull");
-    assert_eq!(titles(&vault_a), ["Alpha", "From A", "From B"]);
-    assert_eq!(
-        vault_a
-            .reveal(
-                vault_a
-                    .search("From B")
-                    .unwrap()
-                    .first()
-                    .expect("From B")
-                    .id,
-                "token"
-            )
-            .unwrap()
-            .expose(),
-        "SYNTH-b"
-    );
-}
-
-#[test]
-fn three_lost_rounds_leave_the_change_for_the_next_sync() {
-    let Pair {
-        _root,
-        relay,
-        a,
-        b,
-        vault_a,
-        mut vault_b,
-        ..
-    } = pair();
-    let vault_a = Arc::new(Mutex::new(vault_a));
-    vault_b.add(item("From B", "SYNTH-b")).expect("add");
+    // Three lost rounds in a row: the change stays for the next sync.
+    vault_b.add(item("From B late", "SYNTH-b")).expect("add");
     // Before each push of B, A pushes a change and arms the next hook: B loses three
     // rounds in a row.
     fn arm(relay: Arc<FakeRelay>, sync: RelaySync, vault: Arc<Mutex<Vault>>, left: u32) {
@@ -371,7 +407,11 @@ fn three_lost_rounds_leave_the_change_for_the_next_sync() {
     }
     let relay = Arc::new(relay);
     arm(Arc::clone(&relay), a.sync.clone(), Arc::clone(&vault_a), 3);
-    assert_eq!(b.sync.sync(&mut vault_b).unwrap_err(), SyncError::RelayBusy);
+    assert_eq!(
+        b.sync.sync(&mut vault_b).unwrap_err(),
+        SyncError::RelayBusy,
+        "three lost rounds"
+    );
     assert!(
         b.sync.local_changed(&vault_b).expect("changed"),
         "the change stays"
@@ -382,7 +422,15 @@ fn three_lost_rounds_leave_the_change_for_the_next_sync() {
     a.sync.sync(&mut vault_a).expect("pull");
     assert_eq!(
         titles(&vault_a),
-        ["A 1", "A 2", "A 3", "Alpha", "From B"],
+        [
+            "A 1",
+            "A 2",
+            "A 3",
+            "Alpha",
+            "From A",
+            "From B",
+            "From B late"
+        ],
         "nothing is lost"
     );
 }
@@ -1118,36 +1166,6 @@ fn a_mac_far_behind_reads_the_chain_in_pages() {
     );
 }
 
-/// "Received by <Mac>": a Mac that merged a pulled version tells the relay.
-#[test]
-fn a_merged_version_is_acknowledged() {
-    let Pair {
-        _root,
-        relay,
-        a,
-        b,
-        mut vault_a,
-        mut vault_b,
-    } = pair();
-    let b_id = vault_b.relay_device().unwrap().unwrap().device_id;
-    assert_eq!(
-        relay.receipts().get(&b_id),
-        Some(&1),
-        "the adoption of version 1"
-    );
-    vault_b.add(item("Beta", "SYNTH-beta")).expect("add");
-    b.sync.sync(&mut vault_b).expect("push version 2");
-    a.sync.sync(&mut vault_a).expect("pull version 2");
-    let a_id = vault_a.relay_device().unwrap().unwrap().device_id;
-    assert_eq!(relay.receipts().get(&a_id), Some(&2));
-    let receipts = a.sync.receipts(&vault_a).expect("receipts");
-    assert!(
-        receipts
-            .iter()
-            .any(|receipt| receipt.device_id == a_id && receipt.version == 2)
-    );
-}
-
 /// Contract sections 5 and 11: a lock ends a long poll in flight at once, and the
 /// dropped session signs in no more.
 #[test]
@@ -1478,36 +1496,6 @@ fn a_lone_mac_uses_the_relay_copy_after_a_relay_rollback() {
     let (mut copy, _) = other.sync.adopt(&joined, &download, PASS).expect("adopt");
     copy.unlock(PASS).expect("unlock");
     assert_eq!(titles(&copy), ["Alpha", "Beta", "Gamma"]);
-}
-
-/// The receipts are read from the version that this Mac saw: the answer has no chain of
-/// older heads.
-#[test]
-fn receipts_ask_from_the_version_this_mac_saw() {
-    let Pair {
-        _root,
-        relay,
-        a,
-        mut vault_a,
-        ..
-    } = pair();
-    for n in 0..3 {
-        vault_a
-            .add(item(&format!("Item {n}"), "SYNTH-x"))
-            .expect("add");
-        a.sync.sync(&mut vault_a).expect("push");
-    }
-    let before = relay.log().len();
-    a.sync.receipts(&vault_a).expect("receipts");
-    let asked: Vec<String> = relay.log()[before..]
-        .iter()
-        .filter(|line| line.starts_with("GET /v1/sync/head"))
-        .cloned()
-        .collect();
-    assert_eq!(asked.len(), 1, "{asked:?}");
-    let state = a.sync.state().unwrap().unwrap();
-    assert_eq!(state.last_remote_version, 4);
-    assert_eq!(relay.last_since(), Some(4));
 }
 
 /// A lock ends a download in flight at once (`forget`), and the sync ends as locked.
