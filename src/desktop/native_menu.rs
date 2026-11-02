@@ -307,6 +307,19 @@ mod tests {
         }
     }
 
+    /// Puts the app of `fixture()` back in its first state for the next case of a
+    /// test (each case also takes a new egui context): no sheet and no owner check,
+    /// the credentials list, and the fixture item selected.
+    fn reset(app: &mut DesktopApp, id: u64) {
+        app.close_owner_check(None);
+        app.ui.sheet = None;
+        app.place = Place::CREDENTIALS;
+        app.selected_item_id = Some(id.to_string());
+        app.ui.selected_items.clear();
+        app.ui.native_library_focus = None;
+        assert!(app.owner.check.is_none() && app.ui.sheet.is_none());
+    }
+
     #[test]
     fn menu_opens_existing_move_and_folder_confirmation_without_mutating_vault() {
         let (_dir, mut app, id, folder) = fixture();
@@ -354,11 +367,38 @@ mod tests {
                 .any(|f| f.uuid == folder)
         );
         assert!(app.owner_ui.session.details(id).is_ok());
-    }
 
-    #[test]
-    fn queued_command_is_rejected_after_lock_unlock_or_selection_change() {
-        let (_dir, mut app, _id, _folder) = fixture();
+        // Copy without text focus never requests a secret reveal.
+        reset(&mut app, id);
+        let ctx = egui::Context::default();
+        let queued = request(&app, &ctx, Command::Copy);
+        dispatch(&mut app, &ctx, queued);
+        assert!(app.owner.check.is_none(), "copy without text focus: owner check");
+        assert!(
+            ctx.input(|input| input.events.is_empty()),
+            "copy without text focus: input events"
+        );
+
+        // Select All needs the same focused library row or a text editor.
+        reset(&mut app, id);
+        let ctx = egui::Context::default();
+        let row = egui::Id::new("native-library-row");
+        app.ui.native_library_focus = Some(row);
+        ctx.memory_mut(|memory| memory.request_focus(row));
+        let queued = request(&app, &ctx, Command::SelectAll);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("different-control")));
+        dispatch(&mut app, &ctx, queued);
+        assert!(
+            ctx.input(|input| input.events.is_empty()),
+            "select all after a focus change: input events"
+        );
+        assert!(
+            app.ui.selected_items.is_empty(),
+            "select all after a focus change: selection"
+        );
+
+        // A queued command is refused after a lock and unlock, or a selection change.
+        reset(&mut app, id);
         let ctx = egui::Context::default();
         let queued = request(&app, &ctx, Command::NewCredential);
         app.owner_ui.session.lock().unwrap();
@@ -367,21 +407,24 @@ mod tests {
             .unlock("native-menu-test-pass")
             .unwrap();
         dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.sheet.is_none());
+        assert!(app.ui.sheet.is_none(), "new credential after lock and unlock");
         let queued = request(&app, &ctx, Command::MoveItems);
         app.selected_item_id = None;
         dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.sheet.is_none());
-    }
+        assert!(app.ui.sheet.is_none(), "move after a selection change");
 
-    #[test]
-    fn queued_command_does_not_replace_a_modal_or_accept_a_deleted_folder() {
-        let (_dir, mut app, _id, folder) = fixture();
+        // A queued command does not replace a modal or accept a deleted folder. This
+        // deletes the folder; the cases after it do not use it.
+        reset(&mut app, id);
         let ctx = egui::Context::default();
         let queued = request(&app, &ctx, Command::NewFolder);
         app.ui.sheet = Some(ui::Sheet::NewCredential);
         dispatch(&mut app, &ctx, queued);
-        assert_eq!(app.ui.sheet, Some(ui::Sheet::NewCredential));
+        assert_eq!(
+            app.ui.sheet,
+            Some(ui::Sheet::NewCredential),
+            "new folder over an open sheet"
+        );
         app.ui.sheet = None;
         app.place = Place::Folder(Some(folder.clone()));
         let queued = request(&app, &ctx, Command::RenameFolder);
@@ -391,72 +434,82 @@ mod tests {
             .unwrap()
             .unwrap();
         dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.sheet.is_none());
-    }
+        assert!(app.ui.sheet.is_none(), "rename of a deleted folder");
 
-    #[test]
-    fn native_undo_restores_actual_move_and_text_undo_never_undoes_the_move() {
-        let (_dir, mut app, id, folder) = fixture();
+        // A queued action is refused when an owner check opens.
+        reset(&mut app, id);
         let ctx = egui::Context::default();
-        app.ui.move_undo = app
-            .owner_ui
-            .session
-            .move_items_to_folder(&[id], Some(&folder))
-            .unwrap();
-        let mut text = "Editable text".to_owned();
-        let text_id = egui::Id::new("native-menu-test-text");
+        let queued = request(&app, &ctx, Command::MoveItems);
+        app.ask_owner(
+            crate::desktop::owner_check::OwnerRequest::Reveal { item_id: id },
+            None,
+        );
+        dispatch(&mut app, &ctx, queued);
+        assert!(app.ui.sheet.is_none(), "move after an owner check opened");
+        assert!(
+            app.owner.check.is_some(),
+            "the owner check stays open after a refused move"
+        );
+
+        // The owner passphrase field allows input but refuses a paste queued for the
+        // previous dialog.
+        reset(&mut app, id);
+        let ctx = egui::Context::default();
+        let owner_request = crate::desktop::owner_check::OwnerRequest::Reveal { item_id: id };
+        app.ask_owner(owner_request.clone(), None);
+        let field = egui::Id::new(("apassy-secret-field", ui::OWNER_CHECK_FIELD));
+        let mut text = "synthetic-passphrase".to_owned();
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            ui.add(egui::TextEdit::singleline(&mut text).id(text_id))
-                .request_focus();
+            ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .password(true)
+                    .id(field),
+            )
+            .request_focus();
         });
         output.drop_without_applying_deltas();
-        assert!(ctx.text_edit_focused());
-        let queued = request(&app, &ctx, Command::Undo);
-        dispatch(&mut app, &ctx, queued);
-        assert!(!app.ui.move_undo.is_empty());
-        assert!(ctx.input(|i| i.events.iter().any(|event| matches!(
-            event,
-            egui::Event::Key {
-                key: egui::Key::Z,
-                ..
-            }
-        ))));
-        ctx.memory_mut(|memory| memory.surrender_focus(text_id));
-        let queued = request(&app, &ctx, Command::Undo);
-        dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.move_undo.is_empty());
-        assert!(
-            !app.owner_ui
-                .session
-                .with_vault(|v| v.items_in_folder(Some(&folder), false))
-                .unwrap()
-                .unwrap()
-                .contains(&id)
+        let state = ui::native_menu_context(&app, &ctx);
+        for command in [
+            Command::Paste,
+            Command::SelectAll,
+            Command::Undo,
+            Command::Redo,
+        ] {
+            assert!(state.allows(command), "owner passphrase field allows input");
+        }
+        for command in [
+            Command::Copy,
+            Command::Cut,
+            Command::MoveItems,
+            Command::NewFolder,
+        ] {
+            assert!(!state.allows(command), "owner passphrase field refuses");
+        }
+        let stale_paste = request(&app, &ctx, Command::Paste);
+        // The same request and field ID still represent a different confirmation.
+        app.ask_owner(owner_request, None);
+        assert_ne!(
+            state.owner_identity,
+            ui::native_menu_context(&app, &ctx).owner_identity
         );
-    }
-
-    #[test]
-    fn native_copy_without_text_focus_never_requests_secret_reveal() {
-        let (_dir, mut app, _id, _folder) = fixture();
-        let ctx = egui::Context::default();
-        let queued = request(&app, &ctx, Command::Copy);
-        dispatch(&mut app, &ctx, queued);
-        assert!(app.owner.check.is_none());
-        assert!(ctx.input(|input| input.events.is_empty()));
-    }
-
-    #[test]
-    fn select_all_requires_the_same_focused_library_row_or_a_text_editor() {
-        let (_dir, mut app, _id, _folder) = fixture();
-        let ctx = egui::Context::default();
-        let row = egui::Id::new("native-library-row");
-        app.ui.native_library_focus = Some(row);
-        ctx.memory_mut(|memory| memory.request_focus(row));
-        let queued = request(&app, &ctx, Command::SelectAll);
-        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("different-control")));
-        dispatch(&mut app, &ctx, queued);
-        assert!(ctx.input(|input| input.events.is_empty()));
-        assert!(app.ui.selected_items.is_empty());
+        dispatch(&mut app, &ctx, stale_paste);
+        assert!(
+            ctx.input(|input| input.events.is_empty()),
+            "a paste queued for the previous dialog"
+        );
+        let select = request(&app, &ctx, Command::SelectAll);
+        dispatch(&mut app, &ctx, select);
+        assert!(
+            ctx.input(|input| input.events.iter().any(|event| matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    ..
+                }
+            ))),
+            "a fresh select all reaches the owner passphrase field"
+        );
+        assert!(app.owner.check.is_some());
     }
 
     fn text_frame(
@@ -502,6 +555,29 @@ mod tests {
     #[test]
     fn native_edit_commands_reach_the_text_editor_and_preserve_its_undo_redo() {
         let (_dir, mut app, id, folder) = fixture();
+
+        // A password field: Select All and Copy give no clipboard output.
+        {
+            let ctx = egui::Context::default();
+            let mut text = "synthetic-password-canary".to_owned();
+            text_frame(&mut app, &ctx, &mut text, true, None, 0.0);
+            text_frame(
+                &mut app,
+                &ctx,
+                &mut text,
+                true,
+                Some(Command::SelectAll),
+                2.0,
+            );
+            assert!(
+                text_frame(&mut app, &ctx, &mut text, true, Some(Command::Copy), 4.0).is_empty(),
+                "password copy: clipboard output"
+            );
+            assert_eq!(text, "synthetic-password-canary", "password copy: text");
+            assert!(app.owner.check.is_none(), "password copy: owner check");
+        }
+
+        // An ordinary text field gets every edit command and keeps its undo and redo.
         app.ui.move_undo = app
             .owner_ui
             .session
@@ -533,93 +609,46 @@ mod tests {
             "text undo must not change vault organization"
         );
         assert!(app.owner.check.is_none());
-    }
 
-    #[test]
-    fn native_password_copy_emits_no_clipboard_output() {
-        let (_dir, mut app, _id, _folder) = fixture();
+        // Native Undo: with text focus it goes to the text editor and keeps the move;
+        // without text focus it undoes the actual move above. This consumes move_undo.
         let ctx = egui::Context::default();
-        let mut text = "synthetic-password-canary".to_owned();
-        text_frame(&mut app, &ctx, &mut text, true, None, 0.0);
-        text_frame(
-            &mut app,
-            &ctx,
-            &mut text,
-            true,
-            Some(Command::SelectAll),
-            2.0,
-        );
-        assert!(text_frame(&mut app, &ctx, &mut text, true, Some(Command::Copy), 4.0).is_empty());
-        assert_eq!(text, "synthetic-password-canary");
-        assert!(app.owner.check.is_none());
-    }
-
-    #[test]
-    fn queued_action_is_rejected_when_an_owner_check_opens() {
-        let (_dir, mut app, id, _folder) = fixture();
-        let ctx = egui::Context::default();
-        let queued = request(&app, &ctx, Command::MoveItems);
-        app.ask_owner(
-            crate::desktop::owner_check::OwnerRequest::Reveal { item_id: id },
-            None,
-        );
-        dispatch(&mut app, &ctx, queued);
-        assert!(app.ui.sheet.is_none());
-        assert!(app.owner.check.is_some());
-    }
-
-    #[test]
-    fn owner_passphrase_allows_input_but_rejects_paste_queued_for_previous_dialog() {
-        let (_dir, mut app, id, _folder) = fixture();
-        let ctx = egui::Context::default();
-        let owner_request = crate::desktop::owner_check::OwnerRequest::Reveal { item_id: id };
-        app.ask_owner(owner_request.clone(), None);
-        let field = egui::Id::new(("apassy-secret-field", ui::OWNER_CHECK_FIELD));
-        let mut text = "synthetic-passphrase".to_owned();
+        let mut text = "Editable text".to_owned();
+        let text_id = egui::Id::new("native-menu-test-text");
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut text)
-                    .password(true)
-                    .id(field),
-            )
-            .request_focus();
+            ui.add(egui::TextEdit::singleline(&mut text).id(text_id))
+                .request_focus();
         });
         output.drop_without_applying_deltas();
-        let state = ui::native_menu_context(&app, &ctx);
-        for command in [
-            Command::Paste,
-            Command::SelectAll,
-            Command::Undo,
-            Command::Redo,
-        ] {
-            assert!(state.allows(command));
-        }
-        for command in [
-            Command::Copy,
-            Command::Cut,
-            Command::MoveItems,
-            Command::NewFolder,
-        ] {
-            assert!(!state.allows(command));
-        }
-        let stale_paste = request(&app, &ctx, Command::Paste);
-        // The same request and field ID still represent a different confirmation.
-        app.ask_owner(owner_request, None);
-        assert_ne!(
-            state.owner_identity,
-            ui::native_menu_context(&app, &ctx).owner_identity
+        assert!(ctx.text_edit_focused());
+        let queued = request(&app, &ctx, Command::Undo);
+        dispatch(&mut app, &ctx, queued);
+        assert!(
+            !app.ui.move_undo.is_empty(),
+            "text-focused undo keeps the move"
         );
-        dispatch(&mut app, &ctx, stale_paste);
-        assert!(ctx.input(|input| input.events.is_empty()));
-        let select = request(&app, &ctx, Command::SelectAll);
-        dispatch(&mut app, &ctx, select);
-        assert!(ctx.input(|input| input.events.iter().any(|event| matches!(
-            event,
-            egui::Event::Key {
-                key: egui::Key::A,
-                ..
-            }
-        ))));
-        assert!(app.owner.check.is_some());
+        assert!(
+            ctx.input(|i| i.events.iter().any(|event| matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Z,
+                    ..
+                }
+            ))),
+            "text-focused undo reaches the text editor"
+        );
+        ctx.memory_mut(|memory| memory.surrender_focus(text_id));
+        let queued = request(&app, &ctx, Command::Undo);
+        dispatch(&mut app, &ctx, queued);
+        assert!(app.ui.move_undo.is_empty(), "unfocused undo undoes the move");
+        assert!(
+            !app.owner_ui
+                .session
+                .with_vault(|v| v.items_in_folder(Some(&folder), false))
+                .unwrap()
+                .unwrap()
+                .contains(&id),
+            "unfocused undo moves the item out of the folder"
+        );
     }
 }
