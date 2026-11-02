@@ -188,7 +188,9 @@ func checkBrowser(_ browser: pid_t) throws -> Checked {
 /// Only bounded switch names, never arbitrary argument values or environment.
 func profileIdentity(_ arguments: [String], known: KnownBrowser) throws -> Data {
     func value(_ key: String) throws -> String? {
-        let matches = arguments.enumerated().filter { $0.element == "--" + key || $0.element.hasPrefix("--" + key + "=") }
+        let matches = arguments.enumerated().filter {
+            $0.element.hasPrefix("-") && $0.element.drop { $0 == "-" }.prefix { $0 != "=" }.lowercased() == key
+        }
         guard matches.count <= 1 else { throw Refused(reason: "ambiguous profile switch") }
         guard let match = matches.first else { return nil }
         if let eq = match.element.firstIndex(of: "=") { return String(match.element[match.element.index(after: eq)...]) }
