@@ -495,6 +495,7 @@ impl eframe::App for DesktopApp {
             self.poll_browser(ctx);
             self.poll_platform(ctx);
             ui::poll_notifications(self);
+            self.poll_update_restart(ctx);
         }
         #[cfg(not(feature = "vault"))]
         let _ = ctx;

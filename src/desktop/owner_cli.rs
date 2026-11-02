@@ -80,6 +80,9 @@ pub(crate) struct CliHost {
 }
 
 impl CliHost {
+    pub(crate) fn update_busy(&self) -> bool {
+        self.socket.as_ref().is_some_and(OwnerSocket::update_busy)
+    }
     pub(crate) fn socket_path(&self) -> Option<&std::path::Path> {
         self.socket.as_ref().map(OwnerSocket::socket_path)
     }

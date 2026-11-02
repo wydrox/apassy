@@ -7,6 +7,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 ### Changed
 
 - The lock screen shows the Apassy logo and asks for Touch ID first when Touch ID unlock is on.
+- Staged updates install when the vault locks, or right away with Restart to update.
 
 ## [0.5.12] - 2026-11-02
 

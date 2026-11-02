@@ -43,6 +43,13 @@ pub(crate) struct InstallReport {
 
 /// The content of `update.json`. A missing field takes its default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AutoRestartAttempt {
+    pub(crate) staged: Staged,
+    pub(crate) at: u64,
+}
+
+/// Persisted updater state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct UpdateFile {
     /// Check at start and every 6 hours.
@@ -54,6 +61,8 @@ pub(crate) struct UpdateFile {
     pub(crate) last_result: Option<String>,
     pub(crate) staged: Option<Staged>,
     pub(crate) last_install: Option<InstallReport>,
+    pub(crate) notified_version: Option<String>,
+    pub(crate) auto_restart_attempt: Option<AutoRestartAttempt>,
 }
 
 impl Default for UpdateFile {
@@ -65,6 +74,8 @@ impl Default for UpdateFile {
             last_result: None,
             staged: None,
             last_install: None,
+            notified_version: None,
+            auto_restart_attempt: None,
         }
     }
 }
@@ -147,6 +158,8 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let path = dir.path().join("data").join("update.json");
         let file = UpdateFile {
+            auto_restart_attempt: None,
+            notified_version: None,
             auto_check: false,
             auto_install: false,
             last_check: Some(1_790_593_085),
