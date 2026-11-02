@@ -3115,3 +3115,89 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
         }
     }
 }
+
+/// Full vector app icon in the supplied bounds, with an antialiased arch.
+pub(crate) fn paint_app_logo(painter: &Painter, rect: Rect) {
+    let side = rect.width().min(rect.height());
+    let tile = Rect::from_center_size(rect.center(), Vec2::splat(side));
+    painter.rect_filled(
+        tile,
+        CornerRadius::same((side * 0.225).round() as u8),
+        Color32::from_rgb(14, 24, 32),
+    );
+    let point = |x: f32, y: f32| {
+        tile.min
+            + Vec2::new(
+                (18.0 + x * (64.0 / 229.0)) * side / 100.0,
+                (20.19 + y * (64.0 / 229.0)) * side / 100.0,
+            )
+    };
+    let arch = (0..=48)
+        .map(|i| {
+            let angle = std::f32::consts::PI + i as f32 / 48.0 * std::f32::consts::PI;
+            point(114.5 + 84.75 * angle.cos(), 114.5 + 84.75 * angle.sin())
+        })
+        .collect();
+    painter.add(Shape::line(
+        arch,
+        Stroke::new(59.5 * (64.0 / 229.0) * side / 100.0, Color32::WHITE),
+    ));
+    painter.rect_filled(
+        Rect::from_min_max(point(0.0, 110.0), point(59.5, 206.2)),
+        0,
+        Color32::WHITE,
+    );
+    let mut right = vec![
+        point(169.5, 110.0),
+        point(229.0, 110.0),
+        point(229.0, 206.2),
+        point(190.5, 206.2),
+    ];
+    for i in 1..=16 {
+        let angle = std::f32::consts::FRAC_PI_2 + i as f32 / 16.0 * std::f32::consts::FRAC_PI_2;
+        right.push(point(
+            190.5 + 21.0 * angle.cos(),
+            185.2 + 21.0 * angle.sin(),
+        ));
+    }
+    painter.add(Shape::convex_polygon(right, Color32::WHITE, Stroke::NONE));
+    let mut blade = vec![point(75.0, 95.0), point(105.54, 106.78)];
+    let start = (106.78_f32 - 130.76).atan2(105.54 - 95.5);
+    for i in 1..=20 {
+        let angle = start * (1.0 - i as f32 / 20.0);
+        blade.push(point(
+            95.5 + 26.0 * angle.cos(),
+            130.76 + 26.0 * angle.sin(),
+        ));
+    }
+    blade.extend([point(121.5, 180.5), point(75.0, 206.2)]);
+    painter.add(Shape::convex_polygon(
+        blade,
+        Color32::from_rgb(10, 119, 254),
+        Stroke::NONE,
+    ));
+}
+
+#[cfg(test)]
+mod app_logo_tests {
+    use super::*;
+    #[test]
+    fn logo_shapes_stay_finite_and_inside_bounds() {
+        for size in [16.0, 64.0, 256.0] {
+            let ctx = egui::Context::default();
+            let rect = Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(size, size * 1.2));
+            let tile = Rect::from_center_size(rect.center(), Vec2::splat(size));
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_app_logo(&ui.ctx().layer_painter(egui::LayerId::background()), rect);
+            });
+            assert!(!output.shapes.is_empty());
+            for shape in &output.shapes {
+                let bounds = shape.shape.visual_bounding_rect();
+                assert!(bounds.is_finite());
+                assert!(rect.expand(0.001).contains_rect(bounds));
+                assert!(tile.expand(0.001).contains_rect(bounds));
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+}

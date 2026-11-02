@@ -884,7 +884,11 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let routes = crate::broker::route_diagnostics::snapshot();
         g.note_row(routes.summary());
         for (reason, count) in routes.top_reasons() {
-            g.note_row(format!("{} {count}", reason.headline()));
+            g.line(
+                reason.headline(),
+                Some(kit::text(count.to_string(), Font::Body)),
+                |_| {},
+            );
         }
         let shared = app.owner_ui.session.shared_vault();
         let guard = shared
