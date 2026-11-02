@@ -6,6 +6,29 @@ import Testing
 /// The models of questions through the relay (ios-core-v1 section 5.10). Synthetic values of the
 /// contract's test vectors.
 @Suite struct QuestionModelTests {
+    @Test func currentAnswerNormalizationAndChoiceBytes() {
+        #expect(RemoteAnswer.normalizeComment(" \tN\u{0000}o\n\u{0085}\u{2028}\u{2029} ") == "No")
+        #expect(RemoteAnswer.normalizeComment("\u{2003}No\u{00A0}") == "No")
+        #expect(RemoteAnswer.normalizeComment("\u{200B}No\u{200B}") == "\u{200B}No\u{200B}")
+        #expect(RemoteAnswer.normalizeComment(" " + String(repeating: "a", count: 500)) == String(repeating: "a", count: 499))
+        #expect(RemoteAnswer.normalizeComment(String(repeating: "😀", count: 501)) == String(repeating: "😀", count: 500))
+        #expect(RemoteAnswer.normalizeComment(String(repeating: "e\u{0301}", count: 251)).unicodeScalars.count == 500)
+        let empty = RemoteAnswer(kind: .denyWithComment, comment: "\n\u{2028} \t")
+        #expect(empty.kind == .deny)
+        #expect(empty.parameters["comment"] == nil)
+        let comment = RemoteAnswer(kind: .denyWithComment, comment: " N\no ")
+        #expect(comment.comment == "No")
+        #expect(comment.signedChoice == "deny_with_comment:Tm8")
+        #expect(comment.parameters["comment"] as? String == "No")
+        #expect(!comment.needsFaceID)
+        for kind in [AnswerKind.approve, .approveAsDevelopment, .approveAsProduction, .deny] {
+            let answer = RemoteAnswer(kind: kind)
+            #expect(answer.signedChoice == kind.rawValue)
+            #expect(answer.needsFaceID == (kind != .deny))
+            #expect(answer.parameters.count == 1)
+        }
+    }
+
     @Test func aListOfTheCoreDecodes() throws {
         let json = """
             {"status": {"enabled": true, "team_id": "t_7k2m5q4x3c", "relay_device_id": 2,
@@ -50,6 +73,26 @@ import Testing
         // An older core: no vaults, and no vault on a question.
         #expect(list.vaults == nil)
         #expect(open.vaultID == nil)
+    }
+
+    @Test func currentKindsHaveExactSevenLineUTF8Messages() async throws {
+        let service = PreviewVaultService()
+        let question = PreviewVaultService.sampleQuestion()
+        await service.setQuestions(enabled: true, questions: [question])
+        let status = try await service.questionsList().status
+        for (answer, line) in [
+            (RemoteAnswer(kind: .approve), "approve"),
+            (RemoteAnswer(kind: .approveAsDevelopment), "approve_as_development"),
+            (RemoteAnswer(kind: .approveAsProduction), "approve_as_production"),
+            (RemoteAnswer(kind: .deny), "deny"),
+            (RemoteAnswer(kind: .denyWithComment, comment: " N\no "), "deny_with_comment:Tm8"),
+        ] {
+            let prepared = try await service.questionAnswerString(qid: question.qid, answer: answer)
+            let expected = ["apassy-question-answer-v1", status.deviceUUID ?? "", status.teamID ?? "",
+                question.qid, line, question.card?.digest ?? "", String(prepared.time)].joined(separator: "\n")
+            #expect(Data(prepared.answerString.utf8) == Data(expected.utf8))
+            #expect(!prepared.answerString.hasSuffix("\n"))
+        }
     }
 
     @Test func aListOfEveryVaultDecodes() throws {

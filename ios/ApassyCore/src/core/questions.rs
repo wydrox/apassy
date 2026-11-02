@@ -630,6 +630,8 @@ struct Qid {
 
 #[derive(Deserialize)]
 struct AnswerIn {
+    #[serde(default)]
+    comment: Option<String>,
     qid: String,
     /// The vault of the question (`Question.vault_id`). Without it, the vault whose
     /// context holds `qid`.
@@ -2049,12 +2051,13 @@ impl Core {
         let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
         let own = using.keys.own_row()?;
         let Opened { record, card } = self.opened(&answer.qid, &using)?;
-        let choice = Choice::for_card(
+        let choice = Choice::for_card_with_comment(
             &answer.kind,
             answer.action.as_deref(),
             answer.project_key.as_deref(),
             answer.item_id.as_deref(),
             answer.environment.as_deref(),
+            answer.comment.as_deref(),
             &card,
         )
         .map_err(CoreError::invalid)?;

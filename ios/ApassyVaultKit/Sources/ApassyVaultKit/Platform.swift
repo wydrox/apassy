@@ -33,7 +33,7 @@ public enum SharedContainer {
 
 /// Keeps the passphrase of each vault in the keychain behind Face ID (ADR 0023): the
 /// item has `.biometryCurrentSet` and `WhenPasscodeSetThisDeviceOnly`, so it never
-/// leaves this iPhone, needs a Face ID match for each read, and is gone after a new
+/// leaves this iPhone, needs an authenticated context for each read, and is gone after a new
 /// Face ID enrollment or when the passcode is turned off. The app and the extension
 /// share it through the keychain access group.
 public protocol PassphraseStore: Sendable {
@@ -87,8 +87,8 @@ public enum Biometry: Sendable, Equatable {
 }
 
 /// The owner check before a secret leaves the vault: a reveal, a copy, a fill
-/// (ADR 0023, as ADR 0021 for the browser). A fresh biometric match each time, with
-/// no reuse window. Without biometry the app asks for the passphrase instead, and
+/// (ADR 0023, as ADR 0021 for the browser). AutoFill uses a fresh biometric match;
+/// the containing app can supply its device-local window. Without biometry the app asks for the passphrase instead, and
 /// checks it with `VaultService.checkPassphrase`.
 public protocol OwnerCheck: Sendable {
     /// The biometry of this iPhone, or `.none` when it is not set up.

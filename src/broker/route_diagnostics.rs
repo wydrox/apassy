@@ -36,6 +36,7 @@ pub enum ReasonKind {
     ModelUnsure,
     AccessCheck,
     Connector,
+    BrowserFill,
     ModelAllowed,
     RememberedAnswer,
     RememberedPattern,
@@ -61,7 +62,8 @@ impl ReasonKind {
             Self::ModelUnsure => "The bouncer brain wasn't sure this run is safe.",
             Self::AccessCheck => "This request didn't pass the access checks.",
             Self::Connector => "This connector operation needs your approval.",
-            Self::ModelAllowed => "The bouncer allowed this run.",
+            Self::BrowserFill => "The agent wants to fill a credential in your browser.",
+            Self::ModelAllowed => "The bouncer gate allowed this run.",
             Self::RememberedAnswer => "Your earlier answer covers this run.",
             Self::RememberedPattern => "An approved pattern covers this run.",
             Self::Other => "This request needs your approval.",
@@ -150,7 +152,7 @@ impl Counters {
             }
         }
         format!(
-            "Since Apassy started: decided by the bouncer {} (allowed {allowed}, refused {refused}); asked you {asked}",
+            "Since Apassy started: decided by the bouncer gate {} (allowed {allowed}, refused {refused}); asked you {asked}",
             allowed + refused
         )
     }
@@ -265,7 +267,10 @@ mod tests {
         assert_eq!(counts.outcomes.len(), 2);
         assert_eq!(counts.outcomes[&event], 1);
         assert_eq!(counts.outcomes[&attempted], 1);
-        assert!(counts.summary().ends_with("asked you 2"));
+        assert_eq!(
+            counts.summary(),
+            "Since Apassy started: decided by the bouncer gate 0 (allowed 0, refused 0); asked you 2"
+        );
         assert_eq!(
             counts.top_reasons(),
             vec![(ReasonKind::ModelUnavailable, 2)]

@@ -10,6 +10,7 @@ pub mod action_kind;
 pub mod agent_items;
 pub mod approvals;
 pub mod bouncer;
+pub mod browser_fill;
 pub mod calibration;
 pub mod corrections;
 pub mod decide;

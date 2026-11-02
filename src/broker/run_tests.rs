@@ -4,6 +4,21 @@ use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::{Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue};
 
 #[test]
+fn browser_login_does_not_claim_read_only_production_semantics() {
+    let command = vec![
+        "apassy-browser-fill".into(),
+        "https://example.com".into(),
+        "username,password".into(),
+    ];
+    let analysis = analyze_run(&command, "Log in", &[], &[]);
+    assert_ne!(classify(&command, &analysis), ActionKind::Read);
+    assert_ne!(
+        classify_certain(&command, &analysis),
+        Some(ActionKind::Read)
+    );
+}
+
+#[test]
 fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
     for declared_project in ["project", "foreign-project"] {
         let dir = tempfile::tempdir().unwrap();
@@ -104,6 +119,28 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
             assert!(
                 matches!(actual, Route::Ask(ref reason, _) if reason.contains("foreign-project"))
             );
+        }
+        if declared_project == "project" {
+            // No hook is required when the caller supplies its task. Empty task still asks.
+            let missing = RunFacts {
+                has_user_request: false,
+                ..facts
+            };
+            assert!(matches!(
+                route(&checked, &missing, &known, &mut ready),
+                Route::Ask(_, ReasonKind::MissingTask)
+            ));
+            checked.declarations[0].as_mut().unwrap().environment = Environment::Production;
+            checked.facts[0].production = true;
+            assert!(matches!(
+                route(&checked, &facts, &known, &mut ready),
+                Route::Ask(_, ReasonKind::Production)
+            ));
+            checked.declarations[0].as_mut().unwrap().scope = Scope::ReadOnly;
+            assert_eq!(route(&checked, &facts, &known, &mut ready), Route::Model);
+            checked.declarations[0].as_mut().unwrap().environment = Environment::Staging;
+            checked.declarations[0].as_mut().unwrap().scope = Scope::ReadWrite;
+            checked.facts[0].production = false;
         }
         assert_eq!(vault.evaluation_scopes(item.id).unwrap().len(), 1);
         assert!(vault.answers_for_item(item.id).unwrap().is_empty());

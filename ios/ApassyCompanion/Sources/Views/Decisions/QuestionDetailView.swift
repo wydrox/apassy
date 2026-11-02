@@ -2,15 +2,12 @@ import ApassyCompanionKit
 import ApassyVaultKit
 import SwiftUI
 
-/// A question through the relay as the mockup's "Decision" (screen 6): the question in one
-/// sentence, its facts, the command, why the owner is asked, and the fixed glass bar: Allow ACTION
-/// in PROJECT (in red as "Allow production: ACTION in PROJECT"), Deny, Allow Once. "⋯" holds the
-/// agent exceptions and the environment of a credential. Allowing asks for Face ID; the stricter answers do not. Once the question ended
-/// (expired, answered on another device, or sent from here) the outcome takes the place of the bar.
+/// A v1 relay question with the same owner choices as the Mac.
 struct QuestionDetailView: View {
     let model: QuestionsModel
     let requestIdentity: String
     @State private var tapGuard = AnswerGuard()
+    @State private var commentQuestion: RemoteQuestion?
 
     private var question: RemoteQuestion? { model.questions.first { $0.requestIdentity == requestIdentity }
         ?? model.receiptQuestions.first { $0.requestIdentity == requestIdentity } }
@@ -33,6 +30,11 @@ struct QuestionDetailView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $commentQuestion) { snapshot in
+            DismissCommentSheet { answer in
+                Task { await model.send(.init(answer: answer, label: "Dismiss with comment", destructive: true), for: snapshot) }
+            }
+        }
         // The bar takes the place of the tab bar, as in the mockup.
         .toolbarVisibility(.hidden, for: .tabBar)
     }
@@ -74,21 +76,6 @@ struct QuestionDetailView: View {
         // A tap meant for the list or a notification must not answer this question.
         .onAppear { tapGuard.arm(now: Date()) }
         .onChange(of: question.card) { _, _ in tapGuard.arm(now: Date()) }
-        .toolbar {
-            if outcome == nil, !bar.menu.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        ForEach(bar.menu) { choice in
-                            Button(choice.label, role: choice.destructive ? .destructive : nil) {
-                                answer(choice, question)
-                            }
-                        }
-                    } label: {
-                        Label("More answers", systemImage: "ellipsis")
-                    }
-                }
-            }
-        }
         .safeAreaInset(edge: .bottom) {
             if let outcome {
                 VStack(spacing: 0) {
@@ -111,7 +98,7 @@ struct QuestionDetailView: View {
                 LabeledContent("Credential") {
                     HStack(spacing: 6) {
                         Text(item.name).lineLimit(1)
-                        if item.production {
+                        if item.production && !item.unconfirmed {
                             DecisionTag(text: "Production", tint: .red)
                         }
                     }
@@ -163,17 +150,19 @@ struct QuestionDetailView: View {
                     Text(bar.deny.label).frame(maxWidth: .infinity)
                 }
                 .decisionButton(.deny)
-                if let once = bar.allowOnce {
-                    Button { answer(once, question) } label: {
-                        Text(once.label).frame(maxWidth: .infinity)
+                if let secondary = bar.secondaryApproval {
+                    Button { answer(secondary, question) } label: {
+                        Text(secondary.label).frame(maxWidth: .infinity)
                     }
-                    .decisionButton(.secondary)
+                    .decisionButton(.primary)
                 }
+            }
+            ForEach(bar.menu) { choice in
+                Button(choice.label, role: .destructive) { answer(choice, question) }
+                    .decisionButton(.deny)
             }
             if busy {
                 Text("Sending…").font(.caption).foregroundStyle(.secondary)
-            } else if let note = AnswerBar.note(bar.primary, card) {
-                Text(note).font(.caption).foregroundStyle(.secondary)
             }
         }
         .disabled(busy)
@@ -181,6 +170,10 @@ struct QuestionDetailView: View {
 
     private func answer(_ choice: AnswerBar.Choice, _ question: RemoteQuestion) {
         guard tapGuard.accepts(now: Date()) else { return }
+        if choice.answer.kind == .denyWithComment {
+            commentQuestion = question
+            return
+        }
         Task { await model.send(choice, for: question) }
     }
 }

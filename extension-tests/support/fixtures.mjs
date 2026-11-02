@@ -105,7 +105,7 @@ class Harness {
     const file = path.join(this.mockDir, "requests.jsonl");
     if (!fs.existsSync(file)) return [];
     const all = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    return cmd ? all.filter((request) => request && request.cmd === cmd) : all;
+    return cmd ? all.filter((request) => request && request.cmd === cmd) : all.filter(request => request?.cmd !== "agent_wait");
   }
 
   removeHost() {

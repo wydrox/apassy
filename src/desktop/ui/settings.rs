@@ -584,7 +584,7 @@ fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             )
             .inner
         });
-        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for browser fills and saves, passkey sign-ins, Allow Once, and Development on agent questions until this time is up. The window ends when your Mac locks or sleeps, not when the display turns off.");
+        g.note_row("After you confirm with Touch ID or your passphrase, Apassy doesn't ask again for anything until this time is up. The window ends when your Mac locks or sleeps.");
     });
     if let Some(note) = &app.owner.frequency_note {
         rows::footnote(ui, note);
@@ -903,7 +903,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         "Today",
                         Some(kit::text(
                             format!(
-                                "{} decided by the bouncer · {} asked you · {} failed",
+                                "{} decided by the bouncer gate · {} asked you · {} failed",
                                 counts.by_model, counts.asked, counts.failed
                             ),
                             Font::Body,
@@ -937,7 +937,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(ModelAction::Settings(settings)) => {
             let off = settings.start == StartMode::Off;
             match server.set_settings(settings) {
-                Ok(()) if off => app.set_note("The bouncer is off. Every run waits for you."),
+                Ok(()) if off => app.set_note("The bouncer brain is off. Every run waits for you."),
                 Ok(()) => {}
                 Err(err) => app.set_err(format!("Apassy cannot save the bouncer setting: {err}")),
             }

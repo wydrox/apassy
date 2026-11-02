@@ -53,6 +53,16 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.13 coordinated release
+
+The owner approved a coordinated 0.5.13 release of all six components on 2026-11-02:
+macOS (global Touch ID window, bouncer owner prompt, remote answer kinds, update
+restart, remote-debugging bypass, agent browser fills), iOS on TestFlight (Face ID
+window, new answer buttons), the browser extension on the Chrome Web Store, the relay
+and the Linux CLI (version alignment, no protocol or schema change), and the website.
+The vault schema stays at 23. Run the version checker with the relay release checkout
+before publication, and report the release complete only when all six are live.
+
 ## 0.5.12 staged app release
 
 The owner approved the bouncer reason headline and privacy-safe route counters for

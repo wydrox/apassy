@@ -415,18 +415,46 @@ fn hard_rules(
             },
         ));
     }
+    // Decision (a) still requires the agent to state a task. Report this even
+    // when a production write guard or a remembered answer also applies.
+    if !run.has_user_request {
+        why.push((
+            "The agent did not send the user request.".to_owned(),
+            ReasonKind::MissingTask,
+        ));
+    }
     if let Some((host, name)) = foreign_db_host(checked, run) {
         why.push((format!(
             "The command connects to the database host {host}, which is not a host of \"{name}\"."
         ), ReasonKind::ForeignHost));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
-        if facts.includes_code && !known.answer.get(index).copied().unwrap_or(false) {
+        if facts.includes_code
+            && ((facts.production
+                || checked
+                    .declarations
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(Declaration::is_production))
+                || !known.answer.get(index).copied().unwrap_or(false))
+        {
             why.push((format!("\"{}\" includes a one-time code: only an explicit owner project answer covering codes can skip this question.", facts.name), ReasonKind::OneTimeCode));
         }
-        if facts.production && !known.answer.get(index).copied().unwrap_or(false) {
+        let production = facts.production
+            || checked
+                .declarations
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(Declaration::is_production);
+        if production
+            && !checked
+                .declarations
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly)
+        {
             let mut text = format!(
-                "\"{}\" is a production credential: you approve each run, unless you allow production for {place}: {}.",
+                "\"{}\" is a production credential with write or admin scope: you approve each run in {place}: {}.",
                 facts.name,
                 action_words(run.action)
             );
@@ -514,20 +542,20 @@ fn route<F: FnMut() -> Result<(), String>>(
             "The folder is not a project (the root, the home folder, or a parent of it), so Apassy remembers nothing there.".to_owned(),
         ReasonKind::NotProject);
     }
-    // Required context is a hard veto, including when an execution answer fits.
-    if !run.has_user_request {
-        return Route::Ask(
-            "The agent did not send the user request.".to_owned(),
-            ReasonKind::MissingTask,
-        );
-    }
     if let Some(index) = checked.declarations.iter().position(Option::is_none) {
         return Route::Ask(
             format!("\"{}\" has no declaration.", checked.facts[index].name),
             ReasonKind::MissingDeclaration,
         );
     }
-    if !known.answer.is_empty() && known.answer.iter().all(|answer| *answer) {
+    if !checked
+        .declarations
+        .iter()
+        .flatten()
+        .any(Declaration::is_production)
+        && !known.answer.is_empty()
+        && known.answer.iter().all(|answer| *answer)
+    {
         return Route::Answer;
     }
     // An answer of the owner that does not cover this run, for example a run to another
@@ -581,7 +609,13 @@ fn route<F: FnMut() -> Result<(), String>>(
             );
         }
     }
-    if run.pattern {
+    if run.pattern
+        && !checked
+            .declarations
+            .iter()
+            .flatten()
+            .any(Declaration::is_production)
+    {
         return Route::Pattern;
     }
     Route::Model
@@ -624,7 +658,9 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
             AnswerKind::InProject(run.action)
         });
     }
-    if checked.facts.iter().any(|facts| facts.unconfirmed) {
+    if checked.facts.iter().any(|facts| facts.unconfirmed)
+        || checked.declarations.iter().any(Option::is_none)
+    {
         valid.push(AnswerKind::CorrectEnvironment);
     }
     valid
@@ -673,11 +709,20 @@ fn known_state(
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    run_inner(ctx, token, request, false)
+    run_inner(ctx, token, request, false, None)
 }
 
 pub(super) fn evaluate(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    run_inner(ctx, token, request, true)
+    run_inner(ctx, token, request, true, None)
+}
+
+pub(super) fn fill_browser(
+    ctx: &BrokerContext,
+    token: &str,
+    request: &RunRequest<'_>,
+    fill: &super::browser_fill::Fill,
+) -> WireResponse {
+    run_inner(ctx, token, request, false, Some(fill))
 }
 
 fn run_inner(
@@ -685,6 +730,7 @@ fn run_inner(
     token: &str,
     request: &RunRequest<'_>,
     evaluation_only: bool,
+    browser_fill: Option<&super::browser_fill::Fill>,
 ) -> WireResponse {
     let mut diagnostic = Attempt::new();
     let items = request.all_items();
@@ -698,7 +744,7 @@ fn run_inner(
             Ok(agent) => agent,
             Err(response) => return response,
         };
-        match check(vault, &agent, request) {
+        match check_inner(vault, &agent, request, browser_fill) {
             Ok(checked) => (checked, label),
             Err((code, reason)) => {
                 record(
@@ -737,6 +783,9 @@ fn run_inner(
         &checked.env_names,
         &checked.provider_hosts,
     );
+    if browser_fill.is_some_and(|f| f.agent_can_read_page) {
+        analysis.flags.push("secret_output".to_owned());
+    }
     // Goal item B6: a user request from the host hook replaces the text from the agent.
     let resolved = ctx.prompts.resolve(
         checked.agent.id,
@@ -1036,11 +1085,12 @@ fn run_inner(
     let question_items: Vec<QuestionItem> = items
         .iter()
         .zip(&checked.facts)
-        .map(|(item, facts)| QuestionItem {
+        .enumerate()
+        .map(|(index, (item, facts))| QuestionItem {
             item_id: *item,
             name: facts.name.clone(),
             production: facts.production,
-            unconfirmed: facts.unconfirmed,
+            unconfirmed: facts.unconfirmed || checked.declarations[index].is_none(),
             always_ask: facts.asks_always(),
         })
         .collect();
@@ -1068,6 +1118,7 @@ fn run_inner(
     let mut remembered = false;
     let mut answer_choice: Option<AnswerChoice> = None;
     let mut evaluation_choice: Option<EvaluationChoice> = None;
+    let mut classification_choice = None;
 
     if !needs_approval {
         let outcome = match route {
@@ -1113,7 +1164,29 @@ fn run_inner(
             command: request.command.to_vec(),
             cwd: checked.cwd.display().to_string(),
             env_names: checked.env_names.clone(),
-            purpose: request.purpose.trim().to_owned(),
+            purpose: browser_fill.map_or_else(
+                || request.purpose.trim().to_owned(),
+                |fill| {
+                    format!(
+                        "{} wants to fill {} on {} in the connected browser. {}{}",
+                        checked.agent.name,
+                        checked
+                            .facts
+                            .first()
+                            .map_or("credential", |f| f.name.as_str()),
+                        fill.site_label(),
+                        request.purpose.trim(),
+                        if fill.agent_can_read_page {
+                            format!(
+                                " {} can read this page through remote debugging.",
+                                checked.agent.name
+                            )
+                        } else {
+                            String::new()
+                        }
+                    )
+                },
+            ),
             risk: risk_note.clone(),
             user_request: user_request.to_owned(),
             request_source: resolved.source.clone(),
@@ -1126,7 +1199,11 @@ fn run_inner(
                 action,
                 production: production_waiting,
                 why: risk_note.clone(),
-                reason: reason_kind,
+                reason: if browser_fill.is_some() {
+                    ReasonKind::BrowserFill
+                } else {
+                    reason_kind
+                },
                 items: question_items,
                 valid_answers: valid,
             },
@@ -1172,6 +1249,8 @@ fn run_inner(
             answer: chosen,
             evaluation: chosen_evaluation,
             attached,
+            refusal_comment,
+            classification,
             ..
         } = match settled {
             Ok(settled) => settled,
@@ -1218,6 +1297,7 @@ fn run_inner(
         };
         answer_choice = chosen;
         evaluation_choice = chosen_evaluation;
+        classification_choice = classification;
         if checked_with == Some(CheckMethod::Companion) {
             logged_decided_by = OWNER_APPROVED_ON_IPHONE;
             ANSWERED_ON_IPHONE.clone_into(&mut answered_on);
@@ -1256,7 +1336,7 @@ fn run_inner(
             | ApprovalOutcome::ApprovedAndGranted => None,
             ApprovalOutcome::Denied => Some((
                 "approval_denied",
-                "The owner denied this run.".to_owned(),
+                super::approvals::owner_refusal(refusal_comment),
                 UseOutcome::Denied,
                 UseDecidedBy::Owner,
             )),
@@ -1346,7 +1426,7 @@ fn run_inner(
             );
             return WireResponse::failure(code, reason);
         }
-        let rechecked = match check(vault, &agent, request) {
+        let rechecked = match check_inner(vault, &agent, request, browser_fill) {
             Ok(rechecked) => rechecked,
             Err((code, reason)) => {
                 record(
@@ -1388,6 +1468,21 @@ fn run_inner(
                 "",
             );
             return WireResponse::failure("authorization_changed", reason);
+        }
+        // Persist classification only after the original authorization baseline passed.
+        if let Some(environment) = classification_choice {
+            for (index, facts) in checked.facts.iter().enumerate() {
+                if (facts.unconfirmed || checked.declarations[index].is_none())
+                    && vault
+                        .set_declaration_environment(items[index], environment)
+                        .is_err()
+                {
+                    return WireResponse::failure(
+                        "classification_failed",
+                        "Could not save the environment. Nothing ran.",
+                    );
+                }
+            }
         }
         // The opt-in local evaluator stops before preparing the secret environment or starting any
         // process/proxy. This mode is not available through the agent wire protocol.
@@ -1473,6 +1568,22 @@ fn run_inner(
         super::corrections::consider_items(vault, &items);
         if vault.is_locked() {
             return locked_response();
+        }
+        if let Some(fill) = browser_fill {
+            let response = fill.deliver(vault, &ctx.vault);
+            record(
+                vault,
+                &agent,
+                request,
+                &label,
+                if response.ok {
+                    ActivityDecision::Allow
+                } else {
+                    ActivityDecision::Deny
+                },
+                "Browser fill delivery requested; extension acknowledgement determines completion.",
+            );
+            return response;
         }
         match read_secrets(vault, request.items, request.codes) {
             Ok(secrets) => {
@@ -1688,10 +1799,20 @@ pub(super) fn foreign_project(declared: &str, project: Option<&Project>) -> Opti
     (!fits).then(|| declared.to_owned())
 }
 
+#[cfg(test)]
 fn check(
     vault: &Vault,
     agent: &AgentSummary,
     request: &RunRequest<'_>,
+) -> Result<Checked, (&'static str, String)> {
+    check_inner(vault, agent, request, None)
+}
+
+fn check_inner(
+    vault: &Vault,
+    agent: &AgentSummary,
+    request: &RunRequest<'_>,
+    browser_fill: Option<&super::browser_fill::Fill>,
 ) -> Result<Checked, (&'static str, String)> {
     request
         .validate()
@@ -1763,7 +1884,13 @@ fn check(
             None
         };
         let code_name = crate::vault::mfa::code_env_name(*item_id);
-        let binding = if !request.items.contains(item_id) {
+        if let Some(fill) = browser_fill {
+            fill.validate_site(vault)
+                .map_err(|reason| ("refused", reason))?;
+        }
+        let binding = if browser_fill.is_some() && request.items.contains(item_id) {
+            Some(EnvBinding { item_id: *item_id, env_name: format!("APASSY_BROWSER_{item_id}"), field: "password".to_owned(), delivery: EnvDelivery::Value })
+        } else if !request.items.contains(item_id) {
             Some(EnvBinding { item_id: *item_id, env_name: code_name.clone(), field: code_field.clone().expect("code-only item"), delivery: EnvDelivery::Value })
         } else { vault.process_binding(*item_id).map_err(|_| {
             ("broker_error", "The broker cannot read the process field.".to_owned())

@@ -36,6 +36,159 @@ const DEFAULT: Vec2 = Vec2::new(1180.0, 800.0);
 const SMALLEST: Vec2 = Vec2::new(900.0, 600.0);
 const WIDE: Vec2 = Vec2::new(1800.0, 1400.0);
 
+use crate::desktop::fake_relay;
+
+/// Exercise the actual UI send, encrypted relay, signature gate, and asking queue.
+#[test]
+fn remote_classify_and_comment_buttons_settle_the_asking_mac() {
+    use crate::questions::{QuestionsConfig, QuestionsWorker};
+    use crate::relay::membership::enable_questions;
+    use crate::sync::{PendingJoin, RelayConfig, RelaySync};
+    use crate::vault::Environment;
+    use std::time::Instant;
+
+    let dir = TempDir::new().unwrap();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut asker, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut asker, &dir);
+    let sender_dir = TempDir::new().unwrap();
+    let (mut sender, _) = unlocked_app_with_item(&sender_dir);
+    let a_data = dir.path().join("relay-a");
+    let b_data = sender_dir.path().join("relay-b");
+    std::fs::create_dir_all(&a_data).unwrap();
+    std::fs::create_dir_all(&b_data).unwrap();
+    let a_shared = asker.owner_ui.session.shared_vault();
+    let b_shared = sender.owner_ui.session.shared_vault();
+    let a_path = a_shared
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .path()
+        .to_path_buf();
+    let a_sync = RelaySync::new(RelayConfig::in_data_dir(
+        &a_data, &a_path, &relay.url, "vault",
+    ));
+    let b_sync = RelaySync::new(RelayConfig::in_data_dir(
+        &b_data,
+        &b_data.join("vault.db"),
+        &relay.url,
+        "vault",
+    ));
+    {
+        let mut guard = a_shared.lock().unwrap();
+        let a = guard.as_mut().unwrap();
+        a_sync
+            .create_team(a, "Personal", &relay.team_code(), "Asking Mac")
+            .unwrap();
+        let code = a_sync.create_link(&mut *a).unwrap();
+        let pending = PendingJoin::request(&code.link, "", "Answering Mac").unwrap();
+        let links = a_sync.pending_links(&mut *a, Some(&code)).unwrap();
+        a_sync.confirm_link(&mut *a, &links[0]).unwrap();
+        let joined = pending.poll().unwrap().unwrap();
+        let download = joined.download(&b_data.join("sync")).unwrap();
+        let (mut b, _) = b_sync.adopt(&joined, &download, PASS).unwrap();
+        b.unlock(PASS).unwrap();
+        enable_questions(a, "Asking Mac").unwrap();
+        a_sync.sync(a).unwrap();
+        b_sync.sync(&mut b).unwrap();
+        enable_questions(&mut b, "Answering Mac").unwrap();
+        b_sync.sync(&mut b).unwrap();
+        a_sync.sync(a).unwrap();
+        *b_shared.lock().unwrap() = Some(b);
+    }
+    let config = QuestionsConfig {
+        tick: Duration::from_millis(25),
+        ..Default::default()
+    };
+    asker.owner.questions = Some(QuestionsWorker::start(
+        Arc::clone(&queue),
+        Arc::clone(&a_shared),
+        asker.owner_gate(),
+        config.clone(),
+    ));
+    sender.owner.questions = Some(QuestionsWorker::start(
+        Arc::new(ApprovalQueue::new()),
+        b_shared,
+        sender.owner_gate(),
+        config,
+    ));
+    let ctx = egui::Context::default();
+    for answer in [
+        Answer::Development {
+            item_id,
+            name: "Guarded key".into(),
+        },
+        Answer::MarkProduction {
+            item_id,
+            name: "Guarded key".into(),
+        },
+        Answer::DenyWithComment(" Stop\n here ".into()),
+    ] {
+        let mut unknown = item(item_id, "Guarded key");
+        unknown.unconfirmed = true;
+        let template = run(
+            "Synthetic agent",
+            question(vec![unknown], &[AnswerKind::CorrectEnvironment]),
+        );
+        let (waiter, pending) = ask(&asker, &queue, 1, template);
+        let start = Instant::now();
+        let remote = loop {
+            if let Some(remote) = sender
+                .owner
+                .questions
+                .as_ref()
+                .unwrap()
+                .view()
+                .remote
+                .into_iter()
+                .find(|remote| remote.question.run.id == pending.id)
+            {
+                break remote;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "remote question did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        decisions::apply_remote(&mut sender, &ctx, &remote, answer.clone());
+        if !matches!(answer, Answer::DenyWithComment(_)) {
+            assert!(
+                sender.owner.check.is_some(),
+                "both classifications require the owner"
+            );
+            assert!(
+                queue.pending().contains(&pending),
+                "no approval before owner authentication"
+            );
+            sender
+                .confirm_owner_now(OwnerCheck::passphrase(PASS))
+                .unwrap();
+        } else {
+            assert!(sender.owner.check.is_none());
+        }
+        sender.settle_remote_answers_for_test();
+        let settled = waiter.join().unwrap().unwrap();
+        assert!(!queue.pending().contains(&pending));
+        match answer {
+            Answer::Development { .. } => {
+                assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+                assert_eq!(settled.classification, Some(Environment::Development));
+            }
+            Answer::MarkProduction { .. } => {
+                assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+                assert_eq!(settled.classification, Some(Environment::Production));
+            }
+            _ => {
+                assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+                assert_eq!(settled.refusal_comment.as_deref(), Some("Stop here"));
+                assert!(settled.classification.is_none());
+            }
+        }
+    }
+}
+
 type Waiter = JoinHandle<Result<Settled, QuestionRefusal>>;
 
 fn project(label: &str) -> Project {
@@ -455,8 +608,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
 }
 
 /// The card says who wants what: the credential with its production cap, the action, the
-/// project, the hosts, the command, and why the owner is asked. The bar has Deny, Allow
-/// Once, and the answer that the question offers. No value shows.
+/// project, the hosts, the command, and why the owner is asked. The bar offers Allow,
+/// Dismiss, Dismiss with comment, and an optional project checkbox. No value shows.
 #[test]
 fn the_detail_shows_the_facts_the_command_and_why() {
     let dir = TempDir::new().expect("temp dir");
@@ -490,24 +643,19 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "curl https://api.stripe.com/v1/payouts",
         "Why you are asked",
         "This is a production key, and there is no production rule for reading in acme-billing yet.",
-        "Deny",
-        "Allow Once",
-        "Allow production: Read in acme-billing",
+        "Dismiss",
+        "Allow",
+        "Dismiss with comment",
+        "Remember for this project",
+        "What the agent says you asked",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    let production_caption = text
-        .lines()
-        .find(|line| line.to_lowercase().contains("production allowance"))
-        .expect("the production answer explains its remembered allowance");
-    for expected in ["acme-billing", "all agents", "next matching use"] {
-        assert!(
-            production_caption.contains(expected),
-            "{expected}: {production_caption}"
-        );
-    }
-    // As in the mockup, the request of the user has no group of its own.
-    assert!(!text.contains("Show the last payouts."), "{text}");
+    assert!(text.contains("Show the last payouts."), "{text}");
+    assert!(
+        text.find(decisions::question_headline(&pending.question)) < text.find("Credential"),
+        "the reason headline precedes the credential facts: {text}"
+    );
     assert!(!text.contains("ui-owner-token-canary"), "{text}");
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
@@ -521,7 +669,7 @@ fn the_detail_shows_the_facts_the_command_and_why() {
     let (waiter, pending) = ask(&app, &queue, 1, changed);
     let (text, _) = frames(&mut app, WIDE, 3);
     for expected in [
-        "Request",
+        "What the agent says you asked",
         "\"Show the last payouts.\" (from the agent)",
         "The agent sent a different request: \"Delete the old payouts.\"",
     ] {
@@ -568,7 +716,8 @@ fn agent_avatars_have_the_colors_of_the_mockup() {
     assert_ne!(agent_color("Aider"), green);
 }
 
-/// "Allow ACTION in PROJECT" opens the owner check. A wrong passphrase approves nothing.
+/// "Allow" with "Remember for this project" opens the owner check outside the window.
+/// A wrong passphrase approves nothing.
 /// After the check the question ends with the answer that the broker remembers for every
 /// agent in the project. The next question is selected.
 #[test]
@@ -585,11 +734,9 @@ fn allow_in_project_needs_the_owner_check_and_selects_the_next_question() {
     let (other_waiter, second) = ask(&app, &queue, 2, run("Codex", offered));
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    assert!(text.contains("Allow Read in acme-billing"), "{text}");
-    assert!(
-        text.contains("All agents in acme-billing · from the next matching use."),
-        "{text}"
-    );
+    assert!(text.lines().any(|line| line.trim() == "Allow"), "{text}");
+    assert!(text.contains("Remember for this project"), "{text}");
+    assert!(!text.contains("Allow Read in acme-billing"), "{text}");
     assert_eq!(decisions::selected(&app), Some(first.id));
 
     let ctx = egui::Context::default();
@@ -714,9 +861,12 @@ fn stricter_answers_need_no_owner_check() {
             question(vec![item(item_id, "Guarded key")], &[]),
         ),
     );
+    app.place = Place::Decisions;
+    // Enter the view and select its row before opening transient detail state.
+    frames(&mut app, DEFAULT, 3);
+    decisions::select_key(&mut app, Key::Run(pending.id));
     decisions::apply(&mut app, &ctx, &pending, Answer::Disconnect);
     assert!(decisions::disconnecting(&app));
-    app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
     assert!(text.contains("Disconnect UI agent?"), "{text}");
     assert!(app.owner.check.is_none());
@@ -752,10 +902,10 @@ fn a_correction_toward_development_needs_the_owner_check() {
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
     for expected in [
-        "Development",
-        "Production",
-        "Allow Once",
-        "Production by default",
+        "Allow as dev",
+        "Allow as prod",
+        "Dismiss",
+        "Dismiss with comment",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -796,26 +946,18 @@ fn a_correction_toward_development_needs_the_owner_check() {
         .expect("owner check");
     assert_eq!(
         environment(&app),
+        before,
+        "broker commits after final baseline check"
+    );
+    assert!(
+        queue.pending().is_empty(),
+        "classification also allows the run"
+    );
+    let settled = waiter.join().expect("waiter").expect("an answer");
+    assert_eq!(
+        settled.classification,
         Some(crate::vault::Environment::Development)
     );
-    assert_eq!(queue.pending().len(), 1, "the question still waits");
-
-    decisions::apply(
-        &mut app,
-        &ctx,
-        &pending,
-        Answer::MarkProduction {
-            item_id,
-            name: "Guarded key".to_owned(),
-        },
-    );
-    assert!(app.owner.check.is_none(), "stricter: no owner check");
-    assert_eq!(
-        environment(&app),
-        Some(crate::vault::Environment::Production)
-    );
-    assert!(queue.deny(pending.id));
-    waiter.join().expect("waiter").expect("an answer");
 }
 
 /// The agent page shows, it does not configure: the note saves without a check, and the
@@ -986,9 +1128,9 @@ fn decisions_and_agents_draw_at_every_size_with_and_without_content() {
         Place::Decisions,
         &[
             "Waiting",
-            "Deny",
-            "Allow Once",
-            "Allow production: Delete in",
+            "Dismiss",
+            "Allow",
+            "Remember for this project",
             "left to answer",
         ],
     );
@@ -1851,8 +1993,8 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
     for expected in [
         "claude-code wants to use Guarded key",
         "Asked on Synthetic Mac mini.",
-        "Allow Once",
-        "Deny",
+        "Allow",
+        "Dismiss",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -1923,7 +2065,7 @@ fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check
 /// Each answer on the bar is the answer kind of the card (section 9.1).
 #[test]
 fn the_answers_of_the_bar_map_to_the_answer_kinds() {
-    use crate::questions::{Choice, RemoteEnvironment};
+    use crate::questions::Choice;
     let pending = run(
         "claude-code",
         question(
@@ -1934,6 +2076,12 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
     let key = "/synthetic/acme-billing".to_owned();
     let cases = [
         (Answer::Deny, Choice::Deny),
+        (
+            Answer::DenyWithComment(" No\n ".into()),
+            Choice::DenyWithComment {
+                comment: "No".into(),
+            },
+        ),
         (Answer::Once, Choice::ApproveOnce),
         (
             Answer::InProject(ActionKind::Read),
@@ -1954,20 +2102,14 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
                 item_id: 7,
                 name: "Guarded key".to_owned(),
             },
-            Choice::CorrectEnvironment {
-                item_id: 7,
-                environment: RemoteEnvironment::Development,
-            },
+            Choice::ApproveAsDevelopment,
         ),
         (
             Answer::MarkProduction {
                 item_id: 7,
                 name: "Guarded key".to_owned(),
             },
-            Choice::CorrectEnvironment {
-                item_id: 7,
-                environment: RemoteEnvironment::Production,
-            },
+            Choice::ApproveAsProduction,
         ),
         (Answer::Never, Choice::NeverForAgent),
         (Answer::AlwaysAsk, Choice::AlwaysAskForAgent),
@@ -1982,6 +2124,7 @@ fn the_answers_of_the_bar_map_to_the_answer_kinds() {
                 | Answer::InProject(_)
                 | Answer::Production(_)
                 | Answer::Development { .. }
+                | Answer::MarkProduction { .. }
         );
         assert_eq!(mapped.needs_owner_check(), approving, "{answer:?}");
     }
@@ -2168,21 +2311,15 @@ fn owner_window_development_requires_a_live_exact_question_click() {
         app.owner.check.is_none(),
         "valid window completes Development without a check"
     );
-    assert_eq!(
-        app.owner_ui
-            .session
-            .declaration(item_id)
-            .unwrap()
-            .unwrap()
-            .environment,
-        crate::vault::Environment::Development
-    );
     assert!(
-        queue.pending().iter().any(|r| r.id == pending.id),
-        "classification does not approve the run"
+        queue.pending().is_empty(),
+        "classification approves the exact pending run"
     );
-    queue.deny(pending.id);
-    waiter.join().unwrap().unwrap();
+    let settled = waiter.join().unwrap().unwrap();
+    assert_eq!(
+        settled.classification,
+        Some(crate::vault::Environment::Development)
+    );
     decisions::apply(
         &mut app,
         &ctx,
@@ -2203,123 +2340,127 @@ fn development_rechecks_the_question_after_vault_contention() {
     use crate::vault::Environment;
     use std::sync::mpsc;
 
-    for reuse in [false, true] {
-        for end in ["removed", "expired", "remote-deny", "replaced", "happy"] {
-            let dir = TempDir::new().unwrap();
-            let (mut app, item_id) = unlocked_app_with_item(&dir);
-            let queue = queue_of(&mut app, &dir);
-            let mut unknown = item(item_id, "Synthetic key");
-            unknown.unconfirmed = true;
-            let template = run(
-                "Synthetic",
-                question(vec![unknown], &[AnswerKind::CorrectEnvironment]),
-            );
-            let (waiter, pending) = ask(&app, &queue, 1, template.clone());
-            let epoch = app.owner_ui.session.epoch().unwrap();
-            let action = OwnerAction::QuestionDevelopment {
-                run_id: pending.id,
-                item_id,
-            };
-            let proof = if reuse {
-                let window = &app.owner_ui.session.owner_window;
-                window.configure(OwnerFrequency::UntilLock);
-                window.observe(true);
-                window.seed(epoch, CheckMethod::Passphrase, window.generation());
-                app.owner_gate()
-                    .reuse_local(action, LocalWindowSource::DevelopmentClick)
-                    .unwrap()
-            } else {
-                app.owner_gate()
-                    .authorize(action, OwnerCheck::passphrase(PASS))
-                    .unwrap()
-            };
-            let before = app.owner_ui.session.declaration(item_id).unwrap();
-            let vault = app.owner_ui.session.shared_vault();
-            let q = Arc::clone(&queue);
-            let id = pending.id;
-            let (held_tx, held_rx) = mpsc::channel();
-            let (validated_tx, validated_rx) = mpsc::channel();
-            let blocker = std::thread::spawn(move || {
-                let guard = vault.lock().unwrap();
-                held_tx.send(()).unwrap();
-                validated_rx.recv().unwrap();
-                let replacement = match end {
-                    "removed" => {
-                        q.invalidate_all();
-                        None
-                    }
-                    "expired" => {
-                        q.expire_question_for_test(id);
-                        None
-                    }
-                    // The authenticated iPhone denial uses this same queue method.
-                    "remote-deny" => {
-                        assert!(q.deny(id));
-                        None
-                    }
-                    "replaced" => {
-                        assert!(q.deny(id));
-                        let next = Arc::clone(&q);
-                        let waiter = std::thread::spawn(move || {
-                            next.wait_for_question(
-                                template,
-                                1,
-                                epoch,
-                                [1; 32],
-                                Duration::from_secs(30),
-                                || true,
-                            )
-                        });
-                        while !q.pending().iter().any(|run| run.id != id) {
-                            std::thread::yield_now();
-                        }
-                        Some(waiter)
-                    }
-                    "happy" => None,
-                    _ => unreachable!(),
-                };
-                drop(guard);
-                replacement
-            });
-            held_rx.recv().unwrap();
-            assert!(
-                queue.pending().contains(&pending),
-                "initial validation succeeds"
-            );
-            validated_tx.send(()).unwrap();
-            let result = app.owner_ui.session.correct_environment(
-                &queue,
-                &pending,
-                item_id,
-                Environment::Development,
-                proof,
-            );
-            let replacement = blocker.join().unwrap();
-            if end == "happy" {
-                result.unwrap();
-                assert_eq!(
-                    app.owner_ui
-                        .session
-                        .declaration(item_id)
-                        .unwrap()
-                        .unwrap()
-                        .environment,
-                    Environment::Development
+    for environment in [Environment::Development, Environment::Production] {
+        for reuse in [false, true] {
+            for end in ["removed", "expired", "remote-deny", "replaced", "happy"] {
+                let dir = TempDir::new().unwrap();
+                let (mut app, item_id) = unlocked_app_with_item(&dir);
+                let queue = queue_of(&mut app, &dir);
+                let mut unknown = item(item_id, "Synthetic key");
+                unknown.unconfirmed = true;
+                let template = run(
+                    "Synthetic",
+                    question(vec![unknown], &[AnswerKind::CorrectEnvironment]),
                 );
+                let (waiter, pending) = ask(&app, &queue, 1, template.clone());
+                let epoch = app.owner_ui.session.epoch().unwrap();
+                let action = OwnerAction::QuestionDevelopment {
+                    run_id: pending.id,
+                    item_id,
+                };
+                let proof = if reuse {
+                    let window = &app.owner_ui.session.owner_window;
+                    window.configure(OwnerFrequency::UntilLock);
+                    window.observe(true);
+                    window.seed(epoch, CheckMethod::Passphrase, window.generation());
+                    app.owner_gate()
+                        .reuse_local(action, LocalWindowSource::DevelopmentClick)
+                        .unwrap()
+                } else {
+                    app.owner_gate()
+                        .authorize(action, OwnerCheck::passphrase(PASS))
+                        .unwrap()
+                };
+                let before = app.owner_ui.session.declaration(item_id).unwrap();
+                let vault = app.owner_ui.session.shared_vault();
+                let q = Arc::clone(&queue);
+                let id = pending.id;
+                let (held_tx, held_rx) = mpsc::channel();
+                let (validated_tx, validated_rx) = mpsc::channel();
+                let blocker = std::thread::spawn(move || {
+                    let guard = vault.lock().unwrap();
+                    held_tx.send(()).unwrap();
+                    validated_rx.recv().unwrap();
+                    let replacement = match end {
+                        "removed" => {
+                            q.invalidate_all();
+                            None
+                        }
+                        "expired" => {
+                            q.expire_question_for_test(id);
+                            None
+                        }
+                        // The authenticated iPhone denial uses this same queue method.
+                        "remote-deny" => {
+                            assert!(q.deny(id));
+                            None
+                        }
+                        "replaced" => {
+                            assert!(q.deny(id));
+                            let next = Arc::clone(&q);
+                            let waiter = std::thread::spawn(move || {
+                                next.wait_for_question(
+                                    template,
+                                    1,
+                                    epoch,
+                                    [1; 32],
+                                    Duration::from_secs(30),
+                                    || true,
+                                )
+                            });
+                            while !q.pending().iter().any(|run| run.id != id) {
+                                std::thread::yield_now();
+                            }
+                            Some(waiter)
+                        }
+                        "happy" => None,
+                        _ => unreachable!(),
+                    };
+                    drop(guard);
+                    replacement
+                });
+                held_rx.recv().unwrap();
                 assert!(
                     queue.pending().contains(&pending),
-                    "correction never approves"
+                    "initial validation succeeds"
                 );
-            } else {
-                assert_eq!(result.unwrap_err().code, "not_waiting");
-                assert_eq!(app.owner_ui.session.declaration(item_id).unwrap(), before);
-            }
-            for run in queue.pending() {
-                queue.deny(run.id);
-            }
-            waiter.join().unwrap().unwrap();
-            if let Some(waiter) = replacement {
-                waiter.join().unwrap().unwrap();
+                validated_tx.send(()).unwrap();
+                let result = app.owner_ui.session.correct_environment(
+                    &queue,
+                    &pending,
+                    item_id,
+                    environment,
+                    proof,
+                );
+                let replacement = blocker.join().unwrap();
+                if end == "happy" {
+                    result.unwrap();
+                    assert_eq!(
+                        app.owner_ui.session.declaration(item_id).unwrap(),
+                        before,
+                        "the broker persists classification after its final baseline check"
+                    );
+                    assert!(
+                        !queue.pending().contains(&pending),
+                        "classification allows this run"
+                    );
+                } else {
+                    assert_eq!(result.unwrap_err().code, "not_waiting");
+                    assert_eq!(app.owner_ui.session.declaration(item_id).unwrap(), before);
+                }
+                for run in queue.pending() {
+                    queue.deny(run.id);
+                }
+                let settled = waiter.join().unwrap().unwrap();
+                if end == "happy" {
+                    assert_eq!(settled.classification, Some(environment));
+                }
+                if let Some(waiter) = replacement {
+                    let settled = waiter.join().unwrap().unwrap();
+                    if end == "happy" {
+                        assert_eq!(settled.classification, Some(environment));
+                    }
+                }
             }
         }
     }
@@ -2377,78 +2518,104 @@ fn fresh_biometry_probe_recovers_and_ignores_old_dialogs() {
 }
 
 #[test]
-fn durable_and_evaluation_answers_still_ask_inside_window() {
+fn durable_and_evaluation_answers_reuse_global_window_only_while_valid() {
     use crate::broker::approvals::{CheckMethod, OwnerFrequency};
-    for answer in [
-        Answer::InProject(ActionKind::Read),
-        Answer::Production(ActionKind::Read),
+    // The 2026-11-02 owner decision includes durable and evaluation answers.
+    // Each still needs an explicit click; revoked windows and Every time ask again.
+    for (policy, revoke) in [
+        (OwnerFrequency::UntilLock, false),
+        (OwnerFrequency::UntilLock, true),
+        (OwnerFrequency::EveryTime, false),
     ] {
-        let dir = TempDir::new().unwrap();
-        let (mut app, item_id) = unlocked_app_with_item(&dir);
-        let queue = queue_of(&mut app, &dir);
-        let (waiter, pending) = ask(
-            &app,
-            &queue,
-            1,
-            run(
-                "Synthetic",
-                question(
-                    vec![item(item_id, "Synthetic")],
-                    &[
-                        AnswerKind::InProject(ActionKind::Read),
-                        AnswerKind::Production(ActionKind::Read),
-                    ],
+        for choice in 0..3 {
+            let dir = TempDir::new().unwrap();
+            let (mut app, item_id) = unlocked_app_with_item(&dir);
+            let queue = queue_of(&mut app, &dir);
+            let offer = evaluation_offer(item_id);
+            let answer = match choice {
+                0 => Answer::InProject(ActionKind::Read),
+                1 => Answer::Production(ActionKind::Read),
+                _ => Answer::Evaluate {
+                    confirmations: offer.items.iter().map(|i| i.confirmation.clone()).collect(),
+                    offer: offer.clone(),
+                },
+            };
+            let production = matches!(answer, Answer::Production(_));
+            // A production allowance is offered only for a production credential.
+            // Otherwise ApprovalQueue::answer_choice correctly refuses NotProduction.
+            let mut credential = item(item_id, "Synthetic");
+            credential.production = production;
+            let (waiter, pending) = ask_with_evaluation(
+                &app,
+                &queue,
+                1,
+                run(
+                    "Synthetic",
+                    question(
+                        vec![credential],
+                        &[if production {
+                            AnswerKind::Production(ActionKind::Read)
+                        } else {
+                            AnswerKind::InProject(ActionKind::Read)
+                        }],
+                    ),
                 ),
-            ),
-        );
-        let w = app.owner_ui.session.owner_window.clone();
-        w.configure(OwnerFrequency::UntilLock);
-        w.observe(true);
-        w.seed(
-            app.owner_ui.session.epoch().unwrap(),
-            CheckMethod::Passphrase,
-            w.generation(),
-        );
-        decisions::apply(&mut app, &egui::Context::default(), &pending, answer);
-        assert!(app.owner.check.is_some());
-        assert!(queue.pending().iter().any(|r| r.id == pending.id));
-        app.close_owner_check(None);
-        queue.deny(pending.id);
-        waiter.join().unwrap().unwrap();
+                (choice == 2).then_some(offer.clone()),
+            );
+            let w = app.owner_ui.session.owner_window.clone();
+            w.configure(policy);
+            w.observe(true);
+            w.seed(
+                app.owner_ui.session.epoch().unwrap(),
+                CheckMethod::Passphrase,
+                w.generation(),
+            );
+            if revoke {
+                w.invalidate();
+            }
+            assert!(
+                queue.pending().iter().any(|r| r.id == pending.id),
+                "verification alone never answers a question"
+            );
+            decisions::apply(&mut app, &egui::Context::default(), &pending, answer);
+            if policy == OwnerFrequency::UntilLock && !revoke {
+                assert!(app.owner.check.is_none(), "global verification is reused");
+                assert!(
+                    !queue.pending().iter().any(|r| r.id == pending.id),
+                    "choice {choice} must settle: {}",
+                    app.status_text
+                );
+                let settled = waiter.join().unwrap().unwrap();
+                assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+                if choice != 2 {
+                    let remembered = settled.answer.expect("durable answer is preserved");
+                    assert_eq!(remembered.action, ActionKind::Read);
+                    assert_eq!(remembered.project.label, "acme-billing");
+                    assert_eq!(remembered.production, production);
+                } else {
+                    let evaluation = settled.evaluation.expect("exact evaluation permission");
+                    assert_eq!(evaluation.offer, offer);
+                    assert_eq!(
+                        evaluation.confirmations,
+                        offer
+                            .items
+                            .iter()
+                            .map(|i| i.confirmation.clone())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            } else {
+                assert!(
+                    app.owner.check.is_some(),
+                    "fresh authentication is required"
+                );
+                assert!(queue.pending().iter().any(|r| r.id == pending.id));
+                app.close_owner_check(None);
+                queue.deny(pending.id);
+                waiter.join().unwrap().unwrap();
+            }
+        }
     }
-    let dir = TempDir::new().unwrap();
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    let queue = queue_of(&mut app, &dir);
-    let offer = evaluation_offer(item_id);
-    let (waiter, pending) = ask_with_evaluation(
-        &app,
-        &queue,
-        1,
-        run("Synthetic", question(vec![item(item_id, "Synthetic")], &[])),
-        Some(offer.clone()),
-    );
-    let w = app.owner_ui.session.owner_window.clone();
-    w.configure(OwnerFrequency::UntilLock);
-    w.observe(true);
-    w.seed(
-        app.owner_ui.session.epoch().unwrap(),
-        CheckMethod::Passphrase,
-        w.generation(),
-    );
-    decisions::apply(
-        &mut app,
-        &egui::Context::default(),
-        &pending,
-        Answer::Evaluate {
-            confirmations: offer.items.iter().map(|i| i.confirmation.clone()).collect(),
-            offer,
-        },
-    );
-    assert!(app.owner.check.is_some());
-    assert!(queue.pending().iter().any(|r| r.id == pending.id));
-    app.close_owner_check(None);
-    queue.deny(pending.id);
-    waiter.join().unwrap().unwrap();
 }
 
 #[test]
@@ -2472,10 +2639,18 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
             "The bouncer brain didn't answer in time.",
         ),
         (
+            ReasonKind::ModelUnsure,
+            "The bouncer brain wasn't sure this run is safe.",
+        ),
+        (
             ReasonKind::HookFlags,
             "The command or task context needs your review.",
         ),
         (ReasonKind::NotProject, "This folder isn't a project."),
+        (
+            ReasonKind::BrowserFill,
+            "The agent wants to fill a credential in your browser.",
+        ),
     ] {
         let dir = TempDir::new().unwrap();
         let (mut app, item_id) = unlocked_app_with_item(&dir);
@@ -2487,19 +2662,22 @@ fn unconfirmed_question_headlines_show_blocking_reason_before_classification() {
         assert_eq!(decisions::question_headline(&info), headline);
         assert_eq!(
             decisions::classification_line(&info).as_deref(),
-            Some("Is Synthetic sandbox a development credential?")
+            Some("Synthetic sandbox: environment unknown")
         );
         let (waiter, pending) = ask(&app, &queue, 1, run("Synthetic agent", info));
         app.place = Place::Decisions;
         let (text, _) = frames(&mut app, WIDE, 3);
         assert!(
             text.find(headline).unwrap()
-                < text
-                    .find("Is Synthetic sandbox a development credential?")
-                    .unwrap(),
+                < text.find("Synthetic sandbox: environment unknown").unwrap(),
             "{text}"
         );
-        for label in ["Deny", "Allow Once", "Production", "Development"] {
+        for label in [
+            "Dismiss",
+            "Dismiss with comment",
+            "Allow as prod",
+            "Allow as dev",
+        ] {
             assert!(text.contains(label), "{text}");
         }
         assert!(queue.deny(pending.id));

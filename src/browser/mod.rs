@@ -13,6 +13,7 @@
 //! suffix list is shared by site matching and WebAuthn; SHA-256 of
 //! `webauthn::client_data` needs the vault feature.
 
+pub mod bypass;
 pub mod caller;
 pub mod install;
 /// New passwords for the browser. It needs the random generator of the vault feature.
@@ -20,5 +21,6 @@ pub mod install;
 pub mod password;
 pub mod relay;
 pub mod site;
+pub mod trust;
 pub mod webauthn;
 pub mod wire;

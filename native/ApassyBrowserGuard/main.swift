@@ -4,7 +4,7 @@
 // The crate forbids unsafe Rust, so the audit token and code signing checks run
 // here. The guard is Apassy.app/Contents/MacOS/apassy-browser-guard. It answers
 // one check and exits: "ok" on standard output and status 0, or status 1 with no
-// output. Only an unsafe switch answers "unsafe-switch\n" with status 2.
+// output. Unsafe switches answer "unsafe-switch <bounded JSON>\n" with status 2.
 // The process that set the switch already knows it; this reveals nothing about
 // the vault. It reads no request and has no development override. The test build
 // adds self-test modes (APASSY_BROWSER_GUARD_SELFTEST) that never answer "ok".
@@ -91,12 +91,14 @@ let knownBrowsers = [
 struct Refused: Error {
     let reason: String
     var unsafeSwitch: Bool = false
+    var identity: Data? = nil
 }
 
 /// A process that passed a check.
 struct Checked {
     let pid: pid_t
     let token: audit_token_t
+    var identity: Data? = nil
 }
 
 // MARK: - Checks
@@ -114,6 +116,7 @@ func checkBrowserParent(app: String, team: String) throws {
     guard getppid() == parent else {
         throw Refused(reason: "the parent changed")
     }
+    if let identity = browser.identity { throw Refused(reason: "unsafe browser", unsafeSwitch: true, identity: identity) }
 }
 
 /// The parent of the guard is the Apassy app, the peer of standard input is
@@ -135,6 +138,7 @@ func checkSocketPeer(app: String, team: String) throws {
     guard getppid() == parent, let again = auditToken(of: parent), same(again, appToken) else {
         throw Refused(reason: "the parent changed")
     }
+    if let identity = browser.identity { throw Refused(reason: "unsafe browser", unsafeSwitch: true, identity: identity) }
 }
 
 /// The process of `token` is apassy-browser-host of this app.
@@ -162,18 +166,91 @@ func checkBrowser(_ browser: pid_t) throws -> Checked {
         throw Refused(reason: "no browser process")
     }
     let code = try guest(token)
-    var allowed = false
+    var allowed: KnownBrowser? = nil
     for known in knownBrowsers {
         if (try? check(code, requirement: developerIDRequirement(known))) != nil {
-            allowed = true
+            allowed = known
             break
         }
     }
-    guard allowed else {
+    guard let allowed else {
         throw Refused(reason: "the browser is not a known signed browser")
     }
-    try checkArguments(of: browser, token: token)
-    return Checked(pid: browser, token: token)
+    let arguments = try processArguments(of: browser)
+    guard let again = auditToken(of: browser), same(again, token) else { throw Refused(reason: "browser changed") }
+    var identity: Data? = nil
+    if unsafeSwitch(in: arguments) != nil {
+        identity = try instanceIdentity(arguments, known: allowed, cwd: browserWorkingDirectory(browser))
+    }
+    return Checked(pid: browser, token: token, identity: identity)
+}
+
+/// Only bounded switch names, never arbitrary argument values or environment.
+func instanceIdentity(_ arguments: [String], known: KnownBrowser, cwd: String? = nil) throws -> Data {
+    let switches = try effectiveIdentitySwitches(arguments)
+    func value(_ key: String) -> String? { switches[key] }
+    let defaults = ["net.imput.helium": "net.imput.helium", "com.google.Chrome": "Google/Chrome"]
+    guard let root = defaults[known.identifier] else { throw Refused(reason: "unknown profile root") }
+    var requested = ((value("user-data-dir") ?? (NSHomeDirectory() + "/Library/Application Support/" + root)) as NSString).expandingTildeInPath
+    if !requested.hasPrefix("/") {
+        guard let cwd, cwd.hasPrefix("/") else { throw Refused(reason: "relative data folder without browser cwd") }
+        requested = (cwd as NSString).appendingPathComponent(requested)
+    }
+    guard requested.hasPrefix("/"), let canonical = realPath(requested), canonical.utf8.count <= 700 else { throw Refused(reason: "profile cannot be canonicalized") }
+    let names = arguments.compactMap { unsafeSwitch(in: [$0]) }
+    guard names.count <= 16 else { throw Refused(reason: "too many switches") }
+    let port = value("remote-debugging-port")
+    let pipe = switches["remote-debugging-pipe"] != nil
+    guard !(pipe && port != nil) else { throw Refused(reason: "ambiguous debugging transport") }
+    var debugging = pipe ? "pipe" : "none"
+    if let port { guard let number = UInt16(port), number > 0, String(number) == port else { throw Refused(reason: "dynamic or invalid debugging port") }; debugging = port }
+    let data = try JSONSerialization.data(withJSONObject: ["bundle_id": known.identifier, "team_id": known.team, "profile_dir": canonical, "debugging": debugging, "unsafe_switches": names], options: [.sortedKeys])
+    guard data.count <= 1024 else { throw Refused(reason: "identity too long") }
+    return data
+}
+
+/// Read the browser's cwd from the kernel, never the guard's working directory.
+func browserWorkingDirectory(_ browser: pid_t) -> String? {
+    var info = proc_vnodepathinfo()
+    let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+    guard proc_pidinfo(browser, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+    return withUnsafeBytes(of: &info.pvi_cdir.vip_path) { bytes in
+        guard let end = bytes.firstIndex(of: 0), end > 0 else { return nil }
+        return String(bytes: bytes[..<end], encoding: .utf8)
+    }
+}
+
+/// base::CommandLine on POSIX reads case-sensitive -name/--name switches,
+/// values only after '=', stops at '--', and keeps the last duplicate value.
+/// Refuse ambiguous identity spellings and conflicting duplicates instead of
+/// guessing. Detection in unsafeSwitch deliberately remains more conservative.
+func effectiveIdentitySwitches(_ arguments: [String]) throws -> [String: String] {
+    guard let executable = arguments.first, !executable.isEmpty, !executable.hasPrefix("-") else {
+        throw Refused(reason: "ambiguous executable argument")
+    }
+    let keys = ["user-data-dir", "remote-debugging-port", "remote-debugging-pipe"]
+    var result: [String: String] = [:]
+    for raw in arguments.dropFirst() {
+        // base::CommandLine trims ASCII whitespace around every argv element.
+        let argument = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\u{000B}\u{000C}"))
+        if argument == "--" { break }
+        guard argument.hasPrefix("-") else { continue }
+        let parts = argument.drop { $0 == "-" }.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first, keys.contains(first.lowercased()) else { continue }
+        let key = String(first)
+        guard keys.contains(key), argument.hasPrefix("--\(key)") || argument.hasPrefix("-\(key)") else {
+            throw Refused(reason: "ambiguous identity switch")
+        }
+        let prefix = argument.prefix { $0 != "=" }
+        guard prefix == "-\(key)" || prefix == "--\(key)" else { throw Refused(reason: "ambiguous identity switch") }
+        guard key == "remote-debugging-pipe" || (parts.count == 2 && !parts[1].isEmpty) else {
+            throw Refused(reason: "identity switch requires an equals value")
+        }
+        let value = parts.count == 2 ? String(parts[1]) : ""
+        if let old = result[key], old != value { throw Refused(reason: "conflicting identity switches") }
+        result[key] = value
+    }
+    return result
 }
 
 /// The arguments of the process `pid` have no unsafe switch. The token is read
@@ -285,7 +362,9 @@ func parseProcessArguments(_ bytes: [UInt8]) throws -> [String] {
 /// The guard also strips more dashes, ignores case, and checks the arguments
 /// after `--`, so it refuses more than Chromium reads.
 func unsafeSwitch(in arguments: [String]) -> String? {
-    for argument in arguments where argument.hasPrefix("-") {
+    for raw in arguments {
+        let argument = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\u{000B}\u{000C}"))
+        guard argument.hasPrefix("-") else { continue }
         let name = argument.drop { $0 == "-" }.prefix { $0 != "=" }.lowercased()
         if unsafeSwitches.contains(name) || unsafeSwitchPrefixes.contains(where: { name.hasPrefix($0) }) {
             return name
@@ -457,6 +536,22 @@ func runSelfTest(_ arguments: [String]) -> Int32? {
     }
     do {
         switch arguments[1] {
+        case "selftest-instance":
+            let input = FileHandle.standardInput.readData(ofLength: maxArgumentBytes + 1)
+            guard input.count <= maxArgumentBytes,
+                  let vector = try JSONSerialization.jsonObject(with: input) as? [String]
+            else { throw Refused(reason: "invalid test vector") }
+            let identity = try instanceIdentity(vector, known: KnownBrowser(identifier: "net.imput.helium", team: "S4Q33XPHB4"), cwd: arguments[2] == "-" ? nil : arguments[2])
+            FileHandle.standardOutput.write(identity)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        case "selftest-identity":
+            let input = FileHandle.standardInput.readData(ofLength: maxArgumentBytes + 1)
+            guard input.count <= maxArgumentBytes,
+                  let vector = try JSONSerialization.jsonObject(with: input) as? [String]
+            else { throw Refused(reason: "invalid test vector") }
+            let switches = try effectiveIdentitySwitches(vector)
+            FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: switches, options: [.sortedKeys]))
+            FileHandle.standardOutput.write(Data("\n".utf8))
         case "selftest-parse":
             // A synthetic KERN_PROCARGS2 buffer from standard input.
             let input = FileHandle.standardInput.readData(ofLength: maxArgumentBuffer + 1)
@@ -509,7 +604,8 @@ func runSelfTest(_ arguments: [String]) -> Int32? {
             guard let target = pid_t(arguments[2]), target > 1 else {
                 throw Refused(reason: "no process")
             }
-            _ = try checkBrowser(target)
+            let checked = try checkBrowser(target)
+            if checked.identity != nil { throw Refused(reason: "unsafe browser") }
         default:
             throw Refused(reason: "unknown self-test")
         }
@@ -547,8 +643,8 @@ func runGuard() -> Int32 {
             throw Refused(reason: "unknown check")
         }
     } catch let refused as Refused {
-        if refused.unsafeSwitch {
-            FileHandle.standardOutput.write(Data("unsafe-switch\n".utf8))
+        if refused.unsafeSwitch, let identity = refused.identity {
+            FileHandle.standardOutput.write(Data("unsafe-switch ".utf8) + identity + Data("\n".utf8))
             return 2
         }
         FileHandle.standardError.write(Data("apassy-browser-guard: refused: \(refused.reason)\n".utf8))

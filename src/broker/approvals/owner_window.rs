@@ -75,7 +75,7 @@ impl WindowClock for Monotonic {
         {
             // Darwin's std::time::Instant uses CLOCK_UPTIME_RAW, which pauses
             // during sleep. CLOCK_MONOTONIC advances during suspension, so an
-            // overdue heartbeat fences reuse even before a queued sleep event.
+            // absolute deadline includes system suspension.
             rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
                 .try_into()
                 .expect("nonnegative monotonic boot clock")
@@ -91,6 +91,7 @@ impl WindowClock for Monotonic {
 struct Verification {
     epoch: [u8; 32],
     at: Duration,
+    lifecycle: Option<(u64, u64)>,
     #[cfg(any(feature = "desktop", test))]
     method: super::CheckMethod,
 }
@@ -100,11 +101,20 @@ struct State {
     generation: u64,
     verified: Option<Verification>,
     healthy_at: Option<Duration>,
+    lifecycle: Option<(u64, u64)>,
+}
+#[derive(Clone)]
+pub(crate) struct LifecycleProbe(pub Arc<dyn Fn() -> bool + Send + Sync>);
+impl std::fmt::Debug for LifecycleProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LifecycleProbe")
+    }
 }
 #[derive(Debug, Clone)]
 pub(crate) struct OwnerWindow {
     state: Arc<Mutex<State>>,
     clock: Arc<dyn WindowClock>,
+    probe: Arc<Mutex<Option<LifecycleProbe>>>,
 }
 impl Default for OwnerWindow {
     fn default() -> Self {
@@ -116,10 +126,42 @@ impl Default for OwnerWindow {
     }
 }
 impl OwnerWindow {
+    #[cfg(any(feature = "desktop", test))]
+    pub(crate) fn set_probe(&self, probe: LifecycleProbe) {
+        self.invalidate_for("helper_started");
+        *self.probe.lock().unwrap() = Some(probe);
+    }
+    #[cfg(feature = "desktop")]
+    pub(crate) fn clear_probe(&self) {
+        self.invalidate_for("helper_stopped");
+        *self.probe.lock().unwrap() = None;
+        self.observe(false);
+    }
+    fn refresh(&self) -> bool {
+        let probe = self.probe.lock().unwrap().clone();
+        if probe.is_some_and(|p| !(p.0)()) {
+            self.observe(false);
+            return false;
+        }
+        true
+    }
+    #[cfg(any(feature = "desktop", test))]
+    pub(crate) fn snapshot(&self, identity: u64, counter: u64, active: bool) {
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.lifecycle.is_some_and(|old| old != (identity, counter)) {
+                s.generation = s.generation.checked_add(1).expect("generation exhausted");
+                s.verified = None;
+            }
+            s.lifecycle = Some((identity, counter));
+        }
+        self.observe(active);
+    }
     fn with_clock(clock: Arc<dyn WindowClock>) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             clock,
+            probe: Default::default(),
         }
     }
     #[cfg(any(feature = "desktop", test))]
@@ -129,20 +171,25 @@ impl OwnerWindow {
     #[cfg(any(feature = "desktop", test))]
     pub(crate) fn configure(&self, policy: OwnerFrequency) {
         let mut s = self.state.lock().unwrap();
-        s.generation = s
-            .generation
-            .checked_add(1)
-            .expect("owner window generation exhausted");
-        tracing::info!(generation = s.generation, "owner window generation changed");
-        s.verified = None;
+        // A later setting write must not resurrect an already expired window.
+        if s.policy != OwnerFrequency::EveryTime
+            && s.verified.is_some_and(|v| {
+                s.policy
+                    .duration()
+                    .is_some_and(|d| self.clock.now().saturating_sub(v.at) >= d)
+            })
+        {
+            s.verified = None;
+        }
         s.policy = policy;
     }
-    /// Lock, sleep, session switch, quit, failed/cancelled check, setting change,
-    /// or observer loss all revoke issued proofs as well as the active window.
+    /// Lock, sleep, session switch, quit or observer loss revoke issued proofs
+    /// as well as the active window.
     #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate(&self) {
         self.invalidate_for("explicit_invalidation");
     }
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn invalidate_for(&self, event: &'static str) {
         tracing::info!(event, "owner window revoked");
         let mut s = self.state.lock().unwrap();
@@ -170,28 +217,20 @@ impl OwnerWindow {
     pub(crate) fn generation(&self) -> u64 {
         self.state.lock().unwrap().generation
     }
-    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn observe(&self, active: bool) {
         let now = self.clock.now();
         let mut state = self.state.lock().unwrap();
-        let gap = state
-            .healthy_at
-            .is_some_and(|at| now.saturating_sub(at) >= Duration::from_secs(2));
         // Revoke on loss/transition, not on every unavailable heartbeat: fresh
         // authentication must remain possible when reuse cannot be observed.
         // Explicit OS revocation events call invalidate independently.
-        if (!active && state.healthy_at.is_some()) || gap {
+        if !active && state.healthy_at.is_some() {
             state.generation = state
                 .generation
                 .checked_add(1)
                 .expect("owner window generation exhausted");
             tracing::info!(
                 generation = state.generation,
-                reason = if gap {
-                    "heartbeat_gap"
-                } else {
-                    "session_inactive"
-                },
+                reason = "session_inactive",
                 "owner window revoked"
             );
             state.verified = None;
@@ -199,6 +238,9 @@ impl OwnerWindow {
         state.healthy_at = active.then_some(now);
     }
     pub(crate) fn seed(&self, epoch: [u8; 32], method: super::CheckMethod, generation: u64) {
+        if !self.refresh() {
+            return;
+        }
         let mut s = self.state.lock().unwrap();
         let reason = if s.generation != generation {
             "generation_changed"
@@ -217,6 +259,7 @@ impl OwnerWindow {
             s.verified = Some(Verification {
                 epoch,
                 at: self.clock.now(),
+                lifecycle: s.lifecycle,
                 #[cfg(any(feature = "desktop", test))]
                 method,
             });
@@ -232,6 +275,9 @@ impl OwnerWindow {
 
     #[cfg(any(feature = "desktop", test))]
     pub(crate) fn ticket(&self, epoch: [u8; 32]) -> Option<(WindowProof, super::CheckMethod)> {
+        if !self.refresh() {
+            return None;
+        }
         let s = self.state.lock().unwrap();
         let now = self.clock.now();
         let age_ms = s
@@ -273,9 +319,8 @@ impl OwnerWindow {
         ))
     }
 }
-fn healthy(s: &State, now: Duration) -> bool {
-    s.healthy_at
-        .is_some_and(|at| now.saturating_sub(at) < Duration::from_secs(2))
+fn healthy(s: &State, _now: Duration) -> bool {
+    s.healthy_at.is_some() && s.verified.is_none_or(|v| v.lifecycle == s.lifecycle)
 }
 /// A fresh one-action proof retains this fence; reuse never updates `verified_at`.
 #[derive(Debug, Clone)]
@@ -287,6 +332,9 @@ pub(crate) struct WindowProof {
 }
 impl WindowProof {
     pub(crate) fn valid(&self) -> bool {
+        if !self.window.refresh() {
+            return false;
+        }
         let s = self.window.state.lock().unwrap();
         let now = self.window.clock.now();
         s.generation == self.generation
@@ -318,7 +366,47 @@ mod tests {
         (w, c)
     }
     #[test]
-    fn heartbeat_exact_boundary_and_recovery_fence_old_proofs() {
+    fn synchronous_probe_timeout_counter_restart_and_inactive_fail_closed() {
+        for cause in 0..4 {
+            let (w, _) = fixture();
+            w.configure(OwnerFrequency::UntilLock);
+            w.snapshot(1, 0, true);
+            w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
+            let (proof, _) = w.ticket([1; 32]).unwrap();
+            match cause {
+                0 => {
+                    *w.probe.lock().unwrap() = Some(LifecycleProbe(Arc::new(|| false)));
+                }
+                1 => w.snapshot(1, 1, true),
+                2 => w.snapshot(2, 0, true),
+                _ => w.snapshot(1, 0, false),
+            }
+            assert!(!proof.valid());
+            assert!(w.ticket([1; 32]).is_none());
+            w.observe(true);
+            assert!(w.ticket([1; 32]).is_none());
+        }
+    }
+    #[test]
+    fn unlock_seeds_both_local_methods_and_setting_preserves_absolute_start() {
+        for method in [
+            super::super::CheckMethod::TouchId,
+            super::super::CheckMethod::Passphrase,
+        ] {
+            let (w, c) = fixture();
+            w.configure(OwnerFrequency::OneMinute);
+            let generation = w.begin_unlock(None).unwrap();
+            w.seed([1; 32], method, generation);
+            assert!(w.ticket([1; 32]).is_some());
+            c.0.store(30, Ordering::SeqCst);
+            w.configure(OwnerFrequency::FiveMinutes);
+            assert!(w.ticket([1; 32]).is_some());
+            c.0.store(300, Ordering::SeqCst);
+            assert!(w.ticket([1; 32]).is_none());
+        }
+    }
+    #[test]
+    fn heartbeat_gaps_do_not_revoke() {
         #[derive(Debug, Default)]
         struct Millis(AtomicU64);
         impl WindowClock for Millis {
@@ -336,8 +424,8 @@ mod tests {
         assert!(proof.valid());
         assert!(w.ticket([1; 32]).is_some());
         clock.0.store(2000, Ordering::SeqCst);
-        assert!(!proof.valid());
-        assert!(w.ticket([1; 32]).is_none());
+        assert!(proof.valid());
+        assert!(w.ticket([1; 32]).is_some());
         w.observe(true);
         w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
         assert!(w.ticket([1; 32]).is_some());
@@ -372,10 +460,9 @@ mod tests {
             "session switch",
             "quit",
             "vault lock",
-            "setting change",
-            "failed check",
-            "cancelled check",
-            "observer loss",
+            "helper exited",
+            "helper restarted",
+            "auto-lock",
         ] {
             let (w, _) = fixture();
             w.configure(OwnerFrequency::UntilLock);
@@ -385,7 +472,7 @@ mod tests {
                 w.generation(),
             );
             let (p, _) = w.ticket([1; 32]).unwrap();
-            w.invalidate();
+            w.invalidate_for(event);
             assert!(!p.valid(), "{event}");
             assert!(w.ticket([1; 32]).is_none(), "{event}");
         }
@@ -418,25 +505,31 @@ mod tests {
         w.configure(OwnerFrequency::UntilLock);
         w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
         c.0.store(2, Ordering::SeqCst);
-        assert!(w.ticket([1; 32]).is_none());
+        assert!(w.ticket([1; 32]).is_some());
         w.observe(false);
         w.observe(true);
         assert!(w.ticket([1; 32]).is_none());
     }
 
     #[test]
-    fn owner_session_suspension_revokes_before_the_next_heartbeat() {
+    fn owner_session_scheduling_gap_only_expires_timed_windows() {
         for policy in [OwnerFrequency::OneMinute, OwnerFrequency::UntilLock] {
             let (w, c) = fixture();
             w.configure(policy);
             w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
             let (proof, _) = w.ticket([1; 32]).unwrap();
             c.0.store(3600, Ordering::SeqCst);
-            assert!(!proof.valid());
-            assert!(w.ticket([1; 32]).is_none());
+            assert_eq!(proof.valid(), policy == OwnerFrequency::UntilLock);
+            assert_eq!(
+                w.ticket([1; 32]).is_some(),
+                policy == OwnerFrequency::UntilLock
+            );
             w.observe(true);
-            assert!(!proof.valid());
-            assert!(w.ticket([1; 32]).is_none());
+            assert_eq!(proof.valid(), policy == OwnerFrequency::UntilLock);
+            assert_eq!(
+                w.ticket([1; 32]).is_some(),
+                policy == OwnerFrequency::UntilLock
+            );
         }
     }
 

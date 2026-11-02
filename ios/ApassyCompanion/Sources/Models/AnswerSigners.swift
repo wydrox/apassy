@@ -24,6 +24,7 @@ extension AnswerSigner {
 /// The answer keys of this iPhone: one per questions team, so that a new key for one vault (after
 /// a removal, or a new Face ID enrollment) leaves the rows of the other vaults as they are.
 protocol AnswerSigners: Sendable {
+    var faceIDWindow: FaceIDWindow? { get }
     /// The key that a join or a connection to `team` sends to the Mac that confirms it: the key of
     /// that team, made now when the team has none. Nil `team` (a link without one): the shared key.
     func joinKey(team: String?) throws -> Data
@@ -32,6 +33,10 @@ protocol AnswerSigners: Sendable {
     func signer(team: String?, registered: Data?) -> (any AnswerSigner)?
     /// A new key for `team` only. The keys of the other teams stay.
     func renew(team: String?) throws -> Data
+}
+
+extension AnswerSigners {
+    var faceIDWindow: FaceIDWindow? { nil }
 }
 
 /// One signer for every team: the tests that have one vault.
@@ -68,6 +73,7 @@ struct KeychainAnswerKeyStore: AnswerKeyStore {
 /// registration breaks. The shared key is never replaced or deleted here; a team leaves it only
 /// when it gets its own key (a new connection, or `renew`).
 struct TeamAnswerSigners: AnswerSigners {
+    var faceIDWindow: FaceIDWindow? { store is KeychainAnswerKeyStore ? .app : nil }
     static let sharedService = "com.wydrox.apassy.questions"
 
     static func service(team: String) -> String { "\(sharedService).\(team)" }
@@ -132,7 +138,11 @@ private struct KeyAnswerSigner: AnswerSigner {
     func publicKey() throws -> Data { try keys().approvalPublicKey }
 
     func sign(_ message: Data, reason: String) async throws -> Data {
-        try await keys().signApproval(message, reason: reason)
+        let keys = try keys()
+        if keys.isSecureEnclave {
+            return try await keys.signAccessApproval(message, reason: reason, authentication: ApprovalAuthentication(window: .app))
+        }
+        return try await keys.signApproval(message, reason: reason)
     }
 
     func renew() throws -> Data { try store.create(service: renewService).approvalPublicKey }

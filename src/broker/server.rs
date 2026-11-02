@@ -71,6 +71,9 @@ impl BrokerOptions {
 /// the socket file.
 #[derive(Debug)]
 pub struct BrokerHandle {
+    /// Requests in flight; the desktop app waits for zero before an automatic update.
+    #[cfg_attr(not(all(feature = "desktop", feature = "vault")), allow(dead_code))]
+    active: Arc<AtomicUsize>,
     socket: PathBuf,
     approvals: Arc<ApprovalQueue>,
     approval_timeout: Duration,
@@ -80,6 +83,10 @@ pub struct BrokerHandle {
 }
 
 impl BrokerHandle {
+    #[cfg_attr(not(all(feature = "desktop", feature = "vault")), allow(dead_code))]
+    pub(crate) fn update_busy(&self) -> bool {
+        self.active.load(Ordering::SeqCst) != 0 || !self.approvals.pending().is_empty()
+    }
     pub fn socket_path(&self) -> &Path {
         &self.socket
     }
@@ -181,10 +188,12 @@ pub fn start_with(
     let stop = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
     let thread_stop = Arc::clone(&stop);
+    let thread_active = Arc::clone(&active);
     let thread = thread::Builder::new()
         .name("apassy-broker".to_owned())
-        .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &active, &operations))?;
+        .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &thread_active, &operations))?;
     Ok(BrokerHandle {
+        active,
         socket: socket.to_path_buf(),
         approvals,
         approval_timeout,

@@ -108,10 +108,15 @@ test("a navigation during the owner check closes the host before it answers", as
   await page.click("#create-passkey");
   await expect.poll(() => ph.requests("passkey_create").length).toBe(1);
   await page.goto(ph.pageUrl("/blank"));
-  await expect.poll(() => ph.events((e) => e && e.event === "eof").length).toBe(1);
-  const [eof] = ph.events((e) => e && e.event === "eof");
+  await expect.poll(() => ph.events((e) => e && e.event === "eof" && e.pendingRid).length).toBe(1);
+  const [eof] = ph.events((e) => e && e.event === "eof" && e.pendingRid);
   expect(eof.pendingRid).toBe(ph.requests("passkey_create")[0].rid);
-  expect(ph.events((e) => e && e.event === "answer")).toHaveLength(0);
+  // Capability negotiation answers status before the owner request starts.
+  // Navigation must prevent every answer to the actual passkey request.
+  expect(ph.events((e) => e && e.event === "answer" && e.cmd?.startsWith("passkey_"))).toHaveLength(0);
+  const events = ph.events();
+  const ownerRequestIndex = events.findIndex(e => !e.event && e.cmd === "passkey_create");
+  expect(events.slice(ownerRequestIndex + 1).filter(e => e.event === "answer" && e.cmd === "status")).toHaveLength(0);
   expect(ph.rp.status().credentialCount).toBe(0);
 });
 

@@ -101,7 +101,7 @@ final class AccessRequestsModel {
     let current = generation
     busy = request.id
     messages[request.id] = choice == .allow_once ? "Preparing Face ID…" : "Sending Deny…"
-    let auth = ApprovalAuthentication()
+    let auth = ApprovalAuthentication(window: signers.faceIDWindow)
     authentication = auth
     defer {
       auth.cancel()

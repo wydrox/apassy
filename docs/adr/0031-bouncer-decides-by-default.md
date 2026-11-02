@@ -7,7 +7,7 @@ ADR 0029 remains a historical record. Its readiness, timeout and authorization p
 
 ## Problem
 
-The model can be ready while nearly every credential request asks the owner before
+The bouncer brain can be ready while nearly every credential request asks the owner before
 inference. Default production, default environment/risk sources and missing local
 evaluation scopes require repeated manual setup. This contradicts the low-friction
 direction of [ADR 0025](0025-low-friction-access.md): over-asking is acceptable;
@@ -15,7 +15,7 @@ configuration before each credential can be evaluated is not.
 
 ## Decision
 
-After the existing hard checks, each process request goes to the model, including
+After the existing hard checks in the bouncer gate, each process request goes to the bouncer brain, including
 first use, staging, default-source environment/risk and unconfirmed production.
 No evaluation scope, earlier use or per-credential setup is required.
 
@@ -25,7 +25,7 @@ The following still ask or refuse before inference, with their existing reasons:
   missing process bindings and duplicate variables.
 - Command-analysis flags, foreign database hosts, Always ask, and production found
   by a signal, confirmed by usage or set by the owner without a fitting allowance.
-- A model that is off, unavailable or has not passed inference readiness.
+- A bouncer brain that is off, unavailable or has not passed inference readiness.
 - Root, HOME or a parent of HOME instead of a project.
 - Missing user request or declaration, including with a fitting execution answer.
 - An existing owner execution answer that does not cover this run.
@@ -37,21 +37,21 @@ does not name its variable. An explicit fitting owner execution answer can add
 non-database hosts. Fitting execution answers and owner-taught patterns otherwise
 retain their existing semantics. Evaluation scopes never waive the foreign-project check.
 
-The current model input has no structured declaration-source fields. The broker
-therefore treats default classifications more strictly: every such model decision
+The current bouncer brain input has no structured declaration-source fields. The bouncer gate
+therefore treats default classifications more strictly: every decision based on those brain answers
 requires `task_match >= 0.80`, even for known safe commands or certain reads.
 Calibration cannot lower this check. The original sensitive declaration is kept:
 high-risk or irreversible credentials still need the existing read-only certainty
-check for commands that are not known safe. Other thresholds and model weights do
+check for commands that are not known safe. Other thresholds and brain weights do
 not change. The question and decision log state the actual failed check and the
 stricter treatment. Shadow decisions use the same treatment.
 
-A model allow permits only the current run. It creates no grant, remembered answer,
+An allowance by the bouncer gate based on brain answers permits only the current run. It creates no grant, remembered answer,
 evaluation scope, classification confirmation or pattern approval. Each later run
 is evaluated afresh unless an explicit owner execution answer or pattern covers it.
 The local verification window of ADR 0030 is separate: it may supply identity proof
 only after an explicit Allow once click. It never answers a question or bypasses
-a routing veto. A model allow neither uses nor seeds that window.
+a routing veto. Such an allowance neither uses nor seeds that window.
 The credential revision, declaration and sources, access, project, canonical
 folders and supported command/script binding are checked again before secret use.
 Existing limits of the binding (no transitive dependency pinning or atomic
@@ -67,10 +67,10 @@ Connector operations keep their existing fixed-profile behavior.
 ## Evidence and visibility
 
 Settings > Bouncer shows inference readiness and counts for the owner's local calendar day from the local
-decision log: allowed by the model, asked the owner, and failed. Failed means model
+decision log: allowed by the bouncer gate based on brain answers, asked the owner, and failed. Failed means brain
 or readiness failure, or an unanswered/invalidated question; it can overlap asked.
 Both UTC boundaries come from the system timezone, including DST transitions.
-Owner denials, patterns and remembered answers are not model successes.
+Owner denials, patterns and remembered answers are not brain successes.
 The view refreshes with the existing supervisor repaint timer.
 
 The evaluation harness uses the broker's non-executing `evaluate_run` entry point.
@@ -80,15 +80,15 @@ project names match fixture declarations; `cwd_project` can deliberately differ.
 A marker executable must never run. Missing intended inference, unsafe allowances,
 empty input and harness errors fail the process. Historical published sets and
 labels stay unchanged. The new frozen smoke set is bounded routing evidence,
-not a broad or independent model-acceptance claim.
+not a broad or independent brain-acceptance claim.
 
 The existing desktop toolkit forces light appearance. A dark tour can document
 that limit; it cannot establish dark-mode design acceptance without a separate
 theme implementation.
 
-Model input must fit in full for every question. The bundled server checks the
+Bouncer brain input must fit in full for every question. The bundled server checks the
 actual token budget before inference and rejects requests that would hide the
-command through truncation. Agent text claiming model-state fields or answers is
+command through truncation. Agent text claiming brain-state fields or answers is
 an analysis flag, including in command arguments. These are bounded defenses; a
 classifier is not a proof that arbitrary adversarial prose cannot affect scores.
 
@@ -101,8 +101,8 @@ existing meaning. Routing order, thresholds and vetoes do not change.
 
 Settings > Bouncer also shows process-lifetime route counters, including the top
 five reasons for asking the owner. These are separate from the encrypted log's
-calendar-day counts. A model response that needs the owner counts as asked, not
-as a model refusal. Connector fixed-profile decisions never count as inference.
+calendar-day counts. A bouncer brain response that needs the owner counts as asked, not
+as a gate refusal. Connector fixed-profile decisions never count as inference.
 Counters reset on app restart and are available without reading the vault.
 
 Each process or connector request emits one info tracing event, including early
@@ -114,3 +114,37 @@ The observation ends at the route decision, before the owner wait or execution;
 it does not claim that a command succeeded. Retries count as separate requests.
 Legacy remote cards retain their existing broker explanation as the headline;
 the relay envelope and authentication contract do not change.
+
+
+## Owner task and floating questions — 2026-11-02
+
+A verified hook task stays preferred. Without one, use the agent's required
+`user_request` and `purpose` for task match and every bouncer brain question. Record
+hook versus agent-stated provenance in activity and decision records. Session
+ambiguity still escalates. Agent-stated task text can be wrong or manipulated.
+
+Production credentials may pass the bouncer gate only with declared `ReadOnly` scope,
+brain task match and all other gate checks passing. Read-write/admin, Always ask,
+one-time codes and project rules still require owner review. Read-only scope
+relies on the owner's declaration; it does not confine the credential provider.
+
+Unknown environments offer Allow as dev, Allow as prod, Dismiss, and Dismiss with
+comment. Either allow classifies the unknown items of this exact pending run
+and approves it once. Known environments offer Allow, Dismiss, and Dismiss with
+comment, with remembering only as a secondary checkbox, off by default.
+Classification is carried by the exact guarded owner answer; the broker saves
+it after its unchanged-authorization check and before execution. This prevents
+an unrelated mutation from being accepted as part of the classification.
+
+All allow actions use the standard owner check and its owner-window policy.
+No owner-window lifecycle changes are part of this decision. Dismiss needs no
+owner check. Its optional single-line plain-text comment is limited to 500
+characters and is returned only as refusal data, never as owner approval.
+
+A small always-on-top, inactive-on-creation Apassy viewport shows the oldest
+waiting question, its agent and local host, credentials and environment badges,
+reason, task provenance, purpose, truncated command with hover text, countdown,
+and the same answer controls. It shows 1 of N and disappears on settlement or
+expiry. Unsupported embedded viewports route to Decisions in the main window.
+Native focus, monitor positioning and fallback behavior require device QA;
+unit tests establish queue selection only, not operating-system behavior.

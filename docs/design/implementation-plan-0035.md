@@ -24,13 +24,13 @@ The owner answered the six open decisions of ADR 0035 on 2026-11-02 (ADR 0035, "
 
 | Decision | Answer | Effect on the plan |
 | --- | --- | --- |
-| 1. Plans | Apassy hosting and training are part of the paid Apassy Connect, for Personal and Team; self-hosting is free and open source | H and I sit behind the Connect entitlement; J copy follows [ADR 0036](../adr/0036-own-relay-open-source.md) D3 |
+| 1. Plans | Apassy hosting and training are part of the paid Apassy Connect, for Personal and Team; self-hosting is free and open source | H and I sit behind the Connect entitlement; J copy follows [ADR 0037](../adr/0037-own-relay-open-source.md) D3 |
 | 2. Location | Contabo VPS `ottervibe`, own compose project, hard limits (first: 2 vCPU / 3 GB inference, 2 vCPU / 4 GB one training job at low CPU priority) | H deploys there after K1 passes with the same limits on `devbox-x86`; no test on the VPS. VPS region must be confirmed as EU |
 | 3. Deadline | 20 s per attempt to a remote bouncer brain, one retry on transport timeout (at most 40 s); 10 s on this Mac | C adds a per-host deadline; K1 threshold p95 ≤ 20 s, target 10 s |
 | 4. License | Laya and ModernBERT-large weights are Apache-2.0 (model card at `55cf4c4`, tag `commercial-use`) | E2 may bake the weights into the image, with their license and notice files |
 | 5. Shared base model | Only with a separate opt-in and anonymization | Out of this plan; a separate ADR comes first |
-| 6. Account | The Apassy Connect account of ADR 0036 D3 | H sign-in waits for the Connect accounts of ADR 0036 stage 7; A defines the bouncer side with its own domain tag |
-| Connect content | The bouncer brain service is the one Connect service that reads content; opt-in with a consent screen | C/J1 consent screen; ADR 0036 "Who sees what" must list it |
+| 6. Account | The Apassy Connect account of ADR 0037 D3 | H sign-in waits for the Connect accounts of ADR 0037 stage 7; A defines the bouncer side with its own domain tag |
+| Connect content | The bouncer brain service is the one Connect service that reads content; opt-in with a consent screen | C/J1 consent screen; ADR 0037 "Who sees what" must list it |
 
 Steps that cost money or touch production need explicit owner confirmation at the time they run, also after the decisions above: `devbox up arm` / `devbox up x86` for K (shared 12.50 EUR/month budget; `devbox down` after each session), any new server, any Stripe price or product, each deployment to the Contabo VPS `ottervibe`, any image publication outside GitHub artifacts.
 
@@ -98,7 +98,7 @@ One editor owns each shared file at a time. Paths are current unless labelled "p
 - Purpose: many owners on one encoder, device-key sign-in, deletion, no request logging, EU.
 - Files: D2 code in `tools/basemodel/`; proposed `docs/operations/bouncer-service.md` (runbook: compose file, limits, deletion, metrics without request data); proposed `tools/basemodel/entitlements.py` (interface; first version a file allow-list until decision 1).
 - Location: a separate compose project on `ottervibe` with hard limits (decision 2): first 2 vCPU / 3 GB for inference and 2 vCPU / 4 GB for one training job at low CPU priority. The limits protect mail, relay, pretix and MDmesh.
-- Owner: ops (opus, high) for deployment plan and compose; implementer (opus, high) for D2 code. Depends on D2, E2, K1, and the Connect accounts of ADR 0036 stage 7 (decision 6). Ops returns a plan; each deployment to `ottervibe` runs only after the owner confirms it. Judge panel: 2× opus + 1× fable (device-key auth, deletion).
+- Owner: ops (opus, high) for deployment plan and compose; implementer (opus, high) for D2 code. Depends on D2, E2, K1, and the Connect accounts of ADR 0037 stage 7 (decision 6). Ops returns a plan; each deployment to `ottervibe` runs only after the owner confirms it. Judge panel: 2× opus + 1× fable (device-key auth, deletion).
 - Acceptance: `test_multi_owner.py` (owner A cannot read or delete owner B's head set; `DELETE /v1/owner` leaves no file, cache entry or job for the owner; a revoked key loses its token at once); a log capture of 100 requests contains no state text; K2/K3 thresholds met.
 
 ### I — Apassy training jobs
@@ -151,7 +151,7 @@ Waves (implementers run first; the panel runs after they return, so the count ne
 | 1b | E1 (worker), K0 = scanner map of PR #60 conflicts in `serve.py` | top-level agent reads CI | nothing |
 | 2 | C, F, E2 (ops) | panel 2× opus + 1× fable on C+F; 1× opus on E2 | A, B, D1 merged |
 | 3 | G, J1, K1 (ops, owner go) | 1× opus on G+J1; architect (fable) reads K1 numbers for decision 3 | wave 2 merged |
-| 4 | D2, H (ops plan + implementer), I | panel 2× opus + 1× fable on D2+H+I | K1 passed; Connect accounts (ADR 0036 stage 7) |
+| 4 | D2, H (ops plan + implementer), I | panel 2× opus + 1× fable on D2+H+I | K1 passed; Connect accounts (ADR 0037 stage 7) |
 | 5 | J2, K2/K3 (ops, owner go), L | panel 2× opus + 1× fable on the combined diff | wave 4 merged |
 
 Handoff format (every agent returns exactly this): `Unit`, `Base revision`, `Files changed` (absolute paths), `Interface` (types, functions, routes, schema), `Tests added` (names; "not run" or "cheap check run: <command>"), `Validation commands for the top-level agent` (exact), `Deviations from the plan`, `Open questions`, `Risks seen`. A judge returns, per acceptance criterion: PASS / FAIL / UNVERIFIED with `file:line` evidence, the counter-example it tried, and a severity.

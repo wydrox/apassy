@@ -80,6 +80,9 @@ pub(crate) struct CliHost {
 }
 
 impl CliHost {
+    pub(crate) fn update_busy(&self) -> bool {
+        self.socket.as_ref().is_some_and(OwnerSocket::update_busy)
+    }
     pub(crate) fn socket_path(&self) -> Option<&std::path::Path> {
         self.socket.as_ref().map(OwnerSocket::socket_path)
     }
@@ -395,13 +398,17 @@ impl DesktopApp {
             // A batch binding has its refusals in the ticket already.
             _ => {}
         }
-        // The socket authenticates a bearer session, not an interactive owner.
-        // An unsandboxed agent can inherit that session. Never let a CLI code
-        // request consume the owner's verification window without a fresh check.
-        self.prepare_owner(request, Some(ctx), true);
+        // Attach the reply ticket before the global window can complete the
+        // action synchronously. Inherited owner sessions share this policy.
+        self.prepare_owner(request, Some(ctx), false);
         if let Some(dialog) = self.owner.check.as_mut() {
             dialog.origin = Some(ticket);
         }
+        self.start_local_owner(
+            crate::broker::approvals::LocalWindowSource::LocalOwner,
+            true,
+            ctx,
+        );
         if self.owner.check.is_some() {
             bring_to_front(ctx);
         }

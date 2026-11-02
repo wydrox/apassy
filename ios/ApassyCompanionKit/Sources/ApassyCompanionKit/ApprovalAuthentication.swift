@@ -1,19 +1,46 @@
 import Foundation
 import LocalAuthentication
 
-/// One signing attempt owns one context. Cancellation invalidates the actual OS prompt.
+/// One signing attempt leases the app context, or owns a fresh context without a provider.
 public final class ApprovalAuthentication: @unchecked Sendable {
-  let context = LAContext()
+  private var storedContext = LAContext()
+  var context: LAContext { lock.withLock { storedContext } }
+  private let window: FaceIDWindow?
+  private var lease: FaceIDLease?
   private let lock = NSLock()
   private var ended = false
-  public init() {
+  private var finished = false
+  public init(window: FaceIDWindow? = nil) {
+    self.window = window
     context.touchIDAuthenticationAllowableReuseDuration = 0
     context.localizedFallbackTitle = ""
   }
-  public var isCancelled: Bool { lock.withLock { ended } }
+  public var isCancelled: Bool { lock.withLock { ended || lease?.isValid == false } }
   public func cancel() {
-    lock.withLock { ended = true }
-    context.invalidate()
+    lock.withLock {
+      ended = true
+      guard !finished else { return }
+      if let lease { lease.end(failed: true) } else {
+        window?.end()
+        storedContext.invalidate()
+      }
+    }
+  }
+  func prepare(reason: String) async throws {
+    guard let window else { return }
+    let acquired = try await window.authenticate(reason: reason)
+    try lock.withLock {
+      guard !ended else { acquired.end(failed: true); throw CompanionKeyError.cancelled }
+      storedContext.invalidate()
+      storedContext = acquired.context
+      lease = acquired
+    }
+  }
+  func finish() {
+    lock.withLock {
+      finished = true
+      if let lease { lease.end() } else { storedContext.invalidate() }
+    }
   }
   public static var faceIDAvailable: Bool {
     let context = LAContext()
@@ -28,5 +55,5 @@ public final class ApprovalAuthentication: @unchecked Sendable {
       context.biometryType == .faceID
     else { throw CompanionKeyError.biometryUnavailable }
   }
-  deinit { context.invalidate() }
+  deinit { finish() }
 }

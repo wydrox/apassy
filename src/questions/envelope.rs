@@ -26,6 +26,9 @@ pub const AAD_TAG: &str = "apassy-question-v1";
 pub const ANSWER_TAG: &str = "apassy-question-answer-v1";
 /// The version of every card, answer, settle, and request body.
 pub const VERSION: u32 = 1;
+/// Published card version. Keep 1 until every recipient can decode card v2:
+/// the relay sends one ciphertext to all devices, without capability negotiation.
+pub const QUESTION_CARD_VERSION: u32 = 1;
 
 /// The largest plaintext of a card, an answer, and a settle (section 6.3).
 pub const MAX_CARD_BYTES: usize = 32_768;
@@ -233,6 +236,33 @@ pub struct Card {
     pub run: CardRun,
     pub question: CardQuestion,
     pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_prompt: Option<OwnerPrompt>,
+}
+
+/// Display context and the current answer contract. Card v2 only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerPrompt {
+    pub agent_stated_task: String,
+    pub purpose: String,
+    pub task_provenance: String,
+    pub reason_headline: String,
+    pub environment_known: bool,
+    pub allowed_answer_kinds: Vec<String>,
+}
+
+pub fn allowed_answer_kinds(question: &QuestionInfo) -> Vec<String> {
+    let mut kinds = vec!["deny".to_owned(), "deny_with_comment".to_owned()];
+    if question.items.iter().any(|item| item.unconfirmed) {
+        kinds.extend([
+            "approve_as_development".into(),
+            "approve_as_production".into(),
+        ]);
+    } else {
+        kinds.push("approve".into());
+    }
+    kinds
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,9 +349,28 @@ impl Card {
         created_at: u64,
         run: &PendingRun,
     ) -> Self {
+        Self::from_run_with_version(
+            qid,
+            asker_device,
+            asker_name,
+            created_at,
+            run,
+            QUESTION_CARD_VERSION,
+        )
+    }
+
+    fn from_run_with_version(
+        qid: &str,
+        asker_device: &str,
+        asker_name: &str,
+        created_at: u64,
+        run: &PendingRun,
+        version: u32,
+    ) -> Self {
+        assert!(matches!(version, 1 | 2));
         let question = &run.question;
         Self {
-            v: VERSION,
+            v: version,
             qid: qid.to_owned(),
             asker: CardAsker {
                 device: asker_device.to_owned(),
@@ -373,6 +422,25 @@ impl Card {
                     .collect(),
             },
             digest: question_digest_v2_hex(run),
+            owner_prompt: (version == 2).then(|| OwnerPrompt {
+                agent_stated_task: if run.agent_request.is_empty() {
+                    run.user_request.clone()
+                } else {
+                    run.agent_request.clone()
+                },
+                purpose: run.purpose.clone(),
+                task_provenance: if run.request_source.starts_with("from the agent")
+                    || run.request_source.is_empty()
+                {
+                    "agent-stated"
+                } else {
+                    "hook"
+                }
+                .into(),
+                reason_headline: question.reason.headline().into(),
+                environment_known: !question.items.iter().any(|item| item.unconfirmed),
+                allowed_answer_kinds: allowed_answer_kinds(question),
+            }),
         }
     }
 
@@ -517,6 +585,12 @@ impl RemoteEnvironment {
 /// An answer to a question (section 9.1) with its extra fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
+    Approve,
+    ApproveAsDevelopment,
+    ApproveAsProduction,
+    DenyWithComment {
+        comment: String,
+    },
     ApproveOnce,
     ApproveInProject {
         action: ActionKind,
@@ -540,6 +614,10 @@ impl Choice {
     /// The `kind` of the answer.
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Approve => "approve",
+            Self::ApproveAsDevelopment => "approve_as_development",
+            Self::ApproveAsProduction => "approve_as_production",
+            Self::DenyWithComment { .. } => "deny_with_comment",
             Self::ApproveOnce => "approve_once",
             Self::ApproveInProject { .. } => "approve_in_project",
             Self::AllowProduction { .. } => "allow_production",
@@ -557,7 +635,10 @@ impl Choice {
     pub fn needs_owner_check(&self) -> bool {
         matches!(
             self,
-            Self::ApproveOnce
+            Self::Approve
+                | Self::ApproveAsDevelopment
+                | Self::ApproveAsProduction
+                | Self::ApproveOnce
                 | Self::ApproveInProject { .. }
                 | Self::AllowProduction { .. }
                 | Self::CorrectEnvironment {
@@ -576,6 +657,12 @@ impl Choice {
     /// control character: such a question offers no project answer remotely.
     pub fn line(&self) -> Option<String> {
         let line = match self {
+            Self::DenyWithComment { comment } => {
+                if *comment != crate::broker::approvals::refusal_comment(comment) {
+                    return None;
+                }
+                format!("deny_with_comment:{}", encode_b64u(comment.as_bytes()))
+            }
             Self::ApproveInProject {
                 action,
                 project_key,
@@ -605,6 +692,15 @@ impl Choice {
                     .is_some_and(|project| project.key == key)
         };
         match self {
+            Self::Approve
+            | Self::ApproveAsDevelopment
+            | Self::ApproveAsProduction
+            | Self::DenyWithComment { .. } => {
+                allowed_answer_kinds(question)
+                    .iter()
+                    .any(|kind| kind == self.kind())
+                    && self.line().is_some()
+            }
             Self::ApproveOnce => offered(AnswerKind::Once),
             Self::ApproveInProject {
                 action,
@@ -631,6 +727,9 @@ impl Choice {
     /// The choice of an answer body: the kind with exactly its extra fields. `None` for
     /// an unknown kind, a missing or an extra field, or a field of a bad form.
     pub fn from_body(body: &AnswerBody) -> Option<Self> {
+        if body.kind != "deny_with_comment" && body.comment.is_some() {
+            return None;
+        }
         let none = |fields: &[&Option<String>]| fields.iter().all(|field| field.is_none());
         let project = || -> Option<(ActionKind, String)> {
             if !none(&[&body.item_id, &body.environment]) {
@@ -651,6 +750,16 @@ impl Choice {
             .then_some(choice)
         };
         match body.kind.as_str() {
+            "approve" => plain(Self::Approve),
+            "approve_as_development" => plain(Self::ApproveAsDevelopment),
+            "approve_as_production" => plain(Self::ApproveAsProduction),
+            "deny_with_comment" => {
+                let comment = body.comment.clone()?;
+                if comment != crate::broker::approvals::refusal_comment(&comment) {
+                    return None;
+                }
+                plain(Self::DenyWithComment { comment })
+            }
             "approve_once" => plain(Self::ApproveOnce),
             "deny" => plain(Self::Deny),
             "never_for_agent" => plain(Self::NeverForAgent),
@@ -688,6 +797,8 @@ pub struct AnswerBody {
     pub by: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_key: Option<String>,
@@ -716,6 +827,10 @@ impl AnswerBody {
             qid: qid.to_owned(),
             by: by.to_owned(),
             kind: choice.kind().to_owned(),
+            comment: match choice {
+                Choice::DenyWithComment { comment } => Some(comment.clone()),
+                _ => None,
+            },
             action: None,
             project_key: None,
             item_id: None,
@@ -850,6 +965,73 @@ impl SettleBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_and_legacy_answer_bodies_round_trip_without_reinterpreting_signatures() {
+        for choice in [
+            Choice::Approve,
+            Choice::ApproveAsDevelopment,
+            Choice::ApproveAsProduction,
+            Choice::Deny,
+            Choice::DenyWithComment {
+                comment: "No".into(),
+            },
+            Choice::ApproveOnce,
+            Choice::ApproveInProject {
+                action: ActionKind::Read,
+                project_key: "project".into(),
+            },
+            Choice::AllowProduction {
+                action: ActionKind::Read,
+                project_key: "project".into(),
+            },
+            Choice::CorrectEnvironment {
+                item_id: 7,
+                environment: RemoteEnvironment::Development,
+            },
+            Choice::CorrectEnvironment {
+                item_id: 7,
+                environment: RemoteEnvironment::Production,
+            },
+            Choice::NeverForAgent,
+            Choice::AlwaysAskForAgent,
+            Choice::Disconnect,
+        ] {
+            let body = AnswerBody::new("qid", "by", &choice, "digest", 1, &[0; 8]);
+            let parsed = AnswerBody::parse(&body.to_plaintext().unwrap()).unwrap();
+            assert_eq!(Choice::from_body(&parsed), Some(choice.clone()));
+            assert!(answer_string("by", "team", "qid", &choice, "digest", 1).is_some());
+            let mut extra = body;
+            extra.comment = Some("forged".into());
+            if !matches!(choice, Choice::DenyWithComment { .. }) {
+                assert!(Choice::from_body(&extra).is_none());
+            }
+        }
+        assert_eq!(
+            Choice::DenyWithComment {
+                comment: "No".into()
+            }
+            .line()
+            .as_deref(),
+            Some("deny_with_comment:Tm8")
+        );
+        for comment in [
+            " No ".to_owned(),
+            "No\n".into(),
+            "é".repeat(501),
+            "No\u{2028}".into(),
+        ] {
+            let body = AnswerBody::new(
+                "qid",
+                "by",
+                &Choice::DenyWithComment { comment },
+                "digest",
+                1,
+                &[0; 8],
+            );
+            assert!(Choice::from_body(&body).is_none());
+        }
+    }
 
     fn key() -> QuestionKey {
         let mut bytes = [0u8; 32];
@@ -999,6 +1181,31 @@ mod tests {
         let card = r#"{"v":1,"qid":"q","asker":{"device":"d","name":"n"},"created_at":1,"run":{"id":"1","agent":"a","command":[],"cwd":"/","env_names":[],"purpose":"","risk":"","user_request":"","request_source":"","agent_request":"","remember":null},"question":{"id":"1","item_ids":[],"items":[],"project":null,"action":"read","production":false,"why":"","valid_answers":["once"]},"digest":"x"}"#;
         let parsed = Card::parse(card.as_bytes()).unwrap();
         assert!(parsed.to_run().is_some());
+        let run = parsed.to_run().unwrap();
+        for version in [1, 2] {
+            let encoded = Card::from_run_with_version("q", "d", "n", 1, &run, version);
+            assert_eq!(encoded.v, version);
+            assert_eq!(encoded.owner_prompt.is_some(), version == 2);
+            if let Some(prompt) = &encoded.owner_prompt {
+                assert!(prompt.environment_known);
+                assert_eq!(
+                    prompt.allowed_answer_kinds,
+                    ["deny", "deny_with_comment", "approve"]
+                );
+                assert_eq!(prompt.purpose, run.purpose);
+            }
+            let bytes = encoded.to_plaintext().unwrap();
+            assert_eq!(Card::parse(&bytes).unwrap(), encoded);
+            assert_eq!(encoded.to_run().unwrap(), run);
+            let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            wire.as_object_mut().unwrap().remove("owner_prompt");
+            wire["v"] = 1.into();
+            wire["digest"] = "x".into();
+            assert_eq!(
+                wire,
+                serde_json::from_str::<serde_json::Value>(card).unwrap()
+            );
+        }
         let missing = card.replace(r#","remember":null"#, "");
         assert_eq!(Card::parse(missing.as_bytes()), Err(CardError::Unreadable));
         let missing = card.replace(r#""project":null,"#, "");
@@ -1014,5 +1221,47 @@ mod tests {
         );
         let mismatch = card.replace(r#""item_ids":[]"#, r#""item_ids":["7"]"#);
         assert!(Card::parse(mismatch.as_bytes()).unwrap().to_run().is_none());
+    }
+
+    #[test]
+    fn current_offers_follow_environment_even_without_legacy_offers() {
+        let mut question = QuestionInfo::default();
+        question.valid_answers.clear();
+        assert!(Choice::Approve.valid_for(&question));
+        assert!(!Choice::ApproveOnce.valid_for(&question));
+        assert!(!Choice::ApproveAsDevelopment.valid_for(&question));
+        question.items.push(QuestionItem {
+            item_id: 1,
+            name: "No environment declaration".into(),
+            production: false,
+            unconfirmed: true,
+            always_ask: false,
+        });
+        assert_eq!(
+            allowed_answer_kinds(&question),
+            [
+                "deny",
+                "deny_with_comment",
+                "approve_as_development",
+                "approve_as_production"
+            ]
+        );
+        assert!(!Choice::Approve.valid_for(&question));
+        assert!(Choice::ApproveAsDevelopment.valid_for(&question));
+        assert!(Choice::ApproveAsProduction.valid_for(&question));
+        assert!(
+            !Choice::CorrectEnvironment {
+                item_id: 1,
+                environment: RemoteEnvironment::Development
+            }
+            .valid_for(&question)
+        );
+        assert!(Choice::Deny.valid_for(&question));
+        assert!(
+            Choice::DenyWithComment {
+                comment: "No".into()
+            }
+            .valid_for(&question)
+        );
     }
 }

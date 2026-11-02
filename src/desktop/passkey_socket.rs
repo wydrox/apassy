@@ -286,6 +286,16 @@ struct Bridge {
 }
 
 impl PlatformHost {
+    pub(crate) fn update_busy(&self) -> bool {
+        self.filled.is_some()
+            || self.running.as_ref().is_some_and(|bridge| {
+                !bridge
+                    .waiting
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+            })
+    }
     /// Use the bridge at `path`. The app starts it at the next unlock.
     pub(crate) fn enable(&mut self, path: PathBuf) {
         self.path = Some(path);

@@ -34,6 +34,13 @@ function startApp(socket, requests, mode) {
       const end = buffer.indexOf("\n");
       if (end < 0) return;
       const request = JSON.parse(buffer.slice(0, end));
+      if (request.cmd === "agent_wait") {
+        const timer = setTimeout(() => connection.end(JSON.stringify({
+          ok: true, code: "ok", data: { type: "agent_wait", pending: false },
+        }) + "\n"), 50000);
+        connection.on("close", () => clearTimeout(timer));
+        return;
+      }
       requests.push(request);
       const reply = (data, message = "ok") => ({ ok: true, code: "ok", message, data });
       let answer;

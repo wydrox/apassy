@@ -385,7 +385,7 @@ extension PreviewVaultService {
                 "\(answer.kind.rawValue):\(question.card?.question.action.rawValue ?? ""):/tmp/synthetic-shop/.git"
             case .correctEnvironment:
                 "correct_environment:\(answer.environment?.rawValue ?? ""):\(answer.itemID ?? "")"
-            default: answer.kind.rawValue
+            default: answer.signedChoice
             }
         let text = [
             "apassy-question-answer-v1", status.deviceUUID ?? "", status.teamID ?? "", qid, line,

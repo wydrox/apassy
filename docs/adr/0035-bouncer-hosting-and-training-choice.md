@@ -6,7 +6,7 @@ Status: ACCEPTED by the owner on 2026-11-02, with the implementation plan
 Direction from the owner on 2026-11-02: "The user has the choice:
 trains it themselves or delegates; hosts it themselves or delegates." The owner
 answered the open decisions on the same day (last section).
-Fits the draft [ADR 0036](0036-own-relay-open-source.md): all of Apassy is open
+Fits the draft [ADR 0037](0037-own-relay-open-source.md): all of Apassy is open
 source, and Apassy Connect is the paid, optional hosted part (its D2 and D3).
 Amends [ADR 0018](0018-local-bouncer-shared-vault-relay.md) ("The bouncer model,
 command analysis, and learning stay on each client computer") and
@@ -94,7 +94,7 @@ certificate gives a public certificate for the `*.ts.net` name. Tailscale gives 
 reachability, never authorization: the owner's server still needs its credential (a
 bearer token). The credential is in the vault, on this Mac only; it does not sync.
 For Apassy Connect, the device signs in to the owner's Connect account
-([ADR 0036](0036-own-relay-open-source.md) D3). The sign-in uses a device key, as in
+([ADR 0037](0037-own-relay-open-source.md) D3). The sign-in uses a device key, as in
 [ADR 0019](0019-relay-teams-and-accounts.md) section 5, with its own domain tag.
 
 ### 3. What does not change in any combination
@@ -136,10 +136,10 @@ For Apassy Connect, the device signs in to the owner's Connect account
   Connect that reads content: the state of each bouncer request (ADR 0007: the user
   request, the command, the relative directory, the purpose, the environment
   variable names and the owner rule), and the examples of a training job. Every other
-  Connect function is blind ([ADR 0036](0036-own-relay-open-source.md)). The owner
+  Connect function is blind ([ADR 0037](0037-own-relay-open-source.md)). The owner
   turns it on separately. The consent screen shows exactly what leaves the Mac, and
-  ADR 0036 lists it in "Who sees what". A variant in a confidential VM (TEE) belongs
-  to the enterprise track of ADR 0036.
+  ADR 0037 lists it in "Who sees what". A variant in a confidential VM (TEE) belongs
+  to the enterprise track of ADR 0037.
 - The base model: Apassy uses owner data for the shared base model only with a
   separate opt-in and anonymization (owner decision 5). A separate ADR defines the
   anonymization, the retention and the consent before anything is collected. Until
@@ -160,7 +160,7 @@ not call it.
 
 ### 6. Plans and price
 
-Own hosting and own training are free and open source, in every plan (ADR 0036
+Own hosting and own training are free and open source, in every plan (ADR 0037
 D3). Apassy hosting and Apassy training are part of the paid Apassy Connect, for
 Personal and Team (owner decision 1). The price follows the measured cost for each
 owner. It can be low because one encoder serves many owners, a head set is small,
@@ -223,7 +223,7 @@ the deadline of section 7, the service moves to a separate server.
    service (section 2).
 5. Shared base model: only with a separate opt-in and anonymization, defined in a
    separate ADR before any collection (section 4).
-6. Account: the Apassy Connect account of ADR 0036 D3, for Personal and Team. No
+6. Account: the Apassy Connect account of ADR 0037 D3, for Personal and Team. No
    relay team is needed (section 2).
 7. Content at Connect: the bouncer brain service is the one Connect service that
    reads content. It is an opt-in with a consent screen (section 4).
@@ -233,4 +233,4 @@ the deadline of section 7, the service moves to a separate server.
 - The final container limits and the price, after the measurement of stage 1.
 - The region of the VPS (it must be in the EU).
 - The ADR for the opt-in, anonymized base-model data (decision 5).
-- ADR 0036 must list the bouncer brain service in "Who sees what" when it is accepted.
+- ADR 0037 must list the bouncer brain service in "Who sees what" when it is accepted.

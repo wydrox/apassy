@@ -3,9 +3,8 @@ import Foundation
 import Observation
 
 /// The owner check before a secret leaves the vault for a human: a reveal, a copy, a one-time
-/// code, or large type. First a fresh Face ID match; when that fails or there is no biometry, the
-/// passphrase, typed and checked by the core. Each check stands for one action: there is no grace
-/// period and nothing is remembered.
+/// code, or large type. Uses the app's Face ID window; when biometry fails or is unavailable,
+/// asks for the passphrase, typed and checked by the core.
 ///
 /// The passphrase prompt is `prompt`; the app shows it above every screen and calls `submit` or
 /// `cancel`.

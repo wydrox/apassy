@@ -13,6 +13,28 @@ import { flush, loadBackground, senderFor } from "./mock-chrome.mjs";
 import { createSyntheticAuthenticator, fail, ok } from "./synthetic-authenticator.mjs";
 
 const ORIGIN = "https://login.example.com";
+
+test("bypass controls only send requests and never an approval or profile", async () => {
+  const bg = setup();
+  const seen = [];
+  bg.setHost((wire, record) => {
+    seen.push(wire);
+    if (wire.cmd === "passkey_get") record.port.postMessage(fail("unsafe_browser", "Owner permission required"));
+  });
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once" })).ok, false);
+  await request(bg, { op: "get", options: getOptions() });
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once", approved: true, identity: "forged", profile: "forged" })).ok, true);
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "five_minutes" })).ok, true);
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "forever" })).ok, false);
+  await flush();
+  const controls = seen.filter(wire => wire.cmd === "bypass_request");
+  assert.deepEqual(controls.map(({ cmd, scope }) => ({ cmd, scope })), [{ cmd: "bypass_request", scope: "once" }, { cmd: "bypass_request", scope: "five_minutes" }]);
+  for (const wire of controls) {
+    assert.deepEqual(Object.keys(wire).sort(), ["bypass_nonce", "cmd", "scope", "v"]);
+    assert.match(wire.bypass_nonce, UUID);
+  }
+
+});
 const b64u = (bytes) => Buffer.from(bytes).toString("base64url");
 const b64 = (bytes) => Buffer.from(bytes).toString("base64");
 const sha256 = (data) => createHash("sha256").update(data).digest();
@@ -91,6 +113,34 @@ test("a valid get goes to the app with the browser origin and a clientDataJSON b
   assert.equal(Buffer.from(wire.client_data_json, "base64").toString("utf8"),
     `{"type":"webauthn.get","challenge":"${b64u(challenge)}","origin":"${ORIGIN}","crossOrigin":false}`);
   assert.equal(port.received.length, 0);
+});
+
+test("an owner-approved once retry includes the refused request nonce on its original port", async () => {
+  const bg = setup();
+  let initial;
+  let nonce;
+  bg.setHost((wire, record) => {
+    if (wire.cmd === "bypass_request") {
+      assert.equal(wire.scope, "once");
+      nonce = wire.bypass_nonce;
+      record.port.postMessage(ok({ type: "bypass", remaining: 1 }));
+    } else if (!initial) {
+      initial = wire;
+      record.port.postMessage(fail("unsafe_browser", "Owner permission required"));
+    } else {
+      assert.deepEqual(wire, { ...initial, bypass_nonce: nonce });
+      record.port.postMessage(getAnswer(wire));
+    }
+  });
+  const port = await request(bg, { op: "get", options: getOptions() });
+  assert.equal(Object.hasOwn(initial, "bypass_nonce"), false);
+  assert.equal(port.received.length, 0);
+  assert.equal((await bg.handle({ type: "bypass_request", scope: "once" })).ok, true);
+  await flush();
+  assert.match(nonce, UUID);
+  assert.equal(bg.natives.length, 1);
+  assert.equal(bg.natives[0].sent.length, 3);
+  assert.equal(port.received[0].kind, "result");
 });
 
 test("the page cannot choose the origin: an extra field is refused before the app", async () => {
@@ -673,7 +723,10 @@ test("fill code: the request, the fill in frame 0 with the code, and a reply wit
   bg.scripts.result = () => ({ ok: true, reason: "", fields: 1 });
   const reply = await bg.handle({ type: "fill_code", tabId: 5, url: `${ORIGIN}/login`, item: 9 });
   assert.deepEqual(reply, { ok: true, code: "ok", message: "Code filled.", filled: { fields: 1 } });
-  assert.deepEqual(bg.natives[0].sent, [{ v: 1, cmd: "fill_code", url: `${ORIGIN}/login`, item: 9 }]);
+  const codeRequest = bg.natives[0].sent[0];
+  assert.equal(Object.hasOwn(codeRequest, "bypass_nonce"), false);
+  assert.equal(bg.natives[0].sent.length, 1);
+  assert.deepEqual(codeRequest, { v: 1, cmd: "fill_code", url: `${ORIGIN}/login`, item: 9 });
   assert.equal(bg.scripts[0].func.name, "fillOneTimeCode");
   assert.deepEqual(bg.scripts[0].target, { tabId: 5, frameIds: [0] });
   assert.deepEqual(bg.scripts[0].args, [ORIGIN, "246810"]);
@@ -763,4 +816,30 @@ test("unsafe browser code: preserve the actionable message for the popup", async
   const reply = await bg.handle({ type: "fill_code", tabId: 5, url: `${ORIGIN}/login`, item: 1 });
   assert.equal(reply.ok, false);
   assert.equal(reply.message, UNSAFE_BROWSER_MESSAGE);
+});
+
+test("code binds only after Allow once and retries the exact packet on the same port", async () => {
+  const bg = setup();
+  const seen = [];
+  bg.setHost((wire, record) => {
+    seen.push(wire);
+    if (wire.cmd === "bypass_request") {
+      record.port.postMessage(ok({ type: "bypass", remaining: 1 }));
+    } else if (seen.length < 4) {
+      record.port.postMessage(fail("unsafe_browser", "Owner permission required"));
+    } else {
+      record.port.postMessage(fail("cancelled"));
+    }
+  });
+  const result = bg.context.askNative({ cmd: "fill_code", url: ORIGIN + "/login", item: 9 });
+  await flush();
+  assert.equal(seen.length, 1);
+  assert.equal(Object.hasOwn(seen[0], "bypass_nonce"), false);
+  await bg.handle({ type: "bypass_request", scope: "once" });
+  await flush();
+  await result;
+  assert.deepEqual(seen.map(w => w.cmd), ["fill_code", "fill_code", "bypass_request", "fill_code"]);
+  assert.deepEqual(seen[1], seen[3]);
+  assert.equal(seen[1].bypass_nonce, seen[2].bypass_nonce);
+  assert.equal(bg.natives.length, 1);
 });
