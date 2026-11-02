@@ -71,6 +71,8 @@ impl BrokerOptions {
 /// the socket file.
 #[derive(Debug)]
 pub struct BrokerHandle {
+    /// Requests in flight; the desktop app waits for zero before an automatic update.
+    #[cfg_attr(not(all(feature = "desktop", feature = "vault")), allow(dead_code))]
     active: Arc<AtomicUsize>,
     socket: PathBuf,
     approvals: Arc<ApprovalQueue>,
@@ -81,6 +83,7 @@ pub struct BrokerHandle {
 }
 
 impl BrokerHandle {
+    #[cfg_attr(not(all(feature = "desktop", feature = "vault")), allow(dead_code))]
     pub(crate) fn update_busy(&self) -> bool {
         self.active.load(Ordering::SeqCst) != 0 || !self.approvals.pending().is_empty()
     }

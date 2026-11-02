@@ -496,7 +496,9 @@ mod tests {
                 text.contains("It installs when the vault locks or you quit Apassy."),
                 "{text}"
             );
-            assert!(text.contains("Later"), "{text}");
+            // An app update cannot be postponed from the banner: it installs at the next
+            // vault lock, or now with Restart to update.
+            assert!(!text.contains("Later"), "{text}");
         }
         app.updates.set_auto_install(false);
         let text = draw(&mut app, size);
