@@ -89,6 +89,12 @@ fn create_starts_locked_and_wrong_passphrase_stays_locked() {
             .expect_err("short create passphrase")
     };
     assert_eq!(err.code, "invalid_input");
+    // The owner messages name the problem.
+    assert!(err.message.contains("minimum of 12"), "{}", err.message);
+    assert!(
+        !dir.path().join("short.db").exists(),
+        "a refused create makes no file"
+    );
     let err = session
         .unlock("short")
         .expect_err("short unlock passphrase");
@@ -99,6 +105,18 @@ fn create_starts_locked_and_wrong_passphrase_stays_locked() {
     assert!(session.is_locked());
     assert!(!format!("{session:?}").contains(PASS));
     assert!(!format!("{session:?}").contains(WRONG));
+    let err = session.unlock("").expect_err("empty passphrase");
+    assert_eq!(err.message, "Type the passphrase.");
+    let err = OwnerSession::new()
+        .create_file(&path, PASS)
+        .expect_err("existing target");
+    assert_eq!(err.code, "already_exists");
+    for message in [&err.message, &session.unlock(WRONG).unwrap_err().message] {
+        assert!(
+            message.starts_with(char::is_uppercase) && message.ends_with('.'),
+            "owner text must be a full sentence: {message}"
+        );
+    }
 }
 
 #[test]
@@ -298,34 +316,6 @@ fn missing_file_keeps_the_current_session() {
     assert_eq!(err.code, "not_found");
     assert_eq!(session.location(), Some(path.as_path()));
     assert!(session.is_locked());
-}
-
-#[test]
-fn owner_messages_name_the_problem() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut blank = OwnerSession::new();
-    let err = blank
-        .create_file(&dir.path().join("short.db"), "short")
-        .expect_err("short create passphrase");
-    assert_eq!(err.code, "invalid_input");
-    assert!(err.message.contains("minimum of 12"), "{}", err.message);
-    assert!(!dir.path().join("short.db").exists());
-
-    let (mut session, path) = session_at(&dir, "messages.db");
-    let err = session.unlock("").expect_err("empty passphrase");
-    assert_eq!(err.message, "Type the passphrase.");
-    let err = session.unlock(WRONG).expect_err("wrong passphrase");
-    assert_eq!(err.code, "wrong_key");
-    let err = OwnerSession::new()
-        .create_file(&path, PASS)
-        .expect_err("existing target");
-    assert_eq!(err.code, "already_exists");
-    for message in [&err.message, &session.unlock(WRONG).unwrap_err().message] {
-        assert!(
-            message.starts_with(char::is_uppercase) && message.ends_with('.'),
-            "owner text must be a full sentence: {message}"
-        );
-    }
 }
 
 #[test]
