@@ -234,7 +234,8 @@ Both crates use the apassy library with the `vault` feature only, so it and SQLC
 The `linux` job runs Clippy for both crates.
 The vault core has no macOS code; the `macos` job keeps the Swift and Xcode checks.
 
-Measured on 2026-11-02, before nextest (run `41513326199`), with cached dependencies: a Linux test group took 10.9 minutes (9.2 of them serial tests with `--test-threads=1`), the `relay` job 8 minutes, the `macos` job 5.6 minutes, and a macOS test group 12.5 minutes.
+Measured on 2026-11-02 with cached dependencies. Before nextest (draft run `41513326199`, main run `41516182416`): a Linux test group took 10.9 minutes (9.2 of them serial tests with `--test-threads=1`), the `relay` job 8 minutes, the `macos` job 5.6 to 7.4 minutes, and a macOS test group 11.8 to 12.6 minutes.
+With nextest (draft run `41532251208`, and manual run `41531190255` for macOS): the Linux test groups took 2.7 to 4.5 minutes (about one minute of it the build), the `relay (K)` jobs 2.8 and 4.0 minutes, the `linux` job 2.2 minutes, the `macos` job 3.1 minutes, and the macOS test groups 4.3 and 6.2 minutes.
 
 Rust dependency caches separate the OS, architecture, compiler, Cargo configuration, lockfile, and job group.
 The release build has its own cache. Only pushes to `main` save these caches; pull requests only restore them.
