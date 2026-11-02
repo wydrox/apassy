@@ -5,6 +5,8 @@ Date: 2026-10-09.
 Each push to `main` that passes CI, names a released version (see [Release eligibility](#release-eligibility)), and has a version strictly newer than public `latest.json` publishes a signed and notarized `Apassy-<version>.dmg`. <https://apassy.wyderka.cc/download> redirects to it, for example `/download/Apassy-0.5.0.dmg`. The same image stays at `/download/Apassy.dmg` for apps before 0.5.0 ([Image names](#image-names)). A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
 The site is a static Astro page in `site/`, served by a Cloudflare Worker on the same domain.
 
+After “Re-run failed jobs”, automatic releases and manual `ci_run_id` dispatches still require the latest CI attempt to be successful for this repository’s push to `main` at the exact release commit. Release resolves the highest available artifact-producing attempt from GitHub’s run artifacts and attempt jobs, requires a successful `release-binaries` job and upload step, downloads by artifact ID, and verifies the manifest against that producing attempt (which can be earlier than the latest attempt). API errors, ambiguous results, and mismatched identities stop the release.
+
 ## Coordinated six-component release policy
 
 From 0.5.5, every release uses one new version for all six components: iOS app,

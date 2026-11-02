@@ -12,6 +12,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - **Relay:** The relay is open source under Apache-2.0 and is part of this repository (`crates/apassy-relay`). Its image and the Linux team CLI build here.
 - **Relay:** The hosted relay no longer serves shared team vaults. It refuses the proxy, MCP, access requests, runs, the host lane and new team-vault content with `410 team_vaults_retired`. Relay sync, questions, the feed and push keep working. A relay that you run yourself keeps team vaults on by default (`APASSY_RELAY_TEAM_VAULTS=1`).
 
+### Fixed
+
+- Release uses the verified successful `release-binaries` artifact after a partial CI rerun, even when that job ran in an earlier attempt.
+
 ### Upgrade notes
 
 - No vault schema change: schema stays at 23. The Touch ID helper protocol stays at version 1.
