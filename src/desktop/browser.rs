@@ -375,6 +375,8 @@ impl DesktopApp {
             Command::AgentPoll {
                 instance,
                 url,
+                document,
+                focused,
                 receipt,
                 filled,
                 exposed,
@@ -382,6 +384,8 @@ impl DesktopApp {
                 let answer = crate::broker::browser_fill::poll(
                     &instance,
                     &url,
+                    document,
+                    focused,
                     receipt.as_deref(),
                     filled,
                     exposed,

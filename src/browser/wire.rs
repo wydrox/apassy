@@ -88,6 +88,17 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+/// Browser-issued top-frame identity, scoped by the extension instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserDocument {
+    pub window_id: i64,
+    pub tab_id: i64,
+    pub frame_id: u32,
+    pub document_id: String,
+    pub generation: String,
+}
+
 /// A checked request. Debug output hides the password of a save.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
@@ -98,6 +109,8 @@ pub enum Command {
     AgentPoll {
         instance: String,
         url: String,
+        document: Option<BrowserDocument>,
+        focused: bool,
         receipt: Option<String>,
         filled: Vec<String>,
         exposed: bool,
@@ -279,6 +292,9 @@ impl Request {
                         cmd: String,
                         instance: String,
                         url: String,
+                        document: Option<BrowserDocument>,
+                        #[serde(default)]
+                        focused: bool,
                         receipt: Option<String>,
                         #[serde(default)]
                         filled: Vec<String>,
@@ -290,6 +306,15 @@ impl Request {
                         || p.instance.len() != 32
                         || !p.instance.bytes().all(|b| b.is_ascii_hexdigit())
                         || p.url.len() > MAX_URL_BYTES
+                        || p.document.as_ref().is_some_and(|d| {
+                            d.window_id < 0
+                                || d.tab_id < 0
+                                || d.frame_id != 0
+                                || d.document_id.is_empty()
+                                || d.document_id.len() > 128
+                                || d.generation.is_empty()
+                                || d.generation.len() > 128
+                        })
                         || p.receipt.as_ref().is_some_and(|r| r.len() > 64)
                         || p.filled.len() > 3
                         || p.filled
@@ -307,6 +332,8 @@ impl Request {
                     return Ok(Command::AgentPoll {
                         instance: p.instance,
                         url: p.url,
+                        document: p.document,
+                        focused: p.focused,
                         receipt: p.receipt,
                         filled: p.filled,
                         exposed: p.exposed,
@@ -783,6 +810,7 @@ pub enum Data {
     AgentFill {
         receipt: String,
         origin: String,
+        document: BrowserDocument,
         username: SecretText,
         password: SecretText,
         code: SecretText,

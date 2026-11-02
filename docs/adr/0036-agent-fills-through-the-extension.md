@@ -1,4 +1,4 @@
-# ADR 0035: Agent fills through the extension
+# ADR 0036: Agent fills through the extension
 
 Date: 2026-11-02
 
@@ -28,16 +28,23 @@ Both the agent's URL and the extension's active page must match the same saved
 website through `site.rs`. No saved website is a refusal. No registrable-domain
 widening is introduced. The requested and actual origin must also be equal.
 Exactly one fresh focused-window extension target must match. The extension
-checks focus, tab and origin again immediately before page injection. Optional
+binds approval and the delivery ticket to the extension instance, window, tab,
+top frame, browser documentId and navigation/activation generation. Injection
+targets that exact documentId. Navigation, tab replacement or tab closure refuses
+delivery, including a switch away and back. An unfocused poll preserves the
+selected document; after approval delivery waits at most 60 seconds for that
+exact document to be active in the focused browser window again. Optional
 site access must already be enabled by the owner; an agent cannot grant it.
 
 ## Threat model
 
-A screen agent cannot read a masked password field through the display. For two
-minutes after an agent fill (or until navigation), a type-attribute observer clears
+A screen agent cannot read a masked password field through the display. For the
+lifetime of the filled value, a type-attribute observer clears
 the filled password if it becomes visible and sends a value-free activity report.
 This is a visibility defense, not protection against a malicious website or DOM
 access. The page receives the password and can process it normally.
+Observation ends when the value changes, the field is removed, or the document
+unloads. Visibility reports have no two-minute expiry either.
 
 A CDP agent can read DOM values even when a field is masked. Remote debugging and
 other unsafe browser switches currently fail the caller guards. A small

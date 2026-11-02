@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use super::decide::BrokerContext;
 use crate::agent::wire::WireResponse;
 use crate::browser::site::{Page, Website, is_website_field};
-use crate::browser::wire::{Data, Response};
+use crate::browser::wire::{BrowserDocument, Data, Response};
 use crate::contracts::CredentialKind;
 use crate::owner::wire::SecretText;
 use crate::vault::{Vault, custom_detail_label};
@@ -16,6 +16,7 @@ const OPEN: &str = "Open the login page in the browser first";
 const REMOTE: &str =
     "This browser runs with remote debugging. Trust this browser profile in Apassy first.";
 const FRESH: Duration = Duration::from_secs(4);
+const CHANGED: &str = "The login page changed. Ask again.";
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
@@ -25,12 +26,15 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 struct Target {
     url: String,
+    document: Option<BrowserDocument>,
+    focused: bool,
     seen: Instant,
     job: Option<Job>,
     remote: bool,
     history: Vec<Job>,
 }
 struct Job {
+    document: BrowserDocument,
     completed: bool,
     id: String,
     origin: String,
@@ -48,6 +52,7 @@ pub(super) struct Fill {
     item: u64,
     requested: Page,
     target: String,
+    document: BrowserDocument,
     fields: Vec<String>,
     pub agent_can_read_page: bool,
 }
@@ -69,6 +74,8 @@ pub(crate) fn blocked(instance: &str, url: &str) {
             instance.into(),
             Target {
                 url: url.into(),
+                document: None,
+                focused: true,
                 seen: Instant::now(),
                 job: None,
                 remote: true,
@@ -84,17 +91,17 @@ impl Fill {
     }
     pub(super) fn validate_site(&self, vault: &Vault) -> Result<(), String> {
         let targets = lock(&TARGETS);
-        if select_target(&targets, &self.requested.origin())? != self.target {
-            return Err(OPEN.into());
-        }
         let target = targets
             .get(&self.target)
             .filter(|t| t.seen.elapsed() < FRESH)
-            .ok_or(OPEN)?;
+            .ok_or(CHANGED)?;
+        if target.document.as_ref() != Some(&self.document) {
+            return Err(CHANGED.into());
+        }
         agent_fill_allowed_in(target.remote).map_err(str::to_owned)?;
-        let actual = Page::parse(&target.url).map_err(|_| OPEN)?;
+        let actual = Page::parse(&target.url).map_err(|_| CHANGED)?;
         if actual.origin() != self.requested.origin() {
-            return Err(OPEN.into());
+            return Err(CHANGED.into());
         }
         let details = vault
             .details(self.item)
@@ -115,6 +122,29 @@ impl Fill {
     }
 
     pub(super) fn deliver(&self, vault: &Vault, shared: &super::SharedVault) -> WireResponse {
+        // Approval may bring Apassy forward. Wait for the bound document only;
+        // a poll of another tab/document permanently fails this request.
+        let start = Instant::now();
+        loop {
+            let targets = lock(&TARGETS);
+            let Some(target) = targets.get(&self.target) else {
+                return refused(CHANGED);
+            };
+            if target.document.as_ref() != Some(&self.document) {
+                return refused(CHANGED);
+            }
+            if let Err(reason) = agent_fill_allowed_in(target.remote) {
+                return refused(reason);
+            }
+            if target.focused && target.seen >= start && target.seen.elapsed() < FRESH {
+                break;
+            }
+            drop(targets);
+            if start.elapsed() >= Duration::from_secs(60) {
+                return refused(CHANGED);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         if let Err(reason) = self.validate_site(vault) {
             return refused(&reason);
         }
@@ -150,10 +180,12 @@ impl Fill {
             return refused("Operation cancelled");
         }
         let mut targets = lock(&TARGETS);
-        let Some(target) = targets
-            .get_mut(&self.target)
-            .filter(|t| t.job.as_ref().is_none_or(|j| j.completed))
-        else {
+        let Some(target) = targets.get_mut(&self.target).filter(|t| {
+            t.document.as_ref() == Some(&self.document)
+                && t.focused
+                && t.seen.elapsed() < FRESH
+                && t.job.as_ref().is_none_or(|j| j.completed)
+        }) else {
             return refused(OPEN);
         };
         let mut random = [0u8; 16];
@@ -165,19 +197,18 @@ impl Fill {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         let origin = self.requested.origin();
-        target
-            .history
-            .retain(|j| j.created.elapsed() < Duration::from_secs(140));
         if let Some(old) = target.job.take() {
             target.history.push(old);
         }
         target.job = Some(Job {
+            document: self.document.clone(),
             completed: false,
             id: id.clone(),
             origin: origin.clone(),
             data: Some(Data::AgentFill {
                 receipt: id,
                 origin,
+                document: self.document.clone(),
                 username,
                 password,
                 code,
@@ -213,7 +244,10 @@ fn select_target(targets: &BTreeMap<String, Target>, origin: &str) -> Result<Str
     let matches = targets
         .iter()
         .filter(|(_, t)| {
-            t.seen.elapsed() < FRESH && Page::parse(&t.url).is_ok_and(|p| p.origin() == origin)
+            t.focused
+                && (t.document.is_some() || t.remote)
+                && t.seen.elapsed() < FRESH
+                && Page::parse(&t.url).is_ok_and(|p| p.origin() == origin)
         })
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
@@ -319,10 +353,14 @@ fn run_inner(
         return refused(reason);
     }
     // agent_poll passes both caller guards, which currently reject unsafe switches.
+    let Some(document) = lock(&TARGETS).get(&target).and_then(|t| t.document.clone()) else {
+        return refused(CHANGED);
+    };
     let fill = Fill {
         item,
         requested,
         target,
+        document,
         fields: fields.to_vec(),
         agent_can_read_page,
     };
@@ -375,6 +413,10 @@ fn run_inner(
             let Some(target) = targets.get_mut(&fill.target) else {
                 return refused(OPEN);
             };
+            if target.document.as_ref() != Some(&fill.document) {
+                target.job = None;
+                return refused(CHANGED);
+            }
             if let Some(job) = &mut target.job {
                 if let Some(fields) = job.result.take() {
                     job.completed = true;
@@ -391,9 +433,12 @@ fn run_inner(
 }
 
 /// Called only after the native host and socket peer caller guards pass.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn poll(
     instance: &str,
     url: &str,
+    document: Option<BrowserDocument>,
+    focused: bool,
     receipt: Option<&str>,
     filled: Vec<String>,
     exposed: bool,
@@ -405,17 +450,21 @@ pub(crate) fn poll(
     }
     let target = targets.entry(instance.into()).or_insert_with(|| Target {
         url: url.into(),
+        document: document.clone(),
+        focused,
         seen: Instant::now(),
         job: None,
         remote: false,
         history: Vec::new(),
     });
     target.remote = false;
-    target.url = url.into();
+    // Losing browser focus must not discard the owner's selected document.
+    if !url.is_empty() {
+        target.url = url.into();
+        target.document = document.clone();
+    }
+    target.focused = focused && document.is_some();
     target.seen = Instant::now();
-    target
-        .history
-        .retain(|j| j.created.elapsed() < Duration::from_secs(140));
     let old_report = receipt.and_then(|id| target.history.iter_mut().find(|j| j.id == id));
     let active = old_report.is_none();
     if let Some(job) = old_report.or(target.job.as_mut()) {
@@ -455,6 +504,8 @@ pub(crate) fn poll(
         if job.created.elapsed() > Duration::from_secs(140) {
             job.data = None;
         } else if active
+            && focused
+            && document.as_ref() == Some(&job.document)
             && Page::parse(url).is_ok_and(|p| p.origin() == job.origin)
             && job.created.elapsed() < Duration::from_secs(10)
         {
@@ -481,6 +532,52 @@ pub(crate) fn poll(
 mod tests {
     use super::*;
     #[test]
+    fn unfocused_poll_preserves_binding_and_navigation_replaces_it() {
+        let instance = "binding-test";
+        let document = BrowserDocument {
+            window_id: 1,
+            tab_id: 2,
+            frame_id: 0,
+            document_id: "first-document".into(),
+            generation: "first-activation".into(),
+        };
+        poll(
+            instance,
+            "https://example.com/login",
+            Some(document.clone()),
+            true,
+            None,
+            vec![],
+            false,
+        );
+        poll(instance, "", None, false, None, vec![], false);
+        {
+            let targets = lock(&TARGETS);
+            let target = targets.get(instance).unwrap();
+            assert_eq!(target.document.as_ref(), Some(&document));
+            assert_eq!(target.url, "https://example.com/login");
+            assert!(!target.focused);
+        }
+        let mut next = document.clone();
+        next.document_id = "second-document".into();
+        poll(
+            instance,
+            "https://example.com/login",
+            Some(next.clone()),
+            true,
+            None,
+            vec![],
+            false,
+        );
+        let mut targets = lock(&TARGETS);
+        assert_eq!(
+            targets.get(instance).unwrap().document.as_ref(),
+            Some(&next)
+        );
+        assert_ne!(next, document);
+        targets.remove(instance);
+    }
+    #[test]
     fn binding_and_debugging() {
         let page = Page::parse("https://example.com/login").unwrap();
         let evil = Page::parse("https://example.com.evil.com").unwrap();
@@ -504,6 +601,14 @@ mod tests {
                 id.into(),
                 Target {
                     url: "https://example.com/login".into(),
+                    document: Some(BrowserDocument {
+                        window_id: 1,
+                        tab_id: 1,
+                        frame_id: 0,
+                        document_id: "doc".into(),
+                        generation: "generation".into(),
+                    }),
+                    focused: true,
                     seen: Instant::now(),
                     job: None,
                     remote: false,

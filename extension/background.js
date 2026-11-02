@@ -21,14 +21,55 @@ importScripts("fill.js");
 const agentInstance = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
 let agentPolling = false;
 const agentReceipts = new Map();
+const agentGenerations = new Map();
+let agentLastTab;
+function invalidateAgentTab(tabId) {
+  agentGenerations.set(tabId, crypto.randomUUID());
+}
+chrome.webNavigation?.onCommitted.addListener(details => {
+  if (details.frameId === 0) invalidateAgentTab(details.tabId);
+});
+for (const event of [chrome.webNavigation?.onHistoryStateUpdated, chrome.webNavigation?.onReferenceFragmentUpdated]) {
+  event?.addListener(details => { if (details.frameId === 0) invalidateAgentTab(details.tabId); });
+}
+chrome.tabs.onActivated?.addListener(({ tabId }) => invalidateAgentTab(tabId));
+chrome.tabs.onRemoved?.addListener(tabId => {
+  invalidateAgentTab(tabId);
+  agentGenerations.delete(tabId);
+  for (const [id, entry] of agentReceipts) if (entry.tab_id === tabId) agentReceipts.delete(id);
+});
+async function agentDocument(tab) {
+  if (!tab) return null;
+  const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 });
+  if (!frame?.documentId || frame.documentLifecycle !== "active") return null;
+  if (!agentGenerations.has(tab.id)) agentGenerations.set(tab.id, crypto.randomUUID());
+  return { window_id: tab.windowId, tab_id: tab.id, frame_id: 0,
+    document_id: frame.documentId, generation: agentGenerations.get(tab.id) };
+}
+function sameAgentDocument(a, b) {
+  return a && b && ["window_id", "tab_id", "frame_id", "document_id", "generation"].every(key => a[key] === b[key]);
+}
+async function agentDocumentActive(document) {
+  const window = await chrome.windows.getLastFocused();
+  if (!window.focused || window.id !== document.window_id) return false;
+  const [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
+  return tab?.id === document.tab_id && sameAgentDocument(document, await agentDocument(tab));
+}
 async function pollAgentFill(receipt = null, filled = [], exposed = false) {
   let url = "";
   let tab;
   try {
     const window = await chrome.windows.getLastFocused();
     if (window.focused) [tab] = await chrome.tabs.query({ active: true, windowId: window.id });
+    if (tab) agentLastTab = tab;
+    else if (agentLastTab) {
+      try { tab = await chrome.tabs.get(agentLastTab.id); } catch (_) { tab = agentLastTab; }
+    }
     url = tab && tab.url || "";
-    const answer = await ask({ cmd: "agent_poll", instance: agentInstance, url, receipt, filled, exposed });
+    let document = null;
+    try { document = await agentDocument(tab); } catch (_) { /* closed document */ }
+    const focused = Boolean(window.focused && tab?.active && tab.windowId === window.id);
+    const answer = await ask({ cmd: "agent_poll", instance: agentInstance, url, document, focused, receipt, filled, exposed });
     if (answer && !answer.ok && answer.code === "unsupported" && /remote debugging/.test(answer.message || "")) {
       await ask({ cmd: "agent_blocked", instance: agentInstance, url });
     }
@@ -37,34 +78,32 @@ async function pollAgentFill(receipt = null, filled = [], exposed = false) {
     answer.data = null;
     let actual = [];
     try {
-      const windowNow = await chrome.windows.getLastFocused();
-      const [active] = await chrome.tabs.query({ active: true, windowId: windowNow.id });
-      if (!tab || !windowNow.focused || !active || active.id !== tab.id || !await tabOn(tab.id, data.origin)) return;
-      agentReceipts.set(data.receipt, { tabId: tab.id, origin: data.origin, until: Date.now() + 120000 });
-      const results = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: fillLogin, args: [data.origin, data.username, data.password, "login", data.receipt] });
+      if (!sameAgentDocument(document, data.document) || !await agentDocumentActive(data.document) || !await tabOn(data.document.tab_id, data.origin)) return;
+      agentReceipts.set(data.receipt, { ...data.document, origin: data.origin });
+      const target = { tabId: data.document.tab_id, documentIds: [data.document.document_id] };
+      const results = await chrome.scripting.executeScript({ target, func: fillLogin, args: [data.origin, data.username, data.password, "login", data.receipt] });
       const result = results && results[0] && results[0].result;
       if (result && result.username) actual.push("username");
       if (result && result.password) actual.push("password");
-      if (data.code && await tabOn(tab.id, data.origin)) {
-        const codes = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: fillOneTimeCode, args: [data.origin, data.code] });
+      if (data.code && await agentDocumentActive(data.document)) {
+        const codes = await chrome.scripting.executeScript({ target, func: fillOneTimeCode, args: [data.origin, data.code, true] });
         if (codes && codes[0] && codes[0].result && codes[0].result.ok) actual.push("code");
       }
     } finally {
       data.username = ""; data.password = ""; data.code = "";
-      await ask({ cmd: "agent_poll", instance: agentInstance, url, receipt: data.receipt, filled: actual });
+      await ask({ cmd: "agent_poll", instance: agentInstance, url: "", document: null, focused: false, receipt: data.receipt, filled: actual });
     }
   } catch (_) { /* Unavailable or untrusted browser: no delivery. */ }
 }
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (!message || message.type !== "apassy_agent_visibility" || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
   const saved = agentReceipts.get(message.receipt);
-  if (saved && saved.until >= Date.now() && saved.tabId === sender.tab.id && originOf(sender.url) === saved.origin) {
+  if (saved && saved.tab_id === sender.tab.id && saved.document_id === sender.documentId && originOf(sender.url) === saved.origin) {
     void pollAgentFill(message.receipt, [], true);
   }
   return false;
 });
 if (typeof setInterval === "function" && chrome.windows) setInterval(() => {
-  for (const [id, entry] of agentReceipts) if (entry.until < Date.now()) agentReceipts.delete(id);
   if (agentPolling) return;
   agentPolling = true;
   pollAgentFill().finally(() => { agentPolling = false; });
@@ -523,9 +562,9 @@ async function fillCode(tabId, url, item, trustedGesture = false) {
 // fields that starts at the marked field (a code split into digits). Nothing
 // else: no password field, no guess, no pasteboard. It returns a count, never
 // the code.
-function fillOneTimeCode(origin, code) {
+function fillOneTimeCode(origin, code, agentFill = false) {
   const result = { ok: false, reason: "no_fields", fields: 0 };
-  if (location.origin !== origin) {
+  if (location.origin !== origin || (agentFill && !document.hasFocus())) {
     result.reason = "origin";
     return result;
   }
