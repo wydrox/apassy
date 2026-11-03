@@ -1,3 +1,6 @@
+// iCloud Drive and the vault service of the iPhone are not built for watchOS: the Apple Watch
+// uses WatchCoreService (ADR 0039).
+#if !os(watchOS)
 import ApassyVaultKit
 import CryptoKit
 import Foundation
@@ -351,3 +354,4 @@ func protect(_ url: URL) throws {
     #endif
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
+#endif

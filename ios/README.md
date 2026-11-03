@@ -7,17 +7,19 @@ The iPhone app of Apassy: the vault on the iPhone ([ADR 0023](../docs/adr/0023-i
 | `ApassyCore` | The vault core: a Rust static library (crate `apassy-core`) with a JSON C interface over the vault and the relay sync code of the Mac app. `scripts/build-ios-core.sh` builds it as `ApassyCore/build/ApassyCore.xcframework` (not committed). |
 | `ApassyVaultKit` | A Swift package. `ApassyVaultKit`: the typed calls of the core (`VaultService`), an in-memory vault for previews and tests, the Face ID passphrase store, the owner check, the local-only clipboard, and the QuickType identities. `ApassyVaultCore`: `VaultService` over the core. |
 | `ApassyCompanionKit` | A Swift package with everything of the companion except the screens: the wire client, the signing strings, the pairing link, the Secure Enclave keys, the pinned TLS check, the pairing store, and the text of a command as the owner reads it. It uses Apple frameworks only (Foundation, CryptoKit, Security, LocalAuthentication). |
-| `ApassyCompanion` | The iPhone app in SwiftUI, and its AutoFill extension (`AutoFill/`). See "The app" below. |
+| `ApassyCompanion` | The iPhone app in SwiftUI, its AutoFill extension (`AutoFill/`), and the Apple Watch app (`Watch/`, target `ApassyWatch`, embedded in the iPhone app; it answers access requests only, [ADR 0039](../docs/adr/0039-apple-watch-access-requests.md)). See "The app" and "The Apple Watch" below. |
 
 ## The vault core
 
 It needs Rust 1.97 with the targets `aarch64-apple-ios`, `aarch64-apple-ios-sim`, and `aarch64-apple-darwin` (the script adds them), and Xcode 27.
 
 ```
-scripts/build-ios-core.sh            # iPhone, Simulator, and macOS
-scripts/build-ios-core.sh device     # iPhone only
-cargo test -p apassy-core            # the calls of the contract, end to end
+scripts/build-ios-core.sh                # iPhone, Simulator, macOS, Apple Watch, and watch Simulator
+scripts/build-ios-core.sh device watch   # iPhone and Apple Watch only
+cargo test -p apassy-core                # the calls of the contract, end to end
 ```
+
+The watch slices (`watch`, `watchsim`, targets `aarch64-apple-watchos` and `aarch64-apple-watchos-sim`) are arm64 only and build SQLCipher with CommonCrypto (ADR 0039, section 4).
 
 The tests drive the JSON calls as the app makes them. One test runs a Mac and an iPhone on the in-process fake relay of the Mac's tests (`tests/common/fake_relay.rs`): the iPhone joins with the device link and the safety words, the Mac confirms, and both sync changes to each other.
 
@@ -103,7 +105,7 @@ The unlocked app has three tabs: **Vault**, **Requests**, and **Search**. Vault 
 | Requests tab | Waiting work and outcomes; see “Requests” below. |
 | Agent Access | Agent Access in Settings lists published Mac feeds for the unlocked vaults, grouped by Mac and by vault when needed (relay-feed-v1 and core feed_* calls). The feed runs while that Settings destination or its agent detail is visible and active, and stops on lock, suspend, or leaving it. The page shows permissions, exceptions, recent use, and From <Mac>, <time>; it does not claim a live connection merely because a feed exists. Stale provenance remains visible and disables actions. Removing an exception confirms the exact agent, credential, and Mac. Removing Never or Always ask signs the core's action string with the answer key of that vault's team after Face ID; removing an only-these-items entry needs no Face ID (the core signs it). The row reports Removed on <Mac> only after confirmation, or explains why the Mac did not apply it. Agent detail keeps names-only visibility, action restrictions, the read-only bouncer note, and provenance. Empty state directs the owner to Requests or Connect this iPhone, as applicable. |
 | Search tab | Searches titles, usernames, tags, and websites. Archived credentials show in their own section. |
-| Settings | Five destinations: Agent Access (permissions and exceptions), plus four groups. **General**: the vault (name or vault picker, "Add another vault", remove from this iPhone), "Move to another app" (import and export), and AutoFill. **Devices**: sync (service, state, last sync, "Sync now", team devices, "Select the iCloud file again", the new passphrase of the vault, "Use the relay copy"), questions through the relay, the Mac on Wi-Fi, and "Open Requests". **Security**: "Unlock with Face ID", "Lock after", "Lock now", and "Clear copied secrets after". **Advanced**: the versions of the app and the vault core, and the licenses. |
+| Settings | Five destinations: Agent Access (permissions and exceptions), plus four groups. **General**: the vault (name or vault picker, "Add another vault", remove from this iPhone), "Move to another app" (import and export), and AutoFill. **Devices**: sync (service, state, last sync, "Sync now", team devices, "Select the iCloud file again", the new passphrase of the vault, "Use the relay copy"), questions through the relay, the Mac on Wi-Fi, "Add Apple Watch" (when a watch with Apassy is paired; see "The Apple Watch"), and "Open Requests". **Security**: "Unlock with Face ID", "Lock after", "Lock now", and "Clear copied secrets after". **Advanced**: the versions of the app and the vault core, and the licenses. |
 | AutoFill | Logins, one-time codes, and passkeys in Safari and apps, after Face ID or the passphrase for each fill or sign-in. New passkeys are saved in a new login or in a login of the website. The QuickType bar shows usernames, hosts, and passkey accounts only. |
 | Passkeys | A login holds at most one passkey (ES256). The credential shows its website, account, and the start of its ID. The ordinary screens never show or copy the key: it is not a field, so no reveal, copy, or large type shows it. After Face ID, the system export can move it to another app. A login with a password and a passkey offers "Remove passkey": Face ID, then the login keeps its fields. A login with a passkey and no password offers "Delete login" instead: removing the passkey of such a login deletes the entire item (notes, tags, websites, one-time passwords, custom details, history, and agent access) on this iPhone and, at the next sync, on the other devices. The dialog says this. To keep the data, add a password with Edit first, or archive the login. |
 | Import and export | Apple's credential exchange (iOS 26): Settings > General > Move to another app exports logins, one-time passwords, and passkeys to an app that the owner picks in the sheet of iOS. To import, start the export in the other app (Passwords, 1Password) and pick Apassy. Both ask for Face ID first; the data goes app to app in memory, never to a file. |
@@ -296,6 +298,50 @@ The link is the text of the QR code. It is a secret for five minutes, so use a l
 ### The icon
 
 `scripts/make-ios-icon.sh` renders `AppIcon.png` (1024x1024, no alpha channel) and the small `CoverIcon.png` of the privacy cover from `packaging/AppIcon.svg`, with `qlmanage` and `sips`. iOS masks the icon itself, so the script draws the mark across the whole square. Run it after a change to the SVG, and commit both files.
+
+## The Apple Watch
+
+`ApassyWatch` (bundle ID `com.wydrox.apassy.companion.watchkitapp`, watchOS 26, arm64 watches only) answers the access requests of ADR 0033 and nothing else: **Allow once** while the watch is unlocked on the wrist, or **Deny** ([ADR 0039](../docs/adr/0039-apple-watch-access-requests.md), [flow spec](../docs/product/apple-watch-access/flow-spec.md)). It never shows run questions, feed actions, or vault items, and holds no credential. The iPhone app embeds it as its Watch content.
+
+| Part | What it does |
+| --- | --- |
+| Connect | The watch has no camera. On the iPhone, Settings > Devices > **Add Apple Watch** (shown when a watch with Apassy is paired) scans the Connect code of the Mac (Settings > Devices > Add an iPhone or a Mac…) and sends it to Apassy on the watch with WatchConnectivity; the watch must be open. The iPhone never uses or keeps the link. The watch makes its relay key and its answer key, shows the six safety words, and is connected once the owner confirms on the Mac with Touch ID. |
+| Requests | The waiting access requests of the connected vault, newest first, with a long poll of the core while the app is active. Answered and expired rows stay 10 minutes with their outcome. Always On redacts every row. |
+| Request | Every scope fact first (agent, credential, Mac, environment, delivery, action, hosts, project and folder, the reason, the host provenance, the expiry), then Allow once and Deny, then Exact identities. A request with an incomplete scope, or without Allow once, offers Deny only and says what is missing. After an answer: "Sent. Waiting for <Mac> to confirm.", "Not confirmed" after 60 s, or the confirmed outcome with a success haptic. No countdown and no automatic retry with a new signature. |
+| This watch | The vault and the Macs that can ask, and Remove This Watch (with a confirmation): the core leaves the team and deletes the replica, and the watch deletes its keys and passphrase. Also remove the watch on the Mac. |
+
+What the watch keeps (all `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, never synchronized, in the keychain access group `com.wydrox.apassy.watch`):
+
+- **The answer key**: one Secure Enclave P-256 key per questions team, with `.privateKeyUsage` and `.userPresence` (`WatchAnswerKeyPolicy`, the one place of the flags). Each Allow once evaluates a new `LAContext` with `.deviceOwnerAuthenticationWithWristDetection`, passes it to the signature, and invalidates it after the signature, a failure, the deadline, or the background. Deny is signed by the core with the relay key.
+- **The replica passphrase**: 32 random bytes in b64u for the questions-only replica vault (no item, no sync). The replica opens when the app becomes active and suspends in the background; in the background a running check of the wrist is cancelled and the requests are dropped.
+
+The relay HTTP of the core goes through URLSession on the watch (`URLSessionCoreTransport`, an ephemeral session with no cookie, cache, or credential storage; redirects are not followed). All watch calls of the core are in `ApassyVaultKit/Sources/ApassyVaultCore/WatchCoreService.swift`; the rules and the models, without UI, are in `ApassyVaultKit` (`WatchRequestRules`, `WatchRequestsModel`, `WatchAppModel`) with their tests in `ApassyVaultKitTests`.
+
+Build (Xcode 27; the core needs its watch slices):
+
+```
+scripts/build-ios-core.sh watch watchsim device sim
+cd ios/ApassyCompanion
+xcodebuild -project ApassyCompanion.xcodeproj -scheme ApassyWatch -sdk watchsimulator \
+  -destination 'generic/platform=watchOS Simulator' -derivedDataPath /tmp/apassy-dd-watch CODE_SIGNING_ALLOWED=NO build
+```
+
+The iPhone scheme builds and embeds the watch app too, so it needs the watch slices as well.
+
+### Watch launch arguments
+
+A Simulator or Debug build takes these development aids:
+
+| Argument | What it does |
+| --- | --- |
+| `-ApassyWatchPreview <state>` | Synthetic data for screenshots, with in-memory keys and no core: `unpaired`, `failed` (the words did not match), `removed`, `words`, `connected`, `empty`, `requests`, `detail`, `denyonly`, `sent`, `notconfirmed`, `allowed`, `denied`, `expired`, `settings`. |
+| `-ApassyWatchConnectLink <link>` | Start a connection with the real core as if the iPhone had sent the Connect code (the Simulator cannot scan). The link is a secret for its few minutes; use a code of a Mac that you own and keep it out of shell history. |
+
+```
+xcrun simctl launch booted com.wydrox.apassy.companion.watchkitapp -ApassyWatchPreview detail
+```
+
+The Simulator has no Secure Enclave, no wrist, and no passcode: a Simulator build keeps a software answer key and the passphrase while unlocked (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`), and a pause stands in for the check of the wrist. Physical acceptance is still pending: the Secure Enclave key policy with wrist detection (`.userPresence` or `.devicePasscode`), the mirrored notification tap, LTE without the iPhone, and Always On redaction.
 
 ## TestFlight
 

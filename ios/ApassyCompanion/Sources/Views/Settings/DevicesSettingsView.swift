@@ -2,8 +2,8 @@ import ApassyVaultKit
 import SwiftUI
 
 /// Settings > Devices: the sync of the vault (its state, "Sync now", the devices of the team, a new
-/// passphrase, the relay copy), the questions through the relay, and the Mac on Wi-Fi (the
-/// companion).
+/// passphrase, the relay copy), the questions through the relay, the Mac on Wi-Fi (the
+/// companion), and Add Apple Watch (ADR 0039) when a watch with Apassy is paired.
 struct DevicesSettingsView: View {
     /// Closes the Settings sheet (`dismiss` here would only go back to the root).
     let close: DismissAction
@@ -18,6 +18,13 @@ struct DevicesSettingsView: View {
             Section {
                 QuestionsStateRow()
                 MacPairingRow()
+                if AppleWatchLink.shared.canAddWatch {
+                    NavigationLink {
+                        AddAppleWatchView()
+                    } label: {
+                        Label("Add Apple Watch", systemImage: "applewatch")
+                    }
+                }
                 if let ui {
                     Button("Open Requests", systemImage: "checkmark.circle") {
                         ui.tab = .decisions
@@ -34,6 +41,7 @@ struct DevicesSettingsView: View {
         }
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
+        .task { AppleWatchLink.shared.activate() }
     }
 }
 

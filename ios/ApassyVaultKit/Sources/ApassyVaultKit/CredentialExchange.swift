@@ -1,4 +1,5 @@
-#if canImport(AuthenticationServices)
+// watchOS has AuthenticationServices but no credential exchange (ADR 0039).
+#if canImport(AuthenticationServices) && !os(watchOS)
 import AuthenticationServices
 import CryptoKit
 import Foundation

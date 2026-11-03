@@ -13,7 +13,7 @@ import Testing
             historyKeyStore: CoreTestHistoryKeys().store)
         let empty = try await core.info()
         #expect(empty.vaults.isEmpty)
-        #expect(empty.schema == 23)
+        #expect(empty.schema == 24)
 
         let vault = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         #expect(try await core.info().selectedVault == vault)

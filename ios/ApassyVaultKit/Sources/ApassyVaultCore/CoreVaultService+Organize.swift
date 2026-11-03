@@ -1,3 +1,4 @@
+#if !os(watchOS)
 import ApassyVaultKit
 import Foundation
 
@@ -56,3 +57,4 @@ extension CoreVaultService {
         try await call("item_options_set", params)
     }
 }
+#endif

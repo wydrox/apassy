@@ -1,3 +1,4 @@
+#if !os(watchOS)
 import ApassyVaultKit
 import Foundation
 
@@ -37,3 +38,4 @@ extension CoreVaultService {
         return try await call("feed_action_wait", params)
     }
 }
+#endif

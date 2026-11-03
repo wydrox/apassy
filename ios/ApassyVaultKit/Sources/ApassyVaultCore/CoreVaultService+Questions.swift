@@ -1,3 +1,4 @@
+#if !os(watchOS)
 import ApassyVaultKit
 import Foundation
 
@@ -102,3 +103,4 @@ extension CoreVaultService {
 
     public func joinAttachCancel() async throws { try await call("join_attach_cancel") }
 }
+#endif

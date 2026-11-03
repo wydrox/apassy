@@ -86,9 +86,14 @@ public enum CompanionKeyError: Error, Equatable, LocalizedError {
         if ns.domain == LAError.errorDomain {
             switch LAError.Code(rawValue: ns.code) {
             case .userCancel, .systemCancel, .appCancel, .userFallback: return .cancelled
+            #if !os(watchOS)
+            // watchOS has no biometry codes (ADR 0039).
             case .biometryNotEnrolled: return .notEnrolled
             case .biometryLockout: return .lockedOut
-            case .biometryNotAvailable, .biometryNotPaired, .biometryDisconnected, .passcodeNotSet, .notInteractive:
+            case .biometryNotAvailable, .biometryNotPaired, .biometryDisconnected:
+                return .biometryUnavailable
+            #endif
+            case .passcodeNotSet, .notInteractive:
                 return .biometryUnavailable
             // A failed match (face not recognised): the key is fine, the owner can try again.
             case .authenticationFailed: return .authenticationFailed
