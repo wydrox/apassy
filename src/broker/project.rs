@@ -88,10 +88,8 @@ pub fn project_of(cwd: &Path, home: Option<&Path>) -> Option<Project> {
 const MAX_GIT_FILE: u64 = 4096;
 
 /// Open a file without a wait on a FIFO that replaced it after the type check.
-#[cfg(target_os = "macos")]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(not(target_os = "macos"))]
-const O_NONBLOCK: i32 = 0o4000;
+/// The value is the target's own (rustix), not a written number.
+const O_NONBLOCK: i32 = rustix::fs::OFlags::NONBLOCK.bits() as i32;
 
 /// The canonical git common directory for the `.git` entry of `folder`. `None`
 /// when there is no usable `.git`: the search then goes on to the parent. `folder` is

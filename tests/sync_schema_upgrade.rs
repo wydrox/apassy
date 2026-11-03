@@ -36,7 +36,7 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 25;
+const CURRENT: i64 = 27;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
@@ -193,6 +193,23 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < 27 {
+        // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
+        conn.execute_batch(
+            "DROP INDEX item_use_decision; DROP INDEX cloud_run_decision; DROP TABLE cloud_run;
+             ALTER TABLE cloud_agent DROP COLUMN connected_with; ALTER TABLE cloud_agent DROP COLUMN client_id;
+             ALTER TABLE decision_log DROP COLUMN wait_ms; ALTER TABLE decision_log DROP COLUMN request;",
+        )
+        .unwrap();
+    }
+    if version < 26 {
+        // Schema 26: the cloud agents of the node (`src/vault/schema26.rs`).
+        conn.execute_batch(
+            "DROP TABLE cloud_node; DROP TABLE cloud_item; DROP TABLE cloud_agent;
+             ALTER TABLE agent DROP COLUMN kind;",
+        )
+        .unwrap();
+    }
     if version < 23 {
         conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values")
             .unwrap();

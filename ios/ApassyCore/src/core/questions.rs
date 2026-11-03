@@ -59,7 +59,7 @@ use apassy::vault::{
     MembershipPurpose, RelayMembership, TrustedDevice, TrustedDeviceKind, Vault, VaultErrorKind,
 };
 
-use envelope::{CardRefusal, Choice};
+use envelope::{AnyCard, CardRefusal, Choice, ConnectCard, ConnectChoice};
 
 use super::config::write_private;
 use super::errors::{CoreError, CoreResult};
@@ -499,7 +499,11 @@ struct QuestionOut {
     expires_at: u64,
     /// The text for the owner when the card cannot be shown.
     problem: Option<&'static str>,
+    /// The card of a run (card v1).
     card: Option<CardOut>,
+    /// The card of a connect request (card v2 `kind = connect`, contract section 7.4).
+    /// A question has a `card` or a `connect`, never both.
+    connect: Option<ConnectOut>,
     settle: Option<SettleOut>,
     /// The kind of the answer this iPhone sent.
     answered: Option<&'static str>,
@@ -512,6 +516,29 @@ struct CardOut {
     run: RunOut,
     question: QuestionInfoOut,
     digest: String,
+}
+
+/// A connect request: a remote agent asks to connect to the asking Mac.
+#[derive(Serialize)]
+struct ConnectOut {
+    asker_device: String,
+    created_at: u64,
+    /// The connect request ID of the node.
+    id: String,
+    client_name: String,
+    mac_name: String,
+    code: String,
+    expires_at: u64,
+    digest: String,
+    /// Where the code goes back: the host of the redirect URI (review 0.5.16). `None`
+    /// for a card of a Mac before 0.5.16.
+    redirect_host: Option<String>,
+    /// The line of the card: "Returns to <host>", or "Returns to a program on a computer
+    /// (localhost)" for a loopback host. `None` without a host.
+    returns_to: Option<String>,
+    /// True when the code goes back to a program on a computer (`localhost`): the card
+    /// shows the line as a warning.
+    local_redirect: bool,
 }
 
 #[derive(Serialize)]
@@ -849,15 +876,19 @@ impl Keys {
     }
 }
 
-/// A card that passed every check of section 7.3, with its record.
-struct Opened {
-    record: Record,
-    card: envelope::Card,
-}
-
 impl Keys {
-    /// Open and check the card of `record` (section 7.3).
+    /// Open and check the run card of `record` (section 7.3). A connect card is not one:
+    /// the request history and the run answers never take it.
     fn open(&self, record: &Record) -> Result<envelope::Card, &'static str> {
+        match self.open_any(record)? {
+            AnyCard::Run(card) => Ok(card),
+            AnyCard::Connect(_) => Err(UPDATE),
+        }
+    }
+
+    /// Open and check the card of `record` of either kind: a run (section 7.3) or a
+    /// connect request (section 7.4).
+    fn open_any(&self, record: &Record) -> Result<AnyCard, &'static str> {
         let Some((key_id, key)) = &self.key else {
             return Err(SYNC_FIRST);
         };
@@ -878,14 +909,20 @@ impl Keys {
         );
         let plaintext = envelope::open(key, &nonce, &aad, &ciphertext).ok_or(READ_FAILED)?;
         let card =
-            envelope::parse_card(&plaintext, &record.qid).map_err(|refusal| match refusal {
+            envelope::parse_any_card(&plaintext, &record.qid).map_err(|refusal| match refusal {
                 CardRefusal::Update => UPDATE,
                 CardRefusal::Unreadable => READ_FAILED,
             })?;
         // Check 5: the asker is a live trusted device of this vault, with the relay
-        // device id of the record when its row has one for this team.
+        // device id of the record when its row has one for this team. A connect request
+        // comes from a Mac only (section 7.4, check 4).
+        let (asker, connect) = match &card {
+            AnyCard::Run(card) => (&card.asker.device, false),
+            AnyCard::Connect(card) => (&card.asker.device, true),
+        };
         let asker_ok = self.devices.iter().any(|device| {
-            device.uuid == card.asker.device
+            device.uuid == *asker
+                && (!connect || device.kind == TrustedDeviceKind::Mac)
                 && device
                     .relay_devices
                     .get(&self.team_id)
@@ -960,6 +997,43 @@ fn card_out(card: &envelope::Card) -> CardOut {
             valid_answers: card.question.valid_answers.clone(),
         },
         digest: card.digest.clone(),
+    }
+}
+
+fn connect_out(card: &ConnectCard) -> ConnectOut {
+    ConnectOut {
+        asker_device: card.asker.device.clone(),
+        created_at: card.created_at,
+        id: card.connect.id.clone(),
+        client_name: envelope::shown(&card.connect.client_name, SHOWN_NAME),
+        mac_name: envelope::shown(&card.connect.mac_name, SHOWN_NAME),
+        code: envelope::shown(&card.connect.code, SHOWN_NAME),
+        expires_at: card.connect.expires_at,
+        digest: card.digest.clone(),
+        redirect_host: card
+            .connect
+            .redirect_host
+            .as_deref()
+            .map(|host| envelope::shown(host, SHOWN_PATH)),
+        returns_to: card.connect.redirect_host.as_deref().map(|host| {
+            envelope::shown(
+                &apassy::questions::envelope::connect_returns_to(host),
+                SHOWN_PATH,
+            )
+        }),
+        local_redirect: card
+            .connect
+            .redirect_host
+            .as_deref()
+            .is_some_and(apassy::questions::envelope::is_local_redirect_host),
+    }
+}
+
+/// The asking Mac's name of `card`.
+fn asker_name(card: &AnyCard) -> &str {
+    match card {
+        AnyCard::Run(card) => &card.asker.name,
+        AnyCard::Connect(card) => &card.asker.name,
     }
 }
 
@@ -1044,7 +1118,7 @@ fn question_out(
     record: &Record,
     at: u64,
 ) -> QuestionOut {
-    let (card, problem) = match keys.open(record) {
+    let (card, problem) = match keys.open_any(record) {
         Ok(card) => (Some(card), None),
         Err(problem) => (None, Some(problem)),
     };
@@ -1055,12 +1129,19 @@ fn question_out(
         state: state_of(record, at),
         asker_name: card.as_ref().map_or_else(
             || envelope::shown(&record.from_device_name, SHOWN_NAME),
-            |card| envelope::shown(&card.asker.name, SHOWN_NAME),
+            |card| envelope::shown(asker_name(card), SHOWN_NAME),
         ),
         created_at: record.created_at,
         expires_at: record.expires_at,
         problem,
-        card: card.as_ref().map(card_out),
+        card: match &card {
+            Some(AnyCard::Run(card)) => Some(card_out(card)),
+            _ => None,
+        },
+        connect: match &card {
+            Some(AnyCard::Connect(card)) => Some(connect_out(card)),
+            _ => None,
+        },
         settle: keys.settle(record).map(settle_out),
         answered: record.answered,
     }
@@ -2045,9 +2126,10 @@ impl Core {
         ))
     }
 
-    /// An open question of the context `using` that passed every check of section 7.3,
-    /// from its records, or from the relay when it is not there yet.
-    fn opened(&self, qid: &str, using: &Using) -> CoreResult<Opened> {
+    /// An open question of the context `using` of either kind that passed every check of
+    /// section 7.3 (a run) or 7.4 (a connect request), from its records, or from the relay
+    /// when it is not there yet.
+    fn opened_any(&self, qid: &str, using: &Using) -> CoreResult<(Record, AnyCard)> {
         if !envelope::valid_qid(qid) {
             return Err(CoreError::invalid("This question is not known."));
         }
@@ -2074,13 +2156,13 @@ impl Core {
             }
             _ => return Err(CoreError::new("expired", "This question expired.")),
         }
-        let card = using.keys.open(&record).map_err(unreadable)?;
-        Ok(Opened { record, card })
+        let card = using.keys.open_any(&record).map_err(unreadable)?;
+        Ok((record, card))
     }
 
     fn question_open(&self, qid: &str, vault_id: Option<&str>) -> CoreResult<QuestionOut> {
         let using = self.context_for(qid, vault_id)?;
-        let Opened { record, card } = self.opened(qid, &using)?;
+        let (record, card) = self.opened_any(qid, &using)?;
         let vault_name = guard(&self.list)
             .get(&using.vault_id)
             .map(|entry| entry.name.clone())
@@ -2090,11 +2172,18 @@ impl Core {
             vault_id: using.vault_id,
             vault_name,
             state: "open",
-            asker_name: envelope::shown(&card.asker.name, SHOWN_NAME),
+            asker_name: envelope::shown(asker_name(&card), SHOWN_NAME),
             created_at: record.created_at,
             expires_at: record.expires_at,
             problem: None,
-            card: Some(card_out(&card)),
+            card: match &card {
+                AnyCard::Run(card) => Some(card_out(card)),
+                AnyCard::Connect(_) => None,
+            },
+            connect: match &card {
+                AnyCard::Connect(card) => Some(connect_out(card)),
+                AnyCard::Run(_) => None,
+            },
             settle: None,
             answered: record.answered,
         })
@@ -2103,10 +2192,17 @@ impl Core {
     // ---- Answers. ----
 
     /// The answer string of `answer` at `time`, checked against the card.
-    fn prepare_answer(&self, answer: &AnswerIn, time: u64) -> CoreResult<(Prepared, Ready)> {
+    fn prepare_answer(&self, answer: &AnswerIn, time: u64) -> CoreResult<(Prepared, Readied)> {
         let using = self.context_for(&answer.qid, answer.vault_id.as_deref())?;
         let own = using.keys.own_row_as(self.role)?;
-        let Opened { record, card } = self.opened(&answer.qid, &using)?;
+        let (record, card) = match self.opened_any(&answer.qid, &using)? {
+            (record, AnyCard::Run(card)) => (record, card),
+            (record, AnyCard::Connect(card)) => {
+                return self
+                    .prepare_connect(answer, time, using, own, record, card)
+                    .map(|(prepared, ready)| (prepared, Readied::Connect(ready)));
+            }
+        };
         let choice = Choice::for_card_with_comment(
             &answer.kind,
             answer.action.as_deref(),
@@ -2147,7 +2243,63 @@ impl Core {
         };
         Ok((
             prepared,
-            Ready {
+            Readied::Run(Ready {
+                using,
+                own,
+                record,
+                digest: card.digest,
+                choice,
+            }),
+        ))
+    }
+
+    /// The answer string of an answer to a connect card (section 7.4): `allow_connect`
+    /// (Face ID) or `deny`, with no other field.
+    fn prepare_connect(
+        &self,
+        answer: &AnswerIn,
+        time: u64,
+        using: Using,
+        own: TrustedDevice,
+        record: Record,
+        card: ConnectCard,
+    ) -> CoreResult<(Prepared, ConnectReady)> {
+        // Only the iPhone answers a connect request; the Apple Watch gets nothing new.
+        if self.role != Role::App {
+            return Err(CoreError::not_allowed());
+        }
+        if answer.comment.is_some()
+            || answer.action.is_some()
+            || answer.project_key.is_some()
+            || answer.item_id.is_some()
+            || answer.environment.is_some()
+        {
+            return Err(CoreError::invalid("This answer takes no other fields."));
+        }
+        let choice = ConnectChoice::parse(&answer.kind)
+            .ok_or_else(|| CoreError::invalid("This question does not offer this answer."))?;
+        if record.answered.is_some() {
+            return Err(CoreError::new(
+                "already_answered",
+                "An answer was already sent. Wait for confirmation from the Mac.",
+            ));
+        }
+        let text = envelope::connect_answer_string(
+            &own.uuid,
+            &using.keys.team_id,
+            &record.qid,
+            choice,
+            &card.digest,
+            time,
+        )
+        .ok_or_else(|| CoreError::invalid("This answer cannot be sent from this iPhone."))?;
+        Ok((
+            Prepared {
+                time,
+                answer_string: text,
+                needs_face_id: choice.needs_face_id(),
+            },
+            ConnectReady {
                 using,
                 own,
                 record,
@@ -2155,6 +2307,109 @@ impl Core {
                 choice,
             },
         ))
+    }
+
+    /// Sign (or check the Face ID signature), seal, and post an answer to a connect card.
+    /// Only the settle of the asking Mac says whether it counted.
+    fn send_connect(
+        &self,
+        answer: &AnswerIn,
+        time: u64,
+        prepared: Prepared,
+        ready: ConnectReady,
+    ) -> CoreResult<Sent> {
+        let member = &ready.using.member;
+        let keys = &ready.using.keys;
+        let signature = if prepared.needs_face_id {
+            let answer_key = ready.own.answer_key.as_deref().ok_or_else(not_registered)?;
+            let signature = answer
+                .signature
+                .as_deref()
+                .and_then(decode_b64u)
+                .ok_or_else(|| CoreError::invalid("This answer needs Face ID."))?;
+            if !verify_signature(answer_key, prepared.answer_string.as_bytes(), &signature) {
+                return Err(CoreError::new(
+                    "not_registered",
+                    "The answer key of this iPhone changed. Turn answers off and on again on this iPhone.",
+                ));
+            }
+            signature
+        } else {
+            if answer.signature.is_some() {
+                return Err(CoreError::invalid("This answer is signed by the core."));
+            }
+            if member.public_key() != ready.own.sign_key.as_slice() {
+                return Err(not_registered());
+            }
+            member.sign(prepared.answer_string.as_bytes())?
+        };
+        let (key_id, key) = keys.key.as_ref().ok_or_else(|| unreadable(SYNC_FIRST))?;
+        if *key_id != ready.record.key_id {
+            return Err(unreadable(SYNC_FIRST));
+        }
+        let plaintext = Zeroizing::new(envelope::connect_answer_plaintext(
+            &ready.record.qid,
+            &ready.own.uuid,
+            ready.choice,
+            &ready.digest,
+            time,
+            &encode_b64u(&signature),
+        ));
+        if plaintext.len() > envelope::MAX_ANSWER_BYTES {
+            return Err(CoreError::new(
+                "too_large",
+                "The answer is too large for the relay.",
+            ));
+        }
+        let mut nonce = [0u8; 12];
+        getrandom::fill(&mut nonce).map_err(|_| CoreError::io())?;
+        let aad = envelope::answer_aad(&keys.team_id, &ready.record.qid, key_id, keys.device_id);
+        let sealed = envelope::seal(key, &nonce, &aad, &plaintext)
+            .ok_or_else(|| CoreError::internal("The answer cannot be sealed."))?;
+        let body = json!({
+            "v": 1,
+            "key_id": key_id,
+            "nonce": encode_b64u(&nonce),
+            "ciphertext": encode_b64u(&sealed),
+        });
+        // One answer per connect card from this iPhone: the first one goes to the node.
+        {
+            let mut state = guard(&self.questions);
+            let context = state.context_mut(&ready.using.vault_id, member)?;
+            if context.keys.is_removed() {
+                return Err(removed());
+            }
+            if context
+                .records
+                .get(&ready.record.qid)
+                .is_some_and(|record| record.answered.is_some())
+            {
+                return Err(CoreError::new(
+                    "already_answered",
+                    "An answer was already sent. Wait for confirmation from the Mac.",
+                ));
+            }
+        }
+        let path = format!("/v1/questions/{}/answers", ready.record.qid);
+        let result = member.call_answer_once(&path, &body).map_err(call_error)?;
+        #[derive(Deserialize)]
+        struct Posted {
+            id: u64,
+            at: u64,
+        }
+        let posted: Posted = serde_json::from_value(result)
+            .map_err(|_| CoreError::from(SyncError::RelayUnreachable))?;
+        let kind = ready.choice.kind();
+        if let Ok(context) = guard(&self.questions).context_mut(&ready.using.vault_id, member)
+            && let Some(record) = context.records.get_mut(&ready.record.qid)
+        {
+            record.answered = Some(kind);
+        }
+        Ok(Sent {
+            id: posted.id,
+            at: posted.at,
+            kind,
+        })
     }
 
     fn question_answer(&self, answer: &AnswerIn) -> CoreResult<Sent> {
@@ -2192,6 +2447,15 @@ impl Core {
             return Err(CoreError::invalid("The answer has a time in the future."));
         }
         let (prepared, ready) = self.prepare_answer(answer, time)?;
+        let ready = match ready {
+            Readied::Run(ready) => ready,
+            Readied::Connect(ready) => {
+                if ready.using.vault_id != bound_vault_id {
+                    return Err(wrong_vault());
+                }
+                return self.send_connect(answer, time, prepared, ready);
+            }
+        };
         if ready.using.vault_id != bound_vault_id {
             return Err(wrong_vault());
         }
@@ -2784,6 +3048,21 @@ struct Ready {
     choice: Choice,
 }
 
+/// An answer to a connect card that passed the checks, ready to sign and seal.
+struct ConnectReady {
+    using: Using,
+    own: TrustedDevice,
+    record: Record,
+    digest: String,
+    choice: ConnectChoice,
+}
+
+/// A prepared answer of either kind of card.
+enum Readied {
+    Run(Ready),
+    Connect(ConnectReady),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2854,5 +3133,155 @@ mod tests {
             call_error(RelayCallError::Unreachable).code,
             "relay_unreachable"
         );
+    }
+
+    /// The keys of a context of team `t_7k2m5q4x3c` with the contract question key and the
+    /// asking Mac of the vectors as a trusted device of `asker_kind`.
+    fn connect_keys(asker_kind: TrustedDeviceKind) -> (Keys, apassy::vault::QuestionKey) {
+        let mut bytes = [0u8; 32];
+        for (at, byte) in bytes.iter_mut().enumerate() {
+            *byte = at as u8;
+        }
+        let key = apassy::vault::QuestionKey::from_bytes(bytes);
+        let asker = TrustedDevice {
+            uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".into(),
+            name: "Synthetic Mac mini".into(),
+            kind: asker_kind,
+            relay_devices: [("t_7k2m5q4x3c".to_owned(), 1)].into_iter().collect(),
+            sign_key: vec![4; 65],
+            answer_key: None,
+            created_at: 1,
+            updated_at: 1,
+            updated_by: "synthetic".into(),
+        };
+        let keys = Keys {
+            vault_identity: "vault".into(),
+            team_id: "t_7k2m5q4x3c".into(),
+            device_id: 3,
+            key: Some((key.key_id(), Zeroizing::new(key.bytes().to_vec()))),
+            devices: vec![asker],
+            own: None,
+            removed: false,
+            questions_only: true,
+        };
+        (keys, key)
+    }
+
+    /// The relay record of `plaintext`, sealed as a card of `qid` that ends at `expires_at`.
+    fn sealed_record(
+        key: &apassy::vault::QuestionKey,
+        qid: &str,
+        expires_at: u64,
+        plaintext: &[u8],
+    ) -> Record {
+        let sealed = apassy::questions::envelope::Sealed::new(
+            key,
+            &envelope::card_aad("t_7k2m5q4x3c", qid, &key.key_id(), "member", expires_at),
+            plaintext,
+        )
+        .unwrap();
+        Record {
+            qid: qid.into(),
+            seq: 1,
+            to: "member".into(),
+            from_device_id: 1,
+            from_device_name: "Synthetic Mac mini".into(),
+            key_id: sealed.key_id,
+            nonce: sealed.nonce,
+            ciphertext: sealed.ciphertext,
+            created_at: expires_at - 300,
+            expires_at,
+            state: "open".into(),
+            settled_at: None,
+            settle: None,
+            answered: None,
+        }
+    }
+
+    #[test]
+    fn a_connect_card_lists_as_a_connect_request_and_never_as_a_run() {
+        use apassy::questions::envelope::{CardConnect, ConnectCard as MacCard};
+        let (keys, key) = connect_keys(TrustedDeviceKind::Mac);
+        let qid = "oKGio6SlpqeoqaqrrK2urw";
+        let expires_at = now() + 300;
+        let card = MacCard::new(
+            qid,
+            "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+            "Synthetic Mac mini",
+            expires_at - 300,
+            &CardConnect {
+                id: "cr_7Hq2xN".into(),
+                client_name: "Grok Bot".into(),
+                mac_name: "Synthetic Mac mini".into(),
+                code: "482 913".into(),
+                expires_at,
+                redirect_host: Some("127.0.0.1".into()),
+            },
+        );
+        let record = sealed_record(&key, qid, expires_at, &card.to_plaintext().unwrap());
+        let out =
+            serde_json::to_value(question_out("vault", "Personal", &keys, &record, now())).unwrap();
+        assert_eq!(out["problem"], serde_json::Value::Null);
+        assert_eq!(out["card"], serde_json::Value::Null);
+        assert_eq!(out["asker_name"], "Synthetic Mac mini");
+        assert_eq!(out["connect"]["client_name"], "Grok Bot");
+        assert_eq!(out["connect"]["mac_name"], "Synthetic Mac mini");
+        assert_eq!(out["connect"]["code"], "482 913");
+        assert_eq!(out["connect"]["id"], "cr_7Hq2xN");
+        assert_eq!(out["connect"]["expires_at"], expires_at);
+        assert_eq!(out["connect"]["digest"], card.digest.as_str());
+        // Where the code goes back (review 0.5.16): a loopback host is a warning.
+        assert_eq!(out["connect"]["redirect_host"], "127.0.0.1");
+        assert_eq!(
+            out["connect"]["returns_to"],
+            "Returns to a program on a computer (localhost)"
+        );
+        assert_eq!(out["connect"]["local_redirect"], true);
+        for (host, line, local) in [
+            (Some("grok.example"), Some("Returns to grok.example"), false),
+            (None, None, false),
+        ] {
+            let other = MacCard::new(
+                qid,
+                "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d",
+                "Synthetic Mac mini",
+                expires_at - 300,
+                &CardConnect {
+                    id: "cr_7Hq2xN".into(),
+                    client_name: "Grok Bot".into(),
+                    mac_name: "Synthetic Mac mini".into(),
+                    code: "482 913".into(),
+                    expires_at,
+                    redirect_host: host.map(str::to_owned),
+                },
+            );
+            let sealed = sealed_record(&key, qid, expires_at, &other.to_plaintext().unwrap());
+            let shown =
+                serde_json::to_value(question_out("vault", "Personal", &keys, &sealed, now()))
+                    .unwrap();
+            assert_eq!(shown["connect"]["returns_to"].as_str(), line, "{host:?}");
+            assert_eq!(shown["connect"]["local_redirect"], local, "{host:?}");
+        }
+        // The request history and the run answers never take it as a run.
+        assert_eq!(keys.open(&record).unwrap_err(), UPDATE);
+        // A connect card comes from a Mac of the vault only.
+        let (phone_keys, _) = connect_keys(TrustedDeviceKind::Iphone);
+        let out = serde_json::to_value(question_out(
+            "vault",
+            "Personal",
+            &phone_keys,
+            &record,
+            now(),
+        ))
+        .unwrap();
+        assert_eq!(out["problem"], READ_FAILED);
+        assert_eq!(out["connect"], serde_json::Value::Null);
+        // A run card still lists as a run, without `connect`.
+        let run = sealed_record(&key, qid, expires_at, envelope::tests::CARD.as_bytes());
+        let out =
+            serde_json::to_value(question_out("vault", "Personal", &keys, &run, now())).unwrap();
+        assert_eq!(out["connect"], serde_json::Value::Null);
+        assert_eq!(out["problem"], serde_json::Value::Null);
+        assert_eq!(out["card"]["run"]["agent"], "claude-code");
     }
 }

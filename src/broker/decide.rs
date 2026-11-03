@@ -211,6 +211,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             prompt,
             transcript_path,
             truncated,
+            source,
         } => super::prompts::submit(
             ctx,
             &request.token,
@@ -221,6 +222,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 prompt,
                 transcript_path: transcript_path.as_deref(),
                 truncated: *truncated,
+                source: source.as_deref(),
             },
         ),
         // ADR 0025 §6: agents add credentials (`super::agent_items`).

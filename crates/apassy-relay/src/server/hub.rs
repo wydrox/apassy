@@ -176,6 +176,8 @@ pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
         with(".pre-v5.tmp"),
         with(".pre-v6"),
         with(".pre-v6.tmp"),
+        with(".pre-v7"),
+        with(".pre-v7.tmp"),
     ];
     for file in std::iter::once(path.clone().into_os_string()).chain(extra) {
         match std::fs::remove_file(&file) {
@@ -282,6 +284,8 @@ const OPEN_THREADS: usize = 8;
 
 /// The member name of the owner of a Connect team.
 pub const CONNECT_OWNER: &str = "owner";
+/// The member name of the owner of an embedded node's personal team.
+pub const PERSONAL_OWNER: &str = "owner";
 
 /// The longest `idle_days` and `delete_days` of `connect-sweep`.
 pub const MAX_SWEEP_DAYS: u64 = 3650;
@@ -367,6 +371,9 @@ pub struct Hub {
     connect_polls: Arc<AtomicUsize>,
     /// The feed long polls that Connect teams hold, all of them together.
     connect_feed_polls: Arc<AtomicUsize>,
+    /// The bad codes and refresh tokens of each OAuth client of an embedded node, in
+    /// memory only (docs/SPEC.md section 31.5).
+    pub(crate) oauth_failures: crate::server::oauth::ClientFailures,
 }
 
 impl Hub {
@@ -405,6 +412,7 @@ impl Hub {
             connect_recovery_rate: connect::RequestRate::default(),
             connect_polls: Arc::new(AtomicUsize::new(0)),
             connect_feed_polls: Arc::new(AtomicUsize::new(0)),
+            oauth_failures: crate::server::oauth::ClientFailures::default(),
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
@@ -665,6 +673,64 @@ impl Hub {
         })?;
         self.register(id.clone(), store, TeamLimits::default(), TeamKind::Operator)?;
         Ok((id, owner_id, device_id))
+    }
+
+    /// The personal team of an embedded node (docs/SPEC.md section 30.2): a team file
+    /// with its owner member, without a team code. The owner token is made, hashed into
+    /// the member row, and dropped here: nobody holds it, and the node acts for the owner
+    /// in process. The team has no member-token deadline (`team.member_tokens_until` is
+    /// `NULL`), so the owner member stays usable in process, and the limits of
+    /// `TeamLimits::personal`. A restart opens it again from `relay.db` as any team.
+    pub fn create_personal_team(&self, name: &str, now: u64) -> RelayResult<TeamId> {
+        let name = checked_team_name(name)?.to_string();
+        let new = make_team_file(&self.config, &name, PERSONAL_OWNER, now)?;
+        let limits = TeamLimits::personal();
+        let added = new
+            .store
+            .tx(|tx| {
+                tx.execute(
+                    "UPDATE team SET member_tokens_until = NULL WHERE id = 1",
+                    [],
+                )
+                .map_err(db)?;
+                Ok(())
+            })
+            .and_then(|()| limits.stored_json(TeamKind::Operator))
+            .and_then(|text| {
+                self.directory.store.tx(|tx| {
+                    directory::insert_team(tx, &new.id, &name, &new.file_key, false, now)?;
+                    tx.execute(
+                        "UPDATE team SET limits = ?1 WHERE id = ?2",
+                        params![text, new.id.as_str()],
+                    )
+                    .map_err(db)?;
+                    self.directory.audit.write_on(
+                        tx,
+                        now,
+                        RELAY_ACTOR,
+                        "team_created",
+                        None,
+                        &json!({"team_id": new.id, "kind": "personal"}),
+                    )?;
+                    Ok(())
+                })
+            });
+        if let Err(error) = added {
+            // The team row did not commit: its file has no key anywhere.
+            let id = new.id.clone();
+            drop(new);
+            let _ = remove_team_file(&self.config, &id);
+            return Err(error);
+        }
+        let NewTeam {
+            id,
+            store,
+            owner_token,
+            ..
+        } = new;
+        drop(owner_token);
+        self.register(id.clone(), store, limits, TeamKind::Operator)?;
+        Ok(id)
     }
 
     /// An existence-independent, bounded recovery challenge for a device key.

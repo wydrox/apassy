@@ -373,6 +373,9 @@ else
   warn "git cannot name the commit. The app has no build identity and updates only to a higher version."
 fi
 RUST_BIN_DIR="$ROOT/target/release"
+# The file in RUST_BIN_DIR that becomes Contents/MacOS/apassy. The CI artifact names it
+# `apassy` already (scripts/ci-release-artifact.py); a local build names it `apassy-app`.
+MAIN_EXE_SOURCE="apassy"
 verify_prebuilt() {
   [ -n "$BUILD_COMMIT" ] || fail "the prebuilt artifact requires a git commit"
   [ "${APASSY_BUILD_COMMIT:-}" = "$BUILD_COMMIT" ] || fail "APASSY_BUILD_COMMIT does not match git HEAD"
@@ -390,7 +393,10 @@ if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
 else
   step "Build the Rust binaries (release)"
   APASSY_BUILD_COMMIT="$BUILD_COMMIT" APASSY_BUILD_DATE="$BUILD_DATE" \
-    cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+    cargo build --release --locked -p apassy -p apassy-app --features apassy/desktop,apassy/vault --bin apassy-app --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+  # The window with the Mac's own node (crates/apassy-app) is the main executable
+  # `apassy`. The root `apassy` target has no node and is not shipped.
+  MAIN_EXE_SOURCE="apassy-app"
 fi
 
 step "Build the Swift helper"
@@ -465,7 +471,8 @@ printf 'APPL????' >"$NT_APP/Contents/PkgInfo"
 if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
   verify_prebuilt
 fi
-cp "$RUST_BIN_DIR/apassy" "$RUST_BIN_DIR/apassy-mcp" "$RUST_BIN_DIR/apassy-hook" \
+cp "$RUST_BIN_DIR/$MAIN_EXE_SOURCE" "$APP/Contents/MacOS/apassy"
+cp "$RUST_BIN_DIR/apassy-mcp" "$RUST_BIN_DIR/apassy-hook" \
   "$RUST_BIN_DIR/apassy-sandbox" "$RUST_BIN_DIR/apassy-browser-host" "$APP/Contents/MacOS/"
 # The launcher reads the profile from Resources without the repository or a
 # profile flag. The app signature seals this resource.

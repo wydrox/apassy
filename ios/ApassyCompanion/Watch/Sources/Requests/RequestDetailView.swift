@@ -6,6 +6,7 @@ import SwiftUI
 struct RequestDetailView: View {
     let model: WatchAppModel
     let id: String
+    @Environment(\.watchSampleNote) private var sampleNote
 
     private var requests: WatchRequestsModel { model.requests }
 
@@ -38,6 +39,11 @@ struct RequestDetailView: View {
                     request: request, phase: phase,
                     onAnswer: { choice in requests.answer(id, choice: choice) },
                     onDone: { model.path.removeAll() })
+                if let sampleNote {
+                    Text(sampleNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 NavigationLink(value: WatchRoute.identities(id)) {
                     Text("Exact identities")
                 }

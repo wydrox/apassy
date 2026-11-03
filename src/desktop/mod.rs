@@ -26,6 +26,9 @@ mod learning_ui;
 pub mod model;
 #[cfg(all(feature = "vault", any(target_os = "macos", test)))]
 mod native_menu;
+/// The Mac's own node for cloud agents (ADR 0037, cloud slice).
+#[cfg(feature = "vault")]
+pub(crate) mod node;
 #[cfg(feature = "vault")]
 pub mod notify;
 /// Tests of the guarded show and copy of one-time codes.
@@ -84,10 +87,15 @@ pub enum Place {
     Folder(Option<String>),
     /// The credentials of one shared vault, by its UUID.
     Shared(String),
+    /// Bouncer > Overview: the numbers of the last 7 days, what needs attention, and the
+    /// agents of every Mac of the vault.
+    Overview,
     /// Runs and requests that wait for the owner, and the history.
     Decisions,
     /// The connected agents.
     Agents,
+    /// Bouncer > Logs: every run, connect, and change of remote access, newest first.
+    Logs,
     /// Settings (ADR 0026 §3): its sections in the list column, the selected one in the
     /// detail column. The gear at the bottom of the sidebar and ⌘, open it.
     Settings,
@@ -102,14 +110,30 @@ impl Place {
         matches!(self, Self::Folder(_) | Self::Shared(_))
     }
 
-    /// The name of the kind of place, as ⌘1 to ⌘3 name it.
+    /// The name of the kind of place, as ⌘1 to ⌘5 name it.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Folder(_) | Self::Shared(_) => "Credentials",
+            Self::Overview => "Overview",
             Self::Decisions => "Decisions",
             Self::Agents => "Agents",
+            Self::Logs => "Logs",
             Self::Settings => "Settings",
         }
+    }
+
+    /// A place of one wide pane, without the list column: Overview, Agents, and Logs
+    /// (implementation-plan-bouncer-section §1). Decisions keeps its list and detail.
+    pub fn is_wide(&self) -> bool {
+        matches!(self, Self::Overview | Self::Agents | Self::Logs)
+    }
+
+    /// A place of the Bouncer section of the sidebar.
+    pub fn is_bouncer(&self) -> bool {
+        matches!(
+            self,
+            Self::Overview | Self::Decisions | Self::Agents | Self::Logs
+        )
     }
 }
 
@@ -195,6 +219,10 @@ pub struct DesktopApp {
     /// tests start nothing.
     #[cfg(feature = "vault")]
     pub(crate) model_server: Option<std::sync::Arc<crate::broker::model_server::ModelServer>>,
+    /// The Mac's own node for cloud agents (ADR 0037). Only the window gets a backend,
+    /// from the app binary, so tests start nothing.
+    #[cfg(feature = "vault")]
+    pub(crate) node: node::NodeFlows,
     styled: bool,
     #[cfg(all(feature = "vault", target_os = "macos"))]
     native_menu: Option<native_menu::NativeMenu>,
@@ -272,16 +300,31 @@ impl DesktopApp {
             companion: companion::CompanionFlows::default(),
             #[cfg(feature = "vault")]
             model_server: None,
+            #[cfg(feature = "vault")]
+            node: node::NodeFlows::default(),
             styled: false,
         }
     }
 
     pub fn from_creation_context(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::from_creation_context_with(cc, RunOptions::default())
+    }
+
+    /// The window of [`run_with`]: [`DesktopApp::from_creation_context`] with the options
+    /// of the app binary.
+    pub fn from_creation_context_with(
+        cc: &eframe::CreationContext<'_>,
+        options: RunOptions,
+    ) -> Self {
         ui::apply_style(&cc.egui_ctx);
         let mut app = Self::new();
         app.styled = true;
+        #[cfg(not(feature = "vault"))]
+        let _ = options;
         #[cfg(feature = "vault")]
         {
+            // The node starts later, for an unlocked vault with cloud agents.
+            app.node = node::NodeFlows::platform(options.node);
             // `bouncer.json`: the broker uses its address, and in "With Apassy" the
             // model server starts now.
             app.model_server = Some(crate::broker::model_server::ModelServer::start_default());
@@ -515,6 +558,10 @@ impl eframe::App for DesktopApp {
             self.poll_platform(ctx);
             ui::poll_notifications(self);
             self.poll_update_restart(ctx);
+            // Here and not in `ui`: the node follows the vault also while the window is
+            // minimized, and a close of the window keeps the app open while it runs.
+            self.sync_node(ctx);
+            self.keep_open_for_node(ctx);
         }
         #[cfg(not(feature = "vault"))]
         let _ = ctx;
@@ -564,12 +611,31 @@ pub fn native_options() -> eframe::NativeOptions {
     native_options
 }
 
-/// Open the native desktop window.
+/// What the app binary gives the window (ADR 0037, cloud slice, decision 1).
+#[derive(Default)]
+pub struct RunOptions {
+    /// Starts the Mac's own node for cloud agents: the embedded relay that the app crate
+    /// (`crates/apassy-app`) passes in. `None`: no node, and Bouncer > Agents says
+    /// so.
+    #[cfg(feature = "vault")]
+    pub node: Option<std::sync::Arc<dyn crate::node::backend::NodeBackend>>,
+}
+
+/// Open the native desktop window without a node.
 pub fn run() -> eframe::Result {
+    run_with(RunOptions::default())
+}
+
+/// Open the native desktop window with the options of the app binary.
+pub fn run_with(options: RunOptions) -> eframe::Result {
     eframe::run_native(
         "apassy",
         native_options(),
-        Box::new(|cc| Ok(Box::new(DesktopApp::from_creation_context(cc)))),
+        Box::new(move |cc| {
+            Ok(Box::new(DesktopApp::from_creation_context_with(
+                cc, options,
+            )))
+        }),
     )
 }
 

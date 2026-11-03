@@ -307,6 +307,14 @@ pub enum Command {
     AgentConnect {
         name: String,
     },
+    /// A remote agent of this Mac's node with a bearer token, for a client without the
+    /// MCP authorization flow (`apassy agents add-remote`). Owner check. The response has
+    /// its token, one time, with the MCP address. `days`: 1 to 365, default 90.
+    AgentAddRemote {
+        name: String,
+        #[serde(default)]
+        days: Option<u32>,
+    },
     AgentRevoke {
         agent: String,
     },
@@ -483,6 +491,13 @@ pub enum Data {
     Token {
         agent: AgentRow,
         token: SecretText,
+    },
+    /// The token of a new remote agent ([`Command::AgentAddRemote`]), one time only, and
+    /// the MCP address that the agent uses with it.
+    RemoteToken {
+        agent: AgentRow,
+        token: SecretText,
+        mcp_url: String,
     },
     Lifetime {
         days: u32,
@@ -864,5 +879,43 @@ mod tests {
             serde_json::from_str(r#"{"ok":false,"code":"vault_locked","message":"Locked."}"#)
                 .expect("parse an error without data");
         assert!(matches!(error.data, Data::None));
+    }
+
+    #[test]
+    fn agent_add_remote_round_trips_and_its_token_is_redacted() {
+        let minimal: Request = serde_json::from_str(
+            r#"{"v":1,"command":{"cmd":"agent_add_remote","name":"Grok Bot"}}"#,
+        )
+        .expect("parse");
+        assert!(minimal.command.needs_session());
+        assert!(matches!(
+            &minimal.command,
+            Command::AgentAddRemote { name, days: None } if name == "Grok Bot"
+        ));
+        let response = Response::ok(
+            "Added.",
+            Data::RemoteToken {
+                agent: AgentRow {
+                    id: 4,
+                    name: "Grok Bot".to_owned(),
+                    created_at: 1,
+                    revoked: false,
+                    token_expires_at: 2,
+                    token_expired: false,
+                    sees_all: false,
+                },
+                token: SecretText::new("apassy_tagt_wire-canary".to_owned()),
+                mcp_url: "https://mac.example.ts.net:8443/mcp".to_owned(),
+            },
+        );
+        assert!(!format!("{response:?}").contains("canary"));
+        let line = serde_json::to_string(&response).expect("serialize");
+        assert!(line.contains(r#""type":"remote_token""#), "{line}");
+        let back: Response = serde_json::from_str(&line).expect("parse");
+        let Data::RemoteToken { token, mcp_url, .. } = back.data else {
+            panic!("wrong data");
+        };
+        assert_eq!(token.expose(), "apassy_tagt_wire-canary");
+        assert_eq!(mcp_url, "https://mac.example.ts.net:8443/mcp");
     }
 }

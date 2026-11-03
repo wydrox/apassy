@@ -161,7 +161,7 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "apassy"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "arboard",
  "ciborium",
@@ -191,8 +191,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "apassy-app"
+version = "0.5.16"
+dependencies = [
+ "apassy",
+ "apassy-relay",
+ "eframe",
+ "rcgen",
+ "ring",
+ "rustix 1.1.4",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "apassy-core"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "apassy",
  "getrandom 0.4.3",
@@ -206,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "apassy-relay"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "apassy",
  "base64",

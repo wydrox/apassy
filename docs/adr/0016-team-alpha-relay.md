@@ -1,7 +1,7 @@
 # ADR 0016 — Team alpha: a relay, shared collections, and agents anywhere
 
 Date: 2026-09-28.
-Status: PROPOSED. A draft for the owner. The open decisions are in the last section, D1 to D9. No code exists yet. The relay is a separate crate under its own license (owner decision of 2026-09-28); this repository stays Apache-2.0.
+Status: SUPERSEDED (2026-11-03). The relay alpha was built from this draft. ADR 0019 (teams), ADR 0022 (relay sync) and ADR 0037 (your own relay) replace its open decisions D1 to D9. Since 0.5.14 the relay is the Apache-2.0 crate `crates/apassy-relay` of this repository, not a separate crate under its own license, and the hosted relay serves no shared team vaults (ADR 0037 D8). This record is history.
 
 Update 2026-10-01: [ADR 0018](0018-local-bouncer-shared-vault-relay.md) replaces the relay model sidecar with a local bouncer and relay policy checks. It also records multiple active vaults and the existing VPS as the initial host. The cloud executor below needs revision. The relay alpha (way B, host-held item keys) is in the separate repository `apassy-relay` and runs on the VPS: see [relay server](../operations/relay.md). [ADR 0019](0019-relay-teams-and-accounts.md) (proposed) adds several teams on one relay, device keys, and onboarding by link; it replaces the cut "a hosted multi-tenant relay" in section 8.
 

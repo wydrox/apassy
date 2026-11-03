@@ -555,7 +555,7 @@ fn directory_connection(config: &apassy_relay::config::RelayConfig) -> rusqlite:
 }
 
 #[test]
-fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
+fn directory_1001_migrates_to_1004_without_losing_teams_codes_or_audit() {
     let mut relay = start(UpstreamOptions::default());
     let a = relay.owner_token.clone();
     let a_id = relay.team_id.clone();
@@ -569,13 +569,14 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1003
+        1004
     );
     // Back to the directory of version 1001: no limits, no kinds, no Connect keys.
     conn.execute_batch(
         "BEGIN IMMEDIATE; ALTER TABLE team DROP COLUMN limits; ALTER TABLE team DROP COLUMN kind;
          ALTER TABLE team DROP COLUMN suspend_reason; DROP INDEX connect_key_created;
-         DROP TABLE connect_key; PRAGMA user_version = 1001; COMMIT;",
+         DROP TABLE connect_key; DROP TABLE oauth_refresh; DROP TABLE connect_request;
+         DROP TABLE oauth_client; PRAGMA user_version = 1001; COMMIT;",
     )
     .unwrap();
     let original_codes: Vec<CodeSnapshot> = conn
@@ -591,7 +592,10 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     for (owner, id) in [(&a, &a_id), (&b, &b_id)] {
         let (status, body) = relay::call_url(
             &url,
-            Some(config.edge_secret.expose()),
+            config
+                .edge
+                .secret()
+                .map(apassy_relay::secret::SecretString::expose),
             "GET",
             "/v1/me",
             Some(owner),
@@ -620,7 +624,7 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1003
+        1004
     );
     let migrated_codes: Vec<CodeSnapshot> = conn
         .prepare("SELECT id,code_hash,used_at,team_id FROM team_code ORDER BY id")
@@ -641,7 +645,10 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
     drop(conn);
     let (status, body) = relay::call_url(
         &url,
-        Some(config.edge_secret.expose()),
+        config
+            .edge
+            .secret()
+            .map(apassy_relay::secret::SecretString::expose),
         "POST",
         "/v1/teams",
         None,
@@ -657,7 +664,8 @@ fn directory_1001_migrates_to_1003_without_losing_teams_codes_or_audit() {
 fn unknown_directory_versions_are_refused_without_changes() {
     let relay = start(UpstreamOptions::default());
     let (config, _dir) = relay.stop_keep();
-    for version in [0, 1000, 1004, 2000] {
+    // 1004 (OAuth, docs/SPEC.md section 31.8) is the current version: 1005 is the next unknown one.
+    for version in [0, 1000, 1005, 2000] {
         let conn = directory_connection(&config);
         conn.execute_batch(&format!("PRAGMA user_version = {version}"))
             .unwrap();

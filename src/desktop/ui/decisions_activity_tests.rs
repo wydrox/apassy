@@ -1,20 +1,21 @@
 //! Tests of Decisions for the whole vault: the line of the week adds the feeds of the
-//! other Macs in the device scope, the recent list mixes this Mac and the other Macs by
-//! day and follows the scope, the detail shows the week by device and the most active
-//! agents, a feed that left out uses says so, a past decision of another Mac shows
-//! read-only, and Activity adds the uses of the feeds. Without another Mac the page
-//! shows this Mac only. The feed is the example of relay-feed-v1 section 17.1, with
-//! synthetic times. Synthetic values only.
+//! other Macs in the scope, History has the runs of the other Macs from the Bouncer
+//! cache, the detail shows the week by environment and the most active agents, a feed
+//! that left out uses says so, a run of another Mac shows read-only, and a new vault has
+//! no decisions yet (frame 9c). The feed is the example of relay-feed-v1 section 17.1,
+//! with synthetic times. Synthetic values only.
 
 use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
 use super::decisions;
-use super::decisions_activity::{self, Day, Source, day_of};
+use super::decisions_activity;
+use super::decisions_bouncer::{self, State as HistoryState};
 use super::draw;
 use super::owner_tests::{collect, unlocked_app_with_item};
 use crate::broker::action_kind::ActionKind;
-use crate::desktop::remote_feeds::{ActivityScope, DeviceScope, RemoteFeedState, RemoteMac};
+use crate::desktop::remote_feeds::{DeviceScope, FeedProblem, RemoteFeedState, RemoteMac};
+use crate::desktop::ui::bouncer::{ActivityScope, LogSource};
 use crate::desktop::{DesktopApp, Place};
 use crate::questions::feed::{Feed, FeedUse};
 use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
@@ -58,6 +59,7 @@ fn ready_mac(feed: Feed) -> RemoteMac {
         name: "MacBook Pro".to_owned(),
         state: RemoteFeedState::Ready(feed),
         received_at: now(),
+        problem: None,
     }
 }
 
@@ -182,145 +184,7 @@ fn the_week_line_adds_the_feeds_in_the_device_scope() {
 }
 
 #[test]
-fn the_scope_bar_gets_this_mac_the_ready_macs_and_the_projects() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = vault_app(&dir, example_feed());
-    app.remote_macs.push(RemoteMac {
-        device: "1a2b3c4d-0000-4000-8000-000000000001".to_owned(),
-        name: "Mac mini".to_owned(),
-        state: RemoteFeedState::NeedsSync,
-        received_at: now(),
-    });
-    let activity = decisions_activity::load(&app);
-    assert_eq!(
-        activity.devices,
-        [
-            (DeviceScope::ThisMac, "This Mac".to_owned()),
-            (
-                DeviceScope::Other(REMOTE_DEVICE.to_owned()),
-                "MacBook Pro".to_owned()
-            ),
-        ],
-        "only the Macs with a feed that opened"
-    );
-    assert_eq!(activity.projects, ["local-proj", "synthetic-shop"]);
-}
-
-#[test]
-fn the_recent_list_mixes_this_mac_and_the_other_macs_by_day() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = vault_app(&dir, example_feed());
-    let activity = decisions_activity::load(&app);
-    let recent = activity.recent_in(&ActivityScope::default());
-    assert_eq!(recent.len(), 3, "{recent:?}");
-    assert!(
-        recent.windows(2).all(|pair| pair[0].at >= pair[1].at),
-        "newest first"
-    );
-    let remote = recent
-        .iter()
-        .find(|decision| decision.item == "API token")
-        .expect("the use of the feed");
-    assert_eq!(
-        remote.source,
-        Source::Other {
-            device: REMOTE_DEVICE.to_owned(),
-            name: "MacBook Pro".to_owned()
-        }
-    );
-    assert_eq!(remote.title(), "Claude Code · API token");
-    assert_eq!(remote.outcome_text(), "Allowed");
-    assert_eq!(remote.decided_text(), "Answered on Test iPhone");
-    let denied = recent
-        .iter()
-        .find(|decision| decision.item == "Shop database")
-        .expect("the older use of the feed");
-    assert_eq!(denied.outcome_text(), "Not allowed");
-    assert_eq!(denied.decided_text(), "Automatic");
-    let local = recent
-        .iter()
-        .find(|decision| decision.source == Source::ThisMac)
-        .expect("the use of this Mac");
-    assert_eq!(local.title(), "Local Agent · Guarded key");
-    assert_eq!(local.decided_text(), "By you");
-
-    let (text, past) = frames(&mut app, WIDE, 3);
-    for expected in [
-        "Nothing waits for you.",
-        "A new question also shows as a macOS notification.",
-        "Recent decisions",
-        "Today",
-        "Earlier",
-        "Claude Code · API token",
-        "Deploy · synthetic-shop · on MacBook Pro",
-        "Allowed · Answered on Test iPhone",
-        "Claude Code · Shop database",
-        "Not allowed · Automatic",
-        "Local Agent · Guarded key",
-        "Read · local-proj · on This Mac",
-        "Allowed · By you",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert!(!text.contains("Nothing needs you"), "{text}");
-    assert!(
-        text.find("Today") < text.find("Earlier"),
-        "Today comes first: {text}"
-    );
-    assert!(past.is_empty(), "{past:?}");
-}
-
-#[test]
-fn the_recent_list_follows_the_device_and_the_project() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = vault_app(&dir, example_feed());
-
-    app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("Local Agent · Guarded key"), "{text}");
-    assert!(!text.contains("Claude Code · API token"), "{text}");
-    assert!(!text.contains("on MacBook Pro"), "{text}");
-
-    app.ui.activity_scope = scope(DeviceScope::Other(REMOTE_DEVICE.to_owned()), None);
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("Claude Code · API token"), "{text}");
-    assert!(!text.contains("Local Agent · Guarded key"), "{text}");
-
-    app.ui.activity_scope = scope(DeviceScope::All, Some("synthetic-shop"));
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("Claude Code · API token"), "{text}");
-    assert!(!text.contains("Local Agent · Guarded key"), "{text}");
-
-    app.ui.activity_scope = scope(DeviceScope::ThisMac, Some("synthetic-shop"));
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("No decisions yet."), "{text}");
-}
-
-#[test]
-fn the_days_follow_the_local_calendar() {
-    // 14:13:20 UTC.
-    let now = 1_790_000_000;
-    let since_midnight = 51_200;
-    assert_eq!(day_of(now - 3_600, now, 0), Day::Today);
-    assert_eq!(day_of(now - since_midnight, now, 0), Day::Today);
-    assert_eq!(day_of(now - since_midnight - 1, now, 0), Day::Yesterday);
-    assert_eq!(
-        day_of(now - since_midnight - 86_400, now, 0),
-        Day::Yesterday
-    );
-    assert_eq!(
-        day_of(now - since_midnight - 86_400 - 1, now, 0),
-        Day::Earlier
-    );
-    // At UTC+10 it is 00:13:20 of the next day: 20 minutes ago is yesterday.
-    assert_eq!(day_of(now - 1_200, now, 36_000), Day::Yesterday);
-    assert_eq!(day_of(now - 600, now, 36_000), Day::Today);
-    // The clock of another Mac runs ahead: today.
-    assert_eq!(day_of(now + 600, now, 0), Day::Today);
-}
-
-#[test]
-fn the_week_shows_each_device_and_the_most_active_agents() {
+fn the_week_shows_each_environment_and_the_most_active_agents() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = vault_app(&dir, example_feed());
     app.remote_macs.push(RemoteMac {
@@ -328,6 +192,7 @@ fn the_week_shows_each_device_and_the_most_active_agents() {
         name: "Mac mini".to_owned(),
         state: RemoteFeedState::NeedsUpdate,
         received_at: now(),
+        problem: None,
     });
     let local = app.owner_ui.session.week_counts().expect("counts");
     let local_row = format!("{} by you · {} automatic", local.by_you, local.automatic);
@@ -337,14 +202,14 @@ fn the_week_shows_each_device_and_the_most_active_agents() {
         "This week",
         "By you",
         "Automatic",
-        "Devices",
+        "Environments",
         "This Mac",
         local_row.as_str(),
         "MacBook Pro",
         "3 by you · 128 automatic",
         "Mac mini",
         "Update Apassy to see the activity of Mac mini.",
-        "Most active agents",
+        "Most active",
         "Claude Code",
         "12 uses · MacBook Pro",
         "Local Agent",
@@ -382,43 +247,75 @@ fn a_truncated_feed_says_that_older_uses_stay_on_its_mac() {
     assert!(!text.contains(note), "{text}");
 }
 
+/// A Mac whose later feed no longer opens keeps the counts and the decisions of its last
+/// good feed, and the list says why they are old (relay-feed-v1 section 7.4); in the
+/// scope of this Mac only, the note goes.
 #[test]
-fn a_decision_of_another_mac_shows_its_facts_read_only() {
+fn a_kept_feed_keeps_its_activity_and_says_why_it_is_old() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = vault_app(&dir, example_feed());
-    let id = decisions_activity::load(&app)
-        .recent
-        .iter()
-        .find(|decision| decision.item == "API token")
-        .expect("the use of the feed")
-        .id;
-    decisions::select_past(&mut app, id);
+    app.remote_macs[0].problem = Some(FeedProblem::NeedsSync);
+    let note = "Sync this vault to see the activity of MacBook Pro.";
+    let activity = decisions_activity::gather(None, &[], &app.remote_macs);
+    assert_eq!(
+        activity.feed_notes(&DeviceScope::All),
+        vec![note.to_owned()]
+    );
+    assert!(activity.unavailable.is_empty(), "its counts stay");
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains(note), "{text}");
+    assert!(text.contains("API token"), "the old decisions stay: {text}");
+
+    app.remote_macs[0].problem = Some(FeedProblem::NeedsUpdate);
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(
+        text.contains("Update Apassy to see the activity of MacBook Pro."),
+        "{text}"
+    );
+
+    app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(!text.contains("to see the activity of"), "{text}");
+}
+
+#[test]
+fn a_run_of_another_mac_shows_its_facts_read_only() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = vault_app(&dir, example_feed());
+    frames(&mut app, WIDE, 2);
+    let event = decisions_bouncer::history_events(
+        &app.ui.bouncer.data,
+        &ActivityScope::default(),
+        &HistoryState::default(),
+    )
+    .into_iter()
+    .find(|event| event.credential.as_deref() == Some("API token"))
+    .expect("the use of the feed")
+    .clone();
+    assert!(matches!(event.source, LogSource::Feed(_)));
+    let key = event.key();
+    decisions::select_past(&mut app, key);
     let (text, past) = frames(&mut app, WIDE, 3);
     assert_eq!(
         decisions::selected_past(&app),
-        Some(id),
+        Some(key),
         "the key holds in each frame"
     );
     for expected in [
+        "Claude Code · API token",
         "Decision",
-        "Mac",
+        "Environment",
         "MacBook Pro",
         "Agent",
-        "Claude Code",
         "Credential",
-        "API token",
-        "Action",
-        "Deploy",
         "Project",
         "synthetic-shop",
         "Command",
         "npm run deploy -- --token [apassy:secret]",
         "Outcome",
-        "Allowed",
-        "Decided",
-        "Answered on Test iPhone",
+        "Allowed on Test iPhone",
         "Time",
-        "This decision was made on MacBook Pro. A change to the agent is made there.",
+        "Change on MacBook Pro.",
         "This Week",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -430,7 +327,7 @@ fn a_decision_of_another_mac_shows_its_facts_read_only() {
     assert!(past.is_empty(), "{past:?}");
 
     // A scope without it: the detail shows the week again.
-    decisions::select_past(&mut app, id);
+    decisions::select_past(&mut app, key);
     app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
     let (text, _) = frames(&mut app, WIDE, 3);
     assert!(!text.contains("npm run deploy"), "{text}");
@@ -438,39 +335,42 @@ fn a_decision_of_another_mac_shows_its_facts_read_only() {
 }
 
 #[test]
-fn activity_adds_the_uses_of_the_other_macs_in_the_scope() {
+fn history_filters_the_runs_and_keeps_the_choice() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = vault_app(&dir, example_feed());
-    decisions::open_activity(&mut app);
     let (text, _) = frames(&mut app, WIDE, 3);
     for expected in [
-        "Activity",
-        "API token on MacBook Pro",
-        "Claude Code · Deploy in synthetic-shop · Answered on Test iPhone",
-        "Shop database on MacBook Pro",
+        "Nothing waits for you",
+        "History",
+        "All",
+        "Asked You",
+        "Automatic",
+        "Denied",
+        "All Agents",
+        "Claude Code · API token",
+        "MacBook Pro",
+        "Allowed on Test iPhone",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert!(
-        text.find("API token on MacBook Pro") < text.find("Shop database on MacBook Pro"),
-        "newest first: {text}"
-    );
-
-    app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
+    // The use of 10 days ago was denied by the bouncer: only "Denied" and "Automatic".
+    app.ui.decision_history.filter = decisions_bouncer::HistoryFilter::Denied;
     let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(!text.contains("API token on MacBook Pro"), "{text}");
-
-    app.ui.activity_scope = scope(DeviceScope::All, Some("synthetic-shop"));
+    assert!(text.contains("Claude Code · Shop database"), "{text}");
+    assert!(!text.contains("Claude Code · API token"), "{text}");
+    app.ui.decision_history.filter = decisions_bouncer::HistoryFilter::AskedYou;
     let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("API token on MacBook Pro"), "{text}");
-    assert!(
-        text.contains(super::decisions_activity::LOG_HAS_NO_PROJECT),
-        "{text}"
-    );
+    assert!(text.contains("Claude Code · API token"), "{text}");
+    assert!(!text.contains("Claude Code · Shop database"), "{text}");
+    // An agent that has no run: nothing matches.
+    app.ui.decision_history.filter = decisions_bouncer::HistoryFilter::All;
+    app.ui.decision_history.agent = Some("Nobody".to_owned());
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains("No decisions match."), "{text}");
 }
 
 #[test]
-fn without_other_macs_decisions_shows_this_mac() {
+fn a_new_vault_has_no_decisions_yet() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.place = Place::Decisions;
@@ -485,32 +385,27 @@ fn without_other_macs_decisions_shows_this_mac() {
     );
     for size in [DEFAULT, SMALLEST] {
         let (text, past) = frames(&mut app, size, 3);
+        // Frame 9c: no decisions yet, the totals of the week only.
         for expected in [
             "Decisions",
             local.as_str(),
-            "Nothing waits for you.",
-            "Recent decisions",
-            "No decisions yet.",
-            "All clear",
+            "No decisions yet",
             "This week",
-            "This Mac",
-            "No agent used a credential this week.",
+            "By you",
+            "Automatic",
         ] {
             assert!(text.contains(expected), "{expected} at {size:?}: {text}");
         }
-        assert!(!text.contains("on This Mac"), "one device: {text}");
+        // No filters and no lists of an empty week ("All Environments" is the scope bar).
+        for absent in ["All clear", "Most active", "Asked You", "No agent used"] {
+            assert!(!text.contains(absent), "{absent} at {size:?}: {text}");
+        }
         assert!(past.is_empty(), "past the edge at {size:?}: {past:?}");
     }
-    let activity = decisions_activity::load(&app);
-    assert_eq!(
-        activity.devices,
-        [(DeviceScope::ThisMac, "This Mac".to_owned())]
-    );
-    assert!(activity.recent.is_empty());
 }
 
 #[test]
-fn the_recent_list_draws_at_the_smallest_size() {
+fn history_draws_at_the_smallest_size() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = vault_app(&dir, example_feed());
     for size in [DEFAULT, SMALLEST] {

@@ -1,7 +1,7 @@
 # ADR 0019 — Teams and accounts on the relay
 
 Date: 2026-10-01.
-Status: ACCEPTED by the owner on 2026-10-01: several teams on one relay, with proper separation, simple onboarding, and the defaults below (identity per team, device keys, a confirmed join, one key holder, team codes from the operator). Implemented in `apassy-relay` on 2026-10-01 (stages 1 to 4; the details and the rules that two reviews added are in its `docs/SPEC.md` sections 22 and 23) and live. Not done yet: one host process for all teams of a machine (section 9; a host serves one team), the Secure Enclave key in the app (stage 5), and notifications beyond the audit.
+Status: ACCEPTED by the owner on 2026-10-01: several teams on one relay, with proper separation, simple onboarding, and the defaults below (identity per team, device keys, a confirmed join, one key holder, team codes from the operator). Implemented in `apassy-relay` on 2026-10-01 (stages 1 to 4; the details and the rules that two reviews added are in its `docs/SPEC.md` sections 22 and 23) and live. Not done yet: one host process for all teams of a machine (section 9; a host serves one team), the Secure Enclave key in the app (stage 5), and notifications beyond the audit. Update 2026-11-03: the relay is now the crate `crates/apassy-relay` of this repository (ADR 0037 stage 1, 0.5.14). The hosted relay keeps the team identity for relay sync and questions, but it refuses team-vault content (ADR 0037 D8). Team vaults move to a team host on the owner's node (ADR 0037 stage 4).
 
 ## Context
 

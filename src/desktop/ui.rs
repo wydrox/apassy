@@ -11,8 +11,18 @@ mod agent_onboarding;
 mod agent_setup;
 #[cfg(feature = "vault")]
 mod agents;
+/// Bouncer > Agents as one wide page, and the page of one agent (both builds).
+mod agents_page;
 #[cfg(all(test, feature = "vault"))]
 mod agents_remote_tests;
+/// The Bouncer section: what Overview and Logs show, and their cache
+/// (implementation-plan-bouncer-section).
+pub(crate) mod bouncer;
+/// The vault build fills the Bouncer data from the vault and the feeds.
+#[cfg(feature = "vault")]
+mod bouncer_load;
+#[cfg(all(test, feature = "vault"))]
+mod bouncer_page_tests;
 #[cfg(feature = "vault")]
 mod browser_settings;
 #[cfg(all(test, feature = "vault"))]
@@ -34,6 +44,8 @@ mod decisions;
 mod decisions_activity;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_activity_tests;
+/// History, the connect card, and the cloud run card of Decisions (both builds).
+mod decisions_bouncer;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_tests;
 #[cfg(not(feature = "vault"))]
@@ -59,19 +71,28 @@ mod items;
 #[cfg(all(test, feature = "vault"))]
 mod keyboard_tests;
 pub(crate) mod kit;
+/// Bouncer > Logs (implementation-plan-bouncer-section §7).
+mod logs;
 /// New credential entry points and local paste detection.
 #[cfg(feature = "vault")]
 mod new_credential;
+/// The lifecycle of the Mac's own node in the window (ADR 0037).
+#[cfg(all(test, feature = "vault"))]
+mod node_tests;
 /// One-time passwords (TOTP) on the credential pages.
 #[cfg(feature = "vault")]
 mod otp;
 #[cfg(all(test, feature = "vault"))]
 mod otp_tests;
+/// Bouncer > Overview (implementation-plan-bouncer-section §3).
+mod overview;
 #[cfg(feature = "vault")]
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
-#[cfg(feature = "vault")]
+/// An idle window asks for no frame soon.
+#[cfg(all(test, feature = "vault"))]
+mod repaint_tests;
 mod scope_bar;
 #[cfg(feature = "vault")]
 mod settings;
@@ -253,9 +274,19 @@ pub(crate) fn default_vault_path() -> std::path::PathBuf {
 pub(crate) struct UiState {
     /// The sheet over the window, if any.
     pub(crate) sheet: Option<Sheet>,
-    /// The scope of Agents and Decisions ("Showing … in …").
-    #[cfg(feature = "vault")]
-    pub(crate) activity_scope: crate::desktop::remote_feeds::ActivityScope,
+    /// The scope of the Bouncer pages ("Showing … in …"), one for all four.
+    pub(crate) activity_scope: bouncer::ActivityScope,
+    /// What the Bouncer pages show, computed at most once per 2 seconds.
+    pub(crate) bouncer: bouncer::BouncerCache,
+    /// The filters, the selection, and the open row of Logs.
+    pub(crate) logs: logs::State,
+    /// The open agent page of Agents and its open groups.
+    pub(crate) agent_page: agents_page::State,
+    /// The filters of History in Decisions.
+    pub(crate) decision_history: decisions_bouncer::State,
+    /// The demo build: the frame of the mockup that the Bouncer pages show.
+    #[cfg(not(feature = "vault"))]
+    pub(crate) demo_frame: demo::BouncerFrame,
     /// The sheet closes when the owner check for its action ends with success. The
     /// value is the status sequence number at the time of the request.
     #[cfg(feature = "vault")]
@@ -454,9 +485,15 @@ pub(crate) enum Sheet {
     /// Archive the selected item.
     #[cfg(feature = "vault")]
     ArchiveItem,
-    /// "Disconnect AGENT…".
+    /// "Disconnect AGENT…": a local agent, or a remote one (then also on the node).
     #[cfg(feature = "vault")]
     RevokeAgent {
+        agent_id: u64,
+        name: String,
+    },
+    /// "Choose Credentials…" of an agent page: the credentials that it may use.
+    #[cfg(feature = "vault")]
+    ChooseCredentials {
         agent_id: u64,
         name: String,
     },
@@ -741,6 +778,10 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.ui.agent_setup = Default::default();
             app.ui.agent_onboarding = Default::default();
             app.ui.agents = Default::default();
+            app.ui.agent_page = Default::default();
+            app.ui.bouncer.clear();
+            app.ui.logs = Default::default();
+            app.ui.decision_history = Default::default();
             invalidate_notifications(app);
             app.ui.move_undo.clear();
             app.ui.selected_items.clear();
@@ -1266,8 +1307,11 @@ mod tests {
                 Place::Shared("drawn-shared".to_owned()),
                 ["Drawn team", "No items yet"],
             ),
-            (Place::Decisions, ["Decisions", "All clear"]),
+            (Place::Overview, ["Overview", "No runs yet"]),
+            // A new vault: no decisions yet, no "All clear" (frame 9c).
+            (Place::Decisions, ["Decisions", "No decisions yet"]),
             (Place::Agents, ["Agents", "No agents yet"]),
+            (Place::Logs, ["Logs", "No activity yet"]),
         ];
         (app, places)
     }
@@ -1285,8 +1329,11 @@ mod tests {
                 Place::CREDENTIALS,
                 ["All credentials", "Project A reporting service"],
             ),
+            (Place::Overview, ["Overview", "Needs attention"]),
             (Place::Decisions, ["Decisions", "Activity"]),
-            (Place::Agents, ["Agents", "Connect agent"]),
+            // Frame 2: this Mac's remote access block heads the page.
+            (Place::Agents, ["Agents", "Remote Access"]),
+            (Place::Logs, ["Logs", "Grok Bot"]),
         ];
         (app, places)
     }
@@ -1378,14 +1425,14 @@ mod tests {
         app.place = Place::Agents;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Claude Code"), "{text}");
-        assert!(text.contains("This Mac · 0 uses this week"), "{text}");
+        assert!(text.contains("Runs Today"), "{text}");
         app.owner_ui.selected_agent = Some(agent.id);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         // A valid token is a rare matter, as in the mockup: its date and "Reconnect
         // with a New Token…" are in the "⋯" menu of the toolbar
-        // (`agents::tests::the_token_line_tells_valid_from_expired`). An expired token
-        // shows on the page with "Reconnect…".
-        assert!(text.contains("Disconnect Claude Code…"), "{text}");
+        // (`agents::tests::the_token_line_tells_valid_from_expired_and_hides_the_far_end`).
+        // An expired token shows on the page with "Reconnect…".
+        assert!(text.contains("Disconnect…"), "{text}");
         assert!(!text.contains("Valid until"), "{text}");
         assert!(!text.contains("Reconnect…"), "{text}");
 

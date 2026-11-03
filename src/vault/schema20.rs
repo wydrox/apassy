@@ -108,7 +108,9 @@ pub(super) fn downgrade_sql() -> String {
             names.push(format!("{table}_{event}"));
         }
     }
-    let mut sql = super::schema24::DOWNGRADE_TO_23_SQL.to_owned();
+    let mut sql = super::schema27::downgrade_to_25_sql();
+    sql.push_str(super::schema25::DOWNGRADE_TO_24_SQL);
+    sql.push_str(super::schema24::DOWNGRADE_TO_23_SQL);
     sql.extend(
         names
             .into_iter()

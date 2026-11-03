@@ -58,10 +58,8 @@ const MAX_PATH_BYTES: usize = 4096;
 const LOGGED_REQUEST_BYTES: usize = 240;
 const LOGGED_AGENT_BYTES: usize = 120;
 /// Open a transcript without a wait on a FIFO.
-#[cfg(target_os = "macos")]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(not(target_os = "macos"))]
-const O_NONBLOCK: i32 = 0o4000;
+/// The value is the target's own (rustix), not a written number.
+const O_NONBLOCK: i32 = rustix::fs::OFlags::NONBLOCK.bits() as i32;
 
 /// Rule flag: the hook prompt is not the newest user message in the host transcript.
 pub const FLAG_UNVERIFIED: &str = "hook_unverified";
@@ -98,6 +96,8 @@ struct Entry {
     prompt: String,
     transcript: Option<PathBuf>,
     truncated: bool,
+    /// The `source` of the hook input: `user`, `sdk`, or `None` for a host without it.
+    source: Option<String>,
     received: Instant,
 }
 
@@ -128,7 +128,15 @@ pub(super) struct Submission<'a> {
     pub prompt: &'a str,
     pub transcript_path: Option<&'a str>,
     pub truncated: bool,
+    /// The `source` of the hook input ([`HOOK_SOURCES`]).
+    pub source: Option<&'a str>,
 }
+
+/// The `source` values of a hook prompt that the broker keeps: the turns of the user
+/// that `apassy-hook` sends (`agent::hook::USER_SOURCES`). Any other is refused.
+pub const HOOK_SOURCES: &[&str] = &["user", "sdk"];
+/// The provenance of a hook prompt with `source` `sdk`, for the bouncer and the card.
+pub const SDK_TURN: &str = "Agent SDK turn";
 
 impl Submission<'_> {
     fn validate(&self) -> Result<(), &'static str> {
@@ -165,6 +173,12 @@ impl Submission<'_> {
             || self.prompt.contains('\0')
         {
             return Err("The user prompt is empty, too long, or has a NUL byte.");
+        }
+        if self
+            .source
+            .is_some_and(|source| !HOOK_SOURCES.contains(&source))
+        {
+            return Err("The prompt source is not a turn of the user.");
         }
         Ok(())
     }
@@ -209,6 +223,7 @@ pub(super) fn submit(
         prompt: submission.prompt.to_owned(),
         transcript: submission.transcript_path.map(PathBuf::from),
         truncated: submission.truncated,
+        source: submission.source.map(str::to_owned),
         received: Instant::now(),
     });
     WireResponse::success(json!({ "stored": true }))
@@ -226,6 +241,9 @@ pub(super) struct Resolved {
     pub agent_text: Option<String>,
     /// Rule flags: [`FLAG_UNVERIFIED`], [`FLAG_AMBIGUOUS`].
     pub flags: Vec<String>,
+    /// [`SDK_TURN`] when the text is a hook prompt of an Agent SDK turn. The bouncer
+    /// gets it as the task provenance; `source` names it for the card and the log.
+    pub provenance: Option<&'static str>,
 }
 
 impl Resolved {
@@ -355,6 +373,7 @@ impl PromptStore {
                 source: source.to_owned(),
                 agent_text: None,
                 flags: Vec::new(),
+                provenance: None,
             };
         };
         let check = self.check_transcript(&entry);
@@ -370,6 +389,7 @@ impl PromptStore {
                 } else {
                     Vec::new()
                 },
+                provenance: None,
             };
         }
         let mut flags = Vec::new();
@@ -393,14 +413,19 @@ impl PromptStore {
         };
         let text = entry.prompt.trim().to_owned();
         let differs = !agent_text.is_empty() && agent_text != text;
+        // An Agent SDK turn is a turn of the user for T3 Code and other SDK hosts, and
+        // also the text of an agent that starts its own SDK session: it is named.
+        let provenance = (entry.source.as_deref() == Some("sdk")).then_some(SDK_TURN);
+        let kind = provenance.map_or_else(String::new, |name| format!(" ({name})"));
         Resolved {
             source: format!(
-                "from the {} hook{matched}, {result}",
+                "from the {} hook{kind}{matched}, {result}",
                 host_label(&entry.host)
             ),
             agent_text: differs.then(|| agent_text.to_owned()),
             text,
             flags,
+            provenance,
         }
     }
 
@@ -549,8 +574,8 @@ fn read_from(file: &mut File, start: u64) -> std::io::Result<Vec<u8>> {
 }
 
 /// The text of a user prompt record, measured on the host versions in
-/// `docs/operations/host-hooks.md`. Tool results, meta records, and records of
-/// subagents are not user prompts.
+/// `docs/operations/host-hooks.md`. Tool results, meta records, records of
+/// subagents, and turns that the host injected are not user prompts.
 ///
 /// - Claude Code: `{"type":"user","message":{"role":"user","content":"..."}}`. The
 ///   content can also be a list of blocks.
@@ -559,7 +584,7 @@ fn user_prompt(line: &Value) -> Option<String> {
     let kind = line.get("type").and_then(Value::as_str);
     let flag = |name: &str| line.get(name).and_then(Value::as_bool) == Some(true);
     if kind == Some("user") {
-        if flag("isMeta") || flag("isSidechain") || flag("isCompactSummary") {
+        if flag("isMeta") || flag("isSidechain") || flag("isCompactSummary") || injected(line) {
             return None;
         }
         let message = line.get("message")?;
@@ -590,6 +615,33 @@ fn user_prompt(line: &Value) -> Option<String> {
         return None;
     }
     block_text(item.get("content")?.as_array()?)
+}
+
+/// The `promptSource` values of a Claude Code user record that the user wrote: `typed`
+/// and `user` (the composer) and `sdk` (an Agent SDK turn). A record without
+/// `promptSource` (an older host) counts as the user's.
+const TRANSCRIPT_USER_SOURCES: &[&str] = &["typed", "user", "sdk"];
+
+/// A Claude Code turn that the host injected, not one that the user wrote (measured on
+/// 2.1.317): a task notification, a peer or channel message, an auto-continuation. The
+/// host writes it as `"type":"user"` with `"promptSource":"system"`, and a task
+/// notification also with `"origin":{"kind":"task-notification"}`. `apassy-hook` does not
+/// send such a turn (`agent::hook`), so the request of the user stays the newest user
+/// prompt after it. Only an allow-list is the user's ([`TRANSCRIPT_USER_SOURCES`]): any
+/// other `promptSource`, also one that a later host adds, or one that is not text,
+/// counts as injected.
+fn injected(line: &Value) -> bool {
+    let source_of_user = match line.get("promptSource") {
+        None => true,
+        Some(Value::String(source)) => TRANSCRIPT_USER_SOURCES.contains(&source.as_str()),
+        Some(_) => false,
+    };
+    !source_of_user
+        || line
+            .get("origin")
+            .and_then(|origin| origin.get("kind"))
+            .and_then(Value::as_str)
+            == Some("task-notification")
 }
 
 /// The text blocks of a message, joined with a newline.
@@ -639,6 +691,7 @@ mod tests {
             prompt: prompt.to_owned(),
             transcript: None,
             truncated: false,
+            source: None,
             received: at(second),
         }
     }
@@ -822,6 +875,164 @@ mod tests {
         assert!(matches!(store.check_transcript(&missing), Check::Failed(_)));
     }
 
+    /// A task notification of Claude Code 2.1.317, as its transcript records it.
+    fn task_notification(prompt_source: Option<&str>) -> Value {
+        let mut line = json!({"type": "user", "sessionId": "s1", "isSidechain": false,
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "turnOrigin": "task_notification",
+            "message": {"role": "user", "content":
+                "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>"}});
+        if let Some(source) = prompt_source {
+            line["promptSource"] = source.into();
+        }
+        line
+    }
+
+    /// F1 (0.5.16): a turn that Claude Code injects after the prompt of the user (a
+    /// finished background task) is not a newer user message. Before the fix it was, so
+    /// the check failed with `hook_unverified` and the owner had to answer.
+    #[test]
+    fn an_injected_turn_after_the_prompt_keeps_it_verified() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("projects");
+        fs::create_dir_all(root.join("-p")).expect("root");
+        let store = PromptStore::new(vec![root.clone()]);
+        let mut sdk_prompt = claude_user("Run the checks.");
+        sdk_prompt["promptSource"] = "sdk".into();
+        let peer = json!({"type": "user", "sessionId": "s1", "promptSource": "system",
+            "message": {"role": "user", "content": [{"type": "text", "text": "A peer message."}]}});
+        let lines = [
+            claude_user("An older prompt."),
+            sdk_prompt,
+            task_notification(Some("system")),
+            // An older record has the origin only.
+            task_notification(None),
+            peer,
+        ];
+        let path = transcript(&root.join("-p"), "s1.jsonl", &lines);
+        assert_eq!(
+            newest_user_prompt(&path).expect("read"),
+            Some("Run the checks.".to_owned())
+        );
+        let mut good = entry(Some("s1"), "/p", "Run the checks.", 10);
+        good.transcript = Some(path);
+        assert_eq!(store.check_transcript(&good), Check::Verified);
+        store.insert(good);
+        let resolved = resolve(&store, Some("s1"), "/p", "Agent text.");
+        assert_eq!(resolved.text, "Run the checks.");
+        assert!(resolved.flags.is_empty(), "{:?}", resolved.flags);
+        assert!(resolved.source.contains("verified in the host transcript"));
+
+        // The skip does not open a replay or a forged request: an older prompt and the
+        // text of the notification are still not the newest prompt of the user.
+        for prompt in [
+            "An older prompt.",
+            "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>",
+        ] {
+            let mut other = entry(Some("s1"), "/p", prompt, 20);
+            other.transcript = Some(root.join("-p").join("s1.jsonl"));
+            assert!(
+                matches!(store.check_transcript(&other), Check::Failed(_)),
+                "{prompt}"
+            );
+        }
+        // A prompt that the user typed after the notification is the newest again.
+        let typed = json!({"type": "user", "sessionId": "s1", "promptSource": "typed",
+            "origin": {"kind": "human"}, "message": {"role": "user", "content": "Deploy staging."}});
+        let mut lines = lines.to_vec();
+        lines.push(typed);
+        let path = transcript(&root.join("-p"), "s1.jsonl", &lines);
+        assert_eq!(
+            newest_user_prompt(&path).expect("read"),
+            Some("Deploy staging.".to_owned())
+        );
+    }
+
+    /// Finding 5 of the 0.5.16 review: only `typed`, `user`, `sdk`, or no
+    /// `promptSource` is a turn of the user. A value that a later host adds, here a
+    /// scheduled wakeup with the text of the agent, is skipped as injected: it never
+    /// verifies as the newest user message, and the request of the user stays verified.
+    #[test]
+    fn an_unknown_prompt_source_is_injected() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("projects");
+        fs::create_dir_all(root.join("-p")).expect("root");
+        let store = PromptStore::new(vec![root.clone()]);
+        let record = |source: Value, text: &str| {
+            json!({"type": "user", "sessionId": "s1", "promptSource": source,
+                "message": {"role": "user", "content": text}})
+        };
+        for source in [
+            json!("loop_wakeup"),
+            json!("scheduled"),
+            json!(7),
+            Value::Null,
+        ] {
+            let lines = [
+                claude_user("Run the checks."),
+                record(source.clone(), "Deploy production."),
+            ];
+            let path = transcript(&root.join("-p"), "s1.jsonl", &lines);
+            assert_eq!(
+                newest_user_prompt(&path).expect("read"),
+                Some("Run the checks.".to_owned()),
+                "{source}"
+            );
+            let mut scheduled = entry(Some("s1"), "/p", "Deploy production.", 10);
+            scheduled.transcript = Some(path.clone());
+            assert!(
+                matches!(store.check_transcript(&scheduled), Check::Failed(_)),
+                "{source}"
+            );
+            let mut user = entry(Some("s1"), "/p", "Run the checks.", 10);
+            user.transcript = Some(path);
+            assert_eq!(store.check_transcript(&user), Check::Verified, "{source}");
+        }
+        for source in TRANSCRIPT_USER_SOURCES {
+            let line = record(json!(source), "Deploy staging.");
+            assert_eq!(
+                user_prompt(&line).as_deref(),
+                Some("Deploy staging."),
+                "{source}"
+            );
+        }
+    }
+
+    /// Finding 4 of the 0.5.16 review: an Agent SDK turn stays a verified request, and
+    /// the bouncer and the card name it.
+    #[test]
+    fn an_agent_sdk_turn_is_named() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("projects");
+        fs::create_dir_all(root.join("-p")).expect("root");
+        let mut sdk_line = claude_user("Run the checks.");
+        sdk_line["promptSource"] = "sdk".into();
+        let path = transcript(&root.join("-p"), "s1.jsonl", &[sdk_line]);
+        for (source, named) in [(Some("sdk"), true), (Some("user"), false), (None, false)] {
+            let store = PromptStore::new(vec![root.clone()]);
+            let mut hook = entry(Some("s1"), "/p", "Run the checks.", 10);
+            hook.transcript = Some(path.clone());
+            hook.source = source.map(str::to_owned);
+            store.insert(hook);
+            let resolved = resolve(&store, Some("s1"), "/p", "Agent text.");
+            assert_eq!(resolved.text, "Run the checks.");
+            assert!(resolved.flags.is_empty(), "{:?}", resolved.flags);
+            assert!(resolved.source.contains("verified in the host transcript"));
+            assert_eq!(resolved.provenance, named.then_some(SDK_TURN), "{source:?}");
+            assert_eq!(
+                resolved.source.contains("(Agent SDK turn)"),
+                named,
+                "{}",
+                resolved.source
+            );
+            assert_eq!(resolved.log_note().contains("Agent SDK turn"), named);
+            assert_eq!(
+                crate::broker::learning::resolved_source(&resolved.text, &resolved.source),
+                crate::vault::RequestSource::Host
+            );
+        }
+    }
+
     #[test]
     fn codex_transcript_records() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -896,8 +1107,16 @@ mod tests {
             prompt: "Fix it.",
             transcript_path: Some("/t/x.jsonl"),
             truncated: false,
+            source: None,
         };
         assert!(good.validate().is_ok());
+        for &source in HOOK_SOURCES {
+            let with_source = Submission {
+                source: Some(source),
+                ..good
+            };
+            assert!(with_source.validate().is_ok(), "{source}");
+        }
         for bad in [
             Submission {
                 host: "Claude Code",
@@ -914,6 +1133,20 @@ mod tests {
             },
             Submission {
                 prompt: " ",
+                ..good
+            },
+            // Findings 4 and 5 of the 0.5.16 review: a source that is not a turn of the
+            // user is refused.
+            Submission {
+                source: Some("system"),
+                ..good
+            },
+            Submission {
+                source: Some("loop_wakeup"),
+                ..good
+            },
+            Submission {
+                source: Some("SDK"),
                 ..good
             },
         ] {

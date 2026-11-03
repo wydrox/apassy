@@ -1657,7 +1657,9 @@ impl Tile {
         }
     }
 
-    /// The round avatar of an agent, in [`agent_color`], as in Decisions.
+    /// The round avatar of an agent, in [`agent_color`], as in Decisions. Only the demo
+    /// build (no vault) draws it.
+    #[cfg(not(feature = "vault"))]
     pub(crate) fn agent(name: &str) -> Self {
         Self {
             round: true,
@@ -2485,6 +2487,656 @@ pub(crate) fn stat_tile(ui: &mut Ui, width: f32, label: &str, value: &str, capti
         });
 }
 
+// ---- The Bouncer pages (implementation-plan-bouncer-section §1). ----
+
+/// "Allowed by bouncer" in charts (the mockup's `--s-auto`).
+pub(crate) const AUTOMATIC: Color32 = Color32::from_rgb(10, 108, 255);
+/// "Asked you" in charts and an ask rate of 25 % or more (`--s-ask`).
+pub(crate) const ASKED: Color32 = Color32::from_rgb(232, 137, 12);
+/// The opacity of a Mac silent for 24 hours or one that never reported.
+pub(crate) const DIMMED: f32 = 0.45;
+
+/// Draw `add` dimmed when `dim` is true.
+pub(crate) fn dimmed<R>(ui: &mut Ui, dim: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        if dim {
+            ui.multiply_opacity(DIMMED);
+        }
+        add(ui)
+    })
+    .inner
+}
+
+/// A figure tile of the Overview: a label, the number, and a share after it ("370 87%").
+/// `width` is the outer width.
+pub(crate) fn figure_tile(
+    ui: &mut Ui,
+    width: f32,
+    label: &str,
+    value: &str,
+    share: Option<&str>,
+) -> Response {
+    let response = Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin {
+            left: 14,
+            right: 14,
+            top: 11,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_width(width - 30.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.add(Label::new(text(label, Font::Callout).color(SECONDARY)).truncate());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(
+                        text(value, Font::Title)
+                            .size(22.0)
+                            .variation(b"wght", 600.0)
+                            .color(LABEL),
+                    );
+                    if let Some(share) = share {
+                        ui.label(medium(share, Font::Body).color(SECONDARY));
+                    }
+                });
+            });
+        })
+        .response;
+    let name = match share {
+        Some(share) => format!("{label}, {value}, {share}"),
+        None => format!("{label}, {value}"),
+    };
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &name));
+    response
+}
+
+/// One bar of [`day_chart`]: the day under it and its two parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChartBar {
+    pub(crate) label: String,
+    pub(crate) automatic: u64,
+    pub(crate) asked: u64,
+}
+
+/// "Runs per day": a legend, then one stacked bar per day, oldest at the left. The
+/// total stands over each bar; VoiceOver reads every day.
+pub(crate) fn day_chart(ui: &mut Ui, bars: &[ChartBar]) -> Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        for (color, label) in [(AUTOMATIC, "Allowed by bouncer"), (ASKED, "Asked you")] {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, color);
+            ui.label(text(label, Font::Callout).color(SECONDARY));
+            ui.add_space(9.0);
+        }
+    });
+    ui.add_space(6.0);
+    let width = ui.available_width();
+    let height = 150.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let name = std::iter::once("Runs per day".to_owned())
+        .chain(bars.iter().map(|bar| {
+            format!(
+                "{}: {} runs, {} asked you",
+                bar.label,
+                bar.automatic + bar.asked,
+                bar.asked
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join(". ");
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &name));
+    if !ui.is_rect_visible(rect) || bars.is_empty() {
+        return response;
+    }
+    let painter = ui.painter();
+    let top = rect.top() + 16.0;
+    let bottom = rect.bottom() - 18.0;
+    let most = bars
+        .iter()
+        .map(|bar| bar.automatic + bar.asked)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f32;
+    let slot = rect.width() / bars.len() as f32;
+    let bar_width = (slot * 0.5).min(36.0);
+    painter.hline(rect.x_range(), bottom, Stroke::new(hairline(ui), SEPARATOR));
+    for (index, bar) in bars.iter().enumerate() {
+        let center = rect.left() + slot * (index as f32 + 0.5);
+        let total = bar.automatic + bar.asked;
+        let scale = (bottom - top) / most;
+        let asked_top = bottom - scale * total as f32;
+        let auto_top = bottom - scale * bar.automatic as f32;
+        let x = (center - bar_width / 2.0)..=(center + bar_width / 2.0);
+        if bar.automatic > 0 {
+            painter.rect_filled(
+                Rect::from_x_y_ranges(x.clone(), auto_top..=bottom),
+                2,
+                AUTOMATIC,
+            );
+        }
+        if bar.asked > 0 {
+            painter.rect_filled(Rect::from_x_y_ranges(x, asked_top..=auto_top), 2, ASKED);
+        }
+        let value = galley(ui, medium(total.to_string(), Font::Footnote));
+        painter.galley(
+            Pos2::new(
+                center - value.size().x / 2.0,
+                asked_top - value.size().y - 2.0,
+            ),
+            value,
+            Color32::from_black_alpha(184),
+        );
+        let day = galley(ui, text(bar.label.clone(), Font::Footnote));
+        painter.galley(
+            Pos2::new(center - day.size().x / 2.0, bottom + 3.0),
+            day,
+            SECONDARY,
+        );
+    }
+    response
+}
+
+/// The header of one environment on a Bouncer page: its name, "This Mac" or
+/// "Read-only", and the age of its report.
+pub(crate) fn environment_header(ui: &mut Ui, name: &str, this_mac: bool, detail: Option<&str>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 7.0;
+        ui.add_space(2.0);
+        ui.label(text(name, Font::Headline).color(LABEL));
+        if this_mac {
+            cap_toned(ui, "This Mac", Tone::Accent);
+        } else {
+            cap(ui, "Read-only", false);
+        }
+        if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+            ui.label(text(detail, Font::Callout).color(SECONDARY));
+        }
+    });
+    ui.add_space(4.0);
+}
+
+/// A cap in the tint of `tone`: "Remote", "This Mac".
+pub(crate) fn cap_toned(ui: &mut Ui, label: &str, tone: Tone) -> Response {
+    let galley = galley(ui, medium(label, Font::Footnote));
+    let size = galley.size() + Vec2::new(12.0, 2.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, 5, tone.mark().gamma_multiply(0.1));
+        painter.galley(rect.center() - galley.size() / 2.0, galley, tone.text());
+    }
+    response
+}
+
+/// The "Remote" cap of a remote agent (an MCP client on the internet). The agent page
+/// uses it; tables paint their own.
+pub(crate) fn remote_cap(ui: &mut Ui) -> Response {
+    cap_toned(ui, "Remote", Tone::Accent)
+}
+
+/// The cloud badge at the lower right of the avatar in `avatar`: a white disk with a
+/// blue cloud.
+pub(crate) fn paint_cloud_badge(painter: &Painter, avatar: Rect) {
+    let side = (avatar.width() * 0.54).max(11.0);
+    let center = avatar.right_bottom() - Vec2::splat(side / 2.0 - side * 0.2);
+    painter.circle_filled(center, side / 2.0, Color32::WHITE);
+    painter.circle_stroke(
+        center,
+        side / 2.0,
+        Stroke::new(0.5, Color32::from_black_alpha(38)),
+    );
+    paint_icon(
+        painter,
+        Rect::from_center_size(center, Vec2::splat(side * 0.66)),
+        Icon::Cloud,
+        ACCENT,
+    );
+}
+
+/// The avatar of an agent, with the cloud badge for a remote one. The agent page uses
+/// it; tables paint their own.
+pub(crate) fn agent_avatar(ui: &mut Ui, name: &str, side: f32, remote: bool) -> Response {
+    let response = avatar(ui, name, side);
+    if remote && ui.is_rect_visible(response.rect) {
+        paint_cloud_badge(ui.painter(), response.rect);
+    }
+    response
+}
+
+/// An ⓘ button that opens a help popover: a title and short lines. Help that does not
+/// fit the 12 words of a page line goes here.
+pub(crate) fn help_button(ui: &mut Ui, title: &str, lines: &[&str]) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    let name = format!("About {title}");
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &name));
+    if ui.is_rect_visible(rect) {
+        let color = if response.hovered() { LABEL } else { SECONDARY };
+        paint_icon(ui.painter(), rect.shrink(1.0), Icon::Info, color);
+        if response.has_focus() {
+            focus_ring(ui.painter(), rect, 9);
+        }
+    }
+    egui::Popup::from_toggle_button_response(&response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_max_width(300.0);
+            ui.spacing_mut().item_spacing.y = 5.0;
+            ui.label(text(title, Font::Headline).color(LABEL));
+            for line in lines {
+                paragraph(ui, *line, Font::Callout, SECONDARY);
+            }
+        });
+    response.on_hover_text(name)
+}
+
+/// A white group of table rows (the mockup's `.grp`), without the space under it.
+pub(crate) fn table_group<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let inner = Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(0, 1))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui)
+        })
+        .inner;
+    ui.add_space(4.0);
+    inner
+}
+
+/// A group heading over a table: "Agents 8", "Needs attention 3".
+pub(crate) fn group_heading(ui: &mut Ui, title: &str, count: Option<usize>, trailing: &str) {
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add_space(2.0);
+        ui.label(medium(title, Font::Callout).color(SECONDARY));
+        if let Some(count) = count {
+            ui.label(text(count.to_string(), Font::Callout).color(SECONDARY));
+        }
+        if !trailing.is_empty() {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(text(trailing, Font::Callout).color(SECONDARY));
+            });
+        }
+    });
+    ui.add_space(4.0);
+}
+
+/// One column of a table: its share of the width and its alignment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Column {
+    pub(crate) share: f32,
+    pub(crate) right: bool,
+}
+
+/// What a table cell shows. Cells are painted, not widgets: a table of 200 rows has one
+/// widget per row.
+#[derive(Debug, Clone)]
+pub(crate) enum Cell {
+    Text(RichText),
+    /// An agent: its avatar (with the cloud badge when remote), its name, and "Remote".
+    Agent {
+        name: String,
+        remote: bool,
+        label: String,
+    },
+    /// A text with a red "Production" cap after it.
+    Production(RichText),
+    /// A status with its dot: green "Active now", orange "Waits for you", gray else.
+    Status {
+        text: String,
+        tone: Tone,
+    },
+    /// A text with a drawn chevron at the right edge of the cell: right when the row is
+    /// closed, down when it is open. The system font has no "⌄", so it is painted.
+    Disclosure {
+        value: RichText,
+        open: bool,
+    },
+    Empty,
+}
+
+impl Cell {
+    pub(crate) fn plain(value: impl Into<String>) -> Self {
+        Self::Text(text(value, Font::Body).color(LABEL))
+    }
+
+    pub(crate) fn secondary(value: impl Into<String>) -> Self {
+        Self::Text(text(value, Font::Body).color(SECONDARY))
+    }
+
+    fn words(&self) -> String {
+        match self {
+            Self::Text(value) | Self::Production(value) | Self::Disclosure { value, .. } => {
+                value.text().to_owned()
+            }
+            Self::Status { text, .. } => text.clone(),
+            Self::Agent { label, remote, .. } => {
+                if *remote {
+                    format!("{label}, Remote")
+                } else {
+                    label.clone()
+                }
+            }
+            Self::Empty => String::new(),
+        }
+    }
+}
+
+/// The header row of a table: its titles in the small gray of the mockup.
+pub(crate) fn table_header(ui: &mut Ui, columns: &[Column], titles: &[&str]) {
+    let cells: Vec<Cell> = titles
+        .iter()
+        .map(|title| Cell::Text(medium(*title, Font::Footnote).color(SECONDARY)))
+        .collect();
+    paint_table_row(ui, columns, &cells, 28.0, Sense::hover(), true, false);
+}
+
+/// One row of a table. `first`: no hairline above it. A clickable row has a hover fill
+/// and a focus ring, and VoiceOver reads its cells.
+pub(crate) fn table_row(
+    ui: &mut Ui,
+    columns: &[Column],
+    cells: &[Cell],
+    first: bool,
+    selected: bool,
+) -> Response {
+    paint_table_row(ui, columns, cells, 40.0, Sense::click(), first, selected)
+}
+
+fn paint_table_row(
+    ui: &mut Ui,
+    columns: &[Column],
+    cells: &[Cell],
+    height: f32,
+    sense: Sense,
+    first: bool,
+    selected: bool,
+) -> Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
+    if sense.senses_click() {
+        let name = cells
+            .iter()
+            .map(Cell::words)
+            .filter(|words| !words.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        response.widget_info(|| {
+            WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, &name)
+        });
+        if response.gained_focus() {
+            response.scroll_to_me(None);
+        }
+    }
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if !first {
+        painter.hline(
+            (rect.left() + 12.0)..=rect.right(),
+            rect.top(),
+            Stroke::new(hairline(ui), SEPARATOR),
+        );
+    }
+    if selected {
+        painter.rect_filled(rect.shrink2(Vec2::new(4.0, 1.0)), 6, Tone::Accent.tint());
+    } else if sense.senses_click() && response.hovered() {
+        painter.rect_filled(
+            rect.shrink2(Vec2::new(4.0, 1.0)),
+            6,
+            Color32::from_rgb(246, 246, 248),
+        );
+    }
+    if response.has_focus() {
+        inner_focus_ring(painter, rect.shrink2(Vec2::new(4.0, 1.0)), 6);
+    }
+    let inner = rect.shrink2(Vec2::new(12.0, 0.0));
+    let gap = 10.0;
+    let total: f32 = columns
+        .iter()
+        .map(|column| column.share)
+        .sum::<f32>()
+        .max(0.01);
+    let usable = (inner.width() - gap * columns.len().saturating_sub(1) as f32).max(0.0);
+    let mut x = inner.left();
+    for (column, cell) in columns.iter().zip(cells) {
+        let cell_width = usable * column.share / total;
+        let cell_rect =
+            Rect::from_min_size(Pos2::new(x, inner.top()), Vec2::new(cell_width, height));
+        x += cell_width + gap;
+        paint_cell(ui, cell_rect, cell, column.right);
+    }
+    response
+}
+
+fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let fit = |value: RichText, max: f32| {
+        WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
+    };
+    match cell {
+        Cell::Empty => {}
+        Cell::Status { text: words, tone } => {
+            let dot = 7.0;
+            let center = Pos2::new(rect.left() + dot / 2.0, rect.center().y);
+            painter.circle_filled(center, dot / 2.0, tone.mark());
+            let galley = fit(
+                // As the mockup's `.stt.live` and `.stt.wait`: the text in the dot's tone.
+                text(words.clone(), Font::Body).color(match tone {
+                    Tone::Warning | Tone::Good => tone.text(),
+                    _ => LABEL,
+                }),
+                (rect.width() - dot - 6.0).max(10.0),
+            );
+            painter.galley(
+                Pos2::new(
+                    rect.left() + dot + 6.0,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                LABEL,
+            );
+        }
+        Cell::Disclosure { value, open } => {
+            let chevron = 12.0;
+            let galley = fit(value.clone(), (rect.width() - chevron - 8.0).max(10.0));
+            painter.galley(
+                Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0),
+                galley,
+                LABEL,
+            );
+            let icon = Rect::from_center_size(
+                Pos2::new(rect.right() - chevron / 2.0, rect.center().y),
+                Vec2::splat(chevron),
+            );
+            let icon_kind = if *open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            };
+            paint_icon(&painter, icon, icon_kind, TERTIARY);
+        }
+        Cell::Text(value) => {
+            let galley = fit(value.clone(), rect.width());
+            let x = if right {
+                rect.right() - galley.size().x
+            } else {
+                rect.left()
+            };
+            painter.galley(
+                Pos2::new(x, rect.center().y - galley.size().y / 2.0),
+                galley,
+                LABEL,
+            );
+        }
+        Cell::Production(value) => {
+            let cap = galley(ui, medium("Production", Font::Footnote));
+            let cap_width = cap.size().x + 12.0;
+            let galley = fit(value.clone(), (rect.width() - cap_width - 6.0).max(10.0));
+            let y = rect.center().y;
+            let text_width = galley.size().x;
+            painter.galley(
+                Pos2::new(rect.left(), y - galley.size().y / 2.0),
+                galley,
+                LABEL,
+            );
+            let cap_rect = Rect::from_min_size(
+                Pos2::new(rect.left() + text_width + 6.0, y - cap.size().y / 2.0 - 1.0),
+                Vec2::new(cap_width, cap.size().y + 2.0),
+            );
+            painter.rect_filled(cap_rect, 5, PRODUCTION.gamma_multiply(0.1));
+            painter.galley(
+                cap_rect.center() - cap.size() / 2.0,
+                cap,
+                Color32::from_rgb(196, 43, 34),
+            );
+        }
+        Cell::Agent {
+            name,
+            remote,
+            label,
+        } => {
+            let side = 22.0;
+            let avatar = Rect::from_min_size(
+                Pos2::new(rect.left(), rect.center().y - side / 2.0),
+                Vec2::splat(side),
+            );
+            painter.circle_filled(avatar.center(), side / 2.0, agent_color(name));
+            let letter: String = name
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect());
+            let letter = galley(
+                ui,
+                text(letter, Font::Body)
+                    .size(10.5)
+                    .variation(b"wght", 600.0),
+            );
+            painter.galley(
+                avatar.center() - letter.size() / 2.0,
+                letter,
+                Color32::WHITE,
+            );
+            if *remote {
+                paint_cloud_badge(&painter, avatar);
+            }
+            let left = avatar.right() + 9.0;
+            // The name gets the width first; "Remote" shows only where the whole name
+            // and the cap fit (the cloud badge still marks a remote agent).
+            let room = (rect.right() - left).max(10.0);
+            let whole = galley(ui, text(label.clone(), Font::Body)).size().x;
+            let cap = remote
+                .then(|| galley(ui, medium("Remote", Font::Footnote)))
+                .filter(|cap| whole + cap.size().x + 12.0 + 6.0 <= room);
+            let name_galley = fit(text(label.clone(), Font::Body).color(LABEL), room);
+            let name_width = name_galley.size().x;
+            painter.galley(
+                Pos2::new(left, rect.center().y - name_galley.size().y / 2.0),
+                name_galley,
+                LABEL,
+            );
+            if let Some(cap) = cap {
+                let cap_rect = Rect::from_min_size(
+                    Pos2::new(
+                        left + name_width + 6.0,
+                        rect.center().y - cap.size().y / 2.0 - 1.0,
+                    ),
+                    Vec2::new(cap.size().x + 12.0, cap.size().y + 2.0),
+                );
+                painter.rect_filled(cap_rect, 5, Tone::Accent.mark().gamma_multiply(0.1));
+                painter.galley(
+                    cap_rect.center() - cap.size() / 2.0,
+                    cap,
+                    Tone::Accent.text(),
+                );
+            }
+        }
+    }
+}
+
+/// What the owner chose in an [`empty_block`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyChoice {
+    None,
+    Button,
+    Link,
+}
+
+/// The empty state inside a group: a title of 5 words or fewer, one line of 12 words or
+/// fewer, one primary button, and at most one link (the mockup's text rules).
+pub(crate) fn empty_block(
+    ui: &mut Ui,
+    title: &str,
+    line: Option<&str>,
+    button: Option<&str>,
+    link: Option<&str>,
+) -> EmptyChoice {
+    debug_assert!(empty_text_fits(title, line), "{title} / {line:?}");
+    let mut choice = EmptyChoice::None;
+    Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, SECTION_EDGE))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(16, 22))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.label(text(title, Font::Title3).color(LABEL));
+                if let Some(line) = line {
+                    ui.add(
+                        Label::new(text(line, Font::Callout).color(SECONDARY))
+                            .wrap()
+                            .halign(Align::Center),
+                    );
+                }
+                if button.is_some() || link.is_some() {
+                    ui.add_space(9.0);
+                    // Centered as one row: measure the buttons first.
+                    let widths: f32 = [button, link]
+                        .iter()
+                        .flatten()
+                        .map(|label| galley(ui, text(*label, Font::Body)).size().x + 32.0)
+                        .sum();
+                    let space = ((ui.available_width() - widths) / 2.0).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(space);
+                        if let Some(button) = button
+                            && self::button(ui, button, Style::Prominent).clicked()
+                        {
+                            choice = EmptyChoice::Button;
+                        }
+                        if let Some(link) = link
+                            && self::button(ui, link, Style::Link).clicked()
+                        {
+                            choice = EmptyChoice::Link;
+                        }
+                    });
+                }
+            });
+        });
+    ui.add_space(16.0);
+    choice
+}
+
+/// The mockup's rule for an empty state: a title of 5 words or fewer, a line of 12 words
+/// or fewer.
+pub(crate) fn empty_text_fits(title: &str, line: Option<&str>) -> bool {
+    let words = |text: &str| text.split_whitespace().count();
+    words(title) <= 5 && line.is_none_or(|line| words(line) <= 12)
+}
+
 // ---- Sheets and the toast. ----
 
 /// What a sheet reports.
@@ -2942,6 +3594,12 @@ pub(crate) enum Icon {
     /// An arrow down in a circle: Settings > Updates.
     #[cfg(feature = "vault")]
     Download,
+    /// A cloud: the badge of a remote agent.
+    Cloud,
+    /// A gauge: the Overview of Bouncer.
+    Gauge,
+    /// Lines of text: Logs.
+    Lines,
 }
 
 /// An icon in a rounded color tile, as in System Settings.
@@ -3175,6 +3833,22 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             line(&[(0.5, 0.28), (0.5, 0.7)]);
             line(&[(0.33, 0.54), (0.5, 0.7), (0.67, 0.54)]);
         }
+        Icon::Cloud => {
+            let mut outline = arc(0.3, 0.6, 0.18, 0.18, 0.5 * PI, 1.5 * PI);
+            outline.extend(arc(0.52, 0.44, 0.24, 0.24, PI, 1.95 * PI));
+            outline.extend(arc(0.74, 0.6, 0.16, 0.18, 1.5 * PI, 2.5 * PI));
+            closed(&outline);
+        }
+        Icon::Gauge => {
+            line(&arc(0.5, 0.62, 0.38, 0.38, PI, TAU));
+            line(&[(0.12, 0.62), (0.88, 0.62)]);
+            line(&[(0.5, 0.62), (0.68, 0.38)]);
+        }
+        Icon::Lines => {
+            for y in [0.26, 0.5, 0.74] {
+                line(&[(0.14, y), (0.86, y)]);
+            }
+        }
     }
 }
 
@@ -3261,5 +3935,49 @@ mod app_logo_tests {
             }
             output.drop_without_applying_deltas();
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_cell_tests {
+    use super::*;
+
+    /// The texts that an agent cell of `width` paints.
+    fn painted(width: f32, label: &str) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let cell = Cell::Agent {
+            name: label.to_owned(),
+            remote: true,
+            label: label.to_owned(),
+        };
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(width, 30.0));
+                paint_cell(ui, rect, &cell, false);
+            });
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+        }
+        texts
+    }
+
+    /// Frame 6: the name of a remote agent gets the width first; "Remote" shows only
+    /// when the whole name and the cap fit.
+    #[test]
+    fn the_name_of_a_remote_agent_comes_before_its_cap() {
+        let wide = painted(400.0, "Grok Bot (new)");
+        assert!(wide.contains(&"Grok Bot (new)".to_owned()), "{wide:?}");
+        assert!(wide.contains(&"Remote".to_owned()), "{wide:?}");
+        let narrow = painted(150.0, "Grok Bot (new)");
+        assert!(narrow.contains(&"Grok Bot (new)".to_owned()), "{narrow:?}");
+        assert!(!narrow.contains(&"Remote".to_owned()), "{narrow:?}");
     }
 }

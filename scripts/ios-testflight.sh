@@ -28,6 +28,10 @@
 #                          make them. Set all three or none.
 #
 # The version is MARKETING_VERSION of ios/ApassyCompanion/project.yml.
+# The app declares ITSAppUsesNonExemptEncryption = true (its own standard encryption).
+# Without ITSEncryptionExportComplianceCode, App Store Connect holds each processed build
+# in "Missing Compliance" until the encryption declaration is attached to it through the
+# API: docs/store/app-store/export-compliance.md, section 2.2. This script does not do it.
 # See ios/README.md, "TestFlight".
 set -euo pipefail
 

@@ -1,7 +1,7 @@
 # ADR 0020 — The iPhone companion: approve runs from your phone on the local network
 
 Date: 2026-09-30.
-Status: ACCEPTED in scope by the owner on 2026-09-30 ("Let's add mobile companion app (native iOS)"). The design choices below are proposals; the open decisions are D1 to D6 in the last section. In the code behind a setting that is off by default.
+Status: ACCEPTED in scope by the owner on 2026-09-30 ("Let's add mobile companion app (native iOS)"). The design choices below are proposals; the open decisions are D1 to D6 in the last section. In the code behind a setting that is off by default. Update 2026-11-03: ADR 0037 D6 (2026-11-02) accepted the removal of companion-v1 after ADR 0037 stage 2 ships the node, with the two-release notice of [ADR 0028](0028-retire-wifi-companion.md) stage 3.
 
 ## Context
 

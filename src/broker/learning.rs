@@ -18,8 +18,8 @@ use super::bouncer::{BouncerVerdict, DecisionContext, Learned, Thresholds, befor
 use super::patterns::{self, Place};
 use super::shell_risk::Analysis;
 use crate::vault::{
-    DecidedBy, DecisionEntry, Declaration, LoggedDecision, PATTERN_APPROVALS_NEEDED, PatternKey,
-    PatternState, RequestSource, Vault, VaultResult,
+    DecidedBy, DecisionEntry, DecisionMeta, Declaration, LoggedDecision, PATTERN_APPROVALS_NEEDED,
+    PatternKey, PatternState, RequestSource, Vault, VaultResult,
 };
 
 /// The pattern of one request.
@@ -320,7 +320,17 @@ pub fn record(
     entry: &DecisionEntry,
     pattern: Option<&RequestPattern>,
 ) -> VaultResult<u64> {
-    let id = vault.record_decision(entry)?;
+    record_with(vault, entry, &DecisionMeta::default(), pattern)
+}
+
+/// [`record`] with the request kind and the owner's answer time (schema 27).
+pub fn record_with(
+    vault: &mut Vault,
+    entry: &DecisionEntry,
+    meta: &DecisionMeta,
+    pattern: Option<&RequestPattern>,
+) -> VaultResult<u64> {
+    let id = vault.record_decision_with(entry, meta)?;
     if entry.owner_denied()
         && let Some(pattern) = pattern
     {
@@ -354,11 +364,13 @@ pub fn agent_source(user_request: &str) -> RequestSource {
 
 /// The source of a user request after the host hook check (goal item B6). `label` is
 /// the source text of `broker::prompts`: it starts with "from the agent" when the text
-/// comes from the agent, and names the hook when the text comes from the host.
+/// comes from the agent, and names the hook when the text comes from the host. The text
+/// of a cloud agent (`run::CLOUD_REQUEST_SOURCE`, "from the cloud agent, ...") is the
+/// text of an agent too.
 pub fn resolved_source(user_request: &str, label: &str) -> RequestSource {
     if user_request.trim().is_empty() {
         RequestSource::None
-    } else if label.starts_with("from the agent") {
+    } else if label.starts_with("from the agent") || label.starts_with("from the cloud agent") {
         RequestSource::Agent
     } else {
         RequestSource::Host

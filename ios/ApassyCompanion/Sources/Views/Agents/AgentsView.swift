@@ -109,8 +109,10 @@ struct AgentsView: View {
         } actions: {
             switch reach.action {
             case .connect:
-                Button("Connect this iPhone") { showsConnect = true }
-                    .buttonStyle(.borderedProminent)
+                Button("Connect this iPhone") {
+                    if root?.isDemo == true { root?.showNotAvailableInDemo() } else { showsConnect = true }
+                }
+                .buttonStyle(.borderedProminent)
             case .openDecisions:
                 Button("Open Requests") {
                     ui?.tab = .decisions
@@ -210,10 +212,11 @@ private struct AgentRow: View {
                             .accessibilityLabel("Last use \(AgentsText.ago(last, now: now))")
                     }
                 }
+                // Two lines: a long Mac name must not cut off the uses ("6 uses this w…").
                 Text(AgentsText.subtitle(entry))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
             }
         }
         .accessibilityElement(children: .combine)

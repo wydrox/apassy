@@ -162,6 +162,11 @@ struct OwnerPromptView: View {
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
+            if let hint = gate.passphraseHint {
+                Text(hint)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 12) {
                 Button {
                     gate.cancel()

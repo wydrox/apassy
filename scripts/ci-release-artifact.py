@@ -21,6 +21,10 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parent.parent
 BINARIES = ("apassy", "apassy-mcp", "apassy-hook", "apassy-sandbox", "apassy-browser-host")
+# The build target of an artifact binary, when it has another name: the main executable
+# `apassy` of the bundle is the app crate's `apassy-app` (the window with the Mac's own
+# node, ADR 0037). The root `apassy` target in target/release is not shipped.
+BUILD_NAMES = {"apassy": "apassy-app"}
 MANIFEST = "manifest.json"
 PLATFORM = {"os": "macos", "architecture": "arm64"}
 
@@ -178,7 +182,7 @@ def create(directory, commit, date, run_id, run_attempt):
     manifest = {"schema": 1, **identity(commit, run_id, run_attempt, date),
                 "version": package_version(), "platform": PLATFORM, "files": {}}
     source = check_directory(ROOT / "target" / "release")
-    contents = {name: read_regular(source / name) for name in BINARIES}
+    contents = {name: read_regular(source / BUILD_NAMES.get(name, name)) for name in BINARIES}
     for name, data in contents.items():
         manifest["files"][name] = binary_metadata(name, data)
     check_embedded_identity(contents["apassy"], manifest)

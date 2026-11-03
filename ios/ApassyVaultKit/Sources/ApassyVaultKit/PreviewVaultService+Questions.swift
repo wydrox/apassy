@@ -69,6 +69,21 @@ public struct PreviewQuestions: Sendable {
 
 extension PreviewVaultService {
     /// The question of the contract's test vectors (section 7.1), open for five minutes.
+    /// A synthetic connect request (card v2 `kind = connect`): Grok Bot asks to connect to the Mac.
+    public static func sampleConnectQuestion(qid: String = "Y29ubmVjdC1yZXF1ZXN0LTE", now: Date = Date())
+        -> RemoteQuestion
+    {
+        let at = Int64(now.timeIntervalSince1970)
+        let connect = ConnectRequestCard(
+            askerDevice: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", createdAt: at, id: "cr_7Hq2xN",
+            clientName: "Grok Bot", macName: "Mac mini (office)", code: "K7Q-4MD", expiresAt: at + 271,
+            digest: "920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12",
+            redirectHost: "grok.example", returnsTo: "Returns to grok.example")
+        return RemoteQuestion(
+            qid: qid, state: .open, askerName: "Mac mini (office)", createdAt: at, expiresAt: at + 271,
+            connect: connect)
+    }
+
     public static func sampleQuestion(qid: String = "oKGio6SlpqeoqaqrrK2urw", now: Date = Date()) -> RemoteQuestion {
         let at = Int64(now.timeIntervalSince1970)
         let card = QuestionCard(
@@ -343,7 +358,7 @@ extension PreviewVaultService {
         }
         // The key derivation of the core takes a moment.
         try await Task.sleep(for: .milliseconds(100))
-        guard passphrase == Self.passphrase else {
+        guard passphrase == unlockPassphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         questionsState.unlocks.append(vaultID)
@@ -389,7 +404,7 @@ extension PreviewVaultService {
             }
         let text = [
             "apassy-question-answer-v1", status.deviceUUID ?? "", status.teamID ?? "", qid, line,
-            question.card?.digest ?? "", String(time),
+            question.card?.digest ?? question.connect?.digest ?? "", String(time),
         ].joined(separator: "\n")
         return PreparedAnswer(time: time, answerString: text, needsFaceID: answer.needsFaceID)
     }

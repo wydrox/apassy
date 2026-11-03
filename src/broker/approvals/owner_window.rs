@@ -1,8 +1,6 @@
 //! Device-local identity window (ADR 0030). No secrets or reusable bearer tokens.
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(not(target_os = "macos"))]
-use std::time::Instant;
 
 /// The six owner-approved choices. Unknown stored values fail closed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -59,31 +57,35 @@ impl OwnerFrequency {
     }
 }
 
+/// The clock of owner deadlines (this window and the idle measure of auto-lock):
+/// monotonic, and it counts the time that the machine sleeps.
+/// - Apple: `CLOCK_MONOTONIC`. Darwin's counts sleep; `Instant` there is
+///   `CLOCK_UPTIME_RAW`, which pauses during sleep.
+/// - Linux and Android: `CLOCK_BOOTTIME`. There `CLOCK_MONOTONIC`, and so `Instant`,
+///   stops during suspend.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) const SLEEP_INCLUSIVE_CLOCK: rustix::time::ClockId = rustix::time::ClockId::Boottime;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) const SLEEP_INCLUSIVE_CLOCK: rustix::time::ClockId = rustix::time::ClockId::Monotonic;
+
+/// Now on [`SLEEP_INCLUSIVE_CLOCK`], from an unspecified start. `None` only if the
+/// system gives a negative time.
+pub(crate) fn sleep_inclusive_now() -> Option<Duration> {
+    rustix::time::clock_gettime(SLEEP_INCLUSIVE_CLOCK)
+        .try_into()
+        .ok()
+}
+
 /// Injectable monotonic time; wall-clock changes cannot extend a window.
 pub(crate) trait WindowClock: std::fmt::Debug + Send + Sync {
     fn now(&self) -> Duration;
 }
-#[cfg(not(target_os = "macos"))]
+/// The production clock: suspension counts, so a window ends during a sleep.
 #[derive(Debug)]
-struct Monotonic(Instant);
-#[cfg(target_os = "macos")]
-#[derive(Debug)]
-struct Monotonic;
-impl WindowClock for Monotonic {
+struct SleepInclusive;
+impl WindowClock for SleepInclusive {
     fn now(&self) -> Duration {
-        #[cfg(target_os = "macos")]
-        {
-            // Darwin's std::time::Instant uses CLOCK_UPTIME_RAW, which pauses
-            // during sleep. CLOCK_MONOTONIC advances during suspension, so an
-            // absolute deadline includes system suspension.
-            rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
-                .try_into()
-                .expect("nonnegative monotonic boot clock")
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.0.elapsed()
-        }
+        sleep_inclusive_now().expect("nonnegative monotonic boot clock")
     }
 }
 
@@ -118,11 +120,7 @@ pub(crate) struct OwnerWindow {
 }
 impl Default for OwnerWindow {
     fn default() -> Self {
-        #[cfg(target_os = "macos")]
-        let clock = Monotonic;
-        #[cfg(not(target_os = "macos"))]
-        let clock = Monotonic(Instant::now());
-        Self::with_clock(Arc::new(clock))
+        Self::with_clock(Arc::new(SleepInclusive))
     }
 }
 impl OwnerWindow {
@@ -533,17 +531,55 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    /// A suspend is a jump of the clock with no heartbeat in between. It ends a timed
+    /// window; on Linux the production clock (`CLOCK_BOOTTIME`) makes that jump.
     #[test]
-    fn owner_session_production_clock_uses_sleep_inclusive_macos_time() {
-        let before: Duration = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
-            .try_into()
-            .unwrap();
+    fn owner_session_suspend_gap_ends_a_timed_window() {
+        let (w, c) = fixture();
+        w.configure(OwnerFrequency::FiveMinutes);
+        w.seed([1; 32], super::super::CheckMethod::TouchId, w.generation());
+        c.0.store(60, Ordering::SeqCst);
+        w.observe(true);
+        let (proof, _) = w.ticket([1; 32]).unwrap();
+        assert!(proof.valid());
+        // Two hours of suspend: no observe call, no heartbeat.
+        c.0.store(60 + 7200, Ordering::SeqCst);
+        assert!(!proof.valid());
+        assert!(w.ticket([1; 32]).is_none());
+        // Input after the wake does not reopen it.
+        w.observe(true);
+        assert!(!proof.valid());
+        assert!(w.ticket([1; 32]).is_none());
+    }
+
+    /// The production clock counts suspension: `CLOCK_BOOTTIME` on Linux, Darwin's
+    /// `CLOCK_MONOTONIC` on macOS (unchanged).
+    #[test]
+    fn owner_session_production_clock_counts_suspended_time() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(SLEEP_INCLUSIVE_CLOCK, rustix::time::ClockId::Boottime);
+        #[cfg(target_os = "macos")]
+        assert_eq!(SLEEP_INCLUSIVE_CLOCK, rustix::time::ClockId::Monotonic);
+        let read = || -> Duration {
+            rustix::time::clock_gettime(SLEEP_INCLUSIVE_CLOCK)
+                .try_into()
+                .unwrap()
+        };
+        let before = read();
         let now = OwnerWindow::default().clock.now();
-        let after: Duration = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
+        let after = read();
+        assert!(before <= now && now <= after);
+    }
+    /// On Linux the window's clock and `CLOCK_MONOTONIC` differ by exactly the time
+    /// suspended since boot: the window's clock is never behind the one that stops.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owner_session_linux_clock_is_not_behind_the_suspend_paused_clock() {
+        let monotonic: Duration = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic)
             .try_into()
             .unwrap();
-        assert!(before <= now && now <= after);
+        let boottime = OwnerWindow::default().clock.now();
+        assert!(boottime >= monotonic);
     }
     #[cfg(feature = "desktop")]
     #[test]
@@ -624,5 +660,48 @@ mod tests {
         }
         w.invalidate();
         assert!(!proof.is_fresh());
+    }
+
+    /// Review 0.5.16: an open window covers a token rotation of the local owner, but
+    /// never a new remote agent, whose bearer token works from the internet.
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn an_open_window_never_covers_a_new_remote_agent() {
+        use super::super::{LocalWindowSource, OwnerAction, OwnerCheck, OwnerGate};
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            crate::vault::Vault::create(&dir.path().join("synthetic.db"), "synthetic-window-pass")
+                .unwrap();
+        vault.unlock("synthetic-window-pass").unwrap();
+        let epoch = vault.epoch();
+        let shared = Arc::new(Mutex::new(Some(vault)));
+        let (w, _clock) = fixture();
+        w.configure(OwnerFrequency::UntilLock);
+        w.seed(epoch, super::super::CheckMethod::TouchId, w.generation());
+        let gate = OwnerGate::new(shared, None).with_window(w.clone());
+        let rotate = OwnerAction::RotateToken { agent_id: 3 };
+        assert!(!rotate.needs_fresh_local_check());
+        assert!(
+            gate.reuse_local(rotate, LocalWindowSource::LocalOwner)
+                .is_some(),
+            "the window is open"
+        );
+        let remote = OwnerAction::AddRemoteAgent {
+            name: "Grok Bot".into(),
+            days: 90,
+        };
+        assert!(remote.needs_fresh_local_check());
+        assert!(
+            gate.reuse_local(remote.clone(), LocalWindowSource::LocalOwner)
+                .is_none()
+        );
+        // A fresh check still gives its exact proof.
+        let proof = gate
+            .authorize(
+                remote.clone(),
+                OwnerCheck::passphrase("synthetic-window-pass"),
+            )
+            .unwrap();
+        assert_eq!(proof.check(&remote, &epoch), Ok(()));
     }
 }

@@ -220,6 +220,7 @@ fn full_decision_report() {
             purpose: String::new(),
             env_names: secrets.clone(),
             instruction: String::new(),
+            task_provenance: String::new(),
         });
         if matches!(verdict, BouncerVerdict::Unavailable(_)) && analysis.flags.is_empty() {
             unavailable += 1;
@@ -556,6 +557,7 @@ fn real_decision_report() {
                 purpose: String::new(),
                 env_names: secrets.clone(),
                 instruction: String::new(),
+                task_provenance: String::new(),
             })
         } else {
             BouncerVerdict::Unavailable("not asked".to_owned())

@@ -40,6 +40,9 @@ mod add;
 mod browser;
 mod copy;
 mod decisions;
+/// Tests of the rows of the last searches ([`SearchCache`]).
+#[cfg(test)]
+mod search_tests;
 pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
 pub use decisions::{ActionUse, AgentActivity, AgentOverview, ExceptionRow, RecentUse, WeekCounts};
 
@@ -320,6 +323,25 @@ impl DeclarationForm {
         }
     }
 
+    /// The environment that the owner chose in the Environment row for a credential
+    /// without a declaration. A risk or a reversibility without a suggestion shows the
+    /// default of the owner's label (ADR 0031, 2026-11-03): development or local gives
+    /// at most the development default, as "Allow as dev" does. A suggested value stays,
+    /// and the owner sees and saves every value in the sheet.
+    pub fn choose_environment(&mut self, environment: Environment) {
+        self.environment = environment;
+        if environment > Environment::Development {
+            return;
+        }
+        let suggestion = self.suggestion.as_ref();
+        if suggestion.is_none_or(|suggestion| suggestion.risk.is_none()) {
+            self.risk = self.risk.min(providers::DEVELOPMENT_RISK);
+        }
+        if suggestion.is_none_or(|suggestion| suggestion.reversibility.is_none()) {
+            self.reversibility = self.reversibility.min(providers::DEVELOPMENT_REVERSIBILITY);
+        }
+    }
+
     pub fn to_declaration(&self) -> Declaration {
         Declaration {
             project: self.project.trim().to_owned(),
@@ -480,6 +502,58 @@ impl fmt::Debug for LockHook {
     }
 }
 
+/// The searches that [`SearchCache`] keeps for one state of the vault: the sidebar and
+/// the list ask for the empty one, and the list for a typed one.
+const CACHED_SEARCHES: usize = 4;
+
+/// The rows of the last searches, for one state of the open vault: its session
+/// ([`Vault::epoch`]) and the number of rows that its connection changed
+/// ([`Vault::change_count`]). Each write of this process goes through that connection,
+/// and each new connection starts a new session, so a row here is never older than the
+/// vault. The window draws the same lists each frame (the sidebar counts, the list,
+/// Agents), and a search decrypts the service and the project of each item: with this, a
+/// frame that changes nothing reads nothing. A lock and another vault empty it.
+#[derive(Default)]
+struct SearchCache {
+    state: Option<([u8; 32], u64)>,
+    /// Each query with its rows, the newest last.
+    searches: Vec<(Zeroizing<String>, Vec<OwnerSummary>)>,
+}
+
+impl SearchCache {
+    fn get(&self, state: ([u8; 32], u64), query: &str) -> Option<Vec<OwnerSummary>> {
+        if self.state != Some(state) {
+            return None;
+        }
+        self.searches
+            .iter()
+            .find(|(asked, _)| asked.as_str() == query)
+            .map(|(_, rows)| rows.clone())
+    }
+
+    fn put(&mut self, state: ([u8; 32], u64), query: &str, rows: &[OwnerSummary]) {
+        if self.state != Some(state) {
+            self.searches.clear();
+            self.state = Some(state);
+        }
+        self.searches.retain(|(asked, _)| asked.as_str() != query);
+        if self.searches.len() >= CACHED_SEARCHES {
+            self.searches.remove(0);
+        }
+        self.searches
+            .push((Zeroizing::new(query.to_owned()), rows.to_vec()));
+    }
+}
+
+/// No query and no row reaches a log.
+impl fmt::Debug for SearchCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SearchCache")
+            .field("searches", &self.searches.len())
+            .finish()
+    }
+}
+
 /// One vault file open inside this process. The broker shares the same slot.
 #[derive(Debug)]
 pub struct OwnerSession {
@@ -492,6 +566,7 @@ pub struct OwnerSession {
     /// `revealed`, so a shown code is not a reveal of the item.
     code_seeds: BTreeMap<(u64, String), RevealedValue>,
     before_lock: LockHook,
+    searches: Mutex<SearchCache>,
 }
 
 /// Mutex guard over an unlocked vault. Hold it only for one short operation.
@@ -520,6 +595,7 @@ impl OwnerSession {
             revealed: BTreeMap::new(),
             code_seeds: BTreeMap::new(),
             before_lock: LockHook::default(),
+            searches: Mutex::default(),
         }
     }
 
@@ -742,15 +818,42 @@ impl OwnerSession {
         self.unlocked()?.export_decisions_jsonl().map_err(map_err)
     }
 
+    /// The rows of `query`. A search that the vault already answered in its current
+    /// state reads nothing: the session keeps the rows of its last searches.
     pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
-        let found = {
-            let vault = self.unlocked()?;
-            vault.search_identities(query).map_err(map_err)?
+        let vault = match self.unlocked() {
+            Ok(vault) => vault,
+            Err(error) => {
+                *self.searches() = SearchCache::default();
+                return Err(error);
+            }
         };
-        found
+        // One vault lock for the whole search: the rows and the state that names them
+        // are of one moment.
+        let state = vault
+            .change_count()
+            .ok()
+            .map(|changes| (vault.epoch(), changes));
+        if let Some(state) = state
+            && let Some(rows) = self.searches().get(state, query)
+        {
+            return Ok(rows);
+        }
+        let rows = vault
+            .search_identities(query)
+            .map_err(map_err)?
             .into_iter()
-            .map(|summary| self.row_from(summary))
-            .collect()
+            .map(|summary| row_in(&vault, summary))
+            .collect::<ModelResult<Vec<_>>>()?;
+        drop(vault);
+        if let Some(state) = state {
+            self.searches().put(state, query, &rows);
+        }
+        Ok(rows)
+    }
+
+    fn searches(&self) -> MutexGuard<'_, SearchCache> {
+        self.searches.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn details(&self, id: u64) -> ModelResult<OwnerDetails> {
@@ -1071,10 +1174,11 @@ impl OwnerSession {
             .min()
     }
 
-    /// Erase every revealed value and every opened seed.
+    /// Erase every revealed value and every opened seed, and the rows of the searches.
     fn forget_all_reveals(&mut self) {
         self.revealed.clear();
         self.code_seeds.clear();
+        *self.searches() = SearchCache::default();
     }
 
     /// Erase the revealed values and the opened seeds of one item.
@@ -1824,6 +1928,7 @@ impl OwnerSession {
     }
 
     fn attach(&mut self, held: HeldVault) {
+        *self.searches() = SearchCache::default();
         *self.slot() = held.vault;
         self.path = held.path;
     }
@@ -1848,15 +1953,8 @@ impl OwnerSession {
     }
 
     fn row_from(&self, summary: crate::vault::ItemSummary) -> ModelResult<OwnerSummary> {
-        let (service, project) = self.service_project(summary.id)?;
-        Ok(OwnerSummary {
-            id: summary.id,
-            name: summary.title,
-            kind: summary.kind,
-            service,
-            project,
-            revision: summary.revision,
-        })
+        let vault = self.unlocked()?;
+        row_in(&vault, summary)
     }
 
     fn service_project(&self, id: u64) -> ModelResult<(String, String)> {
@@ -2397,6 +2495,18 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// The list row of `summary`, with its service and project from `vault`.
+fn row_in(vault: &Vault, summary: crate::vault::ItemSummary) -> ModelResult<OwnerSummary> {
+    Ok(OwnerSummary {
+        id: summary.id,
+        service: plain_value(vault, summary.id, "service")?,
+        project: plain_value(vault, summary.id, "project")?,
+        name: summary.title,
+        kind: summary.kind,
+        revision: summary.revision,
+    })
+}
+
 fn plain_value(vault: &Vault, id: u64, name: &str) -> ModelResult<String> {
     match vault.reveal(id, name) {
         Ok(value) => Ok(value.expose().to_owned()),
@@ -2835,4 +2945,49 @@ pub(crate) fn smoke_roundtrip() -> Result<(), String> {
         .delete(found[0].id, found[0].revision)
         .map_err(|err| err.message)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0031, 2026-11-03: development chosen for a credential without a declaration
+    /// shows the development defaults for the values without a suggestion; staging and
+    /// production keep the careful defaults; a suggested value stays.
+    #[test]
+    fn choosing_development_shows_the_development_defaults() {
+        let mut form = DeclarationForm::default();
+        form.choose_environment(Environment::Development);
+        assert_eq!(form.environment, Environment::Development);
+        assert_eq!(form.risk, providers::DEVELOPMENT_RISK);
+        assert_eq!(form.reversibility, providers::DEVELOPMENT_REVERSIBILITY);
+        assert_eq!(form.scope, providers::DEFAULT_SCOPE);
+        for careful in [Environment::Staging, Environment::Production] {
+            let mut form = DeclarationForm::default();
+            form.choose_environment(careful);
+            assert_eq!(form.risk, providers::DEFAULT_RISK, "{careful:?}");
+            assert_eq!(
+                form.reversibility,
+                providers::DEFAULT_REVERSIBILITY,
+                "{careful:?}"
+            );
+        }
+        let mut suggested = DeclarationForm {
+            suggestion: Some(Suggestion {
+                risk: Some(providers::Suggested {
+                    value: RiskLevel::High,
+                    reason: "A synthetic signal.".to_owned(),
+                    conflict: false,
+                }),
+                ..Suggestion::default()
+            }),
+            ..DeclarationForm::default()
+        };
+        suggested.choose_environment(Environment::Local);
+        assert_eq!(suggested.risk, RiskLevel::High, "a suggested value stays");
+        assert_eq!(
+            suggested.reversibility,
+            providers::DEVELOPMENT_REVERSIBILITY
+        );
+    }
 }

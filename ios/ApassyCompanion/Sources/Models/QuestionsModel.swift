@@ -47,9 +47,11 @@ struct AnswerBar: Equatable {
     var primary: Choice?
     var menu: [Choice]
 
-    /// Unknown item facts take precedence over confirmed production items.
+    /// Unknown item facts take precedence over confirmed production items. "Allow as dev"
+    /// and "Allow as prod" name no item: the Mac labels the one unconfirmed item, so a card
+    /// with two or more unconfirmed items offers "Allow", as the Mac does.
     static func make(for card: QuestionCard) -> AnswerBar {
-        let unknown = card.question.items.contains(where: \.unconfirmed)
+        let unknown = card.question.items.filter(\.unconfirmed).count == 1
         return AnswerBar(
             deny: Choice(answer: RemoteAnswer(kind: .deny), label: "Dismiss", destructive: true),
             secondaryApproval: unknown ? Choice(answer: RemoteAnswer(kind: .approveAsProduction), label: "Allow as prod") : nil,
@@ -207,7 +209,7 @@ final class QuestionsModel {
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let signers: any AnswerSigners
     @ObservationIgnored private weak var push: (any PushPermission)?
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let defaults: any SettingsStore
     /// Keeps the name of a connection for the next one.
     @ObservationIgnored private let onDeviceName: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
@@ -246,7 +248,7 @@ final class QuestionsModel {
 
     init(
         service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
-        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
@@ -279,7 +281,7 @@ final class QuestionsModel {
     /// One answer key for every team: the tests with one vault.
     convenience init(
         service: any VaultService, signer: any AnswerSigner, push: (any PushPermission)?, deviceName: String,
-        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        defaults: any SettingsStore = UserDefaults.standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Requests > Devices > Mac on Wi-Fi to pair with your Mac."
@@ -306,6 +308,19 @@ final class QuestionsModel {
         case .ready: !status.enabled || status.removed
         case .loading, .locked: false
         }
+    }
+
+    /// ADR 0028 stage 1: the vaults whose requests do not come through the relay to this iPhone
+    /// (Requests shows one quiet line for each): the selected vault while it is open without a
+    /// questions team, and the vaults that said so when they opened in this launch.
+    var wifiOnlyVaultNames: [String] {
+        guard let vault, phase == .off || phase == .ready else { return [] }
+        let selected = vault.vault?.id
+        let selectedOff = selected != nil && !status.enabled
+            && !vaults.contains { $0.vaultID == selected && $0.status.enabled }
+        return Decisions.wifiOnlyVaults(
+            entries: vault.vaults.map { (id: $0.id, name: $0.name) }, selected: selected,
+            selectedOff: selectedOff, withoutQuestions: withoutQuestions)
     }
 
     /// The vault of `question`, with this iPhone's row in its team.
@@ -564,6 +579,62 @@ final class QuestionsModel {
         }
         guard isCurrentUnanswered(question), scopedDeliveries[question.requestIdentity] != .sending,
             let card = question.card, let offered = Self.offeredChoice(choice.answer, card: card) else { return }
+        await deliver(choice.answer, for: question,
+            reason: Self.faceIDReason(agent: card.run.agent, answer: offered.label))
+    }
+
+    /// The warning line of a connect request: the owner allows only the request whose code the
+    /// browser page shows. A client id is public, so a request that someone else started can show
+    /// the same client name with another code.
+    static func connectCodeWarning(code: String) -> String {
+        "Allow only if the page in your browser shows this code: \(code)."
+    }
+
+    /// The text of the Face ID prompt of a connect request: the client, where the code goes back
+    /// ("localhost" for a program on a computer), and the Mac, with control characters and `"`
+    /// removed, at most 40 characters each. A card of a Mac before 0.5.16 has no host.
+    static func connectFaceIDReason(client: String, mac: String, host: String? = nil, local: Bool = false)
+        -> String
+    {
+        let clean = { (text: String) -> String in
+            String(String(String.UnicodeScalarView(
+                text.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0 != "\"" }))
+                .prefix(40))
+        }
+        guard let host else { return "allow \"\(clean(client))\" to connect to \(clean(mac))" }
+        let back = local ? "localhost" : clean(host)
+        return "allow \"\(clean(client))\", which returns to \(back), to connect to \(clean(mac))"
+    }
+
+    /// Answer a connect request (card v2 `kind = connect`): Allow asks for Face ID for this answer,
+    /// as "Allow once" of a run; Deny goes at once. Only the settle of the Mac says what happened.
+    func answerConnect(allow: Bool, for question: RemoteQuestion) async {
+        if question.vaultID != nil, vault(of: question) == nil {
+            scopedDeliveries[question.requestIdentity] = .failed(Self.notOpenText(question.vaultName))
+            return
+        }
+        guard isCurrentUnanswered(question), scopedDeliveries[question.requestIdentity] != .sending,
+            let connect = question.connect else { return }
+        await deliver(RemoteAnswer(kind: allow ? .allowConnect : .deny), for: question,
+            reason: Self.connectFaceIDReason(
+                client: connect.clientName, mac: connect.macName, host: connect.redirectHost,
+                local: connect.localRedirect))
+    }
+
+    /// Whether Deny and Allow of the connect request `question` can be used at `now`.
+    func canAnswerConnect(_ question: RemoteQuestion, now: Date) -> Bool {
+        let blocked: Bool
+        switch delivery(for: question) {
+        case .sending, .sent: blocked = true
+        case .failed, nil: blocked = false
+        }
+        return question.connect != nil && !blocked && isCurrentUnanswered(question)
+            && question.expiresAt > Int64(now.timeIntervalSince1970)
+    }
+
+    /// Prepare, sign (Face ID for an answer that gives authority, with `reason`), and post
+    /// `answer` for `question`; the caller checked that the question offers it.
+    private func deliver(_ answer: RemoteAnswer, for question: RemoteQuestion, reason: String) async {
         let generation = openGeneration
         if case .sent = scopedDeliveries[question.requestIdentity] { return }
         scopedDeliveries[question.requestIdentity] = .sending
@@ -579,9 +650,9 @@ final class QuestionsModel {
         let row = vault(of: question)?.status ?? status
         do {
             let prepared = try await service.questionAnswerString(
-                qid: question.qid, answer: choice.answer, vaultID: question.vaultID)
+                qid: question.qid, answer: answer, vaultID: question.vaultID)
             guard generation == openGeneration, isCurrentUnanswered(question),
-                prepared.needsFaceID == choice.answer.needsFaceID else {
+                prepared.needsFaceID == answer.needsFaceID else {
                 throw VaultError(.invalidInput, "Request changed. Review the updated request before answering.")
             }
             var signature: Data?
@@ -589,9 +660,7 @@ final class QuestionsModel {
                 guard let signer = signers.signer(team: row.teamID, registered: row.answerKey) else {
                     throw VaultError(.notRegistered, Self.noKeyText)
                 }
-                signature = try await signer.sign(
-                    Data(prepared.answerString.utf8),
-                    reason: Self.faceIDReason(agent: card.run.agent, answer: offered.label))
+                signature = try await signer.sign(Data(prepared.answerString.utf8), reason: reason)
             }
             guard generation == openGeneration else { return }
             if prepared.needsFaceID { await refresh() }
@@ -599,7 +668,7 @@ final class QuestionsModel {
                 vault(of: question)?.status == row else {
                 throw VaultError(.invalidInput, "Request changed. Review the updated request before answering.")
             }
-            let sent = try await post(question, choice.answer, prepared, signature, generation: generation)
+            let sent = try await post(question, answer, prepared, signature, generation: generation)
             // A lock can complete while transport is in flight. Never restore decrypted state.
             guard generation == openGeneration else { return }
             scopedDeliveries[question.requestIdentity] = .sent(sent.kind)

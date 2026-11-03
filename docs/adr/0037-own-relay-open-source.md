@@ -2,7 +2,8 @@
 
 Date: 2026-11-02.
 Status: ACCEPTED by the owner on 2026-11-02 (all decisions D1 to D14, in the table at the end). TEE
-features are an enterprise track that comes later. Not implemented.
+features are an enterprise track that comes later. Progress (2026-11-03): stages 0 and 1 shipped in 0.5.14 (#66): the relay is the crate `crates/apassy-relay`, and the hosted relay serves no team vaults. The cloud slice of stage 2 is in the draft PRs #85, #86, #87, #89 and #92. Stages 3 to 8 have not started.
+Cloud slice first (owner, 2026-11-03): [docs/design/implementation-plan-0037-cloud-agents.md](../design/implementation-plan-0037-cloud-agents.md).
 When accepted, it replaces the hosted parts of ADR 0016 §5, ADR 0019 (a multi-tenant relay that the
 operator runs for teams), the default relay address of ADR 0022, and Connect creation on an
 Apassy-run server (ADR 0032). It keeps every wire contract and the device identity of ADR 0019.
@@ -374,6 +375,7 @@ Limits:
 | DERP relays | WireGuard ciphertext |
 | Apple | Push metadata. iCloud ciphertext if folder sync is on. |
 | Apassy Connect (if kept and used) | Sealed envelopes and ciphertext, sizes, times |
+| Bouncer brain service of Apassy Connect (paid, opt-in with a consent screen, ADR 0035) | The state of each bouncer request (user request, command, relative directory, purpose, variable names, owner rule), in memory for one request; the examples of a training job for at most 24 h. Never a value, the vault, the vault path, or an absolute project path. It cannot allow a run: the bouncer gate on the Mac decides |
 | Team host node | The values of its team during released runs. It is the key holder already. |
 
 ## Stages

@@ -1,6 +1,9 @@
 import Foundation
 
 /// In-memory UI/model fixtures only. Production uses the signature-verifying Rust core.
+/// The calls of `VaultService` are `async`, as the requirements are: a caller in an async context
+/// that holds a `PreviewVaultService` (the demo) would else pick the defaults of
+/// `extension VaultService`, which refuse ("Update Apassy to answer access requests.").
 extension PreviewVaultService {
   public struct AccessPost: Sendable {
     public let identity: String
@@ -10,18 +13,18 @@ extension PreviewVaultService {
   public func setAccessRequests(_ rows: [RelayAccessRequest]) { accessPreviewRows = rows }
   public func accessPosts() -> [AccessPost] { accessPreviewPosts }
   public func failNextAccessAnswer(_ error: VaultError) { accessPreviewFailures.append(error) }
-  public func accessRequestsList() throws -> AccessRequestsSnapshot {
+  public func accessRequestsList() async throws -> AccessRequestsSnapshot {
     guard unlocked else { throw VaultError(.locked, "Unlock the fixture vault.") }
     return AccessRequestsSnapshot(
       protocolName: "apassy-access-request", version: 1, requests: accessPreviewRows)
   }
-  public func accessRequestsHistory() throws -> AccessRequestsSnapshot {
+  public func accessRequestsHistory() async throws -> AccessRequestsSnapshot {
     guard unlocked else { throw VaultError(.locked, "Unlock the fixture vault.") }
     return AccessRequestsSnapshot(
       protocolName: "apassy-access-request", version: 1,
       requests: accessPreviewRows.filter { $0.receipt != nil })
   }
-  public func accessRequestPrepare(_ request: RelayAccessRequest, choice: AccessChoice) throws
+  public func accessRequestPrepare(_ request: RelayAccessRequest, choice: AccessChoice) async throws
     -> PreparedAccessAnswer
   {
     guard unlocked,
@@ -40,7 +43,7 @@ extension PreviewVaultService {
   public func accessRequestAnswer(
     _ request: RelayAccessRequest, choice: AccessChoice, prepared: PreparedAccessAnswer,
     signature: Data?
-  ) throws -> SentAccessAnswer {
+  ) async throws -> SentAccessAnswer {
     guard unlocked,
       let index = accessPreviewRows.firstIndex(where: { $0.id == request.id && $0.state == "open" }
       ),
@@ -65,7 +68,7 @@ extension PreviewVaultService {
       receipt: receipt, answer_key: request.answer_key)
     return SentAccessAnswer(sent: true)
   }
-  public func accessRequestCancelPrepared() {}
+  public func accessRequestCancelPrepared() async {}
 
   public static func sampleAccessRequest(
     answerKey: Data? = nil, expiresIn: UInt64 = 300, requestID: String = "81"

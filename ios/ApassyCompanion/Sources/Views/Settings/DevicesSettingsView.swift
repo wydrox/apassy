@@ -1,3 +1,4 @@
+import ApassyVaultDemo
 import ApassyVaultKit
 import SwiftUI
 
@@ -18,7 +19,13 @@ struct DevicesSettingsView: View {
             Section {
                 QuestionsStateRow()
                 MacPairingRow()
-                AppleWatchRow()
+                if root.isDemo {
+                    // The demo pairs nothing: no Mac, no watch, no relay.
+                    Button("Pair with a Mac", systemImage: "qrcode.viewfinder") { root.showNotAvailableInDemo() }
+                    Button("Add Apple Watch", systemImage: "applewatch") { root.showNotAvailableInDemo() }
+                } else {
+                    AppleWatchRow()
+                }
                 if let ui {
                     Button("Open Requests", systemImage: "checkmark.circle") {
                         ui.tab = .decisions
@@ -29,13 +36,15 @@ struct DevicesSettingsView: View {
                 Text("Approve agent runs")
             } footer: {
                 Text(
-                    "Questions through the relay reach this iPhone on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. Both show in Decisions."
+                    root.isDemo
+                        ? "In the demo, the questions come from “\(DemoVault.macName)”, a Mac of sample data. Pairing, the relay, and the Apple Watch are not available in the demo."
+                        : "Questions through the relay reach this iPhone on any network. Runs from the Mac on Wi-Fi show while this iPhone and the Mac are on the same network. Both show in Decisions."
                 )
             }
         }
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
-        .task { AppleWatchLink.shared.activate() }
+        .task { if !root.isDemo { AppleWatchLink.shared.activate() } }
     }
 }
 
@@ -96,14 +105,27 @@ struct AppleWatchRow: View {
     }
 }
 
-/// The Mac that this iPhone approves runs for on the local network (the companion).
+/// The Mac that this iPhone approves runs for on the local network (the companion): "<Mac> on
+/// Wi-Fi" with its state. This is the only place that shows the Wi-Fi state (ADR 0028 stage 1).
 struct MacPairingRow: View {
     @Environment(RootModel.self) private var root
 
     var body: some View {
         switch root.companion.phase {
         case .paired(let session):
-            LabeledContent("Paired with", value: session.macName)
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent("\(session.macName) on Wi-Fi", value: session.state.wifiText)
+                if session.state != .connected, let fetchedAt = session.fetchedAt {
+                    Text("Last updated \(fetchedAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("devices.macOnWiFi")
+            if session.state != .connected {
+                Button("Retry \(session.macName) on Wi-Fi") { Task { await session.refresh() } }
+                    .frame(minHeight: 44)
+            }
         default:
             LabeledContent("Mac on Wi-Fi", value: "Not paired")
         }

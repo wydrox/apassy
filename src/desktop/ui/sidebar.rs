@@ -1,6 +1,6 @@
 //! The sidebar (ADR 0026 §1): Personal (all credentials and the folders), Shared (the
-//! shared vaults), Agents (Decisions and Agents), and at the bottom the open vault with
-//! its lock and the Settings button. While Settings shows, no row is selected and the
+//! shared vaults), Bouncer (Overview, Decisions, Agents, Logs), and at the bottom the open
+//! vault with its lock and the Settings button. While Settings shows, no row is selected and the
 //! Settings button is.
 //!
 //! The sidebar is full, a rail of icons, or, in a narrow window, a full sidebar that
@@ -66,6 +66,15 @@ pub(super) fn navigate(app: &mut DesktopApp, place: Place) {
     }
     if let Place::Shared(_) = &place {
         app.selected_item_id = None;
+    }
+    // Agents opens on all agents; a caller opens an agent page after this.
+    if place == Place::Agents {
+        app.ui.agent_page.open = None;
+        app.ui.agent_page.note_open = None;
+        #[cfg(feature = "vault")]
+        {
+            app.owner_ui.selected_agent = None;
+        }
     }
     app.place = place;
     app.ui.sidebar_float = false;
@@ -231,7 +240,7 @@ fn full_content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
             ui.spacing_mut().item_spacing.y = 1.0;
             personal_section(app, ui);
             shared_section(app, ui, false);
-            agents_section(app, ui, pending, false);
+            bouncer_section(app, ui, pending, false);
         });
     footer(app, ui, false);
 }
@@ -258,7 +267,7 @@ fn rail_content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     }
     shared_section(app, ui, true);
     ui.add_space(10.0);
-    agents_section(app, ui, pending, true);
+    bouncer_section(app, ui, pending, true);
     ui.with_layout(Layout::bottom_up(Align::Center), |ui| footer(app, ui, true));
 }
 
@@ -465,10 +474,12 @@ fn shared_section(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
     }
 }
 
-/// What blocks an agent: the waiting questions and the open credential requests.
+/// What blocks an agent: the waiting questions, the open credential requests, and the
+/// connect requests of remote agents.
 fn decisions_badge(app: &DesktopApp, pending: &Pending) -> Badge {
     #[cfg(feature = "vault")]
-    let count = super::decisions::badge_count(app, pending);
+    let count = super::decisions::badge_count(app, pending)
+        + super::bouncer_load::pending_connects(app).len();
     #[cfg(not(feature = "vault"))]
     let count = {
         let _ = pending;
@@ -511,31 +522,34 @@ fn agents_count(app: &DesktopApp) -> (Option<usize>, Option<Badge>) {
     }
 }
 
-/// "Agents": Decisions with the red count of what blocks agents, and Agents.
-fn agents_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, rail: bool) {
+/// "Bouncer": Overview, Decisions with the red count of what blocks agents, Agents with
+/// the count of the connected ones, and Logs; ⌘2 to ⌘5 in that order.
+fn bouncer_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, rail: bool) {
     let badge = decisions_badge(app, pending);
     let (count, agents_badge) = agents_count(app);
     let mut chosen = None;
     let rows = [
+        (Place::Overview, Icon::Gauge, "Overview", None, None, "⌘2"),
         (
             Place::Decisions,
             Icon::CheckCircle,
             "Decisions",
             None,
             Some(badge),
-            "⌘2",
+            "⌘3",
         ),
         (
             Place::Agents,
             Icon::Agent,
             "Agents",
-            count,
+            count.filter(|count| *count > 0),
             agents_badge,
-            "⌘3",
+            "⌘4",
         ),
+        (Place::Logs, Icon::Lines, "Logs", None, None, "⌘5"),
     ];
     if !rail {
-        kit::sidebar_section(ui, "Agents", None);
+        kit::sidebar_section(ui, "Bouncer", None);
     }
     for (place, icon, label, count, badge, keys) in rows {
         let selected = app.place == place;

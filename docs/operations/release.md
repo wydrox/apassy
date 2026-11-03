@@ -47,6 +47,13 @@ the shared marketing version. Before upload, read App Store Connect and choose a
 valid higher build number; a build-number increment alone does not replace the
 marketing-version bump. Keep the iOS 26 deployment target and required toolchain.
 
+The iPhone and watch app declare `ITSAppUsesNonExemptEncryption = YES`. Until
+`project.yml` has an `ITSEncryptionExportComplianceCode`, a processed build stays in
+"Missing Compliance" and no tester gets it: attach the app's encryption declaration
+to the build through the App Store Connect API
+([export-compliance.md](../store/app-store/export-compliance.md) section 2.2) before
+you check the TestFlight group. A build in "Missing Compliance" is not delivered.
+
 Read back all six destinations after delivery: the signed macOS download and
 `latest.json` (including hashes/source), processed TestFlight marketing version and
 build in the intended group, public extension listing/package, public Linux binary
@@ -56,6 +63,23 @@ Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
 
+## 0.5.16 coordinated release
+
+0.5.16 collects the work on main since 0.5.15 (Apple Watch, passkey PRF and
+large blob, full Credential Exchange import, Find duplicates, Agents and
+Decisions of every Mac, the decision log) and the release branch: remote agents
+through the Mac's node and the MCP authorization flow, the Bouncer section, the
+fixes for the over-asking bouncer and the idle CPU, the review fixes, and the
+iPhone demo with the App Store package. All six components move to 0.5.16; the
+relay, the Linux CLI and the extension come from 0.5.14. The vault schema goes
+to 27, relay team schema to 7, and the relay directory to 1004. Build the relay
+image with `relay-image.yml` (tag `image-release-0.5.16`) and deploy it only
+after the owner approves the exact image and backup.
+
+State on 2026-11-03: prepared, not published. The version bump and the changelog
+are on `r16/version-bump` (from `release/0.5.16`). No component is live at 0.5.16
+and there is no tag `v0.5.16`.
+
 ## 0.5.15 coordinated release
 
 0.5.15 fixes the Touch ID panel for vault unlock (#80): the LSUIElement keychain
@@ -63,6 +87,8 @@ helper fell back to the macOS dialog in 0.5.14. All six components move to
 0.5.15; only macOS changes functionally. The vault schema stays at 23. Build the
 relay image with `relay-image.yml` (tag `image-release-0.5.15`) and deploy it only
 after the owner approves the exact image and backup.
+
+State on 2026-11-03: only the macOS download (`latest.json` 0.5.15, 4fd3f9f) and the website went out at 0.5.15. TestFlight 0.5.15 (29895036) is an internal test build from 70e1bac0 with the watch app, not a release. The relay, the Linux CLI and the extension stay at 0.5.14. There is no tag `v0.5.15`. The open components go straight to 0.5.16 ([release plan](../design/release-plan-0.5.16.md)).
 
 ## 0.5.14 coordinated release
 
@@ -212,7 +238,7 @@ Apps from 0.5.0 accept `"file"` equal to `Apassy.dmg` or to `Apassy-<version>.dm
 
 `/download` reads the version of `latest.json` and redirects to `/download/Apassy-<version>.dmg`. When `latest.json` cannot be read, or the versioned key is not in the bucket (a release before 0.5.0), it redirects to `/download/Apassy.dmg`. The Worker serves only `/download/Apassy-MAJOR.MINOR.PATCH[-PRE].dmg`. Other names get the 404 page.
 
-Later step, not done yet: when every installed app runs 0.5.0 or later, one release can change `latest.json` to `"file": "Apassy-<version>.dmg"` (in `scripts/build-dmg.sh`). After that release, the workflow can stop uploading `Apassy.dmg`, the Worker can drop `/download/Apassy.dmg` and the fallback of `/download`, and the bucket key `Apassy.dmg` can go. An app before 0.5.0 then no longer updates itself: its owner downloads the new version from the site once.
+Later step, not done yet. Decision ([D17](../design/implementation-plan-misc.md#d17-latestjson-keeps-apassydmg-0015-1)): keep `Apassy.dmg` until the condition holds. **Condition:** no request for `/latest.json` with a user agent `Apassy/0.3.*` or `Apassy/0.4.*` for 90 days. At each release preparation, read this from Cloudflare's request analytics (read-only, aggregate; no new logging) and note the result in the release record. If the analytics cannot show 90 days, keep it. When the condition holds, one release can change `latest.json` to `"file": "Apassy-<version>.dmg"` (in `scripts/build-dmg.sh`). After that release, the workflow can stop uploading `Apassy.dmg`, the Worker can drop `/download/Apassy.dmg` and the fallback of `/download`, and the bucket key `Apassy.dmg` can go. An app before 0.5.0 then no longer updates itself: its owner downloads the new version from the site once.
 
 ## CI duration and binary artifacts
 

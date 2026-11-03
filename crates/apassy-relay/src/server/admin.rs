@@ -25,7 +25,8 @@ use crate::server::audit::{self, member_actor};
 use crate::server::auth::{AgentAuth, MemberAuth, parse_role, role_text};
 use crate::server::env::{RESERVED_NAMES, base_var, provider_vars};
 use crate::server::store::{
-    ItemRow, db, has_grant, is_unique_violation, load_live_items, team_name, to_i, to_u,
+    ItemRow, agent_items, db, has_grant, is_unique_violation, load_live_items, team_name, to_i,
+    to_u,
 };
 
 const DEFAULT_INVITE_HOURS: u32 = 72;
@@ -33,6 +34,8 @@ const MAX_INVITE_HOURS: u32 = 168;
 const DEFAULT_AGENT_DAYS: u32 = 30;
 const MAX_AGENT_DAYS: u32 = 365;
 const MAX_ITEM_HOSTS: usize = 16;
+/// The longest item list of an agent: the default `items` limit of a team.
+const MAX_AGENT_ITEMS: usize = 500;
 
 fn to_json<T: Serialize>(value: &T) -> RelayResult<Value> {
     serde_json::to_value(value).map_err(|_| RelayError::internal("A result cannot be written."))
@@ -705,7 +708,31 @@ fn declared<T>(
         .map_err(|_| RelayError::invalid(format!("The {what} is not one of the known values.")))
 }
 
-pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> RelayResult<Value> {
+/// The fields of an item after their checks, ready to store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedItem {
+    pub name: String,
+    pub env_name: String,
+    pub uid: String,
+    pub sealed: Vec<u8>,
+    pub provider: Option<String>,
+    /// Host rules as shown (`HostRule::to_string`), without repeats.
+    pub hosts: Vec<String>,
+    /// The hosts of `hosts` that `broad_host` names, allowed on purpose.
+    pub broad_hosts: Vec<String>,
+    pub environment: String,
+    pub risk: String,
+    pub scope: String,
+    pub reversibility: String,
+}
+
+/// The checks of `POST /v1/items` on everything but the collection: the name, the
+/// variable, the uid, the sealed value (`sealed` decodes and checks it; an embedded node
+/// gives `hostkeys::VALUE_ON_HOST`), the provider, the hosts, and the declared values.
+pub fn checked_item(
+    request: &NewItem,
+    sealed: impl FnOnce() -> RelayResult<Vec<u8>>,
+) -> RelayResult<CheckedItem> {
     let name = checked_label(&request.name, "item")?;
     let env_name = checked_env_name(&request.env_name)
         .map_err(|_| RelayError::invalid("The variable name is not allowed."))?
@@ -722,12 +749,7 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
             "The uid is 32 lowercase hex characters.",
         ));
     }
-    let sealed = hostkeys::decode_b64(&request.sealed, hostkeys::MAX_SEALED_BYTES)
-        .ok()
-        .filter(|bytes| bytes.len() >= hostkeys::MIN_SEALED_BYTES)
-        .ok_or_else(|| {
-            RelayError::invalid("The sealed value is base64url text of 12 + 16 + 1 to 4096 bytes.")
-        })?;
+    let sealed = sealed()?;
     let provider = match request.provider.as_deref() {
         None | Some("") => None,
         Some(id) => {
@@ -785,15 +807,58 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         Reversibility::parse,
         "reversibility",
     )?;
-    let hosts_text = serde_json::to_string(&hosts)
+    Ok(CheckedItem {
+        name,
+        env_name,
+        uid: request.uid.clone(),
+        sealed,
+        provider,
+        hosts,
+        broad_hosts,
+        environment,
+        risk,
+        scope,
+        reversibility,
+    })
+}
+
+pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> RelayResult<Value> {
+    let item = checked_item(&request, || {
+        hostkeys::decode_b64(&request.sealed, hostkeys::MAX_SEALED_BYTES)
+            .ok()
+            .filter(|bytes| bytes.len() >= hostkeys::MIN_SEALED_BYTES)
+            .ok_or_else(|| {
+                RelayError::invalid(
+                    "The sealed value is base64url text of 12 + 16 + 1 to 4096 bytes.",
+                )
+            })
+    })?;
+    let id = insert_item(core, by, request.collection_id, &item, now)?;
+    to_json(&ItemCreated {
+        id,
+        hosts: item.hosts,
+    })
+}
+
+/// Stores a checked item in `collection`: the approver is checked again, the uid and the
+/// live variable of the collection are new, and the team's `items` limit holds. Returns
+/// its id.
+pub fn insert_item(
+    core: &Core,
+    by: &MemberAuth,
+    collection: CollectionId,
+    item: &CheckedItem,
+    now: u64,
+) -> RelayResult<u64> {
+    let hosts_text = serde_json::to_string(&item.hosts)
         .map_err(|_| RelayError::internal("The hosts cannot be written."))?;
     let id = core.store.tx(|tx| {
         crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
-        let name = core.audit.mask_text(&name);
+        let name = core.audit.mask_text(&item.name);
         let exists: i64 = tx
             .query_row(
                 "SELECT count(*) FROM collection WHERE id = ?1",
-                params![to_i(request.collection_id.0)],
+                params![to_i(collection.0)],
                 |row| row.get(0),
             )
             .map_err(db)?;
@@ -803,7 +868,7 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         let uid_used: i64 = tx
             .query_row(
                 "SELECT count(*) FROM item WHERE uid = ?1",
-                params![request.uid],
+                params![item.uid],
                 |row| row.get(0),
             )
             .map_err(db)?;
@@ -816,7 +881,7 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         let env_used: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM item WHERE collection_id = ?1 AND env_name = ?2 AND archived_at IS NULL)",
-                params![to_i(request.collection_id.0), env_name],
+                params![to_i(collection.0), item.env_name],
                 |row| row.get(0),
             )
             .map_err(db)?;
@@ -841,17 +906,17 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
              environment, risk, scope, reversibility, created_by, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
-                to_i(request.collection_id.0),
+                to_i(collection.0),
                 name,
-                env_name,
-                request.uid,
-                sealed,
-                provider,
+                item.env_name,
+                item.uid,
+                item.sealed,
+                item.provider,
                 hosts_text,
-                environment,
-                risk,
-                scope,
-                reversibility,
+                item.environment,
+                item.risk,
+                item.scope,
+                item.reversibility,
                 to_i(by.id.0),
                 to_i(now)
             ],
@@ -873,14 +938,121 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
             "item_added",
             None,
             &json!({
-                "item_id": id, "collection_id": request.collection_id, "name": name,
-                "env_name": env_name, "provider": provider, "hosts": hosts,
-                "environment": environment, "broad_hosts": broad_hosts
+                "item_id": id, "collection_id": collection, "name": name,
+                "env_name": item.env_name, "provider": item.provider, "hosts": item.hosts,
+                "environment": item.environment, "broad_hosts": item.broad_hosts
             }),
         )?;
         Ok(Ok(id))
     })??;
-    to_json(&ItemCreated { id, hosts })
+    Ok(id)
+}
+
+/// True when the stored item has the fields of `item` (an embedded node's catalog sync
+/// changes an item only when they differ). The stored name is masked.
+pub fn item_matches(core: &Core, row: &ItemRow, item: &CheckedItem) -> bool {
+    !row.archived
+        && row.name == core.audit.mask_text(&item.name)
+        && row.env_name == item.env_name
+        && row.sealed == item.sealed
+        && row.provider == item.provider
+        && row.hosts == item.hosts
+        && row.environment == item.environment
+        && row.risk == item.risk
+        && row.scope == item.scope
+        && row.reversibility == item.reversibility
+}
+
+/// Changes the fields of item `id` (live or archived) to those of `item` and makes it
+/// live, for an embedded node's catalog sync (docs/SPEC.md section 30.3). Its uid stays.
+/// Its pending runs are denied (`approval_invalidated`) and its sessions end: they were
+/// decided with the old hosts and declarations.
+pub fn item_update(
+    core: &Core,
+    by: &MemberAuth,
+    id: ItemId,
+    item: &CheckedItem,
+    now: u64,
+) -> RelayResult<()> {
+    let hosts_text = serde_json::to_string(&item.hosts)
+        .map_err(|_| RelayError::internal("The hosts cannot be written."))?;
+    core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Approver, now)?;
+        let archived: Option<bool> = tx
+            .query_row(
+                "SELECT archived_at IS NOT NULL FROM item WHERE id = ?1",
+                params![to_i(id.0)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let archived = archived.ok_or_else(|| RelayError::not_found("item"))?;
+        if archived {
+            // An item made live again counts in the team's `items` limit, as a new one.
+            let items: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM item WHERE archived_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            if to_u(items) >= core.limits().items {
+                return Ok(Err(core.limit_error_on(tx, now, "items")?));
+            }
+        }
+        let name = core.audit.mask_text(&item.name);
+        let changed = match tx.execute(
+            "UPDATE item SET name = ?2, env_name = ?3, sealed = ?4, provider = ?5, hosts = ?6, \
+             environment = ?7, risk = ?8, scope = ?9, reversibility = ?10, archived_at = NULL \
+             WHERE id = ?1",
+            params![
+                to_i(id.0),
+                name,
+                item.env_name,
+                item.sealed,
+                item.provider,
+                hosts_text,
+                item.environment,
+                item.risk,
+                item.scope,
+                item.reversibility
+            ],
+        ) {
+            Ok(changed) => changed,
+            Err(error) if is_unique_violation(&error) => {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "This collection has an item with this variable name.",
+                ));
+            }
+            Err(error) => return Err(db(error)),
+        };
+        if changed == 0 {
+            return Err(RelayError::not_found("item"));
+        }
+        let actor = member_actor(by.id.0);
+        invalidate_pending(core, tx, now, &actor, "item_changed", |run| {
+            run.items.contains(&id)
+        })?;
+        core.sessions.end_matching(tx, now, "item_changed", |s| {
+            s.secrets.iter().any(|secret| secret.item_id == id)
+        })?;
+        core.audit.write_on(
+            tx,
+            now,
+            &actor,
+            "item_changed",
+            None,
+            &json!({
+                "item_id": id, "name": name, "env_name": item.env_name,
+                "provider": item.provider, "hosts": item.hosts,
+                "environment": item.environment, "broad_hosts": item.broad_hosts
+            }),
+        )?;
+        Ok(Ok(()))
+    })??;
+    core.notify.notify();
+    Ok(())
 }
 
 /// Why a host is broad, or `None`. A host rule covers the host and every subdomain.
@@ -1102,6 +1274,56 @@ pub fn agent_create(
     request: &AgentCreate,
     now: u64,
 ) -> RelayResult<Value> {
+    let agent = insert_agent(core, by, request, None, now)?;
+    to_json(&IssuedRef {
+        id: agent.id.0,
+        secret: agent.token.expose(),
+        expires_at: Some(agent.expires_at),
+    })
+}
+
+/// A new agent and its token, which exists only here and in the answer.
+pub struct NewAgent {
+    pub id: AgentId,
+    pub token: crate::secret::SecretString,
+    pub expires_at: u64,
+}
+
+/// Checks the item list of an agent: at most `MAX_AGENT_ITEMS` distinct ids of live items.
+fn checked_agent_items(conn: &Connection, items: &[ItemId]) -> RelayResult<String> {
+    let distinct: std::collections::HashSet<&ItemId> = items.iter().collect();
+    if items.len() > MAX_AGENT_ITEMS || distinct.len() != items.len() {
+        return Err(RelayError::invalid(
+            "The item list of an agent has at most 500 distinct items.",
+        ));
+    }
+    for id in items {
+        let live: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM item WHERE id = ?1 AND archived_at IS NULL)",
+                params![to_i(id.0)],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if !live {
+            return Err(RelayError::invalid(
+                "An item of the agent's list is unknown or archived.",
+            ));
+        }
+    }
+    Ok(crate::server::store::items_text(items))
+}
+
+/// Makes an agent of `by`. `items`: its item list (`agent.items`, schema 7), or `None`
+/// for every item of its member's grants (`POST /v1/agents` always). An embedded node
+/// gives a list.
+pub fn insert_agent(
+    core: &Core,
+    by: &MemberAuth,
+    request: &AgentCreate,
+    items: Option<&[ItemId]>,
+    now: u64,
+) -> RelayResult<NewAgent> {
     let name = core
         .audit
         .mask_text(&checked_label(&request.name, "agent")?);
@@ -1133,45 +1355,115 @@ pub fn agent_create(
             }
         }
 
+        // A node with the MCP authorization flow counts every agent that is not revoked:
+        // an agent of the flow has no live token until its client trades a code, and
+        // between two access tokens (decided 2026-11-03). Elsewhere an expired agent
+        // frees its place.
+        let every_agent = core.config.oauth.is_some();
         let agents: i64 = tx
             .query_row(
                 "SELECT count(*) FROM agent a JOIN member m ON m.id = a.member_id \
-                 WHERE a.revoked_at IS NULL AND a.expires_at > ?1 AND m.revoked_at IS NULL",
-                params![to_i(now)],
+                 WHERE a.revoked_at IS NULL AND (?2 OR a.expires_at > ?1) \
+                 AND m.revoked_at IS NULL",
+                params![to_i(now), every_agent],
                 |row| row.get(0),
             )
             .map_err(db)?;
         if to_u(agents) >= core.limits().agents {
             return Ok(Err(core.limit_error_on(tx, now, "agents")?));
         }
+        let items_text = items
+            .map(|items| checked_agent_items(tx, items))
+            .transpose()?;
         tx.execute(
-            "INSERT INTO agent (member_id, name, token_hash, created_at, expires_at, device_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO agent (member_id, name, token_hash, created_at, expires_at, device_id, items) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 to_i(by.id.0),
                 name,
                 hash.0.as_slice(),
                 to_i(now),
                 to_i(expires_at),
-                by.device.as_ref().map(|device| to_i(device.id.0))
+                by.device.as_ref().map(|device| to_i(device.id.0)),
+                items_text
             ],
         )
         .map_err(db)?;
         let id = to_u(tx.last_insert_rowid());
+        let mut detail = json!({"agent_id": id, "name": name, "expires_at": expires_at});
+        if let Some(items) = items {
+            detail["items"] = json!(items);
+        }
         core.audit.write_on(
             tx,
             now,
             &member_actor(by.id.0),
             "agent_created",
             None,
-            &json!({"agent_id": id, "name": name, "expires_at": expires_at}),
+            &detail,
         )?;
         Ok(Ok(id))
     })??;
-    to_json(&IssuedRef {
-        id,
-        secret: token.expose(),
-        expires_at: Some(expires_at),
+    Ok(NewAgent {
+        id: AgentId(id),
+        token,
+        expires_at,
     })
+}
+
+/// Sets the item list of a live agent (`agent.items`): `None` for every item of its
+/// member's grants. A list never widens a grant. The pending runs of the agent with an
+/// item that the new list leaves out are denied (`approval_invalidated`), and its sessions
+/// with such an item end, in the same transaction.
+pub fn agent_set_items(
+    core: &Core,
+    by: &MemberAuth,
+    id: AgentId,
+    items: Option<&[ItemId]>,
+    now: u64,
+) -> RelayResult<()> {
+    core.store.tx(|tx| {
+        crate::server::auth::require_member(tx, by, crate::server::auth::Need::Member, now)?;
+        let owner: Option<i64> = tx
+            .query_row(
+                "SELECT member_id FROM agent WHERE id = ?1 AND revoked_at IS NULL",
+                params![to_i(id.0)],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let owner = owner.ok_or_else(|| RelayError::not_found("agent"))?;
+        if !by.role.is_approver() && to_u(owner) != by.id.0 {
+            return Err(RelayError::not_found("agent"));
+        }
+        let text = items
+            .map(|items| checked_agent_items(tx, items))
+            .transpose()?;
+        tx.execute(
+            "UPDATE agent SET items = ?2 WHERE id = ?1",
+            params![to_i(id.0), text],
+        )
+        .map_err(db)?;
+        let kept = |item: &ItemId| items.is_none_or(|list| list.contains(item));
+        let actor = member_actor(by.id.0);
+        invalidate_pending(core, tx, now, &actor, "agent_items_changed", |run| {
+            run.agent_id == id && run.items.iter().any(|item| !kept(item))
+        })?;
+        core.sessions
+            .end_matching(tx, now, "agent_items_changed", |s| {
+                s.agent_id == id && s.secrets.iter().any(|secret| !kept(&secret.item_id))
+            })?;
+        core.audit.write_on(
+            tx,
+            now,
+            &actor,
+            "agent_items_changed",
+            None,
+            &json!({"agent_id": id, "items": items}),
+        )?;
+        Ok(())
+    })?;
+    core.notify.notify();
+    Ok(())
 }
 
 pub fn agent_list(core: &Core, who: &MemberAuth) -> RelayResult<Value> {
@@ -1268,9 +1560,14 @@ fn approval_text(item: &ItemRow) -> String {
 
 pub fn access(core: &Core, agent: &AgentAuth) -> RelayResult<Value> {
     core.store.with(|conn| {
+        // The agent's own list, when it has one, narrows the grants of its member.
+        let listed = agent_items(conn, agent.id)?;
         let mut items = Vec::new();
         for item in load_live_items(conn, None)? {
             if !has_grant(conn, agent.member.id, item.collection_id)? {
+                continue;
+            }
+            if listed.as_ref().is_some_and(|list| !list.contains(&item.id)) {
                 continue;
             }
             let hosts: Vec<HostRule> = item

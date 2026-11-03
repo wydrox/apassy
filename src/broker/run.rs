@@ -20,11 +20,11 @@
 //!       flag of the analysis (for example `secret_output`, a secret that goes to a
 //!       host that is not a host of its provider, or a production word); a database
 //!       host from the command that is not a known host of the items; "Always ask me"
-//!       of the item or "Always ask for this agent"; and a production item (production from the owner, a value signal, or
-//!       usage) without a production allowance that fits the run (ADR 0010, ADR 0025
-//!       §3b): one for the item, the project, and the kind of action, where the rules are
-//!       certain of that kind, and where each destination host of the run is a host of
-//!       the allowance or a known host of the item.
+//!       of the item or "Always ask for this agent"; and a production item with
+//!       read-write or admin scope (ADR 0010, ADR 0031 of 2026-11-02): production of
+//!       every source, also the careful default of an item without a label, and no
+//!       production allowance or remembered answer waives it. Production with declared
+//!       read-only scope goes on.
 //!       A requested code additionally needs an explicit code-covering owner answer
 //!       for this item/project/action. Patterns and models cannot waive that veto.
 //!    2. Without a running bouncer, each run asks the owner. Every remembered route
@@ -37,10 +37,14 @@
 //!    6. A foreign host or project asks. Each credential must cover each host;
 //!       an explicit execution answer can add hosts or cover the foreign project.
 //!    7. An active owner-taught pattern starts the run.
-//!    8. Otherwise the model decides, including first use, default production and
+//!    8. Otherwise the model decides, including first use, read-only production and
 //!       default-source classifications (ADR 0031). Default sources need 80% task
 //!       match even for known safe commands and reads. Calibration cannot lower it.
 //!       Low confidence asks. Evaluation scopes are retained data, not routing gates.
+//!       A credential that the owner labeled development or local is judged with the
+//!       development defaults for its default risk and reversibility
+//!       ([`DeclarationSources::judged`], ADR 0031 of 2026-11-03), so that default
+//!       risk is no default source.
 //! 7. A question waits for the owner (at most one per agent; the same request again
 //!    joins it while the state that step 8 checks is the same, else it asks again). It
 //!    names the answers that can take effect. "Allow ACTION in PROJECT"
@@ -63,11 +67,22 @@
 //!
 //! Each refusal after step 2 and each result is stored in the activity log. Each decided
 //! use of each item is stored in the use log (`item_use`).
+//!
+//! A run of a cloud agent of the Mac's own node ([`evaluate_cloud`], ADR 0037 cloud slice,
+//! decision 5) takes the same order with these differences: step 2 finds the active cloud
+//! agent by its vault id (the node checked its token); the working directory is `/`, so
+//! the run has no project and nothing can be remembered; the user request is the text
+//! of the agent, "from the cloud agent, not verified" (no host hook; the injection flag
+//! still applies); step 6 always asks the owner (`ReasonKind::CloudAgent`) with the hard
+//! rules in the text, without a model, a pattern, or an answer; the card offers "Allow
+//! once" only; and it stops after step 8, as the local evaluation does, with the
+//! bindings of the second check. The node then releases the values.
 
 use super::route_diagnostics::{Attempt, ReasonKind, RouteKind, TaskMatchBucket, VerdictKind};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -97,9 +112,9 @@ use crate::vault::usage::{
     CUT_MARK, InteractionKind, MAX_COMMAND_SUMMARY_BYTES, NewItemUse, UseDecidedBy, UseOutcome,
 };
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, Declaration, DeclarationSource,
-    DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, Vault,
-    VaultErrorKind,
+    ActivityDecision, AgentSummary, DecisionEntry, DecisionMeta, Declaration, DeclarationSource,
+    DeclarationSources, EnvBinding, EnvDelivery, NewActivity, OwnerLabel, RealOutcome, RequestKind,
+    Vault, VaultErrorKind,
 };
 
 #[cfg(test)]
@@ -132,6 +147,154 @@ const RELOCKED: &str =
 /// The device of an answer on the Mac.
 const ANSWERED_ON_MAC: &str = "this Mac";
 const ANSWERED_ON_IPHONE: &str = "iPhone";
+/// Where the user request of a cloud run comes from, for the card and the log. It
+/// starts with "from the cloud agent", which `learning::resolved_source` reads as text of
+/// the agent.
+pub const CLOUD_REQUEST_SOURCE: &str = "from the cloud agent, not verified";
+/// Why a cloud run asks, before the notes of the hard rules.
+const CLOUD_ASK: &str = "A cloud agent asks to run this through the node of this Mac. Every cloud run waits for you, and Apassy remembers nothing for it.";
+/// The `place` of the hard rules of a cloud run.
+const CLOUD_PLACE: &str = "the cloud";
+
+/// A run that a cloud agent asked the node for (ADR 0037, cloud slice, decision 5). The
+/// node has its token and its own checks; the broker decides with the vault.
+#[derive(Debug, Clone, Copy)]
+pub struct CloudRequest<'a> {
+    /// Vault items, in the order of the node's run.
+    pub items: &'a [u64],
+    pub command: &'a [String],
+    pub purpose: &'a str,
+    /// The text of the agent. Nothing verifies it.
+    pub user_request: Option<&'a str>,
+}
+
+/// What the broker needs besides the request of a cloud run.
+#[derive(Debug, Clone)]
+pub struct CloudContext {
+    /// The run of the node, for the log.
+    pub relay_run: u64,
+    /// The folder that the agent named in its own environment. It is not a folder of
+    /// this Mac, has no function on a cloud run, and the card does not show it: it is
+    /// text of the agent that could pose as a label of Apassy.
+    pub agent_cwd: Option<String>,
+    /// True when the node stops: a waiting question ends as invalidated.
+    pub stop: Arc<AtomicBool>,
+}
+
+impl CloudContext {
+    /// The folder line of the card: a fixed label, never `agent_cwd`.
+    fn card_cwd(&self) -> String {
+        "(the cloud agent, not on this Mac)".to_owned()
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+}
+
+/// The answer of the broker to a cloud run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudDecision {
+    /// The owner approved and the second check passed: the node may release.
+    Approved(CloudApproval),
+    /// Denied, timed out, invalidated, or refused by a check. `reason` is for the agent
+    /// and the log; it has no secret value.
+    Refused { code: String, reason: String },
+}
+
+/// An approved cloud run, as the second check left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudApproval {
+    /// The vault session of the decision: the values are read in it or not at all.
+    pub epoch: [u8; 32],
+    /// The binding of each item of the run, in its order, as the second check read it.
+    pub bindings: Vec<EnvBinding>,
+    /// "Owner approved", or "Owner approved on the iPhone".
+    pub decided_by: String,
+    /// "this Mac", "iPhone", or empty.
+    pub answered_on: String,
+}
+
+/// Who asks for a run.
+#[derive(Clone, Copy)]
+enum Caller<'a> {
+    /// An agent on this Mac, with its vault token.
+    Token(&'a str),
+    /// A cloud agent of the node, by its vault agent id.
+    Cloud {
+        agent_id: u64,
+        context: &'a CloudContext,
+    },
+}
+
+impl<'a> Caller<'a> {
+    fn cloud(self) -> Option<&'a CloudContext> {
+        match self {
+            Self::Token(_) => None,
+            Self::Cloud { context, .. } => Some(context),
+        }
+    }
+
+    fn label(&self, request: &RunRequest<'_>, vault: &Vault) -> String {
+        match self {
+            Self::Token(_) => request.label(vault),
+            Self::Cloud { .. } => {
+                request.label_of(vault, &format!("cloud {}", request.command_text()))
+            }
+        }
+    }
+
+    fn agent(&self, vault: &mut Vault, label: &str) -> Result<AgentSummary, WireResponse> {
+        match self {
+            Self::Token(token) => authenticate(vault, token, label),
+            Self::Cloud { agent_id, .. } => authenticate_cloud(vault, *agent_id, label),
+        }
+    }
+}
+
+/// Step 2 of a cloud run: the active cloud agent `agent_id` whose node token has not
+/// expired. The node checked the token itself; this is the vault's own check.
+fn authenticate_cloud(
+    vault: &mut Vault,
+    agent_id: u64,
+    action: &str,
+) -> Result<AgentSummary, WireResponse> {
+    match vault.cloud_agent_summary(agent_id) {
+        Ok(agent) if agent.token_expired_at(learning::now()) => {
+            let _ = vault.record_activity(&NewActivity {
+                agent_id: Some(agent.id),
+                agent_name: agent.name.clone(),
+                item_id: None,
+                operation: action.to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: "The token of the remote agent expired. Connect the agent again: give it the MCP address of Bouncer > Agents.".to_owned(),
+            });
+            Err(WireResponse::failure(
+                "token_expired",
+                "The token of this cloud agent expired. Ask the owner to add the agent again in Apassy.",
+            ))
+        }
+        Ok(agent) => Ok(agent),
+        Err(err) if err.kind() == VaultErrorKind::NotFound => {
+            let _ = vault.record_activity(&NewActivity {
+                agent_id: None,
+                agent_name: "Unknown cloud agent".to_owned(),
+                item_id: None,
+                operation: action.to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: "The cloud agent is revoked or not in this vault.".to_owned(),
+            });
+            Err(WireResponse::failure(
+                "unauthenticated",
+                "This cloud agent is revoked, or it belongs to another vault than the one open now.",
+            ))
+        }
+        Err(_) => Err(WireResponse::failure(
+            "broker_error",
+            "The broker cannot read the vault.",
+        )),
+    }
+}
 
 /// A run request from the wire. Borrowed from the parsed request.
 #[derive(Debug)]
@@ -169,8 +332,13 @@ impl RunRequest<'_> {
     /// agent can put a value in the command; the Activity never shows it, nor a part of
     /// it at the cut. Without the values, only "run" and the cut mark.
     fn label(&self, vault: &Vault) -> String {
+        self.label_of(vault, &self.command_text())
+    }
+
+    /// [`RunRequest::label`] of `text`, a text with the command in it.
+    fn label_of(&self, vault: &Vault, text: &str) -> String {
         match vault.command_mask(&self.all_items()) {
-            Ok(mask) => mask.summary(&self.command_text(), MAX_LABEL_BYTES),
+            Ok(mask) => mask.summary(text, MAX_LABEL_BYTES),
             Err(_) => format!("run {CUT_MARK}"),
         }
     }
@@ -622,6 +790,17 @@ fn route<F: FnMut() -> Result<(), String>>(
     Route::Model
 }
 
+/// The route of a cloud run: always the owner, with the notes of the hard rules, so the
+/// card still says that an item is production or always asks.
+fn cloud_route(checked: &Checked, run: &RunFacts<'_>, known: &Known) -> Route {
+    let mut text = CLOUD_ASK.to_owned();
+    for (note, _) in hard_rules(checked, run, known, CLOUD_PLACE) {
+        text.push(' ');
+        text.push_str(&note);
+    }
+    Route::Ask(text, ReasonKind::CloudAgent)
+}
+
 /// The answers that a question can take now (ADR 0025 §3): a remembered answer only
 /// when it can take effect for a later run of the same kind.
 fn valid_answers<F: FnMut() -> Result<(), String>>(
@@ -659,12 +838,51 @@ fn valid_answers<F: FnMut() -> Result<(), String>>(
             AnswerKind::InProject(run.action)
         });
     }
-    if checked.facts.iter().any(|facts| facts.unconfirmed)
-        || checked.declarations.iter().any(Option::is_none)
-    {
+    // "Development" or "Production" labels one item. With two or more unconfirmed
+    // items the answer cannot name the item for every device, so the run asks as any
+    // other ([`QuestionInfo::classifiable_item`]).
+    if unconfirmed_count(checked) == 1 {
         valid.push(AnswerKind::CorrectEnvironment);
     }
     valid
+}
+
+/// The items of the run whose environment is production only by default, or that have
+/// no declaration: the items that "Allow as dev" or "Allow as prod" can label.
+fn item_unconfirmed(checked: &Checked, index: usize) -> bool {
+    checked.facts[index].unconfirmed || checked.declarations[index].is_none()
+}
+
+fn unconfirmed_count(checked: &Checked) -> usize {
+    (0..checked.facts.len())
+        .filter(|index| item_unconfirmed(checked, *index))
+        .count()
+}
+
+/// The index of `item_id` in the run when it is the only unconfirmed item, the item that
+/// a classification labels. `None` for any other item, and with two or more unconfirmed
+/// items.
+fn classified_index(checked: &Checked, items: &[u64], item_id: u64) -> Option<usize> {
+    let index = items.iter().position(|item| *item == item_id)?;
+    (item_unconfirmed(checked, index) && unconfirmed_count(checked) == 1).then_some(index)
+}
+
+/// Save "Allow as dev" or "Allow as prod" ([`Settled::classification`]): label the one
+/// item that the owner check named, never the other items of the run. A development
+/// label lowers the default risk and reversibility of the item, so a bundled production
+/// credential without a signal must keep its careful defaults. False when nothing was
+/// saved: the item is not the only unconfirmed item, or the vault failed.
+fn save_classification(
+    vault: &mut Vault,
+    checked: &Checked,
+    items: &[u64],
+    (environment, item_id): (crate::vault::Environment, u64),
+) -> bool {
+    classified_index(checked, items, item_id).is_some_and(|index| {
+        vault
+            .set_declaration_environment(items[index], environment)
+            .is_ok()
+    })
 }
 
 /// Read remembered execution answers. Evaluation scopes no longer affect routing.
@@ -710,11 +928,11 @@ fn known_state(
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    run_inner(ctx, token, request, false, None)
+    run_inner(ctx, Caller::Token(token), request, false, None, &mut None)
 }
 
 pub(super) fn evaluate(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
-    run_inner(ctx, token, request, true, None)
+    run_inner(ctx, Caller::Token(token), request, true, None, &mut None)
 }
 
 pub(super) fn fill_browser(
@@ -723,26 +941,87 @@ pub(super) fn fill_browser(
     request: &RunRequest<'_>,
     fill: &super::browser_fill::Fill,
 ) -> WireResponse {
-    run_inner(ctx, token, request, false, Some(fill))
+    run_inner(
+        ctx,
+        Caller::Token(token),
+        request,
+        false,
+        Some(fill),
+        &mut None,
+    )
+}
+
+/// Decide a run of the cloud agent `agent_id` (the vault id of the agent) for the
+/// node: the order of the module text for a cloud run, as the local evaluation runs it,
+/// without a token, a host hook, or a project. It asks the owner every time, on this Mac
+/// and on the iPhone, and reads no secret value.
+pub fn evaluate_cloud(
+    ctx: &BrokerContext,
+    agent_id: u64,
+    request: &CloudRequest<'_>,
+    context: &CloudContext,
+) -> CloudDecision {
+    let run = RunRequest {
+        access_request_id: None,
+        items: request.items,
+        codes: &[],
+        command: request.command,
+        // The root is no project: nothing can be remembered (step 6.3).
+        cwd: "/",
+        purpose: request.purpose,
+        path: None,
+        user_request: request.user_request,
+        host_session: None,
+    };
+    let mut approved = None;
+    let response = run_inner(
+        ctx,
+        Caller::Cloud { agent_id, context },
+        &run,
+        true,
+        None,
+        &mut approved,
+    );
+    match (response.ok, approved) {
+        (true, Some(approval)) => CloudDecision::Approved(approval),
+        (true, None) => CloudDecision::Refused {
+            code: "broker_error".to_owned(),
+            reason: "The broker did not decide this cloud run.".to_owned(),
+        },
+        (false, _) => {
+            let (code, reason) = response.error.map_or_else(
+                || {
+                    (
+                        "broker_error".to_owned(),
+                        "The broker refused this cloud run.".to_owned(),
+                    )
+                },
+                |error| (error.code, error.message),
+            );
+            CloudDecision::Refused { code, reason }
+        }
+    }
 }
 
 fn run_inner(
     ctx: &BrokerContext,
-    token: &str,
+    caller: Caller<'_>,
     request: &RunRequest<'_>,
     evaluation_only: bool,
     browser_fill: Option<&super::browser_fill::Fill>,
+    approved: &mut Option<CloudApproval>,
 ) -> WireResponse {
     let mut diagnostic = Attempt::new();
     let started = Instant::now();
     let items = request.all_items();
+    let cloud = caller.cloud();
     let (checked, label) = {
         let mut guard = lock(&ctx.vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
             return locked_response();
         };
-        let label = request.label(vault);
-        let agent = match authenticate(vault, token, &label) {
+        let label = caller.label(request, vault);
+        let agent = match caller.agent(vault, &label) {
             Ok(agent) => agent,
             Err(response) => return response,
         };
@@ -789,7 +1068,7 @@ fn run_inner(
                     });
                 }
                 let user_request = request.user_request.unwrap_or_default();
-                let _ = vault.record_decision(
+                let _ = vault.record_decision_with(
                     &RuleDenial {
                         at: learning::now(),
                         agent_id: agent.id,
@@ -802,6 +1081,7 @@ fn run_inner(
                         reason: &reason,
                     }
                     .entry(),
+                    &decision_meta(browser_fill.is_some(), None),
                 );
                 return WireResponse::failure(code, reason);
             }
@@ -819,13 +1099,23 @@ fn run_inner(
         analysis.flags.push("secret_output".to_owned());
     }
     // Goal item B6: a user request from the host hook replaces the text from the agent.
-    let resolved = ctx.prompts.resolve(
-        checked.agent.id,
-        &checked.epoch,
-        request.host_session,
-        &checked.cwd,
-        request.user_request.unwrap_or_default(),
-    );
+    // A cloud agent has no hook: its text stays, marked as not verified.
+    let resolved = match cloud {
+        Some(_) => super::prompts::Resolved {
+            text: request.user_request.unwrap_or_default().trim().to_owned(),
+            source: CLOUD_REQUEST_SOURCE.to_owned(),
+            agent_text: None,
+            flags: Vec::new(),
+            provenance: None,
+        },
+        None => ctx.prompts.resolve(
+            checked.agent.id,
+            &checked.epoch,
+            request.host_session,
+            &checked.cwd,
+            request.user_request.unwrap_or_default(),
+        ),
+    };
     analysis.flags.extend(resolved.flags.iter().cloned());
     let user_request = resolved.text.as_str();
     // Dev round 2: an instruction to the reviewer in the user request asks the owner,
@@ -906,8 +1196,8 @@ fn run_inner(
     if db_host_from_command(&analysis) && uncovered_host(&checked.facts, &hosts).is_none() {
         analysis.flags.retain(|flag| flag != DB_HOST_FLAG);
     }
-    // Default production keeps its sensitive declaration. The source-aware hard
-    // veto above distinguishes it from confirmed production (ADR 0031).
+    // A default source keeps its sensitive declaration and needs 80% task match at
+    // the model step (ADR 0031). Production write/admin asks in `route`, before it.
     let default_source = checked.facts.iter().any(|facts| facts.weak_source);
     let context = DecisionContext {
         analysis: &analysis,
@@ -926,13 +1216,17 @@ fn run_inner(
         instruction: "",
     };
     // ADR 0025 §3a: a pattern belongs to the project key, so all worktrees of one
-    // repository share it.
-    let pattern = learning::request_pattern(scope, request.command).map(|mut pattern| {
-        if let Some(project) = &checked.project {
-            pattern.key.project_dir.clone_from(&project.key);
-        }
-        pattern
-    });
+    // repository share it. A cloud run neither uses nor teaches one.
+    let pattern = if cloud.is_some() {
+        None
+    } else {
+        learning::request_pattern(scope, request.command).map(|mut pattern| {
+            if let Some(project) = &checked.project {
+                pattern.key.project_dir.clone_from(&project.key);
+            }
+            pattern
+        })
+    };
     // Goal item B9: the active model (the default bouncer or a promoted model) and the
     // candidate in shadow mode come from the vault, together with execution answers
     // (ADR 0031); stored evaluation scopes no longer affect routing.
@@ -970,7 +1264,10 @@ fn run_inner(
         action,
         hosts: &hosts,
     };
-    let route = route(&checked, &run_facts, &known, &mut ready);
+    let route = match cloud {
+        Some(_) => cloud_route(&checked, &run_facts, &known),
+        None => route(&checked, &run_facts, &known, &mut ready),
+    };
     let bouncer_request = BouncerRequest {
         user_request: user_request.to_owned(),
         command: request.command.join(" "),
@@ -978,6 +1275,7 @@ fn run_inner(
         purpose: request.purpose.trim().to_owned(),
         env_names: checked.env_names.clone(),
         instruction: String::new(),
+        task_provenance: resolved.provenance.unwrap_or_default().to_owned(),
     };
     // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
     // answers on its own thread. Its answer goes only to the vault. The decision below
@@ -1137,8 +1435,11 @@ fn run_inner(
         .iter()
         .zip(&known.answer)
         .any(|(facts, answer)| facts.production && !answer);
-    // ADR 0025 §3: the card offers only the answers that can take effect.
-    let (valid, remember) = if needs_approval {
+    // ADR 0025 §3: the card offers only the answers that can take effect. A cloud run
+    // remembers nothing: "Allow once" only.
+    let (valid, remember) = if needs_approval && cloud.is_some() {
+        (vec![AnswerKind::Once], None)
+    } else if needs_approval {
         let valid = valid_answers(
             &checked,
             &run_facts,
@@ -1164,7 +1465,7 @@ fn run_inner(
             item_id: *item,
             name: facts.name.clone(),
             production: facts.production,
-            unconfirmed: facts.unconfirmed || checked.declarations[index].is_none(),
+            unconfirmed: item_unconfirmed(&checked, index),
             always_ask: facts.asks_always(),
         })
         .collect();
@@ -1201,7 +1502,8 @@ fn run_inner(
             _ => Outcome::Automatic { by_pattern: false },
         };
         let entry = logged.entry(outcome, &risk_note);
-        decision_id = record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        let meta = decision_meta(browser_fill.is_some(), None);
+        decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
         "allowed".clone_into(&mut debug_line.outcome);
         debug_line.millis = millis(started);
         log_decision(ctx, &items, debug_line.clone());
@@ -1227,19 +1529,21 @@ fn run_inner(
                     })
                     .ok()
             });
-        // The wait ends when the vault session of the first check ends.
+        // The wait ends when the vault session of the first check ends, and for a cloud
+        // run when the node stops.
         let same_session = || {
-            lock(&ctx.vault).as_ref().is_some_and(|vault| {
-                !vault.is_locked()
-                    && vault.epoch() == checked.epoch
-                    && access_admission.as_ref().is_none_or(|a| a.live_in(vault))
-            })
+            cloud.is_none_or(|cloud| !cloud.stopped())
+                && lock(&ctx.vault).as_ref().is_some_and(|vault| {
+                    !vault.is_locked()
+                        && vault.epoch() == checked.epoch
+                        && access_admission.as_ref().is_none_or(|a| a.live_in(vault))
+                })
         };
         let pending = PendingRun {
             id: 0,
             agent: checked.agent.name.clone(),
             command: request.command.to_vec(),
-            cwd: checked.cwd.display().to_string(),
+            cwd: cloud.map_or_else(|| checked.cwd.display().to_string(), CloudContext::card_cwd),
             env_names: checked.env_names.clone(),
             purpose: browser_fill.map_or_else(
                 || request.purpose.trim().to_owned(),
@@ -1285,6 +1589,8 @@ fn run_inner(
                 valid_answers: valid,
             },
         };
+        // The answer time of the decision log (schema 27) starts with the question.
+        let asked_at = Instant::now();
         // A call joins the waiting question only when it saw the same credentials.
         let settled = ctx.approvals.wait_for_evaluation_question(
             pending,
@@ -1328,6 +1634,8 @@ fn run_inner(
             attached,
             refusal_comment,
             classification,
+            classified_item,
+            answered_on: relay_device,
             ..
         } = match settled {
             Ok(settled) => settled,
@@ -1381,19 +1689,22 @@ fn run_inner(
                 return WireResponse::failure(codes::QUESTION_WAITING, text);
             }
         };
-        answer_choice = chosen;
-        evaluation_choice = chosen_evaluation;
-        classification_choice = classification;
-        if checked_with == Some(CheckMethod::Companion) {
-            logged_decided_by = OWNER_APPROVED_ON_IPHONE;
-            ANSWERED_ON_IPHONE.clone_into(&mut answered_on);
-        } else if checked_with.is_some() {
-            ANSWERED_ON_MAC.clone_into(&mut answered_on);
+        // A cloud run remembers nothing, whatever the answer was.
+        if cloud.is_none() {
+            answer_choice = chosen;
+            evaluation_choice = chosen_evaluation;
+            classification_choice = classification.zip(classified_item);
         }
-        // Every owner answer goes to the decision log. A denial blocks the pattern.
+        answered_on = answered_on_of(checked_with, relay_device);
+        if answered_on == ANSWERED_ON_IPHONE {
+            logged_decided_by = OWNER_APPROVED_ON_IPHONE;
+        }
+        // Every owner answer goes to the decision log. A denial blocks the pattern. The
+        // vault keeps the answer time for an owner answer only (not a timeout).
         let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
         entry.at = learning::now();
-        decision_id = record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
+        let meta = decision_meta(browser_fill.is_some(), Some(millis(asked_at)));
+        decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
         approval_text(outcome).clone_into(&mut debug_line.outcome);
         debug_line.answered_on.clone_from(&answered_on);
         debug_line.millis = millis(started);
@@ -1419,7 +1730,7 @@ fn run_inner(
             };
             call.finish(RealOutcome::Ask, owner);
         }
-        remembered = outcome == ApprovalOutcome::ApprovedAndRemembered;
+        remembered = outcome == ApprovalOutcome::ApprovedAndRemembered && cloud.is_none();
         let refusal = match outcome {
             ApprovalOutcome::Approved
             | ApprovalOutcome::ApprovedAndRemembered
@@ -1489,7 +1800,7 @@ fn run_inner(
                 locked_response()
             };
         };
-        let agent = match authenticate(vault, token, &label) {
+        let agent = match caller.agent(vault, &label) {
             Ok(agent) => agent,
             Err(response) => return response,
         };
@@ -1562,19 +1873,42 @@ fn run_inner(
             return WireResponse::failure("authorization_changed", reason);
         }
         // Persist classification only after the original authorization baseline passed.
-        if let Some(environment) = classification_choice {
-            for (index, facts) in checked.facts.iter().enumerate() {
-                if (facts.unconfirmed || checked.declarations[index].is_none())
-                    && vault
-                        .set_declaration_environment(items[index], environment)
-                        .is_err()
-                {
-                    return WireResponse::failure(
-                        "classification_failed",
-                        "Could not save the environment. Nothing ran.",
-                    );
-                }
+        if let Some(choice) = classification_choice
+            && !save_classification(vault, &checked, &items, choice)
+        {
+            return WireResponse::failure(
+                "classification_failed",
+                "Could not save the environment. Nothing ran.",
+            );
+        }
+        // A cloud run stops here, as the local evaluation does: the node releases the
+        // values of the bindings that this check read, in this vault session.
+        if cloud.is_some() {
+            record_uses(
+                vault,
+                &checked,
+                request,
+                action,
+                UseOutcome::Allowed,
+                use_decided_by,
+                &answered_on,
+                decision_id,
+            );
+            for item_id in &items {
+                let _ = vault.record_run(agent.id, *item_id);
             }
+            let _ = vault.touch_cloud_agent(agent.id, learning::now());
+            *approved = Some(CloudApproval {
+                epoch: checked.epoch,
+                bindings: rechecked
+                    .authorization
+                    .iter()
+                    .map(|authorization| authorization.binding.clone())
+                    .collect(),
+                decided_by: logged_decided_by.to_owned(),
+                answered_on: answered_on.clone(),
+            });
+            return WireResponse::success(json!({"would_run": true, "decided_by": decided_by}));
         }
         // The opt-in local evaluator stops before preparing the secret environment or starting any
         // process/proxy. This mode is not available through the agent wire protocol.
@@ -2072,8 +2406,9 @@ fn check_inner(
             includes_code,
             standing,
             always_ask,
-            weak_source: sources.environment == DeclarationSource::Default
-                || sources.risk == DeclarationSource::Default,
+            // ADR 0031, 2026-11-03: a default risk of a credential that the owner
+            // labeled development follows the label, so it is no weak source.
+            weak_source: sources.weak(declaration.as_ref()),
             production: is_production && !unconfirmed,
             unconfirmed,
             foreign_project: declaration
@@ -2121,7 +2456,8 @@ struct Collected<'a> {
     known_hosts: &'a mut Vec<String>,
 }
 
-/// Add the variable, the declaration, the provider hosts, and the authorization of one
+/// Add the variable, the declaration as the bouncer judges it
+/// ([`DeclarationSources::judged`]), the provider hosts, and the authorization of one
 /// item. `authorization` comes without its binding and provider; this fills them in.
 fn push_item(
     vault: &Vault,
@@ -2130,7 +2466,15 @@ fn push_item(
     mut authorization: ItemAuthorization,
     out: &mut Collected<'_>,
 ) -> Result<(), (&'static str, String)> {
-    out.declarations.push(authorization.declaration.clone());
+    // The bouncer judges a development label with the development defaults (ADR 0031,
+    // 2026-11-03), also for a label from before 0.5.16. The authorization keeps the
+    // stored values, so the recheck compares what the vault has.
+    out.declarations.push(
+        authorization
+            .declaration
+            .as_ref()
+            .map(|declaration| authorization.sources.judged(declaration)),
+    );
     // Goal item B4: only the stored provider name. The broker does not run the
     // detection. An unknown provider has no hosts, as an item without a provider.
     let provider = vault.declaration_provider(item_id).map_err(|_| {
@@ -2560,13 +2904,46 @@ fn record_decision_locked(
     ctx: &BrokerContext,
     checked: &Checked,
     entry: &DecisionEntry,
+    meta: &DecisionMeta,
     pattern: Option<&learning::RequestPattern>,
 ) -> Option<u64> {
     let mut guard = lock(&ctx.vault);
     guard
         .as_mut()
         .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
-        .and_then(|vault| learning::record(vault, entry, pattern).ok())
+        .and_then(|vault| learning::record_with(vault, entry, meta, pattern).ok())
+}
+
+/// Where the owner answered, as the uses, the answers, and the decision log file name it:
+/// "iPhone" for the paired iPhone and for an iPhone through the relay, the device that
+/// the questions worker named for another answer through the relay
+/// (`Settled::answered_on`), "this Mac" for an owner check here, and empty without one
+/// (a denial on this Mac, or no answer).
+pub(super) fn answered_on_of(method: Option<CheckMethod>, relay_device: Option<String>) -> String {
+    if method == Some(CheckMethod::Companion) || relay_device.as_deref() == Some(ANSWERED_ON_IPHONE)
+    {
+        ANSWERED_ON_IPHONE.to_owned()
+    } else if let Some(device) = relay_device {
+        device
+    } else if method.is_some() {
+        ANSWERED_ON_MAC.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// The schema 27 columns of a decision of this run: a browser fill or a run, and the
+/// milliseconds from the question to the owner's answer. The vault drops the time for
+/// an entry that the owner did not answer.
+fn decision_meta(browser_fill: bool, wait_ms: Option<u64>) -> DecisionMeta {
+    DecisionMeta {
+        request: if browser_fill {
+            RequestKind::BrowserFill
+        } else {
+            RequestKind::Run
+        },
+        wait_ms,
+    }
 }
 
 /// Append `line` to the decision log file, with the secret values of `items` masked in

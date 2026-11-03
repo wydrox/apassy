@@ -113,9 +113,14 @@ rule, instruction or ask mode into "Always ask for this agent". Access restricti
 such as Never and Only these items still refuse hidden credentials. For visible,
 non-archived credentials with valid process bindings, `src/broker/run.rs` uses:
 
-1. Hard rules ask: analysis flags, foreign database destinations, Always ask, and
-   production from an owner, signal or usage without a fitting production allowance.
-   Production allowances retain the exact project, certain action and host checks.
+1. Hard rules ask: analysis flags (including `hook_unverified` and `hook_ambiguous`
+   of the prompt hook and `injection_phrase`), a missing user request, foreign
+   database destinations, a one-time code without a code-covering owner answer,
+   Always ask, and production with read-write or admin scope. Since 2026-11-02 the
+   production rule covers every source, also the default of a credential without a
+   label, and no allowance or remembered answer waives it. Production with declared
+   read-only scope goes on to the bouncer brain with mandatory `task_match`, `leak` and
+   `destroy` answers (ADR 0031, "Owner task and floating questions").
 2. Failed inference readiness, no model or Off asks. Remembered routes need readiness.
 3. Root, HOME or a parent of HOME is not a project and asks.
 4. A missing user request or declaration asks, also with a fitting execution answer.
@@ -126,11 +131,14 @@ non-archived credentials with valid process bindings, `src/broker/run.rs` uses:
    secret-variable reference. Foreign database hosts still always ask. An evaluation
    scope is never an exception.
 7. An active owner-taught pattern retains its existing execution semantics.
-8. Every remaining request reaches the bouncer brain: first use, staging, unconfirmed
+8. Every remaining request reaches the bouncer brain: first use, staging, read-only
    production and default-source environment/risk included. No evaluation scope is
    required. Defaults always require at least 80% task match, even for safe commands
    and certain reads; calibration cannot lower this check. The sensitive declaration
    is preserved. Low confidence and model failures ask with their exact reasons.
+   Since 0.5.16 a credential that the owner labeled development or local is judged
+   with medium risk and reversible when those values are only defaults, and that
+   default risk is no default source (section 3.0a).
 
 A model allow permits one run, after the authorization recheck. It creates no grant,
 remembered answer, evaluation scope, pattern approval or classification confirmation.
@@ -207,6 +215,22 @@ Each decision has one reason kind (`src/broker/route_diagnostics.rs`, `ReasonKin
 - Decisions: a past decision of this Mac has "Why Apassy asked you" (or "Why it ran"): the reason of the question, the task and its source (prompt hook or agent), the rule flags, and the bouncer brain answers.
 - `apassy decisions log`: the questions of the last 7 days by reason, with what to change, and the last decisions. It reads `~/Library/Logs/Apassy/bouncer-decisions.log` and needs no session ([learning](learning.md), section 1a).
 - Settings > Bouncer: the counts since Apassy started.
+
+#### Why a plain development run still asks
+
+Debugging of 2026-11-03 (0.5.16, F1). The bouncer brain was healthy (`task_match` 0.84 to
+0.96 for typical commands), but the recorded Claude Code runs of 2026-11-01 to 2026-11-03
+were all owner approved. A run with a credential, a stated or verified task, a command
+that fits the task, and a known host asks for one of these reasons, in the order of
+section 3.0:
+
+| Reason kind | When it fires for an ordinary run | What to do |
+| --- | --- | --- |
+| `Production` | The credential has no label: a value without a signal gets production, high risk, admin scope and irreversible by default (`src/vault/providers.rs`), and production with write or admin scope always asks (owner decision of 2026-11-02). Custom tokens, database URLs and credentials that agents save or generate are such values. | Answer "Allow as dev" (or "Allow as prod") on the question, or set the environment of the credential. |
+| `ModelUnsure` (`writes`) | Before 0.5.16, "Allow as dev" set only the environment. The default high risk and irreversibility stayed, so a command that is not known safe, for example `node script.js` or `npm run seed`, needed the bouncer brain to be 80% sure that it does not change state (ADR 0031). Since 0.5.16, "Allow as dev" means development: when the owner labels a credential development or local, a risk or a reversibility that is only a default (no owner value, no strong signal) becomes medium and reversible (`DeclarationSources::judged`, `src/vault/policy.rs`). The broker applies this at decision time also to labels from before 0.5.16, without a change of the stored values. The command then needs only the task match. A high risk or irreversibility that the owner set or that a strong signal found (for example `sk_live_`, a GitHub classic token) stays, and such a command still asks. | Nothing for a default value. For a value of the owner or a signal: change the risk and reversibility of the credential, or remember the answer for the project and the kind of action. |
+| `LowTaskMatch` | A default source needs `task_match` 80%, not 75%: a default environment, or a default risk of a credential that the owner did not label development or local. Since 0.5.16 the default risk of a development label is no default source. | Confirm the declaration. |
+| `HookAmbiguous` | Another Claude Code session of the same agent in the same folder, or in a parent folder such as the home folder, sent a newer prompt within 4 hours, for example parallel T3 Code threads in one checkout (8 of 70 runs in a sample of local transcripts). After a restart of Apassy or a lock, the first new prompt in a folder makes the runs of the other sessions there ambiguous until they get a prompt of their own. | Use one worktree for each thread. The rule stays strict (ADR 0031: session ambiguity escalates). |
+| `HookUnverified`, `LowTaskMatch` | Before 0.5.16, a run after a finished background task (a `<task-notification>` turn) or a scheduled wakeup: the transcript check found the notification as the newest user message, or the hook had sent it as the request, so the bouncer brain compared the command with it. Fixed in 0.5.16 ([host hooks](host-hooks.md), section 4). A slash command or a skill is stored in the transcript as `<command-name>` text; whether the hook prompt matches it is not measured. | Nothing for task notifications. |
 
 ### 3.1 Uncertain commands and project scripts
 

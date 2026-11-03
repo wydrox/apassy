@@ -69,6 +69,24 @@ flowchart LR
 
 The screenshots show synthetic data. `scripts/screenshots.sh` takes them from the real app.
 
+The sidebar has **Bouncer**: Overview (the last 7 days of every Mac of the vault), Decisions, Agents,
+and Logs (every run, connect, and change of remote access). One scope bar picks the Macs and the
+project of all four pages; the other Macs are read-only.
+
+| Shortcut | Opens |
+| --- | --- |
+| ⌘1 | All credentials |
+| ⌘2 | Overview |
+| ⌘3 | Decisions |
+| ⌘4 | Agents |
+| ⌘5 | Logs |
+| ⌘, | Settings |
+| ⌘[ | Back to the list |
+| ⌘N | New credential |
+| ⌘F | Search credentials |
+| ⌘L | Lock the vault |
+| ⌃⌘S | Hide or show the sidebar |
+
 ## Evidence
 
 The bouncer was scored blind on 226 agent commands it had never seen, in three runs ([held-out v4](docs/evaluation/heldout-v4.md)):
@@ -130,6 +148,16 @@ cargo test --locked --all-features                # the test suite
 The full first-day checklist is [daily use](docs/operations/daily-use.md).
 
 Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write` registers the agent and connects the MCP server, with the token in a wrapper script instead of the host configuration. Setup selects the bundled sibling `apassy-hook` automatically. Without `--write`, it only validates and previews; a write retry reuses complete managed wrappers. New connections include catalog consent in the owner approval, while existing agents keep their access. Follow the [installed-app checklist](docs/operations/cli.md#installed-app-first-use).
+
+## Cloud agents
+
+A hosted agent, such as Grok Bot, can use the credentials that you pick for it without their values. It
+connects to Apassy on your own Mac through Tailscale Funnel (`https://<Mac>.<tailnet>.ts.net:8443/mcp`,
+off by default) with a bearer token from **Settings › Cloud agents**. You allow every run on the Mac
+or the iPhone. The agent gets placeholders and base URLs; your Mac puts the real value into the API
+request. Setup for Grok Bot and Cursor: [plugin README](deploy/plugins/apassy-cloud/README.md). The
+surface and its limits: [cloud agents contract](docs/contracts/cloud-agents-v1.md) and the
+[trust model](docs/security/trust-model.md).
 
 ## Command line
 

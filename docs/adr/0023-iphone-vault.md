@@ -1,7 +1,7 @@
 # ADR 0023 — The vault on the iPhone
 
 Date: 2026-10-07.
-Status: ACCEPTED in scope by the owner on 2026-10-07 ("build a companion app for iOS … like the 1Password iOS app, and add it to TestFlight"). Updated by the owner on 2026-10-08: personal vaults use the free iCloud Drive sync option; teams use the relay. The first iPhone build supported only the relay. This update adds iCloud Drive. Copying is allowed, device-local and expiring; the TestFlight build declares that it uses exempt encryption only.
+Status: ACCEPTED in scope by the owner on 2026-10-07 ("build a companion app for iOS … like the 1Password iOS app, and add it to TestFlight"). Updated by the owner on 2026-10-08: personal vaults use the free iCloud Drive sync option; teams use the relay. The first iPhone build supported only the relay. This update adds iCloud Drive. Copying is allowed, device-local and expiring; the first TestFlight builds declared exempt encryption only (changed on 2026-11-03, section 8).
 
 ## Context
 
@@ -61,7 +61,7 @@ The companion of ADR 0020 is one tab of the app ("Approvals") and works as befor
 
 ### 8. Distribution
 
-TestFlight first (ADR 0020 D5 said a development build; the owner asked for TestFlight). Bundle IDs `com.wydrox.apassy.companion` and `.autofill`, team 7S3F9767BM, App Group `group.com.wydrox.apassy.companion`. `scripts/ios-testflight.sh` archives with automatic signing and an App Store Connect API key, and uploads. The build declares `ITSAppUsesNonExemptEncryption = NO` by the owner's decision.
+TestFlight first (ADR 0020 D5 said a development build; the owner asked for TestFlight). Bundle IDs `com.wydrox.apassy.companion` and `.autofill`, team 7S3F9767BM, App Group `group.com.wydrox.apassy.companion`. `scripts/ios-testflight.sh` archives with automatic signing and an App Store Connect API key, and uploads. The first TestFlight builds declared `ITSAppUsesNonExemptEncryption = NO` by the owner's decision. On 2026-11-03 the owner decided to "describe the app correctly": the app and the watch app declare `YES`, because the app implements its own standard encryption (SQLCipher with OpenSSL, rustls, ring) for confidentiality. The answers, the TestFlight step and France are in `docs/store/app-store/export-compliance.md`.
 
 ## What this does not protect
 

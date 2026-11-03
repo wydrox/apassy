@@ -1,6 +1,7 @@
 # Implementation plan: ADR 0025 + ADR 0026
 
 Date: 2026-10-12. Branch: `feat/low-friction-access`. No release; `main` is not touched by this work.
+Status (2026-11-03): done. Merged in PR #15 and shipped in 0.5.0.
 
 Decisions taken by the integrator for open points (record in the ADRs when the code lands):
 

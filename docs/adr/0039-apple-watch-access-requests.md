@@ -1,8 +1,8 @@
 # ADR 0039: Answer access requests from an Apple Watch
 
 Date: 2026-11-03.
-Status: accepted by the owner (plan and decisions of 2026-11-03), in implementation on
-`feat/apple-watch-access`. Physical Apple Watch acceptance is pending: the Secure Enclave key policy
+Status: accepted by the owner (plan and decisions of 2026-11-03), merged to main in #81 and
+#82 on 2026-11-03. It ships in 0.5.16 with all six components (prepared, not published); TestFlight has the internal test build 0.5.15 (29895036). Physical Apple Watch acceptance is pending: the Secure Enclave key policy
 with wrist detection, the mirrored notification tap, LTE without the iPhone, and Always On redaction.
 No release, deployment, account change, or App ID registration is authorized by this ADR.
 

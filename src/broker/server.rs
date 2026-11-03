@@ -78,6 +78,10 @@ pub struct BrokerHandle {
     approvals: Arc<ApprovalQueue>,
     approval_timeout: Duration,
     bouncer_url: Option<String>,
+    /// The context of the requests, for the in-process callers of the broker: the host
+    /// of the Mac's own node (`broker::evaluate_cloud`). Boxed: the handle stays small in
+    /// the state enums of the desktop.
+    context: Box<BrokerContext>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -104,6 +108,13 @@ impl BrokerHandle {
     /// Address of the bouncer, if one is set.
     pub fn bouncer_url(&self) -> Option<&str> {
         self.bouncer_url.as_deref()
+    }
+
+    /// The context that the broker decides with: the shared vault, the approval queue
+    /// of this broker, the bouncer, and the time limits. The host of the Mac's own node
+    /// decides cloud runs with it (`broker::evaluate_cloud`).
+    pub fn context(&self) -> BrokerContext {
+        BrokerContext::clone(&self.context)
     }
 
     /// Stop the broker. A waiting run ends with `approval_invalidated`. An approval
@@ -189,6 +200,7 @@ pub fn start_with(
     let active = Arc::new(AtomicUsize::new(0));
     let thread_stop = Arc::clone(&stop);
     let thread_active = Arc::clone(&active);
+    let context = Box::new(ctx.clone());
     let thread = thread::Builder::new()
         .name("apassy-broker".to_owned())
         .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &thread_active, &operations))?;
@@ -198,6 +210,7 @@ pub fn start_with(
         approvals,
         approval_timeout,
         bouncer_url,
+        context,
         stop,
         thread: Some(thread),
     })

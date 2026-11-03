@@ -16,15 +16,21 @@ configuration before each credential can be evaluated is not.
 ## Decision
 
 After the existing hard checks in the bouncer gate, each process request goes to the bouncer brain, including
-first use, staging, default-source environment/risk and unconfirmed production.
+first use, staging, default-source environment/risk and unconfirmed production with
+declared read-only scope (amended 2026-11-02, see below).
 No evaluation scope, earlier use or per-credential setup is required.
 
 The following still ask or refuse before inference, with their existing reasons:
 
 - Access restrictions, including Never, Only these items, archived/restored items,
   missing process bindings and duplicate variables.
-- Command-analysis flags, foreign database hosts, Always ask, and production found
-  by a signal, confirmed by usage or set by the owner without a fitting allowance.
+- Command-analysis flags, foreign database hosts, Always ask, and a production
+  environment with read-write or admin scope. Since the owner decision of 2026-11-02
+  this covers production of every source: found by a signal, confirmed by usage, set
+  by the owner, or only the careful default of a credential without a label. A
+  production allowance or a remembered answer no longer waives it. Production with
+  declared read-only scope goes to the bouncer brain (section "Owner task and
+  floating questions").
 - A bouncer brain that is off, unavailable or has not passed inference readiness.
 - Root, HOME or a parent of HOME instead of a project.
 - Missing user request or declaration, including with a fitting execution answer.
@@ -123,14 +129,38 @@ A verified hook task stays preferred. Without one, use the agent's required
 hook versus agent-stated provenance in activity and decision records. Session
 ambiguity still escalates. Agent-stated task text can be wrong or manipulated.
 
+A turn that the agent host injects is no owner task: a task notification, a peer or
+channel message, an auto-continuation, or a `/loop` or scheduled wakeup that the
+agent wrote. Since 0.5.16 the hook adapter does not send such a turn, and the
+transcript check skips the host's `promptSource: "system"` records
+([host hooks](../operations/host-hooks.md), sections 2 and 4).
+
 Production credentials may pass the bouncer gate only with declared `ReadOnly` scope,
 brain task match and all other gate checks passing. Read-write/admin, Always ask,
 one-time codes and project rules still require owner review. Read-only scope
 relies on the owner's declaration; it does not confine the credential provider.
 
+This applies to every production environment, including the careful default of a
+credential without a label (environment source `default`). Asked what to do with
+unlabeled credentials, the owner chose a question with Allow as dev and Allow as
+prod over "anything unclear counts as development". A value without a signal gets
+production and admin scope by default, so its runs ask before inference until the
+owner labels it. The Decision section above states the earlier routing of
+unconfirmed production; this paragraph replaces it. Since 2026-11-03 (0.5.16), Allow
+as dev means development: when the owner labels a credential development or local, a
+risk or a reversibility that is only a default (no owner value, no strong signal)
+becomes medium and reversible, also at decision time for earlier labels, and that
+default risk is no default source; owner and strong-signal values do not change, and
+staging and production get the careful defaults.
+
 Unknown environments offer Allow as dev, Allow as prod, Dismiss, and Dismiss with
-comment. Either allow classifies the unknown items of this exact pending run
-and approves it once. Known environments offer Allow, Dismiss, and Dismiss with
+comment. Either allow classifies the unknown item of this exact pending run
+and approves it once. Since the 0.5.16 review the answer exists only when exactly
+one item of the run is unknown, and it labels only that item: the owner check names
+one item and the iPhone answer names none, and a development label lowers the
+default risk and reversibility, so labeling every unknown item downgraded a bundled
+production credential. A run with two or more unknown items offers Allow and labels
+nothing. Known environments offer Allow, Dismiss, and Dismiss with
 comment, with remembering only as a secondary checkbox, off by default.
 Classification is carried by the exact guarded owner answer; the broker saves
 it after its unchanged-authorization check and before execution. This prevents

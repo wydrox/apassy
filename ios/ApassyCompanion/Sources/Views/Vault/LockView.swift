@@ -93,6 +93,11 @@ struct LockView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                    if let hint = vault.gate.passphraseHint {
+                        Text(hint)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         } actions: {

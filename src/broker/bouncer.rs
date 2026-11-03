@@ -83,6 +83,12 @@ pub struct BouncerRequest {
     pub purpose: String,
     pub env_names: Vec<String>,
     pub instruction: String,
+    /// Where the user request comes from, when the broker knows more than "the user":
+    /// "Agent SDK turn" for a hook prompt that an Agent SDK host sent (`source: sdk`).
+    /// An agent can start its own SDK session with its own text, so the model reads
+    /// the request with that in mind. Empty for a prompt from the composer, a host
+    /// without a `source`, and the text of the agent.
+    pub task_provenance: String,
 }
 
 /// One model answer: the probability that the fact is true.
@@ -429,6 +435,10 @@ pub fn state_text(request: &BouncerRequest) -> String {
             request.purpose.trim()
         ));
     }
+    // The provenance of the task (for example "Agent SDK turn") is shown on the card and in
+    // the log, but not sent to the brain: the owner's own messages in T3 Code and other SDK
+    // hosts are Agent SDK turns, and a sentence that the training states never had would
+    // lower the task match of exactly those runs.
     if !request.instruction.trim().is_empty() {
         state.push_str(&format!(" Owner rule: {}", request.instruction.trim()));
     }
@@ -600,8 +610,8 @@ pub fn decide_learned(
     model_step(verdict, context, learned.thresholds, false)
 }
 
-/// Model step after `run::route` has checked the source-aware production veto and
-/// all other hard checks. Default classifications always need 80% task match,
+/// Model step after `run::route` has checked the production write/admin veto (every
+/// source) and all other hard checks. Default classifications always need 80% task match,
 /// including known safe commands and reads; calibration cannot lower this check.
 pub(super) fn decide_routed(
     verdict: &BouncerVerdict,
@@ -828,6 +838,7 @@ mod tests {
             purpose: "Apply migrations".to_owned(),
             env_names: vec!["DB_URL".to_owned()],
             instruction: instruction.to_owned(),
+            task_provenance: String::new(),
         }
     }
 
@@ -896,6 +907,14 @@ mod tests {
                 .unwrap_or_default()
                 .ends_with("Owner rule: Staging only.")
         );
+        // Finding 4 of the 0.5.16 review: the provenance of an Agent SDK turn goes to the
+        // card and the log, never into the state of the brain.
+        assert!(!state.contains("Task provenance"));
+        let sdk = BouncerRequest {
+            task_provenance: "Agent SDK turn".to_owned(),
+            ..request("")
+        };
+        assert_eq!(state_text(&sdk), state);
     }
 
     #[test]

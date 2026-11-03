@@ -7,7 +7,8 @@ struct SecuritySettingsView: View {
     /// Closes the Settings sheet (`dismiss` here would only go back to the root).
     let close: DismissAction
     @Environment(RootModel.self) private var root
-    @State private var frequency = FaceIDWindow.app.frequency
+    /// Read in `task`: the frequency is a keychain item, which the demo never reads.
+    @State private var frequency = FaceIDFrequency.everyTime
     @State private var changingFrequency = false
     @State private var frequencyError: String?
 
@@ -17,9 +18,9 @@ struct SecuritySettingsView: View {
                 Picker("Ask for Face ID", selection: $frequency) {
                     ForEach(FaceIDFrequency.allCases) { Text($0.label).tag($0) }
                 }
-                .disabled(changingFrequency)
+                .disabled(changingFrequency || root.isDemo)
                 .onChange(of: frequency) { _, value in
-                    guard value != FaceIDWindow.app.frequency else { return }
+                    guard !root.isDemo, value != FaceIDWindow.app.frequency else { return }
                     changingFrequency = true
                     Task {
                         PrivacyCover.shared.beginSystemPrompt()
@@ -34,7 +35,11 @@ struct SecuritySettingsView: View {
                 }
                 if let frequencyError { Text(frequencyError).foregroundStyle(.red) }
             } footer: {
-                Text("After you confirm with Face ID, Apassy doesn't ask again in this app until the time is up or your iPhone locks. AutoFill always asks.")
+                Text(
+                    root.isDemo
+                        ? "The demo asks for Face ID each time. This setting is not available in the demo."
+                        : "After you confirm with Face ID, Apassy doesn't ask again in this app until the time is up or your iPhone locks. AutoFill always asks."
+                )
             }
             if let vault = root.vault, vault.hasVault, vault.isUnlocked {
                 SecuritySections(vault: vault, close: close)
@@ -47,6 +52,9 @@ struct SecuritySettingsView: View {
         }
         .navigationTitle("Security")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if !root.isDemo { frequency = FaceIDWindow.app.frequency }
+        }
     }
 }
 

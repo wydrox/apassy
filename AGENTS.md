@@ -20,6 +20,8 @@
   website/changelog. Pending store review is not published.
 - Do not report a complete release until all six are live at the shared version.
   If blocked, identify each unfinished component, its actual version, and the blocker.
+- `deploy/plugins/` is not a release component. Its plugin version follows the repository
+  version, but a marketplace listing is published separately, and only with the owner's OK.
 
 # Pull requests and CI
 

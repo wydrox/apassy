@@ -1,6 +1,6 @@
 # Relay questions wire contract v1
 
-Date: 2026-10-12. Gate 3 fixes (device removal, registration by the confirming Mac, answer ordering, a second Mac, an old relay, the relay limits of feat/questions 9851d33) 2026-10-12.
+Date: 2026-10-12. Gate 3 fixes (device removal, registration by the confirming Mac, answer ordering, a second Mac, an old relay, the relay limits of feat/questions 9851d33) 2026-10-12. Card v2 `kind = connect` (sections 7.4, 8.1, 12.7, 20.6) 2026-11-03.
 Status: implemented, for stage 5 of [ADR 0025](../adr/0025-low-friction-access.md) (§3d, §3e) and section A of the [stage 5 plan](../design/stage5-plan.md). The app side (stream N3: `src/questions/`, `src/vault/questions.rs`, `src/relay/membership.rs`, `src/companion/digest.rs`, `src/broker/approvals/owner_auth.rs`), the iPhone side (stream M3: `ios/ApassyCore`, contract [ios-core-v1](ios-core-v1.md)), and the relay side (stream R4: `apassy-relay`, `docs/SPEC.md` section 25) implement it. A change to this document changes every side, one pull request on each; a change to a tag, to the AAD, to the answer string, to the digest, or to a check bumps its version. The app implements the client itself and does not depend on the relay crate (FSL license): everything the app needs is in this document.
 
 ## 1. Purpose
@@ -222,6 +222,59 @@ In this order; the first failure shows "This question could not be read" and off
 
 The card shows each text with control and format characters replaced by `?`, and long paths shortened, by the rules of `shown_path` (`src/broker/approvals.rs`). Only the display changes; the digest covers the exact bytes. The card offers only the answers of `valid_answers`, plus `deny` (section 9.1).
 
+These checks are for a run card (card v1). A card with `"v": 2` and `"kind": "connect"` is a connect card: section 7.4 replaces checks 2 to 4 for it.
+
+### 7.4 Card v2: a connect request
+
+A remote agent that connects to a Mac with the MCP authorization flow (ADR 0037; plan `docs/design/implementation-plan-bouncer-section.md`, decision 4) makes a connect request on the node of that Mac. The Mac asks the iPhones of the vault about it with a **connect card**: card v2 with `kind = connect`. Run cards stay card v1, byte for byte (section 20.2): `QUESTION_CARD_VERSION` stays 1. The envelope (section 6), the AAD of a card, the routing (`to` is always `member`), the relay endpoints, and the limits of section 15 do not change: the relay cannot tell a connect card from a run card.
+
+```json
+{
+  "v": 2,
+  "kind": "connect",
+  "qid": "oKGio6SlpqeoqaqrrK2urw",
+  "asker": {"device": "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", "name": "Synthetic Mac mini"},
+  "created_at": 1790000000,
+  "connect": {
+    "id": "cr_7Hq2xN",
+    "client_name": "Grok Bot",
+    "mac_name": "Synthetic Mac mini",
+    "code": "482 913",
+    "expires_at": 1790000300
+  },
+  "digest": "414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc"
+}
+```
+
+| Field | Rule |
+| --- | --- |
+| `v` | `2`. |
+| `kind` | `connect`, the only kind of card v2. |
+| `qid`, `asker`, `created_at` | as in card v1 (section 7.1). |
+| `connect.id` | the connect request ID of the node: 1 to 64 bytes of `A-Za-z0-9-_`. |
+| `connect.client_name` | the client name that the agent registered (the relay cleans it; "MCP client" without one): 1 to 64 bytes. |
+| `connect.mac_name` | the Mac that the agent connects to, as the agent's browser page shows it: 1 to 64 bytes. |
+| `connect.code` | the match code of the browser page: 1 to 16 bytes. |
+| `connect.expires_at` | when the connect request ends on the node; the relay record's `expires_at` is the same time. |
+| `connect.redirect_host` | since 0.5.16 (review 0.5.16), optional: the host of the redirect URI of the request, where the browser goes back with the code (lowercase, no port, an IPv6 address in brackets): 1 to 255 bytes of printable ASCII without a space. A Mac of 0.5.16 or later always sends it; a card of an older Mac has none. The iPhone shows "Returns to <host>", or "Returns to a program on a computer (localhost)" for `localhost`, a name under it, `127.0.0.0/8`, `[::1]`, or the unspecified address (`apassy::questions::envelope::connect_returns_to`). |
+| `digest` | the connect digest of section 8.1. |
+
+No text of `connect` holds a control character, a Unicode format character (category Cf), or a code point of the tag block U+E0000–E007F: one rule, `apassy::text::is_hidden_char`, on the Mac, on the iPhone, and for the client name of the connect page. There is no token, item, agent list, or owner name on a connect card. The asking Mac posts at most one connect card at a time (the relay keeps 10 open questions per asking device, section 15); another connect request stays on the Mac.
+
+The answering device checks a connect card in this order; the first failure shows "This question could not be read":
+
+1. The envelope opens (section 6.2).
+2. The JSON parses with exactly the fields above (`connect.redirect_host` may be missing), `v` is 2, `kind` is `connect`, and the texts have the forms above. A reader before 0.5.16 refuses a card with `redirect_host` as "update": it could not say where the code goes back.
+3. `qid` equals the relay's `qid`, and the connect digest of the card's fields is `digest`.
+4. `asker.device` is a live `trusted_device` of kind `mac` whose device number in the questions team, when set, equals the relay's `from_device_id`.
+5. The relay's `expires_at` is in the future.
+
+**Who sees it.** An iPhone shows it in Requests: "<client_name> wants to connect", the Mac, the time left, the Code row, one warning line ("Allow only if this code is on the agent's page. The agent gets no credentials until you choose some."), and Deny / Allow. Another Mac of the vault does not list connect cards: the asking Mac has the request in Decisions itself. An Apple Watch never shows one.
+
+**An old reader.** A reader of card v1 refuses `"v": 2` with "Update Apassy to read this question", for connect cards only: every run card is still card v1.
+
+The unpublished run card v2 with `owner_prompt` in `src/questions/envelope.rs` is not part of this contract: a run card is card v1 until a later version of this section says otherwise.
+
 ## 8. The question digest v2
 
 `question_digest_v2(run) = SHA-256(input)`, sent as 64 lowercase hex characters. It extends the companion digest v1 (`src/companion/digest.rs`, companion-v1 section 7): the same encoding of every `PendingRun` field with a new tag, then every `QuestionInfo` field. The v1 digest stays for the local-network companion and never changes.
@@ -262,6 +315,24 @@ list(question.valid_answers)         -- the texts of section 7.1
 
 The part up to `run.remember` is byte for byte the v1 input with the tag `apassy-question-v2` instead of `apassy-companion-run-v1`. The digest covers the bouncer text (`risk`, `why`) on purpose: the device signs what it showed. The remote digest is not used to join two calls of an agent; that stays `template_of` in the queue.
 
+### 8.1 The connect digest
+
+`connect_digest(card) = SHA-256(input)`, as 64 lowercase hex characters, with the primitives above:
+
+```
+text("apassy-connect-question-v1")
+text(asker.device)
+text(connect.id)
+text(connect.client_name)
+text(connect.mac_name)
+text(connect.code)
+u64(connect.expires_at)
+text("redirect_host")          only when the card has connect.redirect_host
+text(connect.redirect_host)    only when the card has connect.redirect_host
+```
+
+It covers what the iPhone shows, so the device signs what it showed. A card without `redirect_host` has the digest of 0.5.15; taking the host away or changing it changes the digest. `asker.name` and `created_at` are for the display only, as in card v1.
+
 ## 9. The answer
 
 ### 9.1 Answer kinds
@@ -276,6 +347,9 @@ The part up to `run.remember` is byte for byte the v1 input with the tag `apassy
 | `never_for_agent` | none | `never_for_agent` | `deny_stricter(StricterAnswer::NeverForAgent)` | yes |
 | `always_ask_for_agent` | none | `always_ask_for_agent` | `deny_stricter(StricterAnswer::AlwaysAskForAgent)` | yes |
 | `disconnect` | none | `disconnect` | `deny_stricter(StricterAnswer::Disconnect)` | yes |
+| `allow_connect` | none | a connect card (section 7.4) | the node allows the connect request (section 12.7) | yes |
+
+On a connect card only `allow_connect` and `deny` are valid; on a run card `allow_connect` is not known. `deny` on a connect card denies the connect request.
 
 `action` must equal `question.action`, `project_key` must equal `question.project.key` (a question without a project offers neither kind), `item_id` is a decimal string, `environment` is `development` or `production`. "Approve and remember" (a pattern, ADR 0010) is not a remote answer in v1.
 
@@ -319,6 +393,7 @@ approve_in_project:<action>:<project_key>
 allow_production:<action>:<project_key>
 correct_environment:<environment>:<item_id>
 deny
+allow_connect
 never_for_agent
 always_ask_for_agent
 disconnect
@@ -483,7 +558,9 @@ The first answer that passes every check takes effect. Then the asker posts the 
 4. verifies the signature with `answer_key` for an `iphone` row (a NULL `answer_key` is `RemoteRejected`) or `sign_key` for a `mac` row;
 5. checks the vault session before and after, as for Touch ID.
 
-A remote check can make a proof only for `ApproveRun`, `ApproveInProject`, `AllowProduction`, and `ChangeItemRules` for a correction of an item of the waiting question. Any other action is `RemoteUnsupported`: a remote device can never reveal, grant, pair, connect an agent, or change a setting. The answer is counted as one owner interaction by the broker, as a local answer is (ADR 0025 §1).
+A remote check can make a proof only for `ApproveRun`, `ApproveInProject`, `AllowProduction`, and `ChangeItemRules` for a correction of an item of the waiting question. Any other action is `RemoteUnsupported`: a remote device can never reveal, grant, pair, connect an agent, or change a setting through the owner gate. The answer is counted as one owner interaction by the broker, as a local answer is (ADR 0025 §1).
+
+The one exception is a connect card: an iPhone's Allow of a connect request is checked by the connect lane (section 12.7), not by the owner gate, and the node decides. It allows the remote agent to connect with no credentials; choosing credentials for it still needs the owner on the Mac.
 
 ### 12.5 A correction, and a changed question
 
@@ -493,6 +570,19 @@ A remote check can make a proof only for `ApproveRun`, `ApproveInProject`, `Allo
 
 A vault has at most one questions team. A Mac that makes one names it in the vault (`vault_secret` `questions-team-v1`). A second Mac of a vault that syncs another way (iCloud Drive) never makes another: when the vault names a team, or live trusted devices have a device number in a team that this Mac is not in, "Send questions through the relay" joins that team. The owner pastes a device link made on a Mac in the team ("Add an iPhone or a Mac…"); the owner check on the joining Mac names the relay and the team of the link (`EnableRelayQuestions`); both Macs show the safety words; the Mac in the team confirms with its own owner check. The joining Mac then keeps a membership with the purpose `questions` and writes its own row.
 
+### 12.7 A connect card
+
+The asking Mac's connect lane (`src/questions/connect.rs`, its own thread of the questions worker) posts a connect card when the node hands it a connect request (`QuestionsWorker::post_connect`) while the questions are on and the vault is unlocked; without them the request stays on the Mac. `expires_at` is the connect request's end (300 s on the node). Posts retry as in section 12.1. The lane reads the answers with short polls and checks each answer in `id` order; the first failure skips it with an Activity line ("An answer from <device> did not count: <reason>", operation `connect through the relay`):
+
+1. It opens with the question's key and the AAD with the stamped `device_id` (section 6.1).
+2. It is an answer v1 to this `qid` with `kind` `allow_connect` or `deny` and no extra field.
+3. `by` is a live `trusted_device` of kind `iphone` whose device number in the questions team, when set, equals the stamped `device_id`. A Mac and an Apple Watch never answer a connect card.
+4. `digest` equals the connect digest of the posted card.
+5. `now - 60 <= time <= now + 60` on the Mac clock.
+6. The signature verifies over the answer string (section 9.3, `<choice>` `allow_connect` or `deny`): `allow_connect` with the row's `answer_key` (Face ID; a NULL `answer_key` refuses it), `deny` with its `sign_key`.
+
+The first answer that passes goes to the node, once (`QuestionsWorker::set_on_connect_answer`); the lane reads no later answer of that card. When the node took it, the lane settles the question with `approved` or `denied`, the iPhone, and the kind. When the request no longer waits on the node (the owner answered on the Mac, it expired, it went), the lane settles at the end that the node reports (`QuestionsWorker::end_connect`), or as `invalidated` at the expiry. A connect request that ends on the Mac first settles with that end: `approved` or `denied` by the Mac, `timed_out` at the expiry, `invalidated` when the node dropped it. A replayed answer finds the question settled, or fails check 2, 4, or 5.
+
 ## 13. The answering device
 
 1. **Find.** It long-polls `GET /v1/questions?since=<last seq>&wait=25` while it runs in the foreground (an iPhone), or always while the vault is unlocked (a Mac with the feature on). A push wakes the iPhone app only when the owner opens the notification; the app then reads the list.
@@ -500,6 +590,7 @@ A vault has at most one questions team. A Mac that makes one names it in the vau
 3. **Answer.** The owner selects an answer. The device sets `time`, builds the answer string, asks for Face ID (iPhone, `answer_key`) or Touch ID (Mac, `OwnerAction::AnswerRemoteQuestion`) for the approving kinds of section 5.3, signs, seals, and posts. An accepted post shows “Sent. Waiting for the Mac to confirm.” Until a readable settle arrives it is not Allowed or Denied. After 60 seconds or the question expiry, an unsettled answer shows “Not confirmed. The Mac may be offline. Check again for the result.” Timeout or absence is not proof of refusal; the asking Mac logs each refused answer in Activity with the device and the reason (section 12.3).
 4. **Retries.** After a network error or a `500`/`503`, it posts the same answer again (a new nonce and envelope, the same signature) while `time` is less than 55 s old; after that it asks again. A `409 question_settled` or `question_expired` shows "Already answered" or "Expired", with the settle text when it has it. A `403 not_routed` shows "This device cannot answer this question".
 5. The relay accepting an answer does not mean that it counted: only the settle says what happened.
+6. **A connect card** (section 7.4): an iPhone offers Deny and Allow. Allow asks for Face ID for this answer and is signed with the answer key, as "Allow once" of a run; Deny is signed with the relay key. A Mac leaves connect cards out of its list; an Apple Watch never shows one.
 
 ## 14. Push
 
@@ -554,7 +645,8 @@ The relay side of the push (`POST /internal/push` on the Worker with the edge se
 
 ## 17. Versioning
 
-- `v` is `1` in every request body, card, answer, and settle. The relay refuses another `v` with `400`. A device that cannot read a card's `v` shows "Update Apassy to read this question".
+- `v` is `1` in every request body, run card, answer, and settle. The relay refuses another `v` in a request body with `400`; it never reads a card. A device that cannot read a card's `v` shows "Update Apassy to read this question".
+- Card v2 has `kind`; its only kind is `connect` (section 7.4). Run cards stay card v1, so an old reader shows the update text for connect cards only. A connect answer is an answer v1 with the kind `allow_connect` or `deny`, and its settle is a settle v1: no new field.
 - The tags `apassy-question-v1` (AAD), `apassy-question-answer-v1` (answer string), and `apassy-question-v2` (digest; v2 because it extends the companion digest v1) change with any change of their bytes. The vault secret name `question-key-v1` changes with the key's meaning.
 - New optional fields in a relay result are ignored by the app. A new field in a card, answer, or settle is a new `v`.
 - The local-network companion keeps contract companion-v1 and digest v1.
@@ -692,6 +784,36 @@ Settle ciphertext (hex, 221 bytes):
 - The answer signature verifies over the answer string and fails after one changed character of it, and with the companion request key. ECDSA signatures are randomized: a new signature of the same string differs and still verifies.
 - The asker accepts the answer for the question of section 7.1 with the clock at `1790000030` to `1790000090`, and refuses it at `1790000091` (stale), with another digest (`changed`), with the choice `approve_in_project:deploy:/tmp/synthetic-shop/.git` (not in `valid_answers`), and from a `trusted_device` row whose `answer_key` is another key.
 - Every field of `QuestionInfo` changes the digest v2 (as `every_field_changes_the_digest` for v1), and moving text between `why` and an item name, or between two items, changes it.
+
+### 20.6 The connect card
+
+The connect digest (section 8.1) of the card of section 7.4 (asker `0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d`, id `cr_7Hq2xN`, `Grok Bot`, `Synthetic Mac mini`, code `482 913`, `expires_at` `1790000300`; input 160 bytes): `414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc`.
+
+The card plaintext is exactly these 368 bytes (one line; SHA-256 `1b026c3c4364bde88e782ce33c409d5c541fbc5e5fe00d26e2ba639dc3c564a4`):
+
+```
+{"v":2,"kind":"connect","qid":"oKGio6SlpqeoqaqrrK2urw","asker":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"Synthetic Mac mini"},"created_at":1790000000,"connect":{"id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Synthetic Mac mini","code":"482 913","expires_at":1790000300},"digest":"414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc"}
+```
+
+The Allow of the answering device of section 20 at `time` `1790000030` signs this answer string (188 bytes; SHA-256 `a6755a68599b6123e763c54368ac45de0930e8b5f48629ad190b9387682879c9`):
+
+```
+apassy-question-answer-v1
+6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b
+t_7k2m5q4x3c
+oKGio6SlpqeoqaqrrK2urw
+allow_connect
+414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc
+1790000030
+```
+
+The same card with `"redirect_host":"grok.example"` after `expires_at` (since 0.5.16; input 201 bytes) has the connect digest `920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12`, and its plaintext is exactly 399 bytes (SHA-256 `0d8c17b5362a06c9147ab131b073af120b31940e660e0e1975a8a8a4f3757e73`):
+
+```
+{"v":2,"kind":"connect","qid":"oKGio6SlpqeoqaqrrK2urw","asker":{"device":"0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d","name":"Synthetic Mac mini"},"created_at":1790000000,"connect":{"id":"cr_7Hq2xN","client_name":"Grok Bot","mac_name":"Synthetic Mac mini","code":"482 913","expires_at":1790000300,"redirect_host":"grok.example"},"digest":"920e1b31aac3c46fc4bb12a5e3f79d391663c7fa878a3dbbba328de9040b3d12"}
+```
+
+The suites show: the Mac's card and the iPhone's parser agree on the digest and the bytes, with and without `redirect_host`; a card v1 reader refuses the connect card as "update"; an Allow signed with the relay key, a stale or moved answer, a run kind, and an answer of a Mac or an Apple Watch do not count; run cards are still the bytes of section 20.2.
 
 ## Integrator decisions on the open questions (2026-10-12)
 

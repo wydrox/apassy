@@ -2,7 +2,7 @@ import ApassyCompanionKit
 import ApassyVaultKit
 import SwiftUI
 
-/// A v1 relay question with the same owner choices as the Mac.
+/// A v1 relay question with the same owner choices as the Mac, or a connect request (card v2).
 struct QuestionDetailView: View {
     let model: QuestionsModel
     let requestIdentity: String
@@ -14,7 +14,11 @@ struct QuestionDetailView: View {
 
     var body: some View {
         Group {
-            if let question, let card = question.card {
+            if let question, let connect = question.connect {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    ConnectRequestDetail(model: model, question: question, connect: connect, now: context.date)
+                }
+            } else if let question, let card = question.card {
                 // Each second: the timer, and the bar that gives way to "Expired".
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     content(question, card, outcome: model.outcome(for: question))
@@ -192,3 +196,103 @@ struct QuestionDetailView: View {
         }
     }
 #endif
+
+/// A connect request (card v2 `kind = connect`), as in the mockup: "<name> wants to connect", the
+/// Mac and the time left, the Code row, one warning line, and Deny / Allow (Face ID).
+struct ConnectRequestDetail: View {
+    let model: QuestionsModel
+    let question: RemoteQuestion
+    let connect: ConnectRequestCard
+    let now: Date
+    @State private var tapGuard = AnswerGuard()
+
+    var body: some View {
+        let outcome = model.outcome(for: question)
+        List {
+            Section {
+                DecisionHeader(
+                    agent: connect.clientName, sentence: "\(connect.clientName) wants to connect",
+                    detail: connect.macName,
+                    deadline: outcome == nil ? Date(timeIntervalSince1970: TimeInterval(question.expiresAt)) : nil)
+            }
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+            Section {
+                LabeledContent("Code") {
+                    Text(connect.code).font(.title3.monospaced()).tracking(3).foregroundStyle(.primary)
+                }
+                .accessibilityIdentifier("connect.code")
+            } footer: {
+                Label(QuestionsModel.connectCodeWarning(code: connect.code), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
+            // Where the code goes back (review 0.5.16); a program on a computer is a warning.
+            if let returnsTo = connect.returnsTo {
+                Section {
+                    Label(
+                        returnsTo,
+                        systemImage: connect.localRedirect ? "exclamationmark.triangle" : "arrow.uturn.backward"
+                    )
+                    .foregroundStyle(connect.localRedirect ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .accessibilityIdentifier("connect.returnsTo")
+                }
+            }
+            Section {
+                LabeledContent("Asked on", value: question.askerName)
+                if model.namesVaults, let vault = question.vaultName {
+                    LabeledContent("Vault", value: vault)
+                }
+            }
+        }
+        .contentMargins(.bottom, 24, for: .scrollContent)
+        .onAppear { tapGuard.arm(now: Date()) }
+        .onChange(of: question.connect) { _, _ in tapGuard.arm(now: Date()) }
+        .safeAreaInset(edge: .bottom) {
+            if let outcome {
+                VStack(spacing: 0) {
+                    DecisionOutcomeBar(outcome: outcome)
+                    if model.needsConfirmation(for: question) {
+                        Button("Check Again") { Task { await model.refresh() } }
+                            .buttonStyle(.bordered)
+                            .padding(.bottom, 8)
+                    }
+                }
+            } else {
+                actions
+            }
+        }
+    }
+
+    private var actions: some View {
+        let busy = model.delivery(for: question) == .sending
+        let enabled = model.canAnswerConnect(question, now: now)
+        return DecisionBar {
+            if case .failed(let message) = model.delivery(for: question) {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack(spacing: 8) {
+                Button(role: .destructive) { answer(allow: false) } label: {
+                    Text("Deny").frame(maxWidth: .infinity)
+                }
+                .decisionButton(.deny)
+                Button { answer(allow: true) } label: {
+                    Label("Allow", systemImage: "faceid").frame(maxWidth: .infinity)
+                }
+                .decisionButton(.primary)
+            }
+            .disabled(!enabled)
+            if busy {
+                Text("Sending…").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(busy)
+    }
+
+    private func answer(allow: Bool) {
+        guard tapGuard.accepts(now: Date()), model.canAnswerConnect(question, now: Date()) else { return }
+        Task { await model.answerConnect(allow: allow, for: question) }
+    }
+}

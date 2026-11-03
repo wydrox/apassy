@@ -1,6 +1,8 @@
 # Apassy — MVP plan
 
 Date: 2026-09-16.
+Historical (2026-11-03): this plan is closed. [ADR 0010](adr/0010-closing-open-decisions.md) and [goal.md](goal.md) replaced it, and ADR 0001 closed P0 on 2026-09-27.
+
 Status: revised scope and Grok implementation approved by the owner on 2026-09-16. P0 remains open. P1 foundation code is present. The experimental vault is connected to the owner vault and item views when both desktop and vault features are enabled. Rules, agents, and activity remain demo fixtures. P2b is not started.
 This plan replaces the earlier GitHub-centered plan. Rust and macOS desktop with eframe/egui are confirmed. SQLCipher evaluation is approved.
 Implementation starts with P0. Later tasks retain their decision, verification, and access gates.

@@ -104,6 +104,12 @@ Agent commands. AGENT is an ID or the exact name.
   apassy agent list
   apassy agent show AGENT             Grants, operations, and requests.
   apassy agent add NAME               Register. Prints the token one time.
+  apassy agent add-remote NAME [--days N]
+                              Owner check. A remote agent of this Mac (remote access on)
+                              for a client without the MCP authorization flow: no
+                              credential until you choose some; every run asks you.
+                              Prints its token one time with the MCP address. N: 1 to
+                              365, default 90.
   apassy agent revoke AGENT [--yes]
   apassy agent rotate AGENT           Owner check. Prints the new token one time.
   apassy agent see-all AGENT on|off   on: owner check; removes \"Only these items\".
@@ -1321,6 +1327,21 @@ pub fn agent(cli: &Cli, mut args: Args) -> Outcome {
             print_token(cli, &response);
             Ok(())
         }
+        "add-remote" | "remote" => {
+            let days = args.number::<u32>(&["--days"])?;
+            let name = args.rest().join(" ");
+            args.finish()?;
+            if name.trim().is_empty() {
+                return Err(Failure::Usage(usage("Name the remote agent.")));
+            }
+            if days.is_some_and(|days| !(1..=365).contains(&days)) {
+                return Err(Failure::Usage(usage("--days is 1 to 365.")));
+            }
+            expect_owner_check();
+            let response = cli.call(Command::AgentAddRemote { name, days })?;
+            print_remote_token(cli, &response);
+            Ok(())
+        }
         "revoke" => {
             let agent = args.required("agent")?;
             if !confirmed(
@@ -1392,6 +1413,36 @@ fn print_token(cli: &Cli, response: &Response) {
         terminal::tell(
             "Set it as APASSY_AGENT_TOKEN of the MCP server, or run apassy setup claude|codex.",
         );
+    } else {
+        println!("{}", clean(&response.message));
+    }
+}
+
+/// Print the token of a new remote agent with its MCP address, one time. With `--json`,
+/// both are in the JSON.
+fn print_remote_token(cli: &Cli, response: &Response) {
+    if cli.json {
+        print_json(response);
+        return;
+    }
+    if let Data::RemoteToken {
+        agent,
+        token,
+        mcp_url,
+    } = &response.data
+    {
+        terminal::tell(&format!(
+            "{} (ID {}) is a remote agent of this Mac. Save the token now. Apassy does not show it again:",
+            clean(&agent.name),
+            agent.id
+        ));
+        println!("{}", token.expose());
+        let _ = std::io::stdout().flush();
+        terminal::tell(&format!(
+            "MCP address: {}\nGive the agent this address with the header Authorization: Bearer <token>. It works until {}. It sees no credential until you choose some in Apassy (Bouncer > Agents).",
+            clean(mcp_url),
+            print::time(agent.token_expires_at)
+        ));
     } else {
         println!("{}", clean(&response.message));
     }

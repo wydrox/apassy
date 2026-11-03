@@ -703,6 +703,8 @@ impl Vault {
 
     /// Give an active agent a new token. The old token stops working at once. The
     /// returned token is the only copy outside the vault. An expired agent can rotate.
+    /// A cloud agent (schema 26) has no vault token to give: `InvalidInput`; its token is
+    /// the node's.
     pub fn rotate_agent_token(&mut self, agent_id: u64) -> VaultResult<AgentToken> {
         let sql_id = to_sql_id(agent_id)?;
         let token = Zeroizing::new(fresh_epoch()?);
@@ -712,6 +714,14 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_active_agent(&tx, sql_id)?;
+        let kind: String = tx
+            .query_row("SELECT kind FROM agent WHERE id = ?1", [sql_id], |row| {
+                row.get(0)
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if kind != "local" {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
         tx.execute(
             "UPDATE agent SET token = ?1, token_issued_at = ?2 WHERE id = ?3 AND revoked_at IS NULL",
             (token.as_slice(), at, sql_id),
@@ -771,6 +781,8 @@ impl Vault {
 
     /// Find the active agent for a token, also when the token expired. The broker uses
     /// it to name the agent in the refusal. Use [`Vault::authenticate_agent`] for access.
+    /// Only a local agent has a vault token: the random token of a cloud agent (schema
+    /// 26) is never compared.
     pub fn identify_agent(&self, token: &str) -> VaultResult<AgentSummary> {
         let presented =
             Zeroizing::new(parse_token(token).ok_or_else(|| err(VaultErrorKind::NotFound))?);
@@ -779,7 +791,7 @@ impl Vault {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, token, created_at, token_issued_at FROM agent
-                 WHERE revoked_at IS NULL",
+                 WHERE revoked_at IS NULL AND kind = 'local'",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let rows = stmt
@@ -1655,6 +1667,8 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
     // A restored device is not trusted either. The owner pairs each iPhone again, and
     // the listener gets a new certificate and starts off (ADR 0020).
     super::companion::prepare_restored(&tx)?;
+    // The node of the original vault is not the node of this copy (schema 26).
+    super::cloud::prepare_restored(&tx)?;
     tx.execute(
         "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
          SELECT id, ?1 FROM item WHERE id IN (
@@ -1683,6 +1697,8 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
     tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM access_request WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM cloud_item WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     super::suggestions::forget_item(tx, item_id)?;
     super::learning::forget_item(tx, item_id)

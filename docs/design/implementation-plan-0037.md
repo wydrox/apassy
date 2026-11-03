@@ -1,6 +1,6 @@
 # Implementation plan — your own relay, build path (ADR 0037)
 
-Date: 2026-11-02. Status: PLAN, accepted with ADR 0037. Stages 0 and 1 started 2026-11-02. Decision: [ADR 0037](../adr/0037-own-relay-open-source.md).
+Date: 2026-11-02. Status: PLAN, accepted with ADR 0037. Stages 0 and 1 shipped in 0.5.14 (#66). The cloud slice of stage 2 has its own plan, `implementation-plan-0037-cloud-agents.md` (draft PR #85). Decision: [ADR 0037](../adr/0037-own-relay-open-source.md).
 
 ## Outcome and constraints
 
@@ -56,7 +56,8 @@ import one squashed commit.
 - VPS alias, backup paths, and the `cc.wyderka…` launchd label (`deploy/vps/backup/*`, `docs/OPERATIONS.md`).
 - `APNS_KEY_ID` and `APNS_TEAM_ID` in `deploy/worker/wrangler.jsonc:30-31`. Set them as Worker
   variables at deploy time.
-- `health.yml`: it monitors production, so it stays private.
+- `health.yml`: it monitors production, but it uses only public addresses and no secret, so it is public.
+  Done: it is `.github/workflows/relay-health.yml` in this repository (misc plan M2, D13).
 
 The public host name, the bundle id, and the GitHub org are already public and can stay.
 
@@ -112,6 +113,9 @@ from Worker variables and secrets.
 repository.
 
 **1E Archive.** Archive `wydrox/apassy-relay` after the first release from this repository.
+
+Part done: the health workflow now runs from this repository (`relay-health.yml`). The old workflow is
+disabled and the repository archived after two green scheduled runs on `main` (misc plan D13).
 
 **Acceptance:** a clean clone builds `apassy-relay`, `apassy-team`, and the image. The relay tests are
 green in CI. The deployed image from this repository behaves like the last one (health, a synthetic

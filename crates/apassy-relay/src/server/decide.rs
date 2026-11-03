@@ -15,14 +15,14 @@ use crate::api::{self, PolicyMode, RunRequest, RunStatus, RunView, Suggestion};
 use crate::decision::{self, ItemFacts};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::hostkeys::RunKey;
-use crate::ids::{CollectionId, ItemId, MemberId, RunId};
+use crate::ids::{AgentId, CollectionId, ItemId, MemberId, RunId};
 use crate::secret::SecretString;
 use crate::server::Core;
 use crate::server::approvals::{RunRow, insert_run, run_view};
 use crate::server::audit::{RELAY_ACTOR, agent_actor};
 use crate::server::auth::AgentAuth;
 use crate::server::env::EnvItem;
-use crate::server::store::{ItemRow, db, has_grant, load_item, to_i, to_u};
+use crate::server::store::{ItemRow, agent_items, db, has_grant, load_item, to_i, to_u};
 
 /// Checks the shape of a run request (the core `RunRequest::validate`).
 pub fn validate(request: &RunRequest, max_ttl: u64) -> RelayResult<()> {
@@ -69,10 +69,12 @@ pub fn validate(request: &RunRequest, max_ttl: u64) -> RelayResult<()> {
     Ok(())
 }
 
-/// The items of a run: each exists, has a live grant for the member, and is live.
-/// An unknown item and an ungranted item give the same answer.
+/// The items of a run: each exists, has a live grant for the member, is in the item
+/// list of the agent (`agent.items`, when it has one), and is live. An unknown item, an
+/// ungranted item, and an item outside the agent's list give the same answer.
 pub fn check_access(
     conn: &Connection,
+    agent: AgentId,
     member: MemberId,
     ids: &[ItemId],
 ) -> RelayResult<Vec<ItemRow>> {
@@ -82,10 +84,14 @@ pub fn check_access(
             "An item is unknown, or the member has no access to it.",
         )
     };
+    let listed = agent_items(conn, agent)?;
     let mut items = Vec::with_capacity(ids.len());
     for id in ids {
         let item = load_item(conn, *id)?.ok_or_else(not_granted)?;
         if !has_grant(conn, member, item.collection_id)? {
+            return Err(not_granted());
+        }
+        if listed.as_ref().is_some_and(|list| !list.contains(id)) {
             return Err(not_granted());
         }
         if item.archived {
@@ -309,7 +315,7 @@ pub fn request_run(
             return Err(RelayError::unauthenticated());
         }
         let actor = agent_actor(agent.id.0);
-        let items = match check_access(tx, agent.member.id, &request.items) {
+        let items = match check_access(tx, agent.id, agent.member.id, &request.items) {
             Ok(items) => items,
             Err(error) => {
                 core.audit.write_on(

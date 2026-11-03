@@ -4,7 +4,10 @@
 //! kind, state, and the random key of each team file), the one-time team codes of the
 //! operator, the hashes of the device keys that made Connect teams (section 26), and the
 //! audit of the relay: operator actions, and refused requests that name no known team.
-//! It holds no people, no items, and no runs: those are in the file of each team.
+//! Since version 1004 it also holds the OAuth state of an embedded node (docs/SPEC.md
+//! section 31): registered clients, connect requests, and refresh tokens, with codes and
+//! refresh tokens as hashes only. It holds no people, no items, and no runs: those are in
+//! the file of each team.
 
 use std::sync::Arc;
 
@@ -21,7 +24,7 @@ use crate::server::store::{Store, db, to_i, to_u};
 
 /// `PRAGMA user_version` of the directory. Far from the team versions, so one file is
 /// never taken for the other.
-pub const DIRECTORY_VERSION: i64 = 1003;
+pub const DIRECTORY_VERSION: i64 = 1004;
 
 const SCHEMA: &str = "
 CREATE TABLE team (
@@ -41,6 +44,55 @@ CREATE TABLE audit (
 CREATE TABLE connect_key (
   key_hash BLOB PRIMARY KEY, team_id TEXT, created_at INTEGER NOT NULL);
 CREATE INDEX connect_key_created ON connect_key(created_at);
+CREATE TABLE oauth_client (
+  client_id TEXT PRIMARY KEY, client_name TEXT, redirect_uris TEXT NOT NULL,
+  created_at INTEGER NOT NULL, used_at INTEGER);
+CREATE INDEX oauth_client_created ON oauth_client(created_at);
+CREATE TABLE connect_request (
+  id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, state TEXT,
+  code_challenge TEXT NOT NULL, match_code TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','allowed','denied','expired','redeemed')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+  team_id TEXT, agent_id INTEGER, code_hash BLOB UNIQUE, code_expires_at INTEGER);
+CREATE INDEX connect_request_client ON connect_request(client_id);
+CREATE TABLE oauth_refresh (
+  token_hash BLOB PRIMARY KEY, family TEXT NOT NULL, client_id TEXT NOT NULL,
+  team_id TEXT NOT NULL, agent_id INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER, revoked_at INTEGER);
+CREATE INDEX oauth_refresh_family ON oauth_refresh(family);
+CREATE INDEX oauth_refresh_agent ON oauth_refresh(team_id, agent_id);
+PRAGMA user_version = 1004;
+";
+
+/// Version 1003 to 1004 (docs/SPEC.md section 31.8): additive, in one transaction. The
+/// OAuth state of an embedded node; the hosted relay keeps the tables empty.
+const MIGRATE_1004: &str = "
+CREATE TABLE oauth_client (
+  client_id TEXT PRIMARY KEY, client_name TEXT, redirect_uris TEXT NOT NULL,
+  created_at INTEGER NOT NULL, used_at INTEGER);
+CREATE INDEX oauth_client_created ON oauth_client(created_at);
+CREATE TABLE connect_request (
+  id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, state TEXT,
+  code_challenge TEXT NOT NULL, match_code TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','allowed','denied','expired','redeemed')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+  team_id TEXT, agent_id INTEGER, code_hash BLOB UNIQUE, code_expires_at INTEGER);
+CREATE INDEX connect_request_client ON connect_request(client_id);
+CREATE TABLE oauth_refresh (
+  token_hash BLOB PRIMARY KEY, family TEXT NOT NULL, client_id TEXT NOT NULL,
+  team_id TEXT NOT NULL, agent_id INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER, revoked_at INTEGER);
+CREATE INDEX oauth_refresh_family ON oauth_refresh(family);
+CREATE INDEX oauth_refresh_agent ON oauth_refresh(team_id, agent_id);
+PRAGMA user_version = 1004;
+";
+
+/// Version 1004 back to 1003 (`downgrade_to_1003`, docs/OPERATIONS.md section 24): the
+/// OAuth tables go, in one transaction. Every other table is as 1003 made it.
+const DOWNGRADE_1003: &str = "
+DROP TABLE oauth_refresh;
+DROP TABLE connect_request;
+DROP TABLE oauth_client;
 PRAGMA user_version = 1003;
 ";
 
@@ -198,6 +250,19 @@ impl TeamLimits {
             sync_bytes: 0,
             question_bytes: CONNECT_QUESTION_BYTES,
             feed_bytes: CONNECT_FEED_BYTES,
+            ..Self::default()
+        }
+    }
+
+    /// The limits of the personal team of an embedded node (docs/SPEC.md section 30.2):
+    /// 20 agents, 120 runs an hour, 10 pending runs, and 16 agent requests at once, since
+    /// its agents reach it from the internet. The other fields are the defaults.
+    pub fn personal() -> Self {
+        Self {
+            agents: 20,
+            runs_per_hour: 120,
+            pending_runs: 10,
+            agent_requests: 16,
             ..Self::default()
         }
     }
@@ -503,18 +568,21 @@ impl Directory {
         })
     }
 
-    /// Opens `relay.db` and checks its version. 1001 and 1002 move to 1003 in one
+    /// Opens `relay.db` and checks its version. 1001, 1002, and 1003 move to 1004 in one
     /// transaction; a failure leaves the file at its version.
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
         match store.user_version()? {
             DIRECTORY_VERSION => {}
-            version @ (1001 | 1002) => store.tx(|tx| {
+            version @ (1001..=1003) => store.tx(|tx| {
                 if version == 1001 {
                     tx.execute_batch("ALTER TABLE team ADD COLUMN limits TEXT;")
                         .map_err(db)?;
                 }
-                tx.execute_batch(MIGRATE_1003).map_err(db)
+                if version <= 1002 {
+                    tx.execute_batch(MIGRATE_1003).map_err(db)?;
+                }
+                tx.execute_batch(MIGRATE_1004).map_err(db)
             })?,
             _ => {
                 return Err(RelayError::internal(
@@ -526,6 +594,29 @@ impl Directory {
             store: Arc::new(store),
             audit: Audit::new(),
         })
+    }
+
+    /// `apassy-relay downgrade-directory-1003` (docs/OPERATIONS.md section 24): with the
+    /// relay stopped (it takes `relay.lock`), a directory of version 1004 goes back to
+    /// 1003 in place, for an image before OAuth. The OAuth tables go: registered clients,
+    /// connect requests, and refresh tokens. An access token that was issued stays valid in
+    /// its team file until it ends (at most `oauth::ACCESS_TOKEN_SECS`), and no client can
+    /// refresh it. A file of version 1003 is left as it is. Returns the version before and
+    /// after.
+    pub fn downgrade_to_1003(config: &RelayConfig) -> RelayResult<(i64, i64)> {
+        let _lock = crate::server::hub::lock_data_dir(config)?;
+        let store = Store::open_at(&config.directory_path(), &config.master_key)?;
+        let from = store.user_version()?;
+        match from {
+            1004 => store.tx(|tx| tx.execute_batch(DOWNGRADE_1003).map_err(db))?,
+            1003 => {}
+            _ => {
+                return Err(RelayError::internal(
+                    "relay.db is not a directory of version 1003 or 1004.",
+                ));
+            }
+        }
+        Ok((from, store.user_version()?))
     }
 
     /// Every team, oldest first.
@@ -1200,7 +1291,7 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn directory_migrates_1002_to_1003_and_keeps_teams_as_operator() {
+    fn directory_migrates_1002_to_1004_and_keeps_teams_as_operator() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let store =
@@ -1223,7 +1314,7 @@ PRAGMA user_version = 1002;
         drop(store);
 
         let directory = Directory::open(&config).unwrap();
-        assert_eq!(directory.store.user_version().unwrap(), 1003);
+        assert_eq!(directory.store.user_version().unwrap(), 1004);
         let rows = directory.teams().unwrap();
         assert_eq!(rows.len(), 2);
         let first_row = directory.team(&first).unwrap().unwrap();
@@ -1362,15 +1453,15 @@ PRAGMA user_version = 1002;
     }
 
     #[test]
-    fn new_directory_uses_1003_and_refuses_unknown_versions() {
+    fn new_directory_uses_1004_and_refuses_unknown_versions() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
         let directory = Directory::create(&config).unwrap();
         assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
-        assert_eq!(DIRECTORY_VERSION, 1003);
+        assert_eq!(DIRECTORY_VERSION, 1004);
         directory
             .store
-            .with(|conn| conn.pragma_update(None, "user_version", 1004).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 1005).map_err(db))
             .unwrap();
         drop(directory);
         assert!(Directory::open(&config).is_err());
@@ -1379,15 +1470,84 @@ PRAGMA user_version = 1002;
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            1004
+            1005
         );
+    }
+
+    /// The tables, indexes, and their SQL of a directory file, by name.
+    fn schema_of(config: &RelayConfig) -> Vec<(String, String)> {
+        Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT name, coalesce(sql, '') FROM sqlite_master \
+                         WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+                    )
+                    .map_err(db)?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(db)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn directory_moves_from_1003_to_1004_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let fresh = {
+            Directory::create(&config).unwrap();
+            schema_of(&config)
+        };
+        for table in ["oauth_client", "connect_request", "oauth_refresh"] {
+            assert!(fresh.iter().any(|(name, _)| name == table), "{table}");
+        }
+        let team = TeamId::parse("t_abcdefgh23").unwrap();
+        let key = SecretString::new("test-team-file-key".to_string());
+        Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| {
+                insert_team(conn, &team, "First", &key, false, 42)?;
+                conn.execute(
+                    "INSERT INTO oauth_client (client_id, client_name, redirect_uris, created_at) \
+                     VALUES ('c_1', 'Grok Bot', '[\"https://x.example/cb\"]', 42)",
+                    [],
+                )
+                .map_err(db)?;
+                Ok(())
+            })
+            .unwrap();
+        // Down: the OAuth tables go, the team stays, and a second run changes nothing.
+        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1004, 1003));
+        assert_eq!(Directory::downgrade_to_1003(&config).unwrap(), (1003, 1003));
+        let down = schema_of(&config);
+        assert!(
+            down.iter().all(
+                |(name, _)| !name.starts_with("oauth_") && !name.starts_with("connect_request")
+            )
+        );
+        assert!(down.iter().any(|(name, _)| name == "connect_key"));
+        // Up again at the next open, with the schema of a new file.
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), 1004);
+        assert_eq!(directory.teams().unwrap().len(), 1);
+        drop(directory);
+        assert_eq!(schema_of(&config), fresh);
+        // A file of another version is refused, and stays.
+        Store::open_at(&config.directory_path(), &config.master_key)
+            .unwrap()
+            .with(|conn| conn.pragma_update(None, "user_version", 1002).map_err(db))
+            .unwrap();
+        assert!(Directory::downgrade_to_1003(&config).is_err());
     }
 
     #[test]
     fn failed_migration_does_not_advance_version() {
-        // A 1003 file that claims an older version: its migration fails (the columns are
-        // there), and the version stays.
-        for version in [1001, 1002] {
+        // A 1004 file that claims an older version: its migration fails (the columns or
+        // tables are there), and the version stays.
+        for version in [1001, 1002, 1003] {
             let dir = tempfile::tempdir().unwrap();
             let config = config(dir.path());
             let directory = Directory::create(&config).unwrap();

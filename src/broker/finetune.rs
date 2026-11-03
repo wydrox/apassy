@@ -316,6 +316,7 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
             purpose: text(&value, "purpose")?.to_owned(),
             env_names: texts(&value, "env_names")?,
             instruction: instruction.to_owned(),
+            task_provenance: String::new(),
         };
         lines.push(OwnerLine {
             state: bouncer::state_text(&request),

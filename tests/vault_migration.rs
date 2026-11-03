@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 25;
+const CURRENT_VERSION: i64 = 27;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -2395,6 +2395,19 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
+    // Schema 27 (the Bouncer figures) and 26 (the cloud agents of the node) first, then
+    // 23 to 20.
+    conn.execute_batch(
+        "DROP INDEX item_use_decision; DROP INDEX cloud_run_decision; DROP TABLE cloud_run;
+             ALTER TABLE cloud_agent DROP COLUMN connected_with; ALTER TABLE cloud_agent DROP COLUMN client_id;
+             ALTER TABLE decision_log DROP COLUMN wait_ms; ALTER TABLE decision_log DROP COLUMN request;",
+    )
+    .expect("drop schema 27");
+    conn.execute_batch(
+        "DROP TABLE cloud_node; DROP TABLE cloud_item; DROP TABLE cloud_agent;
+         ALTER TABLE agent DROP COLUMN kind;",
+    )
+    .expect("drop schema 26");
     conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values; DROP TABLE access_request_v1; DROP TABLE access_request_creation; DROP TABLE access_request_clock; DROP TABLE relay_connect_pending; DROP TABLE bouncer_scope")
         .unwrap();
     conn.execute_batch(SCHEMA19_ONLY).expect("drop schema 19");

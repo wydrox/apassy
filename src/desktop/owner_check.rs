@@ -629,6 +629,33 @@ pub enum OwnerRequest {
         choice: Choice,
         action: OwnerAction,
     },
+    /// "Allow" on a connect request in Decisions (plan "Bouncer section" decision 6):
+    /// connect the remote agent of the request to this Mac. The values are the request
+    /// exactly as the card showed it; the app allows it only while the node still has it
+    /// with this code (`Node::allow_connect`).
+    AllowConnect {
+        id: String,
+        client_name: String,
+        code: String,
+        /// Where the code goes back (`PendingConnect.redirect_host`, review 0.5.16).
+        redirect_host: String,
+    },
+    /// `apassy agents add-remote NAME [--days N]`: a remote agent with no item and a
+    /// bearer token for the command line. Only the command line asks for it.
+    AddRemoteAgent {
+        name: String,
+        days: u32,
+    },
+    /// The remote access switch on (Bouncer > Agents): Tailscale Funnel to the node.
+    TurnOnRemoteAccess,
+    /// "Choose Credentials…" on an agent page: the agent may use `add` from now on, as
+    /// "only these items" (ADR 0012). Adding gives access, so it needs the check; the
+    /// node then sends the new list to a remote agent. Removing needs none.
+    ChooseAgentItems {
+        agent_id: u64,
+        agent_name: String,
+        add: Vec<u64>,
+    },
 }
 
 impl OwnerRequest {
@@ -1023,6 +1050,26 @@ impl OwnerRequest {
                 }
             }
             Self::AnswerRemoteQuestion { action, .. } => action.clone(),
+            Self::AllowConnect {
+                id,
+                client_name,
+                code,
+                redirect_host,
+            } => OwnerAction::AllowConnect {
+                id: id.clone(),
+                client_name: client_name.clone(),
+                code: code.clone(),
+                redirect_host: redirect_host.clone(),
+            },
+            Self::AddRemoteAgent { name, days } => OwnerAction::AddRemoteAgent {
+                name: name.clone(),
+                days: *days,
+            },
+            Self::TurnOnRemoteAccess => OwnerAction::TurnOnRemoteAccess,
+            Self::ChooseAgentItems { agent_id, add, .. } => OwnerAction::ChangeGrants {
+                agent_id: *agent_id,
+                item_ids: add.clone(),
+            },
         }
     }
 
@@ -1299,7 +1346,7 @@ impl OwnerRequest {
                 environment,
                 ..
             } => format!(
-                "Allow this run for \"{agent}\" and mark its unknown credentials (including \"{name}\") as {}.",
+                "Allow this run for \"{agent}\" and mark \"{name}\" as {}.",
                 environment.as_str()
             ),
             Self::AnswerSuggestion {
@@ -1413,6 +1460,44 @@ impl OwnerRequest {
                     page_text(asker)
                 )
             }
+            Self::AllowConnect {
+                client_name,
+                code,
+                redirect_host,
+                ..
+            } => {
+                // Where the code goes back; a loopback address can be any program of this
+                // Mac, as the node's listener is on the loopback (review 0.5.16).
+                let local = redirect_host.is_empty()
+                    || crate::questions::envelope::is_local_redirect_host(redirect_host);
+                format!(
+                    "Connect {} to this Mac as a new agent? {}.{} Allow only if the page in your browser shows this code: {}. The name comes from the agent and is not verified. It sees no credential until you choose some, and every run asks you.",
+                    page_text(client_name),
+                    page_text(&crate::questions::envelope::connect_returns_to(redirect_host)),
+                    if local {
+                        format!(" {}", crate::questions::envelope::LOCAL_CONNECT_WARNING)
+                    } else {
+                        String::new()
+                    },
+                    page_text(code)
+                )
+            }
+            Self::AddRemoteAgent { name, days } => format!(
+                "Add the remote agent {} and issue its token to the command line? The token works for {days} days. The agent sees no credential until you choose some, and every run asks you.",
+                page_text(name)
+            ),
+            Self::TurnOnRemoteAccess => "Turn on remote access? Remote agents can then reach this Mac through Tailscale Funnel while it is awake and the vault is unlocked. The name of this Mac appears in public certificate logs. Every remote run still asks you.".to_owned(),
+            Self::ChooseAgentItems {
+                agent_name, add, ..
+            } => format!(
+                "Let {} use {}? It sees their names, never their values. The bouncer still decides each use.",
+                page_text(agent_name),
+                if add.len() == 1 {
+                    "1 more credential".to_owned()
+                } else {
+                    format!("{} more credentials", add.len())
+                }
+            ),
         }
     }
 }
@@ -2341,6 +2426,52 @@ impl DesktopApp {
             OwnerRequest::AnswerRemoteQuestion {
                 remote_id, choice, ..
             } => self.answer_remote_question(remote_id, choice, Some(proof)),
+            OwnerRequest::AllowConnect {
+                id,
+                client_name,
+                code,
+                redirect_host,
+            } => self.complete_allow_connect(&id, &client_name, &code, &redirect_host, proof),
+            OwnerRequest::AddRemoteAgent { name, days } => {
+                self.complete_add_remote_agent(&name, days, proof);
+            }
+            OwnerRequest::TurnOnRemoteAccess => self.complete_remote_access_on(proof),
+            OwnerRequest::ChooseAgentItems {
+                agent_id,
+                agent_name,
+                add,
+            } => {
+                let action = OwnerAction::ChangeGrants {
+                    agent_id,
+                    item_ids: add.clone(),
+                };
+                let result = session.with_vault(|vault| {
+                    proof
+                        .check(&action, &vault.epoch())
+                        .map_err(|refusal| refusal.message().to_owned())?;
+                    for item_id in &add {
+                        vault
+                            .add_agent_exception(
+                                agent_id,
+                                *item_id,
+                                crate::vault::exceptions::ExceptionKind::Only,
+                            )
+                            .map_err(|err| format!("The credentials did not change: {err}."))?;
+                    }
+                    Ok::<(), String>(())
+                });
+                match result {
+                    Some(Ok(())) => {
+                        self.sync_remote_catalog();
+                        self.set_ok(format!(
+                            "{} can use the chosen credentials. The bouncer decides each use.",
+                            page_text(&agent_name)
+                        ));
+                    }
+                    Some(Err(message)) => self.set_err(message),
+                    None => self.set_err("The vault is locked."),
+                }
+            }
         }
     }
 
@@ -2386,9 +2517,11 @@ impl DesktopApp {
         }
     }
 
-    /// Mark the environment of an item as the answer of the owner: only the environment
-    /// and its source "owner" change (ADR 0025 §4). The project of a pasted credential
-    /// stays empty, and the other values and sources stay.
+    /// Mark the environment of an item as the answer of the owner: the environment and
+    /// its source "owner" change (ADR 0025 §4). The project of a pasted credential
+    /// stays empty, and the other sources stay. A risk or a reversibility that is only a
+    /// default follows the environment ([`crate::vault::Vault::set_declaration_environment`],
+    /// ADR 0031 of 2026-11-03); the other values stay.
     fn complete_set_environment(
         &mut self,
         item_id: u64,
@@ -2925,6 +3058,9 @@ impl DesktopApp {
         self.ui.discard_item_changes = false;
         self.ui.discard_item_kind_change = false;
         self.files.forget();
+        // The node of cloud agents stops first, so its session rows are written while
+        // the vault is open: every session ends and the Funnel route goes off.
+        self.stop_node();
         let approvals = self.approvals();
         let result = self
             .owner_ui
@@ -2983,6 +3119,8 @@ impl DesktopApp {
         self.browser.stop();
         // The macOS passkey sheet gets "cancelled" for each request that waits.
         self.platform.stop();
+        // The node of cloud agents: sessions end, the Funnel route goes off.
+        self.stop_node();
         let approvals = self.approvals();
         let _ = self
             .owner_ui
@@ -2998,5 +3136,73 @@ impl DesktopApp {
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();
+    }
+}
+
+#[cfg(test)]
+mod connect_prompt_tests {
+    use super::OwnerRequest;
+
+    /// The owner compares the code of the browser page with this one: the prompt names
+    /// the page in the browser, not "the agent", and says that the connect makes a new
+    /// agent (security review finding 1d).
+    #[test]
+    fn the_allow_connect_prompt_asks_to_compare_the_code_of_the_browser_page() {
+        let request = OwnerRequest::AllowConnect {
+            id: "cr_1".to_owned(),
+            client_name: "Grok Bot".to_owned(),
+            code: "K7Q-4MD".to_owned(),
+            redirect_host: "grok.example".to_owned(),
+        };
+        let text = request.describe();
+        assert!(
+            text.contains("Allow only if the page in your browser shows this code: K7Q-4MD."),
+            "{text}"
+        );
+        assert!(
+            text.starts_with(
+                "Connect Grok Bot to this Mac as a new agent? Returns to grok.example. Allow only"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("page of the agent"), "{text}");
+        assert!(!text.contains("A program on this Mac"), "{text}");
+    }
+
+    /// Review 0.5.16: the node's listener is on the loopback, so any program of this Mac
+    /// can start a connect request whose code goes back to localhost. The prompt says so.
+    #[test]
+    fn the_allow_connect_prompt_says_a_program_on_this_mac_can_start_a_localhost_request() {
+        for host in ["127.0.0.1", "localhost", "[::1]", ""] {
+            let request = OwnerRequest::AllowConnect {
+                id: "cr_1".to_owned(),
+                client_name: "Grok Bot".to_owned(),
+                code: "K7Q-4MD".to_owned(),
+                redirect_host: host.to_owned(),
+            };
+            let text = request.describe();
+            assert!(
+                text.contains("A program on this Mac can start this request."),
+                "{host}: {text}"
+            );
+            assert!(text.contains("K7Q-4MD"), "{text}");
+            if !host.is_empty() {
+                assert!(
+                    text.contains("Returns to a program on a computer (localhost)."),
+                    "{text}"
+                );
+            }
+        }
+        // The proof binds the host: another host is another action.
+        let action = |host: &str| {
+            OwnerRequest::AllowConnect {
+                id: "cr_1".to_owned(),
+                client_name: "Grok Bot".to_owned(),
+                code: "K7Q-4MD".to_owned(),
+                redirect_host: host.to_owned(),
+            }
+            .action()
+        };
+        assert_ne!(action("grok.example"), action("127.0.0.1"));
     }
 }

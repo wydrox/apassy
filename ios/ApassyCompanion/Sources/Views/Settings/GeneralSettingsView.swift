@@ -69,7 +69,7 @@ private struct GeneralVaultSections: View {
                     root.addVault()
                 }
                 Button("Remove “\(vault.vault?.name ?? "")” from this iPhone", role: .destructive) {
-                    confirmingRemove = true
+                    if root.isDemo { root.showNotAvailableInDemo() } else { confirmingRemove = true }
                 }
                 .disabled(working)
             } header: {
@@ -87,6 +87,11 @@ private struct GeneralVaultSections: View {
                     } label: {
                         Label("Move to another app", systemImage: "arrow.left.arrow.right")
                     }
+                } else if root.isDemo {
+                    // The demo moves nothing to or from another app.
+                    Button("Move to another app", systemImage: "arrow.left.arrow.right") {
+                        root.showNotAvailableInDemo()
+                    }
                 }
                 NavigationLink {
                     DuplicatesView(vault: vault)
@@ -97,12 +102,14 @@ private struct GeneralVaultSections: View {
                 Text("Import and export")
             } footer: {
                 Text(
-                    root.exchange == nil
+                    root.isDemo
+                        ? "Import, export, and moving to another app are not available in the demo. Find duplicates works on the sample data."
+                        : root.exchange == nil
                         ? "Find duplicates merges items that hold the same credential. The others go to the archive."
                         : "Logins, one-time passwords, and passkeys move between Apassy and another app through iOS, after Face ID. To import, start the export in the other app and pick Apassy. Find duplicates merges items that hold the same credential; the others go to the archive."
                 )
             }
-            autoFill
+            if root.isDemo { demoAutoFill } else { autoFill }
         }
         .confirmationDialog(
             "Remove “\(vault.vault?.name ?? "")” from this iPhone?", isPresented: $confirmingRemove,
@@ -131,6 +138,18 @@ private struct GeneralVaultSections: View {
     }
 
     // MARK: AutoFill
+
+    /// The demo gives iOS no item, so AutoFill never shows one: nothing to set up.
+    private var demoAutoFill: some View {
+        Section {
+            Text(
+                "AutoFill is not available in the demo. The sample items stay inside the app: Safari and other apps never see them."
+            )
+            .foregroundStyle(.secondary)
+        } header: {
+            Text("AutoFill")
+        }
+    }
 
     private var autoFill: some View {
         Section {

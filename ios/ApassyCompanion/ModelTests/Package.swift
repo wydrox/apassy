@@ -24,6 +24,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ApassyCompanionKit", package: "ApassyCompanionKit"),
                 .product(name: "ApassyVaultKit", package: "ApassyVaultKit"),
+                .product(name: "ApassyVaultDemo", package: "ApassyVaultKit"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
@@ -33,6 +34,7 @@ let package = Package(
                 "AppModels",
                 .product(name: "ApassyCompanionKit", package: "ApassyCompanionKit"),
                 .product(name: "ApassyVaultKit", package: "ApassyVaultKit"),
+                .product(name: "ApassyVaultDemo", package: "ApassyVaultKit"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

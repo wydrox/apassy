@@ -1,5 +1,6 @@
 //! The window frame (ADR 0026 §1): the sidebar, the list column, the detail column, and
-//! the sheets.
+//! the sheets. A wide place (Overview, Agents, Logs: `Place::is_wide`) has one pane after
+//! the sidebar instead of the list and the detail ([`wide_pane`]).
 
 use eframe::egui::{self, Frame, Margin};
 
@@ -55,20 +56,29 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         })
         .response
         .rect;
-    let list = egui::Panel::left("apassy-list")
-        .resizable(false)
-        .exact_size(columns.list_width)
-        .show_separator_line(false)
-        .frame(Frame::NONE.fill(kit::LIST))
-        .show(ui, |ui| list_column(app, ui, &pending))
-        .response
-        .rect;
-    for rect in [sidebar, list] {
+    let wide = app.place.is_wide();
+    let list = (!wide).then(|| {
+        egui::Panel::left("apassy-list")
+            .resizable(false)
+            .exact_size(columns.list_width)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(kit::LIST))
+            .show(ui, |ui| list_column(app, ui, &pending))
+            .response
+            .rect
+    });
+    for rect in std::iter::once(sidebar).chain(list) {
         column_edge(ui, rect);
     }
     egui::CentralPanel::default()
         .frame(Frame::NONE.fill(kit::DETAIL))
-        .show(ui, |ui| detail_column(app, ui, &pending));
+        .show(ui, |ui| {
+            if wide {
+                wide_pane(app, ui, &pending);
+            } else {
+                detail_column(app, ui, &pending);
+            }
+        });
     if columns.sidebar == SidebarMode::Float {
         super::sidebar::draw_float(app, &ctx, &pending);
     }
@@ -103,8 +113,9 @@ fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     match &app.place {
         Place::Folder(_) | Place::Shared(_) => super::items::list_column(app, ui),
         Place::Decisions => super::decisions::list_column(app, ui, pending),
-        Place::Agents => super::agents::list_column(app, ui),
         Place::Settings => super::settings_view::list_column(app, ui),
+        // Wide places have no list column.
+        Place::Overview | Place::Agents | Place::Logs => {}
     }
     #[cfg(not(feature = "vault"))]
     {
@@ -112,8 +123,8 @@ fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         match &app.place {
             Place::Folder(_) | Place::Shared(_) => super::demo::list_column(app, ui),
             Place::Decisions => super::demo::decisions_list(app, ui),
-            Place::Agents => super::demo::agents_list(app, ui),
             Place::Settings => super::settings_view::list_column(app, ui),
+            Place::Overview | Place::Agents | Place::Logs => {}
         }
     }
 }
@@ -124,8 +135,8 @@ fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     match &app.place {
         Place::Folder(_) | Place::Shared(_) => super::items::detail_column(app, ui, pending),
         Place::Decisions => super::decisions::detail_column(app, ui, pending),
-        Place::Agents => super::agents::detail_column(app, ui, pending),
         Place::Settings => super::settings_view::detail_column(app, ui),
+        Place::Overview | Place::Agents | Place::Logs => {}
     }
     #[cfg(not(feature = "vault"))]
     {
@@ -133,9 +144,32 @@ fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         match &app.place {
             Place::Folder(_) | Place::Shared(_) => super::demo::detail_column(app, ui),
             Place::Decisions => super::demo::decisions_detail(app, ui),
-            Place::Agents => super::demo::agents_detail(app, ui),
             Place::Settings => super::settings_view::detail_column(app, ui),
+            Place::Overview | Place::Agents | Place::Logs => {}
         }
+    }
+}
+
+/// The one pane of a wide place. Overview, Agents, and Logs read the Bouncer cache,
+/// which computes again at most once per 2 seconds (never per frame).
+fn wide_pane(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
+    let ctx = ui.ctx().clone();
+    if !matches!(app.place, Place::Overview | Place::Agents | Place::Logs) {
+        return;
+    }
+    super::focus::page_start(&mut app.ui.focus, &ctx);
+    #[cfg(feature = "vault")]
+    super::bouncer_load::refresh(app, &ctx, pending);
+    #[cfg(not(feature = "vault"))]
+    super::demo::bouncer_refresh(app, &ctx);
+    match app.place {
+        Place::Overview => super::overview::wide_pane(app, ui, pending),
+        Place::Logs => super::logs::wide_pane(app, ui, pending),
+        #[cfg(feature = "vault")]
+        Place::Agents => super::agents::wide_pane(app, ui, pending),
+        #[cfg(not(feature = "vault"))]
+        Place::Agents => super::demo::agents_wide(app, ui),
+        _ => {}
     }
 }
 
@@ -166,7 +200,7 @@ fn go(app: &mut DesktopApp, place: Place) {
 /// Window shortcuts. They act only when no sheet, alert, token, or owner check is open,
 /// except ⌘L.
 ///
-/// - ⌘1, ⌘2, ⌘3: All credentials, Decisions, Agents. ⌘,: Settings.
+/// - ⌘1 to ⌘5: All credentials, Overview, Decisions, Agents, Logs. ⌘,: Settings.
 /// - ⌘[: back from a credential or an agent to nothing selected.
 /// - ⌘N: a new credential.
 /// - ⌘F: search the credentials.
@@ -205,8 +239,10 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
     }
     let places = [
         (Key::Num1, Place::CREDENTIALS),
-        (Key::Num2, Place::Decisions),
-        (Key::Num3, Place::Agents),
+        (Key::Num2, Place::Overview),
+        (Key::Num3, Place::Decisions),
+        (Key::Num4, Place::Agents),
+        (Key::Num5, Place::Logs),
     ];
     for (key, place) in places {
         if kit::shortcut(ctx, Modifiers::COMMAND, key) {
@@ -227,6 +263,16 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         if app.place == Place::Agents && app.owner_ui.selected_agent.is_some() {
             app.owner_ui.selected_agent = None;
+            app.ui.focus.focus_page_start();
+        }
+        // "‹ Agents": back from an agent page to all agents.
+        if app.place == Place::Agents && app.ui.agent_page.open.is_some() {
+            app.ui.agent_page.open = None;
+            app.ui.agent_page.note_open = None;
+            app.ui.focus.focus_page_start();
+        }
+        if app.place == Place::Logs && app.ui.logs.has_selection() {
+            app.ui.logs.clear_selection();
             app.ui.focus.focus_page_start();
         }
         // The demo build has no shortcut after this one.
@@ -258,14 +304,19 @@ pub(super) fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
 }
 
 /// Runs that wait for the owner. A new run asks macOS for attention. A broker thread
-/// can add a run at any time, so the window checks again soon.
+/// adds a run at any time: the notifier of the notification center wakes the window
+/// then. A waiting run can also end on its own (a timeout, the agent stops), so the
+/// window looks again each second while one waits. Without the notification center
+/// nothing wakes it, so it looks each second.
 #[cfg(feature = "vault")]
 fn watch_approvals(app: &mut DesktopApp, ctx: &egui::Context) -> Pending {
     let crate::desktop::BrokerState::Running(handle) = &app.broker else {
         return Vec::new();
     };
-    ctx.request_repaint_after(std::time::Duration::from_millis(500));
     let pending = handle.approvals().pending();
+    if !pending.is_empty() || app.owner.notifications.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
     if pending
         .iter()
         .any(|run| !app.owner_ui.signaled_runs.contains(&run.id))
@@ -363,6 +414,10 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         Sheet::RevokeAgent { agent_id, name } => {
             super::agents::revoke_sheet(app, ctx, agent_id, &name)
+        }
+        #[cfg(feature = "vault")]
+        Sheet::ChooseCredentials { agent_id, name } => {
+            super::agents::choose_sheet(app, ctx, agent_id, &name)
         }
         #[cfg(feature = "vault")]
         Sheet::ChangePassphrase => super::settings::passphrase_sheet(app, ctx),

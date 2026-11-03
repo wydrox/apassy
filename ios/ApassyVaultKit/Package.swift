@@ -6,6 +6,8 @@
 //   Apple frameworks only.
 // - ApassyVaultCore: VaultService over the Rust core (ApassyCore.xcframework). Build the
 //   framework first: scripts/build-ios-core.sh
+// - ApassyVaultDemo: the demo of the iPhone and watch apps ("Try the Demo", `-ApassyDemo`):
+//   synthetic data in memory only. The app and the watch link it; the AutoFill extension does not.
 //
 // Both also build for watchOS 27: the Apple Watch app that answers access requests only
 // (ADR 0039). The APIs that watchOS lacks are compiled out there.
@@ -19,6 +21,7 @@ let package = Package(
     products: [
         .library(name: "ApassyVaultKit", targets: ["ApassyVaultKit"]),
         .library(name: "ApassyVaultCore", targets: ["ApassyVaultCore"]),
+        .library(name: "ApassyVaultDemo", targets: ["ApassyVaultDemo"]),
     ],
     dependencies: [.package(path: "../ApassyCompanionKit")],
     targets: [
@@ -33,7 +36,9 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
             ]
         ),
+        .target(name: "ApassyVaultDemo", dependencies: ["ApassyVaultKit"], swiftSettings: strict),
         .testTarget(name: "ApassyVaultKitTests", dependencies: ["ApassyVaultKit"], swiftSettings: strict),
         .testTarget(name: "ApassyVaultCoreTests", dependencies: ["ApassyVaultCore"], swiftSettings: strict),
+        .testTarget(name: "ApassyVaultDemoTests", dependencies: ["ApassyVaultDemo"], swiftSettings: strict),
     ]
 )

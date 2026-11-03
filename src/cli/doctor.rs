@@ -671,6 +671,7 @@ fn live_checks(report: &mut Report) {
             prompt: "Synthetic diagnostic prompt".into(),
             transcript_path: None,
             truncated: false,
+            source: None,
         };
         let hook_ok = crate::agent::hook::submit(&socket, token.expose(), hook).is_ok();
         report.add(

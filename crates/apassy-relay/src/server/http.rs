@@ -8,10 +8,17 @@
 //! Question long polls have a lane of their own (`Limits::question_long_polls`), and feed
 //! long polls another (`Limits::feed_long_polls`), apart from `max_active`, so they never
 //! take the threads of the member reserve, and feed polls never take a question poll's.
+//!
+//! An embedded node has a second listener (`Scope::Public`) that serves only `POST /mcp`
+//! and the proxy, and each listener of a node counts failed authentications
+//! (`AuthFailures` for its other paths, `AgentAuthFailures` by source address for `/mcp`
+//! and `/p/`, docs/SPEC.md section 30.5). With `RelayConfig::oauth` (an embedded node)
+//! both listeners also serve the MCP authorization flow (`oauth`, docs/SPEC.md section
+//! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`.
 
 use std::io::Read;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -23,6 +30,7 @@ use crate::api::{
     DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkCancel, LinkRequest, NewItem, Policy,
     ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef, TeamKind, TokenRequest, paths,
 };
+use crate::config::Limits;
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
 use crate::now_unix;
@@ -34,7 +42,10 @@ use crate::server::feed::{self, ActionId};
 use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
-use crate::server::{Core, admin, approvals, connect, decide, devices, host, joins, mcp, sync};
+use crate::server::{
+    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, sync,
+};
+use crate::session::SessionSource;
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
@@ -48,6 +59,283 @@ const LISTENER_PROBE_FAILURES: u32 = 3;
 const MAINTENANCE_SECS: u64 = 5;
 /// Seconds between two sweeps of a Connect team that had no request since its last one.
 const IDLE_MAINTENANCE_SECS: u64 = 60;
+/// Bad bearer tokens and session keys that one listener takes in one window on its
+/// paths other than `/mcp` and `/p/` (`AuthFailures`), and that one source address takes
+/// on `/mcp` and `/p/` (`AgentAuthFailures`). One more request in the window gets 429
+/// `rate_limited`.
+pub const AUTH_FAILURES_MAX: u32 = 20;
+/// The window of `AUTH_FAILURES_MAX`, in seconds, and the `Retry-After` of its 429.
+pub const AUTH_FAILURE_WINDOW_SECS: u64 = 60;
+/// Bad bearer tokens and session keys on `/mcp` and `/p/` of one listener without a
+/// source address, in one window: they share one count (`AgentAuthFailures`), so it is
+/// high enough that the agents of the owner keep working while a stranger floods it,
+/// and a flood is still bounded (review 0.5.16, docs/SPEC.md section 30.5).
+pub const AGENT_SHARED_FAILURES_MAX: u32 = 600;
+/// The source addresses whose failures one listener keeps. A failure of a further
+/// source counts in the shared window until a window of the table ends.
+pub const AUTH_SOURCES_MAX: usize = 4096;
+
+/// What a listener serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Every route: the hosted relay, and the loopback listener of an embedded node.
+    Node,
+    /// `POST /mcp` and `/p/` only: the listener of an embedded node that Tailscale
+    /// Funnel reaches. Every other request, `/healthz` included, is 404 `not_found`.
+    Public,
+}
+
+impl Scope {
+    /// True when this scope serves `method` on `path`.
+    pub fn serves(self, method: &str, path: &str) -> bool {
+        match self {
+            Self::Node => true,
+            Self::Public => {
+                (method == "POST" && path == paths::MCP) || path.starts_with(paths::PROXY_PREFIX)
+            }
+        }
+    }
+
+    /// The kind of the audit row of a listener at its limit.
+    fn limit_kind(self) -> &'static str {
+        match self {
+            Self::Node => "auth_limit_node",
+            Self::Public => "auth_limit_public",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// A fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its first failure, and
+/// the failures in it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Window {
+    start: u64,
+    count: u32,
+}
+
+impl Window {
+    fn ended(&self, now: u64) -> bool {
+        now >= self.start.saturating_add(AUTH_FAILURE_WINDOW_SECS)
+    }
+
+    /// The failures of the window at `now`: none once it ended.
+    fn count(&mut self, now: u64) -> u32 {
+        if self.ended(now) {
+            *self = Self {
+                start: now,
+                count: 0,
+            };
+        }
+        self.count
+    }
+
+    fn record(&mut self, now: u64) {
+        if self.count == 0 || self.ended(now) {
+            *self = Self {
+                start: now,
+                count: 0,
+            };
+        }
+        self.count = self.count.saturating_add(1);
+    }
+}
+
+/// The failed authentications of one listener on its paths other than `/mcp` and `/p/`:
+/// bad bearer tokens in a fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its
+/// first failure. With `AUTH_FAILURES_MAX` of them, every request of those paths gets 429
+/// `rate_limited` until the window ends; then the count starts again. In memory only.
+#[derive(Debug, Default)]
+pub struct AuthFailures {
+    window: Mutex<Window>,
+}
+
+impl AuthFailures {
+    /// True while the listener is at its limit.
+    pub fn limited(&self, now: u64) -> bool {
+        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        window.count(now) >= AUTH_FAILURES_MAX
+    }
+
+    /// Counts one bad bearer token or session key.
+    pub fn record(&self, now: u64) {
+        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        window.record(now);
+    }
+}
+
+/// The client address of a request to `/mcp` or `/p/`: the last address of
+/// `X-Forwarded-For`, which Tailscale Funnel sets to the address that connected to it.
+/// An IPv6 address counts by its /64, as one host can use any address of it. Only the
+/// failed-auth count reads it: it gives no identity and no authority, and a value that
+/// a local program forges only puts its own failures in another count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Source(std::net::IpAddr);
+
+impl Source {
+    /// `None` without the header or with a value that is not one address.
+    pub fn from_forwarded(value: Option<&str>) -> Option<Self> {
+        use std::net::{IpAddr, Ipv6Addr};
+        let last = value?.rsplit(',').next()?.trim();
+        let addr = match last.parse::<IpAddr>().ok()? {
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => {
+                    let s = v6.segments();
+                    IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
+            },
+            v4 => v4,
+        };
+        Some(Self(addr))
+    }
+}
+
+/// The failed authentications of one listener on `/mcp` and `/p/` (review 0.5.16): a
+/// window for each source address (`AUTH_FAILURES_MAX`), so a stranger with bad tokens
+/// holds only their own address at 429, and one shared window for the requests without
+/// an address (`AGENT_SHARED_FAILURES_MAX`). A source that the full table
+/// (`AUTH_SOURCES_MAX`) cannot take counts, and is checked, in the shared window. In
+/// memory only.
+#[derive(Debug, Default)]
+pub struct AgentAuthFailures {
+    state: Mutex<AgentFailureState>,
+}
+
+#[derive(Debug, Default)]
+struct AgentFailureState {
+    sources: std::collections::HashMap<Source, Window>,
+    shared: Window,
+}
+
+impl AgentFailureState {
+    /// True when `source` has a window in the table or the table has room for it. A
+    /// full table first drops the windows that ended.
+    fn has_room(&mut self, source: &Source, now: u64) -> bool {
+        if self.sources.contains_key(source) {
+            return true;
+        }
+        if self.sources.len() >= AUTH_SOURCES_MAX {
+            self.sources.retain(|_, window| !window.ended(now));
+        }
+        self.sources.len() < AUTH_SOURCES_MAX
+    }
+}
+
+impl AgentAuthFailures {
+    /// True while `source` (or, without one, the shared window) is at its limit.
+    pub fn limited(&self, source: Option<Source>, now: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(source) = source
+            && state.has_room(&source, now)
+        {
+            return state
+                .sources
+                .get_mut(&source)
+                .is_some_and(|window| window.count(now) >= AUTH_FAILURES_MAX);
+        }
+        state.shared.count(now) >= AGENT_SHARED_FAILURES_MAX
+    }
+
+    /// Counts one bad bearer token or session key of `source`.
+    pub fn record(&self, source: Option<Source>, now: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(source) = source
+            && state.has_room(&source, now)
+        {
+            state.sources.entry(source).or_default().record(now);
+            return;
+        }
+        state.shared.record(now);
+    }
+}
+
+/// Which failed-auth count a request is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Counted {
+    /// Every path but `/mcp`, `/p/`, and the MCP authorization flow: the listener's.
+    Listener,
+    /// `/mcp` and `/p/`: the count of the source address, or the shared one.
+    Agent(Option<Source>),
+}
+
+impl Counted {
+    /// The count of a request to `path`, with its `X-Forwarded-For`.
+    fn of(path: &str, forwarded: Option<&str>) -> Self {
+        if path == paths::MCP || path.starts_with(paths::PROXY_PREFIX) {
+            Self::Agent(Source::from_forwarded(forwarded))
+        } else {
+            Self::Listener
+        }
+    }
+
+    /// The `bucket` of the audit row of a 429.
+    fn bucket(self) -> &'static str {
+        match self {
+            Self::Listener => "listener",
+            Self::Agent(Some(_)) => "source",
+            Self::Agent(None) => "shared",
+        }
+    }
+}
+
+/// One listener: what it serves, and its failed-auth counts (`None` when
+/// `RelayConfig::auth_limiter` is off). The MCP authorization flow is in neither: it
+/// has a count for each client (`oauth::ClientFailures`).
+pub struct Listener {
+    pub scope: Scope,
+    pub failures: Option<AuthFailures>,
+    pub agent_failures: Option<AgentAuthFailures>,
+}
+
+impl Listener {
+    /// A listener with the counts on or off.
+    pub fn new(scope: Scope, limiter: bool) -> Self {
+        Self {
+            scope,
+            failures: limiter.then(AuthFailures::default),
+            agent_failures: limiter.then(AgentAuthFailures::default),
+        }
+    }
+
+    fn counts(&self) -> bool {
+        self.failures.is_some() || self.agent_failures.is_some()
+    }
+
+    fn record_failure(&self, counted: Counted, now: u64) {
+        match counted {
+            Counted::Listener => {
+                if let Some(failures) = &self.failures {
+                    failures.record(now);
+                }
+            }
+            Counted::Agent(source) => {
+                if let Some(failures) = &self.agent_failures {
+                    failures.record(source, now);
+                }
+            }
+        }
+    }
+
+    fn limited(&self, counted: Counted, now: u64) -> bool {
+        match counted {
+            Counted::Listener => self
+                .failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited(now)),
+            Counted::Agent(source) => self
+                .agent_failures
+                .as_ref()
+                .is_some_and(|failures| failures.limited(source, now)),
+        }
+    }
+}
 
 /// The endpoints of the API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +641,10 @@ pub struct Serving {
     pub proxy: Arc<Proxy>,
     pub server: tiny_http::Server,
     pub stop: Arc<AtomicBool>,
+    /// What this listener serves. Only the `Node` listener runs the maintenance.
+    pub scope: Scope,
+    /// The limits of this listener's lanes.
+    pub limits: Limits,
 }
 
 /// True for a path that agents use: the proxy, MCP, runs, and access. These
@@ -544,8 +836,10 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         proxy,
         server,
         stop,
+        scope,
+        limits,
     } = serving;
-    let limits = hub.config.limits;
+    let listener = Arc::new(Listener::new(scope, hub.config.auth_limiter));
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -556,8 +850,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         rejected: AtomicUsize::new(0),
     });
     // The maintenance of every team runs on its own thread, so many teams never slow the
-    // accept loop.
-    let maintenance = {
+    // accept loop. One for the relay: the public listener has none.
+    let maintenance = (scope == Scope::Node).then(|| {
         let (hub, stop) = (hub.clone(), stop.clone());
         std::thread::Builder::new()
             .name("relay-maintenance".to_string())
@@ -571,8 +865,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                     }
                 }
             })
-    };
-    if maintenance.is_err() {
+    });
+    if maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the maintenance thread cannot start");
     }
     let listen = server.server_addr().to_ip();
@@ -666,7 +960,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                             slots.all.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    let (hub, proxy) = (hub.clone(), proxy.clone());
+                    let (hub, proxy, listener) = (hub.clone(), proxy.clone(), listener.clone());
                     let guard = SlotGuard {
                         slots: slots.clone(),
                         lane,
@@ -678,7 +972,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                         .name("relay-request".to_string())
                         .spawn(move || {
                             let _guard = guard;
-                            handle(&hub, &proxy, request, hold);
+                            handle(&hub, &proxy, &listener, request, hold);
                         });
                 }
             }
@@ -697,7 +991,7 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if outcome.is_err() {
         stop.store(true, Ordering::Relaxed);
     }
-    if let Ok(handle) = maintenance {
+    if let Some(Ok(handle)) = maintenance {
         let _ = handle.join();
     }
     outcome
@@ -823,8 +1117,46 @@ fn respond_ok(request: Request, result: Value) {
     respond_json(request, 200, &Envelope::success(result), false);
 }
 
+/// 429 `rate_limited` with `Retry-After` for a request whose failed-auth count is at its
+/// limit, and a row in the relay audit at most once per ten seconds for each listener.
+fn respond_auth_limited(
+    hub: &Hub,
+    listener: &Listener,
+    counted: Counted,
+    request: Request,
+    now: u64,
+) {
+    hub.refusal(
+        now,
+        listener.scope.limit_kind(),
+        "rate_limited",
+        &json!({
+            "code": codes::RATE_LIMITED,
+            "scope": listener.scope.name(),
+            "bucket": counted.bucket(),
+        }),
+    );
+    let error = RelayError::new(
+        codes::RATE_LIMITED,
+        "Too many requests with a bad token or session key. Try again later.",
+    );
+    respond_json_with(
+        request,
+        error.status(),
+        &error.to_envelope(),
+        false,
+        Header::from_bytes(
+            &b"Retry-After"[..],
+            AUTH_FAILURE_WINDOW_SECS.to_string().as_bytes(),
+        )
+        .ok()
+        .into_iter()
+        .collect(),
+    );
+}
+
 /// Handles one request. `hold`: a question or feed long poll may wait (its own lane).
-fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
+fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, hold: bool) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
@@ -832,6 +1164,18 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
+    // The MCP authorization flow, on a relay that has it (an embedded node).
+    let oauth_route = hub
+        .config
+        .oauth
+        .as_ref()
+        .and_then(|_| oauth::route(&method, &path));
+    // The public listener knows two routes and the flow. Anything else is not there,
+    // before any other check.
+    if oauth_route.is_none() && !listener.scope.serves(&method, &path) {
+        respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
+        return;
+    }
     if method == "GET" && path == paths::HEALTH {
         // Health has no request body. Do not let destructor draining occupy its
         // reserved seats; guarded connections cannot have a pipelined successor.
@@ -851,7 +1195,9 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         return;
     }
     let edge = header_value(&request, EDGE_HEADER);
-    if !auth::edge_ok(&hub.config.edge_secret, edge.as_deref()) {
+    if let Some(secret) = hub.config.edge.secret()
+        && !auth::edge_ok(secret, edge.as_deref())
+    {
         hub.refusal(
             now,
             "edge",
@@ -867,15 +1213,32 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         );
         return;
     }
+    // The flow has its own count for each client (31.5): a stranger's bad tokens on
+    // `/mcp` never hold the owner's client away from its metadata, page, or refresh.
+    if let Some(route) = oauth_route {
+        respond_oauth(hub, request, route, &method, &path, &query, now);
+        return;
+    }
+    let counted = Counted::of(&path, header_value(&request, "X-Forwarded-For").as_deref());
+    if listener.limited(counted, now) {
+        respond_auth_limited(hub, listener, counted, request, now);
+        return;
+    }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
         respond_error(request, &team_vaults_retired());
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) {
-        // Parse only: the proxy still validates and finds the session itself.
-        let core = path
+        let key = path
             .strip_prefix(paths::PROXY_PREFIX)
-            .and_then(|rest| rest.split('/').next())
+            .and_then(|rest| rest.split('/').next());
+        // A key that names no live session counts against the listener. The proxy
+        // refuses it itself, with its own answer and audit row.
+        if listener.counts() && key.is_none_or(|key| hub.find(key, now).is_none()) {
+            listener.record_failure(counted, now);
+        }
+        // Parse only: the proxy still validates and finds the session itself.
+        let core = key
             .and_then(parse_token)
             .filter(|parsed| parsed.kind == TokenKind::Session)
             .and_then(|parsed| parsed.team)
@@ -941,11 +1304,10 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         } else {
             (None, None)
         };
-        let prefix = connect::verified_prefix(
-            hub.config.edge_secret.expose(),
-            prefix.as_deref(),
-            mac.as_deref(),
-        );
+        // Without an edge there is no Worker to prove a prefix.
+        let prefix = hub.config.edge.secret().and_then(|secret| {
+            connect::verified_prefix(secret.expose(), prefix.as_deref(), mac.as_deref())
+        });
         let result = dispatch_edge(hub, endpoint, &body, prefix, now);
         let recovery = endpoint == Endpoint::ConnectChallenge
             || (endpoint == Endpoint::Connect
@@ -1008,13 +1370,20 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     let authorization = header_value(&request, "Authorization");
     let token = auth::bearer(authorization.as_deref());
     let Some(core) = token.and_then(|token| hub.for_token(token)) else {
+        listener.record_failure(counted, now);
         hub.refusal(
             now,
             "token",
             "auth_failed",
             &json!({"code": codes::UNAUTHENTICATED, "path_kind": endpoint_kind(endpoint)}),
         );
-        respond_error(request, &RelayError::unauthenticated());
+        respond_auth_error(
+            hub,
+            endpoint,
+            request,
+            &RelayError::unauthenticated(),
+            token.is_some(),
+        );
         return;
     };
     let principal = match authenticate(&core, need, token, now) {
@@ -1023,6 +1392,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
             // Anyone can send a token with the team's id: for a Connect team the row
             // goes to the relay audit, not the team's capped file.
             if error.code == codes::UNAUTHENTICATED || error.code == codes::TOKEN_EXPIRED {
+                listener.record_failure(counted, now);
                 core.outside_refusal(
                     now,
                     "token",
@@ -1030,7 +1400,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
-            respond_error(request, &error);
+            respond_auth_error(hub, endpoint, request, &error, true);
             return;
         }
     };
@@ -1088,7 +1458,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
-                respond_error(request, &error);
+                respond_auth_error(hub, endpoint, request, &error, true);
                 return;
             }
         }
@@ -1112,7 +1482,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         now
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(&core, request, principal, &body);
+        respond_mcp(hub, &core, request, principal, &body);
         return;
     }
     match dispatch(
@@ -1413,7 +1783,13 @@ fn feed_length(request: &Request) -> RelayResult<()> {
     }
 }
 
-fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body: &[u8]) {
+fn respond_mcp(
+    hub: &Hub,
+    core: &Core,
+    request: Request,
+    principal: Option<Principal>,
+    body: &[u8],
+) {
     let origin = header_value(&request, "Origin");
     if let Some(origin) = origin
         && origin.trim_end_matches('/') != core.config.public_url
@@ -1425,7 +1801,13 @@ fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body
         return;
     }
     let Some(Principal::Agent(agent)) = principal else {
-        respond_error(request, &RelayError::unauthenticated());
+        respond_auth_error(
+            hub,
+            Endpoint::Mcp,
+            request,
+            &RelayError::unauthenticated(),
+            true,
+        );
         return;
     };
     match mcp::handle(core, &agent, body) {
@@ -1441,6 +1823,139 @@ fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body
             let _ = request.respond(response);
         }
     }
+}
+
+/// An error answer that may be a 401 of `POST /mcp`: on a relay with OAuth it carries
+/// `WWW-Authenticate` with the address of the resource metadata (RFC 9728 section 5.1),
+/// so a client can start the authorization flow. `token_sent`: the request had a bearer
+/// token.
+fn respond_auth_error(
+    hub: &Hub,
+    endpoint: Endpoint,
+    request: Request,
+    error: &RelayError,
+    token_sent: bool,
+) {
+    let challenge = (endpoint == Endpoint::Mcp && error.status() == 401)
+        .then(|| oauth::www_authenticate(&hub.config, token_sent))
+        .flatten()
+        .and_then(|value| Header::from_bytes(&b"WWW-Authenticate"[..], value.as_bytes()).ok());
+    respond_json_with(
+        request,
+        error.status(),
+        &error.to_envelope(),
+        error.code == codes::PAYLOAD_TOO_LARGE,
+        challenge.into_iter().collect(),
+    );
+}
+
+/// One request of the MCP authorization flow (`oauth::handle`): its body (at most
+/// `oauth::MAX_BODY`) and its answer. A bad code or refresh token counts for its client
+/// (`oauth::ClientFailures`), not in the listener's failed-auth limiter.
+#[allow(clippy::too_many_arguments)]
+fn respond_oauth(
+    hub: &Hub,
+    mut request: Request,
+    route: oauth::Route,
+    method: &str,
+    path: &str,
+    query: &str,
+    now: u64,
+) {
+    let body = if oauth::has_body(route) {
+        match read_body_max(&mut request, method, oauth::MAX_BODY) {
+            Ok(body) => body,
+            Err(error) => {
+                let reply = oauth::Reply::Json {
+                    status: error.status(),
+                    body: json!({"error": "invalid_request", "error_description": error.message}),
+                    auth_failed: false,
+                    retry_after: None,
+                };
+                write_oauth(request, reply, error.code == codes::PAYLOAD_TOO_LARGE);
+                return;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let content_type = header_value(&request, "Content-Type");
+    // A bad code or refresh token counts for its client only (`oauth::ClientFailures`),
+    // never in the listener's limiter: one stranger must not lock every client out.
+    let reply = oauth::handle(hub, route, path, query, &body, content_type.as_deref(), now);
+    write_oauth(request, reply, false);
+}
+
+/// Writes an answer of the flow: JSON with `Cache-Control: no-store` and `Pragma:
+/// no-cache`, or a page or a 303 with `oauth::PAGE_HEADERS`. Never a cookie.
+fn write_oauth(request: Request, reply: oauth::Reply, close: bool) {
+    let header =
+        |name: &str, value: &str| Header::from_bytes(name.as_bytes(), value.as_bytes()).ok();
+    let page_headers = || {
+        oauth::PAGE_HEADERS
+            .iter()
+            .filter_map(|&(name, value)| header(name, value))
+            .collect::<Vec<_>>()
+    };
+    let response = match reply {
+        oauth::Reply::Json {
+            status,
+            body,
+            retry_after,
+            ..
+        } => {
+            let mut response = Response::from_data(serde_json::to_vec(&body).unwrap_or_default())
+                .with_status_code(status)
+                .with_header(json_header())
+                .with_header(no_store_header())
+                .with_chunked_threshold(usize::MAX);
+            for extra in [
+                header("Pragma", "no-cache"),
+                retry_after.and_then(|secs| header("Retry-After", secs.to_string().as_str())),
+                close.then(|| header("Connection", "close")).flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                response.add_header(extra);
+            }
+            response
+        }
+        oauth::Reply::Page {
+            status,
+            html,
+            refresh,
+        } => {
+            let mut response = Response::from_data(html.into_bytes())
+                .with_status_code(status)
+                .with_chunked_threshold(usize::MAX);
+            for extra in page_headers()
+                .into_iter()
+                .chain(header("Content-Type", "text/html; charset=utf-8"))
+                .chain(
+                    refresh
+                        .then(|| header("Refresh", oauth::PAGE_REFRESH_SECS.to_string().as_str()))
+                        .flatten(),
+                )
+            {
+                response.add_header(extra);
+            }
+            response
+        }
+        oauth::Reply::Redirect { location } => {
+            let mut response = Response::from_data(Vec::new())
+                .with_status_code(303)
+                .with_chunked_threshold(usize::MAX);
+            for extra in page_headers()
+                .into_iter()
+                .chain(header("Location", location.as_str()))
+            {
+                response.add_header(extra);
+            }
+            response
+        }
+    };
+    let _ = request.respond(response);
 }
 
 fn parse_body<T: DeserializeOwned>(body: &[u8]) -> RelayResult<T> {
@@ -2105,6 +2620,141 @@ mod tests {
         ] {
             assert!(!is_agent_path(url), "{url}");
         }
+    }
+
+    #[test]
+    fn the_public_scope_serves_mcp_posts_and_the_proxy_only() {
+        for (method, path) in [
+            ("POST", "/mcp"),
+            ("GET", "/p/apassy_ses_x/api.example.com/v1"),
+            ("POST", "/p/"),
+        ] {
+            assert!(Scope::Public.serves(method, path), "{method} {path}");
+            assert!(Scope::Node.serves(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("GET", "/mcp"),
+            ("POST", "/mcp/x"),
+            ("GET", "/healthz"),
+            ("GET", "/"),
+            ("GET", "/v1/me"),
+            ("POST", "/v1/runs"),
+            ("GET", "/v1/host/requests"),
+            ("GET", "/px/"),
+        ] {
+            assert!(!Scope::Public.serves(method, path), "{method} {path}");
+            assert!(Scope::Node.serves(method, path), "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn the_failed_auth_limit_trips_at_the_21st_request_and_resets_after_its_window() {
+        let failures = AuthFailures::default();
+        let start = 1_000;
+        for n in 0..AUTH_FAILURES_MAX {
+            assert!(!failures.limited(start + u64::from(n)), "{n}");
+            failures.record(start + u64::from(n));
+        }
+        // The 21st request in the window is refused, bad or good.
+        assert!(failures.limited(start + 20));
+        assert!(failures.limited(start + AUTH_FAILURE_WINDOW_SECS - 1));
+        // The window started at the first failure: it ends 60 s later.
+        assert!(!failures.limited(start + AUTH_FAILURE_WINDOW_SECS));
+        failures.record(start + AUTH_FAILURE_WINDOW_SECS);
+        assert!(!failures.limited(start + AUTH_FAILURE_WINDOW_SECS + 1));
+        // Failures of an old window do not count in a new one.
+        let spread = AuthFailures::default();
+        for n in 0..AUTH_FAILURES_MAX {
+            spread.record(10 * u64::from(n));
+        }
+        assert!(!spread.limited(10 * u64::from(AUTH_FAILURES_MAX)));
+    }
+
+    #[test]
+    fn a_source_is_the_last_forwarded_address_and_an_ipv6_address_counts_by_its_64() {
+        let source = |value: &str| Source::from_forwarded(Some(value));
+        assert_eq!(source("203.0.113.9"), source(" 203.0.113.9 "));
+        assert_eq!(source("198.51.100.1, 203.0.113.9"), source("203.0.113.9"));
+        assert_ne!(source("203.0.113.9"), source("203.0.113.10"));
+        assert_eq!(
+            source("2001:db8:1:2:aaaa::1"),
+            source("2001:db8:1:2:bbbb::7")
+        );
+        assert_ne!(source("2001:db8:1:2::1"), source("2001:db8:1:3::1"));
+        assert_eq!(source("::ffff:203.0.113.9"), source("203.0.113.9"));
+        for bad in ["", "unknown", "203.0.113.9:443", "not an address, "] {
+            assert_eq!(source(bad), None, "{bad:?}");
+        }
+        assert_eq!(Source::from_forwarded(None), None);
+    }
+
+    /// Review 0.5.16: bad tokens of one source hold only that source at 429, never an
+    /// agent from another address or one without an address; requests without an
+    /// address share a much higher limit, so a flood is still bounded.
+    #[test]
+    fn agent_routes_count_failures_by_source_and_share_a_high_limit_without_one() {
+        let failures = AgentAuthFailures::default();
+        let stranger = Source::from_forwarded(Some("198.51.100.66"));
+        let agent = Source::from_forwarded(Some("203.0.113.9"));
+        let start = 5_000;
+        for n in 0..AUTH_FAILURES_MAX {
+            assert!(!failures.limited(stranger, start), "{n}");
+            failures.record(stranger, start);
+        }
+        assert!(failures.limited(stranger, start + 1));
+        assert!(!failures.limited(agent, start + 1));
+        assert!(!failures.limited(None, start + 1));
+        // The window of the source ends 60 s after its first failure.
+        assert!(!failures.limited(stranger, start + AUTH_FAILURE_WINDOW_SECS));
+        // Without an address: the shared window, at `AGENT_SHARED_FAILURES_MAX`.
+        for n in 0..AGENT_SHARED_FAILURES_MAX {
+            assert!(!failures.limited(None, start), "{n}");
+            failures.record(None, start);
+        }
+        assert!(failures.limited(None, start + 1));
+        assert!(!failures.limited(agent, start + 1), "a source has its own");
+        assert!(!failures.limited(None, start + AUTH_FAILURE_WINDOW_SECS));
+    }
+
+    #[test]
+    fn a_full_source_table_counts_new_sources_in_the_shared_window() {
+        let failures = AgentAuthFailures::default();
+        let start = 9_000;
+        for n in 0..AUTH_SOURCES_MAX {
+            let addr = std::net::Ipv4Addr::from(0x0A00_0000_u32 + n as u32);
+            failures.record(Source::from_forwarded(Some(&addr.to_string())), start);
+        }
+        let late = Source::from_forwarded(Some("203.0.113.200"));
+        for _ in 0..AGENT_SHARED_FAILURES_MAX {
+            failures.record(late, start);
+        }
+        // The late source went to the shared window, and is checked there.
+        assert!(failures.limited(late, start + 1));
+        assert!(failures.limited(None, start + 1));
+        // A source of the table keeps its own count.
+        let first = Source::from_forwarded(Some("10.0.0.0"));
+        assert!(!failures.limited(first, start + 1));
+        // When the windows of the table end, the late source gets a window of its own.
+        let later = start + AUTH_FAILURE_WINDOW_SECS;
+        assert!(!failures.limited(late, later));
+        failures.record(late, later);
+        assert!(!failures.limited(late, later));
+    }
+
+    #[test]
+    fn only_mcp_and_the_proxy_count_by_source() {
+        let forwarded = Some("203.0.113.9");
+        let source = Source::from_forwarded(forwarded);
+        assert_eq!(Counted::of("/mcp", forwarded), Counted::Agent(source));
+        assert_eq!(
+            Counted::of("/p/apassy_ses_x/api.example.com/", forwarded),
+            Counted::Agent(source)
+        );
+        assert_eq!(Counted::of("/mcp", None), Counted::Agent(None));
+        assert_eq!(Counted::of("/v1/me", forwarded), Counted::Listener);
+        assert_eq!(Counted::Agent(None).bucket(), "shared");
+        assert_eq!(Counted::Agent(source).bucket(), "source");
+        assert_eq!(Counted::Listener.bucket(), "listener");
     }
 
     #[test]

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "apassy": {
+      "url": "${APASSY_MCP_URL}"
+    }
+  }
+}

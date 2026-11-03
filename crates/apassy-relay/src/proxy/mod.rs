@@ -20,7 +20,7 @@ use std::sync::Arc;
 use apassy::broker::proxy::HostRule;
 use zeroize::Zeroizing;
 
-use self::stream::{BodyLen, BodyReader, Pair, Replacer, Scanner};
+use self::stream::{BodyLen, BodyReader, Pair, Pattern, Replacer, Scanner};
 use self::swap::{Refusal, SwapSecret, swap_request};
 use self::upstream::{ServiceStream, Upstream, UpstreamRequest, read_response_head, send_request};
 use crate::api::{RELAY_HEADER, paths};
@@ -334,7 +334,23 @@ impl Proxy {
                 }))
                 .collect()
         };
-        let header_replacer = Replacer::new(pairs());
+        // The JSON, HTML, and percent escapes of each value (`\/`, `\"`, `\u003c`,
+        // `\u00e9`, `&amp;`, `&#x2F;`, `%2F`), so an upstream host that echoes the value
+        // escaped gives back no value either. A pattern also replaces the raw pair of
+        // its value, and it shows the placeholder with the extra bytes after it.
+        let patterns = || -> Vec<Pattern> {
+            session
+                .secrets
+                .iter()
+                .filter_map(|s| {
+                    Pattern::escaped(
+                        s.value.expose().as_bytes(),
+                        s.placeholder.expose().as_bytes(),
+                    )
+                })
+                .collect()
+        };
+        let header_replacer = Replacer::new(pairs()).with_patterns(patterns());
         let mut out_headers = Vec::with_capacity(head.headers.len());
         for (name, value) in &head.headers {
             if DROPPED_RESPONSE_HEADERS
@@ -359,7 +375,11 @@ impl Proxy {
             ),
             BodyLen::Chunked | BodyLen::UntilClose => None,
         };
-        let reader = BodyReader::new(conn, head.body, Replacer::new(pairs()));
+        let reader = BodyReader::new(
+            conn,
+            head.body,
+            Replacer::new(pairs()).with_patterns(patterns()),
+        );
         let mut response = tiny_http::Response::new(
             tiny_http::StatusCode(head.status),
             out_headers,

@@ -277,6 +277,8 @@ mod tests {
         conn.pragma_update(None, "key", pass).unwrap();
         #[cfg(feature = "insecure-test-kdf")]
         crate::vault::test_kdf::match_vault_kdf(&conn).unwrap();
+        conn.execute_batch(&super::super::schema27::downgrade_to_25_sql())
+            .unwrap();
         conn.execute_batch(super::super::access_once::DOWNGRADE_TO_21_SQL)
             .unwrap();
         conn.execute_batch("ALTER TABLE owner_answer DROP COLUMN includes_codes; ALTER TABLE owner_answer DROP COLUMN includes_values; DROP TABLE relay_connect_pending; UPDATE vault_meta SET schema_version=20; PRAGMA user_version=20;").unwrap();

@@ -443,8 +443,9 @@ mod tests {
         let config = RelayConfig {
             data_dir: dir.path().join("data"),
             listen: "127.0.0.1:0".parse().unwrap(),
+            public_listen: None,
             public_url: "https://relay.example.test".into(),
-            edge_secret: SecretString::new("e".repeat(40)),
+            edge: crate::config::EdgeMode::Required(SecretString::new("e".repeat(40))),
             master_key: SecretString::new("synthetic unit test vault key".into()),
             session_ttl_secs: 60,
             approval_timeout_secs: 30,
@@ -458,6 +459,9 @@ mod tests {
             questions_to_approvers: false,
             connect_teams_per_day: 200,
             connect_teams_max: 1000,
+            auth_limiter: false,
+            operator_socket: true,
+            oauth: None,
         };
         let owner = Relay::init(&config, "team", "owner").unwrap();
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();

@@ -14,6 +14,7 @@ SPEC = importlib.util.spec_from_file_location("release_versions", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 RELAY = "crates/apassy-relay"
+APP = "crates/apassy-app"
 
 
 class ReleaseVersionsTests(unittest.TestCase):
@@ -26,6 +27,7 @@ class ReleaseVersionsTests(unittest.TestCase):
             "release-versions.json", "Cargo.toml", "Cargo.lock", "ios/ApassyCore/Cargo.toml",
             "ios/ApassyCompanion/project.yml", "extension/manifest.json", "CHANGELOG.md",
             "site/src/lib/site.ts", f"{RELAY}/Cargo.toml", f"{RELAY}/deploy/worker/package.json",
+            f"{APP}/Cargo.toml",
         ):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +47,8 @@ class ReleaseVersionsTests(unittest.TestCase):
             ("CHANGELOG.md", f'## [{self.version}]'),
             (f"{RELAY}/Cargo.toml", f'version = "{self.version}"'),
             (f"{RELAY}/deploy/worker/package.json", f'"version": "{self.version}"'),
+            (f"{APP}/Cargo.toml", f'version = "{self.version}"'),
+            ("Cargo.lock", f'name = "apassy-app"\nversion = "{self.version}"'),
         ):
             with self.subTest(file=relative, field=field.splitlines()[0]):
                 path = self.root / relative
