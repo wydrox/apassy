@@ -490,11 +490,13 @@ fn the_export_holds_the_active_logins_with_their_values() {
                 "user_handle",
                 "user_name",
                 "user_display_name",
-                "key"
+                "key",
+                "algorithm"
             ]
             .map(String::from)
             .into()
         );
+        assert_eq!(passkey["algorithm"], -7);
         assert_eq!(passkey["rp_id"], rp);
         assert_eq!(unb64(passkey["user_handle"].as_str().unwrap()), handle);
         assert_eq!(unb64(passkey["credential_id"].as_str().unwrap()).len(), 32);
@@ -1067,4 +1069,132 @@ fn the_answer_imports_into_a_fresh_vault() {
     assert!((before..=after).any(|t| code(SEED_BYTES, "sha1", 6, 30, t) == shown));
     let point = &f.point_gamma;
     assert_and_verify(&fresh, new_id, &gamma["passkey"], point, 13);
+}
+
+/// Raw DEFLATE of `blob` in one stored block (RFC 1951, section 3.2.4).
+fn stored_deflate(blob: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(blob.len()).unwrap();
+    let mut data = vec![0x01];
+    data.extend_from_slice(&len.to_le_bytes());
+    data.extend_from_slice(&(!len).to_le_bytes());
+    data.extend_from_slice(blob);
+    data
+}
+
+/// A passkey of each algorithm with PRF secrets and a large blob leaves the vault with
+/// its algorithm, the secrets, and the blob, and imports into a fresh vault with them:
+/// the same PRF outputs and the same blob. Synthetic keys only.
+#[test]
+fn the_algorithm_prf_secrets_and_large_blob_round_trip() {
+    use ring::signature::{ECDSA_P384_SHA384_ASN1_SIGNING, Ed25519KeyPair};
+    let rng = SystemRandom::new();
+    let p384 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng).unwrap();
+    let ed = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let rsa = include_bytes!("../../../tests/fixtures/passkeys/rsa2048-synthetic.pk8");
+    let blob = b"synthetic large blob for the round trip";
+    let (_root2, _dir2, fresh) = phone();
+    let (_root, _dir, phone) = phone();
+    let mut accounts = Vec::new();
+    for (n, key) in [p384.as_ref(), ed.as_ref(), &rsa[..]]
+        .into_iter()
+        .enumerate()
+    {
+        accounts.push(json!({
+            "rp_id": format!("site{n}.example.test"), "credential_id": b64(&[n as u8 + 1; 20]),
+            "user_handle": b64(b"handle-x"), "user_name": "x-user", "user_display_name": "X",
+            "key": b64(key), "title": format!("Site {n}"),
+        }));
+    }
+    // The first account has the extension data.
+    accounts[0]["prf"] = json!({"with_uv": b64(&[0x11; 32]), "without_uv": b64(&[0x33; 32])});
+    let data = stored_deflate(blob);
+    accounts[0]["large_blob"] = json!({"data": b64(&data), "uncompressed_size": blob.len()});
+    let counts = call(
+        &phone,
+        json!({"op": "passkey_import", "accounts": accounts}),
+    );
+    assert_eq!(
+        counts,
+        json!({"imported": 3, "skipped_existing": 0, "failed": 0})
+    );
+    let result = call(&phone, json!({"op": "credential_export"}));
+    let passkeys: Vec<&Value> = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["passkey"])
+        .filter(|passkey| !passkey.is_null())
+        .collect();
+    let mut algorithms: Vec<i64> = passkeys
+        .iter()
+        .map(|passkey| passkey["algorithm"].as_i64().unwrap())
+        .collect();
+    algorithms.sort_unstable();
+    assert_eq!(algorithms, [-257, -35, -8]);
+    let with_data = passkeys
+        .iter()
+        .find(|passkey| passkey["algorithm"] == -35)
+        .unwrap();
+    assert_eq!(
+        unb64(with_data["prf"]["with_uv"].as_str().unwrap()),
+        [0x11; 32]
+    );
+    assert_eq!(
+        unb64(with_data["prf"]["without_uv"].as_str().unwrap()),
+        [0x33; 32]
+    );
+    assert_eq!(
+        unb64(with_data["large_blob"]["data"].as_str().unwrap()),
+        data
+    );
+    assert_eq!(with_data["large_blob"]["uncompressed_size"], blob.len());
+    for passkey in passkeys
+        .iter()
+        .filter(|passkey| passkey["algorithm"] != -35)
+    {
+        assert!(passkey.get("prf").is_none() && passkey.get("large_blob").is_none());
+    }
+    // Into a fresh vault, from the export answer as it is.
+    let accounts: Vec<Value> = passkeys
+        .iter()
+        .map(|passkey| {
+            let mut account = json!({
+                "rp_id": passkey["rp_id"], "credential_id": passkey["credential_id"],
+                "user_handle": passkey["user_handle"], "user_name": passkey["user_name"],
+                "user_display_name": passkey["user_display_name"], "key": passkey["key"],
+            });
+            for name in ["prf", "large_blob"] {
+                if let Some(value) = passkey.get(name) {
+                    account[name] = value.clone();
+                }
+            }
+            account
+        })
+        .collect();
+    let counts = call(
+        &fresh,
+        json!({"op": "passkey_import", "accounts": accounts}),
+    );
+    assert_eq!(counts["imported"], 3);
+    let listed = call(
+        &fresh,
+        json!({"op": "passkey_list", "rp_id": with_data["rp_id"], "allowed": []}),
+    );
+    let entry = &listed["passkeys"][0];
+    let assertion = call(
+        &fresh,
+        json!({"op": "passkey_assert", "id": entry["id"], "rp_id": with_data["rp_id"],
+               "credential_id": entry["credential_id"], "client_data_hash": b64(&[9; 32]),
+               "prf": {"first": b64(&[0x22; 32]), "hashed": true},
+               "large_blob": {"read": true}}),
+    );
+    assert_eq!(assertion["algorithm"], -35);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &[0x11; 32]);
+    let tag = hmac::sign(&key, &[0x22; 32]);
+    let expected: &[u8] = tag.as_ref();
+    assert_eq!(unb64(assertion["prf"]["first"].as_str().unwrap()), expected);
+    assert_eq!(
+        unb64(assertion["large_blob"]["data"].as_str().unwrap()),
+        blob
+    );
 }

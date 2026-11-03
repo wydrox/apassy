@@ -34,7 +34,6 @@ pub const TYPE_GET: &str = "webauthn.get";
 pub const TYPE_CREATE: &str = "webauthn.create";
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-#[cfg(any(feature = "vault", test))]
 const URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 fn bad(message: &str) -> WireError {
@@ -98,9 +97,20 @@ pub fn decode_bytes(text: &str, min: usize, max: usize) -> Result<Vec<u8>, WireE
 }
 
 /// Decode base64url without padding, strictly (canonical last symbol).
-#[cfg(any(feature = "vault", test))]
 fn decode_url(text: &str) -> Option<Vec<u8>> {
     decode(text.as_bytes(), URL_ALPHABET)
+}
+
+/// Decode a credential ID in base64url without padding, as WebAuthn names one in
+/// `evalByCredential`: strict, 1 to [`MAX_CREDENTIAL_ID_BYTES`] bytes.
+pub fn decode_url_id(text: &str) -> Result<Vec<u8>, WireError> {
+    let error = || bad("A credential ID is not canonical base64url of the allowed length.");
+    if text.len() > MAX_CREDENTIAL_ID_BYTES.div_ceil(3) * 4 {
+        return Err(error());
+    }
+    decode_url(text)
+        .filter(|id| (1..=MAX_CREDENTIAL_ID_BYTES).contains(&id.len()))
+        .ok_or_else(error)
 }
 
 /// Decode symbols of `alphabet` without padding. `None` for a symbol outside the
@@ -404,6 +414,17 @@ mod tests {
         assert!(decode_url("-_9").is_none());
         assert!(decode_url("Q").is_none());
         assert!(decode_url("+/8").is_none());
+        // A credential ID of `evalByCredential`: base64url, 1 to 1023 bytes.
+        assert_eq!(decode_url_id("-_8").unwrap(), b"\xfb\xff");
+        let longest = encode(&[7; MAX_CREDENTIAL_ID_BYTES], URL_ALPHABET, false);
+        assert_eq!(
+            decode_url_id(&longest).unwrap().len(),
+            MAX_CREDENTIAL_ID_BYTES
+        );
+        let too_long = encode(&[7; MAX_CREDENTIAL_ID_BYTES + 1], URL_ALPHABET, false);
+        for text in ["", "-_8=", "+/8", "-_9", too_long.as_str()] {
+            assert!(decode_url_id(text).is_err(), "{text:?}");
+        }
     }
 
     #[test]

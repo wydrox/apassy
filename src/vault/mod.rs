@@ -23,6 +23,7 @@ mod candidate;
 mod cloud;
 mod companion;
 mod connect;
+mod dedup;
 pub mod detect;
 pub mod exceptions;
 mod folders;
@@ -41,6 +42,7 @@ mod schema18;
 mod schema19;
 mod schema20;
 mod schema24;
+mod schema25;
 mod schema26;
 pub use connect::PendingConnect;
 mod suggestions;
@@ -91,6 +93,10 @@ pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
     DEFAULT_COMPANION_PORT, MAX_COMPANION_DEVICES, MIN_COMPANION_PORT,
 };
+pub use dedup::{
+    DuplicateGroup, DuplicateMember, MERGED_INTO_DETAIL, MERGED_PREFIX, MergeOutcome, MergeRefusal,
+    merged_count,
+};
 pub use folders::{Folder, ItemFolderMove, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES};
 pub use history::{
     EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
@@ -106,8 +112,9 @@ pub use merge::{
     TOMBSTONE_DAYS,
 };
 pub use passkey::{
-    PasskeyAssertion, PasskeyCreate, PasskeyCreated, PasskeyError, PasskeyExport, PasskeyImport,
-    PasskeyInfo, PasskeyTarget,
+    LargeBlobOp, LargeBlobResult, PasskeyAssertion, PasskeyAssertionExtensions, PasskeyCreate,
+    PasskeyCreated, PasskeyError, PasskeyExport, PasskeyImport, PasskeyInfo, PasskeyLargeBlob,
+    PasskeyPrfInput, PasskeyPrfOutput, PasskeyPrfSecrets, PasskeyTarget,
 };
 pub use policy::{DeclarationSource, DeclarationSources};
 pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
@@ -1125,7 +1132,8 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | 21
         | 22
         | 23
-        | schema24::WATCH_SCHEMA_VERSION
+        | 24
+        | schema25::PASSKEY_EXTENSIONS_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1297,7 +1305,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         &[]
     };
     // Schema 24 adds no table and no column: it widens the kinds of `trusted_device`.
-    // Schema 25 is not known to this build (`schema26.rs`).
+    // Schema 25 adds no table and no column: it adds passkey formats and fields.
     let v26: &[&str] = if version >= schema26::CLOUD_SCHEMA_VERSION {
         &schema26::COLUMNS
     } else {
@@ -1434,6 +1442,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < schema24::WATCH_SCHEMA_VERSION {
         schema24::add_schema_v24(&tx)?;
     }
+    if from < schema25::PASSKEY_EXTENSIONS_SCHEMA_VERSION {
+        schema25::add_schema_v25(&tx)?;
+    }
     if from < schema26::CLOUD_SCHEMA_VERSION {
         schema26::add_schema_v26(&tx)?;
     }
@@ -1496,6 +1507,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     access_once::add_schema(&tx)?;
     answers::add_code_schema(&tx)?;
     schema24::add_schema_v24(&tx)?;
+    schema25::add_schema_v25(&tx)?;
     schema26::add_schema_v26(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

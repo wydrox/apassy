@@ -401,13 +401,22 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
     }
 
     public func passkeyAssert(_ request: PasskeyAssertionRequest) async throws -> PasskeyAssertion {
-        try await call(
-            "passkey_assert",
-            [
-                "id": request.id, "rp_id": request.rpID,
-                "credential_id": request.credentialID.base64EncodedString(),
-                "client_data_hash": request.clientDataHash.base64EncodedString(),
-            ])
+        var params: [String: Any] = [
+            "id": request.id, "rp_id": request.rpID,
+            "credential_id": request.credentialID.base64EncodedString(),
+            "client_data_hash": request.clientDataHash.base64EncodedString(),
+        ]
+        if let prf = request.prf {
+            var input: [String: Any] = ["first": prf.first.base64EncodedString(), "hashed": prf.hashed]
+            if let second = prf.second { input["second"] = second.base64EncodedString() }
+            params["prf"] = input
+        }
+        switch request.largeBlob {
+        case .read: params["large_blob"] = ["read": true]
+        case .write(let blob): params["large_blob"] = ["write": blob.base64EncodedString()]
+        case nil: break
+        }
+        return try await call("passkey_assert", params)
     }
 
     public func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated {
@@ -426,12 +435,26 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
 
     public func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
         try requireAppOwner()
-        let wire: [[String: Any]] = accounts.map {
-            [
-                "rp_id": $0.rpID, "credential_id": $0.credentialID.base64EncodedString(),
-                "user_handle": $0.userHandle.base64EncodedString(), "user_name": $0.userName,
-                "user_display_name": $0.userDisplayName, "key": $0.key.base64EncodedString(), "title": $0.title,
+        let wire: [[String: Any]] = accounts.map { account in
+            var entry: [String: Any] = [
+                "rp_id": account.rpID, "credential_id": account.credentialID.base64EncodedString(),
+                "user_handle": account.userHandle.base64EncodedString(), "user_name": account.userName,
+                "user_display_name": account.userDisplayName, "key": account.key.base64EncodedString(),
+                "title": account.title,
             ]
+            if let prf = account.prf {
+                entry["prf"] = [
+                    "with_uv": prf.withUV.base64EncodedString(), "without_uv": prf.withoutUV.base64EncodedString(),
+                ]
+            }
+            if let blob = account.largeBlob {
+                let largeBlob: [String: Any] = [
+                    "data": blob.data.base64EncodedString(), "uncompressed_size": blob.uncompressedSize,
+                ]
+                entry["large_blob"] = largeBlob
+            }
+            if let attachID = account.attachID { entry["attach_id"] = attachID }
+            return entry
         }
         return try await call("passkey_import", ["accounts": wire])
     }
@@ -444,6 +467,23 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
     public func credentialExport() async throws -> CredentialExport {
         try requireAppOwner()
         return try await call("credential_export")
+    }
+
+    // MARK: - Duplicates
+
+    private struct Duplicates: Decodable, Sendable { var groups: [DuplicateGroup] }
+
+    public func duplicates() async throws -> [DuplicateGroup] {
+        try requireAppOwner()
+        return try await call("duplicates", as: Duplicates.self).groups
+    }
+
+    public func mergeDuplicates(keep: UInt64, keepRevision: UInt64, others: [DuplicateMergeOther]) async throws
+        -> DuplicateMergeResult
+    {
+        try requireAppOwner()
+        let wire: [[String: Any]] = others.map { ["id": $0.id, "revision": $0.revision] }
+        return try await call("duplicates_merge", ["keep": keep, "keep_revision": keepRevision, "others": wire])
     }
 }
 #endif

@@ -244,6 +244,15 @@ public protocol VaultService: Sendable {
     /// environment other than production, as the Mac does.
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws
 
+    // Duplicates (`duplicates`, `duplicates_merge`). The app only, after the owner check for a merge.
+    /// The groups of active items that hold the same credential, without a value.
+    func duplicates() async throws -> [DuplicateGroup]
+    /// Merge `others` into `keep`: the kept item takes the fields that it lacks, and the others go to
+    /// the archive. Every revision is the one that the owner saw: `conflict` when an item changed.
+    /// When a member has a passkey only that member may be kept (`invalid_input` otherwise).
+    func mergeDuplicates(keep: UInt64, keepRevision: UInt64, others: [DuplicateMergeOther]) async throws
+        -> DuplicateMergeResult
+
     // 5.12 The agents of the Macs (contract relay-feed-v1). The app only. An older service throws
     // `VaultError.feedUnsupported` (`Feed.swift`).
     /// The agents of every vault with a questions context, as the feeds of their Macs show them.
@@ -347,6 +356,18 @@ public extension VaultService {
 
     func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
         throw VaultError(.notAllowed, "This vault cannot change the options of a credential. Update Apassy.")
+    }
+
+    // An older service finds no duplicates. The app shows its message.
+
+    func duplicates() async throws -> [DuplicateGroup] {
+        throw VaultError(.notAllowed, "This vault cannot find duplicates. Update Apassy.")
+    }
+
+    func mergeDuplicates(keep: UInt64, keepRevision: UInt64, others: [DuplicateMergeOther]) async throws
+        -> DuplicateMergeResult
+    {
+        throw VaultError(.notAllowed, "This vault cannot merge duplicates. Update Apassy.")
     }
 
     /// An older service keeps the questions of the selected vault only.

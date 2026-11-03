@@ -42,7 +42,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
             domains: Self.domains(serviceIdentifiers),
             request: AssertionRequest(
                 rpID: requestParameters.relyingPartyIdentifier, clientDataHash: requestParameters.clientDataHash,
-                allowed: requestParameters.allowedCredentials))
+                allowed: requestParameters.allowedCredentials, extensions: Self.extensions(requestParameters.extensionInput)))
     }
 
     override func prepareOneTimeCodeCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
@@ -86,11 +86,15 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
             else {
                 return cancel(.credentialIdentityNotFound)
             }
+            var input: ASPasskeyAssertionCredentialExtensionInput?
+            if case .assertion(let assertion) = request.extensionInput {
+                input = assertion
+            }
             model.startDirectPasskey(
                 record: passkey.recordIdentifier, credentialID: passkey.credentialID, userName: passkey.userName,
                 request: AssertionRequest(
                     rpID: passkey.relyingPartyIdentifier, clientDataHash: request.clientDataHash,
-                    allowed: [passkey.credentialID]))
+                    allowed: [passkey.credentialID], extensions: Self.extensions(input)))
         default:
             cancel(.failed)
         }
@@ -141,6 +145,26 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         case .failed(let code):
             cancel(code)
         }
+    }
+
+    /// The prf and largeBlob inputs of a sign-in, as plain values. ProviderModel picks the
+    /// PRF inputs of the chosen credential and checks the sizes before the call.
+    private static func extensions(_ input: ASPasskeyAssertionCredentialExtensionInput?) -> AssertionExtensionRequest {
+        var request = AssertionExtensionRequest()
+        if let prf = input?.prf {
+            func values(_ salts: ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues) -> PrfValues {
+                PrfValues(first: salts.saltInput1, second: salts.saltInput2)
+            }
+            request.prf = PrfRequest(all: prf.inputValues.map(values), byCredential: (prf.perCredentialInputValues ?? [:]).mapValues(values))
+        }
+        if let largeBlob = input?.largeBlob {
+            if case .write(let blob) = largeBlob.operation {
+                request.largeBlob = .write(blob)
+            } else if case .read = largeBlob.operation {
+                request.largeBlob = .read
+            }
+        }
+        return request
     }
 
     /// The websites of the request, as the core reads them (a domain or a URL).

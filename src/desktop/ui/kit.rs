@@ -190,8 +190,9 @@ pub(crate) fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// "just now", "5 min ago", "3 h ago", "yesterday", "4 days ago", or the date. Lists
-/// show this form; the exact UTC time goes in a tooltip or a detail sheet.
+/// "just now", "5 min ago", "3 h ago", "yesterday", "4 days ago", or from 7 days the
+/// day, as "9 Oct 2026". Lists and labels for the owner show this form; the exact UTC
+/// time goes in a tooltip or a detail sheet.
 #[cfg(feature = "vault")]
 pub(crate) fn relative_time(at: u64, now: u64) -> String {
     let age = now.saturating_sub(at);
@@ -201,11 +202,49 @@ pub(crate) fn relative_time(at: u64, now: u64) -> String {
         3_600..86_400 => format!("{} h ago", age / 3_600),
         86_400..172_800 => "yesterday".to_owned(),
         172_800..604_800 => format!("{} days ago", age / 86_400),
-        _ => crate::vault::format_utc(at)
-            .split(' ')
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
+        _ => day_month_year(at),
+    }
+}
+
+/// The UTC day of `at` with the English month abbreviation: "9 Oct 2026".
+#[cfg(feature = "vault")]
+fn day_month_year(at: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let utc = crate::vault::format_utc(at);
+    let day = utc.split(' ').next().unwrap_or_default();
+    let parts: Vec<&str> = day.split('-').collect();
+    let [year, month, day_of_month] = parts[..] else {
+        return day.to_owned();
+    };
+    let (Ok(month), Ok(day_of_month)) = (month.parse::<usize>(), day_of_month.parse::<u32>())
+    else {
+        return day.to_owned();
+    };
+    match month.checked_sub(1).and_then(|index| MONTHS.get(index)) {
+        Some(name) => format!("{day_of_month} {name} {year}"),
+        None => day.to_owned(),
+    }
+}
+
+#[cfg(all(test, feature = "vault"))]
+mod time_tests {
+    use super::relative_time;
+
+    /// From 7 days, the day reads as "9 Oct 2026", in UTC; before that, the age.
+    #[test]
+    fn an_old_time_reads_as_day_month_and_year() {
+        // 2026-10-09 12:00 UTC.
+        let oct_9 = 1_791_547_200;
+        let day = 86_400;
+        assert_eq!(relative_time(oct_9, oct_9 + 6 * day), "6 days ago");
+        assert_eq!(relative_time(oct_9, oct_9 + 7 * day), "9 Oct 2026");
+        assert_eq!(relative_time(oct_9, oct_9 + 400 * day), "9 Oct 2026");
+        // 2025-12-31 23:59:59 UTC stays in its UTC day and year.
+        assert_eq!(relative_time(1_767_225_599, oct_9), "31 Dec 2025");
+        assert_eq!(relative_time(0, oct_9), "1 Jan 1970");
+        assert_eq!(relative_time(oct_9 - 30, oct_9), "just now");
     }
 }
 
@@ -1649,6 +1688,32 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile) {
     }
 }
 
+/// The ring around a tile on a selected row: white, 1.5 points, just outside the tile.
+/// A tile in the accent blue, such as a login, keeps its shape on the blue selection.
+pub(crate) const SELECTED_TILE_RING: Stroke = Stroke {
+    width: 1.5,
+    color: Color32::WHITE,
+};
+
+/// The ring around the tile of a row: [`SELECTED_TILE_RING`] on a selected row, else
+/// none. The tile keeps its own color.
+pub(crate) fn tile_ring(selected: bool) -> Option<Stroke> {
+    selected.then_some(SELECTED_TILE_RING)
+}
+
+/// Paint [`tile_ring`] around the tile or avatar in `rect` of a row.
+pub(crate) fn paint_tile_ring(painter: &Painter, rect: Rect, round: bool, selected: bool) {
+    let Some(ring) = tile_ring(selected) else {
+        return;
+    };
+    let side = rect.width();
+    if round {
+        painter.circle_stroke(rect.center(), (side + ring.width) / 2.0, ring);
+    } else {
+        painter.rect_stroke(rect, (side * 0.25).round() as u8, ring, StrokeKind::Outside);
+    }
+}
+
 /// A tile of `side` points in the layout.
 pub(crate) fn tile(ui: &mut Ui, tile: &Tile, side: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
@@ -1976,6 +2041,7 @@ pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
         Vec2::splat(32.0),
     );
     paint_tile(ui, tile_rect, &row.tile);
+    paint_tile_ring(painter, tile_rect, row.tile.round, row.selected);
     let (title_color, sub_color) = if row.selected {
         (Color32::WHITE, Color32::from_white_alpha(210))
     } else {
@@ -2856,7 +2922,6 @@ pub(crate) enum Icon {
     #[cfg(not(feature = "vault"))]
     List,
     Folder,
-    Eye,
     /// A window with a sidebar, for "Hide sidebar" and "Show sidebar".
     Sidebar,
     /// The Settings gear with teeth, as SF Symbols `gearshape`.
@@ -3041,10 +3106,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             (0.92, 0.82),
             (0.08, 0.82),
         ]),
-        Icon::Eye => {
-            closed(&arc(0.5, 0.5, 0.42, 0.26, 0.0, TAU));
-            circle(0.5, 0.5, 0.12);
-        }
         Icon::Sidebar => {
             painter.rect_stroke(
                 Rect::from_min_max(p(0.06, 0.16), p(0.94, 0.84)),

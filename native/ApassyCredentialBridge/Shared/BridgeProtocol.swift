@@ -25,8 +25,9 @@ enum BridgeConstants {
     static let socketDirectoryName = "bridge"
     static let socketName = "cp.sock"
     static let maxSocketPathBytes = 103
-    /// A request of the extension.
-    static let maxRequestBytes = 64 * 1024
+    /// A request of the extension. A sign-in that writes a large blob of 64 KiB needs
+    /// about 86 KiB of base64, so the frame holds 128 KiB.
+    static let maxRequestBytes = 128 * 1024
     /// An answer to the extension.
     static let maxResponseBytes = 1024 * 1024
     /// The longest wait for one answer, in seconds. The owner check runs in this time.

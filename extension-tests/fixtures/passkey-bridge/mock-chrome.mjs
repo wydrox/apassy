@@ -26,6 +26,18 @@ export const flush = async (rounds = 20) => {
   for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
+// Waits until `condition()` holds, or the deadline passes. A fixed number of
+// `flush` rounds is not enough when the code awaits WebCrypto (the thread pool),
+// which is slow on a busy CI runner.
+export const waitFor = async (condition, timeoutMs = 5000) => {
+  const deadline = Date.now() + timeoutMs;
+  await flush();
+  while (!condition() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await flush();
+  }
+};
+
 function event() {
   const listeners = [];
   return {

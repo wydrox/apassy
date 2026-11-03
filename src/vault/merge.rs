@@ -162,14 +162,15 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
     "moved",
 ];
 
-/// The newest earlier schema that a merge takes. Schemas 20 through 23 add only local
-/// authority/state; older copies preserve synced semantics and acquire no code
-/// authority. Schema 24 adds the kind `watch` to `trusted_device` (ADR 0039): an older
-/// copy has only `mac` and `iphone` rows, which the table of this schema takes as they
-/// are. Schema 26 adds only local tables and a local column (the cloud agents of the
-/// node, `schema26.rs`). Schema 25 belongs to a change that this build does not have, so
-/// a copy of schema 25 is refused ([`is_mergeable_schema`]).
-pub(super) const UPGRADABLE_SCHEMA: i64 = 24;
+/// The previous schema. Schemas 20 through 23 add only local authority/state;
+/// older copies preserve synced semantics and acquire no code authority. Schema 24
+/// adds the kind `watch` to `trusted_device` (ADR 0039): an older copy has only `mac`
+/// and `iphone` rows, which the table of this schema takes as they are. Schema 25 adds
+/// passkey formats and optional passkey fields (`passkey.rs`): an older copy has only
+/// ES256 passkeys without them, which this schema reads as they are. Schema 26 adds
+/// only local tables and a local column (the cloud agents of the node, `schema26.rs`):
+/// a copy has none of their rows.
+pub(super) const UPGRADABLE_SCHEMA: i64 = 25;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -177,17 +178,15 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 through 23 add local state only, schema 24 only widens a `CHECK` of a
-// synced table, and schema 26 adds local state only; future synced schemas require
-// another merge step. The one version between them is not known here.
-const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 2);
-const _: () = assert!(super::schema26::UNKNOWN_SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 8);
+// synced table, schema 25 only adds values of reserved item fields, and schema 26 adds
+// local state only; future synced schemas require another merge step.
+const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 9);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
-/// one of the earlier schemas that it upgrades. Schema 25 is not one of them.
+/// one of the earlier schemas that it upgrades.
 pub(super) fn is_mergeable_schema(version: i64) -> bool {
     (OLDEST_UPGRADABLE_SCHEMA..=SCHEMA_VERSION).contains(&version)
-        && version != super::schema26::UNKNOWN_SCHEMA_VERSION
 }
 
 /// A table whose rows sync one by one.
