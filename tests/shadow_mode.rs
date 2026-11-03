@@ -296,7 +296,7 @@ fn owner_check(vault: &SharedVault, action: OwnerAction) -> OwnerProof {
         .expect("owner check")
 }
 
-fn client(url: &str) -> BouncerClient {
+fn brain_client(url: &str) -> BouncerClient {
     BouncerClient::new(url)
         .expect("url")
         .with_timeout(Duration::from_secs(2))
@@ -352,7 +352,7 @@ fn fixture_with(gate: Option<Arc<dyn ModelGate>>) -> Fixture {
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = Duration::from_secs(20);
     options.run_timeout = Duration::from_secs(10);
-    options.bouncer = Some(client(&active.url));
+    options.bouncer = Some(brain_client(&active.url));
     options.model_gate = gate;
     let socket = dir.path().join("run").join("broker.sock");
     let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
@@ -1037,11 +1037,11 @@ fn a_hosting_change_applies_at_the_next_run() {
         model: BASE,
         answer: unsure_answer,
     });
-    gate.set(Some(client(&fx.active.url)));
+    gate.set(Some(brain_client(&fx.active.url)));
     assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Bouncer allowed");
     assert_eq!((fx.active.calls(), other.calls()), (1, 0));
     // The host changes: the next run asks the new host only.
-    gate.set(Some(client(&other.url)));
+    gate.set(Some(brain_client(&other.url)));
     assert_eq!(outcome(&run(&fx, SEQUENCE[0])), "Owner approved");
     assert_eq!((fx.active.calls(), other.calls()), (1, 1));
     // A candidate rides to the current host too.
