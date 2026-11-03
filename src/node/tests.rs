@@ -35,7 +35,7 @@ const TEAM: &str = "t_fakenode01";
 pub(crate) struct Items {
     /// Placeholder mode for `api.stripe.com`.
     pub(crate) stripe: u64,
-    /// Placeholder mode for `httpbin.org`.
+    /// Placeholder mode for `httpbingo.org`.
     pub(crate) httpbin: u64,
     /// The real value mode: not for cloud agents.
     pub(crate) plain: u64,
@@ -74,7 +74,7 @@ pub(crate) fn synthetic_vault(dir: &tempfile::TempDir) -> (Vault, Items) {
             httpbin,
             "SYNTH_HTTPBIN_TOKEN",
             "token",
-            &EnvDelivery::Placeholder(vec!["httpbin.org".to_owned()]),
+            &EnvDelivery::Placeholder(vec!["httpbingo.org".to_owned()]),
         )
         .unwrap();
     let plain = vault
@@ -522,7 +522,7 @@ impl Fixture {
                 "curl".to_owned(),
                 "-H".to_owned(),
                 "Authorization: Bearer $SYNTH_HTTPBIN_TOKEN".to_owned(),
-                "https://httpbin.org/bearer".to_owned(),
+                "https://httpbingo.org/bearer".to_owned(),
             ],
             purpose: "Check the token with httpbin.".to_owned(),
             user_request: Some(user_request.to_owned()),
@@ -701,7 +701,7 @@ fn a_cloud_run_always_asks_remembers_nothing_and_releases_the_values_in_item_ord
     // The session ends after two proxied requests: the summary row counts them.
     {
         let mut state = fx.state();
-        for (host, outcome) in [("httpbin.org", "forwarded"), ("httpbin.org", "refused")] {
+        for (host, outcome) in [("httpbingo.org", "forwarded"), ("httpbingo.org", "refused")] {
             state.audit(
                 "proxy_request",
                 Some(NodeRunId(1)),

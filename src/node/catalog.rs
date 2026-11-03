@@ -302,6 +302,9 @@ mod tests {
         assert!(public_suffix("co.uk"));
         assert!(public_suffix("github.io:8443"));
         assert!(!public_suffix("api.stripe.com"));
-        assert!(!public_suffix("httpbin.org"));
+        // httpbin.org is in the private section of the list; httpbingo.org is a
+        // registrable domain under "org".
+        assert!(public_suffix("httpbin.org"));
+        assert!(!public_suffix("httpbingo.org"));
     }
 }

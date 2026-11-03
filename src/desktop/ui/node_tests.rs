@@ -65,7 +65,7 @@ fn fixture() -> Fixture {
                     item,
                     "SYNTH_HTTPBIN_TOKEN",
                     "token",
-                    &EnvDelivery::Placeholder(vec!["httpbin.org".to_owned()]),
+                    &EnvDelivery::Placeholder(vec!["httpbingo.org".to_owned()]),
                 )
                 .expect("binding");
             vault.set_cloud_route_on(true).expect("route");
@@ -112,7 +112,9 @@ fn frame(ctx: &egui::Context, app: &mut DesktopApp, close: bool) -> Vec<Viewport
         app.sync_node(ui.ctx());
         app.keep_open_for_node(ui.ctx());
     });
-    output.viewport_output[&ViewportId::ROOT].commands.clone()
+    let commands = output.viewport_output[&ViewportId::ROOT].commands.clone();
+    output.drop_without_applying_deltas();
+    commands
 }
 
 /// The route went off, and the Serve state of the fake is the owner's 443 handler only.
