@@ -800,7 +800,7 @@ impl OwnerSession {
     }
 
     /// The rows of `query`. A search that the vault already answered in its current
-    /// state reads nothing ([`SearchCache`]).
+    /// state reads nothing: the session keeps the rows of its last searches.
     pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
         let vault = match self.unlocked() {
             Ok(vault) => vault,
