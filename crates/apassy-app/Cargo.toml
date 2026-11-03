@@ -6,23 +6,35 @@ rust-version = "1.97"
 publish = false
 license = "Apache-2.0"
 repository = "https://github.com/wydrox/apassy"
-description = "The Apassy desktop app for macOS: the window, the owner command line, and the Mac's own node"
+description = "The Apassy app: on macOS the window, the owner command line, and the Mac's own node; on Linux the node without a window"
+
+[features]
+# The window and the owner command line (the macOS bundle). The Linux package builds
+# `--no-default-features --features node`: no eframe, no desktop code (plan S2-S3, D8).
+default = ["window", "node"]
+window = ["apassy/desktop", "dep:eframe", "dep:tracing"]
+# The node commands (`serve`, `up`, `pair`, `status`, `doctor`, `team`), in the relay
+# crate (`apassy_relay::node`). Always on; the feature names the Linux build.
+node = []
 
 [dependencies]
-# The core with the window and the vault. The relay depends on the core, so the core
-# cannot name the relay: this crate joins them (ADR 0037, cloud slice, decision 1).
-apassy = { path = "../..", features = ["desktop", "vault"] }
-# The embedded node behind `apassy::node::backend` (crates/apassy-relay/src/embedded.rs).
+# The core with the vault (and, with `window`, the desktop). The relay depends on the
+# core, so the core cannot name the relay: this crate joins them (ADR 0037, cloud
+# slice, decision 1).
+apassy = { path = "../..", features = ["vault"] }
+# The embedded node behind `apassy::node::backend` (crates/apassy-relay/src/embedded.rs),
+# and the node commands of Linux (`apassy_relay::node`).
 apassy-relay = { path = "../apassy-relay" }
-eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-tracing = "=0.1.44"
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+tracing = { version = "=0.1.44", optional = true }
 
 [dev-dependencies]
 # The unit test reads the core limit that `apassy::harden` set (src/main.rs).
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "process"] }
 
 # Another name than the root `apassy` target, so the two do not overwrite each other
-# in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy.
+# in target/. scripts/build-app.sh copies it into the bundle as Contents/MacOS/apassy;
+# the Linux package installs it as `apassy`.
 [[bin]]
 name = "apassy-app"
 path = "src/main.rs"
