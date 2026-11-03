@@ -1923,10 +1923,10 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     backup.push(".pre-v6");
     let backup = std::path::PathBuf::from(backup);
     // The start above moved it to 6 and kept the copy (mode 0600, encrypted, version 5),
-    // and then to 7.
+    // and then to 7 and 8.
     assert_eq!(
         relay.vault_rows("SELECT user_version, '' FROM pragma_user_version")[0].0,
-        b"7"
+        b"8"
     );
     assert_eq!(
         std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
@@ -2105,7 +2105,7 @@ fn a_team_file_of_schema_5_moves_to_6_and_keeps_a_pre_v6_copy() {
     });
     assert_eq!(
         relay.vault_rows("SELECT user_version, '' FROM pragma_user_version")[0].0,
-        b"7"
+        b"8"
     );
     assert_eq!(
         relay.vault_rows("SELECT count(*), '' FROM question")[0].0,

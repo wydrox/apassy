@@ -850,9 +850,9 @@ fn a_node_goes_back_to_schema_6_and_its_listed_agents_are_revoked() {
     let answer = serde_json::to_value(&teams).unwrap();
     assert_eq!(
         answer,
-        json!([{"team": team.0, "from": 7, "to": 6, "agents_revoked": 1}])
+        json!([{"team": team.0, "from": 8, "to": 6, "agents_revoked": 1}])
     );
-    // The image of schema 7 moves the file up again; the agent stays revoked.
+    // The image of schema 8 moves the file up again; the agent stays revoked.
     let node = EmbeddedNode::start(config).unwrap();
     let public = node.running().public_listener_url().unwrap();
     let (status, _) = mcp(&public, &token, "apassy_list_access", json!({}));

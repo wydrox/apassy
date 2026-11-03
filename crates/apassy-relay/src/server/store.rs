@@ -27,8 +27,10 @@ use crate::secret::SecretString;
 /// the heads and receipts of vault sync (docs/SPEC.md section 24). Version 5 adds the
 /// questions, their answers, and the push tokens (docs/SPEC.md section 25). Version 6
 /// adds the feeds of the Macs and their actions (docs/SPEC.md section 27). Version 7
-/// adds the item list of an agent, `agent.items` (docs/SPEC.md section 30.4).
-pub const SCHEMA_VERSION: i64 = 7;
+/// adds the item list of an agent, `agent.items` (docs/SPEC.md section 30.4). Version 8
+/// adds the push handles of a node (`push_handle`, docs/SPEC.md section 25.9,
+/// push-gateway-v1 section 10).
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// `max_page_count` without a cap: SQLite clamps it to its own largest value.
 const NO_PAGE_CAP: u64 = 4_294_967_294;
@@ -182,6 +184,14 @@ CREATE INDEX feed_action_created ON feed_action(created_at);
 /// its member's grants give (`agent_items`).
 const AGENT_ITEMS_SCHEMA: &str = "
 ALTER TABLE agent ADD COLUMN items TEXT;
+";
+
+/// Version 8: one push handle of the push gateway per device (push-gateway-v1 section
+/// 10). The handle and its secret never go to a log or an audit row.
+const PUSH_HANDLE_SCHEMA: &str = "
+CREATE TABLE push_handle (
+  device_id INTEGER PRIMARY KEY REFERENCES device(id), gateway TEXT NOT NULL,
+  handle BLOB NOT NULL, secret BLOB NOT NULL, updated_at INTEGER NOT NULL, failed_at INTEGER);
 ";
 
 const REBUILD_V3: &str = "
@@ -379,7 +389,7 @@ impl Store {
             path,
             key,
             &format!(
-                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}{AGENT_ITEMS_SCHEMA}PRAGMA user_version = 7;"
+                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}{AGENT_ITEMS_SCHEMA}{PUSH_HANDLE_SCHEMA}PRAGMA user_version = 8;"
             ),
         )
     }
@@ -433,6 +443,14 @@ impl Store {
             store.migrate_v7(path).map_err(|error| {
                 RelayError::internal(format!(
                     "The team file cannot be moved to schema version 7: {} It is still version 6 and unchanged; free disk space or read the log, then start the relay again.",
+                    error.message
+                ))
+            })?;
+        }
+        if store.user_version()? == 7 {
+            store.migrate_v8(path).map_err(|error| {
+                RelayError::internal(format!(
+                    "The team file cannot be moved to schema version 8: {} It is still version 7 and unchanged; free disk space or read the log, then start the relay again.",
                     error.message
                 ))
             })?;
@@ -526,16 +544,54 @@ impl Store {
         tx.commit().map_err(db)
     }
 
-    /// The way back of version 7 in place, for the image of schema 6 (docs/OPERATIONS.md
-    /// section 23.3), with the relay stopped. That image does not know `agent.items` and
-    /// would give such an agent every item of its member's grants: so each live agent with
-    /// a list is revoked (with an `agent_revoked` row of the operator) and its pending runs
-    /// are denied, and then every list is cleared. The column stays, empty: the image of
-    /// schema 6 never reads it, and `migrate_v7` keeps it. Returns the agents revoked.
-    pub fn downgrade_to_v6(&self, now: u64) -> RelayResult<u64> {
-        if self.user_version()? != 7 {
+    /// Keeps an encrypted version 7 backup and adds `push_handle` in one transaction.
+    /// Additive: the push tokens of the hosted relay stay as they are. A file that
+    /// `downgrade_to_v7` took back has the table already: it stays, without the handles of
+    /// the devices that the image of schema 7 revoked in between (that image does not
+    /// delete them at a revocation).
+    fn migrate_v8(&self, path: &Path) -> RelayResult<()> {
+        let mut conn = self.lock();
+        write_pre(path, ".pre-v8")?;
+        let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate).map_err(db)?;
+        if has_table(&tx, "push_handle")? {
+            tx.execute(
+                "DELETE FROM push_handle WHERE device_id IN \
+                 (SELECT d.id FROM device d JOIN member m ON m.id = d.member_id \
+                  WHERE d.revoked_at IS NOT NULL OR m.revoked_at IS NOT NULL)",
+                [],
+            )
+            .map_err(db)?;
+        } else {
+            tx.execute_batch(PUSH_HANDLE_SCHEMA).map_err(db)?;
+        }
+        tx.pragma_update(None, "user_version", 8).map_err(db)?;
+        tx.commit().map_err(db)
+    }
+
+    /// The way back of version 8 in place, for the image of schema 7 (docs/OPERATIONS.md
+    /// section 26), with the relay stopped. That image does not know `push_handle` and
+    /// never reads it, so only the version changes: the handles stay for the next start of
+    /// schema 8 (`migrate_v8`), and the devices of a node get no push until then.
+    pub fn downgrade_to_v7(&self) -> RelayResult<()> {
+        if self.user_version()? != 8 {
             return Err(RelayError::internal(
-                "Only a team file of schema version 7 goes back to version 6.",
+                "Only a team file of schema version 8 goes back to version 7.",
+            ));
+        }
+        self.tx(|tx| tx.pragma_update(None, "user_version", 7).map_err(db))
+    }
+
+    /// The way back of version 7 (or 8, through the step of `downgrade_to_v7`) in place,
+    /// for the image of schema 6 (docs/OPERATIONS.md section 23.3), with the relay
+    /// stopped. That image does not know `agent.items` and would give such an agent every
+    /// item of its member's grants: so each live agent with a list is revoked (with an
+    /// `agent_revoked` row of the operator) and its pending runs are denied, and then
+    /// every list is cleared. The column stays, empty: the image of schema 6 never reads
+    /// it, and `migrate_v7` keeps it. Returns the agents revoked.
+    pub fn downgrade_to_v6(&self, now: u64) -> RelayResult<u64> {
+        if !matches!(self.user_version()?, 7 | 8) {
+            return Err(RelayError::internal(
+                "Only a team file of schema version 7 or 8 goes back to version 6.",
             ));
         }
         let audit = crate::server::audit::Audit::new();
@@ -716,7 +772,7 @@ pub fn copy_private(source: &Path, dest: &Path) -> RelayResult<u64> {
     Ok(bytes)
 }
 
-/// Writes `<file><suffix>` (`.pre-v3` to `.pre-v6`): a copy of the file before a schema
+/// Writes `<file><suffix>` (`.pre-v3` to `.pre-v8`): a copy of the file before a schema
 /// change, the way back for an image that cannot read the new version. The copy goes to
 /// `<suffix>.tmp`, is synced, and is renamed over `<suffix>`, so a stop at any point
 /// leaves either the old backup or the new one. A backup that exists while the file is
@@ -750,6 +806,17 @@ fn write_pre(path: &Path, suffix: &str) -> RelayResult<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// True when the file has the table `table`.
+pub(crate) fn has_table(conn: &Connection, table: &str) -> RelayResult<bool> {
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(db)
 }
 
 /// True when `table` has `column`.
@@ -1109,7 +1176,7 @@ mod tests {
         let before = crate::now_unix();
         let store = Store::open_team(&path, &key).unwrap();
         let after = crate::now_unix();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
             fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
@@ -1211,7 +1278,7 @@ mod tests {
         fs::write(dir.path().join("team.db.pre-v3.tmp"), b"a half temp copy").unwrap();
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
             original
@@ -1290,8 +1357,8 @@ mod tests {
         v3_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        // Version 3 goes through 4, 5, and 6 to 7 in one start.
-        assert_eq!(store.user_version().unwrap(), 7);
+        // Version 3 goes through 4, 5, 6, and 7 to 8 in one start.
+        assert_eq!(store.user_version().unwrap(), 8);
         let backup = dir.path().join("team.db.pre-v4");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1364,7 +1431,7 @@ mod tests {
         v4_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         let backup = dir.path().join("team.db.pre-v5");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1499,7 +1566,7 @@ mod tests {
         v5_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         let backup = dir.path().join("team.db.pre-v6");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1645,7 +1712,7 @@ mod tests {
         v6_vault(&path, &key);
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         let backup = dir.path().join("team.db.pre-v7");
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
@@ -1714,9 +1781,9 @@ mod tests {
             })
             .unwrap();
         drop(store);
-        // The image of schema 7 moves it up again and keeps the empty column.
+        // The image of schema 8 moves it up again and keeps the empty column.
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         store
             .with(|conn| {
                 assert_eq!(agent_items(conn, AgentId(2))?, None);
@@ -1757,14 +1824,14 @@ mod tests {
     }
 
     #[test]
-    fn a_version_8_file_is_refused() {
+    fn a_version_9_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("team.db");
         let key = SecretString::new("schema migration test passphrase".into());
         drop(Store::create_team(&path, &key).unwrap());
         Store::open_at(&path, &key)
             .unwrap()
-            .with(|conn| conn.pragma_update(None, "user_version", 8).map_err(db))
+            .with(|conn| conn.pragma_update(None, "user_version", 9).map_err(db))
             .unwrap();
         let error = Store::open_team(&path, &key).err().unwrap();
         assert!(error.message.contains("unknown schema version"), "{error}");
@@ -1792,11 +1859,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_team_uses_v7_and_has_a_member_token_deadline() {
+    fn fresh_team_uses_v8_and_has_a_member_token_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let key = SecretString::new("new schema test passphrase".into());
         let store = Store::create_team(&dir.path().join("team.db"), &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 7);
+        assert_eq!(store.user_version().unwrap(), 8);
         store
             .with(|conn| {
                 conn.execute(
@@ -1851,5 +1918,120 @@ mod tests {
     fn this_build_passes_the_check() {
         let conn = Connection::open_in_memory().unwrap();
         require_build_options(&conn).unwrap();
+    }
+
+    /// A team file as the image of schema 7 made it: no `push_handle`, two devices.
+    fn v7_vault(path: &Path, key: &SecretString) {
+        let store = Store::create_at(
+            path,
+            key,
+            &format!(
+                "{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}{QUESTION_SCHEMA}{FEED_SCHEMA}{AGENT_ITEMS_SCHEMA}PRAGMA user_version = 7;"
+            ),
+        )
+        .unwrap();
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO team (id, name, created_at) VALUES (1, 'Team', 100);
+                     INSERT INTO member (name, role, created_at) VALUES ('owner', 'owner', 100);
+                     INSERT INTO device (member_id, name, public_key, key_holder, created_at)
+                        VALUES (1, 'Mac', X'04AA', 1, 100);
+                     INSERT INTO device (member_id, name, public_key, created_at)
+                        VALUES (1, 'iPhone', X'04BB', 100);
+                     INSERT INTO push_token VALUES (2, X'61', 'production', 'b', 100, NULL);",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+    }
+
+    /// The tables, indexes, and their SQL of a team file, by name.
+    fn team_schema_of(store: &Store) -> Vec<(String, String)> {
+        store
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT name, coalesce(sql, '') FROM sqlite_master \
+                         WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+                    )
+                    .map_err(db)?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(db)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn v8_migration_adds_push_handles_and_the_downgrade_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v7_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 8);
+        let backup = dir.path().join("team.db.pre-v8");
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!dir.path().join("team.db.pre-v8.tmp").exists());
+        // A migrated file has the schema of a new one.
+        let fresh_path = dir.path().join("fresh.db");
+        let fresh = Store::create_team(&fresh_path, &key).unwrap();
+        assert_eq!(team_schema_of(&store), team_schema_of(&fresh));
+        drop(fresh);
+        store
+            .with(|conn| {
+                // The push token of the hosted relay stays; the table of handles is empty.
+                let counts: (i64, i64) = conn
+                    .query_row(
+                        "SELECT (SELECT count(*) FROM push_token), (SELECT count(*) FROM push_handle)",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .map_err(db)?;
+                assert_eq!(counts, (1, 0));
+                conn.execute_batch(
+                    "INSERT INTO push_handle VALUES (1, 'https://push.example', X'01', X'02', 100, NULL);
+                     INSERT INTO push_handle VALUES (2, 'https://push.example', X'03', X'04', 100, NULL);",
+                )
+                .map_err(db)?;
+                Ok(())
+            })
+            .unwrap();
+        // The way back: only the version; a second run is refused.
+        store.downgrade_to_v7().unwrap();
+        assert_eq!(store.user_version().unwrap(), 7);
+        assert!(store.downgrade_to_v7().is_err());
+        // The image of schema 7 revokes the iPhone and does not know its handle.
+        store
+            .with(|conn| {
+                conn.execute("UPDATE device SET revoked_at = 200 WHERE id = 2", [])
+                    .map_err(db)?;
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        // Up again: the table stays, without the handle of the revoked device.
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 8);
+        let devices: Vec<i64> = store
+            .with(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT device_id FROM push_handle ORDER BY device_id")
+                    .map_err(db)?;
+                let rows = statement.query_map([], |r| r.get(0)).map_err(db)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db)
+            })
+            .unwrap();
+        assert_eq!(devices, vec![1]);
+        // Schema 8 goes back to 6 in one step too.
+        assert_eq!(store.downgrade_to_v6(300).unwrap(), 0);
+        assert_eq!(store.user_version().unwrap(), 6);
     }
 }
