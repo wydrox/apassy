@@ -75,9 +75,9 @@ pub(crate) struct RemoteMac {
     pub(crate) problem: Option<FeedProblem>,
 }
 
-/// The scope of the Bouncer pages. It lives with the pages (`ui::bouncer`), so the demo
+/// The device of a Bouncer scope. It lives with the pages (`ui::bouncer`), so the demo
 /// build has it too.
-pub(crate) use crate::desktop::ui::bouncer::{ActivityScope, DeviceScope};
+pub(crate) use crate::desktop::ui::bouncer::DeviceScope;
 
 impl From<&OtherFeed> for RemoteFeedState {
     fn from(feed: &OtherFeed) -> Self {

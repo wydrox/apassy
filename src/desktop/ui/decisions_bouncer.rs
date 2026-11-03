@@ -731,7 +731,7 @@ pub(crate) fn cloud_card(ui: &mut Ui, card: &CloudCard) {
 /// `allow`: "Allow" (a connect, Touch ID) or "Allow Once" (a cloud run).
 pub(crate) fn card_bar(
     ui: &mut Ui,
-    id: impl std::hash::Hash,
+    id: impl std::hash::Hash + std::fmt::Debug,
     allow: &str,
     touch_id: bool,
 ) -> Option<CardAnswer> {

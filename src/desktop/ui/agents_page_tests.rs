@@ -54,21 +54,23 @@ fn other(device: &str, id: &str) -> AgentRef {
 /// Frame 2: three Macs; Grok Bot remote and waiting on this Mac; one disconnected agent.
 fn frame_2() -> BouncerData {
     let (o, s, l) = (office(), studio(), laptop());
-    let mut data = BouncerData::default();
-    data.agents = vec![
-        line("Claude Code", &o, AgentRef::Local(1), 287, 17, 60),
-        line("Codex", &o, AgentRef::Local(2), 98, 11, 25 * 60),
-        AgentLine {
-            remote: true,
-            waits: true,
-            projects: Vec::new(),
-            connected_at: Some(NOW - 6 * 86_400),
-            ..line("Grok Bot", &o, AgentRef::Local(3), 12, 12, 60)
-        },
-        line("Claude Code", &s, other(STUDIO, "4"), 203, 8, 60),
-        line("Codex", &s, other(STUDIO, "7"), 63, 19, 3_600),
-        line("Claude Code", &l, other(LAPTOP, "4"), 31, 3, 2 * 86_400),
-    ];
+    let mut data = BouncerData {
+        agents: vec![
+            line("Claude Code", &o, AgentRef::Local(1), 287, 17, 60),
+            line("Codex", &o, AgentRef::Local(2), 98, 11, 25 * 60),
+            AgentLine {
+                remote: true,
+                waits: true,
+                projects: Vec::new(),
+                connected_at: Some(NOW - 6 * 86_400),
+                ..line("Grok Bot", &o, AgentRef::Local(3), 12, 12, 60)
+            },
+            line("Claude Code", &s, other(STUDIO, "4"), 203, 8, 60),
+            line("Codex", &s, other(STUDIO, "7"), 63, 19, 3_600),
+            line("Claude Code", &l, other(LAPTOP, "4"), 31, 3, 2 * 86_400),
+        ],
+        ..BouncerData::default()
+    };
     data.disconnected = vec![line("Old agent", &o, AgentRef::Local(9), 0, 0, 30 * 86_400)];
     data.remote_access_of
         .insert(s.scope.clone(), RemoteAccessWord::Off);
@@ -162,8 +164,10 @@ fn one_environment_shows_its_table_only() {
 #[test]
 fn a_new_vault_a_new_mac_and_a_mac_that_never_reported_have_their_empty_states() {
     // 9b: one Mac, no agent.
-    let mut data = BouncerData::default();
-    data.environments = vec![office()];
+    let mut data = BouncerData {
+        environments: vec![office()],
+        ..BouncerData::default()
+    };
     let view = AgentsView::of(&data, &all(), None, NOW, 0);
     assert_eq!(view.sections[0].empty, Some(SectionEmpty::ThisMac));
     // 11a: another Mac without agents, chosen in the scope: the link to all.
@@ -411,16 +415,18 @@ fn the_page_of_a_remote_agent_has_four_tiles_its_runs_and_what_it_sees() {
 fn a_new_remote_agent_sees_nothing_and_has_no_runs_yet() {
     // 13a: just connected, no credential, no run.
     let o = office();
-    let mut data = BouncerData::default();
-    data.environments = vec![o.clone()];
-    data.agents = vec![AgentLine {
-        remote: true,
-        runs: Some(0),
-        last_active: None,
-        connected_at: Some(NOW - 60),
-        projects: Vec::new(),
-        ..line("Grok Bot", &o, AgentRef::Local(3), 0, 0, 0)
-    }];
+    let data = BouncerData {
+        environments: vec![o.clone()],
+        agents: vec![AgentLine {
+            remote: true,
+            runs: Some(0),
+            last_active: None,
+            connected_at: Some(NOW - 60),
+            projects: Vec::new(),
+            ..line("Grok Bot", &o, AgentRef::Local(3), 0, 0, 0)
+        }],
+        ..BouncerData::default()
+    };
     let facts = LocalFacts {
         id: 3,
         name: "Grok Bot".to_owned(),

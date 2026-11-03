@@ -190,6 +190,7 @@ fn connect(id: &str) -> PendingConnectCard {
         mac_name: "Synthetic MacBook".to_owned(),
         code: "482 913".to_owned(),
         expires_at: now() + 300,
+        redirect_host: Some("grok.example".to_owned()),
     }
 }
 
@@ -385,6 +386,7 @@ fn a_connect_card_is_posted_answered_with_face_id_and_settled_once() {
     assert_eq!(card.connect.mac_name, "Synthetic MacBook");
     assert_eq!(card.connect.code, "482 913");
     assert_eq!(card.connect.expires_at, record.expires_at);
+    assert_eq!(card.connect.redirect_host.as_deref(), Some("grok.example"));
     assert_eq!(record.to, "member");
     // An old reader (the run card reader) shows "Update Apassy to read this question".
     assert_eq!(

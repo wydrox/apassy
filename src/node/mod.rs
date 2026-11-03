@@ -833,7 +833,7 @@ impl Node {
             .as_ref()
             .filter(|_| route_on && !running)
             .and_then(|failure| RouteProblem::of(failure, self.funnel.port()))
-            .or_else(|| match &tailscale {
+            .or(match &tailscale {
                 _ if !route_on => None,
                 Tailscale::Missing => Some(RouteProblem::NoTailscale),
                 Tailscale::NotConnected { .. } => Some(RouteProblem::NotConnected),

@@ -40,72 +40,73 @@ fn frame_5() -> BouncerData {
         never_reported: false,
         note: None,
     };
-    let mut data = BouncerData::default();
-    data.events = vec![
-        event(
-            6 * 60,
-            &studio,
-            "Claude Code",
-            "Shop database",
-            LogOutcome::AllowedByBouncer,
-            LogSource::Feed(1),
-        ),
-        event(
-            8 * 60,
-            &office,
-            "Grok Bot",
-            "GitHub token",
-            LogOutcome::AllowedOn("iPhone".to_owned()),
-            LogSource::Decision(2),
-        ),
-        event(
-            18 * 60,
-            &office,
-            "Claude Code",
-            "Stripe live",
-            LogOutcome::AllowedByYou,
-            LogSource::Decision(3),
-        ),
-        event(
-            62 * 60,
-            &studio,
-            "Codex",
-            "Deploy key",
-            LogOutcome::DeniedByYou,
-            LogSource::Feed(4),
-        ),
-        event(
-            20 * 3_600,
-            &office,
-            "Grok Bot",
-            "GitHub token",
-            LogOutcome::DeniedByYou,
-            LogSource::Decision(5),
-        ),
-        // What waits now is not history.
-        event(
-            30,
-            &office,
-            "Grok Bot",
-            "httpbin test token",
-            LogOutcome::WaitsForYou,
-            LogSource::Waiting(9),
-        ),
-        LogEvent {
-            kind: LogKind::Connect,
-            ..event(
+    BouncerData {
+        events: vec![
+            event(
+                6 * 60,
+                &studio,
+                "Claude Code",
+                "Shop database",
+                LogOutcome::AllowedByBouncer,
+                LogSource::Feed(1),
+            ),
+            event(
+                8 * 60,
+                &office,
+                "Grok Bot",
+                "GitHub token",
+                LogOutcome::AllowedOn("iPhone".to_owned()),
+                LogSource::Decision(2),
+            ),
+            event(
+                18 * 60,
+                &office,
+                "Claude Code",
+                "Stripe live",
+                LogOutcome::AllowedByYou,
+                LogSource::Decision(3),
+            ),
+            event(
+                62 * 60,
+                &studio,
+                "Codex",
+                "Deploy key",
+                LogOutcome::DeniedByYou,
+                LogSource::Feed(4),
+            ),
+            event(
+                20 * 3_600,
+                &office,
+                "Grok Bot",
+                "GitHub token",
+                LogOutcome::DeniedByYou,
+                LogSource::Decision(5),
+            ),
+            // What waits now is not history.
+            event(
                 30,
                 &office,
-                "Grok Bot (new)",
-                "",
+                "Grok Bot",
+                "httpbin test token",
                 LogOutcome::WaitsForYou,
-                LogSource::Connect("c1".to_owned()),
-            )
-        },
-    ];
-    data.environments = vec![office, studio];
-    data.has_agents = true;
-    data
+                LogSource::Waiting(9),
+            ),
+            LogEvent {
+                kind: LogKind::Connect,
+                ..event(
+                    30,
+                    &office,
+                    "Grok Bot (new)",
+                    "",
+                    LogOutcome::WaitsForYou,
+                    LogSource::Connect("c1".to_owned()),
+                )
+            },
+        ],
+        environments: vec![office, studio],
+        has_agents: true,
+        ..BouncerData::default()
+    }
 }
 
 fn titles(view: &HistoryView) -> Vec<(String, Vec<String>)> {
@@ -194,8 +195,10 @@ fn history_filters_by_kind_agent_environment_and_project() {
 #[test]
 fn a_new_vault_has_no_decisions_yet() {
     // Frame 9c.
-    let mut data = BouncerData::default();
-    data.environments = vec![Environment::this_mac("Mac mini (office)")];
+    let data = BouncerData {
+        environments: vec![Environment::this_mac("Mac mini (office)")],
+        ..BouncerData::default()
+    };
     let view = HistoryView::of(&data, &ActivityScope::default(), &State::default(), NOW, 0);
     assert!(view.none_yet);
     assert!(view.groups.is_empty());

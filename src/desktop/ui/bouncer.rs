@@ -693,8 +693,6 @@ pub(crate) enum LogOutcome {
     WaitsForYou,
     /// A change that you made: remote access, a disconnect.
     ByYou,
-    /// Anything else, as the source says it.
-    Other(String),
 }
 
 impl LogOutcome {
@@ -709,7 +707,6 @@ impl LogOutcome {
             Self::NoAnswer => "No answer".to_owned(),
             Self::WaitsForYou => "Waits for you".to_owned(),
             Self::ByYou => "By you".to_owned(),
-            Self::Other(text) => text.clone(),
         }
     }
 

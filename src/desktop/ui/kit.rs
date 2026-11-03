@@ -1657,7 +1657,9 @@ impl Tile {
         }
     }
 
-    /// The round avatar of an agent, in [`agent_color`], as in Decisions.
+    /// The round avatar of an agent, in [`agent_color`], as in Decisions. Only the demo
+    /// build (no vault) draws it.
+    #[cfg(not(feature = "vault"))]
     pub(crate) fn agent(name: &str) -> Self {
         Self {
             round: true,

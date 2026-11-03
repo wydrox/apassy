@@ -14,10 +14,8 @@ use super::decisions_bouncer::{self, State as HistoryState};
 use super::draw;
 use super::owner_tests::{collect, unlocked_app_with_item};
 use crate::broker::action_kind::ActionKind;
-use crate::desktop::remote_feeds::{
-    ActivityScope, DeviceScope, FeedProblem, RemoteFeedState, RemoteMac,
-};
-use crate::desktop::ui::bouncer::LogSource;
+use crate::desktop::remote_feeds::{DeviceScope, FeedProblem, RemoteFeedState, RemoteMac};
+use crate::desktop::ui::bouncer::{ActivityScope, LogSource};
 use crate::desktop::{DesktopApp, Place};
 use crate::questions::feed::{Feed, FeedUse};
 use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};

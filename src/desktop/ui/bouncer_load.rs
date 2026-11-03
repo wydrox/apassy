@@ -496,7 +496,7 @@ fn production_uses(
             times,
         })
         .collect();
-    uses.sort_by(|a, b| b.times.cmp(&a.times));
+    uses.sort_by_key(|row| std::cmp::Reverse(row.times));
     uses
 }
 
