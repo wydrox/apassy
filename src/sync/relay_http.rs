@@ -1040,6 +1040,27 @@ pub(crate) fn exchange(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, 
     }
 }
 
+/// One JSON `POST` without a bearer to `path` of a service that is not a relay: the push
+/// gateway of push-gateway-v1 (`POST /v1/handles`). System trust, as a relay origin; the
+/// whole call ends within `timeout`; the answer is read into memory (at most 2 MiB).
+/// Returns the status and the body, which is erased on drop. Through the external
+/// transport when the host installed one.
+pub fn post_json(
+    origin: &RelayUrl,
+    path: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<(u16, Zeroizing<Vec<u8>>), HttpError> {
+    if !path.starts_with('/') || !path.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(HttpError::Protocol);
+    }
+    let mut request = Request::new("POST", path.to_owned(), None);
+    request.body = Body::Json(Zeroizing::new(body.to_vec()));
+    request.deadline = Some(Instant::now() + timeout);
+    let answer = exchange(origin, &request)?;
+    Ok((answer.status, answer.body))
+}
+
 fn exchange_tcp(url: &RelayUrl, request: &Request<'_>) -> Result<Answer, HttpError> {
     let (mut conn, _complete, _held) = send(url, request)?;
     let Head {

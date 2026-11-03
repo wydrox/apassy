@@ -86,6 +86,11 @@ struct Relay {
     seq: u64,
     next_secret: u64,
     push: Option<(u64, Value)>,
+    /// The push handle of a device and its body (push-gateway-v1 section 10).
+    push_handle: Option<(u64, Value)>,
+    /// The relay pushes through a gateway (a node): it takes handles and refuses tokens.
+    /// Off: it has no handle route (404), as a relay before team schema 8.
+    gateway_mode: bool,
     log: Vec<String>,
     /// The feed of each device, by device id.
     feeds: BTreeMap<u64, StoredFeed>,
@@ -380,6 +385,17 @@ impl QuestionsRelay {
     /// The push token of a device and its body, when one is set.
     pub fn push_token(&self) -> Option<(u64, Value)> {
         lock(&self.shared.0).push.clone()
+    }
+
+    /// The push handle of a device and its body, when one is set.
+    pub fn push_handle(&self) -> Option<(u64, Value)> {
+        lock(&self.shared.0).push_handle.clone()
+    }
+
+    /// Push through a gateway, as a node (push-gateway-v1 section 10): handles in, tokens
+    /// refused with 409 `push_unavailable`.
+    pub fn set_gateway_mode(&self, on: bool) {
+        lock(&self.shared.0).gateway_mode = on;
     }
 
     pub fn log(&self) -> Vec<String> {
@@ -1078,6 +1094,10 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
                     );
                     ok(json!({"id": id, "at": now()}))
                 }
+                ("PUT", ["push", "token"]) if relay.gateway_mode => fail(409, "push_unavailable"),
+                ("DELETE", ["push", "token"]) if relay.gateway_mode => {
+                    fail(409, "push_unavailable")
+                }
                 ("PUT", ["push", "token"]) => {
                     let body = request.json();
                     relay.push = Some((device, body));
@@ -1087,9 +1107,124 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
                     relay.push = None;
                     ok(json!({"device_id": device}))
                 }
+                ("PUT", ["push", "handle"]) if relay.gateway_mode => {
+                    let body = request.json();
+                    let mut fields: Vec<&str> = body
+                        .as_object()
+                        .map(|object| object.keys().map(String::as_str).collect())
+                        .unwrap_or_default();
+                    fields.sort_unstable();
+                    let secret = body["secret"].as_str().unwrap_or_default();
+                    let handle = body["handle"].as_str().unwrap_or_default();
+                    if fields != ["gateway", "handle", "secret", "v"]
+                        || body["v"] != 1
+                        || secret.len() != 43
+                        || decode_b64u(secret).is_none_or(|bytes| bytes.len() != 32)
+                        || decode_b64u(handle).is_none_or(|bytes| bytes.len() < 16)
+                    {
+                        fail(400, "invalid_request")
+                    } else {
+                        relay.push_handle = Some((device, body));
+                        ok(json!({"device_id": device, "updated_at": now()}))
+                    }
+                }
+                ("DELETE", ["push", "handle"]) if relay.gateway_mode => {
+                    relay.push_handle = None;
+                    ok(json!({"device_id": device}))
+                }
                 _ => fail(404, "not_found"),
             }
         }
         _ => fail(404, "not_found"),
+    }
+}
+
+/// A fake push gateway (push-gateway-v1 section 6): `POST /v1/handles` answers a new
+/// synthetic handle and secret for each call and records each request body. Plain HTTP on
+/// 127.0.0.1; it opens and checks nothing.
+pub struct FakeGateway {
+    /// The origin, `http://127.0.0.1:<port>`.
+    pub url: String,
+    shared: Arc<Mutex<GatewayState>>,
+}
+
+#[derive(Default)]
+struct GatewayState {
+    requests: Vec<Value>,
+    /// The next answers with this status and error code instead of a handle.
+    refuse: Option<(u16, String)>,
+}
+
+impl FakeGateway {
+    pub fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "http://127.0.0.1:{}",
+            listener.local_addr().expect("addr").port()
+        );
+        let shared = Arc::new(Mutex::new(GatewayState::default()));
+        let server = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let Some(request) = read_request(&stream) else {
+                    continue;
+                };
+                let (status, body) = {
+                    let mut state = server.lock().unwrap_or_else(PoisonError::into_inner);
+                    if request.method != "POST" || request.path != "/v1/handles" {
+                        fail(404, "not_found")
+                    } else {
+                        state.requests.push(request.json());
+                        let count = state.requests.len();
+                        match state.refuse.clone() {
+                            Some((status, code)) => fail(status, &code),
+                            None => (200, FakeGateway::answer(count)),
+                        }
+                    }
+                };
+                let body = serde_json::to_vec(&body).unwrap_or_default();
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        Self { url, shared }
+    }
+
+    /// The synthetic handle of the `n`th call (from 1): 64 bytes of `n`.
+    pub fn handle(n: usize) -> String {
+        encode_b64u(&[u8::try_from(n).unwrap(); 64])
+    }
+
+    /// The synthetic secret of the `n`th call: 32 bytes of `n + 100`.
+    pub fn secret(n: usize) -> String {
+        encode_b64u(&[u8::try_from(n + 100).unwrap(); 32])
+    }
+
+    fn answer(n: usize) -> Value {
+        json!({"v": 1, "handle": Self::handle(n), "secret": Self::secret(n),
+               "expires_at": now() + 15_552_000})
+    }
+
+    /// The request bodies, in order.
+    pub fn requests(&self) -> Vec<Value> {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .requests
+            .clone()
+    }
+
+    /// Answer the next calls with `status` and `code`, or with handles again (`None`).
+    pub fn refuse(&self, refusal: Option<(u16, &str)>) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refuse = refusal.map(|(status, code)| (status, code.to_owned()));
     }
 }

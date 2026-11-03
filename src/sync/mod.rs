@@ -63,7 +63,7 @@ pub use relay_crypto::{
 };
 pub use relay_http::{
     Cancel, DEFAULT_RELAY_URL, ExternalAnswer, ExternalRequest, HttpError, HttpTransport, RelayUrl,
-    set_http_transport,
+    post_json, set_http_transport,
 };
 pub use state::{SyncState, TransportKind};
 pub use transport::{FolderTransport, Precondition, Remote, RemoteHead, SyncTransport, Transport};

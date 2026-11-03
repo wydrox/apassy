@@ -91,6 +91,10 @@ const WATCH_OPS: &[&str] = &[
     "watch_connect_cancel",
     "watch_status",
     "watch_forget",
+    // The watch's own push handle (push-gateway-v1 section 11) and its summary key.
+    "push_token_set",
+    "push_token_clear",
+    "push_summary_keys",
 ];
 
 #[derive(Deserialize)]
