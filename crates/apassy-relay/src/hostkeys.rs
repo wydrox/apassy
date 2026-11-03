@@ -36,6 +36,17 @@ pub const MIN_SEALED_BYTES: usize = NONCE_BYTES + TAG_BYTES + 1;
 pub const MAX_SEALED_BYTES: usize = NONCE_BYTES + TAG_BYTES + MAX_VALUE_BYTES;
 /// The largest `sealed_keys` of a release, decoded. 16 items need about 2 KiB.
 pub const MAX_SEALED_KEYS_BYTES: usize = 16 * 1024;
+/// The `sealed` of an item of an embedded node (docs/SPEC.md section 28.6): one byte, no
+/// ciphertext. The value stays in the owner's vault and reaches the relay in process at
+/// release (`server::host::release_values`). It is shorter than `MIN_SEALED_BYTES`, so
+/// `POST /v1/items` never stores it, and a release over HTTP of such an item fails closed
+/// with `release_invalid`.
+pub const VALUE_ON_HOST: &[u8] = &[0];
+
+/// True when `sealed` is `VALUE_ON_HOST`.
+pub fn is_value_on_host(sealed: &[u8]) -> bool {
+    sealed == VALUE_ON_HOST
+}
 
 const ITEM_AAD: &[u8] = b"apassy-relay item v1\0";
 const RELEASE_INFO: &[u8] = b"apassy-relay release v1";

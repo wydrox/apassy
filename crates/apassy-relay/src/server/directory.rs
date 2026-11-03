@@ -202,6 +202,19 @@ impl TeamLimits {
         }
     }
 
+    /// The limits of the personal team of an embedded node (docs/SPEC.md section 28.2):
+    /// 20 agents, 120 runs an hour, 10 pending runs, and 16 agent requests at once, since
+    /// its agents reach it from the internet. The other fields are the defaults.
+    pub fn personal() -> Self {
+        Self {
+            agents: 20,
+            runs_per_hour: 120,
+            pending_runs: 10,
+            agent_requests: 16,
+            ..Self::default()
+        }
+    }
+
     /// The largest file of a team of `kind` (`Store::set_max_bytes`), or `None` for no
     /// cap. A Connect team: its `question_bytes` and `feed_bytes`, plus
     /// `CONNECT_FILE_SLACK` for its rows and audit, plus room for the items and members
