@@ -155,8 +155,8 @@ func requestTests() {
     expectThrows("the identity list takes no field") { _ = try check(["op": "credential_identities", "rp_id": "a.com"]) }
     expect((try? check(["op": "autofill_code", "id": 3]))?.op.needsOwnerCheck == true, "a one-time code needs the owner check")
 
-    let huge = ["op": "autofill_list", "domains": [String(repeating: "a", count: 70_000)]] as [String: Any]
-    expectThrows("a request above 64 KiB is refused") { _ = try check(huge) }
+    let huge = ["op": "autofill_list", "domains": [String(repeating: "a", count: 140_000)]] as [String: Any]
+    expectThrows("a request above 128 KiB is refused") { _ = try check(huge) }
     expectThrows("a JSON array is refused") { _ = try checkRequest(Data("[1]".utf8)) }
 }
 
@@ -401,10 +401,10 @@ func integrationTests(binary: String) {
     expect(errorCode(after.flatMap { readAnswer($0) }) == "locked", "the bridge works after a line that is too long")
     if let after { close(after) }
 
-    // A declared frame above 64 KiB.
+    // A declared frame above 128 KiB (0x00020001 bytes).
     if let fd = connectUnix(bridge.socket) {
-        _ = writeAll(fd, Data([0, 1, 0, 1]))
-        expect(errorCode(readAnswer(fd)) == "invalid_input", "a frame above 64 KiB gets invalid_input")
+        _ = writeAll(fd, Data([0, 2, 0, 1]))
+        expect(errorCode(readAnswer(fd)) == "invalid_input", "a frame above 128 KiB gets invalid_input")
         close(fd)
     }
 
@@ -473,6 +473,7 @@ requestTests()
 appLineTests()
 pathTests()
 appexWireTests()
+passkeyExtensionTests()
 await identityPublishTests()
 if CommandLine.arguments.count > 1 {
     integrationTests(binary: CommandLine.arguments[1])

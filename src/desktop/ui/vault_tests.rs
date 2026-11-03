@@ -1233,7 +1233,7 @@ fn folder_sheets_create_nested_rename_move_and_delete() {
     folders::open_new(&mut app, None);
     let (text, _) = frames_with(&mut app, Vec::new());
     assert!(
-        text.contains("New Folder") && text.contains("In Personal."),
+        text.contains("New Folder") && text.contains("At the top level."),
         "{text}"
     );
     app.ui.folder_name = "Work".to_owned();
@@ -1347,10 +1347,26 @@ fn folder_sheets_create_nested_rename_move_and_delete() {
         "the credential stays"
     );
 
-    // Delete Work: the credential goes to the top level.
+    // Delete Work: the credential goes to the top level, in no folder.
+    folders::open_delete(&mut app, &work);
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains(
+            "Its credentials move out of folders, and its subfolders to the top level. \
+             No credential is deleted."
+        ),
+        "{text}"
+    );
+    app.ui.sheet = None;
     assert!(folders::delete(&mut app, &work));
     assert_eq!(folder_of(&app, filed), None);
     assert_eq!(app.place, Place::CREDENTIALS);
+    assert!(
+        app.status_text
+            .contains("Its credential is not in a folder now."),
+        "{}",
+        app.status_text
+    );
 }
 
 // ---- The credential page (ADR 0025, ADR 0026 §2). ----

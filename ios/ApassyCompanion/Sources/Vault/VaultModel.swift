@@ -585,6 +585,18 @@ final class VaultModel {
         await didChangeItems()
     }
 
+    /// Merge a group of duplicates into `keep` at the revisions that the owner saw, then reload,
+    /// publish, and sync in 2 s. The caller asked for the owner check. Throws the core's error
+    /// (`conflict` when an item changed); the caller shows it.
+    func mergeDuplicates(keep: DuplicateMember, in group: DuplicateGroup) async throws -> DuplicateMergeResult {
+        let end = hooks.beginBackgroundWork("Merge the duplicates")
+        defer { end() }
+        let merged = try await service.mergeDuplicates(
+            keep: keep.id, keepRevision: keep.revision, others: group.others(keeping: keep.id))
+        await didChangeItems()
+        return merged
+    }
+
     // MARK: Folders and options
 
     /// Run a change of the folders or of a credential's options, then reload and sync in 2 s. True

@@ -80,20 +80,27 @@ private struct GeneralVaultSections: View {
                         ? "This removes the local vault and stored passphrase. The file in iCloud Drive stays."
                         : "This removes the vault from this iPhone and from the relay. The vault stays on your Macs.")
             }
-            if let exchange = root.exchange {
-                Section {
+            Section {
+                if let exchange = root.exchange {
                     NavigationLink {
                         CredentialExchangeView(model: exchange, mode: .exporting)
                     } label: {
                         Label("Move to another app", systemImage: "arrow.left.arrow.right")
                     }
-                } header: {
-                    Text("Import and export")
-                } footer: {
-                    Text(
-                        "Logins, one-time passwords, and passkeys move between Apassy and another app through iOS, after Face ID. To import, start the export in the other app and pick Apassy."
-                    )
                 }
+                NavigationLink {
+                    DuplicatesView(vault: vault)
+                } label: {
+                    Label("Find duplicates", systemImage: "square.on.square")
+                }
+            } header: {
+                Text("Import and export")
+            } footer: {
+                Text(
+                    root.exchange == nil
+                        ? "Find duplicates merges items that hold the same credential. The others go to the archive."
+                        : "Logins, one-time passwords, and passkeys move between Apassy and another app through iOS, after Face ID. To import, start the export in the other app and pick Apassy. Find duplicates merges items that hold the same credential; the others go to the archive."
+                )
             }
             autoFill
         }

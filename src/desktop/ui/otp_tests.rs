@@ -1,17 +1,19 @@
 //! Headless UI tests of the one-time passwords (TOTP): the login form, the masked code,
-//! the shown code, the per-code Show and Hide, and the request to copy a code. Synthetic
-//! seeds and passwords only. The seed is the SHA-1 seed of RFC 6238 appendix B.
+//! the shown code, the per-code Show and Hide, and the request to copy a code. The code
+//! rows are in the first group of the page, so the Website row of that group is tested
+//! here too. Synthetic seeds and passwords only. The seed is the SHA-1 seed of RFC 6238
+//! appendix B.
 
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
-use super::otp::{Code, MASKED_CODE};
+use super::otp::Code;
 use super::owner_tests::{PASS, locked_app};
 use super::{Sheet, draw};
 use crate::broker::approvals::{OwnerAction, OwnerCheck};
 use crate::contracts::CredentialKind;
 use crate::desktop::DesktopApp;
-use crate::desktop::model::{DetailDraft, ItemDraft};
+use crate::desktop::model::{DetailDraft, ItemDraft, MASKED_VALUE};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{SecretForm, detail_field_name};
 use crate::otp::{self, OtpError};
@@ -143,6 +145,27 @@ impl Window {
     /// True when one painted text is exactly `needle`.
     fn has(&self, needle: &str) -> bool {
         self.texts.iter().any(|(text, _)| text == needle)
+    }
+
+    /// True when the painted text `needle` sits on the same line as the painted text
+    /// `row` and to the right of it.
+    fn beside(&self, row: &str, needle: &str) -> bool {
+        let Some(label) = self
+            .texts
+            .iter()
+            .find(|(text, _)| text == row)
+            .map(|(_, pos)| *pos)
+        else {
+            return false;
+        };
+        self.texts
+            .iter()
+            .any(|(text, pos)| text == needle && (pos.y - label.y).abs() < 24.0 && pos.x > label.x)
+    }
+
+    /// The top of the first painted text that is `needle`.
+    fn top(&self, needle: &str) -> f32 {
+        self.at(needle).y
     }
 
     /// The page never shows a seed, in any state.
@@ -397,15 +420,15 @@ fn show_code_asks_for_the_code_of_that_field_and_not_for_the_password() {
     let (mut app, item_id) = app_with_login(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
-    // The code is masked until the owner shows it.
-    for expected in ["One-time password", "Show code", MASKED_CODE] {
+    // The code is masked until the owner shows it. Its row has Copy and Show.
+    for expected in ["Show", "Copy", MASKED_VALUE] {
         assert!(
-            window.text.contains(expected),
+            window.beside(otp::LABEL, expected),
             "{expected}: {}",
             window.text
         );
     }
-    assert!(!window.text.contains("Copy code"), "{}", window.text);
+    assert!(!window.has("Show code"), "{}", window.text);
     assert!(!shows_any_current_digits(&window.text), "{}", window.text);
     // The seed is not a detail row, and the password stays masked.
     window.assert_no_seed();
@@ -419,8 +442,8 @@ fn show_code_asks_for_the_code_of_that_field_and_not_for_the_password() {
     );
     assert_eq!(window.clipboard_writes, 0);
 
-    // Show code asks for the code of that field only.
-    window.click(&mut app, "Show code");
+    // Show on the code row asks for the code of that field only.
+    window.click_beside(&mut app, otp::LABEL, "Show");
     let check = app.owner.check.as_ref().expect("the owner check opens");
     let OwnerRequest::ShowCode { item_id: id, field } = &check.request else {
         panic!("wrong request: {:?}", check.request.action());
@@ -448,7 +471,7 @@ fn the_check_of_one_code_shows_that_code_only() {
     let mut window = Window::new();
     window.idle(&mut app);
     // The second row asks for the second field.
-    window.click_beside(&mut app, SECOND_LABEL, "Show code");
+    window.click_beside(&mut app, SECOND_LABEL, "Show");
     let request = pass_owner_check(&mut app);
     let second = detail_field_name(SECOND_LABEL);
     assert_eq!(
@@ -480,9 +503,14 @@ fn the_check_of_one_code_shows_that_code_only() {
         window.text
     );
     // The first row is still masked, the second row can hide, and the password is masked.
-    assert!(window.text.contains(MASKED_CODE), "{}", window.text);
-    assert!(window.has("Show code"), "{}", window.text);
-    assert!(window.has("Hide"), "{}", window.text);
+    assert!(window.beside(FIRST_LABEL, MASKED_VALUE), "{}", window.text);
+    assert!(window.beside(FIRST_LABEL, "Show"), "{}", window.text);
+    assert!(window.beside(SECOND_LABEL, "Hide"), "{}", window.text);
+    assert!(
+        !window.beside(SECOND_LABEL, MASKED_VALUE),
+        "{}",
+        window.text
+    );
     assert!(!window.text.contains(PASSWORD), "{}", window.text);
     window.assert_no_seed();
 }
@@ -520,24 +548,31 @@ fn a_shown_code_does_not_change_the_generic_show_of_the_password() {
     let (mut app, item_id) = app_with_login(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
-    window.click(&mut app, "Show code");
+    window.click_beside(&mut app, otp::LABEL, "Show");
     pass_owner_check(&mut app);
     window.idle(&mut app);
     assert!(shows_a_current_code(&window.text), "{}", window.text);
-    // A shown code has Hide, Copy code and its seconds, and no mask or seed.
-    for expected in ["Hide", "Copy code", "s"] {
+    // A shown code has Hide, Copy and its seconds, and no mask or seed.
+    for expected in ["Hide", "Copy"] {
         assert!(
-            window.text.contains(expected),
+            window.beside(otp::LABEL, expected),
             "{expected}: {}",
             window.text
         );
     }
-    assert!(!window.text.contains(MASKED_CODE), "{}", window.text);
+    assert!(window.text.contains(" s"), "{}", window.text);
+    assert!(!window.beside(otp::LABEL, MASKED_VALUE), "{}", window.text);
+    assert!(
+        !window.text.contains("Show code asks for your passphrase"),
+        "{}",
+        window.text
+    );
     window.assert_no_seed();
-    // The secret section still offers "Show": the password is masked.
-    assert!(window.has("Show"), "{}", window.text);
+    // The Password row still offers "Show": the password is masked.
+    assert!(window.beside("Password", "Show"), "{}", window.text);
+    assert!(window.beside("Password", MASKED_VALUE), "{}", window.text);
     assert!(!window.text.contains(PASSWORD), "{}", window.text);
-    window.click(&mut app, "Show");
+    window.click_beside(&mut app, "Password", "Show");
     let check = app.owner.check.as_ref().expect("the owner check opens");
     assert!(
         matches!(check.request, OwnerRequest::Reveal { item_id: id } if id == item_id),
@@ -550,12 +585,12 @@ fn a_shown_code_does_not_change_the_generic_show_of_the_password() {
     app.owner_ui.session.hide(item_id).expect("hide");
     window.idle(&mut app);
     assert!(
-        window.text.contains("Show code"),
+        window.beside(otp::LABEL, "Show"),
         "after hide: {}",
         window.text
     );
     assert!(
-        window.text.contains(MASKED_CODE),
+        window.beside(otp::LABEL, MASKED_VALUE),
         "after hide: {}",
         window.text
     );
@@ -574,7 +609,7 @@ fn copy_code_asks_for_a_new_owner_check_and_the_page_never_writes_the_clipboard(
     let mut window = Window::new();
     window.idle(&mut app);
     assert!(app.owner.check.is_none());
-    window.click(&mut app, "Copy code");
+    window.click_beside(&mut app, otp::LABEL, "Copy");
     let check = app.owner.check.as_ref().expect("the owner check opens");
     let OwnerRequest::CopyCode { item_id: id, field } = &check.request else {
         panic!("wrong request: {:?}", check.request.action());
@@ -590,6 +625,114 @@ fn copy_code_asks_for_a_new_owner_check_and_the_page_never_writes_the_clipboard(
         "the proof names the copy of this field"
     );
     // The page asks. The guarded call writes the clipboard after the check.
+    assert_eq!(window.clipboard_writes, 0);
+    window.assert_no_seed();
+}
+
+#[test]
+fn the_code_row_is_in_the_first_group_right_after_the_password() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = app_with_login(&dir);
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.set_env_binding(item_id, "EXAMPLE_LOGIN", "password"))
+        .expect("open")
+        .expect("variable");
+    let mut window = Window::new();
+    window.idle(&mut app);
+    // No separate section: the label of the row is the only "One-time password" text.
+    assert_eq!(
+        window
+            .texts
+            .iter()
+            .filter(|(text, _)| text == otp::LABEL)
+            .count(),
+        1,
+        "{}",
+        window.text
+    );
+    // The row is under the Password row and above the Variable row.
+    let password = window.top("Password");
+    let code = window.top(otp::LABEL);
+    let variable = window.top("Variable");
+    assert!(password < code && code < variable, "{}", window.text);
+    // Its buttons are the buttons of the Password row, in the same order.
+    let x = |row: &str, button: &str| {
+        let label = window.at(row);
+        window
+            .texts
+            .iter()
+            .find(|(text, pos)| text == button && (pos.y - label.y).abs() < 24.0)
+            .map(|(_, pos)| pos.x)
+            .unwrap_or_else(|| panic!("no {button} beside {row}: {}", window.text))
+    };
+    assert!(x("Password", "Copy") < x("Password", "Show"));
+    assert!(x(otp::LABEL, "Copy") < x(otp::LABEL, "Show"));
+    // While every code is masked, the group has no note about codes or the clipboard.
+    assert!(
+        !window.text.contains("copied code from the clipboard"),
+        "{}",
+        window.text
+    );
+    assert!(
+        !window.text.contains("asks for your passphrase"),
+        "{}",
+        window.text
+    );
+    window.assert_no_seed();
+
+    // A shown code adds the note under the group.
+    show_code(&mut app, item_id, otp::LABEL);
+    window.idle(&mut app);
+    assert!(
+        window.text.contains(&super::otp::clipboard_note()),
+        "{}",
+        window.text
+    );
+    window.assert_no_seed();
+}
+
+#[test]
+fn copy_without_show_asks_for_one_copy_code_check_and_shows_no_code() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = app_with_login(&dir);
+    let field = detail_field_name(otp::LABEL);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    // The code is masked, and Copy is on its row at once.
+    assert!(window.beside(otp::LABEL, MASKED_VALUE), "{}", window.text);
+    window.click_beside(&mut app, otp::LABEL, "Copy");
+    let request = pass_owner_check(&mut app);
+    // One check, for the copy of this field. No Show came first.
+    assert_eq!(
+        request,
+        OwnerRequest::CopyCode {
+            item_id,
+            field: field.clone()
+        }
+    );
+    assert_eq!(
+        request.action(),
+        OwnerAction::CopyCode {
+            item_id,
+            field: field.clone()
+        }
+    );
+    assert!(app.owner.check.is_none(), "no second owner check");
+    assert!(
+        app.status_text.contains("The code is copied."),
+        "{}",
+        app.status_text
+    );
+    // The copy shows nothing: the code row stays masked, and no seed is loaded.
+    let session = &app.owner_ui.session;
+    assert_eq!(session.code_seed(item_id, &field), None);
+    assert_eq!(session.revealed_value(item_id, &field), None);
+    assert_eq!(session.revealed_value(item_id, "password"), None);
+    window.idle(&mut app);
+    assert!(window.beside(otp::LABEL, MASKED_VALUE), "{}", window.text);
+    assert!(!shows_any_current_digits(&window.text), "{}", window.text);
+    // The page never writes the clipboard itself.
     assert_eq!(window.clipboard_writes, 0);
     window.assert_no_seed();
 }
@@ -626,7 +769,8 @@ fn an_unreadable_seed_shows_a_message_and_no_copy_button() {
         "{}",
         window.text
     );
-    assert!(!window.text.contains("Copy code"), "{}", window.text);
+    assert!(!window.beside("OTP", "Copy"), "{}", window.text);
+    assert!(window.beside("OTP", "Hide"), "{}", window.text);
     window.assert_no_seed();
 }
 
@@ -789,7 +933,8 @@ fn a_valid_value_saves_and_the_page_masks_the_code() {
     app.select_item(items[0].id.to_string());
     app.show_credentials();
     window.idle(&mut app);
-    assert!(window.text.contains("Show code"), "{}", window.text);
+    assert!(window.beside(otp::LABEL, "Show"), "{}", window.text);
+    assert!(window.beside(otp::LABEL, MASKED_VALUE), "{}", window.text);
     assert!(!shows_any_current_digits(&window.text), "{}", window.text);
     window.assert_no_seed();
 }
@@ -839,7 +984,7 @@ fn the_edit_form_keeps_a_stored_seed_and_can_remove_it() {
     assert!(app.ui.sheet.is_none(), "{}", app.status_text);
     assert!(stored_otp_labels(&app, item_id).is_empty());
     window.idle(&mut app);
-    assert!(!window.text.contains("Show code"), "{}", window.text);
+    assert!(!window.has(otp::LABEL), "{}", window.text);
 }
 
 #[test]
@@ -931,9 +1076,9 @@ fn a_visible_detail_with_a_setup_key_is_not_drawn() {
     window.assert_no_seed();
     assert!(!window.text.contains("otpauth://totp"), "{}", window.text);
     // The label stays, and the owner reads why there is no value. If the vault model hides
-    // the detail, the code section shows it instead.
+    // the detail, its code row shows it instead.
     assert!(
-        window.text.contains("Apassy hides this setup key") || window.text.contains("Show code"),
+        window.text.contains("Apassy hides this setup key") || window.beside("TOTP", "Show"),
         "{}",
         window.text
     );
@@ -1114,18 +1259,19 @@ fn a_link_under_a_custom_label_shows_only_its_own_code() {
 
     let mut window = Window::new();
     window.idle(&mut app);
-    // One code row, under the custom label, and masked.
-    assert!(window.has("One-time password"), "{}", window.text);
+    // One code row, under the custom label, and masked. No separate section names it.
+    assert!(!window.has("One-time password"), "{}", window.text);
     assert!(window.has(URI_LABEL), "{}", window.text);
-    assert!(window.has("Show code"), "{}", window.text);
-    assert!(window.has(MASKED_CODE), "{}", window.text);
+    assert!(window.beside(URI_LABEL, "Show"), "{}", window.text);
+    assert!(window.beside(URI_LABEL, "Copy"), "{}", window.text);
+    assert!(window.beside(URI_LABEL, MASKED_VALUE), "{}", window.text);
     assert!(!shows_any_current_digits(&window.text), "{}", window.text);
     window.assert_no_seed();
     assert!(!window.text.contains("otpauth"), "{}", window.text);
-    // The plain hidden detail is an ordinary masked detail: it has Show, not Show code.
+    // The plain hidden detail is an ordinary masked detail, with the Show of the values.
     assert!(window.has(NOTES_LABEL), "{}", window.text);
     assert!(!window.text.contains("plain recovery text"));
-    window.click(&mut app, "Show code");
+    window.click_beside(&mut app, URI_LABEL, "Show");
     let open = &app.owner.check.as_ref().expect("check").request;
     assert_eq!(
         *open,
@@ -1147,7 +1293,7 @@ fn a_link_under_a_custom_label_shows_only_its_own_code() {
     window.idle(&mut app);
     assert!(shows_a_current_code(&window.text), "{}", window.text);
     assert!(
-        window.has("Hide") && window.has("Copy code"),
+        window.beside(URI_LABEL, "Hide") && window.beside(URI_LABEL, "Copy"),
         "{}",
         window.text
     );
@@ -1163,4 +1309,145 @@ fn a_link_under_a_custom_label_shows_only_its_own_code() {
         session.revealed_value(item_id, &detail_field_name(NOTES_LABEL)),
         None
     );
+}
+
+// ---- The Website row of the same group. ----
+
+const SITE: &str = "https://odealo-admin.example.test/backoffice/login";
+
+/// An unlocked vault with one login with the website `website`. The login is selected.
+fn app_with_website(dir: &TempDir, website: &str) -> DesktopApp {
+    let mut app = locked_app(dir, "website.db");
+    app.owner_ui.session.unlock(PASS).expect("unlock");
+    let mut secrets = SecretForm::default();
+    secrets.password = PASSWORD.to_owned();
+    let item = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                name: "Admin login".to_owned(),
+                kind: CredentialKind::Login,
+                username: "user@example.test".to_owned(),
+                website: website.to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add");
+    app.select_item(item.id.to_string());
+    app.show_credentials();
+    app
+}
+
+fn opened() -> Vec<String> {
+    super::items::OPENED.with(|opened| opened.borrow().clone())
+}
+
+#[test]
+fn a_website_link_is_the_host_and_an_http_or_https_address() {
+    use super::items::website_link;
+    assert_eq!(
+        website_link(SITE),
+        Some(("odealo-admin.example.test".to_owned(), SITE.to_owned()))
+    );
+    assert_eq!(
+        website_link(" HTTP://Example.test:8080/a?b#c "),
+        Some((
+            "example.test:8080".to_owned(),
+            "http://Example.test:8080/a?b#c".to_owned()
+        ))
+    );
+    // A value without a scheme opens with https, as the browser match reads it.
+    assert_eq!(
+        website_link("example.test/login"),
+        Some((
+            "example.test".to_owned(),
+            "https://example.test/login".to_owned()
+        ))
+    );
+    // Other schemes and values that are not web addresses get no link.
+    for value in [
+        "ftp://example.test/file",
+        "file:///etc/hosts",
+        "javascript:alert(1)",
+        "mailto:user@example.test",
+        "https://user:secret@example.test/",
+        "not a web address",
+        "",
+    ] {
+        assert_eq!(website_link(value), None, "{value}");
+    }
+}
+
+#[test]
+fn the_website_row_shows_the_host_and_open_opens_the_full_address() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_with_website(&dir, SITE);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    // The row shows the host, not the whole address, and has Open.
+    assert!(
+        window.beside("Website", "odealo-admin.example.test"),
+        "{}",
+        window.text
+    );
+    assert!(
+        !window.text.contains("/backoffice/login"),
+        "{}",
+        window.text
+    );
+    assert!(window.beside("Website", "Open"), "{}", window.text);
+    assert!(opened().is_empty());
+    window.click_beside(&mut app, "Website", "Open");
+    // Open opens the full address, once, and asks for no owner check.
+    assert_eq!(opened(), [SITE]);
+    assert!(app.owner.check.is_none());
+}
+
+#[test]
+fn a_website_that_is_not_http_or_https_shows_as_it_is_without_open() {
+    let dir = TempDir::new().expect("temp dir");
+    // A Website must be a web address, so an older import writes the other scheme.
+    let mut app = locked_app(&dir, "other.db");
+    app.owner_ui.session.unlock(PASS).expect("unlock");
+    let field = |name: &str, value: &str, secret: bool| Field {
+        name: name.to_owned(),
+        value: SecretValue::new(value.to_owned()),
+        secret,
+    };
+    let item = app
+        .owner_ui
+        .session
+        .add_imported(VaultDraft {
+            title: "Old import".to_owned(),
+            kind: CredentialKind::Login,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![
+                field("username", "user@example.test", false),
+                field("password", PASSWORD, true),
+                field("website", "ftp://files.example.test/pub", false),
+            ],
+        })
+        .expect("add");
+    app.select_item(item.id.to_string());
+    app.show_credentials();
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert_eq!(
+        app.owner_ui
+            .session
+            .details(item.id)
+            .expect("details")
+            .website,
+        "ftp://files.example.test/pub"
+    );
+    assert!(
+        window.beside("Website", "ftp://files.example.test/pub"),
+        "{}",
+        window.text
+    );
+    assert!(!window.has("Open"), "{}", window.text);
+    assert!(opened().is_empty());
 }

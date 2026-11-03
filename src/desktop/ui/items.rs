@@ -27,7 +27,7 @@ use super::otp;
 use super::timeline::{self, relative_time};
 use super::{
     SECRET_VALUE_CAPACITY, Sheet, UiState, ask_owner_from_sheet, close_sheet, extra_label,
-    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, meta_line, secure_input,
+    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, secure_input,
 };
 use crate::broker::approvals::action_words;
 use crate::broker::profile::REPORTING_API_V0;
@@ -55,6 +55,9 @@ pub(crate) enum Filter {
     /// Archived versions retained after concurrent sync changes.
     Conflicts,
     Archived,
+    /// Look-alike credentials (see [`look_alike_groups`]), each set next to each other.
+    /// Archived credentials stay hidden, as in [`Filter::All`].
+    Duplicates,
 }
 
 impl Filter {
@@ -63,7 +66,97 @@ impl Filter {
             Self::All => "All credentials",
             Self::Conflicts => "Conflicting changes",
             Self::Archived => "Archived",
+            Self::Duplicates => "Possible duplicates",
         }
+    }
+}
+
+/// The name without one trailing tag in brackets, such as the " [1P befydv]" of an
+/// import, and without spaces at the ends. A name that is only a tag stays whole.
+fn untagged_name(name: &str) -> &str {
+    let name = name.trim();
+    if let Some(inner) = name.strip_suffix(']')
+        && let Some(open) = inner.rfind('[')
+        && !inner[open + 1..].contains(']')
+    {
+        let rest = name[..open].trim();
+        if !rest.is_empty() {
+            return rest;
+        }
+    }
+    name
+}
+
+/// The name that look-alikes share: [`untagged_name`] in lowercase.
+fn look_alike_key(name: &str) -> String {
+    untagged_name(&name.trim().to_lowercase()).to_owned()
+}
+
+/// Sets of look-alike credentials: two or more of the same kind with the same
+/// [`look_alike_key`]. Each set keeps the order of `items`, and the sets follow the
+/// order of their first credential. Nothing is merged or renamed.
+fn look_alike_groups<'a>(
+    items: impl IntoIterator<Item = (u64, CredentialKind, &'a str)>,
+) -> Vec<Vec<u64>> {
+    let mut groups: Vec<Vec<u64>> = Vec::new();
+    let mut index: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+    for (id, kind, name) in items {
+        let at = *index
+            .entry((kind.label(), look_alike_key(name)))
+            .or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+        groups[at].push(id);
+    }
+    groups.retain(|group| group.len() > 1);
+    groups
+}
+
+/// The host of a website or a host field: `https://odealo-admin.vercel.app/login`
+/// gives `odealo-admin.vercel.app`. The website comes first. Empty without one.
+fn list_host(website: &str, host: &str) -> String {
+    [website, host]
+        .into_iter()
+        .map(bare_host)
+        .find(|host| !host.is_empty())
+        .unwrap_or_default()
+}
+
+/// The host name of one value, without the scheme, user info, port, and path. Empty
+/// when the split is not certain or the rest is not a plain host name, so that no part
+/// of user info shows in the list.
+fn bare_host(text: &str) -> String {
+    let text = text.trim();
+    let authority = match providers::split_url(text) {
+        Some(parts) => parts.host,
+        None if text.contains("://") || text.contains('@') => return String::new(),
+        None => text.split(['/', '?', '#']).next().unwrap_or_default(),
+    };
+    let host = authority
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_lowercase();
+    let plain = host.contains(|c: char| c.is_ascii_alphanumeric())
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if plain { host } else { String::new() }
+}
+
+/// The second line of a look-alike row: `line · host` with a known host, else
+/// `line · folder` when its look-alikes are in other folders, else the line.
+fn look_alike_line(line: &str, host: &str, folder: Option<&str>) -> String {
+    let extra = if host.is_empty() { folder } else { Some(host) };
+    match extra {
+        Some(extra) if line.is_empty() => extra.to_owned(),
+        Some(extra) => format!("{line} · {extra}"),
+        None => line.to_owned(),
     }
 }
 
@@ -163,9 +256,20 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         columns::list_note(ui, "No items");
         return;
     }
+    let duplicates: usize = look_alike_groups(
+        in_place
+            .iter()
+            .filter(|item| !archived.contains_key(&item.id))
+            .map(|item| (item.id, item.kind, item.name.as_str())),
+    )
+    .iter()
+    .map(Vec::len)
+    .sum();
     columns::list_inset(ui, |ui| {
-        toolbar(app, ui);
-        if !app.ui.selected_items.is_empty() {
+        toolbar(app, ui, duplicates);
+        // A plain click selects one row: the bar is for a choice of several. ⇧⌘M also
+        // moves the one selected credential.
+        if app.ui.selected_items.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 kit::note(ui, format!("{} selected", app.ui.selected_items.len()));
                 if kit::small_button(ui, "Move…", Style::Bordered)
@@ -174,7 +278,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     super::folders::open_move_many(app);
                 }
-                if kit::small_button(ui, "Clear Selection", Style::Link).clicked() {
+                if kit::small_button(ui, "Clear Selection", Style::Bordered).clicked() {
                     app.ui.selected_items.clear();
                 }
             });
@@ -223,11 +327,33 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         })
         .collect();
     items.sort_by_key(|item| item.name.to_lowercase());
-    let hidden_archived = if filter == Filter::Archived || !query.is_empty() {
-        0
-    } else {
-        archived_count
-    };
+    // Look-alikes among the listed credentials, and the folder of each when its set
+    // spans several folders.
+    let alike_groups = look_alike_groups(
+        items
+            .iter()
+            .map(|item| (item.id, item.kind, item.name.as_str())),
+    );
+    let mut alike_folder: BTreeMap<u64, Option<String>> = BTreeMap::new();
+    for group in &alike_groups {
+        let labels: Vec<String> = group
+            .iter()
+            .map(|id| tree.path_label(tree.folder_of(*id)))
+            .collect();
+        let differ = labels.iter().any(|label| label != &labels[0]);
+        for (id, label) in group.iter().zip(labels) {
+            alike_folder.insert(*id, differ.then_some(label));
+        }
+    }
+    if filter == Filter::Duplicates {
+        items.retain(|item| alike_folder.contains_key(&item.id));
+    }
+    let hidden_archived =
+        if matches!(filter, Filter::Archived | Filter::Duplicates) || !query.is_empty() {
+            0
+        } else {
+            archived_count
+        };
     let listed = |item: &OwnerSummary| {
         let status = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
             "Conflict copy".to_owned()
@@ -240,22 +366,50 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let username = matches!(item.kind, CredentialKind::Login | CredentialKind::Database)
             .then(|| page_text(&plain_field(app, item.id, "username")))
             .unwrap_or_default();
+        let mut subtitle = if username.is_empty() {
+            looks.kind_label.clone()
+        } else {
+            username
+        };
+        // A look-alike row tells itself apart by its host (plain fields only), else
+        // by its folder.
+        if let Some(folder) = alike_folder.get(&item.id) {
+            let host = list_host(
+                &plain_field(app, item.id, "website"),
+                &plain_field(app, item.id, "host"),
+            );
+            subtitle = look_alike_line(&subtitle, &host, folder.as_deref());
+        }
         ListedItem {
             id: item.id,
             name: item.name.clone(),
-            subtitle: if username.is_empty() {
-                looks.kind_label.clone()
-            } else {
-                username
-            },
+            subtitle,
             status,
             production: looks.environment == EnvState::Production,
             shared: !looks.shared.is_empty(),
             tile: looks.tile,
         }
     };
-    let grouped = filter != Filter::Conflicts;
-    let groups: Vec<columns::Group<ListedItem>> = if grouped {
+    let grouped = !matches!(filter, Filter::Conflicts | Filter::Duplicates);
+    let groups: Vec<columns::Group<ListedItem>> = if filter == Filter::Duplicates {
+        // One group for each set of look-alikes, named without the tag.
+        alike_groups
+            .iter()
+            .map(|group| {
+                let rows: Vec<&OwnerSummary> = group
+                    .iter()
+                    .filter_map(|id| items.iter().find(|item| item.id == *id))
+                    .collect();
+                columns::Group {
+                    title: rows
+                        .first()
+                        .map(|item| untagged_name(&item.name).to_owned())
+                        .unwrap_or_default(),
+                    rows: rows.into_iter().map(&listed).collect(),
+                }
+            })
+            .collect()
+    } else if grouped {
         // The top level first, then each folder by its path.
         let mut by_folder: BTreeMap<(bool, String), Vec<ListedItem>> = BTreeMap::new();
         for item in &items {
@@ -286,6 +440,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         _ if !query.is_empty() => format!("No credential matches “{query}”."),
         Filter::Archived => "No credential is archived.".to_owned(),
         Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
+        Filter::Duplicates => "No possible duplicates.".to_owned(),
         _ if place != Place::CREDENTIALS && active == 0 => {
             "No credentials in this folder.".to_owned()
         }
@@ -427,6 +582,10 @@ fn update_selection(
     *anchor = Some(id);
 }
 
+#[cfg(test)]
+#[path = "list_tests.rs"]
+mod list_tests;
+
 /// The list of a shared vault: "From you" and "From others" (ADR 0026 §6). Shared vaults
 /// come later, so the list has no item yet.
 fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
@@ -438,8 +597,10 @@ fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
 /// The search field. ⌘F puts the focus in it. The list has no filter or order menus,
 /// as in the mockup: the rows group by folder. A list of archived credentials or of
 /// conflict copies (from "Show archived" and from the review of conflicting changes)
-/// says so under the field, with "Show All" to go back.
-fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
+/// says so under the field, with "Show All" to go back. With `duplicates` look-alike
+/// credentials, "Possible duplicates (N)" under the field lists only them. It is a
+/// filter, not a notice: it goes away when no look-alike is left.
+fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, duplicates: usize) {
     let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
         .on_hover_text("Search by name, username, website, host, project, service, or notes  ⌘F");
     ui.ctx()
@@ -454,13 +615,29 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.selectable_value(&mut app.ui.search_all, true, "All Credentials");
         });
     }
+    let duplicates_label = format!("{} ({duplicates})", Filter::Duplicates.label());
+    if app.ui.credential_filter == Filter::All && duplicates > 0 {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if kit::small_button(ui, &duplicates_label, Style::Link)
+                .on_hover_text("Show credentials with the same kind and name")
+                .clicked()
+            {
+                app.search.clear();
+                app.ui.credential_filter = Filter::Duplicates;
+            }
+        });
+    }
     if app.ui.credential_filter != Filter::All {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(
-                kit::text(app.ui.credential_filter.label(), Font::Footnote).color(kit::SECONDARY),
-            );
+            let label = if app.ui.credential_filter == Filter::Duplicates {
+                duplicates_label.as_str()
+            } else {
+                app.ui.credential_filter.label()
+            };
+            ui.label(kit::text(label, Font::Footnote).color(kit::SECONDARY));
             if kit::small_button(ui, "Show All", Style::Link).clicked() {
                 app.ui.credential_filter = Filter::All;
             }
@@ -986,8 +1163,8 @@ fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pen
 }
 
 /// The header of a credential, as in the mockup: its tile, its name at 20 points, its
-/// provider and kind ("Stripe · Secret key"), and its caps (Production, the shared
-/// vaults). It scrolls with the body.
+/// provider and kind ("Stripe · Secret key", or only the kind), and its caps
+/// (Production, the shared vaults). It scrolls with the body.
 pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
     const TILE: f32 = 56.0;
     let Some(id) = selected_id(app) else {
@@ -1000,15 +1177,11 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     let looks = Looks::of(app, id, details.kind, &details.service, &details.name);
-    // "Stripe · Secret key"; without a provider, the service or the project.
-    let source = looks
-        .provider
-        .clone()
-        .unwrap_or_else(|| meta_line(&details.project, &details.service));
-    let subtitle = if source.is_empty() {
-        looks.kind_label.clone()
-    } else {
-        format!("{source} · {}", looks.kind_label)
+    // "Stripe · Secret key"; without a provider, only the kind. The service and the
+    // project have their own labeled rows in the first group.
+    let subtitle = match &looks.provider {
+        Some(provider) => format!("{provider} · {}", looks.kind_label),
+        None => looks.kind_label.clone(),
     };
     let title = kit::text(&details.name, Font::Title)
         .size(20.0)
@@ -1143,7 +1316,6 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     let passkey = passkey_of(app, &details);
     fields_group(app, ui, &details, passkey.is_some());
-    otp::code_section(app, ui, &details);
     if let Some(passkey) = &passkey {
         passkey_section(ui, &details, passkey);
     }
@@ -1164,10 +1336,24 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         let key = format!("credential-agent-settings-{id}");
         let mut open = app.ui.is_expanded(&key);
-        if kit::disclosure(ui, &mut open, "Agent Access").changed() {
+        let status = AccessFacts::of(app, &details).status();
+        let disclosure = kit::disclosure(ui, &mut open, "Agent Access");
+        ui.ctx()
+            .accesskit_node_builder(disclosure.id, |node| node.set_description(status.as_str()));
+        if disclosure.changed() {
             app.ui.set_expanded(&key, open);
         }
+        // What happens now when an agent asks, also while the group is closed.
+        egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                left: 18,
+                right: 0,
+                top: 2,
+                bottom: 0,
+            })
+            .show(ui, |ui| ui.add(Label::new(rows::small(&status)).wrap()));
         if open {
+            ui.add_space(6.0);
             agent_settings_group(app, ui, &details);
         }
     }
@@ -1194,28 +1380,8 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         );
         ui.spacing_mut().item_spacing.y = 0.0;
     }
-    footer(app, ui, id);
+    footer(app, ui, &details);
     removal_sheet(app, ui.ctx(), &details, passkey.as_ref());
-}
-
-fn detail_disclosure(
-    app: &mut DesktopApp,
-    ui: &mut egui::Ui,
-    id: u64,
-    section: &str,
-    label: &str,
-    add: impl FnOnce(&mut DesktopApp, &mut egui::Ui),
-) {
-    let key = format!("credential-{section}-{id}");
-    let mut open = app.ui.is_expanded(&key);
-    if kit::disclosure(ui, &mut open, label).changed() {
-        app.ui.set_expanded(&key, open);
-    }
-    if open {
-        ui.add_space(8.0);
-        add(app, ui);
-    }
-    ui.add_space(14.0);
 }
 
 /// Open the edit sheet with the stored values. With `add_detail`, the form gets a new
@@ -1227,6 +1393,8 @@ fn open_edit(app: &mut DesktopApp, details: &OwnerDetails, add_detail: bool) {
     }
     app.owner_ui.edit_revision = details.revision;
     app.owner_ui.edit_secrets.clear();
+    // Only "Add website…" puts the focus in the Website field, after this call.
+    app.ui.focus_form_website = false;
     app.ui.sheet = Some(Sheet::EditItem);
 }
 
@@ -1339,12 +1507,7 @@ fn secret_row(
                             *copy = Some(name.to_owned());
                         }
                         if !shown {
-                            ui.label(
-                                kit::text(MASKED_VALUE, Font::Body)
-                                    .size(15.0)
-                                    .extra_letter_spacing(2.0)
-                                    .color(kit::LABEL),
-                            );
+                            rows::mask(ui);
                         }
                         toggle
                     })
@@ -1360,9 +1523,10 @@ fn secret_row(
     })
 }
 
-/// The first group: the username, the secret, the variable, the host or the website,
-/// and the other details that are set, then the custom details. A hidden custom detail
-/// is masked like the secret, and Show shows it with the secret.
+/// The first group: the username, the secret, the one-time passwords, the variable, the
+/// host or the website, and the other details that are set, then the custom details. A
+/// hidden custom detail is masked like the secret, and Show shows it with the secret. A
+/// one-time password has its own Show and Copy (`otp::code_rows`).
 ///
 /// `from_page`: the login has a passkey. A website or macOS gave its account name, and the
 /// vault copied it to the username. The page cleans it like the passkey rows.
@@ -1378,55 +1542,51 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         .iter()
         .filter(|line| !line.name.starts_with(DETAIL_PREFIX))
         .collect();
-    let session = &app.owner_ui.session;
-    let provider_known = session
-        .with_vault(|vault| vault.declaration_provider(id))
-        .and_then(Result::ok)
-        .flatten()
-        .is_some_and(|provider| providers::find(&provider).is_some());
-    let variable = session
+    let variable = app
+        .owner_ui
+        .session
         .env_binding(id)
         .ok()
         .flatten()
         .map(|binding| binding.env_name)
         .filter(|name| name != &format!("APASSY_ITEM_{id}"));
+    // The header names only the provider and the kind, so the service and the project
+    // are labeled rows here.
     let other: Vec<(&str, &str)> = [
         ("Host", details.host.as_str()),
         ("Website", details.website.as_str()),
         ("Database", details.database_name.as_str()),
         ("Public key", details.public_label.as_str()),
-        // Without a provider, the header shows the service and the project.
-        (
-            "Service",
-            if provider_known {
-                details.service.as_str()
-            } else {
-                ""
-            },
-        ),
-        (
-            "Project",
-            if provider_known {
-                details.project.as_str()
-            } else {
-                ""
-            },
-        ),
+        ("Service", details.service.as_str()),
+        ("Project", details.project.as_str()),
     ]
     .into_iter()
     .filter(|(_, value)| !value.is_empty())
     .collect();
+    // A login without a website offers to add one. A website detail, as "Website 2" of
+    // an import, is a website too, as for the browser match. A passkey login shows its
+    // website in the passkey part.
+    let website_detail = details.details.iter().any(|detail| {
+        detail
+            .value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && crate::browser::site::is_website_field(&detail.name, Some(&detail.label))
+    });
+    let add_website = details.kind == CredentialKind::Login
+        && details.website.is_empty()
+        && !website_detail
+        && !details.archived
+        && !from_page;
     let revealed = details.any_revealed();
-    let footer = revealed.then(|| details.reveal_warning());
     let mut toggle = false;
     let mut copy = None;
-    rows::group(ui, |s| {
+    let mut copy_username = false;
+    let mut open_site = None;
+    let mut edit_website = false;
+    let codes = rows::group(ui, |s| {
         if !username.is_empty() {
-            pair_row(
-                s,
-                "Username",
-                kit::text(&username, Font::Body).color(kit::SECONDARY),
-            );
+            copy_username = username_row(s, &username);
         }
         for (index, line) in secrets.iter().enumerate() {
             // A key or a token says "Secret", as in the mockup; a login says "Password".
@@ -1438,6 +1598,9 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             };
             toggle |= secret_row(app, s, details, &label, &line.name, revealed, &mut copy);
         }
+        // Each one-time password is a row right after the password. Its seed is never a
+        // detail row.
+        let codes = otp::code_rows(app, s, details);
         if let Some(variable) = &variable {
             pair_row(
                 s,
@@ -1445,11 +1608,20 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                 kit::text(variable, Font::Mono).color(kit::SECONDARY),
             );
         }
-        for (label, value) in other {
-            pair_row(s, label, kit::text(value, Font::Body).color(kit::SECONDARY));
+        // The other rows of a login are empty, so this is the place of its Website row.
+        if add_website {
+            edit_website = add_website_row(s);
         }
-        // A one-time password has its own section. Its seed is never a detail row. A
-        // visible setup key is not drawn.
+        for (label, value) in other {
+            if label == "Website" {
+                if let Some(url) = website_row(s, value) {
+                    open_site = Some(url);
+                }
+            } else {
+                pair_row(s, label, kit::text(value, Font::Body).color(kit::SECONDARY));
+            }
+        }
+        // A one-time password has its row above. A visible setup key is not drawn.
         for detail in details
             .details
             .iter()
@@ -1478,7 +1650,19 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                 }
             }
         }
+        codes
     });
+    // One note under the group: the reveal warning, and while a code is visible, its
+    // clipboard note.
+    let footer = match (revealed, codes.note()) {
+        (true, Some(_)) => Some(format!(
+            "{} {}",
+            details.reveal_warning(),
+            otp::clipboard_note()
+        )),
+        (true, None) => Some(details.reveal_warning().to_owned()),
+        (false, note) => note,
+    };
     if let Some(footer) = footer {
         ui.add_space(6.0);
         egui::Frame::NONE
@@ -1486,19 +1670,6 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             .show(ui, |ui| kit::note(ui, footer));
     }
     ui.add_space(rows::GROUP_GAP);
-    if details.details.iter().any(is_import_data) {
-        detail_disclosure(app, ui, id, "import", "Import data", |app, ui| {
-            kit::section(ui, None, None, |s| {
-                for detail in details
-                    .details
-                    .iter()
-                    .filter(|detail| is_import_data(detail))
-                {
-                    toggle |= custom_value_row(app, s, details, detail, revealed, &mut copy);
-                }
-            });
-        });
-    }
     if !details.notes.is_empty() {
         rows::group_label(ui, "Notes", None);
         rows::group(ui, |s| {
@@ -1517,8 +1688,194 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         );
     } else if toggle {
         toggle_values(app, ui.ctx());
+    } else if codes.clicked() {
+        codes.answer(app, ui.ctx(), id);
+    } else if let Some(url) = open_site {
+        open_website(app, &url);
+    } else if copy_username {
+        // A username is no secret: the system clipboard takes it with no owner check,
+        // and Apassy does not clear it later.
+        ui.ctx().copy_text(username);
+        app.set_ok("The username is copied.");
+    } else if edit_website {
+        open_edit(app, details, false);
+        app.ui.focus_form_website = true;
     }
 }
+
+/// The hover text of Copy on the Username row.
+const USERNAME_COPY_HINT: &str = "Copy the username. It is not a secret, so Apassy asks for no Touch ID and does not clear the clipboard later.";
+
+/// The link of a login without a website.
+const ADD_WEBSITE: &str = "Add website…";
+
+/// The Username row: the name, the full name as hover text, and "Copy". Returns true
+/// after a click on "Copy".
+fn username_row(group: &mut rows::Group<'_>, username: &str) -> bool {
+    group.line(|ui| {
+        ui.label(kit::text("Username", Font::Body).color(kit::LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let copy = rows::pill_button(ui, "Copy", "Copy Username")
+                .on_hover_text(USERNAME_COPY_HINT)
+                .clicked();
+            ui.add(Label::new(kit::text(username, Font::Body).color(kit::SECONDARY)).truncate())
+                .on_hover_text(username);
+            copy
+        })
+        .inner
+    })
+}
+
+/// The Website row of a login without a website: "Add website…" at the right. Returns
+/// true after a click on it.
+fn add_website_row(group: &mut rows::Group<'_>) -> bool {
+    group.line(|ui| {
+        ui.label(kit::text("Website", Font::Body).color(kit::LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            row_link(ui, ADD_WEBSITE, "Add website")
+                .on_hover_text(
+                    "Edit the credential and type the address of its login page. Browser filling needs it.",
+                )
+                .clicked()
+        })
+        .inner
+    })
+}
+
+/// A link in the accent color at the size of a row value. `name` is its name for
+/// VoiceOver.
+fn row_link(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
+    let galley = kit::galley(ui, kit::text(label, Font::Body).color(rows::LINK));
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, enabled, name));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.has_focus() {
+            kit::focus_ring(painter, rect.expand(2.0), 4);
+        }
+        if response.hovered() {
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, rows::LINK),
+            );
+        }
+        painter.galley(rect.min, galley, rows::LINK);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// "Add website…" asked for the focus in the Website field of the edit sheet. The sheet
+/// gives the focus to its first field when it opens, so the field asks again in each
+/// frame until it keeps the focus. Not in a frame with a pointer press or release, as
+/// [`kit::claim_start_focus`].
+fn claim_website_focus(flag: &mut bool, field: &egui::Response) {
+    if !*flag {
+        return;
+    }
+    if field.has_focus() {
+        *flag = false;
+        return;
+    }
+    let clicking = field
+        .ctx
+        .input(|input| input.pointer.any_pressed() || input.pointer.any_released());
+    if !clicking {
+        field.request_focus();
+    }
+}
+
+/// The Website row: the host, the full address as hover text, and "Open" for an http or
+/// https address. Another value shows as it is, with no "Open". Returns the address to
+/// open after a click on "Open".
+fn website_row(group: &mut rows::Group<'_>, value: &str) -> Option<String> {
+    let Some((host, url)) = website_link(value) else {
+        pair_row(
+            group,
+            "Website",
+            kit::text(value, Font::Body).color(kit::SECONDARY),
+        );
+        return None;
+    };
+    group.line(|ui| {
+        ui.label(kit::text("Website", Font::Body).color(kit::LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let open = rows::pill_button(ui, "Open", &format!("Open {host} in the browser"))
+                .on_hover_text("Open in your default browser")
+                .clicked();
+            ui.add(Label::new(kit::text(&host, Font::Body).color(kit::SECONDARY)).truncate())
+                .on_hover_text(&url);
+            open.then_some(url)
+        })
+        .inner
+    })
+}
+
+/// The host and the address to open of a website value. `None` when Apassy does not
+/// open it: a scheme other than http and https, or a value that is not a web address.
+/// A value without a scheme opens with https, as the browser match reads it
+/// (`Website::parse`).
+pub(super) fn website_link(value: &str) -> Option<(String, String)> {
+    let value = value.trim();
+    // The browser match takes http, https, or no scheme, and a valid host with no user.
+    crate::browser::site::Website::parse(value)?;
+    let (scheme, rest) = value
+        .split_once("://")
+        .map_or(("https".to_owned(), value), |(scheme, rest)| {
+            (scheme.to_ascii_lowercase(), rest)
+        });
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    let host = rest[..end].to_ascii_lowercase();
+    Some((host, format!("{scheme}://{rest}")))
+}
+
+// The addresses that "Open" gave in a test. The tests never start a browser.
+#[cfg(test)]
+thread_local! {
+    pub(super) static OPENED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Open an http or https address in the default browser with `/usr/bin/open`. A thread
+/// waits for `open`, so no finished process stays.
+fn open_website(app: &mut DesktopApp, url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    #[cfg(test)]
+    {
+        let _ = app;
+        OPENED.with(|opened| opened.borrow_mut().push(url.to_owned()));
+    }
+    #[cfg(not(test))]
+    {
+        let spawned = std::process::Command::new("/usr/bin/open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(_) => app.set_err("Apassy could not open the website."),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "detail_fields_tests.rs"]
+mod detail_fields_tests;
 
 /// The names of the shared vaults that hold a credential. None until shared vaults
 /// land (ADR 0026 §6).
@@ -1894,7 +2251,11 @@ fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
 }
 
 /// The third group: "Always ask me", the environment, and "Hosts and risk" with the
-/// declaration, the variable, and the connector.
+/// declaration, the variable, and the connector. "Hosts and risk" names the known hosts
+/// of [`bouncer_hosts`]: one host, "N hosts", or "Not set". Each row says under its
+/// label what its value means for an agent: "Always ask me" what decides each use
+/// ([`AccessFacts`]), the environment what "Not set" and "Not confirmed" do
+/// ([`environment_note`]), and "Hosts and risk" what no known host does.
 fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let always_ask = app
@@ -1935,19 +2296,43 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         .with_vault(|vault| vault.declaration_sources(id))
         .and_then(Result::ok)
         .is_some_and(|sources| sources == crate::vault::DeclarationSources::default());
-    let hosts = match state {
-        EnvState::None => "Not set",
-        _ if by_owner => "Set by you",
-        _ => "Set automatically",
+    let known = bouncer_hosts(app, id);
+    let hosts = match known.as_slice() {
+        [] => "Not set".to_owned(),
+        [host] => host.clone(),
+        several => format!("{} hosts", several.len()),
     };
+    let mut about = Vec::new();
+    match known.len() {
+        0 => about.push("The bouncer knows no host of this credential.".to_owned()),
+        1 => {}
+        _ => about.push(known.join(", ")),
+    }
+    match state {
+        EnvState::None => {}
+        _ if by_owner => about.push("Declaration: set by you.".to_owned()),
+        _ => about.push("Declaration: set automatically.".to_owned()),
+    }
+    // The second line of "Always ask me": what it does when on, else what decides now.
+    let ask_note = if always_ask {
+        ALWAYS_ASK_NOTE
+    } else {
+        AccessFacts::of(app, details).decider()
+    };
+    let env_note = environment_note(state);
+    let hosts_note = known.is_empty().then_some(NO_HOST_NOTE);
     let mut toggle_access = false;
     rows::group(ui, |s| {
-        s.toggle("Always ask me", &mut ask)
-            .on_hover_text("Each use by an agent waits for you.");
-        s.line(|ui| {
-            ui.label(kit::text("Environment", Font::Body).color(kit::LABEL));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.push_id(("credential-environment", id), |ui| {
+        noted_row(s, "Always ask me", Some(ask_note), |ui| {
+            let response = kit::toggle(ui, &mut ask, "Always ask me");
+            ui.ctx()
+                .accesskit_node_builder(response.id, |node| node.set_description(ask_note));
+            response
+        })
+        .on_hover_text(ALWAYS_ASK_NOTE);
+        noted_row(s, "Environment", env_note.as_deref(), |ui| {
+            let menu = ui
+                .push_id(("credential-environment", id), |ui| {
                     rows::pop_menu(
                         ui,
                         &mut environment,
@@ -1955,10 +2340,19 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
                         &shown,
                         &format!("Environment, {shown}"),
                     )
-                });
-            });
+                })
+                .inner;
+            if let Some(note) = &env_note {
+                ui.ctx()
+                    .accesskit_node_builder(menu.id, |node| node.set_description(note.as_str()));
+            }
         });
-        let access = s.chevron("Hosts and risk", hosts);
+        let access = chevron_with_note(s, "Hosts and risk", &hosts, hosts_note);
+        let access = if about.is_empty() {
+            access
+        } else {
+            access.on_hover_text(about.join("\n"))
+        };
         ui_expanded(&access, access_open);
         toggle_access = access.clicked();
     });
@@ -1979,6 +2373,243 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
     {
         set_environment(app, ui.ctx(), details, environment);
     }
+}
+
+/// The line of "Always ask me" while it is on, and its hover text.
+const ALWAYS_ASK_NOTE: &str = "Each use by an agent waits for you.";
+
+/// The line of "Hosts and risk" without a known host. A destination host of a run must
+/// be a known host of the item, unless a fitting answer of the owner names it (`route`
+/// in `crate::broker::run`).
+const NO_HOST_NOTE: &str =
+    "A command that names a host waits for you, unless your answer covers it.";
+
+/// What decides a use of a credential by an agent now, as far as the page can read it:
+/// the order of `route` and `hard_rules` in `crate::broker::run` and of `call` in
+/// `crate::broker::decide` (ADR 0025 §3, ADR 0031, ADR 0034). The first rule that makes
+/// each use wait wins; else the bouncer decides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AccessFacts {
+    /// An archived credential is not for agents.
+    archived: bool,
+    /// Settings from a restored backup wait for the owner review.
+    needs_review: bool,
+    /// "Always ask me" is on.
+    always_ask: bool,
+    /// The bouncer brain is off in Settings: no model answers.
+    brain_off: bool,
+    /// The credential has a declaration. Without one, each run waits for the owner.
+    declared: bool,
+    /// The declaration says production, also when it is only a default.
+    production: bool,
+    /// The scope of the declaration is read-only.
+    read_only: bool,
+    /// A hidden detail holds a one-time password.
+    codes: bool,
+    /// "Never for AGENT" or "Always ask for AGENT".
+    exceptions: bool,
+    /// A remembered answer of the owner for the credential.
+    answers: bool,
+}
+
+impl AccessFacts {
+    fn of(app: &DesktopApp, details: &OwnerDetails) -> Self {
+        let id = details.id;
+        let session = &app.owner_ui.session;
+        let declaration = session.declaration(id).ok().flatten();
+        let rules = rules_of(app, id);
+        Self {
+            archived: details.archived,
+            needs_review: session.needs_review(id).unwrap_or(false),
+            always_ask: session
+                .with_vault(|vault| vault.always_ask(id))
+                .and_then(Result::ok)
+                .unwrap_or(false),
+            brain_off: app.model_server.as_ref().is_some_and(|server| {
+                server.settings().start == crate::broker::model_server::StartMode::Off
+            }),
+            declared: declaration.is_some(),
+            production: declaration
+                .as_ref()
+                .is_some_and(|declaration| declaration.is_production()),
+            read_only: declaration
+                .as_ref()
+                .is_some_and(|declaration| declaration.scope == Scope::ReadOnly),
+            codes: details.details.iter().any(otp::is_otp_detail),
+            exceptions: rules.iter().any(|rule| matches!(rule, Rule::Exception(..))),
+            answers: rules.iter().any(|rule| matches!(rule, Rule::Answer(_))),
+        }
+    }
+
+    /// No rule makes each use wait: the bouncer decides.
+    fn bouncer_decides(self) -> bool {
+        !self.archived
+            && !self.needs_review
+            && !self.always_ask
+            && !self.brain_off
+            && self.declared
+            && (!self.production || self.read_only)
+    }
+
+    /// The first sentence: what decides each use.
+    fn decider(self) -> &'static str {
+        if self.archived {
+            "Agents cannot use it while it is archived."
+        } else if self.needs_review {
+            "Agents cannot use it until you confirm its settings."
+        } else if self.always_ask {
+            ALWAYS_ASK_NOTE
+        } else if self.brain_off {
+            "The bouncer brain is off, so each use waits for you."
+        } else if !self.declared {
+            "Each run waits for you until you set the environment."
+        } else if self.production && !self.read_only {
+            "Each use waits for you, because it is a production credential with write access."
+        } else {
+            "The bouncer decides each use and asks you when it is not sure."
+        }
+    }
+
+    /// One or two short sentences: what decides each use, then the one-time codes and
+    /// the rules of the owner when they change the outcome.
+    fn status(self) -> String {
+        let decides = self.bouncer_decides();
+        // A requested code waits unless a fitting answer includes codes; a production
+        // credential always asks for a code.
+        let codes = (decides && self.codes).then_some(if self.production {
+            "One-time codes always wait for you"
+        } else {
+            "One-time codes wait for you unless your answer includes them"
+        });
+        // An exception counts whenever agents can use the credential. A remembered
+        // answer counts only where the bouncer decides: each rule that waits comes first.
+        let usable = !self.archived && !self.needs_review;
+        let rules = usable && (self.exceptions || (decides && self.answers));
+        let second = match (codes, rules) {
+            (Some(codes), true) => Some(format!("{codes}, and your rules also apply.")),
+            (Some(codes), false) => Some(format!("{codes}.")),
+            (None, true) => Some("Your rules also apply.".to_owned()),
+            (None, false) => None,
+        };
+        match second {
+            Some(second) => format!("{} {second}", self.decider()),
+            None => self.decider().to_owned(),
+        }
+    }
+}
+
+/// The line under "Environment" for a value that the owner did not set. Without a
+/// declaration each run waits for the owner (`route` in `crate::broker::run`). A value
+/// that only a default or the usage found counts until the owner chooses one.
+fn environment_note(state: EnvState) -> Option<String> {
+    match state {
+        EnvState::None => Some("Each run waits for you until you set it.".to_owned()),
+        EnvState::Unconfirmed(environment) => Some(format!(
+            "Treated as {} until you choose one.",
+            environment_label(environment).to_lowercase()
+        )),
+        EnvState::Known(_) | EnvState::Production => None,
+    }
+}
+
+/// A row with its label and, under it, a gray line at the left, and `right` at the
+/// right. Without a line it is the row of [`rows::Group::line`].
+fn noted_row<R>(
+    s: &mut rows::Group<'_>,
+    label: &str,
+    note: Option<&str>,
+    right: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let Some(note) = note else {
+        return s.line(|ui| {
+            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+            ui.with_layout(Layout::right_to_left(Align::Center), right)
+                .inner
+        });
+    };
+    s.row(|ui| {
+        egui::Sides::new()
+            .shrink_left()
+            .wrap_mode(egui::TextWrapMode::Wrap)
+            .show(ui, |ui| label_with_note(ui, label, note), right)
+            .1
+    })
+}
+
+/// A label with a gray line under it.
+fn label_with_note(ui: &mut egui::Ui, label: &str, note: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+        ui.add(Label::new(rows::small(note)).wrap());
+    });
+}
+
+/// The row of [`rows::Group::chevron`], with a gray line under its label when there is
+/// one. VoiceOver reads the line as the description of the row.
+fn chevron_with_note(
+    s: &mut rows::Group<'_>,
+    label: &str,
+    value: &str,
+    note: Option<&str>,
+) -> egui::Response {
+    let Some(note) = note else {
+        return s.chevron(label, value);
+    };
+    let response = s.clickable_row(&format!("{label}, {value}"), |ui| {
+        label_with_note(ui, label, note);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            kit::paint_icon_in(ui, Icon::ChevronRight, 10.0, kit::TERTIARY);
+            ui.add(Label::new(kit::text(value, Font::Body).color(kit::SECONDARY)).truncate());
+        });
+    });
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_description(note));
+    response
+}
+
+#[cfg(test)]
+#[path = "agent_access_tests.rs"]
+mod agent_access_tests;
+
+/// The known hosts of an item, as the broker collects them for a run (`check` and
+/// `push_item` in `crate::broker::run`): the hosts of the stored provider, the hosts of
+/// a placeholder, and the plain `host` field. Lowercase, without a port, sorted. The
+/// website of a login is not one of them.
+fn bouncer_hosts(app: &DesktopApp, id: u64) -> Vec<String> {
+    use crate::vault::answers::normal_host;
+    let session = &app.owner_ui.session;
+    let mut hosts: Vec<String> = session
+        .with_vault(|vault| vault.declaration_provider(id))
+        .and_then(Result::ok)
+        .flatten()
+        .map(|provider| providers::known_hosts(&provider).to_vec())
+        .unwrap_or_default();
+    if let Some(EnvDelivery::Placeholder(rules)) = session
+        .process_binding(id)
+        .ok()
+        .flatten()
+        .map(|binding| binding.delivery)
+    {
+        hosts.extend(
+            rules
+                .iter()
+                .filter_map(|rule| crate::vault::parse_placeholder_host(rule))
+                .map(|(host, _)| host),
+        );
+    }
+    let mut hosts: Vec<String> = hosts.iter().filter_map(|host| normal_host(host)).collect();
+    hosts.extend(
+        session
+            .with_vault(|vault| vault.item_host_field(id))
+            .and_then(Result::ok)
+            .flatten(),
+    );
+    hosts.sort();
+    hosts.dedup();
+    hosts
 }
 
 /// A row that opens and closes a part says so to VoiceOver.
@@ -2143,9 +2774,15 @@ fn environment_question(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
     }
 }
 
-/// "Added … · Changed …". "Added by AGENT in PROJECT" comes with the API of
-/// `item_origin` (stream T2).
-fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
+/// The link of the footer that shows and hides the import rows.
+const IMPORT_DETAILS: &str = "Import details…";
+
+/// "Added … · Changed …". An imported credential starts with "Imported from 1Password"
+/// and ends with "Import details…", which shows its import rows under the footer. The
+/// open state uses the key `credential-import-{id}`. "Added by AGENT in PROJECT" comes
+/// with the API of `item_origin` (stream T2).
+fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let id = details.id;
     let times = app
         .owner_ui
         .session
@@ -2154,7 +2791,24 @@ fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
         .and_then(|times| times.get(&id).copied())
         .unwrap_or_default();
     let now = timeline::now();
+    let imported: Vec<&DetailLine> = details
+        .details
+        .iter()
+        .filter(|detail| is_import_data(detail))
+        .collect();
     let mut parts = Vec::new();
+    if !imported.is_empty() {
+        // "Source record" alone does not name the app it came from.
+        let from = if imported
+            .iter()
+            .any(|detail| detail.label.starts_with("1Password "))
+        {
+            "Imported from 1Password"
+        } else {
+            "Imported"
+        };
+        parts.push(from.to_owned());
+    }
     if let Some(added) = times.added {
         parts.push(format!("Added {}", relative_time(added, now)));
     }
@@ -2169,10 +2823,93 @@ fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
     }
     // Each group adds its gap under it; the footer sits 22 points under the last one.
     ui.add_space(rows::FOOTER_GAP - rows::GROUP_GAP);
-    ui.vertical_centered(|ui| {
-        ui.label(kit::text(parts.join(" · "), Font::Footnote).color(kit::TERTIARY));
-    });
+    let line = parts.join(" · ");
+    if imported.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.label(kit::text(line, Font::Footnote).color(kit::TERTIARY));
+        });
+        ui.add_space(8.0);
+        return;
+    }
+    let key = format!("credential-import-{id}");
+    let open = app.ui.is_expanded(&key);
+    // One centered line when the words and the link fit, else the link under them.
+    let words = format!("{line} · ");
+    let width = kit::galley(ui, kit::text(&words, Font::Footnote)).size().x
+        + kit::galley(ui, kit::text(IMPORT_DETAILS, Font::Footnote))
+            .size()
+            .x;
+    let mut toggle_open = false;
+    if width <= ui.available_width() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+            ui.add(Label::new(kit::text(words, Font::Footnote).color(kit::TERTIARY)).extend());
+            toggle_open = footer_link(ui, IMPORT_DETAILS, open).clicked();
+        });
+    } else {
+        ui.vertical_centered(|ui| {
+            ui.label(kit::text(line, Font::Footnote).color(kit::TERTIARY));
+            toggle_open = footer_link(ui, IMPORT_DETAILS, open).clicked();
+        });
+    }
     ui.add_space(8.0);
+    if open {
+        // The rows of the old "Import data" part. A hidden value keeps Show and Copy,
+        // and both still need the owner check.
+        let revealed = details.any_revealed();
+        let mut toggle = false;
+        let mut copy = None;
+        kit::section(ui, None, None, |s| {
+            for detail in &imported {
+                toggle |= custom_value_row(app, s, details, detail, revealed, &mut copy);
+            }
+        });
+        ui.add_space(rows::GROUP_GAP);
+        if let Some(field) = copy {
+            app.ask_owner(
+                OwnerRequest::CopyField {
+                    item_id: id,
+                    field,
+                    revision: details.revision,
+                },
+                Some(ui.ctx()),
+            );
+        } else if toggle {
+            toggle_values(app, ui.ctx());
+        }
+    }
+    if toggle_open {
+        app.ui.set_expanded(&key, !open);
+    }
+}
+
+/// A small link in the accent color, as "Import details…" of the footer. It tells
+/// VoiceOver whether its part is open.
+fn footer_link(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
+    let galley = kit::galley(ui, kit::text(label, Font::Footnote).color(kit::ACCENT_TEXT));
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    ui_expanded(&response, open);
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.has_focus() {
+            kit::focus_ring(painter, rect.expand(2.0), 4);
+        }
+        if response.hovered() {
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, kit::ACCENT_TEXT),
+            );
+        }
+        painter.galley(rect.min, galley, kit::ACCENT_TEXT);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Labels and values share one reading edge, including paths and long identifiers.
@@ -2183,11 +2920,15 @@ fn value_row(section: &mut Section<'_>, label: &str, value: &str) {
     });
 }
 
+/// A detail that an import added to say where the credential came from: a label that
+/// starts with "1Password " (its item, account, and vault IDs, its vault, and its source
+/// JSON) or "Source record". The footer shows these rows, not the main card. Only the
+/// page uses this; the vault and the agents see each detail as before. A one-time
+/// password and a visible setup key stay where the page hides their values.
 fn is_import_data(detail: &DetailLine) -> bool {
-    matches!(
-        detail.label.as_str(),
-        "1Password item ID" | "1Password source JSON"
-    )
+    (detail.label.starts_with("1Password ") || detail.label == "Source record")
+        && !otp::is_otp_detail(detail)
+        && !otp::exposes_setup_key(detail)
 }
 
 fn custom_value_row(
@@ -2222,6 +2963,10 @@ fn custom_value_row(
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "detail_page_tests.rs"]
+mod detail_page_tests;
 
 fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: CredentialKind) {
     let session = &app.owner_ui.session;
@@ -2771,8 +3516,8 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
                     app.add_form = ItemDraft::default();
                     app.ui.sheet = None;
                     reveal_saved(app, item.id, folder.clone());
-                    let place = FolderTree::load(app).path_label(folder.as_deref());
-                    app.set_ok(format!("Added {} in {place}.", item.name));
+                    let place = FolderTree::load(app).in_folder(folder.as_deref());
+                    app.set_ok(format!("Added {}{place}.", item.name));
                 }
                 Err(err) => app.set_err(err.message),
             }
@@ -2983,9 +3728,12 @@ fn item_form(
         });
         for field in DesktopModel::extra_fields(kind) {
             let (value, placeholder) = extra_value(form, *field);
-            s.field(extra_label(*field), |ui| {
+            let input = s.field(extra_label(*field), |ui| {
                 kit::text_input(ui, value, &format!("{salt}-{field:?}"), placeholder)
             });
+            if editing && *field == ExtraField::Website {
+                claim_website_focus(&mut state.focus_form_website, &input);
+            }
         }
         if !editing {
             secret_rows(s, salt, kind, secrets, "Required");

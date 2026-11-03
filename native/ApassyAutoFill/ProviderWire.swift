@@ -60,6 +60,38 @@ struct PasskeyAssertCall: Encodable {
     let rpId: String
     let credentialId: String
     let clientDataHash: String
+    /// The PRF inputs for the chosen credential. Absent when the website asks for none.
+    var prf: PrfCallInput? = nil
+    /// Absent when the website asks for no large blob operation.
+    var largeBlob: LargeBlobCallInput? = nil
+}
+
+/// {"first", "second"?, "hashed"}: standard base64 inputs of the WebAuthn prf extension.
+/// `hashed` says whether they are already the hmac-secret salts
+/// (SHA-256("WebAuthn PRF" || 0x00 || input)), or the raw inputs that the app hashes.
+struct PrfCallInput: Encodable, Equatable {
+    let first: String
+    let second: String?
+    let hashed: Bool
+}
+
+/// {"read": true} or {"write": bytes}.
+enum LargeBlobCallInput: Encodable, Equatable {
+    case read
+    case write(String)
+
+    private enum Key: String, CodingKey {
+        case read
+        case write
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        switch self {
+        case .read: try container.encode(true, forKey: .read)
+        case .write(let blob): try container.encode(blob, forKey: .write)
+        }
+    }
 }
 
 struct PasskeyRegisterCall: Encodable {
@@ -123,6 +155,23 @@ struct PasskeyAssertAnswer: Decodable {
     let userHandle: String
     let authenticatorData: String
     let signature: String
+    /// The COSE algorithm of the signature. An app before the extension outputs sends
+    /// none, and signs ES256 (-7) only.
+    var algorithm: Int? = nil
+    var prf: PrfAnswer? = nil
+    var largeBlob: LargeBlobAnswer? = nil
+}
+
+/// The PRF outputs: {"first", "second"?}, 32 bytes each.
+struct PrfAnswer: Decodable, Equatable {
+    let first: String
+    var second: String? = nil
+}
+
+/// {"data": bytes} (absent or null: no blob) after a read, {"written": bool} after a write.
+struct LargeBlobAnswer: Decodable, Equatable {
+    var data: String? = nil
+    var written: Bool? = nil
 }
 
 struct PasskeyRegisterAnswer: Decodable {
@@ -228,7 +277,113 @@ func wireBytes(_ text: String, max: Int) -> Data? {
     return bytes
 }
 
+// MARK: - Extensions of a sign-in
+
+/// PRF inputs as macOS gives them (ASAuthorizationPublicKeyCredentialPRFAssertionInput).
+struct PrfValues: Equatable {
+    let first: Data
+    let second: Data?
+}
+
+/// The prf extension of a sign-in: the inputs for every credential (WebAuthn `eval`) and
+/// those for single credentials (`evalByCredential`).
+struct PrfRequest: Equatable {
+    let all: PrfValues?
+    let byCredential: [Data: PrfValues]
+}
+
+enum LargeBlobRequest: Equatable {
+    case read
+    case write(Data)
+}
+
+/// The extension inputs of a sign-in request of macOS.
+struct AssertionExtensionRequest: Equatable {
+    var prf: PrfRequest?
+    var largeBlob: LargeBlobRequest?
+}
+
+enum ExtensionLimits {
+    /// WebAuthn sets no minimum: an empty PRF input is valid.
+    static let minPrfInputBytes = 0
+    static let maxPrfInputBytes = 1024
+    static let maxPrfCredentials = 256
+    static let prfOutputBytes = 32
+    static let maxLargeBlobBytes = 64 * 1024
+}
+
+/// Whether macOS gives the provider hmac-secret salts or the raw WebAuthn PRF inputs.
+///
+/// Evidence (MacOSX.sdk, AuthenticationServices): the provider reads the same type,
+/// ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues
+/// (`saltInput1`, `saltInput2`), that an app gives to
+/// ASAuthorizationPlatformPublicKeyCredentialAssertionRequest.prf, where the values are
+/// the WebAuthn `eval` inputs. Neither the headers nor the swiftinterface say that the
+/// system hashes them before ASPasskeyCredentialRequestParameters.extensionInput or
+/// ASPasskeyCredentialRequest.extensionInput. With no evidence of hashing, the
+/// extension sends them as raw inputs (`hashed: false`), and the app hashes them with
+/// "WebAuthn PRF" || 0x00. Unverified on a device: check with a known PRF test vector.
+let prfInputsAreHashed = false
+
+/// What the call of one credential carries. `skippedWrite`: macOS asked to write an empty
+/// blob, which the wire does not carry; the answer to macOS is "not written".
+struct AssertionCallExtensions: Equatable {
+    var prf: PrfCallInput?
+    var largeBlob: LargeBlobCallInput?
+    var skippedWrite = false
+}
+
+/// The extension inputs for the call of `credentialID`: the inputs of this credential if
+/// the website names it in evalByCredential, else the inputs for every credential. Only
+/// the inputs that the call carries are checked: a bad entry of another credential does
+/// not stop this sign-in. A value outside the limits fails with `unsupported`, before
+/// anything goes to Apassy.
+func assertionCallExtensions(_ request: AssertionExtensionRequest, credentialID: Data) throws -> AssertionCallExtensions {
+    var call = AssertionCallExtensions()
+    if let prf = request.prf {
+        guard prf.byCredential.count <= ExtensionLimits.maxPrfCredentials else {
+            throw ProviderFailure.unsupported
+        }
+        if let values = prf.byCredential[credentialID] ?? prf.all {
+            let range = ExtensionLimits.minPrfInputBytes...ExtensionLimits.maxPrfInputBytes
+            guard range.contains(values.first.count), values.second.map({ range.contains($0.count) }) ?? true else {
+                throw ProviderFailure.unsupported
+            }
+            call.prf = PrfCallInput(
+                first: values.first.base64EncodedString(), second: values.second?.base64EncodedString(),
+                hashed: prfInputsAreHashed)
+        }
+    }
+    switch request.largeBlob {
+    case .read?:
+        call.largeBlob = .read
+    case .write(let blob)?:
+        guard blob.count <= ExtensionLimits.maxLargeBlobBytes else {
+            throw ProviderFailure.unsupported
+        }
+        if blob.isEmpty {
+            call.skippedWrite = true
+        } else {
+            call.largeBlob = .write(blob.base64EncodedString())
+        }
+    case nil:
+        break
+    }
+    return call
+}
+
 // MARK: - Checks of the answers
+
+struct CheckedPrf: Equatable {
+    let first: Data
+    let second: Data?
+}
+
+enum CheckedLargeBlob: Equatable {
+    /// Nil: the passkey has no blob.
+    case read(Data?)
+    case written(Bool)
+}
 
 /// The parts of an assertion for ASPasskeyAssertionCredential.
 struct CheckedAssertion: Equatable {
@@ -236,6 +391,28 @@ struct CheckedAssertion: Equatable {
     let userHandle: Data
     let authenticatorData: Data
     let signature: Data
+    /// The COSE algorithm of the signature.
+    var algorithm: Int = coseES256
+    var prf: CheckedPrf? = nil
+    var largeBlob: CheckedLargeBlob? = nil
+}
+
+let coseES256 = -7
+let coseEdDSA = -8
+let coseES384 = -35
+let coseRS256 = -257
+
+/// Whether a signature has the size of its COSE algorithm. ES256 and ES384 are DER
+/// ECDSA signatures (at most 72 and 104 bytes), EdDSA is Ed25519 (64 bytes), RS256 is
+/// RSA PKCS#1 v1.5 with a modulus of 1024 to 4096 bits. Any other algorithm fails.
+func signatureFits(_ signature: Data, algorithm: Int) -> Bool {
+    switch algorithm {
+    case coseES256: (8...72).contains(signature.count)
+    case coseES384: (8...104).contains(signature.count)
+    case coseEdDSA: signature.count == 64
+    case coseRS256: (128...512).contains(signature.count)
+    default: false
+    }
 }
 
 /// Authenticator data flags (WebAuthn).
@@ -252,13 +429,17 @@ let assertionFlags: UInt8 = flagUserPresent | flagUserVerified | flagBackupEligi
 let registrationFlags: UInt8 = assertionFlags | flagAttestedData
 
 /// Check an assertion before it goes to macOS: the same credential, the hash of the
-/// relying party, exactly the assertion flags, no extension data, and sane sizes. A wrong
-/// answer is never handed on.
-func checkAssertion(_ answer: PasskeyAssertAnswer, rpID: String, credentialID: Data) throws -> CheckedAssertion {
+/// relying party, exactly the assertion flags, no extension data in the authenticator
+/// data, a signature of the size of its algorithm, and extension outputs only for the
+/// extensions of the call. A wrong answer is never handed on.
+func checkAssertion(
+    _ answer: PasskeyAssertAnswer, rpID: String, credentialID: Data, requested: AssertionCallExtensions = AssertionCallExtensions()
+) throws -> CheckedAssertion {
+    let algorithm = answer.algorithm ?? coseES256
     guard let credential = wireBytes(answer.credentialId, max: 1023), credential == credentialID,
           let handle = wireBytes(answer.userHandle, max: 64),
           let data = wireBytes(answer.authenticatorData, max: 1024), data.count >= 37,
-          let signature = wireBytes(answer.signature, max: 128), signature.count >= 8
+          let signature = wireBytes(answer.signature, max: 512), signatureFits(signature, algorithm: algorithm)
     else {
         throw ProviderFailure.failed("Apassy sent a passkey answer that AutoFill cannot use.")
     }
@@ -270,7 +451,57 @@ func checkAssertion(_ answer: PasskeyAssertAnswer, rpID: String, credentialID: D
     guard flags == assertionFlags, data.count == 37 else {
         throw ProviderFailure.failed("Apassy sent a passkey answer that macOS would refuse.")
     }
-    return CheckedAssertion(credentialID: credential, userHandle: handle, authenticatorData: data, signature: signature)
+    return CheckedAssertion(
+        credentialID: credential, userHandle: handle, authenticatorData: data, signature: signature, algorithm: algorithm,
+        prf: try checkPrfOutput(answer.prf, requested: requested.prf),
+        largeBlob: try checkLargeBlobOutput(answer.largeBlob, requested: requested))
+}
+
+/// PRF outputs: only when the call carried inputs, 32 bytes each, a second output only
+/// for a second input. No outputs: the passkey has no PRF, and macOS gets none.
+func checkPrfOutput(_ answer: PrfAnswer?, requested: PrfCallInput?) throws -> CheckedPrf? {
+    guard let answer else { return nil }
+    let size = ExtensionLimits.prfOutputBytes
+    guard let requested, let first = wireBytes(answer.first, max: size), first.count == size else {
+        throw ProviderFailure.failed("Apassy sent a passkey answer that AutoFill cannot use.")
+    }
+    guard let text = answer.second else {
+        return CheckedPrf(first: first, second: nil)
+    }
+    guard requested.second != nil, let second = wireBytes(text, max: size), second.count == size else {
+        throw ProviderFailure.failed("Apassy sent a passkey answer that AutoFill cannot use.")
+    }
+    return CheckedPrf(first: first, second: second)
+}
+
+/// The large blob output must match the operation of the call: data (or none) after a
+/// read, "written" after a write. An empty write that the call skipped is "not written".
+/// A read without an output is a read of a passkey without a blob: Apassy leaves the
+/// output out then, and an app without the extension refuses the call (bad_request), so
+/// this never reports support that is not there.
+func checkLargeBlobOutput(_ answer: LargeBlobAnswer?, requested: AssertionCallExtensions) throws -> CheckedLargeBlob? {
+    if requested.skippedWrite {
+        guard answer == nil else {
+            throw ProviderFailure.failed("Apassy sent a passkey answer that AutoFill cannot use.")
+        }
+        return .written(false)
+    }
+    guard let answer else {
+        return requested.largeBlob == .read ? .read(nil) : nil
+    }
+    switch requested.largeBlob {
+    case .read?:
+        guard answer.written == nil else { break }
+        guard let text = answer.data, !text.isEmpty else { return .read(nil) }
+        guard let blob = wireBytes(text, max: ExtensionLimits.maxLargeBlobBytes) else { break }
+        return .read(blob)
+    case .write?:
+        guard answer.data == nil, let written = answer.written else { break }
+        return .written(written)
+    case nil:
+        break
+    }
+    throw ProviderFailure.failed("Apassy sent a passkey answer that AutoFill cannot use.")
 }
 
 struct CheckedRegistration: Equatable {

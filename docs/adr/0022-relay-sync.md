@@ -1,6 +1,7 @@
 # ADR 0022: Vault sync through the Apassy relay
 
 Date: 2026-10-06. Status: accepted for stage 1 on 2026-10-06.
+Plans (2026-11-03): relay sync is not a paid plan. It stays by operator code until ADR 0037 stage 4 and stage 7; see [plans](../product/plans.md).
 
 ## Context
 

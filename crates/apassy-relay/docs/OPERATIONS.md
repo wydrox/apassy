@@ -920,7 +920,7 @@ The Worker serves three things itself, without the relay and without the edge se
 | Path | What |
 | --- | --- |
 | `/install.sh` | installs `apassy-team` into `~/.local/bin` after a SHA-256 check (`deploy/worker/public/install.sh`) |
-| `/guide` | the alpha guide for owners and members (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
+| `/guide` | the guide for owners and members of a relay that they run (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
 | `/dl/*` | the CLI binaries and `SHA256SUMS` |
 
 Users install with:

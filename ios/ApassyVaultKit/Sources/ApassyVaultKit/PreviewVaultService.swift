@@ -16,10 +16,12 @@ public actor PreviewVaultService: VaultService {
         var passkey: Passkey? = nil
     }
 
-    /// A synthetic passkey with a key made here.
+    /// A synthetic passkey with a key made here, or imported (P-256 only in the preview).
     struct Passkey {
         var summary: PasskeySummary
         var key: P256.Signing.PrivateKey
+        var prf: PasskeyPRFSecrets? = nil
+        var largeBlob: PasskeyLargeBlob? = nil
     }
 
     var vaults: [VaultEntry]
@@ -40,6 +42,11 @@ public actor PreviewVaultService: VaultService {
     var organizeState = PreviewOrganize()
     /// The agents of the Macs (`PreviewVaultService+Feed.swift`).
     var feedState = PreviewFeed()
+    /// Test support: answers that the next `passkeyImport` calls give without importing (for
+    /// example the core's "exists" for an attach target that got a passkey meanwhile).
+    var scriptedPasskeyImports: [PasskeyImportResult] = []
+    /// Test support: the accounts of each `passkeyImport` call, in order.
+    var passkeyImportCalls: [[PasskeyImportAccount]] = []
 
     /// - Parameters:
     ///   - empty: no vault on this iPhone (the setup flow).
@@ -186,6 +193,14 @@ public actor PreviewVaultService: VaultService {
     static func storesPassword(_ secrets: [String: String]) -> Bool {
         secrets["password"].map { !$0.isEmpty } == true
     }
+
+    /// Test support: the answers of the next `passkeyImport` calls (`scriptedPasskeyImports`).
+    func scriptPasskeyImportsForTesting(_ answers: [PasskeyImportResult]) {
+        scriptedPasskeyImports = answers
+    }
+
+    /// Test support: the accounts of each `passkeyImport` call.
+    func passkeyImportCallsForTesting() -> [[PasskeyImportAccount]] { passkeyImportCalls }
 
     /// Test support: a stored secret password with no value. The ordinary calls refuse it, but
     /// the core can hold one (an older import). The row follows the stored value.
@@ -678,7 +693,8 @@ public actor PreviewVaultService: VaultService {
         let data = authenticator.assertionData()
         return PasskeyAssertion(
             credentialID: passkey.summary.credentialID, userHandle: passkey.summary.userHandle, authenticatorData: data,
-            signature: try authenticator.sign(data, clientDataHash: request.clientDataHash))
+            signature: try authenticator.sign(data, clientDataHash: request.clientDataHash),
+            algorithm: PasskeyAlgorithm.es256)
     }
 
     public func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated {
@@ -740,6 +756,8 @@ public actor PreviewVaultService: VaultService {
 
     public func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
         try requireUnlocked()
+        passkeyImportCalls.append(accounts)
+        if !scriptedPasskeyImports.isEmpty { return scriptedPasskeyImports.removeFirst() }
         var result = PasskeyImportResult(imported: 0, skippedExisting: 0, failed: 0)
         for account in accounts {
             if items.values.contains(where: {
@@ -758,7 +776,23 @@ public actor PreviewVaultService: VaultService {
             let summary = PasskeySummary(
                 rpID: account.rpID, userName: account.userName, userDisplayName: account.userDisplayName,
                 credentialID: account.credentialID, userHandle: account.userHandle)
-            _ = insertPasskeyLogin(title: account.title, summary: summary, key: key)
+            let passkey = Passkey(summary: summary, key: key, prf: account.prf, largeBlob: account.largeBlob)
+            if let attachID = account.attachID {
+                // As the core does: only an active login without a passkey takes it.
+                guard var item = items[attachID], item.row.kind == .login, item.passkey == nil, !item.row.archived,
+                    item.row.conflictOf == nil
+                else {
+                    result.failed += 1
+                    continue
+                }
+                item.passkey = passkey
+                item.row.hasPasskey = true
+                item.row.revision += 1
+                items[attachID] = item
+            } else {
+                let id = insertPasskeyLogin(title: account.title, summary: summary, key: key)
+                items[id]?.passkey = passkey
+            }
             result.imported += 1
         }
         return result
@@ -808,7 +842,8 @@ public actor PreviewVaultService: VaultService {
                         ExportedPasskey(
                             rpID: $0.summary.rpID, credentialID: $0.summary.credentialID, userHandle: $0.summary.userHandle,
                             userName: $0.summary.userName, userDisplayName: $0.summary.userDisplayName,
-                            key: $0.key.derRepresentation)
+                            key: $0.key.derRepresentation, algorithm: PasskeyAlgorithm.es256, prf: $0.prf,
+                            largeBlob: $0.largeBlob)
                     }))
         }
         return CredentialExport(items: exported, skipped: skipped)

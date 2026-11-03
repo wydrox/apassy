@@ -97,12 +97,141 @@ fn passkey_get_parses_into_its_own_packet() {
             rp_id: "example.com".to_owned(),
             client_data_json: encode_bytes(client.as_bytes()),
             allowed: allowed.clone(),
+            prf: None,
+            large_blob: None,
         })
     );
     // Debug shows neither the client data nor the credential IDs.
     let debug = format!("{command:?}");
     assert!(!debug.contains(&encode_bytes(client.as_bytes())), "{debug}");
     assert!(!debug.contains(&allowed[0]), "{debug}");
+}
+
+#[test]
+fn passkey_get_takes_prf_and_large_blob_extensions() {
+    use apassy::browser::wire::{PasskeyLargeBlobRequest, PasskeyPrfRequest, PasskeyPrfValues};
+    let client = client_json("webauthn.get", &[1; 32], "https://example.com");
+    let one = vec![encode_bytes(&[5; 16])];
+    let packet = |allowed: &[String], extra: serde_json::Value| {
+        let mut packet: serde_json::Value = serde_json::from_str(&get_packet(
+            "https://example.com",
+            "example.com",
+            &client,
+            allowed,
+        ))
+        .unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            packet[key] = value.clone();
+        }
+        packet.to_string()
+    };
+    let get = |text: &str| match parse(text).unwrap() {
+        WireCommand::PasskeyGet(get) => get,
+        other => panic!("not a passkey_get: {other:?}"),
+    };
+    // `eval` and `eval_by_credential`, keyed by base64url credential IDs.
+    let request = get(&packet(
+        &one,
+        serde_json::json!({"prf": {
+            "eval": {"first": encode_bytes(b"first"), "second": encode_bytes(b"second")},
+            "eval_by_credential": {b64url(&[5; 16]): {"first": encode_bytes(b"by id")}},
+        }}),
+    ));
+    assert_eq!(
+        request.prf,
+        Some(PasskeyPrfRequest {
+            eval: Some(PasskeyPrfValues {
+                first: b"first".to_vec(),
+                second: Some(b"second".to_vec()),
+            }),
+            eval_by_credential: vec![(
+                vec![5; 16],
+                PasskeyPrfValues {
+                    first: b"by id".to_vec(),
+                    second: None,
+                }
+            )],
+        })
+    );
+    let debug = format!("{request:?}");
+    assert!(!debug.contains(&encode_bytes(b"first")), "{debug}");
+    // WebAuthn sets no minimum: an empty input is the empty text.
+    let empty = get(&packet(
+        &one,
+        serde_json::json!({"prf": {"eval": {"first": "", "second": ""}}}),
+    ));
+    let eval = empty.prf.unwrap().eval.unwrap();
+    assert!(eval.first.is_empty() && eval.second == Some(Vec::new()));
+    // A read with any allow list, and a write with exactly one credential.
+    let read = get(&packet(
+        &[],
+        serde_json::json!({"large_blob": {"read": true}}),
+    ));
+    assert_eq!(read.large_blob, Some(PasskeyLargeBlobRequest::Read));
+    let write = get(&packet(
+        &one,
+        serde_json::json!({"large_blob": {"write": encode_bytes(b"blob")}}),
+    ));
+    assert_eq!(
+        write.large_blob,
+        Some(PasskeyLargeBlobRequest::Write(b"blob".to_vec()))
+    );
+    // Outside the contract.
+    let by_unknown_id = serde_json::json!({"prf": {"eval_by_credential": {
+        b64url(&[6; 16]): {"first": encode_bytes(b"x")}}}});
+    let too_many: serde_json::Map<String, serde_json::Value> = (0..257u32)
+        .map(|n| {
+            (
+                b64url(&n.to_be_bytes()),
+                serde_json::json!({"first": encode_bytes(b"x")}),
+            )
+        })
+        .collect();
+    for (allowed, extra) in [
+        (&one[..], by_unknown_id),
+        (
+            &[][..],
+            serde_json::json!({"prf": {"eval_by_credential": {
+            b64url(&[5; 16]): {"first": encode_bytes(b"x")}}}}),
+        ),
+        (
+            &one[..],
+            serde_json::json!({"prf": {"eval_by_credential": {
+            encode_bytes(&[5; 16]): {"first": encode_bytes(b"x")}}}}),
+        ),
+        (
+            &one[..],
+            serde_json::json!({"prf": {"eval_by_credential": too_many}}),
+        ),
+        (
+            &one[..],
+            serde_json::json!({"prf": {"eval": {"first": encode_bytes(&[1; 1025])}}}),
+        ),
+        (
+            &one[..],
+            serde_json::json!({"prf": {"eval": {"first": encode_bytes(b"x"), "hashed": true}}}),
+        ),
+        (&one[..], serde_json::json!({"prf": {"other": {}}})),
+        (&one[..], serde_json::json!({"large_blob": {"read": false}})),
+        (
+            &one[..],
+            serde_json::json!({"large_blob": {"read": true, "write": encode_bytes(b"x")}}),
+        ),
+        (
+            &[][..],
+            serde_json::json!({"large_blob": {"write": encode_bytes(b"x")}}),
+        ),
+        (
+            &one[..],
+            serde_json::json!({"large_blob": {"write": "not base64"}}),
+        ),
+    ] {
+        assert_eq!(
+            code(&packet(allowed, extra.clone())),
+            "bad_request",
+            "{extra}"
+        );
+    }
 }
 
 #[test]
@@ -370,16 +499,61 @@ fn answers_serialize_as_the_contract_says_and_debug_hides_them() {
             authenticator_data: "YXV0aA==".to_owned(),
             signature: "c2lnbmF0dXJlLWNhbmFyeQ==".to_owned(),
             client_data_json: "Y2xpZW50LWNhbmFyeQ==".to_owned(),
+            algorithm: -8,
+            prf: Some(wire::PasskeyPrfResults {
+                first: SecretText::new("cHJmLWNhbmFyeQ==".to_owned()),
+                second: None,
+            }),
+            large_blob: Some(wire::PasskeyLargeBlobResult::Data {
+                data: SecretText::new("YmxvYi1jYW5hcnk=".to_owned()),
+            }),
         },
     );
     let json = serde_json::to_value(&passkey).unwrap();
     assert_eq!(json["data"]["type"], "passkey");
     assert_eq!(json["data"]["rid"], RID);
     assert_eq!(json["data"]["signature"], "c2lnbmF0dXJlLWNhbmFyeQ==");
+    assert_eq!(json["data"]["algorithm"], -8);
+    assert_eq!(
+        json["data"]["prf"],
+        serde_json::json!({"first": "cHJmLWNhbmFyeQ=="})
+    );
+    assert_eq!(
+        json["data"]["large_blob"],
+        serde_json::json!({"data": "YmxvYi1jYW5hcnk="})
+    );
     let debug = format!("{passkey:?}");
-    for hidden in ["c2lnbmF0dXJl", "Y2xpZW50", "Y3JlZA", "dXNlcg", "YXV0aA"] {
+    for hidden in [
+        "c2lnbmF0dXJl",
+        "Y2xpZW50",
+        "Y3JlZA",
+        "dXNlcg",
+        "YXV0aA",
+        "cHJmLWNhbmFyeQ",
+        "YmxvYi1jYW5hcnk",
+    ] {
         assert!(!debug.contains(hidden), "{debug}");
     }
+    let written = Response::ok(
+        "Signed.",
+        Data::Passkey {
+            rid: RID.to_owned(),
+            credential_id: "Y3JlZA==".to_owned(),
+            user_handle: "dXNlcg==".to_owned(),
+            authenticator_data: "YXV0aA==".to_owned(),
+            signature: "c2ln".to_owned(),
+            client_data_json: "Y2xp".to_owned(),
+            algorithm: -7,
+            prf: None,
+            large_blob: Some(wire::PasskeyLargeBlobResult::Written { written: false }),
+        },
+    );
+    let json = serde_json::to_value(&written).unwrap();
+    assert!(json["data"].get("prf").is_none());
+    assert_eq!(
+        json["data"]["large_blob"],
+        serde_json::json!({"written": false})
+    );
     let created = Response::ok(
         "Saved.",
         Data::PasskeyCreated {

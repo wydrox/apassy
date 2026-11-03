@@ -9,23 +9,31 @@
 //! - The login form has one input for it. The input is a secret input. It never shows the
 //!   value of a stored seed. A detail with the label of a one-time password, or with an
 //!   explicit `otpauth://totp` link, is always a hidden detail in every form.
-//! - The credential page shows the codes in their own section. Each code is masked until
-//!   the owner passes the check of [`OwnerRequest::ShowCode`] for that one field. The
-//!   session then loads only that seed. The page shows the code, the seconds left,
-//!   "Hide", and "Copy code" for that row. "Hide" hides that row only. The page borrows the
-//!   seed from the session for the frame. It never shows the seed, and it never writes a
-//!   seed or a code to a log. The password and the other codes stay as they were.
-//! - "Copy code" asks for a new owner check with [`OwnerRequest::CopyCode`]. The desktop
-//!   owns the copy and the clipboard.
+//! - The credential page shows each code as a row of its first group, after the password
+//!   rows. The row has the label as the owner typed it, the mask of the Password row, and
+//!   "Copy" and "Show", in the order of the Password row.
+//! - "Show" asks for the check of [`OwnerRequest::ShowCode`] for that one field. The
+//!   session then loads only that seed. The row shows the code, the seconds left, "Hide",
+//!   and "Copy". "Hide" hides that row only. The page borrows the seed from the session
+//!   for the frame. It never shows the seed, and it never writes a seed or a code to a
+//!   log. The password and the other codes stay as they were.
+//! - "Copy" needs no "Show" first. It asks for its own check with
+//!   [`OwnerRequest::CopyCode`]. The desktop owns the copy and the clipboard. It clears
+//!   the clipboard after [`MIN_CLEAR`] to [`MAX_CLEAR`] if the clipboard still holds the
+//!   code.
+//! - Both checks are the usual owner check: Touch ID or the passphrase, inside the window
+//!   of "How often to ask". Only while a code is visible, the note under the group says
+//!   how long it stays visible and when the clipboard clears.
 //! - A visible custom detail that looks like a setup key is not drawn. The page says that
 //!   it is hidden for safety (`exposes_setup_key`).
 
 use std::time::Duration;
 
-use eframe::egui::{self, CornerRadius, Sense, Vec2};
+use eframe::egui::{self, Align, CornerRadius, Layout, Sense, Vec2};
 
+use super::detail_rows as rows;
 use super::items::set_hidden;
-use super::kit::{self, Font, Icon, Section, Size, Style, Tone};
+use super::kit::{self, Font, Section, Tone};
 use super::{SECRET_VALUE_CAPACITY, forget_secret_field, presize, secure_input};
 use crate::contracts::CredentialKind;
 use crate::desktop::DesktopApp;
@@ -35,8 +43,6 @@ use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{DetailLine, MAX_DETAILS, OwnerDetails, SecretForm};
 use crate::otp::{self, OtpError, Totp};
 
-/// The code is masked with this text.
-pub(super) const MASKED_CODE: &str = "••• •••";
 /// Below this many seconds the countdown turns to a warning color.
 const LOW_SECONDS: u64 = 5;
 /// The page redraws this often while it shows a code, so the countdown and the code
@@ -72,11 +78,7 @@ pub(super) fn exposes_setup_key(detail: &DetailLine) -> bool {
 /// value.
 pub(super) fn exposed_content(ui: &mut egui::Ui, detail: &DetailLine) {
     ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY));
-    ui.label(
-        kit::text(MASKED_CODE, Font::Mono)
-            .size(17.0)
-            .color(kit::LABEL),
-    );
+    rows::mask(ui);
     kit::note(
         ui,
         "Apassy hides this setup key. Edit the credential to store it as a one-time password.",
@@ -159,65 +161,91 @@ impl Code {
     }
 }
 
-/// The section of the one-time passwords of a credential. Nothing for a credential
-/// without one.
-pub(super) fn code_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
-    code_section_at(app, ui, details, kit::now());
+/// The code rows of one credential page: whether a code is visible, and what the owner
+/// asked on a row.
+#[derive(Debug, Default)]
+pub(super) struct CodeRows {
+    action: Option<CodeAction>,
+    visible: bool,
 }
 
-fn code_section_at(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails, unix: u64) {
-    let id = details.id;
-    let lines: Vec<&DetailLine> = details
-        .details
-        .iter()
-        .filter(|d| is_otp_detail(d))
-        .collect();
-    if lines.is_empty() {
-        return;
+/// A row for each one-time password of a credential, in its first group after the
+/// password rows. Nothing for a credential without one.
+pub(super) fn code_rows(
+    app: &DesktopApp,
+    group: &mut rows::Group<'_>,
+    details: &OwnerDetails,
+) -> CodeRows {
+    code_rows_at(app, group, details, kit::now())
+}
+
+fn code_rows_at(
+    app: &DesktopApp,
+    group: &mut rows::Group<'_>,
+    details: &OwnerDetails,
+    unix: u64,
+) -> CodeRows {
+    let mut codes = CodeRows::default();
+    for line in details.details.iter().filter(|d| is_otp_detail(d)) {
+        // The seed of this one field, opened by its own owner check. The page borrows it
+        // from the session for this frame only.
+        let code = app
+            .owner_ui
+            .session
+            .code_seed(details.id, &line.name)
+            .map(|seed| Code::at(seed, unix));
+        codes.visible |= matches!(code, Some(Ok(_)));
+        if let Some(clicked) = code_row(group, line, code.as_ref()) {
+            codes.action = Some(clicked);
+        }
     }
-    // The seed is borrowed from the session for this frame only.
-    let codes: Vec<Option<Result<Code, OtpError>>> = lines
-        .iter()
-        .map(|line| {
-            // The seed of this one field, opened by its own owner check.
-            let seed = app.owner_ui.session.code_seed(id, &line.name)?;
-            Some(Code::at(seed, unix))
+    codes
+}
+
+impl CodeRows {
+    /// Whether the owner clicked a button of a code row.
+    pub(super) fn clicked(&self) -> bool {
+        self.action.is_some()
+    }
+
+    /// The note under the group while a code is visible. `None` while each code is
+    /// masked.
+    pub(super) fn note(&self) -> Option<String> {
+        self.visible.then(|| {
+            format!(
+                "The code is visible for 30 seconds, or until you hide it or lock the vault. {}",
+                clipboard_note()
+            )
         })
-        .collect();
-    let footer = if codes.iter().any(|code| matches!(code, Some(Ok(_)))) {
-        format!(
-            "A code is visible for up to 30 seconds. Copy code asks for your passphrase. Apassy clears the clipboard after {} to {} seconds if it still holds the code.",
-            MIN_CLEAR.as_secs(),
-            MAX_CLEAR.as_secs()
-        )
-    } else if codes.iter().any(Option::is_some) {
-        "A code is visible for up to 30 seconds.".to_owned()
-    } else {
-        "Show code asks for your passphrase.".to_owned()
-    };
-    let mut action = None;
-    kit::section(ui, Some("One-time password"), Some(&footer), |s| {
-        for (line, code) in lines.iter().zip(&codes) {
-            if let Some(clicked) = code_row(s, line, code.as_ref()) {
-                action = Some(clicked);
-            }
-        }
-    });
-    let ctx = ui.ctx().clone();
-    match action {
-        // Each row asks for its own field. The password and the other codes stay as they are.
-        Some(CodeAction::Show(field)) => {
-            app.ask_owner(OwnerRequest::ShowCode { item_id: id, field }, Some(&ctx))
-        }
-        Some(CodeAction::Hide(field)) => {
-            app.owner_ui.session.hide_code(id, &field);
-            app.set_ok("The code is hidden.");
-        }
-        Some(CodeAction::Copy(field)) => {
-            app.ask_owner(OwnerRequest::CopyCode { item_id: id, field }, Some(&ctx));
-        }
-        None => {}
     }
+
+    /// Do what the owner asked on a code row, if anything.
+    pub(super) fn answer(self, app: &mut DesktopApp, ctx: &egui::Context, item_id: u64) {
+        match self.action {
+            // Each row asks for its own field. The password and the other codes stay as
+            // they are.
+            Some(CodeAction::Show(field)) => {
+                app.ask_owner(OwnerRequest::ShowCode { item_id, field }, Some(ctx));
+            }
+            Some(CodeAction::Hide(field)) => {
+                app.owner_ui.session.hide_code(item_id, &field);
+                app.set_ok("The code is hidden.");
+            }
+            Some(CodeAction::Copy(field)) => {
+                app.ask_owner(OwnerRequest::CopyCode { item_id, field }, Some(ctx));
+            }
+            None => {}
+        }
+    }
+}
+
+/// When Apassy clears a copied code from the clipboard.
+pub(super) fn clipboard_note() -> String {
+    format!(
+        "Apassy clears a copied code from the clipboard after {} to {} seconds if it still holds the code.",
+        MIN_CLEAR.as_secs(),
+        MAX_CLEAR.as_secs()
+    )
 }
 
 /// What the owner asked on one code row. The value is the field of that row.
@@ -228,45 +256,58 @@ enum CodeAction {
     Copy(String),
 }
 
-/// One code. Returns what the owner asked on this row, if anything.
+/// One code, laid out as the Password row: the label, the mask, "Copy" and "Show". A
+/// shown code has "Copy" and "Hide", and the code with its seconds under the line.
+/// Returns what the owner asked on this row, if anything.
 fn code_row(
-    section: &mut Section<'_>,
+    group: &mut rows::Group<'_>,
     line: &DetailLine,
     code: Option<&Result<Code, OtpError>>,
 ) -> Option<CodeAction> {
-    section.row(|ui| {
+    group.row(|ui| {
         let mut action = None;
-        egui::Sides::new().show(
-            ui,
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, 24.0),
+            Layout::left_to_right(Align::Center),
             |ui| {
-                ui.label(kit::text(&line.label, Font::Callout).color(kit::SECONDARY));
-            },
-            |ui| match code {
-                None => {
-                    if show_button(ui, &line.label) {
-                        action = Some(CodeAction::Show(line.name.clone()));
+                ui.set_min_size(Vec2::new(width, 24.0));
+                ui.label(kit::text(&line.label, Font::Body).color(kit::LABEL));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    match code {
+                        None => {
+                            if show_button(ui, &line.label) {
+                                action = Some(CodeAction::Show(line.name.clone()));
+                            }
+                            // Copy needs no Show first: it has its own owner check.
+                            if copy_button(ui, &line.label) {
+                                action = Some(CodeAction::Copy(line.name.clone()));
+                            }
+                            rows::mask(ui);
+                        }
+                        Some(code) => {
+                            if hide_button(ui, &line.label) {
+                                action = Some(CodeAction::Hide(line.name.clone()));
+                            }
+                            if code.is_ok() && copy_button(ui, &line.label) {
+                                action = Some(CodeAction::Copy(line.name.clone()));
+                            }
+                        }
                     }
-                }
-                Some(code) => {
-                    if hide_button(ui, &line.label) {
-                        action = Some(CodeAction::Hide(line.name.clone()));
-                    }
-                    if code.is_ok() && copy_button(ui, &line.label) {
-                        action = Some(CodeAction::Copy(line.name.clone()));
-                    }
-                }
+                });
             },
         );
         match code {
-            None => {
-                ui.label(
-                    kit::text(MASKED_CODE, Font::Mono)
-                        .size(26.0)
-                        .color(kit::LABEL),
-                );
+            None => {}
+            Some(Ok(code)) => {
+                ui.add_space(4.0);
+                show_code(ui, code);
             }
-            Some(Ok(code)) => show_code(ui, code),
-            Some(Err(err)) => kit::tone_note(ui, err.to_string(), Tone::Critical),
+            Some(Err(err)) => {
+                ui.add_space(4.0);
+                kit::tone_note(ui, err.to_string(), Tone::Critical);
+            }
         }
         action
     })
@@ -303,37 +344,35 @@ fn show_code(ui: &mut egui::Ui, code: &Code) {
     ui.ctx().request_repaint_after(REDRAW);
 }
 
-fn show_button(ui: &mut egui::Ui, label: &str) -> bool {
-    let button = kit::button_with(
-        ui,
-        Some(Icon::Eye),
-        "Show code",
-        Style::Bordered,
-        Size::Small,
+/// The hover text of "Show" on a code row. The check is the usual owner check, as for
+/// the Password row.
+const SHOW_HOVER: &str = "Confirm with Touch ID or passphrase. The code is visible for 30 seconds.";
+
+/// The hover text of "Copy" on a code row.
+fn copy_hover() -> String {
+    format!(
+        "Confirm with Touch ID or passphrase. Clipboard clears after {} to {} seconds if unchanged.",
+        MIN_CLEAR.as_secs(),
+        MAX_CLEAR.as_secs()
     )
-    .on_hover_text("Show the code. Apassy asks for your passphrase.");
-    let name = format!("Show the code of {label}");
-    ui.ctx()
-        .accesskit_node_builder(button.id, |node| node.set_label(name));
-    button.clicked()
+}
+
+fn show_button(ui: &mut egui::Ui, label: &str) -> bool {
+    rows::pill_button(ui, "Show", &format!("Show the code of {label}"))
+        .on_hover_text(SHOW_HOVER)
+        .clicked()
 }
 
 fn hide_button(ui: &mut egui::Ui, label: &str) -> bool {
-    let button = kit::button_with(ui, Some(Icon::Eye), "Hide", Style::Bordered, Size::Small)
-        .on_hover_text("Hide this code");
-    let name = format!("Hide the code of {label}");
-    ui.ctx()
-        .accesskit_node_builder(button.id, |node| node.set_label(name));
-    button.clicked()
+    rows::pill_button(ui, "Hide", &format!("Hide the code of {label}"))
+        .on_hover_text("Hide this code")
+        .clicked()
 }
 
 fn copy_button(ui: &mut egui::Ui, label: &str) -> bool {
-    let button = kit::small_button(ui, "Copy code", Style::Bordered)
-        .on_hover_text("Copy the code. Apassy asks for your passphrase.");
-    let name = format!("Copy the code of {label}");
-    ui.ctx()
-        .accesskit_node_builder(button.id, |node| node.set_label(name));
-    button.clicked()
+    rows::pill_button(ui, "Copy", &format!("Copy the code of {label}"))
+        .on_hover_text(copy_hover())
+        .clicked()
 }
 
 // ---- The login form. ----

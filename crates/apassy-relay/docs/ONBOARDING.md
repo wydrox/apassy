@@ -1,8 +1,21 @@
-# Apassy team relay — alpha guide
+# Apassy team relay — guide for a relay that you run
 
 This guide is for a team owner and a member.
-The relay URL is `https://apassy-relay.wyderka.cc`.
 The CLI is `apassy-team`.
+
+## Which relay
+
+The hosted relay `https://apassy-relay.wyderka.cc` no longer serves team vaults (since Apassy 0.5.14).
+It refuses runs, remote MCP, the proxy, access requests, and new team-vault content with `410 team_vaults_retired`.
+It still serves the Apassy app: vault sync between your devices, approvals on the iPhone, the feed, and push.
+It also serves the downloads of this CLI.
+
+Team vaults work on a relay that you run yourself.
+They are on by default there (`APASSY_RELAY_TEAM_VAULTS=1`).
+To run a relay, follow [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md).
+Later, a team host runs on an Apassy node on your own machine (ADR 0037, stage 4).
+
+In the commands below, replace `RELAY_URL` with the address of your relay, for example `https://relay.example.com`.
 
 ## Install
 
@@ -27,14 +40,15 @@ It does not use `sudo`.
 
 ## Create a team (owner)
 
-Get a one-time team code from the relay operator.
+Get a one-time team code from the operator of your relay.
+If you run the relay, make the code on its server with `apassy-relay admin team-code --hours 72 > team-code-file` (section 17 of [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md)).
 The code starts with `apassy_tcd_`.
 Save the code in `team-code-file`.
 Replace `NAME` with the team name.
 Replace `OWNERNAME` with the owner's name.
 
 ```sh
-apassy-team create --relay https://apassy-relay.wyderka.cc --team "NAME" \
+apassy-team create --relay RELAY_URL --team "NAME" \
   --name OWNERNAME --device "Owner laptop" < team-code-file
 apassy-team me
 ```
@@ -99,7 +113,7 @@ Keep `APASSY_TEAM_TOKEN` set until enrollment succeeds.
 
 ```sh
 export XDG_CONFIG_HOME="$HOME/.config/apassy-device"
-export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
+export APASSY_RELAY_URL=RELAY_URL
 export APASSY_TEAM_TOKEN="$(cat owner-token-file)"
 apassy-team device enroll --name "Owner laptop"
 unset APASSY_TEAM_TOKEN
@@ -154,7 +168,7 @@ Member: read the invite link or raw code from stdin.
 If the invite has no name, add `--name NAME`.
 
 ```sh
-apassy-team join --relay https://apassy-relay.wyderka.cc \
+apassy-team join --relay RELAY_URL \
   --device "Bob laptop" < invite-link-file
 ```
 
@@ -225,7 +239,7 @@ Send the file to the new device through a private channel.
 On the new machine, read the code from stdin:
 
 ```sh
-apassy-team device link --relay https://apassy-relay.wyderka.cc \
+apassy-team device link --relay RELAY_URL \
   --device "Second laptop" < device-link-code-file
 ```
 
@@ -327,7 +341,7 @@ Put this configuration in `.mcp.json`:
   "mcpServers": {
     "apassy": {
       "type": "http",
-      "url": "https://apassy-relay.wyderka.cc/mcp",
+      "url": "RELAY_URL/mcp",
       "headers": {
         "Authorization": "Bearer ${APASSY_TOKEN}"
       }
@@ -400,13 +414,13 @@ The host must be online for every run.
 
 ## What the alpha does not protect
 
-The relay operator or root on the VPS can read each team's metadata.
+The operator of your relay, or root on its server, can read each team's metadata.
 This includes team, member, collection, and item names, hosts, commands, and audit records.
 The operator cannot read stored item values without the item keys.
 Stored item values stay sealed with keys on the key-holder machine.
 The relay opens item values in memory for a run that the host permits.
 
-Cloudflare sees traffic in clear.
+A TLS proxy in front of the relay sees traffic in clear. With the setup of [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md), that is Cloudflare.
 Old settings can retain invalid legacy member tokens in plain text after enrollment.
 Device access tokens stay only in process memory.
 Item keys remain plain text in `keys.json`.
@@ -420,12 +434,13 @@ The operator cannot add an owner device through the relay.
 
 The key-holder host must be online for every run.
 This is an alpha with no SLA.
-Relay backups are daily.
+Make backups of the relay with `apassy-relay admin backup` (section 13 of [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md)).
 You must also make a backup of the host's `keys.json` file.
 
 ## Get help
 
-Contact the relay operator who gave you the team code.
+Contact the operator of your relay.
+Report a bug in Apassy at <https://github.com/wydrox/apassy/issues>.
 
 
 ## Script output and installer updates

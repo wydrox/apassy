@@ -375,6 +375,8 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         Sheet::Import => super::import::sheet(app, ctx),
         #[cfg(feature = "vault")]
+        Sheet::Duplicates => super::duplicates::sheet(app, ctx),
+        #[cfg(feature = "vault")]
         Sheet::ResetCompanion => super::companion::reset_sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::NewCredential => super::new_credential::sheet(app, ctx),

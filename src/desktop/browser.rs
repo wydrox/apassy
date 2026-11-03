@@ -27,19 +27,24 @@ use eframe::egui;
 use std::os::unix::net::UnixStream;
 
 use super::DesktopApp;
-use super::owner_check::{NO_ACCOUNT, OwnerRequest, PasskeyAccount, PasskeyRequest, page_text};
+use super::owner_check::{
+    NO_ACCOUNT, OwnerRequest, PasskeyAccount, PasskeyRequest, PasskeyRequestExtensions, page_text,
+};
 use super::owner_cli::bring_to_front;
 use super::owner_socket::{self, Envelope, LineWire, OwnerSocket, PeerGone, WireEnvelope};
 use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::browser::site::Page;
 use crate::browser::webauthn;
 use crate::browser::wire::{
-    self, Command, Data, LoginRow, PasskeyCreateRequest, PasskeyGetRequest, Request, Response,
-    VaultState, WireError,
+    self, Command, Data, LoginRow, PasskeyCreateRequest, PasskeyGetRequest,
+    PasskeyLargeBlobRequest, PasskeyLargeBlobResult, PasskeyPrfResults, PasskeyPrfValues, Request,
+    Response, VaultState, WireError,
 };
 use crate::desktop::model::ModelError;
 use crate::owner::wire::SecretText;
-use crate::vault::{PasskeyAssertion, PasskeyCreated, PasskeyTarget};
+use crate::vault::{
+    LargeBlobOp, LargeBlobResult, PasskeyAssertion, PasskeyCreated, PasskeyPrfInput, PasskeyTarget,
+};
 
 /// A fill dialog closes this long before the socket stops waiting, so the extension
 /// gets `cancelled`, and a late check fills nothing. The deadline starts when the UI
@@ -58,6 +63,69 @@ const ES256: i64 = -7;
 
 /// The browser wire on the socket.
 pub(crate) struct BrowserWire;
+
+/// The WebAuthn extensions of a `passkey_get`, for the owner request. The browser sends
+/// raw WebAuthn PRF inputs, so the vault makes the salts (`hashed: false`).
+fn browser_extensions(request: &PasskeyGetRequest) -> PasskeyRequestExtensions {
+    let input = |values: &PasskeyPrfValues| PasskeyPrfInput {
+        first: values.first.clone(),
+        second: values.second.clone(),
+        hashed: false,
+    };
+    PasskeyRequestExtensions {
+        prf: request
+            .prf
+            .as_ref()
+            .and_then(|prf| prf.eval.as_ref())
+            .map(input),
+        prf_by_credential: request
+            .prf
+            .as_ref()
+            .map(|prf| {
+                prf.eval_by_credential
+                    .iter()
+                    .map(|(id, values)| (id.clone(), input(values)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        large_blob: request.large_blob.as_ref().map(|blob| match blob {
+            PasskeyLargeBlobRequest::Read => LargeBlobOp::Read,
+            PasskeyLargeBlobRequest::Write(bytes) => {
+                LargeBlobOp::Write(zeroize::Zeroizing::new(bytes.clone()))
+            }
+        }),
+    }
+}
+
+/// True when the assertion wrote a large blob into the vault. The write is committed
+/// before the answer goes, so a lost answer leaves the blob stored.
+pub(crate) fn blob_written(assertion: &PasskeyAssertion) -> bool {
+    matches!(assertion.large_blob, Some(LargeBlobResult::Written(true)))
+}
+
+/// The PRF outputs and the largeBlob result of an assertion, for the browser. A read
+/// without a stored blob has no entry.
+fn browser_extension_results(
+    assertion: &PasskeyAssertion,
+) -> (Option<PasskeyPrfResults>, Option<PasskeyLargeBlobResult>) {
+    let prf = assertion.prf.as_ref().map(|output| PasskeyPrfResults {
+        first: SecretText::new(webauthn::encode_bytes(&*output.first)),
+        second: output
+            .second
+            .as_ref()
+            .map(|second| SecretText::new(webauthn::encode_bytes(&**second))),
+    });
+    let large_blob = match &assertion.large_blob {
+        Some(LargeBlobResult::Read(Some(blob))) => Some(PasskeyLargeBlobResult::Data {
+            data: SecretText::new(webauthn::encode_bytes(blob)),
+        }),
+        Some(LargeBlobResult::Read(None)) | None => None,
+        Some(LargeBlobResult::Written(written)) => {
+            Some(PasskeyLargeBlobResult::Written { written: *written })
+        }
+    };
+    (prf, large_blob)
+}
 
 /// One request of the browser socket, with the hang-up state of its connection.
 pub(crate) struct BrowserRequest {
@@ -1065,6 +1133,7 @@ impl DesktopApp {
                 },
                 accounts,
                 chosen,
+                extensions: browser_extensions(request),
             },
             ticket,
             ctx,
@@ -1508,6 +1577,8 @@ impl DesktopApp {
         };
         match done {
             PasskeyDone::Signed(assertion) => {
+                let stored = blob_written(&assertion);
+                let (prf, large_blob) = browser_extension_results(&assertion);
                 let delivered = ticket.send(Response::ok(
                     "Signed.",
                     Data::Passkey {
@@ -1517,10 +1588,18 @@ impl DesktopApp {
                         authenticator_data: webauthn::encode_bytes(&assertion.authenticator_data),
                         signature: webauthn::encode_bytes(&assertion.signature),
                         client_data_json: echo.client_data_json,
+                        algorithm: assertion.algorithm,
+                        prf,
+                        large_blob,
                     },
                 ));
                 if delivered {
                     self.set_ok("You are signed in with a passkey from Apassy.");
+                } else if stored {
+                    // The write is in the vault before the answer goes: say so.
+                    self.set_err(
+                        "The browser stopped waiting. The page got no passkey. The data the page sent is stored with the passkey.",
+                    );
                 } else {
                     self.set_err("The browser stopped waiting. The page got no passkey.");
                 }
