@@ -1,3 +1,4 @@
+import ApassyCompanionKit
 import ApassyVaultDemo
 import ApassyVaultKit
 import AuthenticationServices
