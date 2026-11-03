@@ -5,6 +5,11 @@
 pub mod agent;
 /// The browser extension (ADR 0021): wire, site match, and the native messaging host.
 pub mod browser;
+/// The Apassy Connect account of this Mac (ADR 0037 stage 7, contract
+/// connect-account-v1): the account device key in the Keychain, sign-in, device links,
+/// recovery, and the entitlement token. It needs the vault.
+#[cfg(feature = "vault")]
+pub mod connect;
 /// The `apassy` owner command line (ADR 0017).
 #[cfg(feature = "desktop")]
 pub mod cli;
