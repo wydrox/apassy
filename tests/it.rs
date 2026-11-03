@@ -85,6 +85,7 @@ mod shadow_mode;
 #[cfg(feature = "storage-probe")]
 mod sqlcipher_probe;
 mod sync_schema_upgrade;
+mod tls_front;
 mod trusted_devices;
 mod vault_lifecycle;
 mod vault_migration;
