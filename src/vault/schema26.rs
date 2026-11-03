@@ -19,11 +19,10 @@
 //! All four are local ([`super::merge::LOCAL_TABLES`]): a node belongs to one Mac, so a
 //! pushed copy carries none of their rows, and a merge never reads them.
 //!
-//! Schema 25 is the passkey formats and WebAuthn extension fields of another change,
-//! which this build does not have. This build refuses a file and a synced copy of schema
-//! 25 as it refuses any version that it does not know, and it moves a vault of schema 24
-//! or earlier straight to 26. With the passkey change in the same build, the steps run
-//! in order: 24, 25, 26.
+//! Schema 26 follows schema 25 (the passkey formats and fields of WebAuthn extensions):
+//! a vault of schema 24 or earlier runs 25 and then 26 in one migration. A merge takes a
+//! synced copy of schema 16 to 25 as before: a pushed copy has no row of these tables.
+//! A device of schema 25 or earlier refuses a copy of schema 26 (`UnsupportedSchema`).
 
 use rusqlite::Transaction;
 
@@ -32,9 +31,6 @@ use super::verify_expected_columns_in;
 
 /// The schema version of the cloud agents.
 pub(super) const CLOUD_SCHEMA_VERSION: i64 = 26;
-
-/// The version of another change that this build does not know (see the module text).
-pub(super) const UNKNOWN_SCHEMA_VERSION: i64 = 25;
 
 /// The column and the tables of schema 26. The node row starts empty with the route off.
 const SCHEMA_V26_SQL: &str = "
@@ -68,19 +64,19 @@ pub(super) const COLUMNS: [&str; 4] = [
     "SELECT id, team_id, port, route_on FROM cloud_node LIMIT 0",
 ];
 
-/// The way back to schema 24, for test fixtures and for the rollback notes: a cloud
-/// agent becomes a revoked ordinary agent (a build of schema 24 would take it for a
+/// The way back to schema 25, for test fixtures and for the rollback notes: a cloud
+/// agent becomes a revoked ordinary agent (a build of schema 25 would take it for a
 /// local agent with a token that nobody has), then the tables and the column go.
 #[cfg(test)]
-pub(super) const DOWNGRADE_TO_24_SQL: &str = "
+pub(super) const DOWNGRADE_TO_25_SQL: &str = "
 UPDATE agent SET revoked_at = COALESCE(revoked_at, CAST(strftime('%s', 'now') AS INTEGER))
     WHERE kind = 'cloud';
 DROP TABLE cloud_node;
 DROP TABLE cloud_item;
 DROP TABLE cloud_agent;
 ALTER TABLE agent DROP COLUMN kind;
-UPDATE vault_meta SET schema_version = 24 WHERE id = 1;
-PRAGMA user_version = 24;
+UPDATE vault_meta SET schema_version = 25 WHERE id = 1;
+PRAGMA user_version = 25;
 ";
 
 /// Add schema version 26 in the migration or create transaction. Then the columns of
@@ -145,17 +141,17 @@ mod tests {
             == 1
     }
 
-    /// A vault of schema 24 with one local agent and one item.
-    fn schema24_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
-        let path = dir.path().join("v24.db");
+    /// A vault of schema 25 with one local agent and one item.
+    fn schema25_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("v25.db");
         let mut vault = Vault::create(&path, PASS).unwrap();
         vault.unlock(PASS).unwrap();
         vault.add(api_key("Synthetic")).unwrap();
         vault.register_agent("Synthetic local").unwrap();
         vault.lock().unwrap();
         let conn = raw(&path);
-        conn.execute_batch(DOWNGRADE_TO_24_SQL).unwrap();
-        assert_eq!(version(&conn), 24);
+        conn.execute_batch(DOWNGRADE_TO_25_SQL).unwrap();
+        assert_eq!(version(&conn), 25);
         assert!(!has_table(&conn, "cloud_agent"));
         assert!(conn.prepare("SELECT kind FROM agent").is_err());
         close_conn(conn).unwrap();
@@ -163,9 +159,9 @@ mod tests {
     }
 
     #[test]
-    fn a_schema24_vault_moves_to_26_with_local_agents_and_the_route_off() {
+    fn a_schema25_vault_moves_to_26_with_local_agents_and_the_route_off() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = schema24_file(&dir);
+        let path = schema25_file(&dir);
         let mut vault = Vault::open(&path).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
@@ -193,23 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_migration_keeps_schema_24() {
+    fn a_failed_migration_keeps_schema_25() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = schema24_file(&dir);
+        let path = schema25_file(&dir);
         let mut conn = raw(&path);
         let tx = conn.transaction().unwrap();
         add_schema_v26(&tx).unwrap();
         // Roll back, as a failure of a later step does.
         drop(tx);
-        assert_eq!(version(&conn), 24);
-        assert_eq!(meta_version(&conn), 24);
+        assert_eq!(version(&conn), 25);
+        assert_eq!(meta_version(&conn), 25);
         assert!(!has_table(&conn, "cloud_node"));
         assert!(conn.prepare("SELECT kind FROM agent").is_err());
         close_conn(conn).unwrap();
     }
 
     #[test]
-    fn the_way_back_to_24_revokes_cloud_agents_and_the_next_unlock_moves_to_26_again() {
+    fn the_way_back_to_25_revokes_cloud_agents_and_the_next_unlock_moves_to_26_again() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("v26.db");
         let mut vault = Vault::create(&path, PASS).unwrap();
@@ -225,8 +221,8 @@ mod tests {
         drop(vault);
 
         let conn = raw(&path);
-        conn.execute_batch(DOWNGRADE_TO_24_SQL).unwrap();
-        assert_eq!(version(&conn), 24);
+        conn.execute_batch(DOWNGRADE_TO_25_SQL).unwrap();
+        assert_eq!(version(&conn), 25);
         let revoked: Vec<(i64, bool)> = conn
             .prepare("SELECT id, revoked_at IS NOT NULL FROM agent ORDER BY id")
             .unwrap()
@@ -254,22 +250,25 @@ mod tests {
     }
 
     #[test]
-    fn a_file_of_schema_25_is_refused() {
+    fn a_schema24_vault_runs_25_and_26_and_copies_of_24_to_26_merge() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = schema24_file(&dir);
+        let path = schema25_file(&dir);
         let conn = raw(&path);
-        conn.execute_batch(&format!(
-            "UPDATE vault_meta SET schema_version = {UNKNOWN_SCHEMA_VERSION} WHERE id = 1;
-             PRAGMA user_version = {UNKNOWN_SCHEMA_VERSION};"
-        ))
-        .unwrap();
+        conn.execute_batch(crate::vault::schema25::DOWNGRADE_TO_24_SQL)
+            .unwrap();
+        assert_eq!(version(&conn), 24);
         close_conn(conn).unwrap();
         let mut vault = Vault::open(&path).unwrap();
-        let refused = vault.unlock(PASS).unwrap_err();
-        assert_eq!(refused.kind(), VaultErrorKind::UnsupportedSchema);
-        assert!(!crate::vault::merge::is_mergeable_schema(UNKNOWN_SCHEMA_VERSION));
-        assert!(crate::vault::merge::is_mergeable_schema(CLOUD_SCHEMA_VERSION));
-        assert!(crate::vault::merge::is_mergeable_schema(24));
+        vault.unlock(PASS).unwrap();
+        let conn = vault.conn_ref().unwrap();
+        assert_eq!(version(conn), CLOUD_SCHEMA_VERSION);
+        assert_eq!(meta_version(conn), CLOUD_SCHEMA_VERSION);
+        assert!(has_table(conn, "cloud_node"));
+        for version in [16, 24, 25, CLOUD_SCHEMA_VERSION] {
+            assert!(crate::vault::merge::is_mergeable_schema(version), "{version}");
+        }
+        assert!(!crate::vault::merge::is_mergeable_schema(CLOUD_SCHEMA_VERSION + 1));
+        assert_eq!(CLOUD_SCHEMA_VERSION, crate::vault::SCHEMA_VERSION);
     }
 
     #[test]

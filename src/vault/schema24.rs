@@ -217,7 +217,9 @@ mod tests {
         vault.lock().unwrap();
         let conn = Connection::open_with_flags(&path, OPEN_EXISTING).unwrap();
         apply_key(&conn, PASS).unwrap();
-        conn.execute_batch(super::super::schema26::DOWNGRADE_TO_24_SQL)
+        conn.execute_batch(super::super::schema26::DOWNGRADE_TO_25_SQL)
+            .unwrap();
+        conn.execute_batch(super::super::schema25::DOWNGRADE_TO_24_SQL)
             .unwrap();
         conn.execute_batch(DOWNGRADE_TO_23_SQL).unwrap();
         conn.execute_batch(
