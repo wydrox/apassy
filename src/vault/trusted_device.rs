@@ -214,7 +214,9 @@ fn valid_trust(pin: Option<&str>, alt: &[String]) -> bool {
                 && entry
                     .bytes()
                     .all(|byte| byte.is_ascii_graphic() && byte != b',')
-        });
+        })
+        // The stored JSON list fits the column (schema 28 checks its length too).
+        && alt_json(alt).is_none_or(|json| json.len() <= super::schema28::MAX_ALT_JSON_BYTES);
     pin_ok && alt_ok
 }
 
