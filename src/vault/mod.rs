@@ -91,7 +91,7 @@ pub use agents::{
 pub use bouncer_host::{
     BRAIN_IMAGE, BouncerHost, BouncerHostChange, BouncerHostKind, BouncerHostRole,
     GENERATED_BEARER_BYTES, HOSTING_CONSENT_VERSION, MAX_BEARER_BYTES, MAX_HOST_URL_BYTES,
-    MIN_BEARER_BYTES, docker_run_line, generate_bearer, normalize_url, valid_bearer,
+    MIN_BEARER_BYTES, docker_run_lines, generate_bearer, normalize_url, valid_bearer,
     valid_host_url,
 };
 pub use candidate::{

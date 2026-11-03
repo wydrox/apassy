@@ -1578,8 +1578,8 @@ impl OwnerRequest {
 fn hosting_words(change: &crate::vault::BouncerHostChange) -> String {
     use crate::vault::BouncerHostKind;
     let url = page_text(&change.normalized_url());
-    let sent = "Each bouncer request goes there: the user request, the shell command with the variable names in it, the purpose, and your rule. No secret value, vault path or full project path leaves this Mac, and the bouncer gate still decides on this Mac.";
-    let trust = "A server that someone else controls can make the bouncer run development commands without asking you. It can never allow production, a hard check, secret output or another host.";
+    let sent = "Each bouncer request goes there: the user request, the purpose, and the shell command, with paths in your project and home folder shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this Mac, and the bouncer gate still decides on this Mac.";
+    let trust = crate::desktop::brain_hosting_ui::TRUST_WARNING;
     match change.kind {
         BouncerHostKind::ThisMac => {
             "Run the bouncer brain on this Mac again. Bouncer requests stay on this Mac.".to_owned()

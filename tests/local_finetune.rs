@@ -1139,6 +1139,85 @@ printf '{{"version":"apassy-local-v1+{short}","sha256":"{sha}","checkpoint":"%s/
         );
     }
 
+    /// Plan 0035 unit G, the switch that the app runs (`brain_host::switch`): the owner
+    /// confirms a new server, and the head sets go up before the vault stores it. A
+    /// failed upload keeps the old server; after a good one the new server is the host
+    /// and has the promoted head set.
+    #[test]
+    fn the_hosting_switch_uploads_the_head_sets_before_it_stores_the_server() {
+        use apassy::broker::brain_host;
+        let dir = TempDir::new().expect("dir");
+        let vault = training_vault(&dir);
+        let old = heads_brain(4);
+        let active = train(&vault, &placing_trainer(&dir, SHA_A, "models-a", false));
+        host_on(&vault, &old.url);
+        heads_place::place(&vault, active.id, &old.client()).expect("placed");
+        shadow_rows(&vault, active.id);
+        promote(&vault, &active).expect("promoted");
+        let candidate = train(&vault, &placing_trainer(&dir, SHA_B, "models-b", false));
+        heads_place::place(&vault, candidate.id, &old.client()).expect("placed");
+
+        let new = heads_brain(1);
+        let change = BouncerHostChange {
+            kind: BouncerHostKind::OwnServer,
+            url: new.url.clone(),
+            bearer: Some(SecretValue::new(BRAIN_TOKEN.to_owned())),
+            consent_version: HOSTING_CONSENT_VERSION,
+        };
+        let proof = || {
+            OwnerGate::new(Arc::clone(&vault), None)
+                .authorize(
+                    brain_host::owner_action(BouncerHostRole::Hosting, &change),
+                    OwnerCheck::passphrase(PASS),
+                )
+                .expect("owner check")
+        };
+        let hosting_url = || {
+            with(&vault, |vault| {
+                vault
+                    .bouncer_host(BouncerHostRole::Hosting)
+                    .expect("read")
+                    .expect("row")
+                    .url
+            })
+        };
+        let refused = brain_host::switch(
+            &vault,
+            BouncerHostRole::Hosting,
+            &change,
+            proof(),
+            &new.tls,
+            learning::now(),
+        )
+        .expect_err("the new server is full");
+        assert!(refused.starts_with("Nothing changed"), "{refused}");
+        assert_eq!(hosting_url(), old.url, "the old server stays the host");
+        assert_eq!(
+            uploaded_to(&vault, active.id).as_deref(),
+            Some(old.url.as_str())
+        );
+
+        new.capacity.store(4, Ordering::SeqCst);
+        brain_host::switch(
+            &vault,
+            BouncerHostRole::Hosting,
+            &change,
+            proof(),
+            &new.tls,
+            learning::now(),
+        )
+        .expect("switched");
+        assert_eq!(hosting_url(), new.url);
+        assert_eq!(new.stored(), vec![SHA_A.to_owned(), SHA_B.to_owned()]);
+        for id in [active.id, candidate.id] {
+            assert_eq!(
+                uploaded_to(&vault, id).as_deref(),
+                Some(new.url.as_str()),
+                "{id}"
+            );
+        }
+    }
+
     /// Plan 0035 unit G: a full server (409 `heads_full`) loses the oldest replaced head
     /// set of this owner, and the upload is tried once more.
     #[test]

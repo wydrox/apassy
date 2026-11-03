@@ -34,9 +34,10 @@ const UPDATED = "2026-11-03";
         <li>
           By default the bouncer brain runs on your Mac. Agent commands and your rules are not sent anywhere. If you choose
           to run it on a server of yours (Settings, Bouncer, Runs on, My Server), Apassy first shows what leaves your Mac and
-          asks for Touch ID. Each question then goes to your server over HTTPS and holds the request of the user, the shell
-          command, the stated purpose of the agent, and your rule for it, if there is one. It never holds a secret value,
-          your vault, or a full project path. Your server is yours: Apassy receives none of it. The bouncer gate on your Mac
+          asks for Touch ID. Each question then goes to your server over HTTPS and holds the request of the user, the stated
+          purpose of the agent, and the shell command, with paths in your project and home folder shortened. Apassy also
+          sends it the bouncer heads trained on your decisions: numbers, no text. It never holds a secret value, your vault,
+          or the full paths of your project and home folder. Your server is yours: Apassy receives none of it. The bouncer gate on your Mac
           still decides every run.
         </li>
         <li>The iPhone companion talks to your Mac on your local network only.</li>

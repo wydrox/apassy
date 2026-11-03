@@ -4,6 +4,10 @@
 //! - [`change`] applies a change of one choice with the proof of a fresh owner check
 //!   for exactly that change ([`owner_action`]). The global owner window never covers it
 //!   (`OwnerAction::needs_fresh_local_check`). A return to this Mac needs the check too.
+//! - [`switch`] is [`change`] as the app runs it: a change of the host to an own server
+//!   completes only after the active and the shadow head sets are on that server
+//!   ([`heads_place::place_all`](super::heads_place::place_all), plan 0035 unit G). A
+//!   failed upload stores nothing, so the old host keeps answering.
 //! - [`hosting_client`] builds the client of the chosen host from the vault row: no row
 //!   is this Mac (`None`); an own server is an `https://` client with its bearer token
 //!   from the vault ([`StaticBearer`]); Apassy Connect needs the Connect sign-in of unit
@@ -74,6 +78,70 @@ pub fn change(
         .map_err(|error| vault_message(&error))
 }
 
+/// The client of the host that `change` names, before the vault stores it: an own
+/// server with the bearer of the change. `Ok(None)`: this Mac or Apassy Connect, which
+/// take no head set from this function.
+pub fn change_client(
+    change: &BouncerHostChange,
+    tls: &Arc<TlsClient>,
+) -> Result<Option<BouncerClient>, String> {
+    if change.kind != BouncerHostKind::OwnServer {
+        return Ok(None);
+    }
+    let bearer = change
+        .bearer
+        .as_ref()
+        .and_then(|bearer| StaticBearer::new(Zeroizing::new(bearer.expose().to_owned())))
+        .ok_or_else(|| "Nothing changed. The token of the server is not valid.".to_owned())?;
+    let credential: Arc<dyn BrainCredential> = Arc::new(bearer);
+    BouncerClient::remote(&change.normalized_url(), credential, Arc::clone(tls))
+        .map(Some)
+        .map_err(|reason| {
+            format!("Nothing changed. The address of the server is refused: {reason}")
+        })
+}
+
+/// [`change`] as the app runs it. The proof is checked first; then, for a change of
+/// the host to an own server, the active and the shadow head sets go up to it without
+/// the vault lock (`heads_place::place_all`). Only after every upload succeeds does
+/// [`change`] check the proof again and store the choice. A failed upload stores
+/// nothing, so the promoted head set keeps deciding on the old host.
+pub fn switch(
+    vault: &super::SharedVault,
+    role: BouncerHostRole,
+    change: &BouncerHostChange,
+    proof: OwnerProof,
+    tls: &Arc<TlsClient>,
+    now: u64,
+) -> Result<(), String> {
+    {
+        let guard = super::decide::lock(vault);
+        let open = guard
+            .as_ref()
+            .filter(|vault| !vault.is_locked())
+            .ok_or_else(|| "The vault is locked. Nothing changed.".to_owned())?;
+        proof
+            .check(&owner_action(role, change), &open.epoch())
+            .map_err(|refusal| refusal.message().to_owned())?;
+    }
+    if role == BouncerHostRole::Hosting
+        && let Some(client) = change_client(change, tls)?
+    {
+        super::heads_place::place_all(vault, &client).map_err(|error| {
+            format!(
+                "Nothing changed: the head sets must be on the new host first. {}",
+                error.message()
+            )
+        })?;
+    }
+    let mut guard = super::decide::lock(vault);
+    let open = guard
+        .as_mut()
+        .filter(|vault| !vault.is_locked())
+        .ok_or_else(|| "The vault is locked. Nothing changed.".to_owned())?;
+    self::change(open, role, change, proof, now)
+}
+
 /// The client of the chosen bouncer brain host. `Ok(None)`: this Mac (no row). The
 /// bearer of an own server leaves the vault only into the client, which sends it to
 /// that server alone.
@@ -95,12 +163,11 @@ pub fn hosting_client(
                 .bouncer_host_bearer(BouncerHostRole::Hosting)
                 .map_err(|error| vault_message(&error))?
                 .ok_or_else(|| "The server of the bouncer brain has no token in the vault. Choose the server again.".to_owned())?;
-            let bearer = StaticBearer::new(Zeroizing::new(bearer.expose().to_owned())).ok_or_else(
-                || {
+            let bearer =
+                StaticBearer::new(Zeroizing::new(bearer.expose().to_owned())).ok_or_else(|| {
                     "The token of the bouncer brain server is not valid. Choose the server again."
                         .to_owned()
-                },
-            )?;
+                })?;
             let credential: Arc<dyn BrainCredential> = Arc::new(bearer);
             BouncerClient::remote(&host.url, credential, Arc::clone(tls))
                 .map(Some)

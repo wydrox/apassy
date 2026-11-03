@@ -121,6 +121,7 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
             pattern: false,
             action: ActionKind::Read,
             hosts: &[],
+            remote_brain: false,
         };
         let known = known_state(
             &vault,
@@ -157,6 +158,15 @@ fn legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes() {
             ));
             checked.declarations[0].as_mut().unwrap().scope = Scope::ReadOnly;
             assert_eq!(route(&checked, &facts, &known, &mut ready), Route::Model);
+            // A remote bouncer brain never decides production, read-only too (ADR 0035).
+            let remote = RunFacts {
+                remote_brain: true,
+                ..facts
+            };
+            assert!(matches!(
+                route(&checked, &remote, &known, &mut ready),
+                Route::Ask(ref why, ReasonKind::Production) if why.contains("another host")
+            ));
             checked.declarations[0].as_mut().unwrap().environment = Environment::Staging;
             checked.declarations[0].as_mut().unwrap().scope = Scope::ReadWrite;
             checked.facts[0].production = false;
@@ -363,6 +373,7 @@ fn a_development_label_is_judged_with_the_development_defaults() {
             pattern: false,
             action: ActionKind::Change,
             hosts: &[],
+            remote_brain: false,
         };
         let known = known_state(vault, &items, checked, ActionKind::Change, None, &[]);
         let mut ready = Readiness::new(|| Ok(()));

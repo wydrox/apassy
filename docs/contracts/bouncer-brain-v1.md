@@ -167,7 +167,7 @@ A later version defines the bodies, the limits and the states.
 
 ## 8. Rules
 
-- The client MUST NOT send a secret value, the vault path or an absolute project path. The `state` is the state of ADR 0007 only: the user request, the command, the directory relative to the project, the purpose, the environment variable names and the owner rule.
+- The client MUST NOT send a secret value, the vault path, or the full path of the project or of the home folder of the Mac. The `state` is `bouncer::state_text` only: the user request, the shell command and the stated purpose of the agent. In the command, `bouncer::shorten_paths` writes the project root as `.` and the home folder as `~` (the longest first, only at a path boundary), for a local and a remote brain alike. The broker sends no owner rule (its `instruction` is empty).
 - The server MUST NOT log the `state`, the questions, the answers or the token. It may log counts, latency, status codes and hashes.
 - The whole response of `POST /v1/systemone`, headers included, is at most 64 KiB (the client's cap). With a shadow, the server replaces the shadow with `shadow.error: "shadow_failed"` when the answer would be larger.
 - The deadlines belong to the client: 10 s for each attempt to the bouncer brain on this Mac, 20 s for each attempt to a remote bouncer brain, and one retry after a transport timeout. The server has no deadline field. After the deadline, the bouncer gate asks the owner. On macOS the platform certificate check may take longer than the deadline in rare cases; the result is then a failure, never an allowance.
