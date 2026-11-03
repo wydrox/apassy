@@ -3418,6 +3418,174 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     assert!(no_iphone(&a));
 }
 
+/// An Apple Watch links through the same Connect code (ADR 0039 §6). The confirmation
+/// names the kind before the owner check, the row has kind `watch`, Devices shows
+/// "(Apple Watch)", and "Remove…" removes it like an iPhone: a tombstone, a new question
+/// key, and the relay revokes it.
+#[test]
+fn connect_an_apple_watch_shows_its_kind_and_removes_like_an_iphone() {
+    use crate::broker::approvals::{OwnerAction, OwnerCheck};
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::sync::PendingJoin;
+    use crate::vault::TrustedDeviceKind;
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, Some(&folders.icloud));
+    let id = current_id(&a);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
+    let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
+    a.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(relay.team_code()),
+        "Synthetic MacBook",
+        None,
+    )
+    .expect("fields");
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.questions_settle_for_test();
+    let membership = questions_of(&a).expect("on");
+
+    a.questions_add_iphone(None);
+    settled_frames(&mut a);
+    let link = a.relay_add_mac_link_for_test().expect("a link");
+    let watch_key = crate::sync::DeviceKey::generate().expect("key");
+    let watch_name =
+        crate::questions::device_link::watch_link_device_name("Test Watch", watch_key.public_key())
+            .expect("name");
+    let pending = PendingJoin::request(&link, "", &watch_name).expect("join");
+    a.relay_add_mac_poll_for_test();
+    let links = a.relay_add_mac_links_for_test();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].device_name, watch_name);
+    let text = frames(&mut a);
+    for expected in [
+        "Connect Apple Watch “Test Watch”",
+        "This watch can allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access.",
+        "“Test Watch” asks for the questions of “Personal”. Both devices show:",
+        "Compare every word. Confirm only if all words match.",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains(&watch_name), "the key is not shown: {text}");
+    assert!(
+        !text.contains("an iPhone that answers with Face ID"),
+        "a watch is no iPhone: {text}"
+    );
+    assert!(text.contains(&pending.safety), "{text}");
+
+    // The owner check is the same check, for exactly this link; its words name the watch.
+    a.relay_ask_confirm_for_test(links[0].id);
+    let request = a.owner.check.as_ref().expect("owner check").request.clone();
+    assert!(
+        matches!(request, OwnerRequest::ConfirmQuestionsDevice { ref vault, .. } if *vault == id),
+        "{request:?}"
+    );
+    assert_eq!(
+        request.action(),
+        OwnerAction::ConfirmSyncDevice {
+            link_id: links[0].id,
+            device_name: watch_name.clone(),
+            public_key: links[0].public_key.clone(),
+        }
+    );
+    assert!(
+        request
+            .describe()
+            .starts_with("Connect Apple Watch “Test Watch” to the questions of this vault"),
+        "{}",
+        request.describe()
+    );
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.relay_settle_for_test();
+    assert_eq!(
+        a.status_text,
+        "Connected. Test Watch (Apple Watch) can now allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access.",
+        "{}",
+        a.status_text
+    );
+    let joined = pending.poll().expect("poll").expect("confirmed");
+    assert_eq!(joined.member().team_id(), membership.team_id);
+    let row = a
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .trusted_devices()
+                .expect("read")
+                .into_iter()
+                .find(|device| device.kind != TrustedDeviceKind::Mac)
+        })
+        .expect("open")
+        .expect("the row of the watch");
+    assert_eq!(row.kind, TrustedDeviceKind::Watch);
+    assert_eq!(row.name, "Test Watch");
+    assert_eq!(row.sign_key, joined.member().public_key());
+    assert_eq!(row.answer_key.as_deref(), Some(watch_key.public_key()));
+    let text = frames(&mut a);
+    assert!(
+        !text.contains("An older"),
+        "a watch never offers to remove an iPhone: {text}"
+    );
+
+    // Devices names the kind.
+    a.ui.sheet = None;
+    a.questions_settle_for_test();
+    let text = frames(&mut a);
+    assert!(text.contains("Test Watch (Apple Watch)"), "{text}");
+    let rows = a.questions_devices();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.name.as_str(), row.removable))
+            .collect::<Vec<_>>(),
+        [
+            ("Synthetic MacBook", false),
+            ("Test Watch (Apple Watch)", true)
+        ]
+    );
+
+    // "Remove…" as for an iPhone.
+    let key_before = a
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.question_key().expect("read").expect("key").key_id())
+        .expect("open");
+    a.questions_ask_remove(&row.uuid, None);
+    let text = frames(&mut a);
+    for expected in [
+        "Remove “Test Watch (Apple Watch)” from the questions of “Personal”?",
+        "so this Apple Watch cannot read the next questions",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    a.questions_remove_device(&row.uuid);
+    assert!(a.owner.check.is_none(), "removal needs no owner check");
+    a.questions_settle_for_test();
+    assert!(
+        !relay.devices().contains(&joined.device_id()),
+        "the relay revokes the watch"
+    );
+    let (gone, removed, key_after) = a
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            (
+                vault.trusted_device(&row.uuid).expect("read").is_none(),
+                vault.trusted_key_removed(&row.sign_key).expect("read")
+                    && vault
+                        .trusted_key_removed(watch_key.public_key())
+                        .expect("read"),
+                vault.question_key().expect("read").expect("key").key_id(),
+            )
+        })
+        .expect("open");
+    assert!(gone && removed);
+    assert_ne!(key_after, key_before, "a new question key");
+}
+
 /// A second Mac of a vault in iCloud Drive that has a questions team: "Send questions
 /// through the relay" joins that team, never makes another one. Its owner check names
 /// the team of the link; Mac A confirms with the safety words and its own check; then

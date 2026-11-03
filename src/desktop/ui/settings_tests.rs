@@ -671,6 +671,45 @@ fn device_rows_say_how_each_device_answers() {
     );
 }
 
+/// An Apple Watch in Devices (ADR 0039): "(Apple Watch)" after its name, what it can do,
+/// no push state (it registers no push token in v1), and the words of its removal.
+#[test]
+fn a_watch_row_names_its_kind() {
+    use super::super::sync::questions::{device_label, device_words, removal_words};
+    use crate::vault::{TrustedDevice, TrustedDeviceKind};
+    let device = |kind, answer_key: Option<Vec<u8>>| TrustedDevice {
+        uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+        name: "Test Watch".to_owned(),
+        kind,
+        relay_devices: Default::default(),
+        sign_key: vec![4; 65],
+        answer_key,
+        created_at: 0,
+        updated_at: 0,
+        updated_by: String::new(),
+    };
+    let watch = device(TrustedDeviceKind::Watch, Some(vec![4; 65]));
+    assert_eq!(device_label(&watch), "Test Watch (Apple Watch)");
+    for push in [None, Some(true), Some(false)] {
+        assert_eq!(
+            device_words(&watch, false, push),
+            "Apple Watch · allows access requests once, on a wrist"
+        );
+    }
+    assert_eq!(
+        device_words(&device(TrustedDeviceKind::Watch, None), false, None),
+        "Apple Watch · its answer key is missing; connect it again"
+    );
+    assert_eq!(
+        device_label(&device(TrustedDeviceKind::Iphone, None)),
+        "Test Watch"
+    );
+    assert!(
+        removal_words(TrustedDeviceKind::Watch, false)
+            .contains("so this Apple Watch cannot read the next questions")
+    );
+}
+
 #[test]
 fn bouncer_status_requires_inference_readiness_including_external_mode() {
     use crate::broker::model_server::{Problem, ServerState};

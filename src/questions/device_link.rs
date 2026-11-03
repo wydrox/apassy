@@ -11,6 +11,12 @@
 //! the 64 bytes of a relay device name. The proof of the confirmation names the whole
 //! `device_name`, so the owner check covers the answer key too.
 //!
+//! An Apple Watch (ADR 0039 §2) sends its answer key the same way after the marker
+//! ` ~W`: `<name> ~W<44 characters>`, so its name before the marker is at most 17 bytes.
+//! The marker carries the kind: the Mac that confirms the link writes a `watch` row. The
+//! functions for an iPhone ([`link_device_name`], [`split_link_device_name`]) never take
+//! a watch key; [`split_linked_device_name`] tells the two kinds apart.
+//!
 //! The relay can change a name, as it can change any field that the safety words do not
 //! cover. A changed answer key gives the relay nothing: an answer still needs the question
 //! key of the vault, which the relay never has. The iPhone checks that its row holds its
@@ -29,6 +35,10 @@ const KEY_MARK: &str = " ~";
 const KEY_CHARS: usize = 44;
 /// The longest name before the key.
 const MAX_SHOWN_NAME_BYTES: usize = MAX_LINK_NAME_BYTES - KEY_MARK.len() - KEY_CHARS;
+/// Between the key mark and the key of a watch: the kind (ADR 0039 §2).
+const WATCH_KIND: char = 'W';
+/// The longest name of a watch before its key: 17 bytes.
+const MAX_SHOWN_WATCH_NAME_BYTES: usize = MAX_SHOWN_NAME_BYTES - WATCH_KIND.len_utf8();
 
 type U256 = [u64; 4];
 
@@ -206,41 +216,93 @@ pub fn decompress_point(compressed: &[u8]) -> Option<Vec<u8>> {
     Some(point)
 }
 
-/// The `device_name` of the link of an iPhone: its name, cut to fit, then the answer key
-/// (`answer_key`, a P-256 point in X9.63 form). `None` for a key of another form.
-pub fn link_device_name(name: &str, answer_key: &[u8]) -> Option<String> {
-    let key = encode_b64u(&compress_point(answer_key)?);
+/// The kind of device that a link name with an answer key names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkedDeviceKind {
+    /// `<name> ~<44 characters>`.
+    Iphone,
+    /// `<name> ~W<44 characters>` (ADR 0039 §2).
+    Watch,
+}
+
+/// `name` without control characters, trimmed, and cut on a character to at most `max`
+/// bytes; `fallback` when nothing is left.
+fn cut_name(name: &str, max: usize, fallback: &str) -> String {
     let mut shown = String::new();
     for ch in name.trim().chars().filter(|ch| !ch.is_control()) {
-        if shown.len() + ch.len_utf8() > MAX_SHOWN_NAME_BYTES {
+        if shown.len() + ch.len_utf8() > max {
             break;
         }
         shown.push(ch);
     }
     let shown = shown.trim();
-    let shown = if shown.is_empty() { "iPhone" } else { shown };
+    if shown.is_empty() {
+        fallback.to_owned()
+    } else {
+        shown.to_owned()
+    }
+}
+
+/// The `device_name` of the link of an iPhone: its name, cut to fit, then the answer key
+/// (`answer_key`, a P-256 point in X9.63 form). `None` for a key of another form.
+pub fn link_device_name(name: &str, answer_key: &[u8]) -> Option<String> {
+    let key = encode_b64u(&compress_point(answer_key)?);
+    let shown = cut_name(name, MAX_SHOWN_NAME_BYTES, "iPhone");
     Some(format!("{shown}{KEY_MARK}{key}"))
 }
 
-/// The name and the answer key in the `device_name` of a link. A name without a key (a
-/// Mac, or an older iPhone) is the name as it is, with `None`.
+/// The `device_name` of the link of an Apple Watch: `<name> ~W<44 characters: b64u of
+/// the compressed point>`, at most 64 bytes. The name is cut on a character to at most
+/// 17 bytes. `answer_key` is a P-256 point in X9.63 form (65 bytes), as for
+/// [`link_device_name`]; `None` for a key of another form.
+pub fn watch_link_device_name(name: &str, answer_key: &[u8]) -> Option<String> {
+    let key = encode_b64u(&compress_point(answer_key)?);
+    let shown = cut_name(name, MAX_SHOWN_WATCH_NAME_BYTES, "Apple Watch");
+    Some(format!("{shown}{KEY_MARK}{WATCH_KIND}{key}"))
+}
+
+/// The name before the last key mark and the answer key after it, when the text after
+/// the mark is the key of a device of `kind`: for a watch the kind letter first, then
+/// 44 b64u characters of a point on the curve.
+fn key_after_mark(text: &str, kind: LinkedDeviceKind) -> Option<(String, Vec<u8>)> {
+    let (name, rest) = text.rsplit_once(KEY_MARK)?;
+    let key = match kind {
+        LinkedDeviceKind::Iphone => rest,
+        LinkedDeviceKind::Watch => rest.strip_prefix(WATCH_KIND)?,
+    };
+    if key.len() != KEY_CHARS || name.trim().is_empty() {
+        return None;
+    }
+    let point = decompress_point(&decode_b64u(key)?)?;
+    Some((name.trim().to_owned(), point))
+}
+
+/// The name and the answer key in the `device_name` of the link of an iPhone. A name
+/// without a key (a Mac, or an older iPhone) is the name as it is, with `None`. So is the
+/// name of a watch: its key is never taken as the key of an iPhone.
 pub fn split_link_device_name(text: &str) -> (String, Option<Vec<u8>>) {
-    let found = text.rsplit_once(KEY_MARK).and_then(|(name, key)| {
-        if key.len() != KEY_CHARS || name.trim().is_empty() {
-            return None;
-        }
-        let point = decompress_point(&decode_b64u(key)?)?;
-        Some((name.trim().to_owned(), point))
-    });
-    match found {
+    match key_after_mark(text, LinkedDeviceKind::Iphone) {
         Some((name, point)) => (name, Some(point)),
         None => (text.trim().to_owned(), None),
     }
 }
 
-/// The name of a link for the screen: the name without an answer key.
+/// The shown name of a link and, when the name ends in a valid marker and key, the kind
+/// of the device and its answer key in X9.63 form. A name without a valid key is the
+/// whole name, trimmed, with `None`.
+pub fn split_linked_device_name(text: &str) -> (String, Option<(LinkedDeviceKind, Vec<u8>)>) {
+    for kind in [LinkedDeviceKind::Iphone, LinkedDeviceKind::Watch] {
+        if let Some((name, point)) = key_after_mark(text, kind) {
+            return (name, Some((kind, point)));
+        }
+    }
+    (text.trim().to_owned(), None)
+}
+
+/// The name of a link for the screen: the name without an answer key of an iPhone or a
+/// watch.
 pub fn shown_link_name(text: &str) -> String {
-    split_link_device_name(text).0
+    split_linked_device_name(text).0
 }
 
 #[cfg(test)]
@@ -318,5 +380,120 @@ mod tests {
         let broken = format!("Test iPhone ~{}", "A".repeat(44));
         assert_eq!(split_link_device_name(&broken), (broken.clone(), None));
         assert_eq!(link_device_name("Test iPhone", &key[..33]), None);
+    }
+
+    #[test]
+    fn both_kinds_round_trip_and_never_mix() {
+        let key = decode_b64u(ANSWER_PUBLIC).unwrap();
+        let phone = link_device_name("Test iPhone", &key).unwrap();
+        let watch = watch_link_device_name("Test Watch", &key).unwrap();
+        assert!(watch.starts_with("Test Watch ~W"), "{watch}");
+        assert_eq!(watch.len(), "Test Watch".len() + 3 + 44);
+        assert_eq!(
+            split_linked_device_name(&phone),
+            (
+                "Test iPhone".to_owned(),
+                Some((LinkedDeviceKind::Iphone, key.clone()))
+            )
+        );
+        assert_eq!(
+            split_linked_device_name(&watch),
+            (
+                "Test Watch".to_owned(),
+                Some((LinkedDeviceKind::Watch, key.clone()))
+            )
+        );
+        assert_eq!(shown_link_name(&watch), "Test Watch");
+        assert_eq!(shown_link_name(&phone), "Test iPhone");
+        // The iPhone path takes no watch key: a 45-character rest is not an iPhone key.
+        assert_eq!(split_link_device_name(&watch), (watch.clone(), None));
+        assert_eq!(watch_link_device_name("Test Watch", &key[..33]), None);
+    }
+
+    #[test]
+    fn a_broken_watch_key_keeps_the_whole_name() {
+        let key = decode_b64u(ANSWER_PUBLIC).unwrap();
+        let watch = watch_link_device_name("Test Watch", &key).unwrap();
+        // x = p is on no point; a key of 43 or 45 characters is no key.
+        let mut off = [0xffu8; 33];
+        off[0] = 0x02;
+        let short = &watch[..watch.len() - 1];
+        let long = format!("{watch}A");
+        for text in [
+            format!("Test Watch ~W{}", encode_b64u(&off)),
+            short.to_owned(),
+            long,
+            format!(" ~W{}", &watch[watch.len() - 44..]),
+        ] {
+            assert_eq!(
+                split_linked_device_name(&text),
+                (text.trim().to_owned(), None),
+                "{text}"
+            );
+            assert_eq!(shown_link_name(&text), text.trim());
+        }
+        // ` ~X` is not a kind.
+        let other = watch.replacen(" ~W", " ~X", 1);
+        assert_eq!(split_linked_device_name(&other), (other.clone(), None));
+    }
+
+    #[test]
+    fn a_watch_name_is_cut_on_a_character_to_17_bytes() {
+        let key = decode_b64u(ANSWER_PUBLIC).unwrap();
+        for name in [
+            "Zegarek Rafała ąęśćż",
+            "ŻŻŻŻŻŻŻŻŻŻ",
+            "⌚⌚⌚⌚⌚⌚⌚",
+            "Apple Watch of a very long name",
+        ] {
+            let link = watch_link_device_name(name, &key).unwrap();
+            assert!(link.len() <= MAX_LINK_NAME_BYTES, "{link}");
+            let (shown, found) = split_linked_device_name(&link);
+            assert!(shown.len() <= 17, "{shown:?}");
+            assert!(name.starts_with(&shown), "{shown:?}");
+            assert_eq!(found, Some((LinkedDeviceKind::Watch, key.clone())));
+        }
+        // 2-byte characters: eight fit in 17 bytes, the ninth does not.
+        let (shown, _) =
+            split_linked_device_name(&watch_link_device_name("ŻŻŻŻŻŻŻŻŻŻ", &key).unwrap());
+        assert_eq!(shown, "ŻŻŻŻŻŻŻŻ");
+        assert!(
+            watch_link_device_name(" \t", &key)
+                .unwrap()
+                .starts_with("Apple Watch ~W")
+        );
+        // An iPhone name of the longest size still parses the same.
+        let phone = link_device_name("Rafał's very long iPhone name", &key).unwrap();
+        assert_eq!(
+            split_link_device_name(&phone).0,
+            split_linked_device_name(&phone).0
+        );
+    }
+
+    #[test]
+    fn old_iphone_names_parse_as_before() {
+        let key = decode_b64u(ANSWER_PUBLIC).unwrap();
+        let compressed = encode_b64u(&compress_point(&key).unwrap());
+        for text in [
+            format!("Test iPhone ~{compressed}"),
+            format!("  Test iPhone ~{compressed}  "),
+            format!("A ~ B ~{compressed}"),
+            "Mac mini".to_owned(),
+            format!("Test iPhone ~{}", "A".repeat(44)),
+            format!(" ~{compressed}"),
+            "".to_owned(),
+        ] {
+            let (name, found) = split_link_device_name(&text);
+            let (linked_name, linked) = split_linked_device_name(&text);
+            assert_eq!(name, linked_name, "{text:?}");
+            assert_eq!(
+                found,
+                linked.map(|(kind, point)| {
+                    assert_eq!(kind, LinkedDeviceKind::Iphone);
+                    point
+                }),
+                "{text:?}"
+            );
+        }
     }
 }

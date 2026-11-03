@@ -160,17 +160,20 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 ];
 
 /// The previous schema. Schemas 20 through 23 add only local authority/state;
-/// older copies preserve synced semantics and acquire no code authority.
-pub(super) const UPGRADABLE_SCHEMA: i64 = 22;
+/// older copies preserve synced semantics and acquire no code authority. Schema 24
+/// adds the kind `watch` to `trusted_device` (ADR 0039): an older copy has only `mac`
+/// and `iphone` rows, which the table of this schema takes as they are.
+pub(super) const UPGRADABLE_SCHEMA: i64 = 23;
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
 pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERSION;
 
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
-// Schemas 20 through 23 add local state only; future synced schemas require another merge step.
+// Schemas 20 through 23 add local state only, and schema 24 only widens a `CHECK` of a
+// synced table; future synced schemas require another merge step.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 6);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 7);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades.

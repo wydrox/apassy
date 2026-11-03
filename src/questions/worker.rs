@@ -1646,11 +1646,14 @@ impl Shared {
         let Some(run) = run else {
             return Verdict::Ended;
         };
+        // An Apple Watch answers access requests only (ADR 0039 §3): for a run question
+        // it is no device of this vault, whatever it answers.
         let Some(device) = device.filter(|device| {
-            device
-                .relay_devices
-                .get(&active.team_id)
-                .is_none_or(|id| *id == record.device_id)
+            device.kind != TrustedDeviceKind::Watch
+                && device
+                    .relay_devices
+                    .get(&active.team_id)
+                    .is_none_or(|id| *id == record.device_id)
         }) else {
             return refuse(&unknown, "the device is not a device of this vault");
         };

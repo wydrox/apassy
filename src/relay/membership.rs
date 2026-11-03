@@ -19,9 +19,9 @@
 //! `OwnerAction::EnableRelayQuestions`) also makes the question key of the vault when it
 //! has none (`Vault::ensure_question_key`) and registers this Mac as a trusted device with
 //! the public key of the membership and its device number in the team. Only these calls
-//! write the row of a Mac; the questions waiter never does. The row of an iPhone is
-//! written by the Mac that confirms its link ([`register_linked_device`]), from the keys
-//! of the link. The rows sync to the other devices, which then accept their answers.
+//! write the row of a Mac; the questions waiter never does. The row of an iPhone or an
+//! Apple Watch is written by the Mac that confirms its link ([`register_linked_device`]),
+//! from the keys of the link. The rows sync to the other devices, which then accept their answers.
 //! Turning them off takes the purpose away and never touches relay sync
 //! ([`disable_questions`]).
 //!
@@ -336,9 +336,10 @@ fn keep_questions_membership(
 
 /// Write the row of a device that this Mac confirmed through a device link of the team
 /// `team_id` (relay-questions-v1 section 5.2). The caller passed the owner check for
-/// `OwnerAction::ConfirmSyncDevice` of exactly this link. An iPhone sends its answer key
-/// with the link (`crate::questions::device_link`); its row gets a new UUID, the name of
-/// the link, the relay key of the link as `sign_key`, the answer key, and its device
+/// `OwnerAction::ConfirmSyncDevice` of exactly this link. An iPhone or an Apple Watch
+/// sends its answer key with the link (`crate::questions::device_link`); its row gets a
+/// new UUID, the name of the link, the kind of the marker (`~` an iPhone, `~W` a watch,
+/// ADR 0039 §2), the relay key of the link as `sign_key`, the answer key, and its device
 /// number. A link without an answer key (a Mac) writes nothing: a Mac writes its own row
 /// after its own owner check. `AlreadyExists`: a key of the link is a key of a removed
 /// device.
@@ -349,12 +350,16 @@ pub fn register_linked_device(
     link_device_name: &str,
     sign_key: &[u8],
 ) -> VaultResult<Option<TrustedDevice>> {
-    let (name, answer_key) =
-        crate::questions::device_link::split_link_device_name(link_device_name);
-    let Some(answer_key) = answer_key else {
+    use crate::questions::device_link::{LinkedDeviceKind, split_linked_device_name};
+    let (name, found) = split_linked_device_name(link_device_name);
+    let Some((linked, answer_key)) = found else {
         return Ok(None);
     };
-    let name = clean_name(&name, "iPhone");
+    let (kind, fallback) = match linked {
+        LinkedDeviceKind::Iphone => (TrustedDeviceKind::Iphone, "iPhone"),
+        LinkedDeviceKind::Watch => (TrustedDeviceKind::Watch, "Apple Watch"),
+    };
+    let name = clean_name(&name, fallback);
     // The number is checked first: a removal would make the new keys unusable.
     if !valid_team_id(team_id) || relay_device_id == 0 {
         return Err(crate::vault::VaultError::new(VaultErrorKind::InvalidInput));
@@ -367,13 +372,7 @@ pub fn register_linked_device(
         return Err(crate::vault::VaultError::new(VaultErrorKind::AlreadyExists));
     }
     let uuid = new_device_uuid()?;
-    vault.register_trusted_device(
-        &uuid,
-        &name,
-        TrustedDeviceKind::Iphone,
-        sign_key,
-        Some(&answer_key),
-    )?;
+    vault.register_trusted_device(&uuid, &name, kind, sign_key, Some(&answer_key))?;
     vault.set_trusted_device_relay_id(&uuid, team_id, relay_device_id)?;
     vault.trusted_device(&uuid)
 }
@@ -506,6 +505,58 @@ mod tests {
         ] {
             assert!(!valid_device_uuid(bad), "{bad}");
         }
+    }
+
+    /// The marker of the confirmed link picks the kind of the row (ADR 0039 §2): `~W` a
+    /// watch, `~` an iPhone; a name without a valid key writes nothing.
+    #[test]
+    fn a_linked_device_row_takes_the_kind_of_its_marker() {
+        use crate::questions::device_link::{link_device_name, watch_link_device_name};
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("l.db"), "synthetic-link-pass").unwrap();
+        vault.unlock("synthetic-link-pass").unwrap();
+        let team = "t_7k2m5q4x3c";
+        let (watch_relay, watch_answer) = (
+            DeviceKey::generate().unwrap(),
+            DeviceKey::generate().unwrap(),
+        );
+        let name = watch_link_device_name("Test Watch", watch_answer.public_key()).unwrap();
+        let watch = register_linked_device(&mut vault, team, 5, &name, watch_relay.public_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(watch.kind, TrustedDeviceKind::Watch);
+        assert_eq!(watch.name, "Test Watch");
+        assert_eq!(watch.sign_key, watch_relay.public_key());
+        assert_eq!(watch.answer_key.as_deref(), Some(watch_answer.public_key()));
+        assert_eq!(watch.relay_devices.get(team), Some(&5));
+
+        let (phone_relay, phone_answer) = (
+            DeviceKey::generate().unwrap(),
+            DeviceKey::generate().unwrap(),
+        );
+        let name = link_device_name("Test iPhone", phone_answer.public_key()).unwrap();
+        let phone = register_linked_device(&mut vault, team, 6, &name, phone_relay.public_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(phone.kind, TrustedDeviceKind::Iphone);
+        assert_eq!(phone.name, "Test iPhone");
+        assert_eq!(phone.answer_key.as_deref(), Some(phone_answer.public_key()));
+
+        // A Mac, and a watch marker with a point off the curve: no row.
+        let other = DeviceKey::generate().unwrap();
+        let mut off = [0xffu8; 33];
+        off[0] = 0x02;
+        for name in [
+            "Mac mini".to_owned(),
+            format!("Test Watch ~W{}", crate::sync::encode_b64u(&off)),
+        ] {
+            assert_eq!(
+                register_linked_device(&mut vault, team, 7, &name, other.public_key()).unwrap(),
+                None,
+                "{name}"
+            );
+        }
+        assert_eq!(vault.trusted_devices().unwrap().len(), 2);
     }
 
     #[test]
