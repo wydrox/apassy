@@ -252,9 +252,12 @@ pub struct OwnerPrompt {
     pub allowed_answer_kinds: Vec<String>,
 }
 
+/// The answers of the card. "Allow as dev" and "Allow as prod" name no item, so they are
+/// offered only for a run with exactly one unconfirmed item
+/// ([`QuestionInfo::classifiable_item`]); any other run offers "approve".
 pub fn allowed_answer_kinds(question: &QuestionInfo) -> Vec<String> {
     let mut kinds = vec!["deny".to_owned(), "deny_with_comment".to_owned()];
-    if question.items.iter().any(|item| item.unconfirmed) {
+    if question.classifiable_item().is_some() {
         kinds.extend([
             "approve_as_development".into(),
             "approve_as_production".into(),
@@ -1659,5 +1662,38 @@ mod tests {
             }
             .valid_for(&question)
         );
+    }
+
+    /// Finding 1 of the 0.5.16 review: the iPhone answer names no item, so a run with a
+    /// labeled dev key and an unlabeled password, plus a second unlabeled item, offers
+    /// no "Allow as dev" or "Allow as prod" and asks as any other run.
+    #[test]
+    fn classify_answers_need_exactly_one_unconfirmed_item() {
+        let item = |item_id, production, unconfirmed| QuestionItem {
+            item_id,
+            name: format!("item {item_id}"),
+            production,
+            unconfirmed,
+            always_ask: false,
+        };
+        let mut question = QuestionInfo::default();
+        question.items = vec![item(1, false, false), item(2, false, true)];
+        assert_eq!(
+            allowed_answer_kinds(&question),
+            [
+                "deny",
+                "deny_with_comment",
+                "approve_as_development",
+                "approve_as_production"
+            ]
+        );
+        question.items.push(item(3, false, true));
+        assert_eq!(
+            allowed_answer_kinds(&question),
+            ["deny", "deny_with_comment", "approve"]
+        );
+        assert!(!Choice::ApproveAsDevelopment.valid_for(&question));
+        assert!(!Choice::ApproveAsProduction.valid_for(&question));
+        assert!(Choice::Approve.valid_for(&question));
     }
 }

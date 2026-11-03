@@ -266,8 +266,8 @@ struct QuestionsModelTests {
             for unknown in [false, true] {
                 var card = Self.card(validAnswers: [], unconfirmed: false)
                 card.question.production = !production
-                card.question.items = card.question.items.map {
-                    var item = $0; item.production = production; item.unconfirmed = unknown; return item
+                card.question.items = card.question.items.enumerated().map { index, item in
+                    var item = item; item.production = production; item.unconfirmed = unknown && index == 0; return item
                 }
                 let bar = AnswerBar.make(for: card)
                 #expect(bar.primary?.answer.kind == (unknown ? .approveAsDevelopment : .approve))
@@ -280,6 +280,17 @@ struct QuestionsModelTests {
         let mixed = AnswerBar.make(for: PreviewVaultService.sampleQuestion().card!)
         #expect(mixed.primary?.answer.kind == .approveAsDevelopment)
         #expect(mixed.secondaryApproval?.label == "Allow as prod")
+    }
+
+    @Test("two unconfirmed items offer Allow, not Allow as dev: the answer names no item")
+    func twoUnknownItemsAskAsAnyOther() {
+        var card = Self.card(validAnswers: [])
+        card.question.items = card.question.items.map { var item = $0; item.unconfirmed = true; return item }
+        #expect(card.question.items.count >= 2)
+        let bar = AnswerBar.make(for: card)
+        #expect(bar.primary?.answer.kind == .approve)
+        #expect(bar.primary?.label == "Allow")
+        #expect(bar.secondaryApproval == nil)
     }
 
     @Test("the Face ID reason names the agent without control characters or quotes, and the answer")

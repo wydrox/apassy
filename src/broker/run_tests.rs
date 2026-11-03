@@ -517,3 +517,148 @@ fn a_development_label_is_judged_with_the_development_defaults() {
         );
     }
 }
+
+/// Finding 1 of the 0.5.16 review: "Allow as dev" named one item, but the broker labeled
+/// every unconfirmed item of the run, and a development label lowers the default risk
+/// and reversibility. A dev key with an unlabeled password offers no classification;
+/// with one unconfirmed item, only that item is labeled.
+#[test]
+fn a_classification_labels_only_the_one_unconfirmed_item() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-classify-pass").unwrap();
+    vault.unlock("synthetic-classify-pass").unwrap();
+    let add = |vault: &mut Vault, title: &str, kind, field: &str, env_name: &str| {
+        let item = vault
+            .add(ItemDraft {
+                title: title.into(),
+                kind,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: field.into(),
+                    value: SecretValue::new(format!("FAKE-{env_name}-only")),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        vault.set_env_binding(item.id, env_name, field).unwrap();
+        // No signal: production only by default, every value a default.
+        let unlabeled = Declaration {
+            project: "project".to_owned(),
+            environment: providers::DEFAULT_ENVIRONMENT,
+            risk: providers::DEFAULT_RISK,
+            scope: providers::DEFAULT_SCOPE,
+            reversibility: providers::DEFAULT_REVERSIBILITY,
+        };
+        vault
+            .save_declaration(item.id, &unlabeled, None, None)
+            .unwrap();
+        vault
+            .set_declaration_sources(
+                item.id,
+                &DeclarationSources {
+                    environment: DeclarationSource::Default,
+                    risk: DeclarationSource::Default,
+                    scope: DeclarationSource::Default,
+                    reversibility: DeclarationSource::Default,
+                },
+            )
+            .unwrap();
+        item.id
+    };
+    let dev_key = add(
+        &mut vault,
+        "Synthetic dev key",
+        CredentialKind::ApiKey,
+        "token",
+        "SYNTH_DEV_KEY",
+    );
+    let password = add(
+        &mut vault,
+        "Synthetic shop password",
+        CredentialKind::Login,
+        "password",
+        "SYNTH_SHOP_PASSWORD",
+    );
+    let (agent, _) = vault.register_agent("Synthetic classifier").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [dev_key, password];
+    let command = vec!["node".to_owned(), "script.js".into()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Seed the development database.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Seed the development database."),
+        host_session: None,
+    };
+    let analysis = Analysis::default();
+    let offers = |checked: &Checked| {
+        let facts = RunFacts {
+            analysis: &analysis,
+            has_user_request: true,
+            pattern: false,
+            action: ActionKind::Change,
+            hosts: &[],
+        };
+        let mut ready = Readiness::new(|| Ok(()));
+        valid_answers(checked, &facts, None, false, &mut ready)
+            .contains(&AnswerKind::CorrectEnvironment)
+    };
+
+    // Two unconfirmed items: no device offers "Allow as dev", and nothing is labeled.
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.facts.iter().all(|facts| facts.unconfirmed));
+    assert!(!offers(&checked));
+    for item in items {
+        assert_eq!(classified_index(&checked, &items, item), None);
+        assert!(!save_classification(
+            &mut vault,
+            &checked,
+            &items,
+            (Environment::Development, item)
+        ));
+    }
+    assert_eq!(
+        vault.declaration(dev_key).unwrap().unwrap().environment,
+        providers::DEFAULT_ENVIRONMENT
+    );
+
+    // The owner labels the password production; the dev key is the one unconfirmed item.
+    vault
+        .set_declaration_environment(password, Environment::Production)
+        .unwrap();
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.facts[0].unconfirmed);
+    assert!(!checked.facts[1].unconfirmed);
+    assert!(offers(&checked));
+    assert_eq!(classified_index(&checked, &items, password), None);
+    assert!(!save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, password)
+    ));
+    let password_labeled = vault.declaration(password).unwrap();
+    assert!(save_classification(
+        &mut vault,
+        &checked,
+        &items,
+        (Environment::Development, dev_key)
+    ));
+    assert_eq!(
+        vault.declaration(dev_key).unwrap().unwrap().environment,
+        Environment::Development
+    );
+    // The other item of the run keeps its declaration and its careful defaults.
+    assert_eq!(vault.declaration(password).unwrap(), password_labeled);
+    let password_now = vault.declaration(password).unwrap().unwrap();
+    assert_eq!(password_now.environment, Environment::Production);
+    assert_eq!(password_now.risk, providers::DEFAULT_RISK);
+    assert_eq!(password_now.reversibility, providers::DEFAULT_REVERSIBILITY);
+}

@@ -1929,6 +1929,12 @@ fn current_remote_kinds_settle_with_signed_comments_and_guarded_classification()
                 item.unconfirmed = false;
             }
         }
+        // The one unconfirmed item, the only item that a classification labels.
+        let unknown = run
+            .question
+            .classifiable_item()
+            .map(|item| item.item_id)
+            .unwrap_or_default();
         let waiting = world.ask(run, Duration::from_secs(60));
         let opened = phone.next(&[]);
         assert_eq!(opened.card.v, 1);
@@ -1948,10 +1954,12 @@ fn current_remote_kinds_settle_with_signed_comments_and_guarded_classification()
         let ended = settled(waiting);
         match choice {
             Choice::ApproveAsDevelopment => {
-                assert_eq!(ended.classification, Some(Environment::Development))
+                assert_eq!(ended.classification, Some(Environment::Development));
+                assert_eq!(ended.classified_item, Some(unknown));
             }
             Choice::ApproveAsProduction => {
-                assert_eq!(ended.classification, Some(Environment::Production))
+                assert_eq!(ended.classification, Some(Environment::Production));
+                assert_eq!(ended.classified_item, Some(unknown));
             }
             Choice::DenyWithComment { comment } => {
                 assert_eq!(ended.outcome, ApprovalOutcome::Denied);

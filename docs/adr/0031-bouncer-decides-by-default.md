@@ -154,8 +154,13 @@ default risk is no default source; owner and strong-signal values do not change,
 staging and production get the careful defaults.
 
 Unknown environments offer Allow as dev, Allow as prod, Dismiss, and Dismiss with
-comment. Either allow classifies the unknown items of this exact pending run
-and approves it once. Known environments offer Allow, Dismiss, and Dismiss with
+comment. Either allow classifies the unknown item of this exact pending run
+and approves it once. Since the 0.5.16 review the answer exists only when exactly
+one item of the run is unknown, and it labels only that item: the owner check names
+one item and the iPhone answer names none, and a development label lowers the
+default risk and reversibility, so labeling every unknown item downgraded a bundled
+production credential. A run with two or more unknown items offers Allow and labels
+nothing. Known environments offer Allow, Dismiss, and Dismiss with
 comment, with remembering only as a secondary checkbox, off by default.
 Classification is carried by the exact guarded owner answer; the broker saves
 it after its unchanged-authorization check and before execution. This prevents

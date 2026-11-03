@@ -1330,7 +1330,7 @@ impl OwnerRequest {
                 environment,
                 ..
             } => format!(
-                "Allow this run for \"{agent}\" and mark its unknown credentials (including \"{name}\") as {}.",
+                "Allow this run for \"{agent}\" and mark \"{name}\" as {}.",
                 environment.as_str()
             ),
             Self::AnswerSuggestion {

@@ -47,9 +47,11 @@ struct AnswerBar: Equatable {
     var primary: Choice?
     var menu: [Choice]
 
-    /// Unknown item facts take precedence over confirmed production items.
+    /// Unknown item facts take precedence over confirmed production items. "Allow as dev"
+    /// and "Allow as prod" name no item: the Mac labels the one unconfirmed item, so a card
+    /// with two or more unconfirmed items offers "Allow", as the Mac does.
     static func make(for card: QuestionCard) -> AnswerBar {
-        let unknown = card.question.items.contains(where: \.unconfirmed)
+        let unknown = card.question.items.filter(\.unconfirmed).count == 1
         return AnswerBar(
             deny: Choice(answer: RemoteAnswer(kind: .deny), label: "Dismiss", destructive: true),
             secondaryApproval: unknown ? Choice(answer: RemoteAnswer(kind: .approveAsProduction), label: "Allow as prod") : nil,

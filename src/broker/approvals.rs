@@ -131,6 +131,18 @@ pub struct QuestionInfo {
     pub valid_answers: Vec<AnswerKind>,
 }
 
+impl QuestionInfo {
+    /// The one item that "Allow as dev" or "Allow as prod" labels: the only unconfirmed
+    /// item of the run. `None` with no unconfirmed item, and with two or more: the
+    /// owner check and the iPhone answer name a single item (the iPhone answer names
+    /// none), so neither device offers the answer and the run asks as any other.
+    pub fn classifiable_item(&self) -> Option<&QuestionItem> {
+        let mut unconfirmed = self.items.iter().filter(|item| item.unconfirmed);
+        let item = unconfirmed.next()?;
+        unconfirmed.next().is_none().then_some(item)
+    }
+}
+
 impl Default for QuestionInfo {
     fn default() -> Self {
         Self {
@@ -363,7 +375,12 @@ pub struct GrantChoice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settled {
     pub refusal_comment: Option<String>,
+    /// "Allow as dev" or "Allow as prod": the environment of [`Self::classified_item`].
     pub classification: Option<crate::vault::Environment>,
+    /// The one item that the classification labels
+    /// ([`QuestionInfo::classifiable_item`]). No other item of the run changes. Set
+    /// exactly when `classification` is set.
+    pub classified_item: Option<u64>,
     pub outcome: ApprovalOutcome,
     pub method: Option<CheckMethod>,
     pub grant: Option<GrantChoice>,
@@ -387,6 +404,7 @@ impl Settled {
             outcome,
             refusal_comment: None,
             classification: None,
+            classified_item: None,
             method: None,
             grant: None,
             answer: None,
@@ -538,7 +556,7 @@ impl ApprovalRefusal {
 #[derive(Debug, Clone)]
 struct Decision {
     refusal_comment: Option<String>,
-    classification: Option<crate::vault::Environment>,
+    classification: Option<(crate::vault::Environment, u64)>,
     answer: Answer,
     method: Option<CheckMethod>,
     grant: Option<GrantChoice>,
@@ -720,11 +738,10 @@ impl ApprovalQueue {
                 .question
                 .valid_answers
                 .contains(&AnswerKind::CorrectEnvironment)
-            || !waiting
+            || waiting
                 .question
-                .items
-                .iter()
-                .any(|item| item.item_id == item_id && item.unconfirmed)
+                .classifiable_item()
+                .is_none_or(|item| item.item_id != item_id)
             || !state
                 .questions
                 .get(&confirmed.id)
@@ -1031,11 +1048,10 @@ impl ApprovalQueue {
             .questions
             .get(&run.id)
             .is_some_and(|q| proof.check(&expected, &q.session).is_ok())
-            || !run
+            || run
                 .question
-                .items
-                .iter()
-                .any(|item| item.item_id == item_id && item.unconfirmed)
+                .classifiable_item()
+                .is_none_or(|item| item.item_id != item_id)
             || !matches!(
                 environment,
                 crate::vault::Environment::Development | crate::vault::Environment::Production
@@ -1057,7 +1073,7 @@ impl ApprovalQueue {
             None,
             None,
         );
-        state.decisions.get_mut(&run.id).unwrap().classification = Some(environment);
+        state.decisions.get_mut(&run.id).unwrap().classification = Some((environment, item_id));
         self.changed.notify_all();
         true
     }
@@ -1463,7 +1479,8 @@ impl ApprovalQueue {
                 return Ok(Settled {
                     outcome,
                     refusal_comment: decision.refusal_comment,
-                    classification: decision.classification,
+                    classification: decision.classification.map(|(environment, _)| environment),
+                    classified_item: decision.classification.map(|(_, item_id)| item_id),
                     method: decision.method,
                     grant: decision.grant,
                     answer: decision.remember,
@@ -1606,7 +1623,69 @@ mod tests {
                     settled.classification,
                     (end == "happy").then_some(environment)
                 );
+                assert_eq!(settled.classified_item, (end == "happy").then_some(7));
             }
+        }
+    }
+
+    /// Finding 1 of the 0.5.16 review: "Allow as dev" named one item but labeled every
+    /// unconfirmed item of the run. With two unconfirmed items no device may classify.
+    #[test]
+    fn classification_needs_exactly_one_unconfirmed_item() {
+        let item = |item_id, unconfirmed| QuestionItem {
+            item_id,
+            unconfirmed,
+            ..Default::default()
+        };
+        let mut question = QuestionInfo::default();
+        assert!(question.classifiable_item().is_none());
+        question.items = vec![item(7, false), item(8, true)];
+        assert_eq!(question.classifiable_item().map(|i| i.item_id), Some(8));
+        question.items = vec![item(7, true), item(8, true)];
+        assert!(question.classifiable_item().is_none());
+
+        for (case, environment) in [
+            ("local", crate::vault::Environment::Development),
+            ("remote", crate::vault::Environment::Development),
+            ("remote", crate::vault::Environment::Production),
+        ] {
+            let queue = Arc::new(ApprovalQueue::new());
+            let mut template = run();
+            template.question.items = vec![item(7, true), item(8, true)];
+            let q = Arc::clone(&queue);
+            let waiter = std::thread::spawn(move || {
+                q.wait_for_question(
+                    template,
+                    1,
+                    [1; 32],
+                    [0; 32],
+                    Duration::from_secs(5),
+                    || true,
+                )
+            });
+            let id = wait_until_pending(&queue);
+            let pending = queue.pending()[0].clone();
+            let action = if case == "local" {
+                OwnerAction::QuestionDevelopment {
+                    run_id: id,
+                    item_id: 7,
+                }
+            } else {
+                OwnerAction::ClassifyRemoteRun {
+                    run: pending.clone(),
+                    environment,
+                }
+            };
+            let proof = OwnerProof::issue_for_test(action, [1; 32], Instant::now());
+            assert!(
+                !queue.classify_and_approve(&pending, environment, 7, proof),
+                "{case}"
+            );
+            assert!(queue.deny(id));
+            let settled = waiter.join().unwrap().unwrap();
+            assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+            assert!(settled.classification.is_none());
+            assert!(settled.classified_item.is_none());
         }
     }
 
