@@ -15,9 +15,13 @@
 //! the waiter clears its own copy when the vault locks, changes, or the questions go off.
 //! Nothing is kept on disk.
 
+use std::collections::BTreeSet;
+
 use crate::desktop::DesktopApp;
+use crate::desktop::ui::bouncer::{self, Environment};
 use crate::questions::feed::Feed;
 use crate::questions::{OtherFeed, OtherMac};
+use crate::vault::{TrustedDevice, TrustedDeviceKind};
 
 /// What this Mac can show of the feed of another Mac (section 7.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,25 +48,9 @@ pub(crate) struct RemoteMac {
     pub(crate) received_at: u64,
 }
 
-/// The devices that Agents and Decisions show.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) enum DeviceScope {
-    /// This Mac and every other Mac with a feed.
-    #[default]
-    All,
-    /// This Mac only.
-    ThisMac,
-    /// One other Mac, by its `trusted_device` id.
-    Other(String),
-}
-
-/// The scope of Agents and Decisions: "Showing [devices] in [projects]".
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ActivityScope {
-    pub(crate) device: DeviceScope,
-    /// One project label, or `None` for all projects.
-    pub(crate) project: Option<String>,
-}
+/// The scope of the Bouncer pages. It lives with the pages (`ui::bouncer`), so the demo
+/// build has it too.
+pub(crate) use crate::desktop::ui::bouncer::{ActivityScope, DeviceScope};
 
 impl From<&OtherFeed> for RemoteFeedState {
     fn from(feed: &OtherFeed) -> Self {
@@ -129,12 +117,77 @@ impl DesktopApp {
         };
         if let Some(rows) = changed {
             self.remote_macs = rows;
+            self.ui.bouncer.feeds_changed();
         }
     }
 
     /// The vault locked, or another one opens: the other Macs go at once.
     pub(crate) fn forget_remote_feeds(&mut self) {
         self.remote_macs.clear();
+    }
+}
+
+/// The environments of the scope bar (implementation-plan-bouncer-section §1): this Mac
+/// first, then every live `trusted_device` of kind `mac` of the vault with the age of its
+/// feed, then the Macs that never reported, dimmed.
+///
+/// `this_name` is the name of this Mac's own `trusted_device` row ("This Mac" when it has
+/// none), and `own` the UUIDs of this Mac's rows: they are never another environment. A
+/// Mac with a feed but without a row (a row that did not sync yet) still shows, by the
+/// name of its feed.
+pub(crate) fn environments(
+    this_name: &str,
+    own: &BTreeSet<String>,
+    devices: &[TrustedDevice],
+    macs: &[RemoteMac],
+) -> Vec<Environment> {
+    let mut envs = vec![Environment::this_mac(this_name)];
+    for mac in macs.iter().filter(|mac| !own.contains(&mac.device)) {
+        envs.push(environment_of(mac));
+    }
+    for device in devices {
+        if device.kind != TrustedDeviceKind::Mac
+            || own.contains(&device.uuid)
+            || macs.iter().any(|mac| mac.device == device.uuid)
+        {
+            continue;
+        }
+        envs.push(Environment {
+            scope: DeviceScope::Other(device.uuid.clone()),
+            name: shown_name(&device.name, None),
+            reported_at: None,
+            never_reported: true,
+            note: None,
+        });
+    }
+    bouncer::sort_environments(&mut envs);
+    envs
+}
+
+/// The environment of a Mac with a feed: the age is the feed's `generated_at` (a time in
+/// the future reads as now); a feed that this Mac cannot open counts from its arrival.
+fn environment_of(mac: &RemoteMac) -> Environment {
+    let (reported_at, feed, note) = match &mac.state {
+        RemoteFeedState::Ready(feed) => (feed.generated_at, Some(feed), None),
+        RemoteFeedState::NeedsSync => (mac.received_at, None, Some("Sync this vault to see")),
+        RemoteFeedState::NeedsUpdate => (mac.received_at, None, Some("Update Apassy to see")),
+    };
+    let name = shown_name(&mac.name, feed);
+    Environment {
+        scope: DeviceScope::Other(mac.device.clone()),
+        note: note.map(|start| format!("{start} the agents of {name}.")),
+        name,
+        reported_at: Some(reported_at),
+        never_reported: false,
+    }
+}
+
+/// The name of another Mac: its `trusted_device` row, else the name in its feed.
+fn shown_name(row: &str, feed: Option<&Feed>) -> String {
+    match (row.trim(), feed) {
+        ("", Some(feed)) if !feed.mac.name.trim().is_empty() => bouncer::clip(&feed.mac.name),
+        ("", _) => "Another Mac".to_owned(),
+        (name, _) => bouncer::clip(name),
     }
 }
 
@@ -224,5 +277,78 @@ mod tests {
         app.remote_macs = vec![row];
         app.poll_remote_feeds();
         assert!(app.remote_macs.is_empty(), "no vault session");
+    }
+
+    fn trusted(uuid: &str, name: &str, kind: TrustedDeviceKind) -> TrustedDevice {
+        TrustedDevice {
+            uuid: uuid.to_owned(),
+            name: name.to_owned(),
+            kind,
+            relay_devices: Default::default(),
+            sign_key: Vec::new(),
+            answer_key: None,
+            created_at: 1_790_000_000,
+            updated_at: 0,
+            updated_by: String::new(),
+        }
+    }
+
+    /// The scope bar lists this Mac first, then each other Mac with the age of its
+    /// feed, then a Mac of the vault that never reported, last and dimmed. An iPhone is
+    /// no environment, and this Mac's own row is not another Mac.
+    #[test]
+    fn the_environments_are_this_mac_then_reporting_macs_then_never_reported_ones() {
+        let me = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d";
+        let never = "3e0b8f6c-2a4c-4d5e-9f9a-7b3c4d5e6f70";
+        let devices = vec![
+            trusted(me, "Mac mini (office)", TrustedDeviceKind::Mac),
+            trusted(never, "iMac (home)", TrustedDeviceKind::Mac),
+            trusted(OTHER, "Studio Mac", TrustedDeviceKind::Mac),
+            trusted(
+                "4f1c9a7d-3b5d-4e6f-8a0b-8c4d5e6f7081",
+                "Test iPhone",
+                TrustedDeviceKind::Iphone,
+            ),
+        ];
+        let own: BTreeSet<String> = [me.to_owned()].into();
+        let macs = vec![RemoteMac::from(&other(OtherFeed::Ready(feed())))];
+        let envs = environments("Mac mini (office)", &own, &devices, &macs);
+        let names: Vec<&str> = envs.iter().map(|env| env.name.as_str()).collect();
+        assert_eq!(names, ["Mac mini (office)", "Studio Mac", "iMac (home)"]);
+        assert_eq!(envs[0].scope, DeviceScope::ThisMac);
+        assert_eq!(envs[1].reported_at, Some(feed().generated_at));
+        assert!(envs[2].never_reported);
+        let now = feed().generated_at + 60;
+        assert!(envs[2].dimmed(now), "never reported is dimmed");
+        assert!(!envs[1].dimmed(now));
+        assert_eq!(envs[0].menu_detail(now, 0), "This Mac");
+        assert_eq!(envs[2].menu_detail(now, 0), "Never reported");
+        assert_eq!(envs[1].menu_detail(now, 0), "1 min ago");
+        // A feed older than 24 hours is dimmed everywhere.
+        let later = feed().generated_at + 24 * 3_600 + 1;
+        assert!(envs[1].dimmed(later));
+        assert!(envs[1].stale(later));
+    }
+
+    /// With one Mac, the list still has it: the menu shows (frame 12b).
+    #[test]
+    fn one_mac_is_one_environment() {
+        let envs = environments("", &BTreeSet::new(), &[], &[]);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].name, "This Mac");
+        assert!(envs[0].is_this_mac());
+    }
+
+    /// A feed this Mac cannot open still names its Mac, with the text that says why.
+    #[test]
+    fn an_unreadable_feed_is_an_environment_with_a_note() {
+        let macs = vec![RemoteMac::from(&other(OtherFeed::NeedsUpdate))];
+        let envs = environments("Here", &BTreeSet::new(), &[], &macs);
+        assert_eq!(envs.len(), 2);
+        assert_eq!(
+            envs[1].note.as_deref(),
+            Some("Update Apassy to see the agents of Studio Mac.")
+        );
+        assert_eq!(envs[1].reported_at, Some(1_790_000_041));
     }
 }
