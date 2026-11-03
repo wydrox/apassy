@@ -287,6 +287,12 @@ struct AddMac {
     /// The sealed keys for a confirmed iPhone or Apple Watch, the expiry of the code, the
     /// shown name of the device, and whether it is a watch.
     handoff: Option<(crate::questions::envelope::Sealed, u64, String, bool)>,
+    /// The link names this Mac's node (a pinned node team): "via your Mac", Copy, and
+    /// the Tailscale line of frame 2c.
+    node: bool,
+    /// The iPhone or Apple Watch that this sheet added, and whether it is a watch: frame
+    /// 2c of the questions mode.
+    added_device: Option<(String, bool)>,
 }
 
 impl AddMac {
@@ -303,6 +309,8 @@ impl AddMac {
             via,
             channel: None,
             handoff: None,
+            node: false,
+            added_device: None,
         }
     }
 }
@@ -470,6 +478,11 @@ pub(crate) struct RelayUi {
 }
 
 impl RelayUi {
+    /// Whether the sheet of "Add a device…" (any mode) is open for the vault `id`.
+    pub(crate) fn add_open_for(&self, id: &str) -> bool {
+        self.add.as_ref().is_some_and(|add| add.id == id)
+    }
+
     /// The open vault changed: its sheets and their codes go.
     pub(crate) fn forget_open_vault(&mut self) {
         self.add = None;
@@ -1426,6 +1439,11 @@ impl DesktopApp {
     /// A relay sheet closed: "Add a device…" refuses the Macs that wait for its link
     /// (contract section 7.1 step 4), and a join for a vault of this list stops.
     pub(crate) fn relay_sheet_closed(&mut self) {
+        // A move before its join stops; an ended move's sheet is seen.
+        if let Some(id) = self.sync.relay.add.as_ref().map(|add| add.id.clone()) {
+            self.questions_cancel_move(&id);
+        }
+        self.questions_move_seen(false);
         if let Some(add) = self.sync.relay.add.take() {
             let waiting: Vec<u64> = add
                 .links
@@ -2144,7 +2162,9 @@ impl DesktopApp {
             ),
         };
         let via = client.as_ref().ok().cloned();
-        self.sync.relay.add = Some(AddMac::new(id, client.err(), via.clone()));
+        let mut add = AddMac::new(id, client.err(), via.clone());
+        add.node = advertise.is_some();
+        self.sync.relay.add = Some(add);
         if let Some(client) = via {
             self.relay_spawn(id, Job::NewLink, move || {
                 Reply::Link(client.create_link().and_then(|code| match &advertise {
@@ -2376,7 +2396,10 @@ impl DesktopApp {
                         .and_then(|add| add.via.as_ref())
                         .map(|client| client.team_id().to_owned());
                     if let Some(team) = team {
-                        self.questions_device_joined(id, &team);
+                        self.questions_device_joined(id, &team, &name);
+                    }
+                    if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
+                        add.added_device = Some((name.clone(), watch));
                     }
                     let channel = self
                         .sync
@@ -3507,6 +3530,9 @@ pub(super) fn add_mac_sheet(
     // A removed Mac cannot add one: its link works no more, and a new call fails at once.
     let removed = !iphone && app.relay_removed(&entry.id);
     let link = link.filter(|_| added.is_none() && !removed);
+    if iphone {
+        return questions_add_sheet(app, ctx, entry, link, qr, links, error, older);
+    }
     let (title, intro, asks) = if iphone {
         (
             format!("Connect your iPhone to “{}”", entry.name),
@@ -3704,6 +3730,257 @@ pub(super) fn add_mac_sheet(
         super::cancel_sheet(app, ctx);
     }
     response.escape
+}
+
+/// The width of the QR code of the move sheet (frame 4b) in points, about.
+const MOVE_QR_POINTS: f32 = 140.0;
+
+/// The questions mode of "Add a device…": the sheet of "Add an iPhone or a Mac…" and of
+/// "Move Approvals to This Mac…" in Settings > Devices, with the frames and the exact
+/// texts of `docs/design/devices-settings-mockup.html`: 2a the link, 2b the safety
+/// words, 2c done; 4b the move, 4c moved, 4d the old entry still on Apassy relay.
+#[allow(clippy::too_many_arguments)]
+fn questions_add_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    entry: &VaultEntry,
+    link: Option<Zeroizing<String>>,
+    qr: Option<QrModules>,
+    links: Vec<PendingLink>,
+    error: Option<String>,
+    older: Option<(crate::vault::TrustedDevice, String)>,
+) -> bool {
+    use super::super::devices::{self, Kind, LinkStep, MovePhase, Route, StepChoice};
+    let Some(add) = app.sync.relay.add.as_ref() else {
+        return false;
+    };
+    let node = add.node;
+    let added = add.added.clone();
+    let added_device = add.added_device.clone();
+    let seconds_left = add
+        .code
+        .as_ref()
+        .map(|code| code.expires_at.saturating_sub(kit::now()));
+    let route = if node { Route::Mac } else { Route::Relay };
+    let step = LinkStep {
+        route,
+        shown: link
+            .as_ref()
+            .filter(|_| node)
+            .map(|link| devices::shown_link(link)),
+        seconds_left: seconds_left.filter(|_| link.is_some()),
+    };
+    let moving = app.questions_move_sheet(&entry.id);
+    let moved = app.questions_moved(&entry.id).cloned();
+    let removing = moving
+        .as_ref()
+        .is_some_and(|(_, removing)| *removing || added_device.is_some());
+    let deciding =
+        app.relay_busy(&entry.id, Job::Confirm) || app.relay_busy(&entry.id, Job::Refuse);
+    // The first device that asks with the safety words: frame 2b.
+    let asking = links
+        .iter()
+        .find(|pending| pending.safety.is_some())
+        .cloned()
+        .filter(|_| added.is_none() && !removing && moved.is_none());
+    let bound_words = asking.as_ref().and_then(|pending| {
+        let add = app.sync.relay.add.as_ref()?;
+        let channel = add.channel.as_ref()?;
+        let client = add.via.as_ref()?;
+        channel.mac_safety(client.team_id(), &pending.public_key, &pending.device_name)
+    });
+    let mut choice = None;
+    let mut check = false;
+    let mut refuse_old = None;
+    let mut remove_older = false;
+    let mut keep_older = false;
+    let qr_view = |ui: &mut egui::Ui, points: f32| {
+        if let Some(qr) = &qr {
+            draw_qr(ui, qr, points, "Device link QR code");
+        }
+    };
+    // The progress and the error of the sheet, and a device that asks with an older
+    // link.
+    let extra =
+        |ui: &mut egui::Ui, check: &mut bool, new_link: &mut bool, refuse_old: &mut Option<u64>| {
+            for job in [Job::NewLink, Job::Confirm, Job::Refuse] {
+                progress(app, ui, &entry.id, job);
+            }
+            if let Some(error) = &error {
+                kit::tone_note(ui, error, Tone::Critical);
+                ui.horizontal(|ui| {
+                    *check = kit::small_button(ui, "Check Again", Style::Bordered).clicked();
+                    if link.is_none() {
+                        *new_link = kit::small_button(ui, devices::NEW_LINK, Style::Link).clicked();
+                    }
+                });
+            }
+            for pending in links.iter().filter(|pending| pending.safety.is_none()) {
+                ui.add_space(6.0);
+                kit::paragraph(
+                    ui,
+                    format!(
+                        "“{}” asks to join with an older link. Refuse it, and make a new link.",
+                        shown_link_name(&pending.device_name)
+                    ),
+                    Font::Callout,
+                    kit::palette().label,
+                );
+                if kit::small_button(ui, "Refuse", Style::Bordered).clicked() {
+                    *refuse_old = Some(pending.id);
+                }
+            }
+        };
+    let mut new_link = false;
+    let response = kit::sheet(ctx, "sync-relay-add-mac", 440.0, |ui| {
+        if let Some(moved) = &moved {
+            choice = if moved.failed {
+                devices::old_entry_step(ui, false)
+            } else {
+                devices::moved_step(ui, &moved.joined, moved.removed, &moved.watches)
+            };
+            return;
+        }
+        if let Some((iphone, _)) = moving.as_ref().filter(|_| removing) {
+            devices::move_step(
+                ui,
+                iphone,
+                MovePhase::Removing,
+                None,
+                |_| {},
+                |ui| {
+                    extra(ui, &mut check, &mut new_link, &mut refuse_old);
+                },
+            );
+            return;
+        }
+        if let Some((name, watch)) = &added_device {
+            choice = devices::added_step(ui, name, *watch, node, |ui| {
+                let Some((device, _)) = &older else {
+                    return;
+                };
+                let kind = if device.kind == TrustedDeviceKind::Watch {
+                    "Apple Watch"
+                } else {
+                    "iPhone"
+                };
+                kit::paragraph(
+                    ui,
+                    format!(
+                        "An older {kind} '{}' is still paired. Remove it?",
+                        device.name
+                    ),
+                    Font::Callout,
+                    kit::palette().label,
+                );
+                ui.horizontal(|ui| {
+                    remove_older = kit::button(ui, "Remove", Style::Bordered).clicked();
+                    keep_older = kit::button(ui, "Keep", Style::Bordered).clicked();
+                });
+                ui.add_space(8.0);
+            });
+            return;
+        }
+        if let Some(added) = &added {
+            // A confirmation whose keys the vault did not keep: the result and Done.
+            kit::tone_note(ui, added, Tone::Critical);
+            kit::sheet_buttons(
+                ui,
+                |_| {},
+                |ui| {
+                    if kit::button(ui, "Done", Style::Prominent).clicked() {
+                        choice = Some(StepChoice::Done);
+                    }
+                },
+            );
+            return;
+        }
+        if let Some(pending) = &asking {
+            let (shown, found) = split_linked_device_name(&pending.device_name);
+            let kind = match found {
+                Some((LinkedDeviceKind::Iphone, _)) => Kind::Iphone,
+                Some((LinkedDeviceKind::Watch, _)) => Kind::Watch,
+                None => Kind::Mac,
+            };
+            let words = bound_words
+                .as_deref()
+                .or(pending.safety.as_deref())
+                .unwrap_or_default();
+            choice = devices::join_step(ui, &shown, kind, words, route, !deciding, |ui| {
+                if kind == Kind::Watch {
+                    // What a watch can do is visible before Touch ID (ADR 0039 §2).
+                    ui.add_space(6.0);
+                    kit::note(ui, WATCH_CONFIRM_LINE);
+                }
+                extra(ui, &mut check, &mut new_link, &mut refuse_old);
+            });
+            return;
+        }
+        if let Some((iphone, _)) = &moving {
+            choice = devices::move_step(
+                ui,
+                iphone,
+                MovePhase::Scan,
+                Some(&step),
+                |ui| qr_view(ui, MOVE_QR_POINTS),
+                |ui| extra(ui, &mut check, &mut new_link, &mut refuse_old),
+            );
+            return;
+        }
+        choice = devices::link_step(
+            ui,
+            &step,
+            |ui| qr_view(ui, LINK_QR_POINTS),
+            |ui| extra(ui, &mut check, &mut new_link, &mut refuse_old),
+        );
+    });
+    if remove_older || keep_older {
+        if let Some(add) = app.sync.relay.add.as_mut()
+            && !add.older.is_empty()
+        {
+            add.older.remove(0);
+        }
+        if remove_older && let Some((device, team)) = older {
+            app.ask_owner(OwnerRequest::RemoveOlderIphone { device, team }, Some(ctx));
+        }
+        return false;
+    }
+    if check {
+        app.relay_add_mac_poll();
+    } else if let Some(link_id) = refuse_old {
+        app.relay_refuse_link(link_id);
+    } else if new_link {
+        app.relay_add_iphone_start(&entry.id);
+    }
+    match choice {
+        Some(StepChoice::Copy) => {
+            if let Some(link) = &link {
+                ctx.copy_text(link.to_string());
+                app.set_ok("The link is copied. It works once, for 10 minutes.");
+            }
+        }
+        Some(StepChoice::NewLink) => app.relay_add_iphone_start(&entry.id),
+        Some(StepChoice::Confirm) => {
+            if let Some(pending) = &asking {
+                app.relay_ask_confirm(pending.id, Some(ctx));
+            }
+        }
+        Some(StepChoice::Refuse) => {
+            if let Some(pending) = &asking {
+                app.relay_refuse_link(pending.id);
+            }
+        }
+        Some(StepChoice::Later) => {
+            app.questions_move_seen(true);
+            super::cancel_sheet(app, ctx);
+        }
+        Some(StepChoice::Cancel | StepChoice::Done | StepChoice::TryAgain) => {
+            super::cancel_sheet(app, ctx);
+        }
+        None => {}
+    }
+    // After the join there is no cancel: the end of the move runs.
+    response.escape && !removing
 }
 
 /// The title of the confirmation of a watch link (ADR 0039 §2).

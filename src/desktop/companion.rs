@@ -147,6 +147,9 @@ pub(crate) fn now() -> u64 {
 
 impl CompanionFlows {
     /// True while a worker thread makes a pairing window.
+    // Unused since showing Settings > Devices never stops the listener (plan S2–S3, N7
+    // follow-up); W2 removes it.
+    #[allow(dead_code)]
     pub(crate) fn opening_window(&self) -> bool {
         self.opening.is_some()
     }
