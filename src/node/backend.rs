@@ -14,8 +14,13 @@
 //!   cloud agent may see (`sync_items`). An item is named by its uid at this boundary.
 //!   The node never stores a value: values come from the vault only at a release, in the
 //!   order of the run's items (`release`).
-//! - Cloud agents with an item list and a token lifetime (`create_agent`). The token is
-//!   in the answer once; the node keeps only its hash.
+//! - Cloud agents with an item list (`create_agent`). A bearer token now
+//!   (`TokenIssue::Now`, the CLI fallback) is in the answer once; the node keeps only its
+//!   hash. An agent of the MCP authorization flow (`TokenIssue::Later`) has no token until
+//!   its client trades the code of an allowed connect request (`decide_connect`).
+//! - Connect requests: a remote agent opens `/oauth/authorize`, the host loop sees the
+//!   request in `pending_connects`, and the owner allows it for an agent or denies it
+//!   (`decide_connect`).
 //! - Runs: the host loop of the app waits for pending runs (`wait_pending`), decides each
 //!   with the broker, and answers with `release` or `deny`.
 //!
@@ -152,24 +157,88 @@ pub struct SyncReport {
     pub unchanged: usize,
 }
 
+/// When a new cloud agent gets its bearer token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenIssue {
+    /// Now, in the answer, for 1 to 365 days: the CLI fallback
+    /// (`apassy agents add-remote`).
+    Now { lifetime_days: u32 },
+    /// Later, from the MCP authorization flow: the agent has no live token until the
+    /// owner allows a connect request for it and its client trades the code. Each access
+    /// token then lives `ACCESS_TOKEN_SECS` of the relay (24 h) and is refreshed.
+    Later,
+}
+
 /// A new cloud agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCloudAgent {
     /// 1 to 64 bytes, no control character.
     pub name: String,
     /// The uids of the live catalog items it may use, at most 500. It sees nothing else.
+    /// An agent of the flow starts with none.
     pub items: Vec<String>,
-    /// 1 to 365 days.
-    pub lifetime_days: u32,
+    pub token: TokenIssue,
 }
 
 /// A cloud agent that was just made.
 #[derive(Debug)]
 pub struct CreatedAgent {
     pub agent_id: NodeAgentId,
-    /// The bearer token of the agent, shown once. The node keeps only its hash.
-    pub token: NodeSecret,
+    /// The bearer token of the agent, shown once (`TokenIssue::Now`); `None` for
+    /// `TokenIssue::Later`. The node keeps only its hash.
+    pub token: Option<NodeSecret>,
+    /// When the token ends; for `TokenIssue::Later`, the time it was made (no token
+    /// lives).
     pub expires_at: u64,
+}
+
+/// A connect request of the MCP authorization flow that waits for the owner. Its texts
+/// come from the remote client: none of them is verified. The owner checks that the
+/// browser page shows the same `code`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingConnect {
+    /// The id of the request, for `decide_connect`. Not a secret.
+    pub id: String,
+    /// The client that registered with the node (RFC 7591). The same client id with a
+    /// live agent of the vault reconnects to that agent.
+    pub client_id: String,
+    /// The name the client gave: cleaned, at most 64 bytes. `None`: the app says
+    /// "MCP client".
+    pub client_name: Option<String>,
+    /// The match code on the browser page, such as `K7Q-4MD`.
+    pub code: String,
+    pub created_at: u64,
+    /// When the request ends unanswered (300 s after it came).
+    pub expires_at: u64,
+}
+
+/// The owner's answer to a connect request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectDecision {
+    /// Connect the client to this agent of this team (made with `TokenIssue::Later`, or
+    /// the agent the client connected before).
+    Allow {
+        team: NodeTeamId,
+        agent: NodeAgentId,
+    },
+    Deny,
+}
+
+/// How an agent reaches the node now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentAccess {
+    /// The agent is revoked.
+    pub revoked: bool,
+    /// When its live bearer token ends; `None`: it has no live token now (not connected
+    /// yet, expired, or dropped).
+    pub token_expires_at: Option<u64>,
+    /// The OAuth client of its live connection; `None`: no live connection of the flow
+    /// (a CLI token, or not connected).
+    pub client_id: Option<String>,
+    /// When the live connection was made: the first token of its refresh family.
+    pub connected_at: Option<u64>,
+    /// When the refresh token of the live connection ends, unless the client refreshes.
+    pub refresh_expires_at: Option<u64>,
 }
 
 /// The node's own verdict on a run, from the command analysis.
@@ -280,7 +349,8 @@ pub trait RunningNode: Send + Sync {
     fn sync_items(&self, team: &NodeTeamId, items: &[CatalogItem])
     -> Result<SyncReport, NodeError>;
 
-    /// Makes a cloud agent that may use the listed items only.
+    /// Makes a cloud agent that may use the listed items only, with a token now or later
+    /// (`NewCloudAgent::token`).
     fn create_agent(
         &self,
         team: &NodeTeamId,
@@ -297,12 +367,48 @@ pub trait RunningNode: Send + Sync {
     ) -> Result<(), NodeError>;
 
     /// Revokes an agent: its token stops at the next request, its pending runs are
-    /// denied, and its sessions end.
+    /// denied, and its sessions end. Its OAuth refresh families are revoked, and the open
+    /// connect requests of its clients are denied.
     fn revoke_agent(&self, team: &NodeTeamId, agent: NodeAgentId) -> Result<(), NodeError>;
+
+    /// The connect requests that wait for the owner, oldest first, on the whole node
+    /// (every team). A request stays in the list until it is decided or ends (300 s).
+    /// `wait_pending` returns early when this list changes. The default is for nodes
+    /// without the flow: none.
+    fn pending_connects(&self) -> Result<Vec<PendingConnect>, NodeError> {
+        Ok(Vec::new())
+    }
+
+    /// Answers a connect request: `Allow` for a live agent of an open team (`not_found`
+    /// otherwise), or `Deny`. A request that does not wait any more is
+    /// `connect_not_pending`. The browser page shows the answer at its next refresh; an
+    /// allowed one sends the client its code once.
+    fn decide_connect(&self, id: &str, decision: ConnectDecision) -> Result<(), NodeError> {
+        let _ = (id, decision);
+        Err(NodeError::new(
+            "not_supported",
+            "This node has no connect requests.",
+        ))
+    }
+
+    /// How an agent reaches the node now: its live token and its OAuth connection.
+    /// `not_found` for an agent the team does not have.
+    fn agent_access(
+        &self,
+        team: &NodeTeamId,
+        agent: NodeAgentId,
+    ) -> Result<AgentAccess, NodeError> {
+        let _ = (team, agent);
+        Err(NodeError::new(
+            "not_supported",
+            "This node does not report agent access.",
+        ))
+    }
 
     /// The runs that wait for the host, oldest first. While there is none, waits up to
     /// `timeout` for one, or until the node stops. A run stays in the list until it is
-    /// released, denied, or timed out.
+    /// released, denied, or timed out. It also returns early, maybe with an empty list,
+    /// when the connect requests that wait change (`pending_connects`).
     fn wait_pending(
         &self,
         team: &NodeTeamId,

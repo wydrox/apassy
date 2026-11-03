@@ -84,6 +84,9 @@ pub const LOCK_FILE: &str = "relay.lock";
 pub const EMBEDDED_SESSION_TTL_SECS: u64 = 600;
 /// How long a run of an embedded node waits for the owner: the broker's question wait.
 pub const EMBEDDED_APPROVAL_TIMEOUT_SECS: u64 = 300;
+/// The name of the Mac on the connect page until the app gives its own
+/// (`EmbeddedRelay::start` sets the computer name).
+pub const EMBEDDED_MAC_NAME: &str = "this Mac";
 /// The requests that the public listener of an embedded node handles at once. It has
 /// no member reserve: only agents use it (`Scope::Public`).
 pub const PUBLIC_MAX_ACTIVE: usize = 32;
@@ -306,6 +309,39 @@ pub struct RelayConfig {
     /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
     /// embedded node; off on the hosted relay, whose edge limits callers.
     pub auth_limiter: bool,
+    /// The MCP authorization flow of an embedded node (OAuth 2.1, docs/SPEC.md section
+    /// 31): its metadata, `/oauth/...`, and `WWW-Authenticate` on a 401 of `/mcp`. `None`
+    /// on the hosted relay: every OAuth path is 404 there.
+    pub oauth: Option<OAuthConfig>,
+}
+
+/// The settings of the MCP authorization flow of an embedded node (docs/SPEC.md section
+/// 31). The defaults are the product's; tests shorten the times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthConfig {
+    /// The name of the Mac on the connect page, such as "Mac mini (office)".
+    pub mac_name: String,
+    /// The lifetime of an access token (`oauth::ACCESS_TOKEN_SECS`).
+    pub access_token_secs: u64,
+    /// The lifetime of a refresh token (`oauth::REFRESH_TOKEN_SECS`).
+    pub refresh_token_secs: u64,
+    /// How long a connect request waits for the owner (`oauth::CONNECT_SECS`).
+    pub connect_secs: u64,
+    /// How long an authorization code can be redeemed (`oauth::CODE_SECS`).
+    pub code_secs: u64,
+}
+
+impl OAuthConfig {
+    /// The product's times, with the name of the Mac on the connect page.
+    pub fn new(mac_name: &str) -> Self {
+        Self {
+            mac_name: mac_name.to_string(),
+            access_token_secs: crate::server::oauth::ACCESS_TOKEN_SECS,
+            refresh_token_secs: crate::server::oauth::REFRESH_TOKEN_SECS,
+            connect_secs: crate::server::oauth::CONNECT_SECS,
+            code_secs: crate::server::oauth::CODE_SECS,
+        }
+    }
 }
 
 /// Where and how the relay asks the Worker to send pushes.
@@ -384,8 +420,9 @@ impl RelayConfig {
     /// The configuration of a Mac's own node (docs/SPEC.md section 30): the node
     /// listener on `127.0.0.1:0`, the public listener of `options`, no edge, no push,
     /// shared team vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs
-    /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, and the
-    /// operator socket in the data directory.
+    /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, the MCP
+    /// authorization flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`; the app sets the
+    /// name of the Mac), and the operator socket in the data directory.
     pub fn embedded(options: EmbeddedOptions) -> RelayResult<Self> {
         let public_url = checked_public_url(&options.public_url)?;
         if options.master_key.len() < MIN_KEY_BYTES {
@@ -413,6 +450,7 @@ impl RelayConfig {
             connect_teams_per_day: 0,
             connect_teams_max: 0,
             auth_limiter: true,
+            oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
         };
         config.check_listeners()?;
         Ok(config)
@@ -532,6 +570,7 @@ impl RelayConfig {
             connect_teams_per_day,
             connect_teams_max,
             auth_limiter: false,
+            oauth: None,
         })
     }
 }
@@ -697,6 +736,7 @@ mod tests {
         assert_eq!(config.edge.secret().map(SecretString::expose), Some(EDGE));
         assert!(config.public_listen.is_none());
         assert!(!config.auth_limiter);
+        assert!(config.oauth.is_none());
         config.check_listeners().unwrap();
         assert_eq!(config.connect_teams_per_day, DEFAULT_CONNECT_TEAMS_PER_DAY);
         assert_eq!(config.connect_teams_max, DEFAULT_CONNECT_TEAMS_MAX);
@@ -945,6 +985,11 @@ mod tests {
             (0, 0)
         );
         assert!(config.auth_limiter);
+        let oauth = config.oauth.as_ref().expect("an embedded node has OAuth");
+        assert_eq!(oauth.mac_name, EMBEDDED_MAC_NAME);
+        assert_eq!(oauth.access_token_secs, 86_400);
+        assert_eq!(oauth.refresh_token_secs, 90 * 86_400);
+        assert_eq!((oauth.connect_secs, oauth.code_secs), (300, 300));
         assert_eq!(
             config.admin_socket_path(),
             PathBuf::from("/tmp/node/admin.sock")

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::backend::{
     AuditRow, CatalogItem, CreatedAgent, NewCloudAgent, NodeAgentId, NodeBackend, NodeConfig,
     NodeError, NodeRunId, NodeSecret, NodeTeamId, PendingItem, PendingRun, RunState, RunStatus,
-    RunningNode, Suggestion, SyncReport,
+    RunningNode, Suggestion, SyncReport, TokenIssue,
 };
 use super::funnel::tests::{FakeCli, serve_443_only};
 use super::master_key::tests::FakeKeys;
@@ -248,10 +248,14 @@ impl RunningNode for FakeNode {
         state
             .agents
             .insert(id, (agent.name.clone(), agent.items.clone(), false));
+        let days = match agent.token {
+            TokenIssue::Now { lifetime_days } => lifetime_days,
+            TokenIssue::Later => 0,
+        };
         Ok(CreatedAgent {
             agent_id: NodeAgentId(id),
-            token: NodeSecret::new(format!("apassy_tagt_{TEAM}_{id:064x}")),
-            expires_at: fake_now() + u64::from(agent.lifetime_days) * 86_400,
+            token: (days > 0).then(|| NodeSecret::new(format!("apassy_tagt_{TEAM}_{id:064x}"))),
+            expires_at: fake_now() + u64::from(days) * 86_400,
         })
     }
 

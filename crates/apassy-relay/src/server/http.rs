@@ -11,7 +11,9 @@
 //!
 //! An embedded node has a second listener (`Scope::Public`) that serves only `POST /mcp`
 //! and the proxy, and each listener of a node counts failed authentications
-//! (`AuthFailures`, docs/SPEC.md section 30).
+//! (`AuthFailures`, docs/SPEC.md section 30). With `RelayConfig::oauth` (an embedded node)
+//! both listeners also serve the MCP authorization flow (`oauth`, docs/SPEC.md section
+//! 31), and a 401 of `POST /mcp` carries `WWW-Authenticate`.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,7 +41,9 @@ use crate::server::feed::{self, ActionId};
 use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
-use crate::server::{Core, admin, approvals, connect, decide, devices, host, joins, mcp, sync};
+use crate::server::{
+    Core, admin, approvals, connect, decide, devices, host, joins, mcp, oauth, sync,
+};
 use crate::session::SessionSource;
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
@@ -968,9 +972,15 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
-    // The public listener knows two routes. Anything else is not there, before any
-    // other check.
-    if !listener.scope.serves(&method, &path) {
+    // The MCP authorization flow, on a relay that has it (an embedded node).
+    let oauth_route = hub
+        .config
+        .oauth
+        .as_ref()
+        .and_then(|_| oauth::route(&method, &path));
+    // The public listener knows two routes and the flow. Anything else is not there,
+    // before any other check.
+    if oauth_route.is_none() && !listener.scope.serves(&method, &path) {
         respond_error(request, &RelayError::new(codes::NOT_FOUND, "No such path."));
         return;
     }
@@ -1013,6 +1023,10 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
     }
     if listener.limited(now) {
         respond_auth_limited(hub, listener, request, now);
+        return;
+    }
+    if let Some(route) = oauth_route {
+        respond_oauth(hub, listener, request, route, &method, &path, &query, now);
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
@@ -1168,7 +1182,13 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             "auth_failed",
             &json!({"code": codes::UNAUTHENTICATED, "path_kind": endpoint_kind(endpoint)}),
         );
-        respond_error(request, &RelayError::unauthenticated());
+        respond_auth_error(
+            hub,
+            endpoint,
+            request,
+            &RelayError::unauthenticated(),
+            token.is_some(),
+        );
         return;
     };
     let principal = match authenticate(&core, need, token, now) {
@@ -1185,7 +1205,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
-            respond_error(request, &error);
+            respond_auth_error(hub, endpoint, request, &error, true);
             return;
         }
     };
@@ -1243,7 +1263,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
-                respond_error(request, &error);
+                respond_auth_error(hub, endpoint, request, &error, true);
                 return;
             }
         }
@@ -1267,7 +1287,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         now
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(&core, request, principal, &body);
+        respond_mcp(hub, &core, request, principal, &body);
         return;
     }
     match dispatch(
@@ -1568,7 +1588,13 @@ fn feed_length(request: &Request) -> RelayResult<()> {
     }
 }
 
-fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body: &[u8]) {
+fn respond_mcp(
+    hub: &Hub,
+    core: &Core,
+    request: Request,
+    principal: Option<Principal>,
+    body: &[u8],
+) {
     let origin = header_value(&request, "Origin");
     if let Some(origin) = origin
         && origin.trim_end_matches('/') != core.config.public_url
@@ -1580,7 +1606,13 @@ fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body
         return;
     }
     let Some(Principal::Agent(agent)) = principal else {
-        respond_error(request, &RelayError::unauthenticated());
+        respond_auth_error(
+            hub,
+            Endpoint::Mcp,
+            request,
+            &RelayError::unauthenticated(),
+            true,
+        );
         return;
     };
     match mcp::handle(core, &agent, body) {
@@ -1596,6 +1628,144 @@ fn respond_mcp(core: &Core, request: Request, principal: Option<Principal>, body
             let _ = request.respond(response);
         }
     }
+}
+
+/// An error answer that may be a 401 of `POST /mcp`: on a relay with OAuth it carries
+/// `WWW-Authenticate` with the address of the resource metadata (RFC 9728 section 5.1),
+/// so a client can start the authorization flow. `token_sent`: the request had a bearer
+/// token.
+fn respond_auth_error(
+    hub: &Hub,
+    endpoint: Endpoint,
+    request: Request,
+    error: &RelayError,
+    token_sent: bool,
+) {
+    let challenge = (endpoint == Endpoint::Mcp && error.status() == 401)
+        .then(|| oauth::www_authenticate(&hub.config, token_sent))
+        .flatten()
+        .and_then(|value| Header::from_bytes(&b"WWW-Authenticate"[..], value.as_bytes()).ok());
+    respond_json_with(
+        request,
+        error.status(),
+        &error.to_envelope(),
+        error.code == codes::PAYLOAD_TOO_LARGE,
+        challenge.into_iter().collect(),
+    );
+}
+
+/// One request of the MCP authorization flow (`oauth::handle`): its body (at most
+/// `oauth::MAX_BODY`), its answer, and a bad code or refresh token counted in the
+/// listener's failed-auth limiter.
+#[allow(clippy::too_many_arguments)]
+fn respond_oauth(
+    hub: &Hub,
+    listener: &Listener,
+    mut request: Request,
+    route: oauth::Route,
+    method: &str,
+    path: &str,
+    query: &str,
+    now: u64,
+) {
+    let body = if oauth::has_body(route) {
+        match read_body_max(&mut request, method, oauth::MAX_BODY) {
+            Ok(body) => body,
+            Err(error) => {
+                let reply = oauth::Reply::Json {
+                    status: error.status(),
+                    body: json!({"error": "invalid_request", "error_description": error.message}),
+                    auth_failed: false,
+                    retry_after: None,
+                };
+                write_oauth(request, reply, error.code == codes::PAYLOAD_TOO_LARGE);
+                return;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let content_type = header_value(&request, "Content-Type");
+    let reply = oauth::handle(hub, route, path, query, &body, content_type.as_deref(), now);
+    if let oauth::Reply::Json {
+        auth_failed: true, ..
+    } = reply
+    {
+        listener.record_failure(now);
+    }
+    write_oauth(request, reply, false);
+}
+
+/// Writes an answer of the flow: JSON with `Cache-Control: no-store` and `Pragma:
+/// no-cache`, or a page or a 303 with `oauth::PAGE_HEADERS`. Never a cookie.
+fn write_oauth(request: Request, reply: oauth::Reply, close: bool) {
+    let header =
+        |name: &str, value: &str| Header::from_bytes(name.as_bytes(), value.as_bytes()).ok();
+    let page_headers = || {
+        oauth::PAGE_HEADERS
+            .iter()
+            .filter_map(|(name, value)| header(name, value))
+            .collect::<Vec<_>>()
+    };
+    let response = match reply {
+        oauth::Reply::Json {
+            status,
+            body,
+            retry_after,
+            ..
+        } => {
+            let mut response = Response::from_data(serde_json::to_vec(&body).unwrap_or_default())
+                .with_status_code(status)
+                .with_header(json_header())
+                .with_header(no_store_header())
+                .with_chunked_threshold(usize::MAX);
+            for extra in [
+                header("Pragma", "no-cache"),
+                retry_after.and_then(|secs| header("Retry-After", &secs.to_string())),
+                close.then(|| header("Connection", "close")).flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                response.add_header(extra);
+            }
+            response
+        }
+        oauth::Reply::Page {
+            status,
+            html,
+            refresh,
+        } => {
+            let mut response = Response::from_data(html.into_bytes())
+                .with_status_code(status)
+                .with_chunked_threshold(usize::MAX);
+            for extra in page_headers()
+                .into_iter()
+                .chain(header("Content-Type", "text/html; charset=utf-8"))
+                .chain(
+                    refresh
+                        .then(|| header("Refresh", &oauth::PAGE_REFRESH_SECS.to_string()))
+                        .flatten(),
+                )
+            {
+                response.add_header(extra);
+            }
+            response
+        }
+        oauth::Reply::Redirect { location } => {
+            let mut response = Response::from_data(Vec::new())
+                .with_status_code(303)
+                .with_chunked_threshold(usize::MAX);
+            for extra in page_headers()
+                .into_iter()
+                .chain(header("Location", &location))
+            {
+                response.add_header(extra);
+            }
+            response
+        }
+    };
+    let _ = request.respond(response);
 }
 
 fn parse_body<T: DeserializeOwned>(body: &[u8]) -> RelayResult<T> {

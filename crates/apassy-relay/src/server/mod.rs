@@ -24,6 +24,7 @@ pub mod http;
 pub mod hub;
 pub mod joins;
 pub mod mcp;
+pub mod oauth;
 pub mod operator;
 pub mod push;
 pub mod questions;

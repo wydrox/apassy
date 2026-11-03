@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use super::backend::{
     CreatedAgent, NewCloudAgent, NodeAgentId, NodeError, NodeRunId, NodeSecret, NodeTeamId,
-    PendingRun, RunStatus, RunningNode,
+    PendingRun, RunStatus, RunningNode, TokenIssue,
 };
 use super::catalog::{self, Checked};
 use crate::broker::decide::BrokerContext;
@@ -274,7 +274,9 @@ impl Shared {
             &NewCloudAgent {
                 name: name.trim().to_owned(),
                 items: uids.clone(),
-                lifetime_days: days,
+                token: TokenIssue::Now {
+                    lifetime_days: days,
+                },
             },
         )?;
         let saved = self.with_vault(|vault| {

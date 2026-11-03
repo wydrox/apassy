@@ -654,9 +654,12 @@ impl Node {
             .shared()
             .ok_or_else(|| error("node_stopped", "The node is not running."))?;
         let (agent_id, created) = shared.add_agent(name, items, days)?;
+        let token = created
+            .token
+            .ok_or_else(|| error("relay_error", "The node made no token for the agent."))?;
         Ok(AddedAgent {
             agent_id,
-            token: created.token,
+            token,
             expires_at: created.expires_at,
             url: format!("{}/mcp", shared.public_url),
         })
