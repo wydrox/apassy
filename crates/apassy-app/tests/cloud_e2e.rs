@@ -1379,7 +1379,6 @@ fn a_remote_agent_connects_by_itself_runs_through_the_proxy_and_is_disconnected(
     assert_eq!(connect.client_name.as_deref(), Some("Grok Bot"));
     let connected = mac.allow(&connect);
     assert_eq!(connected.name, "Grok Bot");
-    assert!(!connected.reconnected);
     let agent = connected.agent_id;
     let mut tokens = mac.trade_code(&found, &client, &page, &verifier, &state);
     // The MCP session: initialize, the notification, and the three tools.
@@ -1567,13 +1566,34 @@ fn a_remote_agent_connects_by_itself_runs_through_the_proxy_and_is_disconnected(
         mac.refresh(&found, &client, &rotated.refresh).json()["error"],
         "invalid_grant"
     );
-    // The same client authorizes again: the same agent, with its credential.
+    // The same client authorizes again: a second agent with no credential, never the
+    // first one (a client id is public, so a connect never takes over an agent). The
+    // first stays until the owner disconnects it; the owner chooses the item again.
     let (page, verifier, state) = mac.authorize(&found, &client);
     let connect = mac.waiting_connect(&client, &page);
     let again = mac.allow(&connect);
-    assert!(again.reconnected);
-    assert_eq!(again.agent_id, agent);
+    assert_ne!(again.agent_id, agent);
+    assert_eq!(again.name, "Grok Bot 2");
     tokens = mac.trade_code(&found, &client, &page, &verifier, &state);
+    assert!(
+        mac.access(&found, &tokens.access).is_empty(),
+        "a new agent sees nothing"
+    );
+    assert_eq!(
+        mac.node.agents(&mac.vault).expect("agents").len(),
+        2,
+        "the first agent stays"
+    );
+    mac.node
+        .revoke_agent(&mac.vault, agent)
+        .expect("disconnect the first agent");
+    let agent = again.agent_id;
+    mac.with_vault(|vault| {
+        vault
+            .add_agent_exception(agent, mac.httpbin, ExceptionKind::Only)
+            .expect("Choose Credentials…");
+    });
+    mac.node.sync_catalog().expect("sync");
     assert_eq!(mac.access(&found, &tokens.access), [(ENV.to_owned(), item)]);
 
     // Step 9: a lock stops the node and Funnel; `/mcp` and `/p/` do not answer.
@@ -1677,7 +1697,8 @@ fn a_remote_agent_connects_by_itself_runs_through_the_proxy_and_is_disconnected(
     assert_eq!(count(ACTIVITY_ROUTE_ON), 1, "{rows:?}");
     assert_eq!(count(ACTIVITY_CONNECTED), 2, "{rows:?}");
     assert_eq!(count(ACTIVITY_CONNECT_DENIED), 1, "{rows:?}");
-    assert_eq!(count(ACTIVITY_DISCONNECTED), 1, "{rows:?}");
+    // The first agent at the second connect, and the second at the end.
+    assert_eq!(count(ACTIVITY_DISCONNECTED), 2, "{rows:?}");
     assert!(
         rows.iter()
             .any(|row| row.0.starts_with("cloud run") && row.1 == ActivityDecision::Allow),
