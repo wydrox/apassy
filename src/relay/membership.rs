@@ -45,6 +45,20 @@ use crate::vault::{
     VaultResult,
 };
 
+/// The Apassy release that ends the free paths on the hosted relay (ADR 0037 D14, stage 7):
+/// the questions-only Connect path of ADR 0032 and relay sync on
+/// `apassy-relay.wyderka.cc`. The notice ships two releases before (R1 = 0.5.16, R3 =
+/// 0.5.18, implementation plan s7 section 5). The release unit of R1 confirms the number,
+/// and a later slip changes it here and in the iPhone app (`VaultText.swift`,
+/// `FreeRelayNotice.endVersion`); a test checks that both say the same.
+pub const FREE_RELAY_PATHS_END_VERSION: &str = "0.5.18";
+
+/// Whether `url` is the hosted relay (`DEFAULT_RELAY_URL`), whose free paths end with
+/// [`FREE_RELAY_PATHS_END_VERSION`]. A relay that the owner runs is never the hosted one.
+pub fn on_hosted_relay(url: &str) -> bool {
+    RelayUrl::parse(url).is_ok_and(|url| url.as_str() == crate::sync::DEFAULT_RELAY_URL)
+}
+
 /// A new team on the relay: its ID and the device number of its first device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreatedTeam {

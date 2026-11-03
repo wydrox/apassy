@@ -48,9 +48,9 @@ use crate::desktop::DesktopApp;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::relay::membership::{
-    QuestionsAvailability, adopt_questions_team, disable_questions, enable_questions,
-    join_questions_team, new_questions_team, questions_availability, questions_membership,
-    questions_only, this_device,
+    FREE_RELAY_PATHS_END_VERSION, QuestionsAvailability, adopt_questions_team, disable_questions,
+    enable_questions, join_questions_team, new_questions_team, on_hosted_relay,
+    questions_availability, questions_membership, questions_only, this_device,
 };
 use crate::sync::{
     DEFAULT_RELAY_URL, DeviceKey, JoinedDevice, PendingJoin, RelayRefusal, RelayUrl, SyncError,
@@ -67,6 +67,19 @@ const DEVICES_EVERY: Duration = Duration::from_secs(30);
 const JOIN_POLL_EVERY: Duration = Duration::from_secs(2);
 /// The note of a Mac whose relay sync key was removed from the questions.
 pub(crate) const REMOVED_SYNC: &str = "This Mac was removed from the questions of this vault. To answer and ask through the relay again, turn relay sync off and join the vault again from another Mac: that gives this Mac a new key.";
+
+/// The notice of ADR 0037 D14 (plan s7 unit N1): the free approvals through the hosted
+/// relay end with [`FREE_RELAY_PATHS_END_VERSION`]. Settings > Devices shows it under
+/// "Get approvals on your iPhone" while the questions of the vault go through the hosted
+/// relay, and the sheet of that link shows it before a new Connect team. A relay that the
+/// owner runs gets no notice.
+pub(crate) fn free_approvals_notice(relay_url: &str) -> Option<String> {
+    on_hosted_relay(relay_url).then(|| {
+        format!(
+            "Free approvals through apassy-relay.wyderka.cc end with Apassy {FREE_RELAY_PATHS_END_VERSION}. Keep them free over Tailscale with this Mac as the node, or use Apassy Connect (paid)."
+        )
+    })
+}
 
 /// A join of the questions team that waits for the owner check. Debug shows no link.
 struct JoinRequest {
@@ -1052,6 +1065,16 @@ impl DesktopApp {
             None => self.questions_turn_on(ctx),
         }
     }
+
+    /// The D14 notice of Settings > Devices ([`free_approvals_notice`]) while the
+    /// questions of the open vault go through the hosted relay, or `None`.
+    pub(crate) fn questions_free_notice(&self) -> Option<String> {
+        self.owner_ui
+            .session
+            .with_vault(|vault| questions_membership(vault).ok().flatten())
+            .flatten()
+            .and_then(|membership| free_approvals_notice(&membership.relay_url))
+    }
 }
 
 /// Account-free Connect setup for a vault that does not use relay sync. The owner
@@ -1104,6 +1127,15 @@ pub(super) fn team_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vaul
                 });
             },
         );
+        let typed = app.sync.relay.url_input.trim();
+        let address = if typed.is_empty() {
+            DEFAULT_RELAY_URL
+        } else {
+            typed
+        };
+        if let Some(notice) = free_approvals_notice(address) {
+            kit::tone_note(ui, notice, Tone::Neutral);
+        }
         if busy {
             kit::tone_note(ui, "Connecting…", Tone::Accent);
         }

@@ -3829,3 +3829,138 @@ fn late_touch_id_result_after_passphrase_unlock_is_silent() {
     );
     assert_eq!(app.status_text, status);
 }
+
+/// A Connect membership of the open vault for the questions only, on the relay `url`.
+fn add_questions_membership(app: &mut DesktopApp, url: &str) {
+    let key = crate::sync::DeviceKey::generate().expect("synthetic key");
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.add_relay_membership(&crate::vault::RelayMembership {
+                team_id: "t_7k2m5q4x3c".to_owned(),
+                relay_url: url.to_owned(),
+                device_id: 2,
+                public_key: key.public_key().to_vec(),
+                key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
+                purposes: std::collections::BTreeSet::from([
+                    crate::vault::MembershipPurpose::Questions,
+                ]),
+                created_at: 0,
+            })
+        })
+        .expect("open vault")
+        .expect("membership");
+}
+
+#[test]
+fn the_free_connect_notice_names_the_ending_release_and_both_choices() {
+    use super::sync::questions::free_approvals_notice;
+    use crate::relay::membership::FREE_RELAY_PATHS_END_VERSION;
+
+    // The hosted relay, as the owner may type it.
+    for url in [
+        crate::sync::DEFAULT_RELAY_URL,
+        "https://apassy-relay.wyderka.cc/",
+        " https://apassy-relay.wyderka.cc:443 ",
+    ] {
+        let notice = free_approvals_notice(url).unwrap_or_else(|| panic!("{url}"));
+        assert!(
+            notice.contains(&format!("end with Apassy {FREE_RELAY_PATHS_END_VERSION}.")),
+            "{notice}"
+        );
+        assert!(notice.contains("apassy-relay.wyderka.cc"), "{notice}");
+        // Both choices: Tailscale with this Mac as the node (free), or Connect (paid).
+        assert!(notice.contains("free over Tailscale"), "{notice}");
+        assert!(notice.contains("Apassy Connect (paid)"), "{notice}");
+        // Plans section 5: no price, no other plan name, no promise that it stays free.
+        for banned in [
+            "€",
+            "EUR",
+            "a month",
+            "Connect Personal",
+            "stays free",
+            "relay sync",
+        ] {
+            assert!(!notice.contains(banned), "{banned}: {notice}");
+        }
+    }
+    // A relay that the owner runs keeps its approvals: no notice.
+    for url in [
+        "https://relay.example.test",
+        "https://apassy-relay.wyderka.cc.example.test",
+        "http://127.0.0.1:8080",
+        "not a url",
+    ] {
+        assert_eq!(free_approvals_notice(url), None, "{url}");
+    }
+
+    // Settings > Devices: the notice follows the questions membership of the open vault.
+    let folders = folders();
+    let mut app = folders.mac("mac-a");
+    create(&mut app, "Personal", PASS, None);
+    assert_eq!(app.questions_free_notice(), None, "no questions team");
+    add_questions_membership(&mut app, crate::sync::DEFAULT_RELAY_URL);
+    let notice = app.questions_free_notice().expect("hosted questions team");
+    assert!(notice.contains(FREE_RELAY_PATHS_END_VERSION), "{notice}");
+    let mut other = folders.mac("mac-b");
+    create(&mut other, "Work", PASS, None);
+    add_questions_membership(&mut other, "https://relay.example.test");
+    assert_eq!(other.questions_free_notice(), None, "own relay");
+}
+
+#[test]
+fn the_relay_sync_notice_shows_only_for_the_hosted_relay() {
+    use super::sync::relay::relay_sync_notice;
+    use crate::relay::membership::FREE_RELAY_PATHS_END_VERSION;
+
+    let notice = relay_sync_notice(crate::sync::DEFAULT_RELAY_URL).expect("hosted relay");
+    assert!(
+        notice.contains(&format!(
+            "free until Apassy {FREE_RELAY_PATHS_END_VERSION}."
+        )),
+        "{notice}"
+    );
+    assert!(notice.contains("part of Apassy Connect"), "{notice}");
+    assert!(
+        notice.contains("Mac or Linux node can be the sync home (free)"),
+        "{notice}"
+    );
+    // Plans section 5: relay sync is not the paid feature, and no price shows.
+    for banned in ["paid", "€", "EUR", "a month", "for teams"] {
+        assert!(!notice.contains(banned), "{banned}: {notice}");
+    }
+    for url in [
+        "https://relay.example.test",
+        "https://relay.example.test:8443",
+        "http://127.0.0.1:8080",
+        "",
+    ] {
+        assert_eq!(relay_sync_notice(url), None, "{url}");
+    }
+
+    // A vault on a relay that the owner runs (the fake relay on 127.0.0.1) shows its
+    // relay row without the notice.
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut a, _) = relay_mac_a(&folders, &relay);
+    super::open_settings(&mut a, super::SettingsSection::Vault);
+    let text = settled_frames(&mut a);
+    assert!(text.contains("Apassy relay"), "{text}");
+    assert!(!text.contains("free until Apassy"), "{text}");
+    assert!(!text.contains("apassy-relay.wyderka.cc is free"), "{text}");
+}
+
+#[test]
+fn the_iphone_notice_names_the_same_release() {
+    use crate::relay::membership::FREE_RELAY_PATHS_END_VERSION;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("ios/ApassyCompanion/Sources/Vault/VaultText.swift");
+    let source = fs::read_to_string(&path).expect("read VaultText.swift");
+    assert!(
+        source.contains(&format!(
+            "static let endVersion = \"{FREE_RELAY_PATHS_END_VERSION}\""
+        )),
+        "the iPhone notice names another release than FREE_RELAY_PATHS_END_VERSION"
+    );
+}
