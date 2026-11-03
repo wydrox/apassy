@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::vault::{
         BouncerHostChange, BouncerHostKind, BouncerHostRole, HOSTING_CONSENT_VERSION,
-        OPEN_EXISTING, SecretValue, Vault, apply_key, close_conn,
+        OPEN_EXISTING, SecretValue, Vault, VaultErrorKind, apply_key, close_conn,
     };
 
     const PASS: &str = "synthetic-schema29-pass";

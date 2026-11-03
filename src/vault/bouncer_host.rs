@@ -227,12 +227,11 @@ fn activity_text(role: BouncerHostRole, change: &BouncerHostChange) -> (&'static
         BouncerHostRole::Hosting => "change bouncer brain host",
         BouncerHostRole::Training => "change bouncer brain trainer",
     };
-    let reason = match change.kind {
+    let mut reason = match change.kind {
         BouncerHostKind::ThisMac => "This Mac.".to_owned(),
         BouncerHostKind::OwnServer => format!("My server at {}.", change.normalized_url()),
         BouncerHostKind::Connect => format!("Apassy Connect at {}.", change.normalized_url()),
     };
-    let mut reason = reason;
     if reason.len() > MAX_ACTIVITY_REASON_BYTES {
         let mut end = MAX_ACTIVITY_REASON_BYTES;
         while !reason.is_char_boundary(end) {

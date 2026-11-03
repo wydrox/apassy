@@ -655,7 +655,7 @@ pub trait ModelGate: fmt::Debug + Send + Sync {
     /// The client of the bouncer brain now: the remote host from the vault, or the
     /// server of this Mac (ADR 0035). `None`: the broker keeps the client it started
     /// with. The broker reads it for each request (plan 0035 unit F wires it).
-    fn client(&self) -> Option<BouncerClient> {
+    fn bouncer_client(&self) -> Option<BouncerClient> {
         None
     }
 }
@@ -1652,8 +1652,8 @@ impl ModelServer {
 }
 
 impl ModelGate for ModelServer {
-    fn client(&self) -> Option<BouncerClient> {
-        ModelServer::client(self).ok()
+    fn bouncer_client(&self) -> Option<BouncerClient> {
+        self.client().ok()
     }
 
     fn before_model(&self) -> Result<(), String> {
@@ -2528,7 +2528,13 @@ mod tests {
             let read = BouncerSettings::load(&path);
             assert_eq!(read.start, StartMode::Off);
             assert_eq!(read.url, None, "{url}");
-            let server = ModelServer::start(Some(path.clone()), layout(dir.path()));
+            // As `ModelServer::start`, without the LaunchAgents and `uv` of this Mac.
+            let server = ModelServer::start_with_host(
+                Some(path.clone()),
+                BouncerSettings::load(&path),
+                layout(dir.path()),
+                Host::none(),
+            );
             let status = server.status();
             assert_eq!(status.url, DEFAULT_URL, "{url}");
             assert!(!status.remote);
