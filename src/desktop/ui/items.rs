@@ -1336,10 +1336,24 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         let key = format!("credential-agent-settings-{id}");
         let mut open = app.ui.is_expanded(&key);
-        if kit::disclosure(ui, &mut open, "Agent Access").changed() {
+        let status = AccessFacts::of(app, &details).status();
+        let disclosure = kit::disclosure(ui, &mut open, "Agent Access");
+        ui.ctx()
+            .accesskit_node_builder(disclosure.id, |node| node.set_description(status.as_str()));
+        if disclosure.changed() {
             app.ui.set_expanded(&key, open);
         }
+        // What happens now when an agent asks, also while the group is closed.
+        egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                left: 18,
+                right: 0,
+                top: 2,
+                bottom: 0,
+            })
+            .show(ui, |ui| ui.add(Label::new(rows::small(&status)).wrap()));
         if open {
+            ui.add_space(6.0);
             agent_settings_group(app, ui, &details);
         }
     }
@@ -2238,7 +2252,10 @@ fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
 
 /// The third group: "Always ask me", the environment, and "Hosts and risk" with the
 /// declaration, the variable, and the connector. "Hosts and risk" names the known hosts
-/// of [`bouncer_hosts`]: one host, "N hosts", or "Not set".
+/// of [`bouncer_hosts`]: one host, "N hosts", or "Not set". Each row says under its
+/// label what its value means for an agent: "Always ask me" what decides each use
+/// ([`AccessFacts`]), the environment what "Not set" and "Not confirmed" do
+/// ([`environment_note`]), and "Hosts and risk" what no known host does.
 fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let always_ask = app
@@ -2296,14 +2313,26 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         _ if by_owner => about.push("Declaration: set by you.".to_owned()),
         _ => about.push("Declaration: set automatically.".to_owned()),
     }
+    // The second line of "Always ask me": what it does when on, else what decides now.
+    let ask_note = if always_ask {
+        ALWAYS_ASK_NOTE
+    } else {
+        AccessFacts::of(app, details).decider()
+    };
+    let env_note = environment_note(state);
+    let hosts_note = known.is_empty().then_some(NO_HOST_NOTE);
     let mut toggle_access = false;
     rows::group(ui, |s| {
-        s.toggle("Always ask me", &mut ask)
-            .on_hover_text("Each use by an agent waits for you.");
-        s.line(|ui| {
-            ui.label(kit::text("Environment", Font::Body).color(kit::LABEL));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.push_id(("credential-environment", id), |ui| {
+        noted_row(s, "Always ask me", Some(ask_note), |ui| {
+            let response = kit::toggle(ui, &mut ask, "Always ask me");
+            ui.ctx()
+                .accesskit_node_builder(response.id, |node| node.set_description(ask_note));
+            response
+        })
+        .on_hover_text(ALWAYS_ASK_NOTE);
+        noted_row(s, "Environment", env_note.as_deref(), |ui| {
+            let menu = ui
+                .push_id(("credential-environment", id), |ui| {
                     rows::pop_menu(
                         ui,
                         &mut environment,
@@ -2311,10 +2340,14 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
                         &shown,
                         &format!("Environment, {shown}"),
                     )
-                });
-            });
+                })
+                .inner;
+            if let Some(note) = &env_note {
+                ui.ctx()
+                    .accesskit_node_builder(menu.id, |node| node.set_description(note.as_str()));
+            }
         });
-        let access = s.chevron("Hosts and risk", &hosts);
+        let access = chevron_with_note(s, "Hosts and risk", &hosts, hosts_note);
         let access = if about.is_empty() {
             access
         } else {
@@ -2341,6 +2374,205 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         set_environment(app, ui.ctx(), details, environment);
     }
 }
+
+/// The line of "Always ask me" while it is on, and its hover text.
+const ALWAYS_ASK_NOTE: &str = "Each use by an agent waits for you.";
+
+/// The line of "Hosts and risk" without a known host. A destination host of a run must
+/// be a known host of the item, unless a fitting answer of the owner names it (`route`
+/// in `crate::broker::run`).
+const NO_HOST_NOTE: &str =
+    "A command that names a host waits for you, unless your answer covers it.";
+
+/// What decides a use of a credential by an agent now, as far as the page can read it:
+/// the order of `route` and `hard_rules` in `crate::broker::run` and of `call` in
+/// `crate::broker::decide` (ADR 0025 §3, ADR 0031, ADR 0034). The first rule that makes
+/// each use wait wins; else the bouncer decides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AccessFacts {
+    /// An archived credential is not for agents.
+    archived: bool,
+    /// Settings from a restored backup wait for the owner review.
+    needs_review: bool,
+    /// "Always ask me" is on.
+    always_ask: bool,
+    /// The bouncer brain is off in Settings: no model answers.
+    brain_off: bool,
+    /// The credential has a declaration. Without one, each run waits for the owner.
+    declared: bool,
+    /// The declaration says production, also when it is only a default.
+    production: bool,
+    /// The scope of the declaration is read-only.
+    read_only: bool,
+    /// A hidden detail holds a one-time password.
+    codes: bool,
+    /// "Never for AGENT" or "Always ask for AGENT".
+    exceptions: bool,
+    /// A remembered answer of the owner for the credential.
+    answers: bool,
+}
+
+impl AccessFacts {
+    fn of(app: &DesktopApp, details: &OwnerDetails) -> Self {
+        let id = details.id;
+        let session = &app.owner_ui.session;
+        let declaration = session.declaration(id).ok().flatten();
+        let rules = rules_of(app, id);
+        Self {
+            archived: details.archived,
+            needs_review: session.needs_review(id).unwrap_or(false),
+            always_ask: session
+                .with_vault(|vault| vault.always_ask(id))
+                .and_then(Result::ok)
+                .unwrap_or(false),
+            brain_off: app.model_server.as_ref().is_some_and(|server| {
+                server.settings().start == crate::broker::model_server::StartMode::Off
+            }),
+            declared: declaration.is_some(),
+            production: declaration
+                .as_ref()
+                .is_some_and(|declaration| declaration.is_production()),
+            read_only: declaration
+                .as_ref()
+                .is_some_and(|declaration| declaration.scope == Scope::ReadOnly),
+            codes: details.details.iter().any(otp::is_otp_detail),
+            exceptions: rules.iter().any(|rule| matches!(rule, Rule::Exception(..))),
+            answers: rules.iter().any(|rule| matches!(rule, Rule::Answer(_))),
+        }
+    }
+
+    /// No rule makes each use wait: the bouncer decides.
+    fn bouncer_decides(self) -> bool {
+        !self.archived
+            && !self.needs_review
+            && !self.always_ask
+            && !self.brain_off
+            && self.declared
+            && (!self.production || self.read_only)
+    }
+
+    /// The first sentence: what decides each use.
+    fn decider(self) -> &'static str {
+        if self.archived {
+            "Agents cannot use it while it is archived."
+        } else if self.needs_review {
+            "Agents cannot use it until you confirm its settings."
+        } else if self.always_ask {
+            ALWAYS_ASK_NOTE
+        } else if self.brain_off {
+            "The bouncer brain is off, so each use waits for you."
+        } else if !self.declared {
+            "Each run waits for you until you set the environment."
+        } else if self.production && !self.read_only {
+            "Each use waits for you, because it is a production credential with write access."
+        } else {
+            "The bouncer decides each use and asks you when it is not sure."
+        }
+    }
+
+    /// One or two short sentences: what decides each use, then the one-time codes and
+    /// the rules of the owner when they change the outcome.
+    fn status(self) -> String {
+        let decides = self.bouncer_decides();
+        // A requested code waits unless a fitting answer includes codes; a production
+        // credential always asks for a code.
+        let codes = (decides && self.codes).then_some(if self.production {
+            "One-time codes always wait for you"
+        } else {
+            "One-time codes wait for you unless your answer includes them"
+        });
+        // An exception counts whenever agents can use the credential. A remembered
+        // answer counts only where the bouncer decides: each rule that waits comes first.
+        let usable = !self.archived && !self.needs_review;
+        let rules = usable && (self.exceptions || (decides && self.answers));
+        let second = match (codes, rules) {
+            (Some(codes), true) => Some(format!("{codes}, and your rules also apply.")),
+            (Some(codes), false) => Some(format!("{codes}.")),
+            (None, true) => Some("Your rules also apply.".to_owned()),
+            (None, false) => None,
+        };
+        match second {
+            Some(second) => format!("{} {second}", self.decider()),
+            None => self.decider().to_owned(),
+        }
+    }
+}
+
+/// The line under "Environment" for a value that the owner did not set. Without a
+/// declaration each run waits for the owner (`route` in `crate::broker::run`). A value
+/// that only a default or the usage found counts until the owner chooses one.
+fn environment_note(state: EnvState) -> Option<String> {
+    match state {
+        EnvState::None => Some("Each run waits for you until you set it.".to_owned()),
+        EnvState::Unconfirmed(environment) => Some(format!(
+            "Treated as {} until you choose one.",
+            environment_label(environment).to_lowercase()
+        )),
+        EnvState::Known(_) | EnvState::Production => None,
+    }
+}
+
+/// A row with its label and, under it, a gray line at the left, and `right` at the
+/// right. Without a line it is the row of [`rows::Group::line`].
+fn noted_row<R>(
+    s: &mut rows::Group<'_>,
+    label: &str,
+    note: Option<&str>,
+    right: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let Some(note) = note else {
+        return s.line(|ui| {
+            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+            ui.with_layout(Layout::right_to_left(Align::Center), right)
+                .inner
+        });
+    };
+    s.row(|ui| {
+        egui::Sides::new()
+            .shrink_left()
+            .wrap_mode(egui::TextWrapMode::Wrap)
+            .show(ui, |ui| label_with_note(ui, label, note), right)
+            .1
+    })
+}
+
+/// A label with a gray line under it.
+fn label_with_note(ui: &mut egui::Ui, label: &str, note: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+        ui.add(Label::new(rows::small(note)).wrap());
+    });
+}
+
+/// The row of [`rows::Group::chevron`], with a gray line under its label when there is
+/// one. VoiceOver reads the line as the description of the row.
+fn chevron_with_note(
+    s: &mut rows::Group<'_>,
+    label: &str,
+    value: &str,
+    note: Option<&str>,
+) -> egui::Response {
+    let Some(note) = note else {
+        return s.chevron(label, value);
+    };
+    let response = s.clickable_row(&format!("{label}, {value}"), |ui| {
+        label_with_note(ui, label, note);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            kit::paint_icon_in(ui, Icon::ChevronRight, 10.0, kit::TERTIARY);
+            ui.add(Label::new(kit::text(value, Font::Body).color(kit::SECONDARY)).truncate());
+        });
+    });
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_description(note));
+    response
+}
+
+#[cfg(test)]
+#[path = "agent_access_tests.rs"]
+mod agent_access_tests;
 
 /// The known hosts of an item, as the broker collects them for a run (`check` and
 /// `push_item` in `crate::broker::run`): the hosts of the stored provider, the hosts of
