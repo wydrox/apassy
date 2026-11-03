@@ -6,7 +6,7 @@
 //! - With nothing waiting, the list shows the newest decisions in the scope by day, and
 //!   the detail shows the week: the totals, one row per device, and the most active
 //!   agents. A click on a decision shows its facts, read-only.
-//! - Activity adds the newest uses of the feeds to the log of this Mac.
+//! - Bouncer > Logs shows every run of this Mac and of the feeds (`logs.rs`).
 //!
 //! The rows of another Mac show what its feed says, nothing more. Its texts come from
 //! agents, so they show as plain text, never as a link.
@@ -23,10 +23,10 @@ use super::columns::{self, Group};
 use super::kit::{self, Font, Icon, Tone};
 use crate::broker::approvals::shown_path;
 use crate::desktop::DesktopApp;
-use crate::desktop::owner_store::{AgentActivity, AgentActivityRow, WeekCounts};
+use crate::desktop::owner_store::{AgentActivity, WeekCounts};
 use crate::desktop::remote_feeds::{ActivityScope, DeviceScope, RemoteFeedState, RemoteMac};
 use crate::questions::feed::{Feed, FeedAgent, FeedUse};
-use crate::vault::{ActivityDecision, format_utc};
+use crate::vault::format_utc;
 
 /// The decisions that the list shows.
 pub(super) const RECENT: usize = 20;
@@ -934,48 +934,3 @@ pub(super) fn past_detail(ui: &mut egui::Ui, decision: &PastDecision, why: Optio
         );
     }
 }
-
-// ---- Activity. ----
-
-/// The decisions of the other Macs in the scope as rows of the Activity log, newest
-/// first. The credential names the Mac, and the reason line names the agent, the action,
-/// the project, and who decided.
-pub(super) fn remote_activity_rows(
-    activity: &VaultActivity,
-    scope: &ActivityScope,
-) -> Vec<AgentActivityRow> {
-    activity
-        .recent
-        .iter()
-        .filter(|decision| decision.source != Source::ThisMac && in_scope(decision, scope))
-        .map(|decision| AgentActivityRow {
-            id: 0,
-            at: decision.at,
-            when: format_utc(decision.at),
-            agent: decision.agent.clone(),
-            item: format!("{} on {}", decision.item, decision.source.name()),
-            operation: if decision.command.is_empty() {
-                format!("{} in {}", decision.action, decision.project_text())
-            } else {
-                decision.command.clone()
-            },
-            decision: if decision.allowed() {
-                ActivityDecision::Allow
-            } else {
-                ActivityDecision::Deny
-            },
-            reason: format!(
-                "{} · {} in {} · {}",
-                decision.agent,
-                decision.action,
-                decision.project_text(),
-                decision.decided_text()
-            ),
-        })
-        .collect()
-}
-
-/// The note under Activity when a project is chosen: the log of this Mac keeps no
-/// project, so its rows are all shown.
-pub(super) const LOG_HAS_NO_PROJECT: &str =
-    "The log of this Mac keeps no project, so it shows all of its rows.";
