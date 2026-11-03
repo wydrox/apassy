@@ -1,6 +1,6 @@
 # Trust model
 
-Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel. Decision:
+Date: 2026-11-02. Updated 2026-11-03: cloud agents through Tailscale Funnel; the node over the tailnet and the push gateway (planned, contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md)). Decision:
 [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see what. Update it in the
 same change as any code that changes an answer here.
 
@@ -20,7 +20,7 @@ Apache-2.0 and builds from this repository.
 | A team member's node | Its device key; in way A, a value for one run | Its own runs; in way A, the value (it can keep a copy) | In way B, the value |
 | Tailscale control server (or Headscale) | Node keys and names | Which nodes exist and their addresses | Traffic |
 | Tailscale DERP relays | — | WireGuard ciphertext, sizes, times | Traffic |
-| Push gateway (Apassy project) | The APNs key | Push handles, node IP addresses, times | Tokens of other gateways, any question data |
+| Push gateway (Apassy project) | The APNs key and its own handle key | Push handles (inside its key: device tokens, device kinds), node IP addresses, device IP addresses when a handle is made, times, the ciphertext of a sealed summary | Which team or vault a push is for, any question data, the text of a summary. It stores and logs nothing ([push-gateway-v1](../contracts/push-gateway-v1.md)) |
 | Apple (APNs, iCloud) | Push delivery; iCloud copies if folder sync is on | Push metadata; SQLCipher ciphertext of iCloud copies | Vault contents |
 | Apassy Connect (paid, optional) | Sealed envelopes and sync snapshots | TLS records, ciphertext, sizes, times | Values, vault contents, questions, answers |
 | Apassy project | Release signing keys | Nothing at run time | Anything of a user |
@@ -55,6 +55,21 @@ A hosted cloud agent (first: Grok Bot) reaches the Mac's node at
 
 The owner decides every cloud run in this release, on the Mac or the iPhone. The node trusts the app
 process: code that runs in it can release any run, but it can read the vault anyway.
+
+## The node over the tailnet (planned: plan S2–S3)
+
+A device reaches the Mac's node, or a Linux node, at the **node origin** `https://<Tailscale IPv4>:8444`
+behind a pinned self-signed certificate ([node-pairing-v1](../contracts/node-pairing-v1.md)). The
+questions, the feed, the access requests, and relay sync use their contracts unchanged at that origin.
+
+| Part | Holds | Sees | Cannot see or do |
+| --- | --- | --- | --- |
+| The node origin and its pin | The pairing link holds both (QR or pasted text); each device stores them with its membership, never in synced data | — | A link with another pin gives other safety words (the pin is in the handoff transcript); a stored pin changes only by a new pairing. Tailscale identity is never authorization |
+| The TLS front (tailnet addresses, port 8444) | The node certificate; its key sealed under the node master key (`node/front/key.sealed`) | TLS records of the devices; peer addresses; it ends TLS and forwards bytes to the relay's tailnet-scope listener on the loopback | It binds only `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, never `0.0.0.0` or `::`; it refuses other peers before the handshake; it parses no HTTP. It runs only while a vault is unlocked (Mac) or the service runs (Linux) |
+| The relay's tailnet-scope listener (loopback) | The node's team files (SQLCipher) | Device-signed requests: sealed envelopes, ciphertext, ids, push handles and their secrets | Operator routes, `/v1/connect`, OAuth; on the Mac also the team and agent routes: 404. It trusts no header |
+| A device with a pinned membership | Its device key, the pin, the alternatives | The node's answers | It never accepts another certificate for that origin and never falls back to system trust |
+| `tailscaled` and the tailnet | WireGuard keys | Which devices talk to the node, sizes, times | Traffic: TLS runs end to end between the device and the node |
+| Push gateway | The APNs key and its handle key | Handles, node addresses, times | Tokens are sealed under the gateway's key; the node never sees them. A node that held a handle can push the fixed notification within the limits until the handle expires (180 days) |
 
 ## The hosted relay today (until ADR 0037 stage 7)
 
