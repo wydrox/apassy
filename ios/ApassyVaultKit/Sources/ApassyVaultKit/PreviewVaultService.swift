@@ -24,6 +24,8 @@ public actor PreviewVaultService: VaultService {
         var largeBlob: PasskeyLargeBlob? = nil
     }
 
+    /// The passphrase that opens this vault: `passphrase`, or the one of `init(vaultID:name:passphrase:)`.
+    let acceptedPassphrase: String
     var vaults: [VaultEntry]
     var selected: String?
     var unlocked: Bool
@@ -52,6 +54,7 @@ public actor PreviewVaultService: VaultService {
     ///   - empty: no vault on this iPhone (the setup flow).
     ///   - unlocked: the vault starts unlocked.
     public init(empty: Bool = false, unlocked: Bool = true) {
+        acceptedPassphrase = Self.passphrase
         let vault = VaultEntry(
             id: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", name: "Personal",
             relayURL: nil, teamID: nil, deviceID: nil,
@@ -70,6 +73,22 @@ public actor PreviewVaultService: VaultService {
                 nextID += 1
             }
         }
+    }
+
+    /// An empty local vault named `name`, unlocked, that `passphrase` opens. It is kept over a
+    /// suspend, as a vault unlocked with "keep": the demo of the app fills it through the public
+    /// calls and stays open while the app is away for less than its lock time. It never syncs.
+    public init(vaultID: String, name: String, passphrase: String) {
+        acceptedPassphrase = passphrase
+        let vault = VaultEntry(
+            id: vaultID, name: name, relayURL: nil, teamID: nil, deviceID: nil,
+            addedAt: Int64(Date().timeIntervalSince1970))
+        vaults = [vault]
+        selected = vault.id
+        unlocked = true
+        status = SyncStatus(
+            enabled: false, state: .off, message: "", version: 0, lastSyncAt: nil, pushed: false, merged: nil)
+        kept = true
     }
 
     // MARK: - Synthetic items
@@ -279,7 +298,7 @@ public actor PreviewVaultService: VaultService {
         kept = keep
         try requireVault()
         try await Task.sleep(for: .milliseconds(300))
-        guard passphrase == Self.passphrase else {
+        guard passphrase == acceptedPassphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         unlocked = true
@@ -294,7 +313,7 @@ public actor PreviewVaultService: VaultService {
 
     public func checkPassphrase(_ passphrase: String) async throws -> Bool {
         try requireVault()
-        return passphrase == Self.passphrase
+        return passphrase == acceptedPassphrase
     }
 
     public func createLocalVault(name: String, passphrase: String) async throws -> VaultEntry {
@@ -311,7 +330,7 @@ public actor PreviewVaultService: VaultService {
     }
 
     public func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
-        guard passphrase == Self.passphrase else {
+        guard passphrase == acceptedPassphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         let vault = VaultEntry(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
@@ -372,7 +391,7 @@ public actor PreviewVaultService: VaultService {
 
     public func joinFinish(passphrase: String) async throws -> VaultEntry {
         guard join?.state == .ready else { throw VaultError(.invalidInput, "The Mac did not confirm this iPhone yet.") }
-        guard passphrase == Self.passphrase else {
+        guard passphrase == acceptedPassphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         join = nil
@@ -595,7 +614,7 @@ public actor PreviewVaultService: VaultService {
     }
 
     public func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
-        guard passphrase == Self.passphrase else {
+        guard passphrase == acceptedPassphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         status.state = .ok

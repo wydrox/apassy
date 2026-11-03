@@ -7,6 +7,7 @@ import SwiftUI
 /// when Face ID unlock is off.
 struct LockView: View {
     @Environment(VaultModel.self) private var vault
+    @Environment(RootModel.self) private var root: RootModel?
     @Environment(\.scenePhase) private var scenePhase
     @State private var passphrase = ""
     @State private var prompted = false
@@ -88,6 +89,12 @@ struct LockView: View {
                         Text(message)
                             .font(.footnote)
                             .foregroundStyle(.red)
+                    } else if root?.isDemo == true {
+                        // The demo vault has a known passphrase: nothing in it is real.
+                        Text("The passphrase of the demo is “\(DemoData.passphrase)”.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("demo.passphraseHint")
                     } else {
                         Text("Type the passphrase of “\(vault.vault?.name ?? "")”.")
                             .font(.footnote)
