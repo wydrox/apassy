@@ -1,0 +1,11 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    12Gi    52%    487k  128M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.26s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-0033/debug/deps/it-9eea3897d949de45)
+
+running 1 test
+test relay_questions::changed_answer_key_mapping_or_revocation_invalidates_a_prepared_remote_proof ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 822 filtered out; finished in 2.24s
+

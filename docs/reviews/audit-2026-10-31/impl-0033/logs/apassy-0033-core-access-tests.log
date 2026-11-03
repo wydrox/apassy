@@ -1,0 +1,11 @@
+   Compiling apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e/ios/ApassyCore)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.76s
+     Running tests/access_requests.rs (/Users/rafalw/Dev/.target-0033/debug/deps/access_requests-ec1b2c6d81f56976)
+
+running 3 tests
+test cancellation_and_guard_storage_failure_send_nothing ... ok
+test wrong_vault_and_three_uncertain_posts_never_reset_with_history_clear ... ok
+test typed_access_calls_use_mac_authenticity_and_choice_specific_keys ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
+

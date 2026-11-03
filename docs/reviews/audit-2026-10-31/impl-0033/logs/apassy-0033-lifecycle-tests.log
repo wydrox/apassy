@@ -1,0 +1,14 @@
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.22s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-55c55a32d5430aea)
+
+running 6 tests
+test vault::access_once::tests::exact_ports_and_unknown_destination_forms_fail_closed ... ok
+test vault::access_once::tests::coalescing_and_cancel_do_not_refund_cooldown ... ok
+test vault::access_once::tests::denial_cancellation_and_other_agents_cannot_create_or_authorize ... ok
+test vault::access_once::tests::first_answer_and_one_consumer_win_without_durable_authority ... ok
+test vault::access_once::tests::scope_mutations_and_key_or_policy_rotation_fence_admission ... ok
+test vault::access_once::tests::restart_loses_permits_but_keeps_receipts_and_creation_budget ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1241 filtered out; finished in 1.53s
+

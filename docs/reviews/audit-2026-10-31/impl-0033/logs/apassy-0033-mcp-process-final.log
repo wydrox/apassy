@@ -1,0 +1,10 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    12Gi    52%    487k  128M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-0033/debug/deps/it-9eea3897d949de45)
+
+running 1 test
+test agent_path::mcp_adapter_process_round_trip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 822 filtered out; finished in 0.72s
+

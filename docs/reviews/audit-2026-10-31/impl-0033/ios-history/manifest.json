@@ -1,0 +1,35 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "DE2CA4AF-692C-4033-B41A-725AA3FADD25.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-history_0_B1D40FCD-04D1-44B9-A831-D38EC1C2FAA3.png",
+        "timestamp" : 1793530262.495
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "AF6BDEE1-6977-4D49-AFCC-96C5943259DB.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-denied_0_42987959-20A1-49C4-96AD-C193221AED26.png",
+        "timestamp" : 1793530257.516
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "C09186E1-1A04-4B85-8052-D7D250130BAC.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-card_0_37E94B91-644E-4C19-9FE9-A492CF2C40FD.png",
+        "timestamp" : 1793530247.581
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly"
+  }
+]

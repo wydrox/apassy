@@ -1,0 +1,48 @@
+    Blocking waiting for file lock on build directory
+   Compiling syn v3.0.5
+   Compiling smallvec v1.16.1
+   Compiling crc32fast v1.5.2
+   Compiling once_cell v1.21.4
+   Compiling half v2.7.1
+   Compiling time v0.3.47
+   Compiling simd-adler32 v0.3.10
+   Compiling log v0.4.34
+   Compiling miniz_oxide v0.9.1
+   Compiling rustls v0.23.46
+   Compiling tempfile v3.27.0
+   Compiling rusqlite v0.40.2
+   Compiling ciborium-ll v0.2.2
+   Compiling yasna v0.6.0
+   Compiling flate2 v1.1.10
+   Compiling rcgen v0.14.10
+   Compiling synstructure v0.14.0
+   Compiling zerovec-derive v0.11.7
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling zerovec v0.11.9
+   Compiling zerotrie v0.2.5
+   Compiling serde v1.0.229
+   Compiling tinystr v0.8.5
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.4.0
+   Compiling icu_locale_core v2.4.0
+   Compiling ciborium v0.2.2
+   Compiling icu_provider v2.4.0
+   Compiling icu_properties v2.4.0
+   Compiling icu_normalizer v2.4.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-7d26558a)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 38.00s
+     Running unittests src/bin/apassy-eval.rs (/Users/rafalw/Dev/.target-agent-tools/debug/deps/apassy_eval-11a3b2b1efbead6b)
+
+running 1 test
+test input_tests::invalid_fixture_is_a_bounded_error ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -1,0 +1,23 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    16Gi    46%    487k  163M    0%   /
+   Compiling apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/ios/ApassyCore)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.70s
+     Running tests/icloud_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/icloud_flow-33fc243dc147e1ee)
+
+running 13 tests
+test a_lock_during_import_prevents_a_late_selection_or_unlock ... ok
+test a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit ... ok
+test already_connected_phone_accepts_a_released_schema16_conflict_snapshot ... ok
+test an_output_failure_after_rekey_reports_the_accepted_passphrase ... ok
+test completion_tokens_are_one_use_bound_to_session_and_do_not_hide_new_edits ... ok
+test concurrent_imports_never_remove_the_successful_import ... ok
+test import_checks_key_preserves_identity_and_strips_raw_mac_local_data ... ok
+test old_registry_files_still_load_and_icloud_source_survives_restart_and_remove ... ok
+test repeated_single_item_merges_advance_status_version ... ok
+test snapshots_merge_mac_and_phone_edits_conflicts_and_deletions ... ok
+test startup_recovers_only_owned_unregistered_import_files ... ok
+test transfer_paths_roles_and_size_have_strict_bounds ... ok
+test wrong_identity_and_new_passphrase_never_replace_local_items ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.20s
+

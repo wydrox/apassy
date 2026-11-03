@@ -1,0 +1,1738 @@
+TAP version 13
+# Subtest: navigation retries ERR_ABORTED, but propagates other failures
+ok 1 - navigation retries ERR_ABORTED, but propagates other failures
+  ---
+  duration_ms: 250.44325
+  type: 'test'
+  ...
+# Subtest: an interrupted navigation is bounded to three attempts
+ok 2 - an interrupted navigation is bounded to three attempts
+  ---
+  duration_ms: 501.624916
+  type: 'test'
+  ...
+# Subtest: warm-up quiet time restarts after a late main-document reload
+ok 3 - warm-up quiet time restarts after a late main-document reload
+  ---
+  duration_ms: 4035.647375
+  type: 'test'
+  ...
+# Subtest: synthetic fill (gesture=false) replies only after the fixture releases its barrier
+ok 4 - synthetic fill (gesture=false) replies only after the fixture releases its barrier
+  ---
+  duration_ms: 64.896041
+  type: 'test'
+  ...
+# Subtest: synthetic fill (gesture=true) replies only after the fixture releases its barrier
+ok 5 - synthetic fill (gesture=true) replies only after the fixture releases its barrier
+  ---
+  duration_ms: 55.191333
+  type: 'test'
+  ...
+# Subtest: synthetic create (gesture=false) replies only after the fixture releases its barrier
+ok 6 - synthetic create (gesture=false) replies only after the fixture releases its barrier
+  ---
+  duration_ms: 60.028792
+  type: 'test'
+  ...
+# Subtest: synthetic create (gesture=true) replies only after the fixture releases its barrier
+ok 7 - synthetic create (gesture=true) replies only after the fixture releases its barrier
+  ---
+  duration_ms: 52.869917
+  type: 'test'
+  ...
+# Subtest: synthetic status matches the app (legacy=false, vault=none)
+ok 8 - synthetic status matches the app (legacy=false, vault=none)
+  ---
+  duration_ms: 38.778792
+  type: 'test'
+  ...
+# Subtest: synthetic status matches the app (legacy=false, vault=locked)
+ok 9 - synthetic status matches the app (legacy=false, vault=locked)
+  ---
+  duration_ms: 33.292625
+  type: 'test'
+  ...
+# Subtest: synthetic status matches the app (legacy=false, vault=unlocked)
+ok 10 - synthetic status matches the app (legacy=false, vault=unlocked)
+  ---
+  duration_ms: 38.534208
+  type: 'test'
+  ...
+# Subtest: synthetic status matches the app (legacy=true, vault=none)
+ok 11 - synthetic status matches the app (legacy=true, vault=none)
+  ---
+  duration_ms: 32.493292
+  type: 'test'
+  ...
+# Subtest: synthetic status matches the app (legacy=true, vault=locked)
+ok 12 - synthetic status matches the app (legacy=true, vault=locked)
+  ---
+  duration_ms: 31.732416
+  type: 'test'
+  ...
+# Subtest: synthetic status matches the app (legacy=true, vault=unlocked)
+ok 13 - synthetic status matches the app (legacy=true, vault=unlocked)
+  ---
+  duration_ms: 45.277084
+  type: 'test'
+  ...
+# Subtest: capture stays only in worker memory; metadata query and banner response contain no password
+ok 14 - capture stays only in worker memory; metadata query and banner response contain no password
+  ---
+  duration_ms: 9.283375
+  type: 'test'
+  ...
+# Subtest: same-tab same-origin next document resumes an offer; old document cannot accept it
+ok 15 - same-tab same-origin next document resumes an offer; old document cannot accept it
+  ---
+  duration_ms: 3.399542
+  type: 'test'
+  ...
+# Subtest: exact existing metadata chooses update; only trusted accept sends the typed password once
+ok 16 - exact existing metadata chooses update; only trusted accept sends the typed password once
+  ---
+  duration_ms: 3.733875
+  type: 'test'
+  ...
+# Subtest: new login accept uses existing SaveLogin packet and no password in response
+ok 17 - new login accept uses existing SaveLogin packet and no password in response
+  ---
+  duration_ms: 2.801458
+  type: 'test'
+  ...
+# Subtest: pending password erased on dismiss
+ok 18 - pending password erased on dismiss
+  ---
+  duration_ms: 3.230708
+  type: 'test'
+  ...
+# Subtest: pending password erased on timeout
+ok 19 - pending password erased on timeout
+  ---
+  duration_ms: 5.95625
+  type: 'test'
+  ...
+# Subtest: pending password erased on no transition
+ok 20 - pending password erased on no transition
+  ---
+  duration_ms: 6.174125
+  type: 'test'
+  ...
+# Subtest: pending password erased on tab close
+ok 21 - pending password erased on tab close
+  ---
+  duration_ms: 3.700542
+  type: 'test'
+  ...
+# Subtest: pending password erased on other origin
+ok 22 - pending password erased on other origin
+  ---
+  duration_ms: 2.232167
+  type: 'test'
+  ...
+# Subtest: pending password erased on disable
+ok 23 - pending password erased on disable
+  ---
+  duration_ms: 2.9835
+  type: 'test'
+  ...
+# Subtest: pending password erased on permission removed
+ok 24 - pending password erased on permission removed
+  ---
+  duration_ms: 3.606459
+  type: 'test'
+  ...
+# Subtest: Never shares toolbar hostname exclusion and erases the secret
+ok 25 - Never shares toolbar hostname exclusion and erases the secret
+  ---
+  duration_ms: 3.571333
+  type: 'test'
+  ...
+# Subtest: username-first memory is tab/origin bound and expires without extending password lifetime
+ok 26 - username-first memory is tab/origin bound and expires without extending password lifetime
+  ---
+  duration_ms: 4.613875
+  type: 'test'
+  ...
+# Subtest: untrusted sender rejected: {"id":"other"}
+ok 27 - untrusted sender rejected: {"id":"other"}
+  ---
+  duration_ms: 0.789041
+  type: 'test'
+  ...
+# Subtest: untrusted sender rejected: {"frameId":2}
+ok 28 - untrusted sender rejected: {"frameId":2}
+  ---
+  duration_ms: 0.699167
+  type: 'test'
+  ...
+# Subtest: untrusted sender rejected: {"origin":"https://evil.example"}
+ok 29 - untrusted sender rejected: {"origin":"https://evil.example"}
+  ---
+  duration_ms: 1.601875
+  type: 'test'
+  ...
+# Subtest: untrusted sender rejected: {"documentLifecycle":"cached"}
+ok 30 - untrusted sender rejected: {"documentLifecycle":"cached"}
+  ---
+  duration_ms: 2.266708
+  type: 'test'
+  ...
+# Subtest: metadata decisions fail closed on errors, wrong origins, ambiguity and a full prefix result
+ok 31 - metadata decisions fail closed on errors, wrong origins, ambiguity and a full prefix result
+  ---
+  duration_ms: 0.923084
+  type: 'test'
+  ...
+# Subtest: navigation during metadata lookup cannot resurrect an expired or dismissed offer
+ok 32 - navigation during metadata lookup cannot resurrect an expired or dismissed offer
+  ---
+  duration_ms: 52.857417
+  type: 'test'
+  ...
+# Subtest: a stalled metadata-only compatibility probe cannot retain or later send a password past the deadline
+ok 33 - a stalled metadata-only compatibility probe cannot retain or later send a password past the deadline
+  ---
+  duration_ms: 12.812541
+  type: 'test'
+  ...
+# Subtest: a destroyed source document cannot replace the destination banner binding
+ok 34 - a destroyed source document cannot replace the destination banner binding
+  ---
+  duration_ms: 2.786
+  type: 'test'
+  ...
+# Subtest: case-insensitive duplicate metadata preserves the exact selected username in an update
+ok 35 - case-insensitive duplicate metadata preserves the exact selected username in an update
+  ---
+  duration_ms: 8.025625
+  type: 'test'
+  ...
+# Subtest: focused second form receives both values; unrelated form stays empty
+ok 36 - focused second form receives both values; unrelated form stays empty
+  ---
+  duration_ms: 4.168042
+  type: 'test'
+  ...
+# Subtest: toolbar capture refuses ambiguity when no login field is focused
+ok 37 - toolbar capture refuses ambiguity when no login field is focused
+  ---
+  duration_ms: 0.657083
+  type: 'test'
+  ...
+# Subtest: same-document form replacement is rejected before any fill
+ok 38 - same-document form replacement is rejected before any fill
+  ---
+  duration_ms: 1.418208
+  type: 'test'
+  ...
+# Subtest: SPA URL change, action change, focus to another form each invalidate target
+ok 39 - SPA URL change, action change, focus to another form each invalidate target
+  ---
+  duration_ms: 1.637542
+  type: 'test'
+  ...
+# Subtest: open shadow root has an independently captured form and fields
+ok 40 - open shadow root has an independently captured form and fields
+  ---
+  duration_ms: 0.676583
+  type: 'test'
+  ...
+# Subtest: username-first result says no password filled
+ok 41 - username-first result says no password filled
+  ---
+  duration_ms: 0.671375
+  type: 'test'
+  ...
+# Subtest: a password-masked OTP is excluded when capturing its username form
+ok 42 - a password-masked OTP is excluded when capturing its username form
+  ---
+  duration_ms: 0.939166
+  type: 'test'
+  ...
+# Subtest: synchronous page replacement after username input cannot redirect password
+ok 43 - synchronous page replacement after username input cannot redirect password
+  ---
+  duration_ms: 0.819125
+  type: 'test'
+  ...
+# Subtest: capture uses preferred originating field while the chooser has focus
+ok 44 - capture uses preferred originating field while the chooser has focus
+  ---
+  duration_ms: 1.034
+  type: 'test'
+  ...
+# Subtest: update chooses new-password with matching confirmation when username or submit has focus
+ok 45 - update chooses new-password with matching confirmation when username or submit has focus
+  ---
+  duration_ms: 2.478709
+  type: 'test'
+  ...
+# Subtest: update rejects multiple unmarked passwords rather than storing the old one
+ok 46 - update rejects multiple unmarked passwords rather than storing the old one
+  ---
+  duration_ms: 0.471291
+  type: 'test'
+  ...
+# Subtest: submit capture requires typed password and excludes Apassy-filled unchanged values
+ok 47 - submit capture requires typed password and excludes Apassy-filled unchanged values
+  ---
+  duration_ms: 0.48425
+  type: 'test'
+  ...
+# Subtest: submit capture selects typed new-password and checks confirmations
+ok 48 - submit capture selects typed new-password and checks confirmations
+  ---
+  duration_ms: 0.295708
+  type: 'test'
+  ...
+# Subtest: submit capture refuses cross-origin, OTP, search forms and ambiguous passwords
+ok 49 - submit capture refuses cross-origin, OTP, search forms and ambiguous passwords
+  ---
+  duration_ms: 0.785417
+  type: 'test'
+  ...
+# Subtest: username-only submission preserves metadata for the second step
+ok 50 - username-only submission preserves metadata for the second step
+  ---
+  duration_ms: 0.209958
+  type: 'test'
+  ...
+# Subtest: placement stays field-aligned below, flips above a submit, clamps and shortens inside viewport
+ok 51 - placement stays field-aligned below, flips above a submit, clamps and shortens inside viewport
+  ---
+  duration_ms: 0.242708
+  type: 'test'
+  ...
+# Subtest: typing provenance expires, clears on fill/consumption, and rejects a programmatic value replacement
+ok 52 - typing provenance expires, clears on fill/consumption, and rejects a programmatic value replacement
+  ---
+  duration_ms: 0.286083
+  type: 'test'
+  ...
+# Subtest: field route rejects other extension before native host
+ok 53 - field route rejects other extension before native host
+  ---
+  duration_ms: 5.880375
+  type: 'test'
+  ...
+# Subtest: field route rejects no document before native host
+ok 54 - field route rejects no document before native host
+  ---
+  duration_ms: 1.652292
+  type: 'test'
+  ...
+# Subtest: field route rejects cached document before native host
+ok 55 - field route rejects cached document before native host
+  ---
+  duration_ms: 1.451583
+  type: 'test'
+  ...
+# Subtest: field route rejects cross origin before native host
+ok 56 - field route rejects cross origin before native host
+  ---
+  duration_ms: 2.0375
+  type: 'test'
+  ...
+# Subtest: field route rejects cross origin frame before native host
+ok 57 - field route rejects cross origin frame before native host
+  ---
+  duration_ms: 1.795666
+  type: 'test'
+  ...
+# Subtest: field route rejects no frame before native host
+ok 58 - field route rejects no frame before native host
+  ---
+  duration_ms: 1.699292
+  type: 'test'
+  ...
+# Subtest: field route rejects opaque origin before native host
+ok 59 - field route rejects opaque origin before native host
+  ---
+  duration_ms: 1.721333
+  type: 'test'
+  ...
+# Subtest: no optional site access means no metadata request
+ok 60 - no optional site access means no metadata request
+  ---
+  duration_ms: 20.727792
+  type: 'test'
+  ...
+# Subtest: suggestions are metadata only; fill requires offered choice and owner/native round trip
+ok 61 - suggestions are metadata only; fill requires offered choice and owner/native round trip
+  ---
+  duration_ms: 42.314708
+  type: 'test'
+  ...
+# Subtest: same origin iframe uses its own browser document, never frame zero
+ok 62 - same origin iframe uses its own browser document, never frame zero
+  ---
+  duration_ms: 5.943875
+  type: 'test'
+  ...
+# Subtest: navigation while owner check waits prevents secret injection
+ok 63 - navigation while owner check waits prevents secret injection
+  ---
+  duration_ms: 3.210333
+  type: 'test'
+  ...
+# Subtest: explicit update sends exact selected identity and reads password only into native request
+ok 64 - explicit update sends exact selected identity and reads password only into native request
+  ---
+  duration_ms: 12.413458
+  type: 'test'
+  ...
+# Subtest: session outcome excludes password, account labels and sensitive URL; expires on stale document
+ok 65 - session outcome excludes password, account labels and sensitive URL; expires on stale document
+  ---
+  duration_ms: 3.581125
+  type: 'test'
+  ...
+# Subtest: disabling suggestions during owner approval invalidates pending inline delivery
+ok 66 - disabling suggestions during owner approval invalidates pending inline delivery
+  ---
+  duration_ms: 4.196667
+  type: 'test'
+  ...
+# Subtest: a valid get goes to the app with the browser origin and a clientDataJSON built here
+ok 67 - a valid get goes to the app with the browser origin and a clientDataJSON built here
+  ---
+  duration_ms: 51.205375
+  type: 'test'
+  ...
+# Subtest: the page cannot choose the origin: an extra field is refused before the app
+ok 68 - the page cannot choose the origin: an extra field is refused before the app
+  ---
+  duration_ms: 3.375291
+  type: 'test'
+  ...
+# Subtest: a port from another extension gets a fallback and nothing reaches the app
+ok 69 - a port from another extension gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 3.665791
+  type: 'test'
+  ...
+# Subtest: a port from no tab gets a fallback and nothing reaches the app
+ok 70 - a port from no tab gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 3.651459
+  type: 'test'
+  ...
+# Subtest: a port from a subframe gets a fallback and nothing reaches the app
+ok 71 - a port from a subframe gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 2.792584
+  type: 'test'
+  ...
+# Subtest: a port from no documentId gets a fallback and nothing reaches the app
+ok 72 - a port from no documentId gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 5.187125
+  type: 'test'
+  ...
+# Subtest: a port from a prerendered document gets a fallback and nothing reaches the app
+ok 73 - a port from a prerendered document gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 2.905
+  type: 'test'
+  ...
+# Subtest: a port from a cached document gets a fallback and nothing reaches the app
+ok 74 - a port from a cached document gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 2.577125
+  type: 'test'
+  ...
+# Subtest: a port from an opaque origin gets a fallback and nothing reaches the app
+ok 75 - a port from an opaque origin gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 4.613292
+  type: 'test'
+  ...
+# Subtest: a port from no origin gets a fallback and nothing reaches the app
+ok 76 - a port from no origin gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 3.171875
+  type: 'test'
+  ...
+# Subtest: a port from a url of another origin gets a fallback and nothing reaches the app
+ok 77 - a port from a url of another origin gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 4.77975
+  type: 'test'
+  ...
+# Subtest: a port from a tab on another origin gets a fallback and nothing reaches the app
+ok 78 - a port from a tab on another origin gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 2.269167
+  type: 'test'
+  ...
+# Subtest: a port from plain http gets a fallback and nothing reaches the app
+ok 79 - a port from plain http gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 3.577125
+  type: 'test'
+  ...
+# Subtest: a port from http on 127.0.0.1 gets a fallback and nothing reaches the app
+ok 80 - a port from http on 127.0.0.1 gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 4.815125
+  type: 'test'
+  ...
+# Subtest: a port from a file page gets a fallback and nothing reaches the app
+ok 81 - a port from a file page gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 5.290541
+  type: 'test'
+  ...
+# Subtest: a port from an origin with a path gets a fallback and nothing reaches the app
+ok 82 - a port from an origin with a path gets a fallback and nothing reaches the app
+  ---
+  duration_ms: 1.634417
+  type: 'test'
+  ...
+# Subtest: a port with another name is closed at once
+ok 83 - a port with another name is closed at once
+  ---
+  duration_ms: 1.422292
+  type: 'test'
+  ...
+# Subtest: http://localhost works for a local test site, with the RP ID localhost
+ok 84 - http://localhost works for a local test site, with the RP ID localhost
+  ---
+  duration_ms: 1.300417
+  type: 'test'
+  ...
+# Subtest: RP ID "example.com" on https://login.example.com: served
+ok 85 - RP ID "example.com" on https://login.example.com: served
+  ---
+  duration_ms: 1.151708
+  type: 'test'
+  ...
+# Subtest: RP ID "login.example.com" on https://login.example.com: served
+ok 86 - RP ID "login.example.com" on https://login.example.com: served
+  ---
+  duration_ms: 1.305583
+  type: 'test'
+  ...
+# Subtest: RP ID "undefined" on https://login.example.com: served
+ok 87 - RP ID "undefined" on https://login.example.com: served
+  ---
+  duration_ms: 2.576375
+  type: 'test'
+  ...
+# Subtest: RP ID "other.com" on https://login.example.com: left to the browser
+ok 88 - RP ID "other.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 2.218083
+  type: 'test'
+  ...
+# Subtest: RP ID "com" on https://login.example.com: left to the browser
+ok 89 - RP ID "com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 2.225083
+  type: 'test'
+  ...
+# Subtest: RP ID "Example.com" on https://login.example.com: left to the browser
+ok 90 - RP ID "Example.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 1.913292
+  type: 'test'
+  ...
+# Subtest: RP ID "xample.com" on https://login.example.com: left to the browser
+ok 91 - RP ID "xample.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 1.447667
+  type: 'test'
+  ...
+# Subtest: RP ID "ogin.example.com" on https://login.example.com: left to the browser
+ok 92 - RP ID "ogin.example.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 1.335
+  type: 'test'
+  ...
+# Subtest: RP ID "deeper.login.example.com" on https://login.example.com: left to the browser
+ok 93 - RP ID "deeper.login.example.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 2.368167
+  type: 'test'
+  ...
+# Subtest: RP ID "localhost" on https://login.example.com: left to the browser
+ok 94 - RP ID "localhost" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 1.13275
+  type: 'test'
+  ...
+# Subtest: RP ID "" on https://login.example.com: left to the browser
+ok 95 - RP ID "" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 1.250708
+  type: 'test'
+  ...
+# Subtest: RP ID "example.com." on https://login.example.com: left to the browser
+ok 96 - RP ID "example.com." on https://login.example.com: left to the browser
+  ---
+  duration_ms: 1.58075
+  type: 'test'
+  ...
+# Subtest: RP ID "exa_mple.com" on https://login.example.com: left to the browser
+ok 97 - RP ID "exa_mple.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 3.963708
+  type: 'test'
+  ...
+# Subtest: RP ID "-example.com" on https://login.example.com: left to the browser
+ok 98 - RP ID "-example.com" on https://login.example.com: left to the browser
+  ---
+  duration_ms: 2.815125
+  type: 'test'
+  ...
+# Subtest: an IP address origin is never served
+ok 99 - an IP address origin is never served
+  ---
+  duration_ms: 4.228291
+  type: 'test'
+  ...
+# Subtest: conditional mediation: a fallback to the browser, nothing to the app
+ok 100 - conditional mediation: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 5.666542
+  type: 'test'
+  ...
+# Subtest: immediate mediation: a fallback to the browser, nothing to the app
+ok 101 - immediate mediation: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 5.228625
+  type: 'test'
+  ...
+# Subtest: a prf extension (get): a fallback to the browser, nothing to the app
+ok 102 - a prf extension (get): a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 2.197917
+  type: 'test'
+  ...
+# Subtest: an appid extension: a fallback to the browser, nothing to the app
+ok 103 - an appid extension: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 5.858834
+  type: 'test'
+  ...
+# Subtest: a large blob extension (create): a fallback to the browser, nothing to the app
+ok 104 - a large blob extension (create): a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 6.003041
+  type: 'test'
+  ...
+# Subtest: no ES256: a fallback to the browser, nothing to the app
+ok 105 - no ES256: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 5.155375
+  type: 'test'
+  ...
+# Subtest: a cross-platform attachment: a fallback to the browser, nothing to the app
+ok 106 - a cross-platform attachment: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 1.8435
+  type: 'test'
+  ...
+# Subtest: enterprise attestation: a fallback to the browser, nothing to the app
+ok 107 - enterprise attestation: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.07325
+  type: 'test'
+  ...
+# Subtest: a security-key hint: a fallback to the browser, nothing to the app
+ok 108 - a security-key hint: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 2.739209
+  type: 'test'
+  ...
+# Subtest: a short challenge: a fallback to the browser, nothing to the app
+ok 109 - a short challenge: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 1.549708
+  type: 'test'
+  ...
+# Subtest: a long challenge: a fallback to the browser, nothing to the app
+ok 110 - a long challenge: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 1.809833
+  type: 'test'
+  ...
+# Subtest: a non-canonical challenge: a fallback to the browser, nothing to the app
+ok 111 - a non-canonical challenge: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 5.01975
+  type: 'test'
+  ...
+# Subtest: a long user ID: a fallback to the browser, nothing to the app
+ok 112 - a long user ID: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.137542
+  type: 'test'
+  ...
+# Subtest: an empty user ID: a fallback to the browser, nothing to the app
+ok 113 - an empty user ID: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.344375
+  type: 'test'
+  ...
+# Subtest: a long user name: a fallback to the browser, nothing to the app
+ok 114 - a long user name: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 2.153584
+  type: 'test'
+  ...
+# Subtest: an empty user name: a fallback to the browser, nothing to the app
+ok 115 - an empty user name: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 2.523333
+  type: 'test'
+  ...
+# Subtest: 65 allowed credentials: a fallback to the browser, nothing to the app
+ok 116 - 65 allowed credentials: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 4.089584
+  type: 'test'
+  ...
+# Subtest: a long credential ID: a fallback to the browser, nothing to the app
+ok 117 - a long credential ID: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.567916
+  type: 'test'
+  ...
+# Subtest: a string timeout: a fallback to the browser, nothing to the app
+ok 118 - a string timeout: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 2.42875
+  type: 'test'
+  ...
+# Subtest: an unknown op: a fallback to the browser, nothing to the app
+ok 119 - an unknown op: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.272666
+  type: 'test'
+  ...
+# Subtest: no options: a fallback to the browser, nothing to the app
+ok 120 - no options: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.172542
+  type: 'test'
+  ...
+# Subtest: a message over 64 KiB: a fallback to the browser, nothing to the app
+ok 121 - a message over 64 KiB: a fallback to the browser, nothing to the app
+  ---
+  duration_ms: 3.495125
+  type: 'test'
+  ...
+# Subtest: no request within 10 s: a fallback
+ok 122 - no request within 10 s: a fallback
+  ---
+  duration_ms: 5.230875
+  type: 'test'
+  ...
+# Subtest: a signed answer reaches the page as base64url, and both ports close
+ok 123 - a signed answer reaches the page as base64url, and both ports close
+  ---
+  duration_ms: 6.299084
+  type: 'test'
+  ...
+# Subtest: app answer not_running (before any owner check): a fallback
+ok 124 - app answer not_running (before any owner check): a fallback
+  ---
+  duration_ms: 2.533917
+  type: 'test'
+  ...
+# Subtest: app answer none_open (before any owner check): a fallback
+ok 125 - app answer none_open (before any owner check): a fallback
+  ---
+  duration_ms: 2.707958
+  type: 'test'
+  ...
+# Subtest: app answer vault_locked (before any owner check): a fallback
+ok 126 - app answer vault_locked (before any owner check): a fallback
+  ---
+  duration_ms: 1.859584
+  type: 'test'
+  ...
+# Subtest: app answer no_match (before any owner check): a fallback
+ok 127 - app answer no_match (before any owner check): a fallback
+  ---
+  duration_ms: 1.75425
+  type: 'test'
+  ...
+# Subtest: app answer unsupported (before any owner check): a fallback
+ok 128 - app answer unsupported (before any owner check): a fallback
+  ---
+  duration_ms: 1.69
+  type: 'test'
+  ...
+# Subtest: app answer bad_request (before any owner check): a fallback
+ok 129 - app answer bad_request (before any owner check): a fallback
+  ---
+  duration_ms: 1.631709
+  type: 'test'
+  ...
+# Subtest: app answer bad_version (before any owner check): a fallback
+ok 130 - app answer bad_version (before any owner check): a fallback
+  ---
+  duration_ms: 2.607208
+  type: 'test'
+  ...
+# Subtest: app answer cancelled: NotAllowedError, never a fallback
+ok 131 - app answer cancelled: NotAllowedError, never a fallback
+  ---
+  duration_ms: 3.151625
+  type: 'test'
+  ...
+# Subtest: app answer owner_check_failed: NotAllowedError, never a fallback
+ok 132 - app answer owner_check_failed: NotAllowedError, never a fallback
+  ---
+  duration_ms: 2.839125
+  type: 'test'
+  ...
+# Subtest: app answer refused: NotAllowedError, never a fallback
+ok 133 - app answer refused: NotAllowedError, never a fallback
+  ---
+  duration_ms: 2.913958
+  type: 'test'
+  ...
+# Subtest: app answer busy: NotAllowedError, never a fallback
+ok 134 - app answer busy: NotAllowedError, never a fallback
+  ---
+  duration_ms: 1.929667
+  type: 'test'
+  ...
+# Subtest: app answer timeout: NotAllowedError, never a fallback
+ok 135 - app answer timeout: NotAllowedError, never a fallback
+  ---
+  duration_ms: 1.768417
+  type: 'test'
+  ...
+# Subtest: app answer stopped: NotAllowedError, never a fallback
+ok 136 - app answer stopped: NotAllowedError, never a fallback
+  ---
+  duration_ms: 1.50525
+  type: 'test'
+  ...
+# Subtest: app answer something_new: NotAllowedError, never a fallback
+ok 137 - app answer something_new: NotAllowedError, never a fallback
+  ---
+  duration_ms: 2.69975
+  type: 'test'
+  ...
+# Subtest: excluded: InvalidStateError for create, NotAllowedError for get
+ok 138 - excluded: InvalidStateError for create, NotAllowedError for get
+  ---
+  duration_ms: 2.838625
+  type: 'test'
+  ...
+# Subtest: an answer with another rid: NotAllowedError, nothing delivered
+ok 139 - an answer with another rid: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 2.9105
+  type: 'test'
+  ...
+# Subtest: an answer with no rid: NotAllowedError, nothing delivered
+ok 140 - an answer with no rid: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 1.923084
+  type: 'test'
+  ...
+# Subtest: an answer with other client data: NotAllowedError, nothing delivered
+ok 141 - an answer with other client data: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 3.144042
+  type: 'test'
+  ...
+# Subtest: an answer with another RP ID hash: NotAllowedError, nothing delivered
+ok 142 - an answer with another RP ID hash: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 1.784958
+  type: 'test'
+  ...
+# Subtest: an answer with no user verification flag: NotAllowedError, nothing delivered
+ok 143 - an answer with no user verification flag: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 3.191458
+  type: 'test'
+  ...
+# Subtest: an answer with no user presence flag: NotAllowedError, nothing delivered
+ok 144 - an answer with no user presence flag: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 2.968833
+  type: 'test'
+  ...
+# Subtest: an answer with base64 without padding: NotAllowedError, nothing delivered
+ok 145 - an answer with base64 without padding: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 3.109125
+  type: 'test'
+  ...
+# Subtest: an answer with base64url instead of base64: NotAllowedError, nothing delivered
+ok 146 - an answer with base64url instead of base64: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 3.429583
+  type: 'test'
+  ...
+# Subtest: an answer with a created type for get: NotAllowedError, nothing delivered
+ok 147 - an answer with a created type for get: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 2.567375
+  type: 'test'
+  ...
+# Subtest: an answer with a short signature: NotAllowedError, nothing delivered
+ok 148 - an answer with a short signature: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 3.724833
+  type: 'test'
+  ...
+# Subtest: an answer with a long user handle: NotAllowedError, nothing delivered
+ok 149 - an answer with a long user handle: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 9.275292
+  type: 'test'
+  ...
+# Subtest: an answer with data that is not an object: NotAllowedError, nothing delivered
+ok 150 - an answer with data that is not an object: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 8.071458
+  type: 'test'
+  ...
+# Subtest: an answer with no ok field: NotAllowedError, nothing delivered
+ok 151 - an answer with no ok field: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 2.527583
+  type: 'test'
+  ...
+# Subtest: an answer with a string: NotAllowedError, nothing delivered
+ok 152 - an answer with a string: NotAllowedError, nothing delivered
+  ---
+  duration_ms: 2.555125
+  type: 'test'
+  ...
+# Subtest: a credential outside the allow list is refused
+ok 153 - a credential outside the allow list is refused
+  ---
+  duration_ms: 3.129708
+  type: 'test'
+  ...
+# Subtest: create: the wire request, clean names, and a checked answer with credProps
+ok 154 - create: the wire request, clean names, and a checked answer with credProps
+  ---
+  duration_ms: 5.625459
+  type: 'test'
+  ...
+# Subtest: create: an untitled RP gets the RP ID as title
+ok 155 - create: an untitled RP gets the RP ID as title
+  ---
+  duration_ms: 2.32975
+  type: 'test'
+  ...
+# Subtest: create: an empty pubKeyCredParams means ES256 and RS256
+ok 156 - create: an empty pubKeyCredParams means ES256 and RS256
+  ---
+  duration_ms: 3.283042
+  type: 'test'
+  ...
+# Subtest: create answer with an excluded credential: NotAllowedError
+ok 157 - create answer with an excluded credential: NotAllowedError
+  ---
+  duration_ms: 3.874125
+  type: 'test'
+  ...
+# Subtest: create answer with another credential ID than in the authenticator data: NotAllowedError
+ok 158 - create answer with another credential ID than in the authenticator data: NotAllowedError
+  ---
+  duration_ms: 4.319875
+  type: 'test'
+  ...
+# Subtest: create answer with another algorithm: NotAllowedError
+ok 159 - create answer with another algorithm: NotAllowedError
+  ---
+  duration_ms: 4.581875
+  type: 'test'
+  ...
+# Subtest: create answer with no item: NotAllowedError
+ok 160 - create answer with no item: NotAllowedError
+  ---
+  duration_ms: 4.12975
+  type: 'test'
+  ...
+# Subtest: create answer with authenticator data without the attested flag: NotAllowedError
+ok 161 - create answer with authenticator data without the attested flag: NotAllowedError
+  ---
+  duration_ms: 6.622791
+  type: 'test'
+  ...
+# Subtest: create answer with an attestation object of other data: NotAllowedError
+ok 162 - create answer with an attestation object of other data: NotAllowedError
+  ---
+  duration_ms: 4.005834
+  type: 'test'
+  ...
+# Subtest: the page closes its port: the native port closes and a late answer goes nowhere
+ok 163 - the page closes its port: the native port closes and a late answer goes nowhere
+  ---
+  duration_ms: 3.472708
+  type: 'test'
+  ...
+# Subtest: the tab went to another origin before the answer: nothing delivered
+ok 164 - the tab went to another origin before the answer: nothing delivered
+  ---
+  duration_ms: 5.834542
+  type: 'test'
+  ...
+# Subtest: the document that asked is gone (same origin, new document): nothing delivered
+ok 165 - the document that asked is gone (same origin, new document): nothing delivered
+  ---
+  duration_ms: 5.410625
+  type: 'test'
+  ...
+# Subtest: a created passkey that the page did not get shows a badge
+ok 166 - a created passkey that the page did not get shows a badge
+  ---
+  duration_ms: 3.002625
+  type: 'test'
+  ...
+# Subtest: the tab navigated before the request reached the app: nothing is sent
+ok 167 - the tab navigated before the request reached the app: nothing is sent
+  ---
+  duration_ms: 15.549417
+  type: 'test'
+  ...
+# Subtest: the deadline: the page timeout is clamped to 30 s, then NotAllowedError and the native port closes
+ok 168 - the deadline: the page timeout is clamped to 30 s, then NotAllowedError and the native port closes
+  ---
+  duration_ms: 5.420917
+  type: 'test'
+  ...
+# Subtest: the deadline is at most 180 s
+ok 169 - the deadline is at most 180 s
+  ---
+  duration_ms: 5.049709
+  type: 'test'
+  ...
+# Subtest: a new request of the same tab ends the old one
+ok 170 - a new request of the same tab ends the old one
+  ---
+  duration_ms: 4.075125
+  type: 'test'
+  ...
+# Subtest: requests of two tabs run side by side
+ok 171 - requests of two tabs run side by side
+  ---
+  duration_ms: 4.051084
+  type: 'test'
+  ...
+# Subtest: a second message on the same port ends the request
+ok 172 - a second message on the same port ends the request
+  ---
+  duration_ms: 2.140917
+  type: 'test'
+  ...
+# Subtest: no native host: a fallback (nothing reached the app)
+ok 173 - no native host: a fallback (nothing reached the app)
+  ---
+  duration_ms: 5.178458
+  type: 'test'
+  ...
+# Subtest: the host ends without an answer: NotAllowedError (it may have shown the owner check)
+ok 174 - the host ends without an answer: NotAllowedError (it may have shown the owner check)
+  ---
+  duration_ms: 3.635042
+  type: 'test'
+  ...
+# Subtest: one native port per request
+ok 175 - one native port per request
+  ---
+  duration_ms: 9.498292
+  type: 'test'
+  ...
+# Subtest: passkeys turn on only with the permission, and register MAIN + ISOLATED top-frame scripts
+ok 176 - passkeys turn on only with the permission, and register MAIN + ISOLATED top-frame scripts
+  ---
+  duration_ms: 8.705
+  type: 'test'
+  ...
+# Subtest: a grant without a wish from the popup does not turn passkeys on
+ok 177 - a grant without a wish from the popup does not turn passkeys on
+  ---
+  duration_ms: 1.413541
+  type: 'test'
+  ...
+# Subtest: removing the site access in the browser turns passkeys off
+ok 178 - removing the site access in the browser turns passkeys off
+  ---
+  duration_ms: 2.377375
+  type: 'test'
+  ...
+# Subtest: turning off ends an open passkey request
+ok 179 - turning off ends an open passkey request
+  ---
+  duration_ms: 2.878625
+  type: 'test'
+  ...
+# Subtest: the manifest asks for the passkey site access only as optional
+ok 180 - the manifest asks for the passkey site access only as optional
+  ---
+  duration_ms: 1.285
+  type: 'test'
+  ...
+# Subtest: state: the popup gets hasTotp only as a flag, and the login shape is unchanged without it
+ok 181 - state: the popup gets hasTotp only as a flag, and the login shape is unchanged without it
+  ---
+  duration_ms: 9.317542
+  type: 'test'
+  ...
+# Subtest: a password fill keeps the native request but targets one exact browser document
+ok 182 - a password fill keeps the native request but targets one exact browser document
+  ---
+  duration_ms: 1.979959
+  type: 'test'
+  ...
+# Subtest: fill code: the request, the fill in frame 0 with the code, and a reply without the code
+ok 183 - fill code: the request, the fill in frame 0 with the code, and a reply without the code
+  ---
+  duration_ms: 0.934792
+  type: 'test'
+  ...
+# Subtest: fill code answer with another origin: nothing filled
+ok 184 - fill code answer with another origin: nothing filled
+  ---
+  duration_ms: 6.910208
+  type: 'test'
+  ...
+# Subtest: fill code answer with another item: nothing filled
+ok 185 - fill code answer with another item: nothing filled
+  ---
+  duration_ms: 5.291958
+  type: 'test'
+  ...
+# Subtest: fill code answer with letters in the code: nothing filled
+ok 186 - fill code answer with letters in the code: nothing filled
+  ---
+  duration_ms: 1.622291
+  type: 'test'
+  ...
+# Subtest: fill code answer with a short code: nothing filled
+ok 187 - fill code answer with a short code: nothing filled
+  ---
+  duration_ms: 0.948083
+  type: 'test'
+  ...
+# Subtest: fill code answer with a long code: nothing filled
+ok 188 - fill code answer with a long code: nothing filled
+  ---
+  duration_ms: 0.958084
+  type: 'test'
+  ...
+# Subtest: fill code answer with another type: nothing filled
+ok 189 - fill code answer with another type: nothing filled
+  ---
+  duration_ms: 2.957625
+  type: 'test'
+  ...
+# Subtest: fill code: the tab went elsewhere during the owner check, nothing filled
+ok 190 - fill code: the tab went elsewhere during the owner check, nothing filled
+  ---
+  duration_ms: 1.633833
+  type: 'test'
+  ...
+# Subtest: fill code: no field on the page is a message, and a cancel is the message of the app
+ok 191 - fill code: no field on the page is a message, and a cancel is the message of the app
+  ---
+  duration_ms: 2.494875
+  type: 'test'
+  ...
+# Subtest: fill code needs a tab, a url, and an integer item
+ok 192 - fill code needs a tab, a url, and an integer item
+  ---
+  duration_ms: 0.787666
+  type: 'test'
+  ...
+# Subtest: the passkey internals are pure helpers
+ok 193 - the passkey internals are pure helpers
+  ---
+  duration_ms: 0.502833
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.7 app: fill omits unknown gesture field
+ok 194 - new extension / 0.5.7 app: fill omits unknown gesture field
+  ---
+  duration_ms: 12.051083
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.8 app: fill retains trusted gesture
+ok 195 - new extension / 0.5.8 app: fill retains trusted gesture
+  ---
+  duration_ms: 4.020875
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.7 app: save omits unknown gesture field
+ok 196 - new extension / 0.5.7 app: save omits unknown gesture field
+  ---
+  duration_ms: 3.414625
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.8 app: save retains trusted gesture
+ok 197 - new extension / 0.5.8 app: save retains trusted gesture
+  ---
+  duration_ms: 1.240791
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.7 app: create omits unknown gesture field
+ok 198 - new extension / 0.5.7 app: create omits unknown gesture field
+  ---
+  duration_ms: 1.0895
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.8 app: create retains trusted gesture
+ok 199 - new extension / 0.5.8 app: create retains trusted gesture
+  ---
+  duration_ms: 3.607625
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.7 app: fill_code omits unknown gesture field
+ok 200 - new extension / 0.5.7 app: fill_code omits unknown gesture field
+  ---
+  duration_ms: 2.01
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.8 app: fill_code retains trusted gesture
+ok 201 - new extension / 0.5.8 app: fill_code retains trusted gesture
+  ---
+  duration_ms: 0.849125
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.7 app: passkey_get omits unknown gesture field
+ok 202 - new extension / 0.5.7 app: passkey_get omits unknown gesture field
+  ---
+  duration_ms: 1.954208
+  type: 'test'
+  ...
+# Subtest: new extension / 0.5.8 app: passkey_get retains trusted gesture
+ok 203 - new extension / 0.5.8 app: passkey_get retains trusted gesture
+  ---
+  duration_ms: 2.871542
+  type: 'test'
+  ...
+# Subtest: old extension / new app wire stays flag-free for fresh authentication
+ok 204 - old extension / new app wire stays flag-free for fresh authentication
+  ---
+  duration_ms: 2.070958
+  type: 'test'
+  ...
+# Subtest: untrusted gesture is never upgraded, including on new app
+ok 205 - untrusted gesture is never upgraded, including on new app
+  ---
+  duration_ms: 3.982541
+  type: 'test'
+  ...
+# Subtest: unknown/unsupported version undefined falls back to fresh checks
+ok 206 - unknown/unsupported version undefined falls back to fresh checks
+  ---
+  duration_ms: 1.796792
+  type: 'test'
+  ...
+# Subtest: unknown/unsupported version  falls back to fresh checks
+ok 207 - unknown/unsupported version  falls back to fresh checks
+  ---
+  duration_ms: 2.5035
+  type: 'test'
+  ...
+# Subtest: unknown/unsupported version 0.5.8-beta falls back to fresh checks
+ok 208 - unknown/unsupported version 0.5.8-beta falls back to fresh checks
+  ---
+  duration_ms: 2.23075
+  type: 'test'
+  ...
+# Subtest: unknown/unsupported version garbage falls back to fresh checks
+ok 209 - unknown/unsupported version garbage falls back to fresh checks
+  ---
+  duration_ms: 1.452125
+  type: 'test'
+  ...
+# Subtest: unknown/unsupported version 0.4.99 falls back to fresh checks
+ok 210 - unknown/unsupported version 0.4.99 falls back to fresh checks
+  ---
+  duration_ms: 3.390125
+  type: 'test'
+  ...
+# Subtest: failed status never enables window reuse
+ok 211 - failed status never enables window reuse
+  ---
+  duration_ms: 1.889459
+  type: 'test'
+  ...
+# Subtest: actual passkey port negotiates gesture with app 0.5.7
+ok 212 - actual passkey port negotiates gesture with app 0.5.7
+  ---
+  duration_ms: 3.633
+  type: 'test'
+  ...
+# Subtest: actual passkey port negotiates gesture with app 0.5.8
+ok 213 - actual passkey port negotiates gesture with app 0.5.8
+  ---
+  duration_ms: 2.777875
+  type: 'test'
+  ...
+# Subtest: a stalled passkey status probe is owned by the session: deadline
+ok 214 - a stalled passkey status probe is owned by the session: deadline
+  ---
+  duration_ms: 70.657833
+  type: 'test'
+  ...
+# Subtest: a stalled passkey status probe is owned by the session: disconnect
+ok 215 - a stalled passkey status probe is owned by the session: disconnect
+  ---
+  duration_ms: 10.722583
+  type: 'test'
+  ...
+# Subtest: a stalled passkey status probe is owned by the session: replacement
+ok 216 - a stalled passkey status probe is owned by the session: replacement
+  ---
+  duration_ms: 2.641625
+  type: 'test'
+  ...
+# Subtest: a stalled passkey status probe is owned by the session: navigation
+ok 217 - a stalled passkey status probe is owned by the session: navigation
+  ---
+  duration_ms: 8.45625
+  type: 'test'
+  ...
+# Subtest: create then get, verified by @simplewebauthn/server (toJSON)
+ok 218 - create then get, verified by @simplewebauthn/server (toJSON)
+  ---
+  duration_ms: 23.954042
+  type: 'test'
+  ...
+# Subtest: create then get, verified by @simplewebauthn/server (manual)
+ok 219 - create then get, verified by @simplewebauthn/server (manual)
+  ---
+  duration_ms: 7.230458
+  type: 'test'
+  ...
+# Subtest: the verifier rejects the answer for another origin or challenge (the check is real)
+ok 220 - the verifier rejects the answer for another origin or challenge (the check is real)
+  ---
+  duration_ms: 3.544167
+  type: 'test'
+  ...
+# Subtest: the attributes are own read-only properties; the prototype accessors are never hit
+ok 221 - the attributes are own read-only properties; the prototype accessors are never hit
+  ---
+  duration_ms: 2.139083
+  type: 'test'
+  ...
+# Subtest: the wrapper keeps the name and the length of the browser methods
+ok 222 - the wrapper keeps the name and the length of the browser methods
+  ---
+  duration_ms: 0.852541
+  type: 'test'
+  ...
+# Subtest: get with no publicKey: the browser's own method, nothing to the app
+ok 223 - get with no publicKey: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.669541
+  type: 'test'
+  ...
+# Subtest: get with a password next to publicKey: the browser's own method, nothing to the app
+ok 224 - get with a password next to publicKey: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.543334
+  type: 'test'
+  ...
+# Subtest: get with conditional mediation: the browser's own method, nothing to the app
+ok 225 - get with conditional mediation: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.527541
+  type: 'test'
+  ...
+# Subtest: get with immediate mediation: the browser's own method, nothing to the app
+ok 226 - get with immediate mediation: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.767792
+  type: 'test'
+  ...
+# Subtest: get with a prf extension: the browser's own method, nothing to the app
+ok 227 - get with a prf extension: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.950791
+  type: 'test'
+  ...
+# Subtest: get with an appid extension: the browser's own method, nothing to the app
+ok 228 - get with an appid extension: the browser's own method, nothing to the app
+  ---
+  duration_ms: 1.695708
+  type: 'test'
+  ...
+# Subtest: get with a challenge that is not a buffer: the browser's own method, nothing to the app
+ok 229 - get with a challenge that is not a buffer: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.906041
+  type: 'test'
+  ...
+# Subtest: get with a shared buffer: the browser's own method, nothing to the app
+ok 230 - get with a shared buffer: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.613875
+  type: 'test'
+  ...
+# Subtest: get with an aborted signal: the browser's own method, nothing to the app
+ok 231 - get with an aborted signal: the browser's own method, nothing to the app
+  ---
+  duration_ms: 0.694125
+  type: 'test'
+  ...
+# Subtest: create with the defaults of the browser's JSON parser is served (empty hints and attestationFormats)
+ok 232 - create with the defaults of the browser's JSON parser is served (empty hints and attestationFormats)
+  ---
+  duration_ms: 3.39325
+  type: 'test'
+  ...
+# Subtest: create without ES256 or without a user name goes to the browser before the app
+ok 233 - create without ES256 or without a user name goes to the browser before the app
+  ---
+  duration_ms: 2.299625
+  type: 'test'
+  ...
+# Subtest: no passkey of the site in Apassy (before any owner check): the browser's own get
+ok 234 - no passkey of the site in Apassy (before any owner check): the browser's own get
+  ---
+  duration_ms: 15.197917
+  type: 'test'
+  ...
+# Subtest: no bridge answer in 1.5 s: the browser's own method
+ok 235 - no bridge answer in 1.5 s: the browser's own method
+  ---
+  duration_ms: 6.754333
+  type: 'test'
+  ...
+# Subtest: the owner cancelled: NotAllowedError, and the browser is not asked
+ok 236 - the owner cancelled: NotAllowedError, and the browser is not asked
+  ---
+  duration_ms: 3.748958
+  type: 'test'
+  ...
+# Subtest: the owner owner_check_failed: NotAllowedError, and the browser is not asked
+ok 237 - the owner owner_check_failed: NotAllowedError, and the browser is not asked
+  ---
+  duration_ms: 4.237958
+  type: 'test'
+  ...
+# Subtest: the owner refused: NotAllowedError, and the browser is not asked
+ok 238 - the owner refused: NotAllowedError, and the browser is not asked
+  ---
+  duration_ms: 2.250459
+  type: 'test'
+  ...
+# Subtest: an excluded credential: InvalidStateError
+ok 239 - an excluded credential: InvalidStateError
+  ---
+  duration_ms: 7.157334
+  type: 'test'
+  ...
+# Subtest: an answer with another rid: NotAllowedError, no credential
+ok 240 - an answer with another rid: NotAllowedError, no credential
+  ---
+  duration_ms: 2.624333
+  type: 'test'
+  ...
+# Subtest: AbortSignal: the page gets the abort reason, the native port closes, a late answer is dropped
+ok 241 - AbortSignal: the page gets the abort reason, the native port closes, a late answer is dropped
+  ---
+  duration_ms: 15.569458
+  type: 'test'
+  ...
+# Subtest: pagehide: AbortError for the page, and the request ends in the app
+ok 242 - pagehide: AbortError for the page, and the request ends in the app
+  ---
+  duration_ms: 5.230084
+  type: 'test'
+  ...
+# Subtest: the page's own deadline (200 s) ends a request that never ends
+ok 243 - the page's own deadline (200 s) ends a request that never ends
+  ---
+  duration_ms: 8.82025
+  type: 'test'
+  ...
+# Subtest: the worker deadline gives NotAllowedError to the page
+ok 244 - the worker deadline gives NotAllowedError to the page
+  ---
+  duration_ms: 6.389041
+  type: 'test'
+  ...
+# Subtest: a second request ends the first with NotAllowedError
+ok 245 - a second request ends the first with NotAllowedError
+  ---
+  duration_ms: 4.871959
+  type: 'test'
+  ...
+# Subtest: a page that calls the bridge itself gets only its own origin into clientDataJSON
+ok 246 - a page that calls the bridge itself gets only its own origin into clientDataJSON
+  ---
+  duration_ms: 2.336
+  type: 'test'
+  ...
+# Subtest: forged answers for an unknown rid are ignored
+ok 247 - forged answers for an unknown rid are ignored
+  ---
+  duration_ms: 4.760917
+  type: 'test'
+  ...
+# Subtest: the bridge passes only options and its own browser gesture provenance
+ok 248 - the bridge passes only options and its own browser gesture provenance
+  ---
+  duration_ms: 5.414584
+  type: 'test'
+  ...
+# Subtest: an oversized or malformed request event is ignored by the bridge
+ok 249 - an oversized or malformed request event is ignored by the bridge
+  ---
+  duration_ms: 4.220791
+  type: 'test'
+  ...
+# Subtest: synthetic page event without browser user activation is refused
+ok 250 - synthetic page event without browser user activation is refused
+  ---
+  duration_ms: 3.071375
+  type: 'test'
+  ...
+# Subtest: origin and RP ID come from the configuration
+ok 251 - origin and RP ID come from the configuration
+  ---
+  duration_ms: 24.042959
+  type: 'test'
+  ...
+# Subtest: a configured origin sets a deterministic port
+ok 252 - a configured origin sets a deterministic port
+  ---
+  duration_ms: 2.298667
+  type: 'test'
+  ...
+# Subtest: bad configuration is refused
+ok 253 - bad configuration is refused
+  ---
+  duration_ms: 0.781458
+  type: 'test'
+  ...
+# Subtest: registration options are fresh and require a discoverable, verified passkey
+ok 254 - registration options are fresh and require a discoverable, verified passkey
+  ---
+  duration_ms: 29.84875
+  type: 'test'
+  ...
+# Subtest: authentication options require user verification
+ok 255 - authentication options require user verification
+  ---
+  duration_ms: 5.82275
+  type: 'test'
+  ...
+# Subtest: registration succeeds and the server stores the credential
+ok 256 - registration succeeds and the server stores the credential
+  ---
+  duration_ms: 13.436917
+  type: 'test'
+  ...
+# Subtest: registration with a wrong challenge fails
+ok 257 - registration with a wrong challenge fails
+  ---
+  duration_ms: 5.854625
+  type: 'test'
+  ...
+# Subtest: registration from a wrong origin fails
+ok 258 - registration from a wrong origin fails
+  ---
+  duration_ms: 9.527208
+  type: 'test'
+  ...
+# Subtest: registration for a wrong RP ID fails
+ok 259 - registration for a wrong RP ID fails
+  ---
+  duration_ms: 6.422625
+  type: 'test'
+  ...
+# Subtest: registration without user verification fails
+ok 260 - registration without user verification fails
+  ---
+  duration_ms: 8.705458
+  type: 'test'
+  ...
+# Subtest: registration without user presence fails
+ok 261 - registration without user presence fails
+  ---
+  duration_ms: 5.861417
+  type: 'test'
+  ...
+# Subtest: registration with an authentication-type client data fails
+ok 262 - registration with an authentication-type client data fails
+  ---
+  duration_ms: 6.004541
+  type: 'test'
+  ...
+# Subtest: a registered credential is excluded from the next registration
+ok 263 - a registered credential is excluded from the next registration
+  ---
+  duration_ms: 8.688042
+  type: 'test'
+  ...
+# Subtest: the server refuses a second registration of the same credential ID
+ok 264 - the server refuses a second registration of the same credential ID
+  ---
+  duration_ms: 13.361083
+  type: 'test'
+  ...
+# Subtest: a ceremony works once
+ok 265 - a ceremony works once
+  ---
+  duration_ms: 7.788291
+  type: 'test'
+  ...
+# Subtest: a failed attempt uses up the ceremony
+ok 266 - a failed attempt uses up the ceremony
+  ---
+  duration_ms: 9.11575
+  type: 'test'
+  ...
+# Subtest: a ceremony for registration cannot finish a sign-in
+ok 267 - a ceremony for registration cannot finish a sign-in
+  ---
+  duration_ms: 12.471
+  type: 'test'
+  ...
+# Subtest: an unknown ceremony ID fails
+ok 268 - an unknown ceremony ID fails
+  ---
+  duration_ms: 8.8515
+  type: 'test'
+  ...
+# Subtest: an old ceremony expires
+ok 269 - an old ceremony expires
+  ---
+  duration_ms: 6.328334
+  type: 'test'
+  ...
+# Subtest: sign-in with a discoverable credential succeeds and updates the counter
+ok 270 - sign-in with a discoverable credential succeeds and updates the counter
+  ---
+  duration_ms: 29.130709
+  type: 'test'
+  ...
+# Subtest: sign-in with an allowCredentials list succeeds
+ok 271 - sign-in with an allowCredentials list succeeds
+  ---
+  duration_ms: 17.021959
+  type: 'test'
+  ...
+# Subtest: sign-in with a wrong challenge fails
+ok 272 - sign-in with a wrong challenge fails
+  ---
+  duration_ms: 10.393334
+  type: 'test'
+  ...
+# Subtest: sign-in from a wrong origin fails
+ok 273 - sign-in from a wrong origin fails
+  ---
+  duration_ms: 10.363958
+  type: 'test'
+  ...
+# Subtest: sign-in for a wrong RP ID fails
+ok 274 - sign-in for a wrong RP ID fails
+  ---
+  duration_ms: 9.482458
+  type: 'test'
+  ...
+# Subtest: sign-in without user verification fails
+ok 275 - sign-in without user verification fails
+  ---
+  duration_ms: 11.183458
+  type: 'test'
+  ...
+# Subtest: sign-in without user presence fails
+ok 276 - sign-in without user presence fails
+  ---
+  duration_ms: 9.800416
+  type: 'test'
+  ...
+# Subtest: sign-in with a registration-type client data fails
+ok 277 - sign-in with a registration-type client data fails
+  ---
+  duration_ms: 11.555083
+  type: 'test'
+  ...
+# Subtest: sign-in with an unknown credential fails
+ok 278 - sign-in with an unknown credential fails
+  ---
+  duration_ms: 24.549625
+  type: 'test'
+  ...
+# Subtest: sign-in with a signature from another key fails
+ok 279 - sign-in with a signature from another key fails
+  ---
+  duration_ms: 12.039125
+  type: 'test'
+  ...
+# Subtest: sign-in with a damaged signature fails
+ok 280 - sign-in with a damaged signature fails
+  ---
+  duration_ms: 13.441584
+  type: 'test'
+  ...
+# Subtest: sign-in with another user handle fails
+ok 281 - sign-in with another user handle fails
+  ---
+  duration_ms: 7.842084
+  type: 'test'
+  ...
+# Subtest: a lower sign counter is refused after a higher one
+ok 282 - a lower sign counter is refused after a higher one
+  ---
+  duration_ms: 14.255583
+  type: 'test'
+  ...
+# Subtest: a counter that stays at zero is accepted
+ok 283 - a counter that stays at zero is accepted
+  ---
+  duration_ms: 27.410917
+  type: 'test'
+  ...
+# Subtest: the server refuses a foreign Host header
+ok 284 - the server refuses a foreign Host header
+  ---
+  duration_ms: 2.299375
+  type: 'test'
+  ...
+# Subtest: POST checks Origin, content type and size
+ok 285 - POST checks Origin, content type and size
+  ---
+  duration_ms: 11.20475
+  type: 'test'
+  ...
+# Subtest: unknown routes give 404
+ok 286 - unknown routes give 404
+  ---
+  duration_ms: 4.065
+  type: 'test'
+  ...
+# Subtest: the page has clear buttons, a status area and a strict policy
+ok 287 - the page has clear buttons, a status area and a strict policy
+  ---
+  duration_ms: 3.81775
+  type: 'test'
+  ...
+# Subtest: the CLI starts, prints its address and stops
+ok 288 - the CLI starts, prints its address and stops
+  ---
+  duration_ms: 160.510667
+  type: 'test'
+  ...
+1..288
+# tests 288
+# suites 0
+# pass 288
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4879.188125

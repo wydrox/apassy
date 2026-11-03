@@ -1,0 +1,180 @@
+{
+  "version": "0.5.10",
+  "status": "macos_and_ios_live_extension_pending",
+  "sources": {
+    "app_merge": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+    "ios_source": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+    "app_tree": "b9d8d6e6e15deec8ac8149d332a7f8d7bb75feb8",
+    "relay_merge": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f"
+  },
+  "source_version_check": "PASS: Python 3.12 scripts/check-release-versions.py without --require-relay or --relay-checkout; relay intentionally remains 0.5.9 and was not accessed",
+  "deliveries": {
+    "ios": {
+      "version": "0.5.10",
+      "build": 29892158,
+      "processing": "VALID",
+      "distribution": "testflight_internal",
+      "group": "internal",
+      "intended_tester_access": true,
+      "notes_verified": true,
+      "sha256": "ece06bc0541af1fbf605cb4699a1862f0f77f0123b642b6a7633fd973beed71c",
+      "verified_at": "2026-11-01T22:39:00Z",
+      "pending_reason": null,
+      "reserved_build": 29892158,
+      "resume_kit": "/Users/rafalw/Dev/.release-0.5.10-ios",
+      "agreement_check_output": "ASC profile API succeeded: the PLA_NOT_ACCEPTED gate is cleared.",
+      "agreement_check_exit": 0,
+      "asc_builds_checked": 14,
+      "asc_max_build": 29875607,
+      "asc_build_id": "15a7561c-d8dc-42a5-bdae-3c70f2dc70f9",
+      "internal_build_state": "IN_BETA_TESTING"
+    },
+    "macos": {
+      "status": "live",
+      "manifest": {
+        "version": "0.5.10",
+        "build": "65ce00c",
+        "commit": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+        "date": "2026-11-01T22:28:06Z",
+        "file": "Apassy.dmg",
+        "size": 26769326,
+        "sha256": "5347753e82da836430c3bc0f167f78d215236beaae1435dec80152203abaadb7",
+        "notarized": true,
+        "minimum_macos": "15.0",
+        "arch": "arm64"
+      },
+      "download": {
+        "size": 26769326,
+        "sha256": "5347753e82da836430c3bc0f167f78d215236beaae1435dec80152203abaadb7"
+      },
+      "workflow": {
+        "url": "https://github.com/wydrox/apassy/actions/runs/41356923795",
+        "source": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+        "conclusion": "success",
+        "id": 41356923795,
+        "created_at": "2026-11-01T22:23:53Z",
+        "completed_at": "2026-11-01T22:28:26Z",
+        "duration_seconds": 273
+      },
+      "verified_at": "2026-11-01T22:29:17.510702+00:00",
+      "strict_signatures": null,
+      "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0510-verify-vnptpmyp/Apassy-0.5.10.dmg: accepted\nsource=Notarized Developer ID\n",
+      "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0510-verify-vnptpmyp/Apassy-0.5.10.dmg\nThe validate action worked!\n",
+      "provider_profiles": null,
+      "readonly_mount_detached": null,
+      "installed_app_untouched": true,
+      "team_id": null,
+      "download_url": "https://apassy.wyderka.cc/download/Apassy-0.5.10.dmg",
+      "embedded_version": null,
+      "embedded_commit": null,
+      "download_verifications": [
+        {
+          "url": "https://apassy.wyderka.cc/download/Apassy.dmg",
+          "size": 26769326,
+          "sha256": "5347753e82da836430c3bc0f167f78d215236beaae1435dec80152203abaadb7",
+          "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0510-verify-vnptpmyp/Apassy.dmg: accepted\nsource=Notarized Developer ID\n",
+          "gatekeeper_exit": 0,
+          "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0510-verify-vnptpmyp/Apassy.dmg\nThe validate action worked!\n",
+          "stapler_exit": 0
+        },
+        {
+          "url": "https://apassy.wyderka.cc/download/Apassy-0.5.10.dmg",
+          "size": 26769326,
+          "sha256": "5347753e82da836430c3bc0f167f78d215236beaae1435dec80152203abaadb7",
+          "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0510-verify-vnptpmyp/Apassy-0.5.10.dmg: accepted\nsource=Notarized Developer ID\n",
+          "gatekeeper_exit": 0,
+          "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0510-verify-vnptpmyp/Apassy-0.5.10.dmg\nThe validate action worked!\n",
+          "stapler_exit": 0
+        }
+      ],
+      "downloaded_dmgs_deleted": true,
+      "app_mounted": false
+    },
+    "linux": {
+      "filename": null,
+      "sha256": null,
+      "size": null,
+      "version": null,
+      "public_matches_ci": null,
+      "ci_version_execution": null,
+      "maximum_glibc": null
+    },
+    "relay": {
+      "version": "0.5.9",
+      "commit": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f",
+      "healthy": null,
+      "runtime_image_manifest_digest": null,
+      "ci_image_config_digest": null,
+      "public_health_http": null,
+      "unauthenticated_me_http": null,
+      "status": "still 0.5.9, unchanged; no deploy needed (owner-provided; not independently runtime verified)",
+      "repository": "wydrox/apassy-relay",
+      "image": null
+    },
+    "extension": {
+      "status": "submitted_pending_review",
+      "package": {
+        "version": "0.5.10",
+        "bytes": 70616,
+        "sha256": "5220bfda74184d9daba7a84e9bae3ea81843ce1140fe1515f4c7b45075d40f7a",
+        "format": "zip",
+        "path": "/Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/release/apassy-extension-0.5.10.zip"
+      },
+      "listing": {
+        "url": null,
+        "version": null,
+        "updated": null,
+        "size_display": null,
+        "verification": null
+      },
+      "verified_at": "2026-11-01T22:29:17.510702+00:00",
+      "pending_reason": "Submitted to the Chrome Web Store on 2026-11-02 (replaced the pending 0.5.9 review, owner-approved). Auto-publish after approval is on. Published version is still 0.5.6. Permissions unchanged.",
+      "package_note": "Rebuilt with scripts/build-extension-zip.sh at v0.5.10 (manifest key removed for the store); the first zip kept the key and was not uploaded.",
+      "evidence": "docs/reviews/audit-2026-10-31/impl-cws-0510/04-submitted.png"
+    },
+    "website": {
+      "verified_at": "2026-11-01T22:29:17.510702+00:00",
+      "homepage": "https://apassy.wyderka.cc/",
+      "changelog": "https://apassy.wyderka.cc/changelog",
+      "homepage_has_version": null,
+      "changelog_has_dated_version": true,
+      "workflow": {
+        "conclusion": "success",
+        "headSha": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+        "status": "completed",
+        "url": "https://github.com/wydrox/apassy/actions/runs/41355237041"
+      },
+      "cloudflare_version_id": null,
+      "html_sha256": {
+        "site": null,
+        "changelog": "63a2f5e92a9d4bd5a5fd479cd847803671b0eab8c5af7b8e365d8831a4c2ca81"
+      }
+    }
+  },
+  "unverified_device_acceptance": [
+    "Face ID approve/cancel",
+    "APNs foreground/background/cold launch",
+    "real-device history upgrade",
+    "macOS AutoFill registration and use",
+    "multi-device request delivery after explicit relay enrollment"
+  ],
+  "operational_boundaries": [
+    "Mac manifest, both public DMG URLs, Gatekeeper, stapler and changelog verified read-only. No app mounted, opened or installed; embedded metadata and internal signatures not independently inspected.",
+    "Relay stays 0.5.9, unchanged; no deploy needed. Relay live state supplied by owner; no relay access performed.",
+    "TestFlight 0.5.10 build/upload and Chrome Web Store 0.5.10 upload follow separately. Chrome Web Store 0.5.9 remains in Google review (owner-provided).",
+    "Unknown verification fields are null; this is not an all-six-live release.",
+    "Mac unlock migrates to schema 23; keep an encrypted backup, shared-vault clients closed, and update every Mac and iPhone to 0.5.10 before syncing.",
+    "Agreement check unexpectedly succeeded; no build, archive, signing or upload performed."
+  ],
+  "app_main_ci": {
+    "status": "success",
+    "run_url": "https://github.com/wydrox/apassy/actions/runs/41355237106",
+    "source": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+    "created_at": "2026-11-01T22:04:30Z",
+    "completed_at": "2026-11-01T22:23:51Z",
+    "duration_seconds": 1161
+  },
+  "source_tags": [
+    "v0.5.10"
+  ]
+}

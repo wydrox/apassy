@@ -1,0 +1,103 @@
+Connect onboarding implementation validation
+Final implementation head: fc7dc9aeb75ba5b7f1d142dd3de2d2ebc6dedd89
+PR: https://github.com/wydrox/apassy/pull/41
+Base: 0b103687 (main, 0.5.8). Changes remain Unreleased.
+
+Flow
+Mac Settings > Devices > Get approvals on your iPhone. No operator code, account,
+Stripe or paid sync. A signed Connect request uses a P-256 key committed to the
+SQLCipher vault before network writes. The saved key survives restart, offline
+failures and a lost response. Legacy 0.5.8 returns a clear retained-key error when
+connect_key_used cannot be recovered; the F06 challenge route is feature-detected.
+Neither path rotates a key on an ambiguous failure. Retry-After seconds distinguish
+short edge limits from capacity limits. Membership has only Questions.
+
+The iPhone opens the same vault from iCloud Drive, scans the pairing code, compares
+safety words and waits for Mac confirmation. A QR-only secret encrypts the question
+key and public trust rows over the existing opaque relay transport. The iPhone
+checks vault/recipient/answer keys and tombstones, then commits the membership and
+keys together. It offers Request Notifications and Open Requests. No answer private
+key is transferred. Fresh Connect pairing replaces a Keychain key retained after
+reinstall. Existing operator-code and paid-sync paths remain available.
+
+Local checks
+PASS: cargo fmt --all -- --check
+PASS: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+PASS: 70 focused Rust unit regressions (sync/settings, Connect limits, schema 20
+migration and the model-server retry check), serial. The initial full library run
+had 1220 passes, 3 failures and 5 pre-existing ignored tests. The two UI assertions
+were updated for the new text/QR/handoff result; the model-server timing test passed
+on the serial rerun. Initial logs are retained, not presented as a green full run.
+PASS: 104 distinct selected Rust integration cases across Connect, questions, relay
+sync, schema upgrades, vault migration and trusted devices: initial 102 passed with
+one downgrade-fixture failure; final six-case rerun passed the corrected migration
+fixture and all five Connect cases (including one newly added short-limit test).
+PASS: all 153 ApassyCore unit/integration cases (57 unit; 96 integration), plus
+zero doc cases. An old future-schema fixture used 21, which is now current; it now
+uses current+1. Its corrected 13-case iCloud suite passed. Other completed core
+suites were retained and the unrun targets completed separately; see the logs.
+PASS: swift test --package-path ios/ApassyCompanion/ModelTests
+416 model tests in 36 suites, macOS package; all pass, including retained-key and
+notification-choice coverage. This is not 416 tests on a physical iPhone.
+PASS: scripts/build-ios-core.sh sim mac (dev) with the prescribed target/incremental
+and Xcode 27 build-override strip settings. The final invocation checked disk space
+before every cargo build and would wait below 8 GiB.
+PASS: xcodebuild test ... -only-testing:ApassyCompanionUITests/ConnectUITests
+2 tests, 0 failures, one iPhone 17 / iOS 27.0 Simulator. Parallel testing disabled.
+Simulator D21FAD17-A4D4-42F7-884F-A15E924F81C3 was shut down, erased and deleted.
+
+Screenshots
+12 original PNGs, individually inspected. SHA-256 and sizes are in evidence.json.
+Mac: eight captures from examples/screenshots.rs using only its local fake relay,
+an isolated APASSY_DEBUG_DATA_DIR and synthetic data. The native helper was disabled
+to avoid the owner's Keychain; the visible native-notification/Touch ID unavailable
+note is a fixture condition. Owner checks use the synthetic vault passphrase.
+iPhone: four captures from the Simulator UI tests using the in-memory preview vault.
+The unavailable-camera panel is expected in the Simulator. These are independent
+Mac/iPhone UI fixtures; matching safety words and the actual encrypted key handoff
+are verified by the Rust UI and ApassyCore local fake-relay tests, not inferred from
+the different words in the independent screenshots.
+
+Acceptance boundary
+No production relay/account calls, owner vault/Keychain/running-app access, physical
+iPhone use, merge, TestFlight upload or App Store changes. Real cellular approval,
+physical APNs receipt, real camera scan and Secure Enclave/Face ID remain device
+acceptance. APNs token registration against the local fake is not delivery proof.
+Wi-Fi retirement and access-request answer semantics remain open for ADR 0033.
+
+CI and target cleanup are recorded below.
+
+Final UI follow-up: successful pairing opened from Agent Access also closes its
+Settings flow and selects Requests. The five-line callback follows the existing
+Open Requests action. A generic iOS Simulator build passed after that follow-up;
+the two interactive UI tests cover the primary Requests pairing entry point.
+
+Main advanced during validation. The branch incorporates main dd4d9e60, including
+PR #37 host repair, via a local branch merge. Only CHANGELOG needed a manual conflict
+resolution, preserving both Added sections. No pull request was merged.
+Final post-main workspace Clippy with all features/targets passes.
+PASS after main update: all 56 Mac sync/pairing unit regressions; demo build without
+vault support. Temporary iOS build/test outputs and the synthetic screenshot vault
+were removed after exporting screenshots, logs and Simulator result summaries.
+
+PASS full post-main Rust library run: 1230 passed, 0 failed, 5 existing ignored,
+1235 total (four test threads; 148.83 seconds). This supersedes the initial broad
+library failure. PASS all 14 merged agent-path fake-service integration cases.
+PASS nine isolation fixture boundary tests; this is synthetic fixture evidence,
+not product isolation acceptance. PASS all 77 CI helper tests with Python 3.12.
+The first helper attempt used Xcode Python 3.9, which lacks tomllib; no source fix
+was needed. PASS coordinated source version check (0.5.8); no publication checks
+or production calls were performed.
+
+PASS final future-schema fixture group: five cases. Its future version now uses
+SCHEMA_VERSION + 1; no product behavior changed in that final test-only commit.
+PASS final workspace Clippy all features/targets. Target process/open-file checks
+were clear, then /Users/rafalw/Dev/.target-connect and the task cargo wrapper were
+deleted as requested. The Simulator data and all temporary iOS builds are removed.
+
+Final GitHub readback: 2026-11-01 00:15:49 UTC. PR #41 OPEN and MERGEABLE at
+fc7dc9aeb75ba5b7f1d142dd3de2d2ebc6dedd89. Site passed. CI run 41255909567
+is queued overall: Linux quality, audit and one Linux shard running; other shards,
+macOS quality, extension and release binaries queued. No failed check was reported.
+No reviews submitted. CI is not green yet; this remains the outstanding completion
+condition. No pull request merge, TestFlight upload or App Store changes performed.

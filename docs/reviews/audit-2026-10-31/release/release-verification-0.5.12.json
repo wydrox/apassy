@@ -1,0 +1,59 @@
+{
+  "version": "0.5.12",
+  "status": "macos_live_ios_unchanged_extension_pending",
+  "sources": {
+    "app_merge": "8a98ae8040416c38f112711c6f79e6a6db9ef28d",
+    "ios_source": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+    "relay_merge": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f"
+  },
+  "source_version_check": "Release PR #52 bumped every version file to 0.5.12; vault schema remains 23.",
+  "deliveries": {
+    "ios": {
+      "version": "0.5.10",
+      "build": 29892158,
+      "status": "no_new_build_needed",
+      "pending_reason": null,
+      "notes": "Schema unchanged (23); TestFlight 0.5.10 build 29892158 remains current."
+    },
+    "macos": {
+      "status": "live",
+      "manifest": {
+        "version": "0.5.12",
+        "build": "8a98ae8",
+        "commit": "8a98ae8040416c38f112711c6f79e6a6db9ef28d",
+        "date": "2026-11-02T12:55:11Z",
+        "file": "Apassy.dmg",
+        "size": 26799142,
+        "sha256": "fefd5294ff8d4f5baac2499fd30dc7df1540ef25696ee48b339d522bddf60c4c",
+        "notarized": true,
+        "minimum_macos": "15.0",
+        "arch": "arm64"
+      },
+      "download": {
+        "size": 26799142,
+        "sha256": "fefd5294ff8d4f5baac2499fd30dc7df1540ef25696ee48b339d522bddf60c4c"
+      },
+      "workflow": {
+        "url": "https://github.com/wydrox/apassy/actions/runs/41445090292",
+        "source": "8a98ae8040416c38f112711c6f79e6a6db9ef28d",
+        "conclusion": "success",
+        "id": 41445090292,
+        "created_at": "2026-11-02T12:29:15Z",
+        "completed_at": "2026-11-02T12:55:34Z",
+        "duration_seconds": 1579
+      },
+      "verified_at": "2026-11-02T12:56:28.139912+00:00",
+      "gatekeeper": "Apassy-0.5.12.dmg: accepted; source=Notarized Developer ID; origin=Developer ID Application (7S3F9767BM)",
+      "stapler": "The validate action worked!"
+    },
+    "extension": {
+      "version": "0.5.10",
+      "status": "submitted_pending_review",
+      "notes": "Chrome Web Store 0.5.10 still in review; the 0.5.12 manifest has no extension code changes since 0.5.11."
+    },
+    "relay": {
+      "version": "0.5.9",
+      "status": "unchanged"
+    }
+  }
+}

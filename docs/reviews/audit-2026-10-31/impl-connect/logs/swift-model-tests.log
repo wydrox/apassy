@@ -1,0 +1,950 @@
+Building for debugging...
+[Starting]
+[1 / 5]
+[2 / 6] AppModels
+[3 / 7] AppModels
+[7 / 11] AppModels
+[10 / 14] AppModelsTests-product
+[12 / 16] AppModelsTests-product
+[16 / 18] AppModelsTests-product
+[17 / 18] AppModelsTests-product
+Build complete! (14,45 sec)
+Test Suite 'All tests' started at 2026-11-01 00:53:19.643.
+Test Suite 'All tests' passed at 2026-11-01 00:53:19.644.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 2084
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Mac places" started.
+◇ Suite "Agents reach" started.
+◇ Suite "Request list actions" started.
+◇ Suite "Older core and the sync of folder changes" started.
+◇ Suite "QuestionsModel with a core that lists every vault" started.
+◇ Suite "ItemDetailModel" started.
+◇ Suite "NewCredentialModel" started.
+◇ Suite "PairingModel" started.
+◇ Suite "ItemEditorModel" started.
+◇ Suite "Automatic sync" started.
+◇ Suite "ItemEditor submission safety" started.
+◇ Suite "Credential exchange" started.
+◇ Suite "CoverPolicy" started.
+◇ Suite "GeneratorModel" started.
+◇ Suite "Decisions" started.
+◇ Suite "QuestionsModel" started.
+◇ Suite "Credential looks and options" started.
+◇ Suite "VaultModel" started.
+◇ Suite "Vault lifecycle" started.
+◇ Suite "QuestionsModel with two vaults" started.
+◇ Suite "VaultText" started.
+◇ Suite "ItemEditorModel folder" started.
+◇ Suite "FolderTree" started.
+◇ Suite "Agents of a vault that is not selected" started.
+◇ Suite "SessionModel" started.
+◇ Suite "VaultQuery" started.
+◇ Suite "AgentsModel" started.
+◇ Suite "JoinModel" started.
+◇ Suite "OwnerGate" started.
+◇ Suite "Answer keys per team" started.
+◇ Suite "Passkeys in the app" started.
+◇ Suite "VaultSettings" started.
+◇ Suite "ICloudVaultModel" started.
+◇ Suite "Paste submission safety" started.
+◇ Suite "Questions of the other vaults" started.
+◇ Test "source identities cannot collide through delimiters or equal qids" started.
+◇ Test "no questions and no Mac on Wi-Fi: connect this iPhone" started.
+◇ Test "production, unconfirmed, destructive, unknown and missing scope require Review" started.
+◇ Test "while the questions load, no action and no claim about the connection" started.
+◇ Test "the questions of two vaults show, each row with its vault and Mac" started.
+◇ Test "no state says the agents show when the Mac is connected" started.
+◇ Test "agent use of a credential: Open Decisions when connected, Connect this iPhone when not" started.
+◇ Test "the editor has no folder menu and saves" started.
+◇ Test "an answer names the vault of its question, and the key of that vault's team signs" started.
+◇ Test "the credential screen has no Options group and no folder, and loads" started.
+◇ Test "a locked list of questions makes no claim about the connection" started.
+◇ Test "every key error of the pairing avoids the word approved" started.
+◇ Test "an iPhone removed from the questions is not connected" started.
+◇ Test "no place says it is available when the Mac is connected, and each names the Mac" started.
+◇ Test "closing drops the paste and the rows" started.
+◇ Test "questions through the relay: connected, and the action opens Decisions" started.
+◇ Test "a cancelled passphrase prompt reveals nothing" started.
+◇ Test "two captures at once keep their own messages, and the alert works after them" started.
+◇ Test "requests without a Mac on Wi-Fi: they are on the Mac, and pairing on Wi-Fi brings them" started.
+◇ Test "the token is sent again when another vault joins the list" started.
+◇ Test "Add right after a change detects the new text first, shows its rows, and adds on the next tap" started.
+◇ Test "Back clears a QR received from another scanner without starting pairing" started.
+◇ Test "the favorites of the Vault root skip archived and deleted items, in the order added" started.
+◇ Test "a generic notification refreshes all open vaults without selecting a question" started.
+◇ Test "a favorite is toggled from the item" started.
+◇ Test "the paste sheet shows the core's message, has no folder menu, and adds nothing" started.
+◇ Test "large type of a secret needs the owner check and is marked secret" started.
+◇ Test "a Mac paired on Wi-Fi is named, with or without the questions" started.
+◇ Test "an empty paste shows no hint, and Add stays off" started.
+◇ Suite "RunSnapshot" started.
+◇ Test "loading folder choices preserves an explicit destination even when it is gone" started.
+◇ Test "large type of a plain field needs no owner check" started.
+◇ Test "a detected row has the Mac's line, the cap of a signal, and only the core's mask" started.
+◇ Test "rules stay on the Mac, with no action" started.
+◇ Test "a cancel that lands after the Mac answered shows no code and starts no polling" started.
+◇ Test "a refused link has its own title, so the title does not repeat the message" started.
+◇ Test "the Vault root has no folders section, and the rest of it stays" started.
+◇ Test "a name counts scalars, and every White_Space scalar around it is trimmed" started.
+◇ Test "suggestions come from the Mac, with no action, in every state" started.
+◇ Test "a field that is not a one-time password shows no code" started.
+◇ Test "hide removes a revealed secret at once" started.
+◇ Test "a dropped connection sets a note and polling goes on until the Mac answers" started.
+◇ Test "a new detection keeps the titles and checkboxes of the rows that stay" started.
+◇ Test "only an explicit fully readable routine Read gets Allow Once" started.
+◇ Test "a one-time code shows as six digits after the owner check" started.
+◇ Test "scanning clears the notice, and a code that is no pairing link only sets a note" started.
+◇ Test "the push token reaches every team at once, and turning notifications off clears every team" started.
+◇ Test "with every row unchecked, Add is off and says why" started.
+◇ Test "cancelling on the code screen stops the polling" started.
+◇ Test "a cancelled Face ID while pairing says that nothing is paired, not that nothing was approved" started.
+◇ Test "a device without a Secure Enclave fails with the message, before any request" started.
+◇ Test "delete removes the item from the vault" started.
+◇ Test "detection waits until the text stops changing, and only the last text applies" started.
+◇ Test "the folder menu lists the tree with depths, after No folder" started.
+◇ Test "an item that is not in the vault is gone" started.
+◇ Test "a revealed secret shows after the owner check and goes after its lifetime" started.
+◇ Test "a detection error shows the core's message instead of rows" started.
+◇ Test "a name with no character or 41 characters blocks the scan" started.
+◇ Test "a QR received from another scanner retains name validation and rejects malformed links" started.
+◇ Test "Add with the rows on the screen still matching the text adds the checked rows" started.
+◇ Test "dropSecrets clears the revealed values, the codes, and a secret in large type" started.
+◇ Test "load reads the four fields of an item" started.
+◇ Test "the Mac closing the pairing ends with nothing stored, and start again scans" started.
+◇ Test "a failed move goes to the sheet that asked, not to the alert of the tabs" started.
+◇ Test "a companion QR in the relay scanner waits for Continue, then uses the normal pairing" started.
+◇ Test "a text changed before the detection adds nothing on Add, and the rows are refreshed" started.
+◇ Test "Add sends the checked rows and the typed titles, into the folder, and reloads the vault" started.
+◇ Test "the message of the core shows when a save fails" started.
+◇ Test "a move that works reports nothing" started.
+◇ Test "a name is sent without the spaces around it" started.
+◇ Test "an empty website and an empty one-time password are left out" started.
+◇ Test "an expired window ends with nothing stored" started.
+◇ Test "a .env paste gives one checked row for each line, and masked lines" started.
+◇ Test "a tag that the item has, in other case, is refused with a message" started.
+◇ Test "the paste goes when revealed values go, and the sheet keeps its folder" started.
+◇ Test "editing a login keeps its website, and its secrets stay unchanged" started.
+◇ Test "another scanner cannot replace a pairing that is waiting for Mac confirmation" started.
+◇ Test "editing the title of an item keeps its password" started.
+◇ Test "a return to the app syncs at once and runs the loop again" started.
+◇ Test "the website and the code count as details" started.
+◇ Test "a new login makes a draft with its website and one-time password as details" started.
+◇ Test "saving a new item adds it to the vault" started.
+◇ Test "a good link shows the code, the Mac says paired, and Continue hands over the record" started.
+◇ Test "a stored hidden detail keeps its value under its stored name, also when renamed" started.
+◇ Test "Save commits a typed tag without Return and rejects invalid pending tags without a write" started.
+◇ Test "a website that is stored under the label url keeps that label" started.
+◇ Test "saving with no title shows a message and sends nothing" started.
+◇ Test "leaving a partial save reports its persisted identity and actual location, not later edits" started.
+◇ Test "an item of the other kind keeps the name of its secret and its value" started.
+◇ Test "a tag has at most 64 bytes, and an item has at most 32 tags" started.
+◇ Test "a suspended save submits its original fields and destination once" started.
+◇ Test "the options of a credential and a paste each push soon after" started.
+◇ Test "a new item never silently loses a destination deleted before the editor loads" started.
+◇ Test "an older core without folder capability clears inherited destination without a dirty edit" started.
+◇ Test "changes after a failed move update the saved identity instead of creating another item" started.
+◇ Test "dirty protection includes pending input and exact changes can be undone" started.
+◇ Test "an export whose vault locked during the pick waits, reads nothing, and goes on after the unlock" started.
+◇ Test "an export asks the owner, then the system, and hands over the passkeys" started.
+◇ Test "an item has at most ten details" started.
+◇ Test "an export that the owner or the system cancels hands over nothing" started.
+◇ Test "all ordinary login requirements are visible before Save; Website remains optional" started.
+◇ Test "a canceled export that waited cannot be continued" started.
+◇ Test "the app is covered when inactive or in the background, and not when active" started.
+◇ Test "a random password has 24 characters and a strength" started.
+◇ Test "polling stops in the background only" started.
+◇ Test "a PIN has six digits" started.
+◇ Test "an import waits for the owner, and a refusal reads nothing" started.
+◇ Test "an import that the system cancels changes nothing" started.
+◇ Test "an export never takes the data of another vault that the owner opened during the pick" started.
+◇ Test "clear drops the value" started.
+◇ Test "a memorable password joins words with the separator" started.
+◇ Test "each regenerate bumps the generation" started.
+◇ Test "an export that waits ignores another vault, and goes on only in its own vault after a new owner check" started.
+◇ Test "a failed write preserves draft fields, tags, destination and the actionable error" started.
+◇ Test "a restored attempt without known acceptance never claims Answer sent" started.
+◇ Test "a question from another Mac never hides a run of the paired Mac" started.
+◇ Test "a system prompt of the app excuses the inactive phase only" started.
+◇ Test "an offline Mac leaves a sent answer unconfirmed, never refused" started.
+◇ Test "a tap right after a decision appears or changes does not answer" started.
+◇ Test "an expired or settled question is not waiting" started.
+◇ Test "the score comes from the bits, and from the core only when the bits are unknown" started.
+◇ Test "the length stays in the range of the style" started.
+◇ Test "changing the style back sets the default length of that style" started.
+◇ Test "the tab badge counts the rows of Decisions: a run that a question shows counts once" started.
+◇ Test "without a vault that sends requests through the relay, the status says so, not Apple" started.
+◇ Test "an existing companion pairing keeps its keys and stays in the connect sheet" started.
+◇ Test "a folder can be made and renamed" started.
+◇ Test "a removed device connects again with a new answer key" started.
+◇ Test "PostgreSQL gets the database tile, and an unknown provider the tile of its kind" started.
+◇ Test "a run that a question already shows is listed once, as the question" started.
+◇ Test "questions and runs are one list, newest first; a run of unknown age goes last" started.
+◇ Test "a cancelled Face ID sends nothing" started.
+◇ Test "an answer that gives authority asks for Face ID and sends the signature" started.
+◇ Test "the right passphrase unlocks and reads the items and Watchtower" started.
+◇ Test "turning Always ask off needs the owner, turning it on does not" started.
+◇ Test "a less careful environment waits for the owner, production does not" started.
+◇ Test "the first environment of a credential without a declaration waits for the owner, production too" started.
+◇ Test "unlocking gives iOS the logins for the QuickType bar once" started.
+◇ Test "OS revocation and APNs failure are visible, and registration can recover" started.
+◇ Test "Always ask turns on at once and turns off only after the owner check" started.
+◇ Test "a row names the credential, the agent and the project, and marks production" started.
+◇ Test "a delayed iCloud publication error cannot replace the next vault status or identities" started.
+◇ Test "moveItem puts a credential in a folder" started.
+◇ Test "saving a new login adds it, publishes the logins, and syncs soon after" started.
+◇ Test "a sent question is recent and its matching run cannot be answered again" started.
+◇ Test "a long poll that ends at once without news waits before the next one, longer each time" started.
+◇ Test "without a provider, the service in the subtitle picks the tile, as the Mac's provider or service" started.
+◇ Test "deleting a folder moves its credentials up and deletes none" started.
+◇ Test "detailLine shows the username of a login and the kind of anything else" started.
+◇ Test "settlement clears only the delivered snapshot when no request still waits" started.
+◇ Test "a one-time code goes after its lifetime, as a revealed value" started.
+◇ Test "start reads the folders of the vault" started.
+◇ Test "an open question has no outcome; this iPhone's answer, a settle, or the expiry replace the bar" started.
+◇ Test "the environment cap shows a confirmed environment and hides a default" started.
+◇ Test "a return waits for the background transition before it resumes" started.
+◇ Test "an opened notification opens nothing when the owner opened something during the refresh" started.
+◇ Test "a delayed rekey does not recreate credentials after the original vault is removed" started.
+◇ Test "Connect this iPhone routes a companion QR after dismissal without starting a relay join" started.
+◇ Test "a journal attempt during retry preserves exactly one original signed payload" started.
+◇ Test "a code that arrives after the screen dropped its secrets is not kept" started.
+◇ Test "the auto-lock measures the time away on the continuous clock" started.
+◇ Test "the sync loop syncs, waits, and syncs again when the relay has news, and stops on request" started.
+◇ Test "making, renaming, moving, and deleting a folder each sync soon after" started.
+◇ Test "every environment but production needs the owner, as on the Mac" started.
+◇ Test "an unlock that ends after the app went away is closed with 5 minutes too" started.
+◇ Test "turning Face ID unlock off removes the passphrase and the choice" started.
+◇ Test "the Face ID reason names the agent without control characters or quotes, and the answer" started.
+◇ Test "a secret that arrives after the secrets were dropped is not kept" started.
+◇ Test "a resume that returns after the app went away again closes the vault at once" started.
+◇ Test "duplicate taps during Face ID cannot prepare another answer" started.
+◇ Test "local identity includes trusted pairing and immutable digest" started.
+◇ Test "an unoffered answer cannot be prepared or authenticated" started.
+◇ Test "a favorite is toggled on and off" started.
+◇ Test "lock drops the items and the revealed values" started.
+◇ Test "notifications ask for permission when turned on, and the token goes to the relay" started.
+◇ Test "history is only available metadata, clears locally, and disappears on leave" started.
+◇ Test "a local vault does not sync" started.
+◇ Test "the refresh of a code stops and drops it when the secrets are dropped" started.
+◇ Test "a project answer, a correction, and a question without a project" started.
+◇ Test "relay row identity includes the vault even when qids collide" started.
+◇ Test "the time left: 5 minutes for a question, the Mac's timeout for a run" started.
+◇ Test "going to the background locks at once with Immediately" started.
+◇ Test "the folder label follows a move" started.
+◇ Test "removing the vault forgets its passphrase, settings, and QuickType logins" started.
+◇ Test "a stalled OS permission read cannot block discovery of an unconnected vault" started.
+◇ Test "a known provider gets a letter tile in its color" started.
+◇ Test "an unlock that ends after the app went away locks again with Immediately" started.
+◇ Test "a secret field is copied after the owner check, marked secret" started.
+◇ Test "the Options group shows only when the core sends Always ask me" started.
+◇ Test "the bar of a production question: Allow production: ACTION in PROJECT first, in red, the rest in the menu" started.
+◇ Test "a row with this key needs no registration and clears the notice" started.
+◇ Test "going to the background closes a vault that the screens do not show as unlocked" started.
+◇ Test "a generic notification refreshes the list once without choosing a question" started.
+◇ Test "a network failure sends the same answer again; a settled question says so" started.
+◇ Test "the main secret of a row is copied: the token of an API key" started.
+◇ Test "a core that refuses an overtaken unlock with locked leaves the lock screen without a message" started.
+◇ Test "the push token reaches the team of each vault that opens in this launch" started.
+◇ Test "agent names and the environment of a question" started.
+◇ Test "reconnecting a removed vault keeps the answer key of the other vault" started.
+◇ Test "Face ID unlock checks the passphrase before it stores it" started.
+◇ Test "a device link is the relay link or the bare token, trimmed" started.
+◇ Test "states that the owner must solve stop the sync loop" started.
+◇ Test "a wrong passphrase leaves the vault locked with a message" started.
+◇ Test "an answer to a question of a vault whose questions are not open is refused before Face ID" started.
+◇ Test "a code is spoken digit by digit" started.
+◇ Test "a team that is not open now is cleared when its vault opens, also after a new launch" started.
+◇ Test "Face ID unlock reads the stored passphrase and unlocks" started.
+◇ Test "a locked vault says so instead of an empty list" started.
+◇ Test "turning notifications off clears the token in every team that has it" started.
+◇ Test "a new Face ID enrollment makes a new answer key but does not register it" started.
+◇ Test "a request changed while Face ID is pending never posts the old choice" started.
+◇ Test "a row that has not synced yet gets a notice and no registration" started.
+◇ Test "foreground quieting is limited to an unlocked visible list" started.
+◇ Test "a new item goes into the chosen folder after the save" started.
+◇ Test "a new item without a folder stays at the top level" started.
+◇ Test "an empty passphrase asks for one" started.
+◇ Test "a lock while Face ID is pending drops request and receipt metadata" started.
+◇ Test "a failed move retains a saved identity and retries the same item without a duplicate" started.
+◇ Test "cancelling a current waiting relay connection still cancels it on the service" started.
+◇ Test "an edited item moves only when its folder changed" started.
+◇ Test "Connect pairing offers push only after confirmation and an explicit notification action" started.
+◇ Test "a character is a letter, a digit, a symbol, or a space" started.
+◇ Test "a passphrase that did not rekey does not replace the stored passphrase" started.
+◇ Test "a plain field is copied without an owner check" started.
+◇ Test "a folder that is gone reads as the top level and is no change" started.
+◇ Test "a label inside a sentence loses its first capital, unless it starts an acronym" started.
+◇ Test "a cancelled Face ID prompt leaves the lock screen as it is" started.
+◇ Test "the username of a row is copied plain" started.
+◇ Test "a cancelled Face ID does nothing" started.
+◇ Test "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test "an old generic push never opens an unrelated newer request" started.
+◇ Test "a stored passphrase that does not open the vault: the note to select it" started.
+◇ Test "the host of a website has no www" started.
+◇ Test "Deny and the stricter answers go without Face ID" started.
+◇ Test "a sync merged something when the merge exists and the version or the merge moved" started.
+◇ Test "no stored passphrase: Remove does not show, and the note says to select the vault" started.
+◇ Test "children lists the folders right under a parent" started.
+◇ Test "a code is grouped from the right in threes" started.
+◇ Test "a time of the core is a date" started.
+◇ Test "a removed device gets a notice and no registration" started.
+◇ Test "count adds the subfolders, skips archived items, and reads a gone folder as the top level" started.
+◇ Test "a stored passphrase: Remove reads the keys again with Face ID, then asks, then sends" started.
+◇ Test "choices go depth first with levels and drop excluded folders" started.
+◇ Test "a website opens with https when it has no scheme, and only as http or https" started.
+◇ Test "a cancelled passphrase prompt copies nothing" started.
+◇ Test "a device link connects the vault after the Mac confirms" started.
+◇ Test "a one-time password setup code is an otpauth totp URI" started.
+◇ Test "stalled delivered-alert housekeeping cannot block connection discovery or clear a new request" started.
+◇ Test "a stored passphrase that iOS dropped is stored again at the next unlock" started.
+◇ Test "Connect this iPhone rejects malformed or expired companion QR without a relay fallback" started.
+◇ Test "an iCloud publication error reloads a committed local merge and AutoFill identities" started.
+◇ Test "moveTargets keeps the folder and the levels below it within the maximum depth" started.
+◇ Test "the sync loop tries again after an error" started.
+◇ Test "pathLabel joins the names, and says no folder for nil and for an unknown folder" started.
+◇ Test "off without a team; ready with one, and the answer key is registered once" started.
+◇ Test "deleting an item removes it and its favorite" started.
+◇ Test "canHoldSubfolder is false at the maximum depth and true at the top level" started.
+◇ Test "a delayed rekey stores the passphrase for its original vault after selection changes" started.
+◇ Test "search matches the title, the subtitle, a tag, and a website" started.
+◇ Test "with 5 minutes the vault stays for 60 seconds and locks after 301" started.
+◇ Test "groups put the credentials without a folder first, then folders by path, A–Z" started.
+◇ Test "a folder without credentials has no group" started.
+◇ Test "moveTargets leaves out the folder and its subtree" started.
+◇ Test "an offline cached row requires refresh instead of sending Deny" started.
+◇ Test "start finds the vault and leaves it locked" started.
+◇ Test "the team of a device link" started.
+◇ Test "each failure of the Mac gives its own state, and the last inbox stays" started.
+◇ Test "recent is the five newest items that are not archived" started.
+◇ Test theListStartsLoadingThenShowsTheFeeds() started.
+◇ Test "parent Settings, dismissal, and tab changes retain foreground request alerts" started.
+◇ Test "subtree holds a folder and the folders below it, and level counts from 0" started.
+◇ Test errorsOfTheCoreAreSaidPlainly() started.
+◇ Test "search puts archived items in their own list" started.
+◇ Test "sorted by change puts the newest first, and by title uses the title order" started.
+◇ Test anOnlyRemovalNeedsNoFaceID() started.
+◇ Test "the right passphrase offers Face ID, and turning it on stores the passphrase" started.
+◇ Test "a 401 unpaired deletes the pairing and ends once, with the message" started.
+◇ Test "items(in:of:) lists the direct, not archived items A–Z" started.
+◇ Test "an error of the relay while waiting ends in a failure" started.
+◇ Test "start shows the safety words, then the passphrase when the Mac confirmed" started.
+◇ Test aLeaveEndsARemovalThatWaitsHonestly() started.
+◇ Test seesSaysThatTheMacListsOnlyItsRows() started.
+◇ Test "forget deletes the record and does not ask the Mac" started.
+◇ Test agentsAreGroupedByMacAndByVault() started.
+◇ Test "cancel while waiting cancels the join on the relay" started.
+◇ Test "a device link goes to the name step" started.
+◇ Test "a wrong passphrase keeps the step with a message" started.
+◇ Test "empty search text finds nothing" started.
+◇ Test aStaleMacIsDimmedAndTakesNoAction() started.
+◇ Test "a tab shows the connection in place of its rows before the first answer, and for another Mac" started.
+◇ Test "equal device IDs and Mac names remain distinct when their verified pins differ" started.
+◇ Test "sections run from A to Z with the hash last, and titles are sorted inside" started.
+◇ Test "tags are unique without regard to case, sorted, and leave out archived-only tags" started.
+◇ Test aFailureShowsAnErrorOrANoticeOverTheList() started.
+◇ Test "search needs every word" started.
+◇ Test "it starts connecting, then shows the inbox and the status" started.
+◇ Test "a name needs a character and at most 64 bytes" started.
+◇ Test theAnswerOfAnOlderMacSaysToUpdateIt() started.
+◇ Test "filter keeps the kind and the tag, and nil keeps all" started.
+◇ Test "the letter of a title is its first letter without accents, or a hash" started.
+◇ Test "invalid companion QR codes stay in the scanner and never enter relay joining" started.
+◇ Test "favorites keep the order of the IDs and skip missing and archived items" started.
+◇ Test "a refused denial of an access request sets the message for the alert" started.
+◇ Test "a valid companion QR from either scan entry routes to companion pairing" started.
+◇ Test aVaultThatIsNotSelectedAsksToSelectItFirst() started.
+◇ Test "an inbox response already in flight cannot restore rows after Forget" started.
+◇ Test "approve sends the run as shown, and the run leaves the inbox" started.
+◇ Test anExceptionGoneDuringFaceIDSaysTheListChanged() started.
+◇ Test "changed or missing local snapshots cannot deny another version with the same ID" started.
+◇ Test aNeverRemovalSignsWithTheKeyOfTheVaultsTeamAfterFaceID() started.
+◇ Test "a wrong passphrase keeps the prompt with a message, and the right one allows the action" started.
+◇ Test "search ignores case and accents" started.
+◇ Test "renew replaces the key of one team only, never the shared key" started.
+◇ Test "an unavailable companion flow leaves an actionable scanner note" started.
+◇ Test "a join that finishes while the app is away leaves the vault closed" started.
+◇ Test "cancel refuses the action" started.
+◇ Test eachVaultSignsWithItsOwnTeamKey() started.
+◇ Test "an empty passphrase asks for one and keeps the prompt" started.
+◇ Test "forget clears cached private rows and disables every list Deny" started.
+◇ Test "a category lists its kind without archived items, and the archive lists the archived" started.
+◇ Test aKeyOfAnotherTeamNeverSigns() started.
+◇ Test "unpair deletes the record even when the Mac is not reachable, and says so" started.
+◇ Test aFeedThatLandsDuringFaceIDStillSendsThePreparedAction() started.
+◇ Test "a failed match or a cancelled prompt keeps the pairing, and the run stays" started.
+◇ Test "start sends the answer key of this iPhone with the link; without a key it sends none" started.
+◇ Test "text that is not a device link only sets a note" started.
+◇ Test "the biometry of the check is the biometry of the gate" started.
+◇ Test "a second confirm while the first waits answers false at once" started.
+◇ Test "unpair tells the Mac, deletes the record, and ends" started.
+◇ Test "not now keeps the passphrase out of the store" started.
+◇ Test namesThatDifferFromTheAlertSendNothing() started.
+◇ Test "without biometry the right passphrase ends the flow" started.
+◇ Test "no key for a team: no signer, and none is made" started.
+◇ Test "a new team gets its own key; a team whose row holds the shared key keeps it" started.
+◇ Test "without a match the passphrase prompt shows the reason" started.
+◇ Test "the app gives iOS the passkeys and the one-time passwords with the logins" started.
+◇ Test aMacWithAProblemIsListedWithItsText() started.
+◇ Test anOlderCoreKeepsTheHonestScreen() started.
+◇ Test aLockClearsEverything() started.
+◇ Test theTextsOfAnAgent() started.
+◇ Test "start asks for the answer key of the team that the link names" started.
+◇ Test aCancelledFaceIDSendsNothing() started.
+◇ Test "the key whose public key the row holds signs" started.
+◇ Test oneVaultNamesOnlyTheMacs() started.
+◇ Test "list denials require a fresh connected inbox and a real remaining deadline" started.
+◇ Test "the Face ID choice belongs to one vault" started.
+◇ Test anOlderMacAsksForAnUpdate() started.
+◇ Test "a removal made for an older revision deletes nothing" started.
+◇ Test "still stale after the keys were read again: the list changed" started.
+◇ Test refusedStaleAndExpiredSayWhatHappened() started.
+◇ Test "a Face ID match allows the action and shows no prompt" started.
+◇ Test actionsAreOfferedOnlyWhenThisIPhoneCanSendThem() started.
+◇ Test anAlwaysAskRemovalAsksFaceIDWithTheReasonOfTheCore() started.
+◇ Test "a login with a password and a passkey keeps its notes and codes" started.
+◇ Test "a vault that was never left does not lock" started.
+◇ Test theWatchReadsTheListAgainAfterAChange() started.
+◇ Test aNewFeedWhileTheAlertIsUpSendsNothing() started.
+◇ Test "submit without a prompt does nothing" started.
+◇ Test "background during open closes the vault even after a quick return" started.
+◇ Test "polling asks again and again, and stops when the task is cancelled" started.
+◇ Test "cancel at the Face ID offer closes the vault and saves no passphrase" started.
+◇ Test "a wrong passphrase stays at the selected file and can be corrected" started.
+◇ Test "an edit of a passkey-only login needs no password and keeps the passkey" started.
+◇ Test withoutAFeedTheTabSaysWhereTheAgentsAre() started.
+◇ Test aRowWithAnotherKeyIsNotSigned() started.
+◇ Test "AutoFill setup cannot bypass the passphrase or biometry choice" started.
+◇ Test "cancel restores the previous vault after it removes the new local entry" started.
+◇ Test "deny removes the run, and an access request is denied by its ID" started.
+◇ Test "a failed cancel cleanup stays closed and lets the owner try Cancel again" started.
+◇ Test "the filename gives the name and Face ID needs the owner choice" started.
+◇ Test "Later completes import with AutoFill off, and failed settings has recovery" started.
+◇ Test "reselection connects the existing vault and reports a failed selection" started.
+◇ Test "the service rejects a wrong provider without completion" started.
+◇ Test "a key that cannot be used ends the pairing: the Mac is asked, the record goes, the flow shows the message" started.
+◇ Test "cancel during open waits for the result and closes the vault" started.
+◇ Test "a passkey-only login is deleted whole, and the owner check says so" started.
+◇ Test "two open actions make one import" started.
+◇ Test "background at the Face ID offer drops its passphrase and closes the vault" started.
+◇ Test "AutoFill is optional and opening Settings does not mark it enabled" started.
+◇ Test "headerLine joins the provider and the kind" started.
+◇ Test case passing 1 argument error → .cancelled to "every key error of the pairing avoids the word approved" started.
+◇ Test case passing 1 argument error → .authenticationFailed to "every key error of the pairing avoids the word approved" started.
+◇ Test case passing 1 argument error → .lockedOut to "every key error of the pairing avoids the word approved" started.
+◇ Test case passing 1 argument error → .biometryUnavailable to "every key error of the pairing avoids the word approved" started.
+◇ Test "a refused list Deny preserves the row and returns the real Mac error" started.
+◇ Test "Immediately locks at once" started.
+◇ Test "an error of the Mac reaches the caller as it is, and the run stays" started.
+◇ Test "forget clears the favorites and the Face ID choice of one vault" started.
+◇ Test "the choices survive a new settings object on the same defaults" started.
+◇ Test "a favorite is added at the end and removed by a second toggle" started.
+◇ Test "without rows, a Mac that does not answer shows its state and not a blank list; with rows the last ones stay" started.
+◇ Test "a refused delete keeps the session and shows the error" started.
+◇ Test "1 minute locks at 60 seconds and not before" started.
+◇ Test "a delayed Add freezes row choices and submits its original text and folder once" started.
+◇ Test "removing a passkey asks the owner each time and keeps the login" started.
+◇ Test "failed Add retains text, row choices and a missing destination until explicitly changed" started.
+◇ Test "the defaults are Immediately and 1 minute" started.
+◇ Test "blank selected names are explained before persistence and preserve the paste" started.
+◇ Test "an older core without folder capability clears inherited destination and keeps the unavailable message" started.
+◇ Test "a resume asks no Face ID; one tap on the row opens the other vaults again with one Face ID" started.
+◇ Test "background clearing during a suspended detection cannot submit stale pasted text" started.
+◇ Test "a lock shows every other vault as locked, and drops every question" started.
+◇ Test "the passphrase sheet closes when the app leaves the screen, and the work stops" started.
+◇ Test "a stored passphrase that does not open the vault keeps it locked, and Unlock asks for the passphrase" started.
+◇ Test "the item screen shows the passkey and no field of its key" started.
+◇ Test "concurrent list Deny taps send once and hold the original row" started.
+◇ Test "generic notifications never unlock hidden vaults or start a passphrase carousel" started.
+◇ Test "the selected vault never gets the passphrase sheet, and nothing is stored for it" started.
+◇ Test "a vault without a stored passphrase shows one Unlock row, and its sheet opens its questions only" started.
+◇ Test "a typed unlock asks no Face ID: the vaults with a stored passphrase share one row, and its tap opens them" started.
+◇ Test "a cancelled Face ID leaves the other vaults locked, each with Unlock" started.
+◇ Test "notifications off: iOS stops, the open teams drop the token, and the closed vaults are named" started.
+◇ Test case passing 1 argument editingExisting → true to "leaving a partial save reports its persisted identity and actual location, not later edits" started.
+◇ Test case passing 1 argument editingExisting → false to "leaving a partial save reports its persisted identity and actual location, not later edits" started.
+◇ Test case passing 1 argument error → .failed(code: -1) to "every key error of the pairing avoids the word approved" started.
+◇ Test "a Face ID unlock reads the passphrases of the selected and the other vaults with one prompt" started.
+◇ Test case passing 2 arguments dismiss → false, completion → .keyError to "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test case passing 2 arguments dismiss → true, completion → .success to "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test case passing 2 arguments dismiss → false, completion → .relayError to "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test case passing 2 arguments dismiss → true, completion → .relayError to "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test case passing 2 arguments dismiss → false, completion → .success to "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test case passing 2 arguments dismiss → true, completion → .keyError to "a cancelled or dismissed relay start cannot replace a newer companion scan" started.
+◇ Test case passing 2 arguments text → "https://relay.example/link#apassy_lnk_t_aaaaaaaaaa_00&r=connect&n=Mac", team → "t_aaaaaaaaaa" to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "apassy_lnk_t_7k2m5q4x3c", team → nil to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "apassy_lnk_t_7k2m5q4x31_00", team → nil to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "apassy_lnk_t_7k2m5q4x3c_00ff", team → "t_7k2m5q4x3c" to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "apassy_lnk_t_7K2M5Q4X3C_00", team → nil to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "apassy_lnk_t_7k2m5q4x3c_0G", team → nil to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "apassy_lnk_abc123", team → nil to "the team of a device link" started.
+◇ Test case passing 2 arguments text → "no link", team → nil to "the team of a device link" started.
+◇ Test case passing 1 argument error → .authenticationFailed to "a failed match or a cancelled prompt keeps the pairing, and the run stays" started.
+◇ Test case passing 1 argument error → .cancelled to "a failed match or a cancelled prompt keeps the pairing, and the run stays" started.
+◇ Test case passing 1 argument error → .lockedOut to "a failed match or a cancelled prompt keeps the pairing, and the run stays" started.
+◇ Test case passing 1 argument error → .invalidKey to "a key that cannot be used ends the pairing: the Mac is asked, the record goes, the flow shows the message" started.
+◇ Test case passing 1 argument error → .biometryChanged to "a key that cannot be used ends the pairing: the Mac is asked, the record goes, the flow shows the message" started.
+✔ Test "requests without a Mac on Wi-Fi: they are on the Mac, and pairing on Wi-Fi brings them" passed after 0.006 seconds.
+✔ Test "while the questions load, no action and no claim about the connection" passed after 0.007 seconds.
+✔ Test "source identities cannot collide through delimiters or equal qids" passed after 0.007 seconds.
+✔ Test "an iPhone removed from the questions is not connected" passed after 0.007 seconds.
+◇ Test "a run that is gone from the inbox cannot be decided, and gone is not a change" started.
+◇ Test "a sheet that opens with the current run takes nothing at first appearance" started.
+◇ Test "the view keeps the run with the digest it showed until the owner has read a new one" started.
+✔ Test "no questions and no Mac on Wi-Fi: connect this iPhone" passed after 0.007 seconds.
+◇ Test "another digest for the same run shows the new run and stops Approve until the owner confirms" started.
+✔ Test "questions through the relay: connected, and the action opens Decisions" passed after 0.006 seconds.
+✔ Test "agent use of a credential: Open Decisions when connected, Connect this iPhone when not" passed after 0.007 seconds.
+◇ Test "a second change after the confirmation asks again" started.
+◇ Test "a run that goes back to its first version is still a change that the owner did not read" started.
+◇ Test "a run that the Mac still shows the same can be approved and denied" started.
+✔ Test "a Mac paired on Wi-Fi is named, with or without the questions" passed after 0.007 seconds.
+✔ Test "rules stay on the Mac, with no action" passed after 0.007 seconds.
+✔ Test "suggestions come from the Mac, with no action, in every state" passed after 0.007 seconds.
+◇ Test "a sheet that opens with a stale run takes the new digest at first appearance and needs a review before Approve" started.
+✔ Test "only an explicit fully readable routine Read gets Allow Once" passed after 0.007 seconds.
+◇ Test case passing 1 argument access → false to "concurrent list Deny taps send once and hold the original row" started.
+◇ Test case passing 1 argument access → true to "concurrent list Deny taps send once and hold the original row" started.
+✔ Test "production, unconfirmed, destructive, unknown and missing scope require Review" passed after 0.007 seconds.
+✔ Test "the app is covered when inactive or in the background, and not when active" passed after 0.006 seconds.
+✔ Test "polling stops in the background only" passed after 0.006 seconds.
+✔ Test "an expired or settled question is not waiting" passed after 0.006 seconds.
+✔ Test "a run that a question already shows is listed once, as the question" passed after 0.006 seconds.
+✔ Test "questions and runs are one list, newest first; a run of unknown age goes last" passed after 0.006 seconds.
+✔ Test "a sent question is recent and its matching run cannot be answered again" passed after 0.006 seconds.
+✔ Test "a tap right after a decision appears or changes does not answer" passed after 0.006 seconds.
+✔ Test "a system prompt of the app excuses the inactive phase only" passed after 0.006 seconds.
+✔ Test "relay row identity includes the vault even when qids collide" passed after 0.006 seconds.
+✔ Test "a row names the credential, the agent and the project, and marks production" passed after 0.006 seconds.
+✔ Test "local identity includes trusted pairing and immutable digest" passed after 0.006 seconds.
+✔ Test "a question from another Mac never hides a run of the paired Mac" passed after 0.006 seconds.
+✔ Test "the host of a website has no www" passed after 0.005 seconds.
+✔ Test "agent names and the environment of a question" passed after 0.006 seconds.
+✔ Test "a code is spoken digit by digit" passed after 0.005 seconds.
+✔ Test "a label inside a sentence loses its first capital, unless it starts an acronym" passed after 0.005 seconds.
+✔ Test "a device link is the relay link or the bare token, trimmed" passed after 0.006 seconds.
+✔ Test "a time of the core is a date" passed after 0.005 seconds.
+✔ Test "a code is grouped from the right in threes" passed after 0.005 seconds.
+✔ Test "a one-time password setup code is an otpauth totp URI" passed after 0.005 seconds.
+✔ Test "a character is a letter, a digit, a symbol, or a space" passed after 0.005 seconds.
+✔ Test "the time left: 5 minutes for a question, the Mac's timeout for a run" passed after 0.006 seconds.
+✔ Test "renew replaces the key of one team only, never the shared key" passed after 0.005 seconds.
+✔ Test "the key whose public key the row holds signs" passed after 0.004 seconds.
+✔ Test "a new team gets its own key; a team whose row holds the shared key keeps it" passed after 0.004 seconds.
+✔ Test "no key for a team: no signer, and none is made" passed after 0.004 seconds.
+✔ Test "a website opens with https when it has no scheme, and only as http or https" passed after 0.005 seconds.
+✔ Test "no state says the agents show when the Mac is connected" passed after 0.007 seconds.
+✔ Test "the view keeps the run with the digest it showed until the owner has read a new one" passed after 0.001 seconds.
+✔ Test "no place says it is available when the Mac is connected, and each names the Mac" passed after 0.007 seconds.
+✔ Suite "Request list actions" passed after 0.009 seconds.
+✔ Test "another digest for the same run shows the new run and stops Approve until the owner confirms" passed after 0.001 seconds.
+✔ Test "a sheet that opens with the current run takes nothing at first appearance" passed after 0.001 seconds.
+✔ Suite "CoverPolicy" passed after 0.008 seconds.
+✔ Suite "Answer keys per team" passed after 0.008 seconds.
+✔ Test "a run that goes back to its first version is still a change that the owner did not read" passed after 0.001 seconds.
+✔ Test "a run that the Mac still shows the same can be approved and denied" passed after 0.001 seconds.
+✔ Test "a run that is gone from the inbox cannot be decided, and gone is not a change" passed after 0.001 seconds.
+✔ Suite "VaultText" passed after 0.008 seconds.
+✔ Test "a second change after the confirmation asks again" passed after 0.001 seconds.
+✔ Test "a sheet that opens with a stale run takes the new digest at first appearance and needs a review before Approve" passed after 0.001 seconds.
+✔ Suite "Agents reach" passed after 0.009 seconds.
+✔ Test "a locked list of questions makes no claim about the connection" passed after 0.007 seconds.
+✔ Suite "RunSnapshot" passed after 0.007 seconds.
+✔ Suite "Mac places" passed after 0.009 seconds.
+✔ Test "an empty paste shows no hint, and Add stays off" passed after 0.140 seconds.
+✔ Test "scanning clears the notice, and a code that is no pairing link only sets a note" passed after 0.150 seconds.
+✔ Test "submit without a prompt does nothing" passed after 0.284 seconds.
+✔ Test "a detected row has the Mac's line, the cap of a signal, and only the core's mask" passed after 0.375 seconds.
+✔ Test "the folder menu lists the tree with depths, after No folder" passed after 0.401 seconds.
+✔ Test "a tag that the item has, in other case, is refused with a message" passed after 0.405 seconds.
+✔ Test "a device without a Secure Enclave fails with the message, before any request" passed after 0.405 seconds.
+✔ Test "editing a login keeps its website, and its secrets stay unchanged" passed after 0.405 seconds.
+✔ Test "a .env paste gives one checked row for each line, and masked lines" passed after 0.405 seconds.
+✔ Test "an item of the other kind keeps the name of its secret and its value" passed after 0.405 seconds.
+✔ Test "dirty protection includes pending input and exact changes can be undone" passed after 0.406 seconds.
+✔ Test "a website that is stored under the label url keeps that label" passed after 0.407 seconds.
+✔ Test "an empty passphrase asks for one" passed after 0.425 seconds.
+✔ Test "start finds the vault and leaves it locked" passed after 0.435 seconds.
+✔ Test anOlderCoreKeepsTheHonestScreen() passed after 0.529 seconds.
+✔ Test "a Face ID match allows the action and shows no prompt" passed after 0.531 seconds.
+✔ Test "a refused delete keeps the session and shows the error" passed after 0.536 seconds.
+✔ Test "Back clears a QR received from another scanner without starting pairing" passed after 0.550 seconds.
+✔ Test "loading folder choices preserves an explicit destination even when it is gone" passed after 0.553 seconds.
+✔ Test "a name counts scalars, and every White_Space scalar around it is trimmed" passed after 0.553 seconds.
+✔ Test "a new detection keeps the titles and checkboxes of the rows that stay" passed after 0.553 seconds.
+✔ Test "a QR received from another scanner retains name validation and rejects malformed links" passed after 0.554 seconds.
+✔ Test "a detection error shows the core's message instead of rows" passed after 0.554 seconds.
+✔ Test "an empty website and an empty one-time password are left out" passed after 0.556 seconds.
+✔ Test "a name with no character or 41 characters blocks the scan" passed after 0.556 seconds.
+✔ Test "a name is sent without the spaces around it" passed after 0.556 seconds.
+✔ Test "the website and the code count as details" passed after 0.556 seconds.
+✔ Test "a new login makes a draft with its website and one-time password as details" passed after 0.556 seconds.
+✔ Test "a stored hidden detail keeps its value under its stored name, also when renamed" passed after 0.556 seconds.
+✔ Test "a tag has at most 64 bytes, and an item has at most 32 tags" passed after 0.555 seconds.
+✔ Test "an item has at most ten details" passed after 0.556 seconds.
+✔ Test "a random password has 24 characters and a strength" passed after 0.555 seconds.
+✔ Test "a PIN has six digits" passed after 0.555 seconds.
+✔ Test "clear drops the value" passed after 0.555 seconds.
+✔ Test "a memorable password joins words with the separator" passed after 0.555 seconds.
+✔ Test "the length stays in the range of the style" passed after 0.555 seconds.
+✔ Test "the score comes from the bits, and from the core only when the bits are unknown" passed after 0.555 seconds.
+✔ Test "all ordinary login requirements are visible before Save; Website remains optional" passed after 0.555 seconds.
+✔ Test "changing the style back sets the default length of that style" passed after 0.556 seconds.
+✔ Test "PostgreSQL gets the database tile, and an unknown provider the tile of its kind" passed after 0.556 seconds.
+✔ Test "turning Always ask off needs the owner, turning it on does not" passed after 0.556 seconds.
+✔ Test "every key error of the pairing avoids the word approved" with 5 test cases passed after 0.557 seconds.
+✔ Test "detailLine shows the username of a login and the kind of anything else" passed after 0.559 seconds.
+✔ Test "without a provider, the service in the subtitle picks the tile, as the Mac's provider or service" passed after 0.559 seconds.
+✔ Test "turning Face ID unlock off removes the passphrase and the choice" passed after 0.559 seconds.
+✔ Test "the Face ID reason names the agent without control characters or quotes, and the answer" passed after 0.559 seconds.
+✔ Test "a cancelled Face ID while pairing says that nothing is paired, not that nothing was approved" passed after 0.561 seconds.
+✔ Test "a refused link has its own title, so the title does not repeat the message" passed after 0.561 seconds.
+✔ Test "another scanner cannot replace a pairing that is waiting for Mac confirmation" passed after 0.563 seconds.
+✔ Test "a project answer, a correction, and a question without a project" passed after 0.562 seconds.
+✔ Test "a known provider gets a letter tile in its color" passed after 0.563 seconds.
+✔ Test "the Options group shows only when the core sends Always ask me" passed after 0.563 seconds.
+✔ Test "the bar of a production question: Allow production: ACTION in PROJECT first, in red, the rest in the menu" passed after 0.563 seconds.
+✔ Test "a core that refuses an overtaken unlock with locked leaves the lock screen without a message" passed after 0.563 seconds.
+✔ Test "states that the owner must solve stop the sync loop" passed after 0.569 seconds.
+✔ Test "a cancelled Face ID prompt leaves the lock screen as it is" passed after 0.569 seconds.
+✔ Test "children lists the folders right under a parent" passed after 0.570 seconds.
+✔ Test "a sync merged something when the merge exists and the version or the merge moved" passed after 0.570 seconds.
+✔ Test "count adds the subfolders, skips archived items, and reads a gone folder as the top level" passed after 0.570 seconds.
+✔ Test "choices go depth first with levels and drop excluded folders" passed after 0.570 seconds.
+✔ Test "moveTargets keeps the folder and the levels below it within the maximum depth" passed after 0.571 seconds.
+✔ Test "canHoldSubfolder is false at the maximum depth and true at the top level" passed after 0.571 seconds.
+✔ Test "search matches the title, the subtitle, a tag, and a website" passed after 0.571 seconds.
+✔ Test "moveTargets leaves out the folder and its subtree" passed after 0.571 seconds.
+✔ Test "a folder without credentials has no group" passed after 0.571 seconds.
+✔ Test "pathLabel joins the names, and says no folder for nil and for an unknown folder" passed after 0.571 seconds.
+✔ Test "recent is the five newest items that are not archived" passed after 0.571 seconds.
+✔ Test "groups put the credentials without a folder first, then folders by path, A–Z" passed after 0.571 seconds.
+✔ Test "sorted by change puts the newest first, and by title uses the title order" passed after 0.571 seconds.
+✔ Test "items(in:of:) lists the direct, not archived items A–Z" passed after 0.571 seconds.
+✔ Test "search puts archived items in their own list" passed after 0.572 seconds.
+✔ Test "subtree holds a folder and the folders below it, and level counts from 0" passed after 0.571 seconds.
+✔ Test "a 401 unpaired deletes the pairing and ends once, with the message" passed after 0.571 seconds.
+✔ Test seesSaysThatTheMacListsOnlyItsRows() passed after 0.571 seconds.
+✔ Suite "FolderTree" passed after 0.575 seconds.
+✔ Test agentsAreGroupedByMacAndByVault() passed after 0.571 seconds.
+✔ Test theListStartsLoadingThenShowsTheFeeds() passed after 0.572 seconds.
+✔ Test "closing drops the paste and the rows" passed after 0.574 seconds.
+✔ Test "a device link goes to the name step" passed after 0.572 seconds.
+✔ Test "empty search text finds nothing" passed after 0.585 seconds.
+✔ Test "tags are unique without regard to case, sorted, and leave out archived-only tags" passed after 0.585 seconds.
+✔ Test "sections run from A to Z with the hash last, and titles are sorted inside" passed after 0.585 seconds.
+✔ Test "a name needs a character and at most 64 bytes" passed after 0.585 seconds.
+✔ Test "invalid companion QR codes stay in the scanner and never enter relay joining" passed after 0.585 seconds.
+✔ Test "filter keeps the kind and the tag, and nil keeps all" passed after 0.585 seconds.
+✔ Test "the team of a device link" with 8 test cases passed after 0.585 seconds.
+✔ Test "favorites keep the order of the IDs and skip missing and archived items" passed after 0.585 seconds.
+✔ Test "a valid companion QR from either scan entry routes to companion pairing" passed after 0.585 seconds.
+✔ Test "the letter of a title is its first letter without accents, or a hash" passed after 0.585 seconds.
+✔ Test "equal device IDs and Mac names remain distinct when their verified pins differ" passed after 0.585 seconds.
+✔ Test "search needs every word" passed after 0.585 seconds.
+✔ Test "a category lists its kind without archived items, and the archive lists the archived" passed after 0.585 seconds.
+✔ Test "an unavailable companion flow leaves an actionable scanner note" passed after 0.585 seconds.
+✔ Test "unpair deletes the record even when the Mac is not reachable, and says so" passed after 0.585 seconds.
+✔ Test "text that is not a device link only sets a note" passed after 0.585 seconds.
+✔ Test "the biometry of the check is the biometry of the gate" passed after 0.585 seconds.
+✔ Test "search ignores case and accents" passed after 0.586 seconds.
+✔ Test aMacWithAProblemIsListedWithItsText() passed after 0.586 seconds.
+✔ Suite "VaultQuery" passed after 0.590 seconds.
+✔ Test "start asks for the answer key of the team that the link names" passed after 0.588 seconds.
+✔ Test theTextsOfAnAgent() passed after 0.588 seconds.
+✔ Test oneVaultNamesOnlyTheMacs() passed after 0.588 seconds.
+✔ Test "the Face ID choice belongs to one vault" passed after 0.588 seconds.
+✔ Test actionsAreOfferedOnlyWhenThisIPhoneCanSendThem() passed after 0.589 seconds.
+✔ Test "reselection connects the existing vault and reports a failed selection" passed after 0.589 seconds.
+✔ Test "headerLine joins the provider and the kind" passed after 0.591 seconds.
+✔ Test "a vault that was never left does not lock" passed after 0.589 seconds.
+✔ Test "the choices survive a new settings object on the same defaults" passed after 0.588 seconds.
+✔ Test "Immediately locks at once" passed after 0.588 seconds.
+✔ Test "1 minute locks at 60 seconds and not before" passed after 0.588 seconds.
+✔ Test "forget clears the favorites and the Face ID choice of one vault" passed after 0.588 seconds.
+✔ Test "the defaults are Immediately and 1 minute" passed after 0.588 seconds.
+✔ Test "a favorite is added at the end and removed by a second toggle" passed after 0.589 seconds.
+✔ Suite "VaultSettings" passed after 0.593 seconds.
+✔ Test "the environment cap shows a confirmed environment and hides a default" passed after 0.592 seconds.
+✔ Test "a folder that is gone reads as the top level and is no change" passed after 0.593 seconds.
+✔ Test "forget deletes the record and does not ask the Mac" passed after 0.594 seconds.
+✔ Test "it starts connecting, then shows the inbox and the status" passed after 0.595 seconds.
+✔ Test anOlderMacAsksForAnUpdate() passed after 0.595 seconds.
+✔ Test "AutoFill setup cannot bypass the passphrase or biometry choice" passed after 0.595 seconds.
+✔ Test "the filename gives the name and Face ID needs the owner choice" passed after 0.596 seconds.
+✔ Test "Later completes import with AutoFill off, and failed settings has recovery" passed after 0.596 seconds.
+✔ Test "the service rejects a wrong provider without completion" passed after 0.596 seconds.
+✔ Test "AutoFill is optional and opening Settings does not mark it enabled" passed after 0.596 seconds.
+✔ Test "the questions of two vaults show, each row with its vault and Mac" passed after 0.602 seconds.
+✔ Test "a restored attempt without known acceptance never claims Answer sent" passed after 0.603 seconds.
+✔ Test "each regenerate bumps the generation" passed after 0.603 seconds.
+✔ Suite "GeneratorModel" passed after 0.605 seconds.
+✔ Test "the tab badge counts the rows of Decisions: a run that a question shows counts once" passed after 0.603 seconds.
+✔ Suite "Decisions" passed after 0.605 seconds.
+✔ Test "every environment but production needs the owner, as on the Mac" passed after 0.605 seconds.
+✔ Test "removing the vault forgets its passphrase, settings, and QuickType logins" passed after 0.605 seconds.
+✔ Test "Face ID unlock checks the passphrase before it stores it" passed after 0.605 seconds.
+✔ Test "a row that has not synced yet gets a notice and no registration" passed after 0.606 seconds.
+✔ Test "a removed device gets a notice and no registration" passed after 0.605 seconds.
+✔ Test "cancel while waiting cancels the join on the relay" passed after 0.606 seconds.
+✔ Test aStaleMacIsDimmedAndTakesNoAction() passed after 0.607 seconds.
+✔ Test aVaultThatIsNotSelectedAsksToSelectItFirst() passed after 0.608 seconds.
+✔ Test "an inbox response already in flight cannot restore rows after Forget" passed after 0.608 seconds.
+✔ Test "forget clears cached private rows and disables every list Deny" passed after 0.608 seconds.
+✔ Test "start sends the answer key of this iPhone with the link; without a key it sends none" passed after 0.608 seconds.
+✔ Test "a second confirm while the first waits answers false at once" passed after 0.608 seconds.
+✔ Test "cancel refuses the action" passed after 0.608 seconds.
+✔ Test "an empty passphrase asks for one and keeps the prompt" passed after 0.608 seconds.
+✔ Test "without a match the passphrase prompt shows the reason" passed after 0.608 seconds.
+✔ Test "OS revocation and APNs failure are visible, and registration can recover" passed after 0.612 seconds.
+✔ Test "detection waits until the text stops changing, and only the last text applies" passed after 0.613 seconds.
+✔ Test "a removed device connects again with a new answer key" passed after 0.612 seconds.
+✔ Test "the Mac closing the pairing ends with nothing stored, and start again scans" passed after 0.613 seconds.
+✔ Test "an expired window ends with nothing stored" passed after 0.613 seconds.
+✔ Test "a stalled OS permission read cannot block discovery of an unconnected vault" passed after 0.612 seconds.
+✔ Test "an error of the relay while waiting ends in a failure" passed after 0.611 seconds.
+✔ Test "foreground quieting is limited to an unlocked visible list" passed after 0.612 seconds.
+✔ Test "parent Settings, dismissal, and tab changes retain foreground request alerts" passed after 0.612 seconds.
+✔ Test "Connect this iPhone rejects malformed or expired companion QR without a relay fallback" passed after 0.612 seconds.
+✔ Test "a tab shows the connection in place of its rows before the first answer, and for another Mac" passed after 0.611 seconds.
+✔ Test "a refused denial of an access request sets the message for the alert" passed after 0.611 seconds.
+✔ Test "a cancelled or dismissed relay start cannot replace a newer companion scan" with 6 test cases passed after 0.612 seconds.
+✔ Test "approve sends the run as shown, and the run leaves the inbox" passed after 0.611 seconds.
+✔ Test "unpair tells the Mac, deletes the record, and ends" passed after 0.611 seconds.
+✔ Test aCancelledFaceIDSendsNothing() passed after 0.611 seconds.
+✔ Test aRowWithAnotherKeyIsNotSigned() passed after 0.611 seconds.
+✔ Test "an error of the Mac reaches the caller as it is, and the run stays" passed after 0.610 seconds.
+✔ Test "a generic notification refreshes all open vaults without selecting a question" passed after 0.614 seconds.
+✔ Test "the Vault root has no folders section, and the rest of it stays" passed after 0.614 seconds.
+✔ Test "saving with no title shows a message and sends nothing" passed after 0.614 seconds.
+✔ Test "the message of the core shows when a save fails" passed after 0.614 seconds.
+✔ Test "without a vault that sends requests through the relay, the status says so, not Apple" passed after 0.616 seconds.
+✔ Test "an opened notification opens nothing when the owner opened something during the refresh" passed after 0.615 seconds.
+✔ Test "start reads the folders of the vault" passed after 0.615 seconds.
+✔ Test "a favorite is toggled on and off" passed after 0.616 seconds.
+✔ Test "an answer to a question of a vault whose questions are not open is refused before Face ID" passed after 0.616 seconds.
+✔ Test "the username of a row is copied plain" passed after 0.617 seconds.
+✔ Test "an offline cached row requires refresh instead of sending Deny" passed after 0.617 seconds.
+✔ Test "cancelling a current waiting relay connection still cancels it on the service" passed after 0.617 seconds.
+✔ Test aFailureShowsAnErrorOrANoticeOverTheList() passed after 0.617 seconds.
+✔ Test aKeyOfAnotherTeamNeverSigns() passed after 0.616 seconds.
+✔ Test withoutAFeedTheTabSaysWhereTheAgentsAre() passed after 0.616 seconds.
+✔ Test "a wrong passphrase stays at the selected file and can be corrected" passed after 0.616 seconds.
+✔ Test "deny removes the run, and an access request is denied by its ID" passed after 0.616 seconds.
+✔ Test "a wrong passphrase keeps the prompt with a message, and the right one allows the action" passed after 0.617 seconds.
+✔ Test "the credential screen has no Options group and no folder, and loads" passed after 0.620 seconds.
+✔ Test "a refused list Deny preserves the row and returns the real Mac error" passed after 0.616 seconds.
+✔ Suite "OwnerGate" passed after 0.621 seconds.
+✔ Test "a favorite is toggled from the item" passed after 0.620 seconds.
+✔ Test "with every row unchecked, Add is off and says why" passed after 0.620 seconds.
+✔ Test "large type of a plain field needs no owner check" passed after 0.621 seconds.
+✔ Test "a field that is not a one-time password shows no code" passed after 0.621 seconds.
+✔ Test "load reads the four fields of an item" passed after 0.621 seconds.
+✔ Test "an item that is not in the vault is gone" passed after 0.621 seconds.
+✔ Test "an export that the owner or the system cancels hands over nothing" passed after 0.621 seconds.
+✔ Test "an import that the system cancels changes nothing" passed after 0.621 seconds.
+✔ Test "a local vault does not sync" passed after 0.621 seconds.
+✔ Test "a row with this key needs no registration and clears the notice" passed after 0.622 seconds.
+✔ Test "a plain field is copied without an owner check" passed after 0.621 seconds.
+✔ Test anExceptionGoneDuringFaceIDSaysTheListChanged() passed after 0.621 seconds.
+✔ Test "a failed match or a cancelled prompt keeps the pairing, and the run stays" with 3 test cases passed after 0.621 seconds.
+✔ Test "list denials require a fresh connected inbox and a real remaining deadline" passed after 0.620 seconds.
+✔ Test namesThatDifferFromTheAlertSendNothing() passed after 0.621 seconds.
+✔ Test aNewFeedWhileTheAlertIsUpSendsNothing() passed after 0.620 seconds.
+✔ Test "cancel at the Face ID offer closes the vault and saves no passphrase" passed after 0.620 seconds.
+✔ Test "the app gives iOS the passkeys and the one-time passwords with the logins" passed after 0.621 seconds.
+✔ Test "the paste sheet shows the core's message, has no folder menu, and adds nothing" passed after 0.624 seconds.
+✔ Test "a text changed before the detection adds nothing on Add, and the rows are refreshed" passed after 0.624 seconds.
+✔ Test "a new item never silently loses a destination deleted before the editor loads" passed after 0.624 seconds.
+✔ Test "a failed write preserves draft fields, tags, destination and the actionable error" passed after 0.624 seconds.
+✔ Test "lock drops the items and the revealed values" passed after 0.624 seconds.
+✔ Test "a locked vault says so instead of an empty list" passed after 0.624 seconds.
+✔ Test "an old generic push never opens an unrelated newer request" passed after 0.624 seconds.
+✔ Test "blank selected names are explained before persistence and preserve the paste" passed after 0.623 seconds.
+✔ Test "the item screen shows the passkey and no field of its key" passed after 0.623 seconds.
+✔ Test "cancel restores the previous vault after it removes the new local entry" passed after 0.624 seconds.
+✔ Test "hide removes a revealed secret at once" passed after 0.627 seconds.
+✔ Test "a one-time code shows as six digits after the owner check" passed after 0.627 seconds.
+✔ Test "the favorites of the Vault root skip archived and deleted items, in the order added" passed after 0.628 seconds.
+✔ Test "background at the Face ID offer drops its passphrase and closes the vault" passed after 0.625 seconds.
+✔ Test "an export asks the owner, then the system, and hands over the passkeys" passed after 0.628 seconds.
+✔ Test "an unoffered answer cannot be prepared or authenticated" passed after 0.628 seconds.
+✔ Test "the main secret of a row is copied: the token of an API key" passed after 0.628 seconds.
+✔ Test "a secret field is copied after the owner check, marked secret" passed after 0.628 seconds.
+✔ Test "a failed cancel cleanup stays closed and lets the owner try Cancel again" passed after 0.627 seconds.
+✔ Test "a key that cannot be used ends the pairing: the Mac is asked, the record goes, the flow shows the message" with 2 test cases passed after 0.627 seconds.
+✔ Test "an existing companion pairing keeps its keys and stays in the connect sheet" passed after 0.629 seconds.
+✔ Test "an older core without folder capability clears inherited destination and keeps the unavailable message" passed after 0.626 seconds.
+✔ Test "the sync loop syncs, waits, and syncs again when the relay has news, and stops on request" passed after 0.629 seconds.
+✔ Test "the token is sent again when another vault joins the list" passed after 0.630 seconds.
+✔ Test "concurrent list Deny taps send once and hold the original row" with 2 test cases passed after 0.626 seconds.
+✔ Test "going to the background locks at once with Immediately" passed after 0.629 seconds.
+✔ Test "a lock while Face ID is pending drops request and receipt metadata" passed after 0.629 seconds.
+✔ Test "changed or missing local snapshots cannot deny another version with the same ID" passed after 0.628 seconds.
+✔ Test theWatchReadsTheListAgainAfterAChange() passed after 0.628 seconds.
+✔ Test "the paste goes when revealed values go, and the sheet keeps its folder" passed after 0.631 seconds.
+✔ Test "saving a new item adds it to the vault" passed after 0.631 seconds.
+✔ Test "a cancelled Face ID sends nothing" passed after 0.631 seconds.
+✔ Test "moveItem puts a credential in a folder" passed after 0.631 seconds.
+✔ Test "deleting a folder moves its credentials up and deletes none" passed after 0.631 seconds.
+✔ Test "the push token reaches the team of each vault that opens in this launch" passed after 0.630 seconds.
+✔ Test "off without a team; ready with one, and the answer key is registered once" passed after 0.630 seconds.
+✔ Test "a passphrase that did not rekey does not replace the stored passphrase" passed after 0.630 seconds.
+✔ Test "deleting an item removes it and its favorite" passed after 0.630 seconds.
+✔ Test "the editor has no folder menu and saves" passed after 0.632 seconds.
+✔ Test "delete removes the item from the vault" passed after 0.632 seconds.
+✔ Test "the push token reaches every team at once, and turning notifications off clears every team" passed after 0.633 seconds.
+✔ Test "Add right after a change detects the new text first, shows its rows, and adds on the next tap" passed after 0.633 seconds.
+✔ Test "Save commits a typed tag without Return and rejects invalid pending tags without a write" passed after 0.632 seconds.
+✔ Test "settlement clears only the delivered snapshot when no request still waits" passed after 0.632 seconds.
+✔ Test "an offline Mac leaves a sent answer unconfirmed, never refused" passed after 0.632 seconds.
+✔ Test "history is only available metadata, clears locally, and disappears on leave" passed after 0.632 seconds.
+✔ Test "a generic notification refreshes the list once without choosing a question" passed after 0.632 seconds.
+✔ Test "a new item without a folder stays at the top level" passed after 0.632 seconds.
+✔ Test "dropSecrets clears the revealed values, the codes, and a secret in large type" passed after 0.633 seconds.
+✔ Test "an older core without folder capability clears inherited destination without a dirty edit" passed after 0.633 seconds.
+✔ Test "Add with the rows on the screen still matching the text adds the checked rows" passed after 0.633 seconds.
+✔ Test "Add sends the checked rows and the typed titles, into the folder, and reloads the vault" passed after 0.633 seconds.
+✔ Test "an open question has no outcome; this iPhone's answer, a settle, or the expiry replace the bar" passed after 0.633 seconds.
+✔ Suite "NewCredentialModel" passed after 0.635 seconds.
+✔ Test "a cancelled passphrase prompt reveals nothing" passed after 0.634 seconds.
+✔ Test "the folder label follows a move" passed after 0.632 seconds.
+✔ Test "without rows, a Mac that does not answer shows its state and not a blank list; with rows the last ones stay" passed after 0.630 seconds.
+✔ Test "an edit of a passkey-only login needs no password and keeps the passkey" passed after 0.631 seconds.
+✔ Test "editing the title of an item keeps its password" passed after 0.634 seconds.
+✔ Test "an answer that gives authority asks for Face ID and sends the signature" passed after 0.634 seconds.
+✔ Suite "ItemEditorModel" passed after 0.636 seconds.
+✔ Test "a move that works reports nothing" passed after 0.634 seconds.
+✔ Test "a new Face ID enrollment makes a new answer key but does not register it" passed after 0.633 seconds.
+✔ Test "stalled delivered-alert housekeeping cannot block connection discovery or clear a new request" passed after 0.633 seconds.
+✔ Test "each failure of the Mac gives its own state, and the last inbox stays" passed after 0.633 seconds.
+✔ Test "duplicate taps during Face ID cannot prepare another answer" passed after 0.634 seconds.
+✔ Test "notifications ask for permission when turned on, and the token goes to the relay" passed after 0.634 seconds.
+✔ Test "a cancelled passphrase prompt copies nothing" passed after 0.633 seconds.
+✔ Test "a folder can be made and renamed" passed after 0.635 seconds.
+✔ Test "turning notifications off clears the token in every team that has it" passed after 0.634 seconds.
+✔ Test errorsOfTheCoreAreSaidPlainly() passed after 0.634 seconds.
+✔ Test "a secret that arrives after the secrets were dropped is not kept" passed after 0.635 seconds.
+✔ Test "a code that arrives after the screen dropped its secrets is not kept" passed after 0.635 seconds.
+✔ Test "a request changed while Face ID is pending never posts the old choice" passed after 0.634 seconds.
+✔ Test "a new item goes into the chosen folder after the save" passed after 0.634 seconds.
+✔ Test "a failed move goes to the sheet that asked, not to the alert of the tabs" passed after 0.636 seconds.
+✔ Test "background clearing during a suspended detection cannot submit stale pasted text" passed after 0.632 seconds.
+✔ Test "leaving a partial save reports its persisted identity and actual location, not later edits" with 2 test cases passed after 0.636 seconds.
+✔ Test "an edited item moves only when its folder changed" passed after 0.635 seconds.
+✔ Test "reconnecting a removed vault keeps the answer key of the other vault" passed after 0.635 seconds.
+✔ Test "failed Add retains text, row choices and a missing destination until explicitly changed" passed after 0.633 seconds.
+✔ Test "an answer names the vault of its question, and the key of that vault's team signs" passed after 0.637 seconds.
+✔ Suite "QuestionsModel with a core that lists every vault" passed after 0.638 seconds.
+✔ Test "a failed move retains a saved identity and retries the same item without a duplicate" passed after 0.635 seconds.
+✔ Test "two captures at once keep their own messages, and the alert works after them" passed after 0.637 seconds.
+✔ Suite "ItemEditorModel folder" passed after 0.638 seconds.
+✔ Test "a good link shows the code, the Mac says paired, and Continue hands over the record" passed after 0.636 seconds.
+✔ Test "an import waits for the owner, and a refusal reads nothing" passed after 0.636 seconds.
+✔ Test "a login with a password and a passkey keeps its notes and codes" passed after 0.634 seconds.
+✔ Test "changes after a failed move update the saved identity instead of creating another item" passed after 0.637 seconds.
+✔ Test "a removal made for an older revision deletes nothing" passed after 0.634 seconds.
+✔ Test "the first environment of a credential without a declaration waits for the owner, production too" passed after 0.636 seconds.
+✔ Test "a passkey-only login is deleted whole, and the owner check says so" passed after 0.634 seconds.
+✔ Test "a team that is not open now is cleared when its vault opens, also after a new launch" passed after 0.636 seconds.
+✔ Suite "QuestionsModel with two vaults" passed after 0.639 seconds.
+✔ Test "start shows the safety words, then the passphrase when the Mac confirmed" passed after 0.637 seconds.
+✔ Test "the right passphrase offers Face ID, and turning it on stores the passphrase" passed after 0.637 seconds.
+✔ Test "Connect pairing offers push only after confirmation and an explicit notification action" passed after 0.638 seconds.
+✔ Test "a device link connects the vault after the Mac confirms" passed after 0.637 seconds.
+✔ Test "a suspended save submits its original fields and destination once" passed after 0.639 seconds.
+✔ Suite "ItemEditor submission safety" passed after 0.641 seconds.
+✔ Test "a journal attempt during retry preserves exactly one original signed payload" passed after 0.639 seconds.
+✔ Test "a less careful environment waits for the owner, production does not" passed after 0.640 seconds.
+✔ Test "a delayed Add freezes row choices and submits its original text and folder once" passed after 0.637 seconds.
+✔ Suite "Paste submission safety" passed after 0.642 seconds.
+✔ Test "Deny and the stricter answers go without Face ID" passed after 0.641 seconds.
+✔ Test "a network failure sends the same answer again; a settled question says so" passed after 0.644 seconds.
+✔ Test "Always ask turns on at once and turns off only after the owner check" passed after 0.645 seconds.
+✔ Suite "Credential looks and options" passed after 0.647 seconds.
+✔ Test "a wrong passphrase keeps the step with a message" passed after 0.644 seconds.
+✔ Test "not now keeps the passphrase out of the store" passed after 0.643 seconds.
+✔ Test "removing a passkey asks the owner each time and keeps the login" passed after 0.642 seconds.
+✔ Suite "Passkeys in the app" passed after 0.647 seconds.
+✔ Test "a companion QR in the relay scanner waits for Continue, then uses the normal pairing" passed after 0.647 seconds.
+✔ Test "without biometry the right passphrase ends the flow" passed after 0.644 seconds.
+✔ Test "a join that finishes while the app is away leaves the vault closed" passed after 0.645 seconds.
+✔ Suite "JoinModel" passed after 0.648 seconds.
+✔ Test "Connect this iPhone routes a companion QR after dismissal without starting a relay join" passed after 0.656 seconds.
+✔ Test "a dropped connection sets a note and polling goes on until the Mac answers" passed after 0.658 seconds.
+✔ Test "saving a new login adds it, publishes the logins, and syncs soon after" passed after 0.667 seconds.
+✔ Test "background during open closes the vault even after a quick return" passed after 0.669 seconds.
+✔ Test "an iCloud publication error reloads a committed local merge and AutoFill identities" passed after 0.671 seconds.
+✔ Test "the sync loop tries again after an error" passed after 0.673 seconds.
+✔ Test "two open actions make one import" passed after 0.672 seconds.
+✔ Test "cancel during open waits for the result and closes the vault" passed after 0.674 seconds.
+✔ Suite "ICloudVaultModel" passed after 0.678 seconds.
+✔ Test "a cancel that lands after the Mac answered shows no code and starts no polling" passed after 0.705 seconds.
+✔ Test "the options of a credential and a paste each push soon after" passed after 0.705 seconds.
+✔ Test "unlocking gives iOS the logins for the QuickType bar once" passed after 0.712 seconds.
+✔ Test "the right passphrase unlocks and reads the items and Watchtower" passed after 0.712 seconds.
+✔ Test "a return waits for the background transition before it resumes" passed after 0.712 seconds.
+✔ Test "the auto-lock measures the time away on the continuous clock" passed after 0.713 seconds.
+✔ Test "a revealed secret shows after the owner check and goes after its lifetime" passed after 0.716 seconds.
+✔ Test "large type of a secret needs the owner check and is marked secret" passed after 0.717 seconds.
+✔ Suite "ItemDetailModel" passed after 0.718 seconds.
+✔ Test "a return to the app syncs at once and runs the loop again" passed after 0.717 seconds.
+✔ Suite "Automatic sync" passed after 0.718 seconds.
+✔ Test "a delayed rekey does not recreate credentials after the original vault is removed" passed after 0.723 seconds.
+✔ Test "a wrong passphrase leaves the vault locked with a message" passed after 0.726 seconds.
+✔ Test "going to the background closes a vault that the screens do not show as unlocked" passed after 0.727 seconds.
+✔ Test "with 5 minutes the vault stays for 60 seconds and locks after 301" passed after 0.738 seconds.
+✔ Test anOnlyRemovalNeedsNoFaceID() passed after 0.758 seconds.
+✔ Test theAnswerOfAnOlderMacSaysToUpdateIt() passed after 0.765 seconds.
+✔ Test eachVaultSignsWithItsOwnTeamKey() passed after 0.765 seconds.
+✔ Test anAlwaysAskRemovalAsksFaceIDWithTheReasonOfTheCore() passed after 0.765 seconds.
+✔ Test aNeverRemovalSignsWithTheKeyOfTheVaultsTeamAfterFaceID() passed after 0.765 seconds.
+✔ Test aFeedThatLandsDuringFaceIDStillSendsThePreparedAction() passed after 0.765 seconds.
+✔ Test "polling asks again and again, and stops when the task is cancelled" passed after 0.776 seconds.
+✔ Suite "SessionModel" passed after 0.780 seconds.
+✔ Test "a one-time code goes after its lifetime, as a revealed value" passed after 0.782 seconds.
+✔ Test aLeaveEndsARemovalThatWaitsHonestly() passed after 0.805 seconds.
+✔ Test "making, renaming, moving, and deleting a folder each sync soon after" passed after 0.819 seconds.
+✔ Suite "Older core and the sync of folder changes" passed after 0.821 seconds.
+✔ Test "cancelling on the code screen stops the polling" passed after 0.829 seconds.
+✔ Suite "PairingModel" passed after 0.831 seconds.
+✔ Test "an unlock that ends after the app went away is closed with 5 minutes too" passed after 0.863 seconds.
+✔ Test "an unlock that ends after the app went away locks again with Immediately" passed after 0.863 seconds.
+✔ Test "a stored passphrase that iOS dropped is stored again at the next unlock" passed after 0.875 seconds.
+✔ Test "Face ID unlock reads the stored passphrase and unlocks" passed after 0.875 seconds.
+✔ Test "the passphrase sheet closes when the app leaves the screen, and the work stops" passed after 0.930 seconds.
+✔ Test "a canceled export that waited cannot be continued" passed after 0.934 seconds.
+✔ Test "the selected vault never gets the passphrase sheet, and nothing is stored for it" passed after 0.931 seconds.
+✔ Test "a resume that returns after the app went away again closes the vault at once" passed after 0.934 seconds.
+✔ Test "an export whose vault locked during the pick waits, reads nothing, and goes on after the unlock" passed after 0.946 seconds.
+✔ Test "a long poll that ends at once without news waits before the next one, longer each time" passed after 0.981 seconds.
+✔ Suite "QuestionsModel" passed after 0.983 seconds.
+✔ Test "no stored passphrase: Remove does not show, and the note says to select the vault" passed after 1.021 seconds.
+✔ Test "a cancelled Face ID does nothing" passed after 1.021 seconds.
+✔ Test "a cancelled Face ID leaves the other vaults locked, each with Unlock" passed after 1.038 seconds.
+✔ Test "generic notifications never unlock hidden vaults or start a passphrase carousel" passed after 1.039 seconds.
+✔ Test "notifications off: iOS stops, the open teams drop the token, and the closed vaults are named" passed after 1.039 seconds.
+✔ Test aLockClearsEverything() passed after 1.072 seconds.
+✔ Test "a stored passphrase that does not open the vault: the note to select it" passed after 1.132 seconds.
+✔ Test "still stale after the keys were read again: the list changed" passed after 1.131 seconds.
+✔ Test "a typed unlock asks no Face ID: the vaults with a stored passphrase share one row, and its tap opens them" passed after 1.142 seconds.
+✔ Test "a Face ID unlock reads the passphrases of the selected and the other vaults with one prompt" passed after 1.142 seconds.
+✔ Test "a lock shows every other vault as locked, and drops every question" passed after 1.143 seconds.
+✔ Test "a stored passphrase that does not open the vault keeps it locked, and Unlock asks for the passphrase" passed after 1.245 seconds.
+✔ Test "a vault without a stored passphrase shows one Unlock row, and its sheet opens its questions only" passed after 1.245 seconds.
+✔ Test "an export never takes the data of another vault that the owner opened during the pick" passed after 1.249 seconds.
+✔ Test "a stored passphrase: Remove reads the keys again with Face ID, then asks, then sends" passed after 1.291 seconds.
+✔ Suite "Agents of a vault that is not selected" passed after 1.293 seconds.
+✔ Test "a resume asks no Face ID; one tap on the row opens the other vaults again with one Face ID" passed after 1.355 seconds.
+✔ Suite "Questions of the other vaults" passed after 1.360 seconds.
+✔ Test "a delayed rekey stores the passphrase for its original vault after selection changes" passed after 1.513 seconds.
+✔ Test "a delayed iCloud publication error cannot replace the next vault status or identities" passed after 1.538 seconds.
+✔ Suite "VaultModel" passed after 1.540 seconds.
+✔ Test "an export that waits ignores another vault, and goes on only in its own vault after a new owner check" passed after 1.574 seconds.
+✔ Suite "Credential exchange" passed after 1.576 seconds.
+✔ Test "the refresh of a code stops and drops it when the secrets are dropped" passed after 1.633 seconds.
+✔ Suite "Vault lifecycle" passed after 1.636 seconds.
+✔ Test refusedStaleAndExpiredSayWhatHappened() passed after 3.005 seconds.
+✔ Suite "AgentsModel" passed after 3.009 seconds.
+✔ Test run with 416 tests in 36 suites passed after 3.009 seconds.

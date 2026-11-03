@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+BIN=/Users/rafalw/Dev/.target-review37/debug/examples/screenshots
+if [ "$1" = run ]; then
+  export CLAUDE_CONFIG_DIR="$HOME/.claude"
+  export CODEX_HOME="$HOME/.codex"
+  mkdir -p "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$HOME/.config/apassy"
+  if [ "${REVIEW37_STATE:-not-connected}" != not-connected ]; then
+    python3 /tmp/review37-shot-fixture.py
+  fi
+fi
+exec "$BIN" "$@"

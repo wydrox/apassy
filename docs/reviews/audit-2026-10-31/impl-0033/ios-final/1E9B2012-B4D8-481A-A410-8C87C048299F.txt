@@ -1,0 +1,5 @@
+Query chain:
+ →Find: Target Application 'com.wydrox.apassy.companion'
+  ↪︎Find: Descendants matching type Button
+    ↪︎Find: Elements matching predicate 'label CONTAINS "Synthetic API key"'
+      ↪︎Find: First Match

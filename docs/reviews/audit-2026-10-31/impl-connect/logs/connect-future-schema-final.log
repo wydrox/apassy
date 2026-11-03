@@ -1,0 +1,13 @@
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.20s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-connect/debug/deps/apassy-a9f9d73f5eb8e22a)
+
+running 5 tests
+test vault::merge::schema16_tests::schema16_concurrent_conflict_keeps_current_policy_home_and_both_values ... ok
+test vault::merge::schema16_tests::schema16_copy_passphrase_paths_validate_original_and_keep_source_unchanged ... ok
+test vault::merge::schema16_tests::schema16_corrupt_future_and_foreign_snapshots_still_fail ... ok
+test vault::merge::schema16_tests::schema16_newer_record_uses_the_same_renaming_as_local_migration ... ok
+test vault::merge::schema16_tests::schema16_snapshot_check_adopt_merge_keeps_binding_and_clocks ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1230 filtered out; finished in 3.89s
+

@@ -1,0 +1,2 @@
+Release source versions match 0.5.8.
+Relay and Linux CLI checkout not checked; pass --relay-checkout PATH --require-relay before publication.

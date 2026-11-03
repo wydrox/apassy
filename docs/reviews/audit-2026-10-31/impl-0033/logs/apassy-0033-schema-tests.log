@@ -1,0 +1,31 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    46%    487k  162M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.02s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-60eccd1fa8445697)
+
+running 21 tests
+test agent::mcp::tests::source_schemas_and_adapter_refuse_ambiguous_calls ... ok
+test agent::mcp::tests::source_schema_one_of_validation_matches_adapter ... ok
+test broker::packs::tests::schema_mistakes_are_rejected ... ok
+test broker::shell_risk::tests::schema_reads_are_known_safe ... ok
+test vault::connect::tests::schema20_upgrades_without_recreating_existing_scopes_or_a_pending_identity ... ok
+test vault::merge::schema16_tests::schema16_snapshot_check_adopt_merge_keeps_binding_and_clocks ... ok
+test vault::merge::schema16_tests::schema16_concurrent_conflict_keeps_current_policy_home_and_both_values ... ok
+test broker::run::tests::legacy_schema_twenty_scopes_neither_require_setup_nor_waive_vetoes ... ok
+test vault::schema18::tests::every_new_table_is_classified ... ok
+test vault::merge::schema16_tests::schema16_corrupt_future_and_foreign_snapshots_still_fail ... ok
+test vault::schema19::tests::every_new_table_is_classified ... ok
+test vault::merge::schema16_tests::schema16_copy_passphrase_paths_validate_original_and_keep_source_unchanged ... ok
+test vault::merge::schema16_tests::schema16_newer_record_uses_the_same_renaming_as_local_migration ... ok
+test vault::passkey::tests::schema_16_reserved_names_are_renamed_and_values_kept ... ok
+test vault::schema19::tests::a_failure_after_the_marks_rolls_back_the_move ... ok
+test vault::schema18::tests::a_failure_after_the_derivation_rolls_back_every_step ... ok
+test vault::schema20::tests::schema19_migrates_to_empty_local_scopes ... ok
+test vault::merge::schema17_tests::a_concurrent_edit_never_drops_always_ask ... ok
+test vault::merge::schema17_tests::a_schema17_copy_merges_and_keeps_the_folder_and_policy_of_this_vault ... ok
+test vault::merge::schema17_tests::folder_sync_links_a_schema17_file_and_replaces_it_with_the_current_schema ... ok
+test vault::merge::schema17_tests::schema17_copies_keep_every_check_and_other_schemas_fail ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 1259 filtered out; finished in 13.69s
+

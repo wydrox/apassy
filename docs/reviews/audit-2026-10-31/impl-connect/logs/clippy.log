@@ -1,0 +1,5 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    16Gi    45%    487k  168M    0%   /
+    Checking apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Checking apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/ios/ApassyCore)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.68s

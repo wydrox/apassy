@@ -1,0 +1,29 @@
+   Compiling apassy v0.5.12 (/Users/rafalw/Dev/.shots-0513)
+    Finished `release` profile [optimized] target(s) in 45.55s
+seeded /tmp/apassy-shots.qaN1Sv/home-seed-1/Library/Application Support/Apassy/vault.db
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-all-credentials.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-folder.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-credential.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-credential-options.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-new-credential.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-decisions-question.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-decisions-request.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-decisions-suggestion.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-agents.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-sidebar-collapsed.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-narrow.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-narrow-float.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-vault.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-security.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-devices.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-bouncer.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-tools.png
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-updates.png
+seeded an empty vault /tmp/apassy-shots.qaN1Sv/home-seed-empty-2/Library/Application Support/Apassy/vault.db
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-first-steps.png
+seeded /tmp/apassy-shots.qaN1Sv/home-seed-3/Library/Application Support/Apassy/vault.db
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-devices-relay.png
+seeded /tmp/apassy-shots.qaN1Sv/home-seed-4/Library/Application Support/Apassy/vault.db
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour/ui-settings-devices-relay-old.png
+Done: 21 screenshots in /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0513-tour
+scripts/screenshots.sh: line 50: 58800 Terminated: 15          caffeinate -d -u -t 900

@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy-a9f9d73f5eb8e22a)
+
+running 4 tests
+test desktop::ui::agent_onboarding::tests::audit_hosts_have_names_setup_targets_and_a_guess_from_the_agent_name ... ok
+test desktop::ui::agent_onboarding::health_tests::missing_host_is_visible_and_never_claims_a_request ... ok
+test desktop::ui::agent_onboarding::tests::launch_commands_preserve_shell_words_in_bash_and_zsh ... ok
+test desktop::ui::agent_onboarding::tests::connect_registers_once_and_gives_the_token_after_one_owner_check ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1228 filtered out; finished in 0.35s
+

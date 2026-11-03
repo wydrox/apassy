@@ -1,0 +1,4 @@
+synthetic access: Ok(WireResponse { operation_id: None, ok: true, result: Some(Object {"new": Bool(true), "note": String("Access consent only. The bouncer still checks each command. Query status, then explicitly attach access_request_id to one matching one-item run. Cancel if abandoning this request."), "request_id": Number(1), "state": String("open")}), error: None })
+SNAP /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0033/mac-access-card.png
+SNAP /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0033/mac-access-actions.png
+SNAP /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-0033/mac-access-denied.png

@@ -1,0 +1,65 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "EC7C7346-5C49-41F9-8A61-7705D29A5346.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-denied_0_9D4AECB3-588B-437C-897C-9F3DDA23BCAD.png",
+        "timestamp" : 1793528110.923
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "BE441288-D513-41B9-A1AC-144F4966FE52.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-card_0_0283969A-C4F2-4A46-A2A6-D39C000422C3.png",
+        "timestamp" : 1793528101.132
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "6283175A-F6C9-4A3C-9760-A8870491045D.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-expired-accessibility-dark_0_42F86458-C372-43D1-B09C-75186AE91F7C.png",
+        "timestamp" : 1793528159.349
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessExpiryAndAccessibilitySizeDisableControls()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessExpiryAndAccessibilitySizeDisableControls"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "3EBE4A4D-F58F-417C-9FBD-20D37A77AAE6.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-allowed-once_0_8CE9F17B-F6AA-4AB0-B564-0B8475D98EF4.png",
+        "timestamp" : 1793528202.415
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "72087145-F9BF-4B1D-8F62-6698CD69071C.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-face-id-fixture-pending_0_215F1C40-0E64-4A4C-919A-7825E59A7DFC.png",
+        "timestamp" : 1793528194.88
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessFaceIDStateCancellationAndFreshRetry()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessFaceIDStateCancellationAndFreshRetry"
+  }
+]

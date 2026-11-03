@@ -1,0 +1,17 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    46%    487k  162M    0%   /
+    Blocking waiting for file lock on build directory
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.70s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-connect/debug/deps/it-0890ab3e9422be5e)
+
+running 6 tests
+test relay_connect::a_short_edge_rate_limit_reports_retry_after_and_keeps_the_same_key ... ok
+test relay_connect::confirmed_join_hands_keys_only_to_the_confirmed_device_and_preserves_revocation ... ok
+test relay_connect::connect_persists_before_network_and_adopts_only_questions_after_restart ... ok
+test relay_connect::lost_response_on_live_058_keeps_the_key_and_explains_recovery_is_unavailable ... ok
+test relay_connect::lost_response_recovers_with_fresh_possession_proof_when_f06_becomes_available ... ok
+test vault_migration::version_19_migration_moves_relay_device_and_is_atomic ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 808 filtered out; finished in 2.87s
+

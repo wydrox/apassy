@@ -1,0 +1,158 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    46%    487k  160M    0%   /
+    Blocking waiting for file lock on build directory
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+   Compiling apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/ios/ApassyCore)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.21s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-connect/debug/deps/apassy_core-cfeb97a3e525bb20)
+
+running 57 tests
+test core::autofill::tests::hosts_and_subdomains ... ok
+test core::autofill::tests::junk ... ok
+test core::autofill::tests::ports ... ok
+test core::config::tests::ids_name_files_only_as_hex ... ok
+test core::config::tests::the_list_round_trips_and_selects ... ok
+test core::credential_export::tests::nothing_that_holds_a_value_has_debug ... ok
+test core::credential_export::tests::the_label_gives_issuer_and_account ... ok
+test core::feed::tests::a_face_id_signature_is_checked_against_the_prepared_key ... ok
+test core::feed::tests::a_feed_of_a_mac_that_checks_names_reads_with_the_decoder_of_0_5_2 ... ok
+test core::feed::tests::a_feed_outside_the_schema_is_refused ... ok
+test core::feed::tests::a_target_names_its_exception_byte_for_byte ... ok
+test core::feed::tests::item_references_have_one_form ... ok
+test core::feed::tests::marks_hold_the_seq_only_and_a_file_with_more_still_loads ... ok
+test core::feed::tests::marks_rise_only ... ok
+test core::feed::tests::relay_refusals_have_their_codes ... ok
+test core::feed::tests::the_action_string_and_envelope_match_the_vectors ... ok
+test core::feed::tests::the_face_id_reason_is_cut_and_clean ... ok
+test core::feed::tests::the_feed_vector_seals_opens_and_parses ... ok
+test core::feed::tests::the_settle_vector_opens_with_its_outcome_only ... ok
+test core::feed::tests::the_shown_title_is_the_own_copy_else_the_feed ... ok
+test core::feed::tests::the_v2_vectors_match ... ok
+test core::generate::tests::memorable_and_pin ... ok
+test core::generate::tests::random_has_each_class_and_the_length ... ok
+test core::generate::tests::strength_scores ... ok
+test core::generate::tests::the_word_list_is_the_eff_list ... ok
+test core::organize::tests::a_preview_has_no_part_of_a_secret ... ok
+test core::otp::tests::debug_is_redacted ... ok
+test core::otp::tests::errors_are_invalid_input_with_a_plain_message ... ok
+test core::otp::tests::the_core_reads_a_secret_and_an_rfc_vector ... ok
+test core::otp::tests::the_labels_and_uris_come_from_the_shared_module ... ok
+test core::passkey::tests::base64_round_trips_and_refuses_junk ... ok
+test core::passkey::tests::relying_party_ids_are_hosts ... ok
+test core::passkey::tests::the_values_have_limits ... ok
+test core::questions::envelope::tests::a_card_with_a_wrong_digest_or_shape_is_refused ... ok
+test core::questions::envelope::tests::answers_are_checked_against_the_card ... ok
+test core::questions::envelope::tests::display_text_hides_format_characters_and_shortens ... ok
+test core::questions::envelope::tests::every_field_of_the_question_changes_the_digest ... ok
+test core::questions::envelope::tests::the_answer_string_signature_and_envelope_match_the_vectors ... ok
+test core::questions::envelope::tests::the_card_seals_and_opens_with_the_vectors ... ok
+test core::questions::envelope::tests::the_digests_match_the_vectors ... ok
+test core::questions::envelope::tests::the_key_gives_its_key_id ... ok
+test core::questions::envelope::tests::the_settle_opens_with_the_vectors_and_not_as_a_card ... ok
+test core::questions::tests::relay_refusals_have_their_codes ... ok
+test core::questions::tests::retained_migration_material_never_restores_old_authority_and_drops_with_context ... ok
+test core::request_history::tests::encrypted_roundtrip_wrong_key_vault_binding_and_corruption ... ok
+test core::request_history::tests::existing_v2_never_recreates_missing_key_and_rejects_wrong_key_or_vault ... ok
+test core::request_history::tests::failed_or_impossible_migration_preserves_v1_bytes_without_reset ... ok
+test core::request_history::tests::legacy_fixture_migrates_atomically_and_survives_question_key_changes ... ok
+test core::request_history::tests::live_attempt_survives_1001_newer_observations_and_full_pending_capacity_refuses_another ... ok
+test core::request_history::tests::removal_is_scoped_and_rejects_paths_and_symlinks ... ok
+test core::request_history::tests::retention_and_bound_are_deterministic_and_clock_rollback_is_conservative ... ok
+test core::request_history::tests::sent_is_not_confirmed_and_reobserving_is_idempotent ... ok
+test core::request_history::tests::unreadable_journal_never_calls_provider_or_replaces_ciphertext ... ok
+test core::wire::tests::a_changed_serializer_cannot_grow_a_secret_buffer ... ok
+test core::wire::tests::secret_answer_keeps_exact_room_for_ffi_termination ... ok
+test ffi::tests::reserved_answer_moves_to_c_without_a_copy ... ok
+test ffi::tests::unexpected_nul_returns_a_safe_error ... ok
+
+test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/core_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/core_flow-b3352e8e8b9c6234)
+
+running 2 tests
+test a_local_vault_lists_shows_reveals_and_saves_like_the_mac ... ok
+test an_iphone_joins_a_mac_vault_on_the_relay_and_syncs_both_ways ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.99s
+
+     Running tests/credential_exchange_export.rs (/Users/rafalw/Dev/.target-connect/debug/deps/credential_exchange_export-cf89ba35135b7c08)
+
+running 7 tests
+test a_conflict_copy_is_not_exported_twice ... ok
+test a_recovered_login_is_exported_once_after_its_original_is_deleted ... ok
+test a_restored_copy_with_a_recovered_passkey_is_exported_once ... ok
+test each_exported_item_gets_one_event_without_values ... ok
+test only_the_unlocked_app_exports_and_no_answer_quotes_a_value ... ok
+test the_answer_imports_into_a_fresh_vault ... ok
+test the_export_holds_the_active_logins_with_their_values ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.08s
+
+     Running tests/feed_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/feed_flow-aa417b8775e9f261)
+
+running 20 tests
+test a_device_that_is_not_present_or_was_removed_leaves_the_list ... ok
+test a_feed_of_a_device_that_is_not_a_trusted_mac_is_refused ... ok
+test a_feed_older_than_a_day_is_stale_and_takes_no_action ... ok
+test a_feed_rate_answer_pauses_the_feed_reads_for_a_minute ... ok
+test a_feed_that_lands_during_face_id_does_not_stop_the_action ... ok
+test a_lock_drops_everything ... ok
+test a_lower_or_equal_seq_is_ignored_also_after_a_restart ... ok
+test a_mac_whose_device_number_has_not_synced_is_ignored ... ok
+test a_new_feed_while_the_confirmation_is_up_stops_the_action ... ok
+test a_settle_that_does_not_open_is_never_applied_or_stale ... ok
+test a_v2_action_signs_the_names_that_the_list_shows ... ok
+test an_action_is_sealed_with_its_aad_and_reaches_the_relay ... ok
+test an_item_reference_has_one_form ... ok
+test the_action_string_is_the_contract_vector ... ok
+test the_feed_of_the_vectors_is_read_and_shown ... ok
+test the_feeds_of_two_vaults_show_together ... ok
+test the_iphone_sends_v2_without_a_mark_or_a_marks_file ... ok
+test the_keys_of_a_vault_that_is_not_selected_are_a_copy ... ok
+test the_outcomes_of_an_action ... ok
+test the_v2_action_string_is_the_contract_vector ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 82.90s
+
+     Running tests/feed_names.rs (/Users/rafalw/Dev/.target-connect/debug/deps/feed_names-cfec3d25cffd30c5)
+
+running 2 tests
+test a_planted_feed_with_false_names_is_refused_and_the_row_stays ... ok
+test a_removal_with_the_names_the_owner_saw_applies_on_the_mac ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.37s
+
+     Running tests/icloud_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/icloud_flow-33fc243dc147e1ee)
+
+running 13 tests
+test a_lock_during_import_prevents_a_late_selection_or_unlock ... ok
+test a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit ... FAILED
+test already_connected_phone_accepts_a_released_schema16_conflict_snapshot ... ok
+test an_output_failure_after_rekey_reports_the_accepted_passphrase ... ok
+test completion_tokens_are_one_use_bound_to_session_and_do_not_hide_new_edits ... ok
+test concurrent_imports_never_remove_the_successful_import ... ok
+test import_checks_key_preserves_identity_and_strips_raw_mac_local_data ... ok
+test old_registry_files_still_load_and_icloud_source_survives_restart_and_remove ... ok
+test repeated_single_item_merges_advance_status_version ... ok
+test snapshots_merge_mac_and_phone_edits_conflicts_and_deletions ... ok
+test startup_recovers_only_owned_unregistered_import_files ... ok
+test transfer_paths_roles_and_size_have_strict_bounds ... ok
+test wrong_identity_and_new_passphrase_never_replace_local_items ... ok
+
+failures:
+
+---- a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit stdout ----
+
+thread 'a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit' (2463954) panicked at ios/ApassyCore/tests/icloud_flow.rs:31:5:
+assertion `left == right` failed: {"ok":true,"result":{"vault":{"added_at":1793491211,"device_id":null,"id":"f81ef102-b5b9-4d82-80d2-80717cbaf840","name":"Personal","relay_url":null,"sync_source":"icloud","team_id":null}}}
+  left: Bool(true)
+ right: false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_schema17_snapshot_imports_and_the_next_sync_writes_schema21_with_no_edit
+
+test result: FAILED. 12 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.38s
+
+error: test failed, to rerun pass `-p apassy-core --test icloud_flow`

@@ -1,0 +1,60 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running unittests src/main.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy-9497f4e4e346e4e5)
+
+running 1 test
+test tests::core_dump_limit_is_zero_and_cannot_be_raised ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-browser-host.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_browser_host-351c62160ddfae6e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-dev-reporting.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_dev_reporting-7f83278d6d470aea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-eval.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_eval-61b61dc774041f30)
+
+running 1 test
+test input_tests::invalid_fixture_is_a_bounded_error ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-hook.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_hook-c12e7f961b8cd158)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-mcp.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_mcp-30841803befbaed8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-packs.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_packs-d79da92ef7903b37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/apassy-sandbox.rs (/Users/rafalw/Dev/.target-review37/debug/deps/apassy_sandbox-686beaf3a6b065c5)
+
+running 9 tests
+test tests::launcher_protects_its_own_bundle_and_the_source_build_bundle ... ok
+test tests::the_profile_has_a_rule_for_each_vault_parameter ... ok
+test tests::only_vaults_outside_the_data_directory_get_a_parameter ... ok
+test tests::more_vaults_than_the_profile_supports_fail_closed ... ok
+test tests::printed_command_preserves_shell_words_and_removes_owner_session ... ok
+test tests::signed_bundle_resources_and_adjacent_development_profiles_are_found ... ok
+test tests::a_damaged_vault_list_fails_closed_and_no_list_is_fine ... ok
+test tests::relay_links_are_skipped ... ok
+test tests::synced_files_outside_the_denied_folders_get_a_parameter ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

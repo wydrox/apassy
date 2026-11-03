@@ -1,0 +1,22 @@
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.75s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-connect/debug/deps/it-0890ab3e9422be5e)
+
+running 14 tests
+test agent_path::a_connector_use_with_a_running_bouncer_starts_without_the_model ... ok
+test agent_path::a_connector_use_without_a_running_bouncer_waits_for_the_owner ... ok
+test agent_path::an_archived_connector_is_refused_until_it_comes_back ... ok
+test agent_path::delete_item_removes_links_and_restore_revokes_agents ... ok
+test agent_path::https_destination_with_trusted_test_root ... ok
+test agent_path::https_refuses_untrusted_or_mismatched_certificates_before_the_request ... ok
+test agent_path::mcp_adapter_explains_an_expired_token ... ok
+test agent_path::mcp_adapter_process_round_trip ... ok
+test agent_path::permitted_call_returns_only_permitted_fields ... ok
+test agent_path::refusals_are_specific_and_recorded ... ok
+test agent_path::restored_connector_waits_for_the_owner_review ... ok
+test agent_path::revoke_lock_and_destination_rules ... ok
+test agent_path::sandboxed_adapter_uses_broker_but_cannot_read_vault ... ok
+test agent_path::tokens_expire_and_rotation_replaces_them ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 7.81s
+

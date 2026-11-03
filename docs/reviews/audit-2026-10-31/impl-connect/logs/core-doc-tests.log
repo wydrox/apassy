@@ -1,0 +1,9 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    16Gi    46%    487k  163M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+   Doc-tests apassy_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

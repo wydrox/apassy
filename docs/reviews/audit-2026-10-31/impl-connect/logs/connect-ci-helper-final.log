@@ -1,0 +1,28 @@
+E.................................................
+======================================================================
+ERROR: test_ci_release_artifact (unittest.loader._FailedTest)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_ci_release_artifact
+Traceback (most recent call last):
+  File "/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/scripts/ci-release-artifact.py", line 17, in <module>
+    import tomllib
+ModuleNotFoundError: No module named 'tomllib'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/loader.py", line 436, in _find_test_path
+    module = self._get_module_from_name(name)
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/loader.py", line 377, in _get_module_from_name
+    __import__(name)
+  File "/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/scripts/tests/test_ci_release_artifact.py", line 16, in <module>
+    SPEC.loader.exec_module(artifact)
+  File "/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/scripts/ci-release-artifact.py", line 19, in <module>
+    raise SystemExit("ci-release-artifact: Python 3.11 or later is required")
+SystemExit: ci-release-artifact: Python 3.11 or later is required
+
+
+----------------------------------------------------------------------
+Ran 50 tests in 0.322s
+
+FAILED (errors=1)

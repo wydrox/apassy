@@ -1,0 +1,15 @@
+test_fixture_has_no_credential_like_values (__main__.TestP0ServiceCandidates) ... ok
+test_fixture_is_proposed_synthetic_candidates (__main__.TestP0ServiceCandidates) ... ok
+test_hostnames_use_example_invalid (__main__.TestP0ServiceCandidates) ... ok
+test_operations_are_named_typed_bounded_reads (__main__.TestP0ServiceCandidates) ... ok
+test_path_with_spaces (__main__.TestSandboxFilesystemBoundary) ... ok
+test_same_uid_child_can_read_canaries_then_sandbox_denies (__main__.TestSandboxFilesystemBoundary) ... ok
+test_profile_includes_spaced_literals (__main__.TestSbplLiteral) ... ok
+test_quote_and_backslash_are_escaped (__main__.TestSbplLiteral) ... ok
+test_space_stays_inside_quoted_literal (__main__.TestSbplLiteral) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.274s
+
+OK
+Real-secret gate: BLOCKED. This fixture is not product isolation evidence.

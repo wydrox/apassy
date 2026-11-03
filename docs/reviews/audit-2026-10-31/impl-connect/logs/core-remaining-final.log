@@ -1,0 +1,97 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    16Gi    46%    487k  163M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/multi_device_questions.rs (/Users/rafalw/Dev/.target-connect/debug/deps/multi_device_questions-a5688f54680d5566)
+
+running 14 tests
+test a1_one_iphone_answers_the_questions_of_two_macs_of_one_vault ... ok
+test a2_the_iphone_lists_and_answers_the_questions_of_every_vault ... ok
+test a2_the_push_token_reaches_the_team_of_every_vault ... ok
+test a_lock_drops_the_context_of_every_vault ... ok
+test a_removal_during_questions_unlock_leaves_no_context ... ok
+test a_removed_vault_has_no_context ... ok
+test a_suspend_waits_for_questions_unlock_and_leaves_no_file_lock ... ok
+test an_answer_with_the_wrong_vault_is_refused ... ok
+test b1_two_iphones_get_each_question_and_the_first_answer_settles_it_on_both ... ok
+test questions_unlock_makes_the_context_of_another_vault ... ok
+test questions_unlock_of_the_open_vault_checks_the_passphrase ... ok
+test removing_a_vault_clears_its_push_token_now_or_at_the_next_read ... ok
+test selecting_another_vault_keeps_the_questions_of_both ... ok
+test the_push_token_follows_the_vaults_that_open_later ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.82s
+
+     Running tests/organize_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/organize_flow-0bed8fb212cc8283)
+
+running 6 tests
+test a_locked_vault_and_the_autofill_extension_refuse_the_changes ... ok
+test add_pasted_saves_the_picked_rows_in_one_transaction_like_the_mac ... ok
+test detect_finds_each_credential_and_never_answers_a_secret_value ... ok
+test folder_and_option_changes_on_the_iphone_sync_with_the_mac ... ok
+test folders_nest_rename_move_and_delete_like_the_mac ... ok
+test item_options_set_saves_the_owners_answer ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+
+     Running tests/otp_import_semantics.rs (/Users/rafalw/Dev/.target-connect/debug/deps/otp_import_semantics-f429e7f4bffa58fd)
+
+running 1 test
+test a_custom_title_keeps_totp_controls_without_releasing_the_setup_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/passkey_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/passkey_flow-789b100ddd3b5e7d)
+
+running 9 tests
+test a_passkey_attaches_to_an_existing_login ... ok
+test a_passwordless_passkey_login_survives_an_update ... ok
+test a_registration_refuses_an_excluded_credential_and_unknown_algorithms ... ok
+test a_wrong_site_or_credential_does_not_sign ... ok
+test an_import_counts_each_account_and_never_shows_a_key ... ok
+test identities_hold_passkeys_and_codes_without_secrets ... ok
+test invalid_encodings_sizes_and_requests_are_refused ... ok
+test only_the_app_removes_and_a_stale_revision_conflicts ... ok
+test the_app_and_the_extension_register_list_and_sign ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.23s
+
+     Running tests/passkey_removal_metadata.rs (/Users/rafalw/Dev/.target-connect/debug/deps/passkey_removal_metadata-8fcfc220c08b0383)
+
+running 3 tests
+test a_password_set_on_an_empty_one_keeps_the_login ... ok
+test the_flag_matches_what_the_removal_does ... ok
+test the_row_says_whether_the_password_has_a_value_and_never_gives_it ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+     Running tests/questions_flow.rs (/Users/rafalw/Dev/.target-connect/debug/deps/questions_flow-ea40371f767f0a1b)
+
+running 14 tests
+test a_cancelled_attach_leaves_the_vault_without_a_team ... ok
+test a_removed_iphone_cannot_answer_until_it_is_connected_again ... ok
+test a_removed_iphone_joins_again_with_new_keys ... ok
+test a_removed_iphone_waits_out_the_long_poll ... ok
+test an_iphone_attaches_reads_a_card_and_answers_with_face_id_and_without ... ok
+test cards_that_fail_a_check_are_not_shown_or_answered ... ok
+test connect_handoff_registers_the_confirmed_phone_without_waiting_for_icloud ... ok
+test full_pending_history_refuses_post_without_evicting_an_authority_guard ... ok
+test history_intent_survives_lock_during_post_and_removal_never_resurrects_it ... ok
+test removing_a_vault_takes_its_push_token_and_its_device_off_the_team ... ok
+test request_history_says_off_for_an_open_vault_without_a_questions_team ... ok
+test request_history_survives_restart_hides_on_lock_and_never_invents_a_settle ... ok
+test the_long_poll_wakes_on_a_new_question_and_push_tokens_reach_the_relay ... ok
+test the_row_of_an_iphone_comes_from_the_confirming_mac ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.44s
+
+     Running tests/requests_compatibility.rs (/Users/rafalw/Dev/.target-connect/debug/deps/requests_compatibility-9a7d1407c68905b5)
+
+running 5 tests
+test accepted_answer_with_lost_response_keeps_its_guard_when_the_retry_gets_429 ... ok
+test definitive_429_allows_a_different_choice_immediately_and_after_restart ... ok
+test question_key_rotation_preserves_history_and_allows_a_registered_phone_to_answer ... ok
+test required_history_bootstrap_failure_cannot_bypass_an_existing_guard ... ok
+test transient_legacy_migration_recovers_after_live_key_rotation_but_drops_on_lock ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.52s
+

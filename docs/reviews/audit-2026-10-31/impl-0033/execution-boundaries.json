@@ -1,0 +1,27 @@
+{
+  "task": "ADR 0033 + optional older-iPhone removal after Connect #41",
+  "base": "8e61e047f6e5254b29b34d6519f937185d1260b8",
+  "concurrency_base_merged": "e9041dbed31f467d33d305fed485e9c4aabf05d8",
+  "environment": "Synthetic vaults, keys, commands and local fake relays. One dedicated Simulator.",
+  "simulator": "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+  "physical_acceptance": "PENDING: each fresh Face ID, direct signing without match, no passcode/Touch ID fallback, biometric re-enrollment invalidation, OS prompt cancellation, physical two-device/offline races and APNs routing.",
+  "notification_policy": "Owner accepted inherited generic time-sensitive pushes and conservative per-Mac quotas. No relay edits or deployment.",
+  "incident": {
+    "test": "isolation_profile::keychain_item_is_not_readable_in_profile",
+    "command_scope": "Inherited full Rust integration test: security list-keychains and find-generic-password for a nonexistent synthetic vault account in the logged-in Keychain context.",
+    "result": "Read-only query returned status 44 (no matching item). No value was returned; no Keychain item was written or removed.",
+    "disposition": "Disclosed to owner. Not repeated locally. New signing tests use synthetic providers."
+  },
+  "history": "Phone receipts are historical consent; they never report an available permit.",
+  "screenshots": "Mac native tour uses isolated APASSY_DEBUG_DATA_DIR and nonexistent native helpers. iPhone captures use in-memory UI fixtures and a simulated signing wait, not a Secure Enclave match.",
+  "cleanup": {
+    "removed": [
+      "/Users/rafalw/Dev/.target-0033",
+      "/tmp/apassy-0033-xcode",
+      "/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e/ios/ApassyCore/build"
+    ],
+    "simulator": "Shutdown, erased and deleted only 6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+    "target_open_files_before_removal": "none",
+    "df_after": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s1   228Gi   176Gi    24Gi    88%    2.5M  253M    1%   /System/Volumes/Data\n"
+  }
+}

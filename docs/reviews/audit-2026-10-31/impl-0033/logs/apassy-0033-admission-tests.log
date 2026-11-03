@@ -1,0 +1,13 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    18Gi    42%    487k  186M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.87s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-0033/debug/deps/it-cb9a87c6bdf4c2fd)
+
+running 3 tests
+test access_requests::access_consent_does_not_answer_the_bouncer_and_failed_run_never_refunds_it ... ok
+test access_requests::an_identical_inflight_retry_cannot_join_and_cancellation_fences_the_waiting_run ... ok
+test access_requests::status_and_cancel_neither_create_nor_expose_another_agents_request ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 805 filtered out; finished in 1.01s
+

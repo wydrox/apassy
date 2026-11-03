@@ -1,0 +1,9 @@
+    Checking apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+error[E0425]: cannot find value `conn` in this scope
+   --> src/broker/proxy/mod.rs:935:26
+    |
+935 | ...   respond(&mut conn.inner,403,"Forbidden","The exact scoped access consent expired, was revoked, or does not cover this host an...
+    |                    ^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `apassy` (lib) due to 1 previous error

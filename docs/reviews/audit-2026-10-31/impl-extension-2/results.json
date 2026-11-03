@@ -1,0 +1,183 @@
+{
+  "checks": [
+    {
+      "name": "scratch profile optional permissions and profile-local mock only",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "signin trusted typing + submit + transition + explicit owner-path action",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "signup trusted typing + submit + transition + explicit owner-path action",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "step1 trusted typing + submit + transition + explicit owner-path action",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "xhr trusted typing + submit + transition + explicit owner-path action",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "click trusted typing + submit + transition + explicit owner-path action",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "change trusted typing + submit + transition + explicit owner-path action",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "Apassy-filled unchanged password produces no offer",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "Never persists by hostname across navigation and reload",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "github live empty-field placement",
+      "pass": true,
+      "detail": {
+        "field": {
+          "left": 460,
+          "top": 187,
+          "bottom": 227,
+          "width": 352
+        },
+        "menu": {
+          "left": 460,
+          "top": 233,
+          "bottom": 464.65625,
+          "width": 352
+        },
+        "viewport": {
+          "width": 1272,
+          "height": 830
+        }
+      }
+    },
+    {
+      "name": "google live empty-field placement",
+      "pass": true,
+      "detail": {
+        "field": {
+          "left": 452,
+          "top": 348.984375,
+          "bottom": 404.984375,
+          "width": 368
+        },
+        "menu": {
+          "left": 452,
+          "top": 128.71875,
+          "bottom": 342.984375,
+          "width": 368
+        },
+        "viewport": {
+          "width": 1272,
+          "height": 830
+        }
+      }
+    },
+    {
+      "name": "vercel live empty-field placement",
+      "pass": true,
+      "detail": {
+        "field": {
+          "left": 476,
+          "top": 182.5,
+          "bottom": 222.5,
+          "width": 320
+        },
+        "menu": {
+          "left": 476,
+          "top": 228.5,
+          "bottom": 460.15625,
+          "width": 320
+        },
+        "viewport": {
+          "width": 1272,
+          "height": 830
+        }
+      }
+    },
+    {
+      "name": "native request logs redact passwords",
+      "pass": true,
+      "detail": true
+    }
+  ],
+  "geometry": [
+    {
+      "name": "github",
+      "url": "https://github.com/login",
+      "field": {
+        "left": 460,
+        "top": 187,
+        "bottom": 227,
+        "width": 352
+      },
+      "menu": {
+        "left": 460,
+        "top": 233,
+        "bottom": 464.65625,
+        "width": 352
+      },
+      "viewport": {
+        "width": 1272,
+        "height": 830
+      }
+    },
+    {
+      "name": "google",
+      "url": "https://accounts.google.com/v3/signin/identifier?continue=https://accounts.google.com/&followup=https://accounts.google.com/&passive=1209600&flowName=WebLiteSignIn&flowEntry=ServiceLogin&dsh=S1831674221:1793489639392931",
+      "field": {
+        "left": 452,
+        "top": 348.984375,
+        "bottom": 404.984375,
+        "width": 368
+      },
+      "menu": {
+        "left": 452,
+        "top": 128.71875,
+        "bottom": 342.984375,
+        "width": 368
+      },
+      "viewport": {
+        "width": 1272,
+        "height": 830
+      }
+    },
+    {
+      "name": "vercel",
+      "url": "https://vercel.com/login",
+      "field": {
+        "left": 476,
+        "top": 182.5,
+        "bottom": 222.5,
+        "width": 320
+      },
+      "menu": {
+        "left": 476,
+        "top": 228.5,
+        "bottom": 460.15625,
+        "width": 320
+      },
+      "viewport": {
+        "width": 1272,
+        "height": 830
+      }
+    }
+  ],
+  "boundary": "Synthetic fixture credentials and profile-local mock native host. No real-site typing. No owner app, vault, keychain or Touch ID. Live sites loaded and focused only. No local Playwright run."
+}

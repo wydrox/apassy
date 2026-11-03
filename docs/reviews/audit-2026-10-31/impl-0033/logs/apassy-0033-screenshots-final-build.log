@@ -1,0 +1,4 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    13Gi    50%    487k  140M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.01s

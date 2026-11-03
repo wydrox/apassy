@@ -1,0 +1,144 @@
+{
+  "version": "0.5.9",
+  "status": "macos_and_relay_live_ios_and_extension_pending",
+  "sources": {
+    "app_merge": "29f6cf1f366d40391369371c3d782049b8cd170e",
+    "ios_source": "29f6cf1f366d40391369371c3d782049b8cd170e",
+    "app_tree": "ca4f17f9730dcafe39720076b6846cea2b0243d5",
+    "relay_merge": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f"
+  },
+  "source_version_check": "PASS: Python 3.12 with --relay-checkout and --require-relay",
+  "deliveries": {
+    "ios": {
+      "version": "0.5.9",
+      "build": null,
+      "processing": null,
+      "distribution": "pending",
+      "group": null,
+      "intended_tester_access": null,
+      "notes_verified": null,
+      "sha256": null,
+      "verified_at": null,
+      "pending_reason": "TestFlight build and upload follow separately; resume kit prepared, no IPA built",
+      "reserved_build": 29892157,
+      "resume_kit": "/Users/rafalw/Dev/.release-0.5.9-ios"
+    },
+    "macos": {
+      "status": "live",
+      "manifest": {
+        "version": "0.5.9",
+        "build": "29f6cf1",
+        "commit": "29f6cf1f366d40391369371c3d782049b8cd170e",
+        "date": "2026-11-01T11:18:46Z",
+        "file": "Apassy.dmg",
+        "size": 26589514,
+        "sha256": "4a7b7792da2c215e2e0ede959915715db5abe935c89eefc9155ebe069eb1421a",
+        "notarized": true,
+        "minimum_macos": "15.0",
+        "arch": "arm64"
+      },
+      "download": {
+        "size": 26589514,
+        "sha256": "4a7b7792da2c215e2e0ede959915715db5abe935c89eefc9155ebe069eb1421a"
+      },
+      "workflow": {
+        "url": "https://github.com/wydrox/apassy/actions/runs/41301024515",
+        "source": "29f6cf1f366d40391369371c3d782049b8cd170e",
+        "conclusion": "success",
+        "id": 41301024515
+      },
+      "verified_at": "2026-11-01T11:20:01.536651+00:00",
+      "strict_signatures": true,
+      "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-059-verify-z4ju2pib/Apassy-0.5.9.dmg: accepted\nsource=Notarized Developer ID",
+      "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-059-verify-z4ju2pib/Apassy-0.5.9.dmg\nThe validate action worked!",
+      "provider_profiles": null,
+      "readonly_mount_detached": true,
+      "installed_app_untouched": true,
+      "team_id": "7S3F9767BM",
+      "download_url": "https://apassy.wyderka.cc/download/Apassy-0.5.9.dmg",
+      "embedded_version": "0.5.9",
+      "embedded_commit": "29f6cf1f366d40391369371c3d782049b8cd170e"
+    },
+    "linux": {
+      "filename": null,
+      "sha256": null,
+      "size": null,
+      "version": null,
+      "public_matches_ci": null,
+      "ci_version_execution": null,
+      "maximum_glibc": null
+    },
+    "relay": {
+      "version": "0.5.9",
+      "commit": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f",
+      "healthy": null,
+      "runtime_image_manifest_digest": null,
+      "ci_image_config_digest": null,
+      "public_health_http": null,
+      "unauthenticated_me_http": null,
+      "status": "live (owner-provided; not independently runtime verified)",
+      "repository": "wydrox/apassy-relay",
+      "image": null
+    },
+    "extension": {
+      "status": "pending",
+      "package": {
+        "version": "0.5.9",
+        "bytes": 70509,
+        "sha256": "d01a8b6a5e2e31ede168d5f33d008bd6a46e7d12febc4cf05bf0931fedf16c58",
+        "format": "zip",
+        "path": "/Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/release/apassy-extension-0.5.9.zip"
+      },
+      "listing": {
+        "url": null,
+        "version": null,
+        "updated": null,
+        "size_display": null,
+        "verification": null
+      },
+      "verified_at": "2026-11-01T11:20:01.536651+00:00",
+      "pending_reason": "Manual Chrome Web Store upload by the owner follows separately"
+    },
+    "website": {
+      "verified_at": "2026-11-01T11:20:01.536651+00:00",
+      "homepage": "https://apassy.wyderka.cc/",
+      "changelog": "https://apassy.wyderka.cc/changelog",
+      "homepage_has_version": true,
+      "changelog_has_dated_version": true,
+      "workflow": {
+        "conclusion": "success",
+        "headSha": "29f6cf1f366d40391369371c3d782049b8cd170e",
+        "status": "completed",
+        "url": "https://github.com/wydrox/apassy/actions/runs/41300133318"
+      },
+      "cloudflare_version_id": null,
+      "html_sha256": {
+        "site": "2e1974166f5730bf2ecbabe86b8a6eb769d081a6e93393fd7669365b8f3dcbcf",
+        "changelog": "6653e3fd5486bbec526e8fa125bbec1782600d49214145ba681acdbacadf4033"
+      }
+    }
+  },
+  "unverified_device_acceptance": [
+    "Face ID approve/cancel",
+    "APNs foreground/background/cold launch",
+    "real-device history upgrade",
+    "macOS AutoFill registration and use",
+    "multi-device request delivery after explicit relay enrollment"
+  ],
+  "operational_boundaries": [
+    "Mac artifact and public website verified read-only in this task; relay live state supplied by owner.",
+    "TestFlight 0.5.9 and Chrome Web Store 0.5.9 are not yet published.",
+    "Unknown verification fields are null; this is not an all-six-live release.",
+    "Mac unlock migrates to schema 21; keep an encrypted backup and update every Mac and iPhone to 0.5.9 before syncing.",
+    "Release workflow warning: models/apassy-base-v1.safetensors absent from bucket; app ships without base model."
+  ],
+  "app_main_ci": {
+    "status": "success",
+    "run_url": "https://github.com/wydrox/apassy/actions/runs/41300133305",
+    "source": "29f6cf1f366d40391369371c3d782049b8cd170e"
+  },
+  "source_tags": [
+    "0.5.9",
+    "v0.5.9"
+  ]
+}

@@ -1,0 +1,15 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    16Gi    46%    487k  163M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-60eccd1fa8445697)
+
+running 6 tests
+test broker::operations::tests::retention_is_at_least_fifteen_minutes_and_digests_are_keyed ... ok
+test broker::operations::tests::retained_outcomes_exclude_output_arguments_names_and_raw_errors ... ok
+test broker::operations::tests::fingerprints_canonicalize_json_maps_and_credential_sets_but_preserve_command_text ... ok
+test broker::operations::tests::a_referenced_use_never_returns_an_idempotency_receipt ... ok
+test broker::operations::tests::vault_lock_erases_receipts_and_late_workers_cannot_restore_them ... ok
+test broker::operations::tests::legacy_clients_share_active_limits_without_changing_their_wire_responses ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1274 filtered out; finished in 0.79s
+

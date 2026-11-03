@@ -1,0 +1,2 @@
+SIGKILL during fixture creation; next run removed abandoned fixture; only control lock remains
+[('Live broker', 'ok'), ('Live MCP handshake', 'ok'), ('Live MCP fixture', 'ok'), ('Live hook', 'ok'), ('Live cleanup', 'ok'), ('Live sandbox', 'unverified')]

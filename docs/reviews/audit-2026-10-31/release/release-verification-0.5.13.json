@@ -1,0 +1,97 @@
+{
+ "version": "0.5.13",
+ "status": "five_live_extension_pending_review",
+ "sources": {
+  "app_merge": "80ba3fd8b99a108bd5cce9f3ca2216e90cb5c426",
+  "ios_source": "80ba3fd8b99a108bd5cce9f3ca2216e90cb5c426",
+  "extension_source": "80ba3fd8b99a108bd5cce9f3ca2216e90cb5c426",
+  "relay_source": "5fbb83491a758d4b6e5060be0bcd919763b2421c"
+ },
+ "source_version_check": "python3.12 scripts/check-release-versions.py --relay-checkout /Users/rafalw/Dev/.relay-0513 --require-relay: 'Release source versions match 0.5.13.' Vault schema 23 (unchanged).",
+ "deliveries": {
+  "macos": {
+   "status": "live",
+   "manifest": {
+    "version": "0.5.13",
+    "build": "80ba3fd",
+    "commit": "80ba3fd8b99a108bd5cce9f3ca2216e90cb5c426",
+    "date": "2026-11-02T18:51:22Z",
+    "file": "Apassy.dmg",
+    "size": 27161533,
+    "sha256": "f76d35233fe38d1b3edf2da4f7516114caf5de1fee59f8637f04d55fc7944c5a",
+    "notarized": true,
+    "minimum_macos": "15.0",
+    "arch": "arm64"
+   },
+   "download": {
+    "size": 27161533,
+    "sha256": "f76d35233fe38d1b3edf2da4f7516114caf5de1fee59f8637f04d55fc7944c5a",
+    "versioned_and_compat_identical": true
+   },
+   "workflow": {
+    "url": "https://github.com/wydrox/apassy/actions/runs/41503853107",
+    "id": 41503853107,
+    "source": "80ba3fd8b99a108bd5cce9f3ca2216e90cb5c426",
+    "conclusion": "success",
+    "created_at": "2026-11-02T18:47:17Z",
+    "completed_at": "2026-11-02T18:51:47Z"
+   },
+   "ci": {
+    "run": "https://github.com/wydrox/apassy/actions/runs/41494709718",
+    "attempts": 4,
+    "notes": "A macOS test shard was cancelled twice by GitHub hosted-runner capacity; attempt 3 passed but Release could not find an attempt-3 artifact (only attempt 1 uploaded it). Attempt 4 reran release-binaries only. Fix in PR #70."
+   },
+   "gatekeeper": "Apassy-0.5.13.dmg: accepted; source=Notarized Developer ID. Apassy.app: accepted; source=Notarized Developer ID",
+   "stapler": "The validate action worked!",
+   "codesign": "codesign --verify --deep --strict OK; TeamIdentifier=7S3F9767BM",
+   "app_version": "0.5.13"
+  },
+  "ios": {
+   "status": "live_testflight_internal",
+   "version": "0.5.13",
+   "build": 29893861,
+   "asc_build_id": "baacb687-3598-4d52-99d7-10d60a0f58b9",
+   "processing_state": "VALID",
+   "internal_build_state": "IN_BETA_TESTING",
+   "group_available": true,
+   "ipa_sha256": "63a545b4521a5d85cb0f3ccfde4280731f821e2d8d6a12d78280adb0075f2a32"
+  },
+  "extension": {
+   "status": "submitted_pending_review",
+   "version": "0.5.13",
+   "public_version": "0.5.10",
+   "zip_sha256": "0aea537cf86aa69a9a0b66138c20e94e6b1cb3b667137f06ff8bb7f13de04c91",
+   "zip_size": 74162,
+   "permissions_unchanged": [
+    "nativeMessaging",
+    "activeTab",
+    "scripting",
+    "storage"
+   ],
+   "auto_publish_after_review": true,
+   "notes": "Listing description and nativeMessaging/scripting/storage justifications updated to the 0.5.13 texts of PR #69 before submission. Pending review is not published."
+  },
+  "relay": {
+   "status": "live",
+   "version": "0.5.13",
+   "commit": "5fbb83491a758d4b6e5060be0bcd919763b2421c",
+   "healthz": "HTTP/2 200 ok; x-apassy-relay-version: 0.5.13",
+   "worker_version": "8e1901b0-f3ff-4ff5-ac96-beb75cd30052",
+   "rollback": "apassy-relay:release-0.5.9; /opt/apassy/compose.yaml.pre-release-0.5.13; Worker 75318a52-14fd-42ab-8641-c0f375ac653d"
+  },
+  "linux_cli": {
+   "status": "live_version_readback_pending",
+   "version": "0.5.13",
+   "release_json": "https://apassy-relay.wyderka.cc/dl/release.json",
+   "linux_x86_64_sha256": "2b83ba754707dcedab7ce71321f44988dafe18a0d095ea1d6f9fba1793e9d422",
+   "darwin_arm64_sha256": "3393c85619522913e81a2ee8d81afe3053bcd4f0b605a68bc0bdd02fddb9a6f2",
+   "notes": "Public bytes equal the CI artifacts; CI checked the Linux artifact version; the darwin binary prints 'apassy-team 0.5.13'. Public Linux --version on a non-production Linux host not run (needs an approved paid devbox)."
+  },
+  "website": {
+   "status": "live",
+   "changelog": "https://apassy.wyderka.cc/changelog/ has '0.5.13 - 2026-11-02'; homepage shows v0.5.13",
+   "site_workflow": "https://github.com/wydrox/apassy/actions/runs/41494709603"
+  }
+ },
+ "verified_at": "2026-11-02T18:53:50.789093+00:00"
+}

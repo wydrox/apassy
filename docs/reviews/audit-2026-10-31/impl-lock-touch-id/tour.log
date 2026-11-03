@@ -1,0 +1,6 @@
+   Compiling apassy v0.5.11 (/Users/rafalw/Dev/.shots-lock)
+    Finished `release` profile [optimized] target(s) in 1m 33s
+seeded /tmp/apassy-shots.Vzh1vw/home-seed-1/Library/Application Support/Apassy/vault.db
+captured /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-lock-touch-id/ui-locked.png
+Done: 1 screenshots in /Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/impl-lock-touch-id
+scripts/screenshots.sh: line 50:  2840 Terminated: 15          caffeinate -d -u -t 900

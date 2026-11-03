@@ -1,0 +1,84 @@
+{
+  "head": "fc7dc9aeb75ba5b7f1d142dd3de2d2ebc6dedd89",
+  "pr": "https://github.com/wydrox/apassy/pull/41",
+  "generated_at": "2026-11-01T00:05:06.701575+00:00",
+  "screenshots": [
+    {
+      "file": "iphone-connect-pairing.png",
+      "bytes": 231562,
+      "sha256": "a17a21966b4cc24dababa3087090f6d50a9d5c15b3a7f7265807910204a3bf13"
+    },
+    {
+      "file": "iphone-connect-requests.png",
+      "bytes": 140286,
+      "sha256": "891e88a03c3242710cbf3380560a40e4e522ee26d910ad01210d37aa069eff1c"
+    },
+    {
+      "file": "iphone-connect-safety-words.png",
+      "bytes": 130935,
+      "sha256": "df9b0a2eef0124bf73dd36506e62a946bf8568d335bd94611e48c76c35125158"
+    },
+    {
+      "file": "iphone-connect-success.png",
+      "bytes": 180499,
+      "sha256": "dfea911b2cfcae3340d89619b851d1f158913970eef336e1f48f3ad5dab6bec2"
+    },
+    {
+      "file": "mac-connect-devices-connected.png",
+      "bytes": 147610,
+      "sha256": "891c382fa9a0566273a06383586473ef8b87c31b4f26ced63098a5777897e6d2"
+    },
+    {
+      "file": "mac-connect-devices.png",
+      "bytes": 129917,
+      "sha256": "e993e497708f597e122582e1a5fde013a7bd07488166d8d095720a44ab198088"
+    },
+    {
+      "file": "mac-connect-owner-check.png",
+      "bytes": 353761,
+      "sha256": "8c5074c2d22fc6e8e9a1d0b708906d1bbe58b4970ae28c21d7c2b7fff503190c"
+    },
+    {
+      "file": "mac-connect-qr.png",
+      "bytes": 253405,
+      "sha256": "4a29e818c60dfdff275e878c2ed3c370c22f2e6e7db8503f5717c56b37c8754b"
+    },
+    {
+      "file": "mac-connect-safety-words.png",
+      "bytes": 251368,
+      "sha256": "2fb66df8a08a3ed1f8f032b2c5f2d420ebdefc836638080846a6d1f83e92c532"
+    },
+    {
+      "file": "mac-connect-setup.png",
+      "bytes": 231384,
+      "sha256": "f7b7cc985836d050295bf4f1b47f308801cefa561ea2cecc9a4dbdcb616aa686"
+    },
+    {
+      "file": "mac-connect-success.png",
+      "bytes": 242285,
+      "sha256": "f2df1d8ff4cfee58b7de16ba708cb5b81d229afc4d56289bf0323ed43ece0399"
+    },
+    {
+      "file": "mac-settings-initial.png",
+      "bytes": 112753,
+      "sha256": "dfc1f9c4115ccfa03ea4a73f4aa0d5577be8343a2785e9ddb32f702129592dd5"
+    }
+  ],
+  "simulator_id": "D21FAD17-A4D4-42F7-884F-A15E924F81C3",
+  "simulator_erased_and_deleted": true,
+  "native_mac_helper": "disabled for fixture; passphrase owner checks",
+  "physical_device_acceptance": "not run: cellular approval, APNs receipt, real QR camera and biometric hardware",
+  "incorporated_main": "dd4d9e609af49b954d3e1e90a0d8d7bd64b19182 (merged, not rebased)",
+  "temporary_ios_builds_and_synthetic_vault_removed": true,
+  "cargo_target_removed": "/Users/rafalw/Dev/.target-connect",
+  "final_local_checks": "1230 library pass, 5 pre-existing ignored; five updated future-schema cases pass; final Clippy pass",
+  "ci": {
+    "checked_at": "2026-11-01T00:15:49Z",
+    "run_id": 41255909567,
+    "site": "success",
+    "ci": "queued; some Linux jobs running",
+    "reviews": "none",
+    "green": false
+  },
+  "cleanup_verified_at": "2026-11-01T00:16:02.987013+00:00"
+}

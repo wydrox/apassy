@@ -1,0 +1,3 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    12Gi    52%    487k  128M    0%   /
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s

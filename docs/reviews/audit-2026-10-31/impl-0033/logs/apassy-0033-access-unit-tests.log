@@ -1,0 +1,37 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    46%    487k  161M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-60eccd1fa8445697)
+
+running 28 tests
+test agent::mcp::tests::request_access_arguments_are_checked ... ok
+test companion::wire::tests::activity_and_access_requests_have_string_ids_and_cut_text ... ok
+test desktop::ui::sync::relay::access_repair_tests::re_pair_offers_same_name_or_any_iphone_in_team_without_removing_them ... ok
+test agent::mcp::tests::scoped_access_refusals_are_typed_and_status_tools_never_get_cached ... ok
+test questions::access_request::tests::exact_hosts_and_display_escaping ... ok
+test questions::access_request::tests::strict_json_and_protocol_separation ... ok
+test questions::access_request::tests::freshness_edges_and_long_prompt ... ok
+test questions::access_request::tests::answer_cannot_replay_other_context_or_choice ... ok
+test questions::access_request::tests::independently_generated_openssl_vectors ... ok
+test questions::access_request::tests::independent_signed_settle_and_unchanged_outer_carrier_vectors ... ok
+test vault::access_once::tests::exact_ports_and_unknown_destination_forms_fail_closed ... ok
+test broker::shell_risk::tests::sql_changes_and_access_reads ... ok
+test questions::access_request::tests::every_body_byte_is_authenticated ... ok
+test desktop::auto_lock::tests::auto_lock_never_vault_access_does_not_wait_for_idle_telemetry ... ok
+test desktop::auto_lock::tests::auto_lock_access_fence_blocks_worker_before_ui_lock ... ok
+test agent::mcp::lifecycle_tests::auto_lock_access_fence_ends_an_inflight_owner_wait ... ok
+test vault::access_once::tests::denial_cancellation_and_other_agents_cannot_create_or_authorize ... ok
+test vault::access_once::tests::exact_proxy_handoff_rechecks_ports_deadline_and_rotated_question_key ... ok
+test vault::access_once::tests::legacy_notes_are_not_broadcast_and_explicit_dispatch_is_deny_only ... ok
+test vault::access_once::tests::coalescing_and_cancel_do_not_refund_cooldown ... ok
+test vault::access_once::tests::first_answer_and_one_consumer_win_without_durable_authority ... ok
+test vault::access_once::tests::failed_receipt_commit_installs_no_permit_and_durable_grant_wins_only_once ... ok
+test vault::access_once::tests::concurrent_consumers_have_exactly_one_winner_and_expiry_fences_the_winner ... ok
+test vault::access_once::tests::local_allow_deny_and_durable_grant_race_has_one_atomic_winner ... ok
+test vault::access_once::tests::restart_loses_permits_but_keeps_receipts_and_creation_budget ... ok
+test vault::access_once::tests::scope_mutations_and_key_or_policy_rotation_fence_admission ... ok
+test vault::access_once::tests::ten_open_requests_is_a_mac_local_limit ... ok
+test vault::access_once::tests::quota_clock_and_failed_dispatch_cannot_refund_creation ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 1252 filtered out; finished in 5.31s
+

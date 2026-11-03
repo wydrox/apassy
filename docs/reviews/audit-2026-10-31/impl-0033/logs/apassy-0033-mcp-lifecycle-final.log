@@ -1,0 +1,10 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    12Gi    52%    487k  128M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-60eccd1fa8445697)
+
+running 1 test
+test agent::mcp::lifecycle_tests::bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1280 filtered out; finished in 0.06s
+

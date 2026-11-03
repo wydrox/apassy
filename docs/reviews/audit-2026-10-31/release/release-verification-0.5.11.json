@@ -1,0 +1,166 @@
+{
+  "version": "0.5.11",
+  "status": "macos_live_ios_unchanged_extension_pending",
+  "sources": {
+    "app_merge": "2e5a418d45fea04d53079a3b5ce90566b81b4fcc",
+    "ios_source": "65ce00ceaadf77e7fe63f96f42893d9ba3696295",
+    "app_tree": "4825d4bfe8002b68bda43ed144d1573bf01b6d84",
+    "relay_merge": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f"
+  },
+  "source_version_check": "Tagged extension manifest verified as 0.5.11; no version-check script or build run locally. Vault schema remains 23.",
+  "deliveries": {
+    "ios": {
+      "version": "0.5.10",
+      "build": 29892158,
+      "status": "no_new_build_needed",
+      "pending_reason": null,
+      "notes": "Schema unchanged (23); TestFlight 0.5.10 build 29892158 remains current (owner-provided; no ASC access performed)."
+    },
+    "macos": {
+      "status": "live",
+      "manifest": {
+        "version": "0.5.11",
+        "build": "2e5a418",
+        "commit": "2e5a418d45fea04d53079a3b5ce90566b81b4fcc",
+        "date": "2026-11-02T00:25:16Z",
+        "file": "Apassy.dmg",
+        "size": 26791106,
+        "sha256": "2e14716b5410d0984fcbcf2bbeb5bd8673e39dd75d778d444c31c010959427bb",
+        "notarized": true,
+        "minimum_macos": "15.0",
+        "arch": "arm64"
+      },
+      "download": {
+        "size": 26791106,
+        "sha256": "2e14716b5410d0984fcbcf2bbeb5bd8673e39dd75d778d444c31c010959427bb"
+      },
+      "workflow": {
+        "url": "https://github.com/wydrox/apassy/actions/runs/41366619497",
+        "source": "2e5a418d45fea04d53079a3b5ce90566b81b4fcc",
+        "conclusion": "success",
+        "id": 41366619497,
+        "created_at": "2026-11-02T00:20:28Z",
+        "completed_at": "2026-11-02T00:25:38Z",
+        "duration_seconds": 310
+      },
+      "verified_at": "2026-11-02T00:26:07.534085+00:00",
+      "strict_signatures": null,
+      "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0511-verify-rb8oci5b/Apassy-0.5.11.dmg: accepted\nsource=Notarized Developer ID\n",
+      "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0511-verify-rb8oci5b/Apassy-0.5.11.dmg\nThe validate action worked!\n",
+      "provider_profiles": null,
+      "readonly_mount_detached": null,
+      "installed_app_untouched": true,
+      "team_id": null,
+      "download_url": "https://apassy.wyderka.cc/download/Apassy-0.5.11.dmg",
+      "embedded_version": null,
+      "embedded_commit": null,
+      "download_verifications": [
+        {
+          "url": "https://apassy.wyderka.cc/download/Apassy.dmg",
+          "size": 26791106,
+          "sha256": "2e14716b5410d0984fcbcf2bbeb5bd8673e39dd75d778d444c31c010959427bb",
+          "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0511-verify-rb8oci5b/Apassy.dmg: accepted\nsource=Notarized Developer ID\n",
+          "gatekeeper_exit": 0,
+          "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0511-verify-rb8oci5b/Apassy.dmg\nThe validate action worked!\n",
+          "stapler_exit": 0
+        },
+        {
+          "url": "https://apassy.wyderka.cc/download/Apassy-0.5.11.dmg",
+          "size": 26791106,
+          "sha256": "2e14716b5410d0984fcbcf2bbeb5bd8673e39dd75d778d444c31c010959427bb",
+          "gatekeeper": "/var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0511-verify-rb8oci5b/Apassy-0.5.11.dmg: accepted\nsource=Notarized Developer ID\n",
+          "gatekeeper_exit": 0,
+          "stapler": "Processing: /var/folders/bs/24cqnk7x43x7_cqt37rcntjm0000gn/T/apassy-0511-verify-rb8oci5b/Apassy-0.5.11.dmg\nThe validate action worked!\n",
+          "stapler_exit": 0
+        }
+      ],
+      "downloaded_dmgs_deleted": true,
+      "app_mounted": false
+    },
+    "linux": {
+      "filename": null,
+      "sha256": null,
+      "size": null,
+      "version": null,
+      "public_matches_ci": null,
+      "ci_version_execution": null,
+      "maximum_glibc": null
+    },
+    "relay": {
+      "version": "0.5.9",
+      "commit": "67dc72204f8dd738f0eac6b7dc149e1921f19a6f",
+      "healthy": null,
+      "runtime_image_manifest_digest": null,
+      "ci_image_config_digest": null,
+      "public_health_http": null,
+      "unauthenticated_me_http": null,
+      "status": "still 0.5.9, unchanged; no deploy needed (owner-provided; not independently runtime verified)",
+      "repository": "wydrox/apassy-relay",
+      "image": null
+    },
+    "extension": {
+      "status": "pending_submission",
+      "package": {
+        "version": "0.5.11",
+        "bytes": 70656,
+        "sha256": "bb637fb4d98d38e430d3a851728dd2154aca8d70bcf864c4db6ce6409c9181f5",
+        "format": "zip",
+        "path": "/Users/rafalw/Dev/apassy/docs/reviews/audit-2026-10-31/release/apassy-extension-0.5.11.zip"
+      },
+      "listing": {
+        "url": null,
+        "version": null,
+        "updated": null,
+        "size_display": null,
+        "verification": null
+      },
+      "verified_at": "2026-11-02T00:26:07.534085+00:00",
+      "pending_reason": "Chrome Web Store 0.5.10 is in review; 0.5.11 to be submitted after approval. No upload performed.",
+      "package_note": "Built only with scripts/build-extension-zip.sh from detached v0.5.11; manifest version verified, key absent, same 18-file list as 0.5.10; temporary worktree removed.",
+      "evidence": null
+    },
+    "website": {
+      "verified_at": "2026-11-02T00:26:07.534085+00:00",
+      "homepage": "https://apassy.wyderka.cc/",
+      "changelog": "https://apassy.wyderka.cc/changelog",
+      "homepage_has_version": null,
+      "changelog_has_dated_version": true,
+      "workflow": null,
+      "cloudflare_version_id": null,
+      "html_sha256": {
+        "site": null,
+        "changelog": "abdd54b7cd40392d7ae4e25dbf31d83ce8cbd12c63fd3cb08ef53291adb68099"
+      }
+    }
+  },
+  "unverified_device_acceptance": [
+    "Face ID approve/cancel",
+    "APNs foreground/background/cold launch",
+    "real-device history upgrade",
+    "macOS AutoFill registration and use",
+    "multi-device request delivery after explicit relay enrollment"
+  ],
+  "operational_boundaries": [
+    "Mac manifest, both DMG URLs, Gatekeeper, stapler and changelog verified live. Downloads deleted; no mount, open or install.",
+    "Vault schema remains 23; iPhone stays on TestFlight 0.5.10 build 29892158; no new iOS build needed.",
+    "Relay 0.5.9 unchanged (owner-provided); no relay access performed.",
+    "Chrome Web Store 0.5.10 is in review; 0.5.11 submission follows approval. ZIP prepared, not uploaded.",
+    "No local builds, tests, app, vault, keychain, browser, LaunchAgent or production host access. Unknown verification fields remain null."
+  ],
+  "app_main_ci": {
+    "status": "success",
+    "run_url": "https://github.com/wydrox/apassy/actions/runs/41366365518",
+    "source": "2e5a418d45fea04d53079a3b5ce90566b81b4fcc",
+    "created_at": "2026-11-02T00:17:39Z",
+    "completed_at": "2026-11-02T00:20:26Z",
+    "duration_seconds": 167,
+    "reuse": true,
+    "reused_pr_run_id": 41364843273,
+    "reuse_log_line": "Reusing successful PR CI run 41364843273 for tree 4825d4bfe8002b68bda43ed144d1573bf01b6d84",
+    "tests": "skipped",
+    "release_binaries": "success"
+  },
+  "source_tags": [
+    "v0.5.11"
+  ]
+}

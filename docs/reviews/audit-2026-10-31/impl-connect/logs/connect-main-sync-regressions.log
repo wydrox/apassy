@@ -1,0 +1,64 @@
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.79s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-connect/debug/deps/apassy-a9f9d73f5eb8e22a)
+
+running 56 tests
+test desktop::ui::sync_tests::a_change_syncs_after_a_pause_and_a_changed_file_merges_while_unlocked ... ok
+test desktop::ui::sync_tests::a_damaged_relay_copy_offers_replace_with_this_macs_vault ... ok
+test desktop::ui::sync_tests::a_lock_drops_the_relay_key_at_once ... ok
+test desktop::ui::sync_tests::a_lone_mac_after_a_relay_rollback_uses_the_relay_copy ... ok
+test desktop::ui::sync_tests::a_lost_link_answer_does_not_use_up_the_code ... ok
+test desktop::ui::sync_tests::a_mac_that_turned_relay_sync_off_joins_again_with_a_link_and_merges ... ok
+test desktop::ui::sync_tests::a_new_passphrase_found_by_the_worker_opens_the_sheet_in_the_next_frame ... ok
+test desktop::ui::sync_tests::a_new_passphrase_from_another_mac_asks_once_and_rekeys ... ok
+test desktop::ui::sync_tests::a_new_passphrase_from_another_mac_on_the_relay_rekeys_off_the_window_thread ... ok
+test desktop::ui::sync_tests::a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time ... ok
+test desktop::ui::sync_tests::a_rebuilt_list_links_sync_again ... ok
+test desktop::ui::sync_tests::a_refused_team_code_keeps_the_folder_sync ... ok
+test desktop::ui::sync_tests::a_removed_mac_offers_only_turning_relay_sync_off ... ok
+test desktop::ui::sync_tests::a_second_mac_joins_the_questions_team_with_a_link ... ok
+test desktop::ui::sync_tests::a_sync_now_that_a_pause_ends_tells_nothing ... ok
+test desktop::ui::sync_tests::add_a_device_shows_the_link_as_a_qr_code_for_the_iphone ... ok
+test desktop::ui::sync_tests::add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_check ... ok
+test desktop::ui::sync_tests::add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check ... ok
+test desktop::ui::sync_tests::add_an_iphone_twice_adds_two_answering_devices ... ok
+test desktop::ui::sync_tests::agent_activity_alone_does_not_sync ... ok
+test desktop::ui::sync_tests::an_unreachable_folder_never_blocks_a_lock_or_an_unlock ... ok
+test desktop::ui::sync_tests::both_macs_editing_one_credential_keep_both_versions_with_a_notice ... ok
+test desktop::ui::sync_tests::cancel_of_a_waiting_mac_cancels_its_link_on_the_relay ... ok
+test desktop::ui::sync_tests::connect_onboarding_checks_the_owner_then_continues_to_iphone_pairing ... ok
+test desktop::ui::sync_tests::create_with_sync_writes_the_file_and_settings_shows_the_status ... ok
+test desktop::ui::sync_tests::custom_folder_placeholder_keeps_selection_and_advances_when_ready ... ok
+test desktop::ui::sync_tests::discovery_timeout_has_retry_and_help_and_preserves_safe_values ... ok
+test desktop::ui::sync_tests::folder_sync_status_does_not_claim_receipt_on_another_mac ... ok
+test desktop::ui::sync_tests::joining_a_relay_copy_under_another_passphrase_asks_for_it ... ok
+test desktop::ui::sync_tests::open_a_synced_vault_adds_it_with_sync_on ... ok
+test desktop::ui::sync_tests::questions_through_a_notifications_only_team_need_the_owner_check ... ok
+test desktop::ui::sync_tests::received_by_shows_the_receipt_of_the_other_mac ... ok
+test desktop::ui::sync_tests::relay_calls_of_the_owner_leave_the_window_responsive ... ok
+test desktop::ui::sync_tests::relay_statuses_read_as_in_the_adr ... ok
+test desktop::ui::sync_tests::remove_from_list_stops_sync_and_keeps_the_synced_file ... ok
+test desktop::ui::sync_tests::removing_a_mac_asks_first_and_return_keeps_it ... ok
+test desktop::ui::sync_tests::retry_finds_a_provider_that_appears_after_an_empty_scan ... ok
+test desktop::ui::sync_tests::return_on_a_relay_alert_opened_with_the_pointer_cancels ... ok
+test desktop::ui::sync_tests::second_mac_flow_shows_file_service_and_existing_passphrase_without_paths ... ok
+test desktop::ui::sync_tests::switching_a_relay_vault_to_a_folder_leaves_the_relay_team ... ok
+test desktop::ui::sync_tests::the_picker_offers_the_relay_after_the_detected_folders ... ok
+test desktop::ui::sync_tests::the_relay_setup_sheet_asks_for_the_address_the_team_code_and_the_name ... ok
+test desktop::ui::sync_tests::the_switch_does_not_sync_into_the_wrong_vault ... ok
+test desktop::ui::sync_tests::the_sync_picker_turns_on_moves_and_turns_off ... ok
+test desktop::ui::sync_tests::the_sync_setting_waits_while_relay_sync_turns_on ... ok
+test desktop::ui::sync_tests::the_team_code_field_is_masked_and_erased_after_each_try ... ok
+test desktop::ui::sync_tests::the_worker_asks_icloud_again_for_a_file_that_stays_in_icloud ... ok
+test desktop::ui::sync_tests::the_worker_does_not_sync_a_locked_vault ... ok
+test desktop::ui::sync_tests::the_worker_pushes_and_merges_without_any_frame ... ok
+test desktop::ui::sync_tests::the_worker_syncs_while_a_run_waits_for_the_owner ... ok
+test desktop::ui::sync_tests::the_worker_thread_starts_only_with_sync_and_stops ... ok
+test desktop::ui::sync_tests::turn_off_of_a_removed_or_last_mac_says_what_happened ... ok
+test desktop::ui::sync_tests::turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it ... ok
+test desktop::ui::sync_tests::unlock_merges_before_the_list_and_a_lock_pushes ... ok
+test desktop::ui::sync_tests::use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy ... ok
+test desktop::ui::sync_tests::without_sync_the_app_shows_no_sync_control ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 1179 filtered out; finished in 81.44s
+

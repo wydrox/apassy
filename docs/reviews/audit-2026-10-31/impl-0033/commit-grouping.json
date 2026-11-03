@@ -1,0 +1,8 @@
+{
+  "before_head": "cc394050c61fed494872984fad30edd04d46ddbf",
+  "after_head": "ec9d7a652caf41b88fa335cd7fc16131d61cf43c",
+  "tree": "9048178459472358e06b50db5915289a792a6bc1",
+  "tree_diff": "empty",
+  "base": "e9041dbed31f467d33d305fed485e9c4aabf05d8",
+  "backup_ref": "refs/backup/adr0033-before-validation-squash"
+}

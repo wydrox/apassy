@@ -1,0 +1,236 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "4FBD7295-AE26-4038-8A15-FCDAB397A014.txt",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "App UI hierarchy for com.wydrox.apassy_0_C9D44C97-9B6B-4E9E-BB3F-879959FC31CD.companion",
+        "timestamp" : 1793529898.596
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "CDC36E1B-5B6D-4407-92AC-9C32DDCF6961",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "UI Snapshot 2026-11-01 at 11.44.58 AM",
+        "timestamp" : 1793529898.596
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "0BCDA82D-78D5-4B55-8001-7154E44AC162.txt",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Debug description for `Button (First Match)`_0_A6E04AD8-F080-4D55-88A2-CAEDC33A0F23.txt",
+        "timestamp" : 1793529898.451
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "985A0FC8-FA5C-4489-94A9-6A26D1CD0DEA.txt",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Debug description for `Button (First Match)`_0_0D2B9C51-5DB0-4938-BBAB-0CDAB978ACBB.txt",
+        "timestamp" : 1793529897.539
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "1E9B2012-B4D8-481A-A410-8C87C048299F.txt",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Debug description for `Button (First Match)`_0_4656D10F-A594-46B8-B3B1-5841F1EC119F.txt",
+        "timestamp" : 1793529896.524
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "52F23DCD-7934-42A0-88AB-AED6231A027F.txt",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Debug description for `Button (First Match)`_0_E87BA35E-E308-4AB3-826C-B5BD2D56B1FF.txt",
+        "timestamp" : 1793529895.497
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "1E377565-FA90-4567-A4B2-A5FD871F551A.txt",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Debug description for `Button (First Match)`_0_E425B1AA-E4C6-4EFB-A853-AA61F0F0EBF0.txt",
+        "timestamp" : 1793529894.508
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "5E2DD80F-C4DC-427F-851E-99CCC255F23C",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "UI Snapshot 2026-11-01 at 11.44.52 AM",
+        "timestamp" : 1793529892.195
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "DA86564A-34FA-478C-A378-D6F94A2C6B3B",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Synthesized Event 2026-11-01 at 11.44.52 AM",
+        "timestamp" : 1793529892.487
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "2FF0E2AE-6A79-4907-8E5D-82A826F49B8A",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "UI Snapshot 2026-11-01 at 11.44.51 AM",
+        "timestamp" : 1793529891.518
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "59E42F0C-72FC-4168-BD0F-F7337D6BD601",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Synthesized Event 2026-11-01 at 11.44.51 AM",
+        "timestamp" : 1793529891.805
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "620F78BA-56C8-4DDE-A33C-A262FA3E2A5D.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-denied_0_BD05AF6B-E6CE-489C-B05D-C8011C6A7DCD.png",
+        "timestamp" : 1793529891.432
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "8F642850-2FB9-4A38-84EF-72745983217C",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "UI Snapshot 2026-11-01 at 11.44.49 AM",
+        "timestamp" : 1793529889.662
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "1B5E1EE8-51A0-4FB6-B524-F6604158F537",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Synthesized Event 2026-11-01 at 11.44.49 AM",
+        "timestamp" : 1793529889.953
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "44288A98-E2AD-4919-801D-BF5E4677B876",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "UI Snapshot 2026-11-01 at 11.44.47 AM",
+        "timestamp" : 1793529887.354
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "5BFA5074-8586-4F31-AC4C-7A57C4D2B8C8",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Synthesized Event 2026-11-01 at 11.44.47 AM",
+        "timestamp" : 1793529887.775
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "DF8CF146-1B23-4A75-8B51-ADD8461A4036",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "UI Snapshot 2026-11-01 at 11.44.44 AM",
+        "timestamp" : 1793529884.448
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "FE3763CF-01C8-4A64-AF70-23A2E7D94E5E",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Synthesized Event 2026-11-01 at 11.44.44 AM",
+        "timestamp" : 1793529884.864
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "BBF9B823-D308-4C58-B88C-36A07CAFEBCD.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-card_0_8F62270A-10BD-4BC3-B34B-386AD54683E1.png",
+        "timestamp" : 1793529882.263
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "F02C3C3A-0035-4353-9656-7C963D3772C7",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Synthesized Event 2026-11-01 at 11.44.40 AM",
+        "timestamp" : 1793529880.489
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "D4E62205-DCE5-4504-80B6-87951C37B7DA.mp4",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Screen Recording 2026-11-01 at 11.44.28 AM.mp4",
+        "timestamp" : 1793529868.409
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessDenyIsSeparateFromExecutionAndHistoryIsReadOnly"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "1C01D2DF-E038-42BE-B06A-AD2D20E4B5A6.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-expired-accessibility-dark_0_FEEB82F6-C0AA-411E-8A42-FDA5BBC9F0CC.png",
+        "timestamp" : 1793529949.67
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessExpiryAndAccessibilitySizeDisableControls()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessExpiryAndAccessibilitySizeDisableControls"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "B030663E-A85D-4B98-9ACA-C1E8F2E5F43F.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-access-allowed-once_0_630B2244-85B4-4B22-8E5B-39FEF6010F35.png",
+        "timestamp" : 1793529983.229
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "6A8A89DF-55A7-43B0-89F4-5C546C1128AD",
+        "deviceName" : "Apassy ADR0033 isolated QA",
+        "exportedFileName" : "E3C49A8A-FBF7-4A7F-B6B3-ECF960E886B7.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-face-id-fixture-pending_0_5BCAA730-D1EA-473A-A776-DE2EE5507F64.png",
+        "timestamp" : 1793529975.78
+      }
+    ],
+    "testIdentifier" : "RequestsUITests/testAccessFaceIDStateCancellationAndFreshRetry()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/RequestsUITests/testAccessFaceIDStateCancellationAndFreshRetry"
+  }
+]

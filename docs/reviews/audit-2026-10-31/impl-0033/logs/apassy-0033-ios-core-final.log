@@ -1,0 +1,15 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    47%    487k  157M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+   Compiling apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e/ios/ApassyCore)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.48s
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    47%    487k  156M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+   Compiling apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e/ios/ApassyCore)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.26s
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    47%    487k  154M    0%   /
+   Compiling apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e/ios/ApassyCore)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s
+build-ios-core: /Users/rafalw/.t3/worktrees/apassy/t3-96fd459e/ios/ApassyCore/build/ApassyCore.xcframework (sim mac, dev)

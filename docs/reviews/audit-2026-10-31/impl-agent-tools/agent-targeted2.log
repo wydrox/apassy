@@ -1,0 +1,78 @@
+    Blocking waiting for file lock on build directory
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-7d26558a)
+warning: variable does not need to be mutable
+   --> src/cli/setup.rs:335:9
+    |
+335 |     let mut existing = managed_token(&mcp_wrapper, &mcp)?;
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `apassy` (lib test) generated 1 warning (run `cargo fix --lib -p apassy --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 18s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-agent-tools/debug/deps/apassy-94e5533b47ebd2be)
+
+running 58 tests
+test cli::commands::tests::shell_lines_set_and_clear_the_session ... ok
+test cli::commands::tests::kinds_have_short_names ... ok
+test cli::completions::tests::a_closed_pipe_is_not_an_error ... ok
+test cli::args::tests::options_and_positionals_mix_in_any_order ... ok
+test cli::args::tests::words_after_the_separator_are_not_options ... ok
+test cli::args::tests::unknown_options_and_missing_values_are_usage_errors ... ok
+test cli::completions::tests::each_subcommand_is_offered_for_its_own_command ... ok
+test cli::commands::tests::import_json_holds_the_failure_in_one_document ... ok
+test cli::commands::tests::import_text_shows_the_full_reason_of_each_variable_not_bound ... ok
+test cli::completions::tests::each_script_has_every_command_and_subcommand_of_the_help_tables ... ok
+test cli::completions::tests::fish_accepts_its_script ... ok
+test cli::doctor::tests::referenced_wrapper_requires_executable_bits_and_is_never_run ... ok
+test cli::help::tests::unknown_subjects_name_the_path_and_valid_alternatives ... ok
+test cli::doctor::tests::static_configs_are_parsed_without_executing_or_showing_contents ... ok
+test cli::help::tests::each_complete_command_path_has_help ... ok
+test cli::import::tests::audit_csv_rejects_truncated_export_before_any_entries ... ok
+test cli::import::tests::audit_csv_preserves_website ... ok
+test cli::import::tests::audit_csv_preserves_password_bytes ... ok
+test cli::completions::tests::zsh_accepts_its_script ... ok
+test cli::completions::tests::bash_accepts_its_script ... ok
+test cli::import::tests::bitwarden_csv_maps_custom_fields_to_hidden_details ... ok
+test cli::import::tests::csv_records_handle_quotes_commas_and_newlines ... ok
+test cli::import::tests::bitwarden_totp_column_gets_the_same_label ... ok
+test cli::import::tests::detection_uses_the_name_then_the_header ... ok
+test cli::import::tests::csv_items_carry_a_variable_only_when_the_title_is_one ... ok
+test cli::import::tests::env_custom_kind_uses_a_safe_field_name ... ok
+test cli::import::tests::review_csv_decoding_matches_validation ... ok
+test cli::import::tests::env_files_keep_quotes_comments_exports_and_multiline_values ... ok
+test cli::import::tests::one_password_csv_becomes_logins_keys_and_notes ... ok
+test cli::import::tests::the_imported_one_time_label_is_the_canonical_one_and_the_app_reads_it ... ok
+test cli::print::tests::times_are_utc_dates ... ok
+test cli::print::tests::tables_align_and_clean_cells ... ok
+test cli::setup::tests::claude_paths_use_the_cli_configuration_directory ... ok
+test cli::setup::tests::codex_migration_changes_only_the_legacy_managed_timeout ... ok
+test cli::setup::tests::codex_setup_allows_appendable_dotted_and_normal_parent_tables ... ok
+test cli::setup::tests::cli_writes_only_a_fixed_status_for_a_private_error ... ok
+test cli::setup::tests::codex_setup_accepts_only_its_existing_configuration ... ok
+test cli::setup::tests::codex_setup_rejects_inline_parent_tables_before_an_invalid_append ... ok
+test cli::setup::tests::codex_setup_allows_unrelated_apassy_references ... ok
+test cli::setup::tests::codex_setup_rejects_noncanonical_servers_and_invalid_toml ... ok
+test cli::setup::tests::desktop_status_refuses_to_replace_existing_data_or_symlinks ... ok
+test cli::setup::tests::claude_setup_reuses_only_its_managed_user_server ... ok
+test cli::setup::tests::status_codes_discard_error_details_and_unknown_codes ... ok
+test cli::setup::tests::setup_json_is_one_document_with_completed_stages_and_partial_state ... ok
+test cli::setup::tests::managed_wrapper_repair_reuses_token_and_rejects_user_commands ... ok
+test cli::setup::tests::preflight_leaves_invalid_hooks_unchanged_and_recovers ... ok
+test cli::browser::tests::setup_writes_only_for_browsers_on_this_mac_and_removes ... ok
+test cli::setup::tests::hook_failures_have_fixed_status_codes_and_preserve_the_file ... ok
+test cli::setup::tests::the_hook_merge_requires_a_prompt_command_hook ... ok
+test cli::setup::tests::the_hook_merge_keeps_other_settings_and_runs_once ... ok
+test cli::setup::tests::wrappers_quote_the_token_and_have_mode_0700 ... ok
+test cli::setup::tests::timeouts_migrate_legacy_values_and_preserve_custom_values ... ok
+test cli::completions::tests::zsh_completes_file_names_where_no_subcommand_fits ... ok
+test cli::completions::tests::bash_completes_commands_subcommands_and_options ... ok
+test cli::setup::transaction_tests::rollback_restores_bytes_modes_and_removes_partial_new_files ... ok
+test cli::setup::transaction_tests::repair_recreates_missing_hook_without_touching_catalog ... ok
+test cli::completions::tests::the_documented_bash_line_works_in_the_bash_of_macos ... ok
+test cli::doctor::live_tests::isolated_live_fixture_reports_broker_mcp_hook_and_cleanup ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 1172 filtered out; finished in 0.38s
+

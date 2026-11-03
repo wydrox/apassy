@@ -1,0 +1,13 @@
+    Blocking waiting for file lock on build directory
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-7d26558a)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 57.88s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-agent-tools/debug/deps/apassy-94e5533b47ebd2be)
+
+running 4 tests
+test desktop::ui::agent_onboarding::tests::audit_hosts_have_names_setup_targets_and_a_guess_from_the_agent_name ... ok
+test desktop::ui::agent_onboarding::health_tests::missing_host_is_visible_and_never_claims_a_request ... ok
+test desktop::ui::agent_onboarding::tests::launch_commands_preserve_shell_words_in_bash_and_zsh ... ok
+test desktop::ui::agent_onboarding::tests::connect_registers_once_and_gives_the_token_after_one_owner_check ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1226 filtered out; finished in 0.48s
+

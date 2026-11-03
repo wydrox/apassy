@@ -1,0 +1,9 @@
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-8a61c770)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 52s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-review37/debug/deps/it-0890ab3e9422be5e)
+
+running 1 test
+test agent_path::a_connector_use_without_a_running_bouncer_waits_for_the_owner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 808 filtered out; finished in 5.19s
+

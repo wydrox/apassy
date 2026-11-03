@@ -1,0 +1,80 @@
+Building for debugging...
+[Planning deferred tasks]
+[39 / 78]
+[41 / 80] ApassyCompanionKit
+[43 / 128]
+[46 / 128]
+[51 / 166]
+[54 / 166]
+[60 / 166]
+[64 / 166]
+[65 / 166]
+[69 / 166]
+[72 / 166]
+[76 / 166]
+[81 / 166]
+[84 / 166]
+[85 / 166]
+[87 / 166]
+[91 / 166]
+[96 / 166]
+[98 / 166] ApassyCompanionKit
+[109 / 166]
+[111 / 166] ApassyCompanionKit
+[114 / 166] ApassyCompanionKit
+[116 / 166] ApassyCompanionKit
+[118 / 166] ApassyCompanionKit
+[119 / 166] ApassyCompanionKit
+[120 / 166] ApassyVaultKit
+[121 / 166] ApassyVaultKit
+[123 / 166] ApassyVaultKit
+[129 / 166] ApassyVaultKit
+[130 / 166] ApassyVaultKit
+[131 / 166] ApassyVaultKit
+[132 / 166] ApassyVaultKit
+[133 / 166] ApassyVaultKit
+[135 / 166] ApassyVaultKit
+[136 / 166] ApassyVaultKit
+[139 / 166] ApassyCompanionKit
+[142 / 167] ApassyCompanionKit
+[144 / 167] AppModels
+[146 / 178] AppModels
+[147 / 178] AppModels
+[149 / 178] AppModels
+[151 / 178] AppModels
+[157 / 178] AppModels
+[158 / 178] AppModels
+[159 / 178] AppModels
+[161 / 178] AppModels
+[161 / 178]
+[163 / 178] AppModels
+[168 / 179] AppModelsTests-product
+[169 / 192]
+[173 / 192] AppModelsTests-product
+[175 / 192] AppModelsTests-product
+[180 / 192] AppModelsTests-product
+[181 / 192] AppModelsTests-product
+[182 / 192] AppModelsTests-product
+[184 / 192] AppModelsTests-product
+[186 / 192] AppModelsTests-product
+[188 / 192] AppModelsTests-product
+[191 / 192] AppModelsTests-product
+Build complete! (30,47 sec)
+◇ Test run started.
+↳ Testing Library Version: 2084
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite AccessRequestsModelTests started.
+◇ Test doubleTapCannotStartAnotherMatchOrPost() started.
+◇ Test unsupportedBiometryEnrollmentFailureAndExpiryFailClosed() started.
+◇ Test cancellationInvalidatesTheContextAndDiscardsLateCompletion() started.
+◇ Test denyDoesNotUseBiometryOrTheAnswerSigner() started.
+◇ Test eachAllowNeedsItsOwnFreshSignerInvocation() started.
+◇ Test backgroundOrVaultSwitchNeverPostsALateSignature() started.
+✔ Test denyDoesNotUseBiometryOrTheAnswerSigner() passed after 0.022 seconds.
+✔ Test backgroundOrVaultSwitchNeverPostsALateSignature() passed after 0.022 seconds.
+✔ Test unsupportedBiometryEnrollmentFailureAndExpiryFailClosed() passed after 0.024 seconds.
+✔ Test doubleTapCannotStartAnotherMatchOrPost() passed after 0.026 seconds.
+✔ Test cancellationInvalidatesTheContextAndDiscardsLateCompletion() passed after 0.026 seconds.
+✔ Test eachAllowNeedsItsOwnFreshSignerInvocation() passed after 0.026 seconds.
+✔ Suite AccessRequestsModelTests passed after 0.026 seconds.
+✔ Test run with 6 tests in 1 suite passed after 0.027 seconds.

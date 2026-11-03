@@ -1,0 +1,50 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "D21FAD17-A4D4-42F7-884F-A15E924F81C3",
+        "deviceName" : "Apassy Connect 0032",
+        "exportedFileName" : "90A65E7D-2D75-4C73-B38F-F5FB28458380.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-connect-pairing_0_C44CDDB1-8413-43DE-A6BE-A2F27D6BED02.png",
+        "timestamp" : 1793491182.718
+      }
+    ],
+    "testIdentifier" : "ConnectUITests/testPairingInstructionsHaveNoAccountOrTeamCodeStep()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/ConnectUITests/testPairingInstructionsHaveNoAccountOrTeamCodeStep"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "D21FAD17-A4D4-42F7-884F-A15E924F81C3",
+        "deviceName" : "Apassy Connect 0032",
+        "exportedFileName" : "9C7EB056-882B-4B07-8F53-6168A839118F.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-connect-requests_0_BDBBC6D5-F8B2-457E-8E70-8488991B857E.png",
+        "timestamp" : 1793491200.557
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "D21FAD17-A4D4-42F7-884F-A15E924F81C3",
+        "deviceName" : "Apassy Connect 0032",
+        "exportedFileName" : "804C0138-C4E7-4A4C-8813-A74F477FFA1B.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-connect-success_0_96DCC0D4-3384-4D80-B9DC-BE3FCE634A04.png",
+        "timestamp" : 1793491198.496
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "D21FAD17-A4D4-42F7-884F-A15E924F81C3",
+        "deviceName" : "Apassy Connect 0032",
+        "exportedFileName" : "D12AE36C-BBE1-4153-A2FA-7CAF5FD538C6.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "iphone-connect-safety-words_0_291A8A83-9933-4F8C-B837-B1736A2F98B5.png",
+        "timestamp" : 1793491196.889
+      }
+    ],
+    "testIdentifier" : "ConnectUITests/testPairingSafetyWordsThenRequestsAndNotificationChoice()",
+    "testIdentifierURL" : "test://com.apple.xcode/ApassyCompanion/ApassyCompanionUITests/ConnectUITests/testPairingSafetyWordsThenRequestsAndNotificationChoice"
+  }
+]

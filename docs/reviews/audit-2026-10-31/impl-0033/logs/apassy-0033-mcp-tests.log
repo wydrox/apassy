@@ -1,0 +1,59 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    15Gi    46%    487k  161M    0%   /
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-60eccd1fa8445697)
+
+running 35 tests
+test agent::mcp::lifecycle_tests::cancelling_a_credential_request_dismisses_its_owner_inbox_entry ... ok
+test agent::mcp::lifecycle_tests::auto_lock_access_fence_ends_an_inflight_owner_wait ... ok
+test agent::mcp::lifecycle_tests::idempotent_retry_reuses_outcome_and_different_arguments_are_refused ... ok
+test agent::mcp::lifecycle_tests::cancellation_before_submission_is_fenced_and_binds_the_retry_key ... ok
+test agent::mcp::lifecycle_tests::inflight_replay_does_not_take_over_owner_question_and_other_agents_cannot_read_receipt ... ok
+test agent::mcp::lifecycle_tests::a_cancelled_retry_id_cannot_replace_an_existing_key_binding ... ok
+test agent::mcp::lifecycle_tests::hosts_without_optional_notifications_and_legacy_brokers_fail_safely ... ok
+test agent::mcp::lifecycle_tests::execution_cancellation_is_honest_and_reconnect_retrieves_final_outcome ... ok
+test agent::mcp::tests::a_token_for_another_vault_gives_the_user_a_next_step ... ok
+test agent::mcp::tests::audit_mcp_frame_is_bounded_without_a_newline ... ok
+test agent::mcp::tests::call_arguments_refuse_urls_and_nested_values ... ok
+test agent::mcp::tests::credential_tool_arguments_are_checked_and_a_saved_value_is_redacted ... ok
+test agent::mcp::tests::error_categories_are_structured_and_sanitized ... ok
+test agent::mcp::tests::expired_token_gives_the_user_a_next_step ... ok
+test agent::mcp::tests::initialize_and_tools_list ... ok
+test agent::mcp::tests::malformed_stub_broker_keeps_protocol_cause ... ok
+test agent::mcp::tests::missing_broker_is_a_tool_error_not_a_crash ... ok
+test agent::mcp::tests::oversized_request_fails_before_connection_and_excludes_value ... ok
+test agent::mcp::tests::request_access_arguments_are_checked ... ok
+test agent::mcp::tests::scoped_access_refusals_are_typed_and_status_tools_never_get_cached ... ok
+test agent::mcp::tests::socket_permission_and_refusal_are_distinct ... ok
+test agent::mcp::tests::source_schema_one_of_validation_matches_adapter ... ok
+test agent::mcp::tests::source_schemas_and_adapter_refuse_ambiguous_calls ... ok
+test agent::mcp::tests::stub_broker_refusals_and_client_timeout_keep_their_causes ... ok
+test agent::mcp::tests::tool_descriptions_follow_the_bouncer_model ... ok
+test agent::mcp::tests::validation_and_broker_errors_never_echo_request_content ... ok
+test agent::mcp::lifecycle_tests::per_agent_active_limit_leaves_capacity_for_another_agent ... ok
+test agent::mcp::lifecycle_tests::stdin_eof_drains_a_short_mutation_before_cancelling_remaining_waits ... ok
+test agent::mcp::lifecycle_tests::read_completes_while_run_waits_and_cancellation_withdraws_question ... ok
+test agent::mcp::lifecycle_tests::replacing_the_vault_does_not_expose_receipts_to_the_same_numeric_agent_id ... ok
+test agent::mcp::lifecycle_tests::simultaneous_identical_keys_execute_one_command_and_keys_are_agent_scoped ... ok
+test agent::mcp::lifecycle_tests::vault_lock_ends_owner_wait_and_previous_session_receipts_are_unavailable ... ok
+test agent::mcp::lifecycle_tests::progress_repeats_without_arguments_and_eof_withdraws_question ... ok
+test agent::mcp::lifecycle_tests::bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available ... FAILED
+test agent::mcp::lifecycle_tests::one_agent_cannot_fill_the_receipt_table_with_cancellation_tombstones ... ok
+
+failures:
+
+---- agent::mcp::lifecycle_tests::bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available stdout ----
+
+thread 'agent::mcp::lifecycle_tests::bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available' (865054) panicked at src/agent/mcp_lifecycle_tests.rs:522:5:
+assertion `left == right` failed
+  left: 12
+ right: 10
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    agent::mcp::lifecycle_tests::bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available
+
+test result: FAILED. 34 passed; 1 failed; 0 ignored; 0 measured; 1245 filtered out; finished in 6.77s
+
+error: test failed, to rerun pass `--lib`

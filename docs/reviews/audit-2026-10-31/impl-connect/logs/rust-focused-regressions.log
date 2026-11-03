@@ -1,0 +1,212 @@
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    16Gi    45%    487k  166M    0%   /
+    Blocking waiting for file lock on build directory
+    Checking apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Checking apassy-core v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea/ios/ApassyCore)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 09s
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    14Gi    48%    487k  150M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 21s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-connect/debug/deps/apassy-a9f9d73f5eb8e22a)
+
+running 70 tests
+test broker::model_server::tests::a_failed_weights_download_still_starts_the_server_with_apassy ... ok
+test desktop::ui::settings::tests::a_sheet_of_settings_shows_over_the_window ... ok
+test desktop::ui::settings::tests::bouncer_status_requires_inference_readiness_including_external_mode ... ok
+test desktop::ui::settings::tests::device_rows_say_how_each_device_answers ... ok
+test desktop::ui::settings::tests::devices_counts_each_iphone_once ... ok
+test desktop::ui::settings::tests::each_section_draws_at_the_minimum_window_size ... ok
+test desktop::ui::settings::tests::each_section_shows_its_groups ... ok
+test desktop::ui::settings::tests::security_owner_frequency_defaults_every_time_and_names_covered_actions ... ok
+test desktop::ui::settings::tests::the_gear_and_command_comma_open_settings_and_the_sidebar_leaves_it ... ok
+test desktop::ui::settings::tests::the_relay_questions_switch_needs_the_owner_check_to_go_on ... ok
+test desktop::ui::settings::tests::the_relay_questions_switch_offers_a_team_without_relay_sync ... ok
+test desktop::ui::settings::tests::today_uses_local_calendar_boundaries_including_dst_and_skipped_midnight ... ok
+test desktop::ui::sync_tests::a_change_syncs_after_a_pause_and_a_changed_file_merges_while_unlocked ... ok
+test desktop::ui::sync_tests::a_damaged_relay_copy_offers_replace_with_this_macs_vault ... ok
+test desktop::ui::sync_tests::a_lock_drops_the_relay_key_at_once ... ok
+test desktop::ui::sync_tests::a_lone_mac_after_a_relay_rollback_uses_the_relay_copy ... ok
+test desktop::ui::sync_tests::a_lost_link_answer_does_not_use_up_the_code ... ok
+test desktop::ui::sync_tests::a_mac_that_turned_relay_sync_off_joins_again_with_a_link_and_merges ... ok
+test desktop::ui::sync_tests::a_new_passphrase_found_by_the_worker_opens_the_sheet_in_the_next_frame ... ok
+test desktop::ui::sync_tests::a_new_passphrase_from_another_mac_asks_once_and_rekeys ... ok
+test desktop::ui::sync_tests::a_new_passphrase_from_another_mac_on_the_relay_rekeys_off_the_window_thread ... ok
+test desktop::ui::sync_tests::a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time ... ok
+test desktop::ui::sync_tests::a_rebuilt_list_links_sync_again ... ok
+test desktop::ui::sync_tests::a_refused_team_code_keeps_the_folder_sync ... ok
+test desktop::ui::sync_tests::a_removed_mac_offers_only_turning_relay_sync_off ... ok
+test desktop::ui::sync_tests::a_second_mac_joins_the_questions_team_with_a_link ... ok
+test desktop::ui::sync_tests::a_sync_now_that_a_pause_ends_tells_nothing ... ok
+test desktop::ui::sync_tests::add_a_device_shows_the_link_as_a_qr_code_for_the_iphone ... ok
+test desktop::ui::sync_tests::add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_check ... ok
+test desktop::ui::sync_tests::add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check ... ok
+test desktop::ui::sync_tests::add_an_iphone_twice_adds_two_answering_devices ... ok
+test desktop::ui::sync_tests::agent_activity_alone_does_not_sync ... ok
+test desktop::ui::sync_tests::an_unreachable_folder_never_blocks_a_lock_or_an_unlock ... ok
+test desktop::ui::sync_tests::both_macs_editing_one_credential_keep_both_versions_with_a_notice ... ok
+test desktop::ui::sync_tests::cancel_of_a_waiting_mac_cancels_its_link_on_the_relay ... ok
+test desktop::ui::sync_tests::connect_onboarding_checks_the_owner_then_continues_to_iphone_pairing ... ok
+test desktop::ui::sync_tests::create_with_sync_writes_the_file_and_settings_shows_the_status ... ok
+test desktop::ui::sync_tests::custom_folder_placeholder_keeps_selection_and_advances_when_ready ... ok
+test desktop::ui::sync_tests::discovery_timeout_has_retry_and_help_and_preserves_safe_values ... ok
+test desktop::ui::sync_tests::folder_sync_status_does_not_claim_receipt_on_another_mac ... ok
+test desktop::ui::sync_tests::joining_a_relay_copy_under_another_passphrase_asks_for_it ... ok
+test desktop::ui::sync_tests::open_a_synced_vault_adds_it_with_sync_on ... ok
+test desktop::ui::sync_tests::questions_through_a_notifications_only_team_need_the_owner_check ... ok
+test desktop::ui::sync_tests::received_by_shows_the_receipt_of_the_other_mac ... ok
+test desktop::ui::sync_tests::relay_calls_of_the_owner_leave_the_window_responsive ... ok
+test desktop::ui::sync_tests::relay_statuses_read_as_in_the_adr ... ok
+test desktop::ui::sync_tests::remove_from_list_stops_sync_and_keeps_the_synced_file ... ok
+test desktop::ui::sync_tests::removing_a_mac_asks_first_and_return_keeps_it ... ok
+test desktop::ui::sync_tests::retry_finds_a_provider_that_appears_after_an_empty_scan ... ok
+test desktop::ui::sync_tests::return_on_a_relay_alert_opened_with_the_pointer_cancels ... ok
+test desktop::ui::sync_tests::second_mac_flow_shows_file_service_and_existing_passphrase_without_paths ... ok
+test desktop::ui::sync_tests::switching_a_relay_vault_to_a_folder_leaves_the_relay_team ... ok
+test desktop::ui::sync_tests::the_picker_offers_the_relay_after_the_detected_folders ... ok
+test desktop::ui::sync_tests::the_relay_setup_sheet_asks_for_the_address_the_team_code_and_the_name ... ok
+test desktop::ui::sync_tests::the_switch_does_not_sync_into_the_wrong_vault ... ok
+test desktop::ui::sync_tests::the_sync_picker_turns_on_moves_and_turns_off ... ok
+test desktop::ui::sync_tests::the_sync_setting_waits_while_relay_sync_turns_on ... ok
+test desktop::ui::sync_tests::the_team_code_field_is_masked_and_erased_after_each_try ... ok
+test desktop::ui::sync_tests::the_worker_asks_icloud_again_for_a_file_that_stays_in_icloud ... ok
+test desktop::ui::sync_tests::the_worker_does_not_sync_a_locked_vault ... ok
+test desktop::ui::sync_tests::the_worker_pushes_and_merges_without_any_frame ... ok
+test desktop::ui::sync_tests::the_worker_syncs_while_a_run_waits_for_the_owner ... ok
+test desktop::ui::sync_tests::the_worker_thread_starts_only_with_sync_and_stops ... ok
+test desktop::ui::sync_tests::turn_off_of_a_removed_or_last_mac_says_what_happened ... ok
+test desktop::ui::sync_tests::turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it ... ok
+test desktop::ui::sync_tests::unlock_merges_before_the_list_and_a_lock_pushes ... ok
+test desktop::ui::sync_tests::use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy ... ok
+test desktop::ui::sync_tests::without_sync_the_app_shows_no_sync_control ... ok
+test relay::connect::tests::connect_capacity_errors_explain_the_different_bounds ... ok
+test vault::connect::tests::schema20_upgrades_without_recreating_existing_scopes_or_a_pending_identity ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 1159 filtered out; finished in 155.10s
+
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s3s1   228Gi    13Gi    14Gi    48%    487k  146M    0%   /
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-4d4e8dea)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.61s
+     Running tests/it.rs (/Users/rafalw/Dev/.target-connect/debug/deps/it-0890ab3e9422be5e)
+
+running 103 tests
+test relay_connect::confirmed_join_hands_keys_only_to_the_confirmed_device_and_preserves_revocation ... ok
+test relay_connect::connect_persists_before_network_and_adopts_only_questions_after_restart ... ok
+test relay_connect::lost_response_on_live_058_keeps_the_key_and_explains_recovery_is_unavailable ... ok
+test relay_connect::lost_response_recovers_with_fresh_possession_proof_when_f06_becomes_available ... ok
+test relay_questions::a_notifications_only_team_carries_the_questions_and_goes_with_off ... ok
+test relay_questions::a_question_expires_with_its_wait ... ok
+test relay_questions::a_question_of_mac_b_shows_on_mac_a_and_its_answers_reach_b ... ok
+test relay_questions::a_removed_device_is_revoked_on_the_relay ... ok
+test relay_questions::a_removed_mac_does_not_register_again ... ok
+test relay_questions::a_reordered_correction_of_another_device_does_not_count ... ok
+test relay_questions::a_replayed_correction_does_not_undo_a_newer_one ... ok
+test relay_questions::a_second_mac_joins_the_questions_team_of_the_vault ... ok
+test relay_questions::a_settled_unreadable_remote_question_never_reappears_after_key_sync ... ok
+test relay_questions::an_iphone_approves_with_its_answer_key ... ok
+test relay_questions::an_iphone_link_carries_its_answer_key_and_the_mac_writes_its_row ... ok
+test relay_questions::an_old_relay_without_questions_keeps_them_on_this_mac ... ok
+test relay_questions::an_unreadable_remote_question_reappears_after_its_asker_syncs ... ok
+test relay_questions::an_unreadable_remote_question_reappears_after_its_key_syncs ... ok
+test relay_questions::invalid_answers_are_refused_and_logged ... ok
+test relay_questions::locking_clears_an_unreadable_remote_question_and_its_problem ... ok
+test relay_questions::no_request_body_holds_a_command_an_item_name_or_a_secret ... ok
+test relay_questions::questions_through_the_relay_are_off_by_default ... ok
+test relay_questions::removing_a_device_rotates_the_question_key ... ok
+test relay_questions::the_asker_takes_the_vector_answer_only_in_its_window ... ok
+test relay_questions::the_contract_test_vectors_reproduce_exactly ... ok
+test relay_questions::the_first_valid_answer_wins ... ok
+test relay_questions::two_macs_round_trip ... ok
+test relay_sync::a_412_merges_and_pushes_again_and_nothing_is_lost ... ok
+test relay_sync::a_429_waits_retry_after ... ok
+test relay_sync::a_copy_with_a_new_passphrase_is_downloaded_once ... ok
+test relay_sync::a_copy_with_a_newer_schema_is_downloaded_once ... ok
+test relay_sync::a_damaged_relay_copy_is_replaced_with_this_macs_vault ... ok
+test relay_sync::a_failed_sync_after_a_new_passphrase_keeps_the_new_passphrase ... ok
+test relay_sync::a_forked_chain_is_refused ... ok
+test relay_sync::a_join_under_another_passphrase_takes_the_passphrase_of_the_copy ... ok
+test relay_sync::a_link_older_than_the_held_code_gets_no_words ... ok
+test relay_sync::a_lock_during_the_tls_handshake_ends_the_sync_at_once ... ok
+test relay_sync::a_lock_ends_a_transfer_at_once ... ok
+test relay_sync::a_lock_ends_the_long_poll_at_once ... ok
+test relay_sync::a_lone_mac_uses_the_relay_copy_after_a_relay_rollback ... ok
+test relay_sync::a_mac_far_behind_reads_the_chain_in_pages ... ok
+test relay_sync::a_merged_version_is_acknowledged ... ok
+test relay_sync::a_new_team_pushes_version_1_and_stores_the_link_after_the_push ... ok
+test relay_sync::a_pending_join_can_be_cancelled ... ok
+test relay_sync::a_refused_challenge_is_asked_again_later_and_sync_comes_back ... ok
+test relay_sync::a_refused_link_ends_the_join ... ok
+test relay_sync::a_refused_token_is_no_removal ... ok
+test relay_sync::a_relay_rollback_before_a_passphrase_change_keeps_the_passphrase_of_this_mac ... ok
+test relay_sync::a_removed_mac_is_told_and_keeps_its_vault ... ok
+test relay_sync::a_removed_mac_signs_in_no_more_until_it_turns_sync_off ... ok
+test relay_sync::a_stale_copy_is_refused ... ok
+test relay_sync::a_sync_that_waits_during_a_pause_does_not_run ... ok
+test relay_sync::a_transient_error_keeps_a_join_waiting ... ok
+test relay_sync::a_work_file_that_a_crash_left_goes_at_the_next_sync ... ok
+test relay_sync::a_wrong_passphrase_at_adoption_makes_no_file_and_the_download_stays ... ok
+test relay_sync::an_upload_signs_in_again_when_the_token_ends_before_the_transfer_could ... ok
+test relay_sync::loopback_http_is_allowed_and_plain_http_elsewhere_is_refused ... ok
+test relay_sync::oversized_snapshots_are_refused ... ok
+test relay_sync::push_and_pull_between_two_macs ... ok
+test relay_sync::receipts_ask_from_the_version_this_mac_saw ... ok
+test relay_sync::removing_the_mac_that_signed_the_head_keeps_sync_working ... ok
+test relay_sync::the_contract_vectors_verify_with_ring ... ok
+test relay_sync::the_long_poll_hears_a_push_of_another_mac ... ok
+test relay_sync::the_same_version_with_another_head_is_refused ... ok
+test relay_sync::the_step_before_a_lock_ends_within_its_limit ... ok
+test relay_sync::the_step_before_a_lock_skips_while_another_sync_runs ... ok
+test relay_sync::three_lost_rounds_leave_the_change_for_the_next_sync ... ok
+test relay_sync::turn_off_asks_the_relay_after_a_refusal ... ok
+test sync_schema_upgrade::a_17_copy_merges_and_is_replaced_by_an_18_copy ... ok
+test sync_schema_upgrade::a_new_mac_adopts_a_schema17_copy_without_a_change_to_the_copy ... ok
+test sync_schema_upgrade::a_new_mac_adopts_a_schema17_relay_copy_and_its_first_sync_upgrades_it ... ok
+test sync_schema_upgrade::a_new_passphrase_comes_from_a_schema17_copy ... ok
+test sync_schema_upgrade::a_schema17_relay_copy_is_replaced_also_with_the_same_content_and_after_a_failed_push ... ok
+test sync_schema_upgrade::a_schema17_relay_copy_merges_an_edit_and_the_schema_in_the_report ... ok
+test sync_schema_upgrade::an_18_copy_merges_and_is_replaced_by_a_19_copy ... ok
+test sync_schema_upgrade::folder_sync_adopts_a_schema17_file_and_a_new_passphrase_replaces_it ... ok
+test sync_schema_upgrade::schema17_adoption_keeps_the_key_digest_and_schema_checks ... ok
+test trusted_devices::an_item_home_syncs_with_its_credential_and_not_with_a_conflict_copy ... ok
+test trusted_devices::relay_memberships_stay_on_their_mac ... ok
+test trusted_devices::trusted_devices_merge_last_writer_wins_and_tombstone_wins ... ok
+test vault_migration::a_failed_migration_from_version_10_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_11_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_12_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_13_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_6_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_7_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_8_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_from_version_9_keeps_the_old_version_and_data ... ok
+test vault_migration::a_failed_migration_keeps_the_old_version_and_data ... ok
+test vault_migration::restore_migrates_an_old_backup ... ok
+test vault_migration::two_copies_of_one_vault_get_the_same_record_uuids ... ok
+test vault_migration::unlock_migrates_each_earlier_schema_version_to_the_current_one ... ok
+test vault_migration::version_14_migration_keeps_sync_records_and_is_atomic ... ok
+test vault_migration::version_15_migration_adds_the_relay_device_table_and_is_atomic ... ok
+test vault_migration::version_17_migration_renames_reserved_fields_and_their_binding ... ok
+test vault_migration::version_18_drops_an_expired_grant_from_only ... ok
+test vault_migration::version_18_gives_a_narrow_agent_without_grants_only_the_marker ... ok
+test vault_migration::version_18_migration_derives_exceptions_and_is_atomic ... ok
+test vault_migration::version_18_puts_connector_grants_in_only ... ok
+test vault_migration::version_18_turns_a_placeholder_any_folder_grant_into_nothing ... ok
+test vault_migration::version_18_turns_a_rule_limit_into_always_ask ... ok
+test vault_migration::version_18_turns_any_folder_with_the_real_value_into_always_ask ... ok
+test vault_migration::version_19_migration_moves_relay_device_and_is_atomic ... FAILED
+
+failures:
+
+---- vault_migration::version_19_migration_moves_relay_device_and_is_atomic stdout ----
+
+thread 'vault_migration::version_19_migration_moves_relay_device_and_is_atomic' (2442252) panicked at tests/vault_migration.rs:2433:24:
+schema 18 to current: VaultError { kind: Storage }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    vault_migration::version_19_migration_moves_relay_device_and_is_atomic
+
+test result: FAILED. 102 passed; 1 failed; 0 ignored; 0 measured; 710 filtered out; finished in 181.76s
+
+error: test failed, to rerun pass `--test it`

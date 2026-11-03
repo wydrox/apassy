@@ -1,0 +1,7 @@
+key cmd+comma
+wait 1
+click 450 262
+wait 1
+scroll 1000 500 -1000
+wait 1
+snap settings-tools

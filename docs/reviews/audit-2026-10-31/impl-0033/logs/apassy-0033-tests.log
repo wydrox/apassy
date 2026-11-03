@@ -1,0 +1,38 @@
+   Compiling apassy v0.5.8 (/Users/rafalw/.t3/worktrees/apassy/t3-96fd459e)
+warning: methods `policy` and `begin_unlock` are never used
+   --> src/broker/approvals/owner_window.rs:126:19
+    |
+118 | impl OwnerWindow {
+    | ---------------- methods in this implementation
+...
+126 |     pub(crate) fn policy(&self) -> OwnerFrequency {
+    |                   ^^^^^^
+...
+151 |     pub(crate) fn begin_unlock(&self, expected: Option<u64>) -> Option<u64> {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `insert_remote_for_test` is never used
+   --> src/questions/worker.rs:677:19
+    |
+571 | impl QuestionsWorker {
+    | -------------------- method in this implementation
+...
+677 |     pub(crate) fn insert_remote_for_test(&self, question: OpenedQuestion) -> u64 {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `apassy` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.62s
+     Running unittests src/lib.rs (/Users/rafalw/Dev/.target-0033/debug/deps/apassy-6d0dd9617cc96ba4)
+
+running 6 tests
+test questions::access_request::tests::strict_json_and_protocol_separation ... ok
+test questions::access_request::tests::exact_hosts_and_display_escaping ... ok
+test questions::access_request::tests::freshness_edges_and_long_prompt ... ok
+test questions::access_request::tests::answer_cannot_replay_other_context_or_choice ... ok
+test questions::access_request::tests::independently_generated_openssl_vectors ... ok
+test questions::access_request::tests::every_body_byte_is_authenticated ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 633 filtered out; finished in 0.28s
+
