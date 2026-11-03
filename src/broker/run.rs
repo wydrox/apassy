@@ -98,8 +98,8 @@ use super::exec::{self, Network, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
 use super::project::{Project, project_of};
 use super::proxy::{
-    HostRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret, RunProxy,
-    mint_placeholder,
+    HostRule, NetworkRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret,
+    RunProxy, mint_placeholder,
 };
 use super::shadow::{self, ShadowInput};
 use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
@@ -2059,7 +2059,7 @@ fn run_inner(
             }
         },
     );
-    let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
+    let enforced = network.is_some_and(|network| network.rule != NetworkRule::None);
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();
     drop(secrets);
     let proxy_note = proxy_summary(&requests);

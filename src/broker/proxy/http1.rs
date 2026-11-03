@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The largest request or response head.
 pub(super) const MAX_HEAD_BYTES: usize = 64 * 1024;
@@ -27,6 +27,19 @@ impl<S: Read> Conn<S> {
         Self {
             inner,
             buf: Zeroizing::new(Vec::with_capacity(READ_CHUNK)),
+            start: 0,
+        }
+    }
+
+    /// A stream whose first bytes another reader took already. They come first. The
+    /// given buffer is erased, because it can hold the proxy password.
+    pub fn with_buffered(inner: S, mut bytes: Vec<u8>) -> Self {
+        let mut buf = Zeroizing::new(Vec::with_capacity(READ_CHUNK.max(bytes.len())));
+        buf.extend_from_slice(&bytes);
+        bytes.zeroize();
+        Self {
+            inner,
+            buf,
             start: 0,
         }
     }
