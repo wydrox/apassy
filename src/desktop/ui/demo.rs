@@ -1415,10 +1415,12 @@ fn bouncer_events(now: u64, waiting: bool) -> Vec<super::bouncer::LogEvent> {
 // ---- Settings > Devices (mockup docs/design/devices-settings-mockup.html). ----
 
 /// The frame of the Devices mockup that Settings > Devices shows in the demo build. The
-/// menu at the top of the section picks it, and `APASSY_DEMO_DEVICES` (1, 3a, 3b, 3c, 3d,
-/// 3f, 3g, 3h, 4, 5a, 5b, 5c, 6a, 6b, 6d, 7) sets it at start and opens the section, for
-/// screenshots. 3e and 6c are frame 1 with the ⓘ of the switch or of Wi-Fi Pairing open.
-/// Frames 2 and 4b–4d are the pairing and move sheets of the vault build.
+/// menu at the top of the section picks it, and `APASSY_DEMO_DEVICES` (1, 2a, 2b, 2c, 3a,
+/// 3b, 3c, 3d, 3f, 3g, 3h, 4, 4b, 4c, 4d, 4d+, 5a, 5b, 5c, 6a, 6b, 6d, 7, R) sets it at
+/// start and opens the section, for screenshots. 3e and 6c are frame 1 with the ⓘ of the switch or of Wi-Fi Pairing open.
+/// Frames 2a–2c and 4b–4d are the steps of the add and move sheets, drawn by the same
+/// functions as the vault build (`devices::link_step` and the others); "4d+" is frame 1
+/// after "Later" of 4d, and "R" frame 1 with the Relay group (not in the mockup).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum DevicesFrame {
     /// 1: the route on, every kind of device, the Wi-Fi group.
@@ -1438,8 +1440,22 @@ pub(crate) enum DevicesFrame {
     PortTaken,
     /// 3h.
     AddressChanged,
+    /// 2a: the link of "Add an iPhone or a Mac…".
+    AddLink,
+    /// 2b: the safety words.
+    AddWords,
+    /// 2c: the device was added.
+    Added,
     /// 4: the approvals go through Apassy relay.
     Move,
+    /// 4b: the move sheet.
+    MoveSheet,
+    /// 4c: the approvals moved.
+    Moved,
+    /// 4d: the old entry is still on Apassy relay.
+    OldEntry,
+    /// After "Later" of 4d: the row in the This Mac group.
+    OldEntryRow,
     /// 5a: Revoke an iPhone with a watch.
     RevokeIphone,
     /// 5b: Revoke another Mac.
@@ -1454,11 +1470,17 @@ pub(crate) enum DevicesFrame {
     NextVersion,
     /// 7: first run, no Tailscale.
     FirstRun,
+    /// Frame 1 with the Relay group: the questions through the relay, the feed, the
+    /// other Macs, and the end of the free approvals.
+    Relay,
 }
 
 impl DevicesFrame {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 24] = [
         Self::TailnetOn,
+        Self::AddLink,
+        Self::AddWords,
+        Self::Added,
         Self::NoTailscale,
         Self::NotConnected,
         Self::RouteOff,
@@ -1467,6 +1489,10 @@ impl DevicesFrame {
         Self::PortTaken,
         Self::AddressChanged,
         Self::Move,
+        Self::MoveSheet,
+        Self::Moved,
+        Self::OldEntry,
+        Self::OldEntryRow,
         Self::RevokeIphone,
         Self::RevokeMac,
         Self::AfterRevoke,
@@ -1474,6 +1500,7 @@ impl DevicesFrame {
         Self::NoticeRelay,
         Self::NextVersion,
         Self::FirstRun,
+        Self::Relay,
     ];
 
     fn label(self) -> &'static str {
@@ -1486,7 +1513,14 @@ impl DevicesFrame {
             Self::Locked => "Frame 3f: Vault Locked",
             Self::PortTaken => "Frame 3g: Port in Use",
             Self::AddressChanged => "Frame 3h: Address Changed",
+            Self::AddLink => "Frame 2a: Add, the Link",
+            Self::AddWords => "Frame 2b: Add, the Words",
+            Self::Added => "Frame 2c: Added",
             Self::Move => "Frame 4: Move Approvals",
+            Self::MoveSheet => "Frame 4b: Move Sheet",
+            Self::Moved => "Frame 4c: Approvals Moved",
+            Self::OldEntry => "Frame 4d: Old Entry on Relay",
+            Self::OldEntryRow => "Frame 4d+: After Later",
             Self::RevokeIphone => "Frame 5a: Revoke iPhone",
             Self::RevokeMac => "Frame 5b: Revoke Mac",
             Self::AfterRevoke => "Frame 5c: After Revoke",
@@ -1494,6 +1528,7 @@ impl DevicesFrame {
             Self::NoticeRelay => "Frame 6b: Notice, Relay",
             Self::NextVersion => "Frame 6d: Next Version",
             Self::FirstRun => "Frame 7: First Run",
+            Self::Relay => "Frame R: Relay Group",
         }
     }
 
@@ -1551,8 +1586,8 @@ fn hosted_target(uuid: &str) -> super::devices::Target {
 /// The view of a frame of the Devices mockup. Synthetic data only.
 pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
     use super::devices::{
-        Address, DevicesView, Kind, NodeProblem, NodeState, Route, Target, WifiDevice, WifiEnd,
-        WifiView,
+        Address, DevicesView, Kind, NodeProblem, NodeState, OtherMacsRow, Questions, RelayView,
+        Route, Target, WifiDevice, WifiEnd, WifiView,
     };
     let address = |ipv4: &str| Address {
         ipv4: ipv4.to_owned(),
@@ -1560,7 +1595,7 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
         port: 8444,
         words: Some("harbor lemon quartz otter cedar mango".to_owned()),
     };
-    let moving = frame == DevicesFrame::Move;
+    let moving = matches!(frame, DevicesFrame::Move | DevicesFrame::MoveSheet);
     let first_run = frame == DevicesFrame::FirstRun;
     let (approvals, phone_route) = if moving {
         ("Asks for approvals", Route::Relay)
@@ -1690,6 +1725,15 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
             WifiEnd::TwoVersions
         },
     });
+    let relay = (frame == DevicesFrame::Relay).then(|| RelayView {
+        questions: Questions::On,
+        feed_shown: true,
+        other_macs: Some(OtherMacsRow {
+            words: "Through the Apassy relay".to_owned(),
+            relay: true,
+        }),
+        free_end: Some("0.5.19".to_owned()),
+    });
     DevicesView {
         node,
         problem,
@@ -1698,8 +1742,112 @@ pub(crate) fn devices_view(frame: DevicesFrame) -> super::devices::DevicesView {
         devices,
         notes: Vec::new(),
         wifi,
+        relay,
+        old_relay_entry: frame == DevicesFrame::OldEntryRow,
         now: DEVICES_NOW,
     }
+}
+
+/// The link of frames 2a and 4b: the node origin of the mockup, 9:41 left.
+fn demo_link_step() -> super::devices::LinkStep {
+    super::devices::LinkStep {
+        route: super::devices::Route::Mac,
+        shown: Some(super::devices::shown_link(
+            "https://100.101.7.12:8444/link#apassy_lnk_demo",
+        )),
+        seconds_left: Some(9 * 60 + 41),
+    }
+}
+
+/// A synthetic QR code of 29 modules: the three finder patterns and a fixed scatter, in
+/// the fixed QR colors. It encodes nothing.
+fn demo_qr(ui: &mut egui::Ui, size: f32) {
+    use super::kit::fixed;
+    const WIDTH: usize = 29;
+    const QUIET: usize = 2;
+    let total = WIDTH + 2 * QUIET;
+    let unit = (size / total as f32).floor().max(1.0);
+    let side = unit * total as f32;
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0, fixed::QR_LIGHT);
+    let finder = |x: usize, y: usize| {
+        [(0, 0), (WIDTH - 7, 0), (0, WIDTH - 7)]
+            .iter()
+            .find_map(|&(left, top)| {
+                (x >= left && x < left + 7 && y >= top && y < top + 7).then(|| {
+                    let (dx, dy) = (x - left, y - top);
+                    let ring = dx == 0 || dy == 0 || dx == 6 || dy == 6;
+                    let core = (2..=4).contains(&dx) && (2..=4).contains(&dy);
+                    ring || core
+                })
+            })
+    };
+    for y in 0..WIDTH {
+        for x in 0..WIDTH {
+            let dark = finder(x, y).unwrap_or((x * 7 + y * 13 + x * y) % 5 < 2);
+            if dark {
+                let min =
+                    rect.min + egui::vec2((x + QUIET) as f32 * unit, (y + QUIET) as f32 * unit);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(min, egui::Vec2::splat(unit)),
+                    0,
+                    fixed::QR_DARK,
+                );
+            }
+        }
+    }
+}
+
+/// Frames 2a–2c and 4b–4d: the steps of the add and move sheets, from fixtures. Returns
+/// the frame that the choice leads to.
+fn demo_step_sheet(ctx: &egui::Context, frame: DevicesFrame) -> Option<DevicesFrame> {
+    use super::devices::{self, Kind, MovePhase, Route, StepChoice};
+    let mut choice = None;
+    let response = kit::sheet(ctx, "demo-devices-step", 440.0, |ui| {
+        choice = match frame {
+            DevicesFrame::AddLink => {
+                devices::link_step(ui, &demo_link_step(), |ui| demo_qr(ui, 180.0), |_| {})
+            }
+            DevicesFrame::AddWords => devices::join_step(
+                ui,
+                "Rafal's iPhone",
+                Kind::Iphone,
+                "amber falcon",
+                Route::Mac,
+                true,
+                |_| {},
+            ),
+            DevicesFrame::Added => devices::added_step(ui, "Rafal's iPhone", false, true, |_| {}),
+            DevicesFrame::MoveSheet => devices::move_step(
+                ui,
+                "Rafal's iPhone",
+                MovePhase::Scan,
+                Some(&demo_link_step()),
+                |ui| demo_qr(ui, 140.0),
+                |_| {},
+            ),
+            DevicesFrame::Moved => devices::moved_step(
+                ui,
+                &["Rafal's iPhone".to_owned()],
+                true,
+                &["Rafal's Apple Watch".to_owned()],
+            ),
+            DevicesFrame::OldEntry => devices::old_entry_step(ui, false),
+            _ => None,
+        };
+    });
+    let choice = choice.or(response.escape.then_some(StepChoice::Cancel))?;
+    Some(match (frame, choice) {
+        (DevicesFrame::AddLink, StepChoice::Copy) => {
+            ctx.copy_text("https://100.101.7.12:8444/link#apassy_lnk_demo".to_owned());
+            return None;
+        }
+        (DevicesFrame::AddWords, StepChoice::Confirm) => DevicesFrame::Added,
+        (DevicesFrame::MoveSheet, StepChoice::Cancel) => DevicesFrame::Move,
+        (DevicesFrame::OldEntry, StepChoice::Later) => DevicesFrame::OldEntryRow,
+        _ => DevicesFrame::TailnetOn,
+    })
 }
 
 /// The status line of Settings > Devices in the demo build.
@@ -1775,6 +1923,8 @@ pub(super) fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ui.ctx().copy_text(origin);
             None
         }
+        Some(Action::Add) => Some(DevicesFrame::AddLink),
+        Some(Action::Move | Action::PairAgain) => Some(DevicesFrame::MoveSheet),
         _ => None,
     };
     if let Some(next) = next {
@@ -1782,7 +1932,8 @@ pub(super) fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The sheets of the Devices frames 5a, 5b, 6a, and 6b, and `APASSY_DEMO_DEVICES`.
+/// The sheets of the Devices frames 2a–2c, 4b–4d, 5a, 5b, 6a, and 6b, and
+/// `APASSY_DEMO_DEVICES`.
 pub(super) fn devices_overlays(app: &mut DesktopApp, ctx: &egui::Context) {
     use super::devices::{Choice, DevicesSheet};
     use std::sync::Once;
@@ -1793,6 +1944,21 @@ pub(super) fn devices_overlays(app: &mut DesktopApp, ctx: &egui::Context) {
             select_devices_frame(app, frame);
         }
     });
+    let frame = app.ui.devices.demo;
+    if matches!(
+        frame,
+        DevicesFrame::AddLink
+            | DevicesFrame::AddWords
+            | DevicesFrame::Added
+            | DevicesFrame::MoveSheet
+            | DevicesFrame::Moved
+            | DevicesFrame::OldEntry
+    ) {
+        if let Some(next) = demo_step_sheet(ctx, frame) {
+            select_devices_frame(app, next);
+        }
+        return;
+    }
     let Some(sheet) = app.ui.devices.sheet.clone() else {
         return;
     };

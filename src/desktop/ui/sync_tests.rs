@@ -3074,17 +3074,22 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         )),
         "{link}"
     );
+    // Frame 2a of the Devices mockup, through hosted Connect: "via Apassy relay".
     for expected in [
-        "Connect your iPhone to “Personal”",
-        "On your iPhone, open the same vault from iCloud Drive",
-        "Waiting for the other device…",
+        super::devices::ADD_TITLE,
+        super::devices::ADD_LEAD,
+        "via Apassy relay",
+        super::devices::EXPIRES_IN,
+        "Cancel",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert!(
-        !text.contains("Copy link"),
-        "Connect must not copy its capability to the pasteboard"
-    );
+    for gone in ["Copy link", "Copy", super::devices::PASTE_ON_MAC] {
+        assert!(
+            !text.contains(gone),
+            "Connect must not copy its capability to the pasteboard: {gone}: {text}"
+        );
+    }
     assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
 
     // The iPhone scans the code and asks, as `join_attach` does: its link carries its
@@ -3110,10 +3115,18 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         "legacy wire proof"
     );
     let text = frames(&mut a);
-    assert!(
-        text.contains("“Test iPhone” (an iPhone that answers with Face ID) asks for the questions of “Personal”. Both devices show:"),
-        "{text}"
-    );
+    // Frame 2b: the device, the two safety words, Kind and Route, Refuse and Confirm….
+    for expected in [
+        super::devices::join_title("Test iPhone").as_str(),
+        "Confirm only if the iPhone shows these words.",
+        "Kind",
+        "iPhone",
+        "via Apassy relay",
+        "Refuse",
+        "Confirm…",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
     assert!(!text.contains(&link_name), "the key is not shown: {text}");
     assert!(text.contains(&pending.safety), "{text}");
 
@@ -3462,10 +3475,10 @@ fn connect_an_apple_watch_shows_its_kind_and_removes_like_an_iphone() {
     assert_eq!(links[0].device_name, watch_name);
     let text = frames(&mut a);
     for expected in [
-        "Connect Apple Watch “Test Watch”",
+        super::devices::join_title("Test Watch").as_str(),
+        "Apple Watch",
         "This watch can allow an access request once while it is unlocked on a wrist. It cannot approve runs or change access.",
-        "“Test Watch” asks for the questions of “Personal”. Both devices show:",
-        "Compare every word. Confirm only if all words match.",
+        "Confirm only if the iPhone shows these words.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
