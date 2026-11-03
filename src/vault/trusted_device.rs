@@ -230,7 +230,9 @@ fn parse_alt(text: Option<&str>) -> VaultResult<Vec<String>> {
         None => Ok(Vec::new()),
         Some(text) => serde_json::from_str(text).map_err(storage),
     }
+}
 
+impl RelayMembership {
     /// True for a vault store of Apassy Connect (schema 34, `key_source = 'account'`):
     /// the row holds no private key (`key_pkcs8` is empty), and the account device key of
     /// this Mac (`crate::connect::AccountSigner`) signs for it. Its `public_key` is the
