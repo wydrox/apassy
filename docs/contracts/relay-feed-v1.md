@@ -234,7 +234,7 @@ In this order; the first failure keeps the last good feed of that Mac on the scr
 2. The JSON has exactly the fields of section 7.1, within the limits. Else "Update Apassy to see the agents of <Mac>".
 3. `v` is 1 or 2 (section 7.5) and `seq` equals the relay's `seq`. A feed of v1 has none of the fields of v2; a feed of v2 has those of section 7.5 in their form. Any other `v` shows "Update Apassy to see the agents of <Mac>".
 4. `mac.device` is a live `trusted_device` of kind `mac` whose device number in this team (`relay_devices[team id]`) equals the relay's `device_id`. Else the feed is ignored, with no text. The publisher's `trusted_device` row must carry `relay_devices[team]` equal to the relay's `device_id` on the reader's copy of the vault; a row without that entry publishes nothing there, and its feed is ignored without a text. Unlike the asker check of questions (questions section 13), a missing entry is never accepted: a feed never predates the membership, because the Mac publishes only after its row has its device number in the team.
-5. `seq` is above the highest `seq` that this reader accepted from that device (section 8). Else the feed is ignored, with no text.
+5. `seq` is above the highest `seq` that this reader accepted from that device (section 8). Else the feed is ignored, with no text. One exception on a Mac: when nothing of that device shows (for example after a lock dropped the feeds), a feed with a `seq` equal to the mark shows again. The AAD binds the device id and `seq`, so an equal `seq` is the same feed.
 
 **A Mac as a reader** (added 2026-11-03, `src/questions/feed_reader.rs`). A Mac runs the same steps, in the same order, with the question key of the vault and its own copy of `trusted_device`:
 
