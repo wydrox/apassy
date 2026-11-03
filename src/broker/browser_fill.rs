@@ -18,18 +18,34 @@ use serde_json::json;
 // Demand is value-free. Only a fresh guarded poll can establish a target.
 static DEMAND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static DEMAND_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Wakes the window when a new demand starts: the window then answers the waits of the
+/// extension at once, with no poll while nothing happens.
+type DemandWake = std::sync::Arc<dyn Fn() + Send + Sync>;
+static DEMAND_WAKE: Mutex<Option<DemandWake>> = Mutex::new(None);
 struct Demand;
 impl Demand {
     fn new() -> Self {
         DEMAND_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         DEMAND.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // A clone, so that the window is not woken under the lock.
+        let wake = lock(&DEMAND_WAKE).clone();
+        if let Some(wake) = wake {
+            wake();
+        }
         Self
     }
 }
+
 impl Drop for Demand {
     fn drop(&mut self) {
         DEMAND.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// Wake the window with `wake` each time an agent asks for a fill. `None` stops it.
+#[cfg(feature = "desktop")]
+pub(crate) fn set_demand_wake(wake: Option<DemandWake>) {
+    *lock(&DEMAND_WAKE) = wake;
 }
 #[cfg(any(feature = "desktop", test))]
 pub(crate) fn pending() -> bool {

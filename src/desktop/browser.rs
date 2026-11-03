@@ -55,6 +55,11 @@ const TICKET_MARGIN: Duration = Duration::from_secs(15);
 /// browser hung up. The socket thread also wakes the app when it sees the hang-up.
 const HANG_UP_REPAINT: Duration = Duration::from_millis(500);
 
+/// The longest agent wait of the extension: then it gets `pending: false` and asks
+/// again. The window looks at a wait only at its end, when an agent asks for a fill
+/// (the broker wakes it), and when the browser hangs up (the socket thread wakes it).
+const AGENT_WAIT: Duration = Duration::from_secs(50);
+
 /// The note in the owner check dialog for a request of the browser.
 pub(crate) const BROWSER_ORIGIN_NOTE: &str = "Your browser asked for this (the Apassy extension). If you did not ask for it in your browser just now, click Cancel.";
 
@@ -320,11 +325,15 @@ pub(crate) struct PasskeyEcho {
 }
 
 impl BrowserHost {
+    /// Answer the agent waits that end now. The window looks again when the first
+    /// other one ends ([`AGENT_WAIT`]); a demand and a hang-up wake it earlier.
     fn poll_agent_waits(&mut self, epoch: Option<u64>, ctx: &egui::Context) {
         let waits = std::mem::take(&mut self.agent_waits);
+        let mut next: Option<Duration> = None;
         for (instance, (started, ticket)) in waits {
             let pending = epoch.is_some_and(|e| self.agent_epochs.get(&instance) != Some(&e));
-            if !ticket.is_live() || pending || started.elapsed() >= Duration::from_secs(50) {
+            let waited = started.elapsed();
+            if !ticket.is_live() || pending || waited >= AGENT_WAIT {
                 if pending {
                     self.agent_epochs.insert(instance.clone(), epoch.unwrap());
                 }
@@ -333,11 +342,13 @@ impl BrowserHost {
                     Data::AgentWait { pending },
                 ));
             } else {
+                let left = AGENT_WAIT.saturating_sub(waited).min(ticket.left());
+                next = Some(next.map_or(left, |next| next.min(left)));
                 self.agent_waits.insert(instance, (started, ticket));
             }
         }
-        if !self.agent_waits.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+        if let Some(next) = next {
+            ctx.request_repaint_after(next);
         }
     }
 }
@@ -435,6 +446,11 @@ impl DesktopApp {
                 self.browser.socket = Some(handle);
                 self.browser.inbox = Some(inbox);
                 self.browser.problem = None;
+                // An agent that asks for a fill ends the waits of the extension at once.
+                let wake = ctx.clone();
+                crate::broker::browser_fill::set_demand_wake(Some(std::sync::Arc::new(
+                    move || wake.request_repaint(),
+                )));
             }
             Err(err) => {
                 self.browser.problem = Some(format!(
@@ -592,7 +608,9 @@ impl DesktopApp {
                 self.browser
                     .agent_waits
                     .insert(instance, (Instant::now(), ticket));
-                ctx.request_repaint_after(Duration::from_millis(100));
+                // The next frame answers it at once when an agent already asks, and else
+                // plans the look at its end.
+                ctx.request_repaint();
             }
             Command::AgentBlocked { instance, url } => {
                 crate::broker::browser_fill::blocked(&instance, &url);
@@ -1670,6 +1688,47 @@ impl DesktopApp {
 #[cfg(test)]
 mod owner_window_delivery_tests {
     use super::*;
+
+    /// The delay of the next frame that one frame of `poll` asks for, after two empty
+    /// frames that settle egui. `Duration::MAX`: no frame.
+    fn asked_repaint(ctx: &egui::Context, mut poll: impl FnMut(&egui::Context)) -> Duration {
+        for _ in 0..2 {
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
+        }
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| poll(ui.ctx()));
+        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        output.drop_without_applying_deltas();
+        delay
+    }
+
+    /// The extension keeps a wait open almost all the time. The window answers it when it
+    /// ends, when an agent asks (the broker wakes it), or when the browser hangs up (the
+    /// socket thread wakes it), and asks for no frame in between: it did ten a second.
+    #[test]
+    fn an_agent_wait_wakes_the_window_only_at_its_end() {
+        let mut host = BrowserHost::default();
+        let ctx = egui::Context::default();
+        assert_eq!(
+            asked_repaint(&ctx, |ctx| host.poll_agent_waits(None, ctx)),
+            Duration::MAX,
+            "no wait"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        host.agent_waits.insert(
+            "instance".into(),
+            (
+                Instant::now() - Duration::from_secs(20),
+                BrowserTicket::new(tx, None),
+            ),
+        );
+        let delay = asked_repaint(&ctx, |ctx| host.poll_agent_waits(None, ctx));
+        assert!(
+            delay > Duration::from_secs(29) && delay <= Duration::from_secs(30),
+            "{delay:?}"
+        );
+        assert!(rx.try_recv().is_err(), "the wait goes on");
+    }
 
     #[test]
     fn agent_wait_pending_timeout_and_replacement() {
