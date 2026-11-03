@@ -27,7 +27,7 @@ class ReleaseVersionsTests(unittest.TestCase):
             "release-versions.json", "Cargo.toml", "Cargo.lock", "ios/ApassyCore/Cargo.toml",
             "ios/ApassyCompanion/project.yml", "extension/manifest.json", "CHANGELOG.md",
             "site/src/lib/site.ts", f"{RELAY}/Cargo.toml", f"{RELAY}/deploy/worker/package.json",
-            f"{APP}/Cargo.toml",
+            f"{APP}/Cargo.toml", "packaging/linux/build.sh", "packaging/linux/deb/control.in",
         ):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +64,22 @@ class ReleaseVersionsTests(unittest.TestCase):
         self.assertIn('name = "apassy-team"', original)
         path.write_text(original.replace('name = "apassy-team"', 'name = "apassy-other"', 1))
         self.assertIn("Linux", " ".join(MODULE.check(self.root)[1]))
+
+    def test_the_linux_node_package_is_checked(self):
+        for relative, old, new in (
+            (f"{APP}/Cargo.toml", "\nnode = []", "\nnode-less = []"),
+            (f"{APP}/Cargo.toml", 'default = ["window", "node"]', 'default = ["window"]'),
+            (f"{APP}/Cargo.toml", 'name = "apassy-app"', 'name = "apassy-other"'),
+            ("packaging/linux/deb/control.in", "Version: @VERSION@", f"Version: {self.version}"),
+            ("packaging/linux/build.sh", "crates/apassy-relay/Cargo.toml", "Cargo.toml"),
+        ):
+            with self.subTest(file=relative, old=old):
+                path = self.root / relative
+                original = path.read_text()
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new))
+                self.assertTrue(MODULE.check(self.root)[1])
+                path.write_text(original)
 
     def test_old_relay_checkout_flag_fails_clearly(self):
         result = subprocess.run(

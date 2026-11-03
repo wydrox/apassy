@@ -9,6 +9,9 @@
   derives its version from the changelog. The relay is the crate `crates/apassy-relay`
   of this workspace (ADR 0037); its package version, with the edge Worker package,
   also versions the Linux CLI. Its own rules are in `crates/apassy-relay/AGENTS.md`.
+- The `linux-cli` component is the Linux node (`apassy`, from `crates/apassy-app` built
+  `--no-default-features --features node`; packages from `relay-image.yml`, see
+  `docs/operations/release.md`, "Linux node packages"); its version is the relay crate's.
 - Run `python3 scripts/check-release-versions.py` with Python 3.12 before publication.
   Local source checks do not prove publication.
 - iOS `CURRENT_PROJECT_VERSION` / `APASSY_IOS_BUILD` is an upload build number,

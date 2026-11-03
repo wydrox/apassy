@@ -291,6 +291,16 @@ fn pair_makes_a_one_use_node_link_of_the_running_node() {
     );
     assert_eq!(first.origin, state.origin);
     assert_eq!(first.pin, state.pin);
+    // The Mac's reader (N3) takes the link: a pair link of this origin and pin.
+    let parsed = apassy::sync::PairedLink::parse(&first.link).expect("a node-pairing-v1 link");
+    assert_eq!(
+        (parsed.kind, parsed.origin.as_str(), parsed.pin),
+        (
+            apassy::sync::LinkKind::Pair,
+            state.origin.as_str(),
+            apassy::net::pin::parse(&state.pin)
+        )
+    );
     let now = apassy_relay::now_unix();
     assert!(first.expires_at > now && first.expires_at <= now + 600 + 5);
     let json = pair::to_json(&first);

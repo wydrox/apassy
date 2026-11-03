@@ -1,0 +1,16 @@
+[Unit]
+Description=Apassy node
+Documentation=https://github.com/wydrox/apassy/blob/main/docs/operations/linux-node.md
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/apassy serve
+ExecStop=/usr/bin/apassy serve --stop
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -14,6 +14,8 @@
 //!   (`status`, `doctor`), as text or with `--json` (shapes in `docs/operations/linux-node.md`).
 //! - `apassy team ...`: the team command line (`crate::cli`), the same as `apassy-team ...`
 //!   (`team`).
+//! - `apassy uninstall`: stops and removes the systemd user unit and keeps the node's
+//!   files (`service`, `up`).
 //!
 //! Nothing here binds `0.0.0.0` or `::`: the relay listens on the loopback, and the front
 //! binds only tailnet addresses (or the loopback, for the Tailscale Serve TCP fallback).
@@ -28,6 +30,7 @@ pub mod keys;
 pub mod pair;
 pub mod qr;
 pub mod serve;
+pub mod service;
 pub mod status;
 pub mod team;
 pub mod up;
@@ -47,9 +50,11 @@ apassy: the Apassy node without a window
 
 Commands
   up [--port N] [--route direct|serve-tcp] [--push-gateway URL | --no-push]
-     [--no-service] [--no-pair] [--json]
-                     Check Tailscale, make the node's files, install and start the
-                     systemd user service apassy-node.service, then pair.
+     [--no-service] [--no-encrypt] [--no-pair] [--print-unit] [--json]
+                     Check Tailscale, make the node's files, encrypt the key with
+                     systemd-creds where it can, install and start the systemd user
+                     service apassy-node.service, then pair.
+  uninstall [--json] Stop and remove apassy-node.service. The node's files stay.
   serve              Run the node in the foreground (the service runs this).
   serve --stop       Stop the node that runs on this data directory.
   pair [--minutes N] [--json]
@@ -335,6 +340,7 @@ pub fn main(args: Vec<String>) -> i32 {
         "team" => return team::run(rest.to_vec()),
         "serve" => serve::command(rest),
         "up" => up::command(rest),
+        "uninstall" => up::uninstall(rest),
         "pair" => pair::command(rest),
         "status" => status::command(rest),
         "doctor" => doctor::command(rest),

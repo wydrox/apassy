@@ -26,6 +26,11 @@ def expected_assets(public, version, commit):
         raise ValueError("Require the approved release version")
     paths = ["dl/apassy-team-linux-x86_64", "dl/apassy-team-darwin-arm64",
              "dl/SHA256SUMS", "dl/release.json", "install.sh", "guide.html"]
+    # The Linux node packages (plan S2-S3, L3): both tarballs and both .debs.
+    node_names = ["apassy-" + version + "-linux-x86_64.tar.gz",
+                  "apassy-" + version + "-linux-aarch64.tar.gz",
+                  "apassy_" + version + "_amd64.deb", "apassy_" + version + "_arm64.deb"]
+    paths += ["dl/" + name for name in node_names]
     blobs = {}
     for path in paths:
         file = public / path
@@ -43,8 +48,17 @@ def expected_assets(public, version, commit):
         if metadata["artifacts"][platform] != dict(filename=name, sha256=digest, size=len(blob)) or not blob:
             raise ValueError("Unverified staged download: " + name)
         sums.append(digest + "  " + name)
+    node = metadata.get("node")
+    if not isinstance(node, dict) or sorted(node) != sorted(node_names):
+        raise ValueError("release.json must list exactly the four Linux node packages")
+    for name in node_names:
+        blob = blobs["dl/" + name]
+        digest = hashlib.sha256(blob).hexdigest()
+        if node[name] != dict(sha256=digest, size=len(blob)) or not blob:
+            raise ValueError("Unverified staged download: " + name)
+        sums.append(digest + "  " + name)
     if sorted(blobs["dl/SHA256SUMS"].decode().strip().splitlines()) != sorted(sums):
-        raise ValueError("SHA256SUMS must verify exactly both downloads")
+        raise ValueError("SHA256SUMS must verify exactly the six downloads")
     return [("/guide" if path == "guide.html" else "/" + path, blob)
             for path, blob in blobs.items()]
 

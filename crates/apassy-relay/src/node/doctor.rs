@@ -329,6 +329,34 @@ fn key_check(dir: &Path, probe: &dyn Probe, state: Option<&ServeState>) -> Check
         (Ok(_), keys::KeySource::Credential(_)) => {
             check("key", CheckStatus::Pass, "The key is a systemd credential.")
         }
+        (Ok(_), keys::KeySource::Encrypted(_)) => {
+            let plain = dir.join(keys::KEY_FILE);
+            if fs::symlink_metadata(&plain).is_ok() {
+                with_hint(
+                    check(
+                        "key",
+                        CheckStatus::Warn,
+                        format!(
+                            "The key is the encrypted credential {}, and a plain key file is left beside it.",
+                            path.display()
+                        ),
+                    ),
+                    format!(
+                        "Check that the node runs (`{PROGRAM} status`), then remove {}",
+                        plain.display()
+                    ),
+                )
+            } else {
+                check(
+                    "key",
+                    CheckStatus::Pass,
+                    format!(
+                        "The key is the encrypted credential {}; systemd gives it to the service only.",
+                        path.display()
+                    ),
+                )
+            }
+        }
         (Ok(meta), keys::KeySource::File(_)) if meta.mode() & 0o077 == 0 => check(
             "key",
             CheckStatus::Pass,

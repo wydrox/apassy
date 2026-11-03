@@ -10,7 +10,8 @@ After “Re-run failed jobs”, automatic releases and manual `ci_run_id` dispat
 ## Coordinated six-component release policy
 
 From 0.5.5, every release uses one new version for all six components: iOS app,
-macOS app, Linux CLI (`apassy-team`), browser extension, relay, and website. Bump
+macOS app, Linux CLI (from 0.5.17 the Linux node `apassy`, with `apassy-team` as its
+alias; see [Linux node packages](#linux-node-packages)), browser extension, relay, and website. Bump
 every component even if its code did not change. A same-version rebuild is not a
 new release: installed clients compare versions and do not receive it as an update.
 The production Mac workflow checks the public `latest.json` before entering the
@@ -28,7 +29,11 @@ deriving `VERSION` from the first dated changelog section; its npm package has n
 separate product version. The relay is the crate `crates/apassy-relay` of this
 workspace (ADR 0037): update its Cargo package (the workspace `Cargo.lock` follows)
 and the edge Worker package in `crates/apassy-relay/deploy/worker`. Both
-`apassy-relay` and the Linux `apassy-team` binary inherit the crate version.
+`apassy-relay` and the Linux `apassy-team` binary inherit the crate version, and so
+does the Linux node: its commands are in the relay crate, `apassy --version` prints
+the relay crate's version, and `packaging/linux/build.sh` names the packages with it.
+The app crate `crates/apassy-app`, which the packages install as `apassy`, must have
+the same version.
 
 Before publication, use Python 3.12 to check the exact release commit:
 
@@ -36,7 +41,7 @@ Before publication, use Python 3.12 to check the exact release commit:
 python3 scripts/check-release-versions.py
 ```
 
-CI runs the same check on every change, the relay and the Linux CLI included. The
+CI runs the same check on every change, the relay and the Linux node included. The
 old `--relay-checkout` option now fails with a message. The
 existing eligibility helper remains separate: populated `Unreleased` entries still
 skip production signing and deployment without failing that helper. Neither source
@@ -49,12 +54,34 @@ marketing-version bump. Keep the iOS 26 deployment target and required toolchain
 
 Read back all six destinations after delivery: the signed macOS download and
 `latest.json` (including hashes/source), processed TestFlight marketing version and
-build in the intended group, public extension listing/package, public Linux binary
-with checksum and `--version`, running relay version/source, and live website and
+build in the intended group, public extension listing/package, public Linux node
+packages (both tarballs and both `.deb`s) and the old `apassy-team` binary with their
+checksums and `--version`, running relay version/source, and live website and
 changelog. A submitted extension awaiting store review is pending, not published.
 Do not report the release complete until all six are live at the shared version.
 If a destination is blocked, report its actual version and the exact unfinished
 step; retain the shared target version for the remaining deliveries.
+
+## Linux node packages
+
+Date: 2026-11-03. Plan: [implementation plan S2–S3](../design/implementation-plan-s2-s3.md), D8, unit L3. Guide: [the node on Linux](linux-node.md).
+
+The `linux-cli` component of `release-versions.json` is the Linux node from 0.5.17: `crates/apassy-app` built with `--no-default-features --features node` (no window, no eframe), installed as `apassy`. `relay-image.yml` builds it on the `image-*` tag with the relay image:
+
+| Job | Runner | What |
+| --- | --- | --- |
+| `linux-node (x86_64)` | `ubuntu-24.04`, in `rust:1.97.0-bullseye` | `apassy-<version>-linux-x86_64.tar.gz`, `apassy_<version>_amd64.deb`, `SHA256SUMS-node-x86_64`, `release-linux-x86_64.json`, `dpkg-deb --info` and `--contents`, the SBOM; also the old `apassy-team-linux-x86_64` with `SHA256SUMS-linux` and `release-linux.json` (artifact `apassy-team-linux-x86_64`, as before) |
+| `linux-node (aarch64)` | `ubuntu-24.04-arm`, in the same bullseye image (arm64) | `apassy-<version>-linux-aarch64.tar.gz`, `apassy_<version>_arm64.deb`, and the same files for aarch64 |
+| `linux-node-verify` | both runners, without a container | `packaging/linux/verify.sh --containers`: the checksums; the `.deb` installs on Ubuntu 24.04, `apassy --version` and `apassy-team --version` print the version, `systemd-analyze verify` accepts the packaged unit and the unit of `apassy up --print-unit` with an encrypted key, the `.deb` removes; `install.sh` installs the tarball from a `file://` directory; the `.deb` installs and the tarball runs in `debian:11-slim` and `debian:12-slim` |
+| `linux-node-sums` | `ubuntu-24.04` | `SHA256SUMS-node` of the four packages (artifact `apassy-node-sha256sums`) |
+
+- Both machines build in Debian 11 (glibc 2.31), and `build.sh --max-glibc 2.31` refuses a newer requirement. If the bullseye image has no arm64 variant at its pinned digest, the aarch64 job fails at its first step: then pin the arm64 digest of `rust:1.97.0-bullseye` in a `matrix.image` value, or build aarch64 on the bare `ubuntu-24.04-arm` runner with `--max-glibc 2.39` and say so in the download note (plan L3).
+- `build.sh` takes the version from `crates/apassy-relay/Cargo.toml` and checks `apassy --version` against it. The `.deb` `Depends` is computed from the binary: `libc6 (>= <newest GLIBC symbol>)` and `libgcc-s1`; any other shared library stops the build. The tarball and the `.deb` are reproducible from the commit time (`SOURCE_DATE_EPOCH`).
+- Package contents. The tarball `apassy-<version>-linux-<arch>/`: `apassy`, `apassy-team` (a shell shim that runs `apassy team`), `apassy-node.service` (the unit template), `LICENSE`, `NOTICE`, `README.md`, `licenses/`. The `.deb`: `/usr/bin/apassy`, `/usr/bin/apassy-team`, `/usr/lib/systemd/user/apassy-node.service`, `/usr/share/doc/apassy/{copyright,NOTICE,README.md,licenses/}`; its `postinst` only prints the next step, `apassy up`, for the user.
+- The PR CI job `linux-node` (`ci.yml`) builds the node without the window, fails when `cargo tree` resolves eframe for it, runs `shellcheck` on the scripts and `install.sh`, and packages and verifies its debug build with the same scripts (without the Debian containers: that build needs Ubuntu 24.04's glibc).
+- Test the workflow on a test tag before the release tag (plan L3): the owner pushes `image-test-<version>-<n>` on the release commit. The tag builds artifacts only; deployment stays a separate step.
+
+To stage `/dl/` for the Worker deploy, download the artifacts of the run (`gh run download RUN_ID -n apassy-node-linux-x86_64 -n apassy-node-linux-aarch64 -n apassy-node-sha256sums -n apassy-team-linux-x86_64 -n apassy-team-darwin-arm64`), copy the four packages and both team CLIs into `crates/apassy-relay/deploy/worker/public/dl/`, write `dl/SHA256SUMS` with all six lines (`SHA256SUMS-node`, `SHA256SUMS-linux`, `SHA256SUMS-darwin`), and `dl/release.json` with `version`, `commit`, `artifacts` (the two team CLIs, as before), and `node` (a map from each package's file name to its `sha256` and `size`). `check-public-assets.py` refuses a staging that misses one of them, and reads every file back from the public origin. `install.sh` picks the single `apassy-<x.y.z>-linux-<arch>.tar.gz` of `SHA256SUMS` on Linux and the team CLI on macOS.
 
 ## 0.5.15 coordinated release
 
@@ -362,7 +389,8 @@ the SBOM. Only the jobs that attest have `id-token: write` and `attestations: wr
 | Mac disk image | `release.yml` (`macos`, after notarization, before the R2 upload) | `Apassy-<version>.dmg`, `latest.json`, `macos-binaries.json` | the app of the disk image and `Cargo.lock`, to the image | `apassy-proof-macos-<version>`: `macos-binaries.json`, `Apassy-<version>.spdx.json`, `latest.json` (90 days) |
 | Mac test build | `release.yml` (`provider-check`) | the same, source ref is the branch | the same | in `apassy-provider-test-<sha>-<attempt>` (3 days) |
 | Relay image | `relay-image.yml` (`image`) | `relay-image.tar.gz`, `relay-image.release.json` | the image `apassy-relay:release-<version>`, to the tarball | `relay-image.spdx.json` in `relay-image` (7 days) |
-| Linux CLI | `relay-image.yml` (`linux-cli`) | `apassy-team-linux-x86_64`, `release-linux.json` | the binary and the workspace `Cargo.lock`, to the binary | `apassy-team-linux-x86_64.spdx.json` in `apassy-team-linux-x86_64` (7 days) |
+| Linux node | `relay-image.yml` (`linux-node`, x86_64 and aarch64) | `apassy-<version>-linux-<arch>.tar.gz`, `apassy_<version>_<deb arch>.deb`, `release-linux-<arch>.json` | the stripped `apassy` and the workspace `Cargo.lock`, to both packages | `apassy-node-linux-<arch>.spdx.json` in `apassy-node-linux-<arch>` (7 days) |
+| Old Linux CLI | `relay-image.yml` (`linux-node`, x86_64) | `apassy-team-linux-x86_64`, `release-linux.json` | the binary and the workspace `Cargo.lock`, to the binary | `apassy-team-linux-x86_64.spdx.json` in `apassy-team-linux-x86_64` (7 days) |
 | Darwin CLI | `relay-image.yml` (`darwin-cli`) | `apassy-team-darwin-arm64`, `release-darwin.json` | the same, to the binary | `apassy-team-darwin-arm64.spdx.json` in `apassy-team-darwin-arm64` (7 days) |
 | Extension zip | `extension-package.yml` (`package`, on a change of `extension/` on `main`, or by hand) | `apassy-extension-<version>.zip` | every file of the zip with its SHA-256, to the zip | `apassy-extension-<version>`: zip, `.sha256`, `.spdx.json` (90 days) |
 | iPhone build record | `ios-build-record.yml` (by hand on `main`) | `apassy-ios-<version>-<build>.json` | the commit's `Cargo.lock` and its resolved Swift packages (none today: the app has only local packages), to the record | `apassy-ios-<version>-<build>` (90 days) |
@@ -399,6 +427,10 @@ to R2.
    gh release upload v<version> macos-binaries.json Apassy-<version>.spdx.json \
      apassy-extension-<version>.zip apassy-extension-<version>.spdx.json \
      relay-image.spdx.json relay-image.release.json \
+     apassy-<version>-linux-x86_64.tar.gz apassy-<version>-linux-aarch64.tar.gz \
+     apassy_<version>_amd64.deb apassy_<version>_arm64.deb SHA256SUMS-node \
+     release-linux-x86_64.json release-linux-aarch64.json \
+     apassy-node-linux-x86_64.spdx.json apassy-node-linux-aarch64.spdx.json \
      apassy-team-linux-x86_64.spdx.json apassy-team-darwin-arm64.spdx.json \
      apassy-ios-<version>-<build>.json apassy-ios-<version>-<build>.spdx.json
    ```
@@ -428,8 +460,12 @@ gh attestation verify apassy-extension-0.5.16.zip --repo wydrox/apassy \
   --signer-workflow wydrox/apassy/.github/workflows/extension-package.yml \
   --source-ref refs/heads/main
 
-# The Linux CLI and the relay image tarball: the commit is in release-linux.json and
-# relay-image.release.json. The source ref is the image-* tag.
+# The Linux node packages, the Linux CLI, and the relay image tarball: the commit is in
+# release-linux-<arch>.json, release-linux.json, and relay-image.release.json. The
+# source ref is the image-* tag.
+gh attestation verify apassy_0.5.17_amd64.deb --repo wydrox/apassy \
+  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+  --source-digest COMMIT
 gh attestation verify apassy-team-linux-x86_64 --repo wydrox/apassy \
   --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
   --source-digest COMMIT
@@ -602,6 +638,6 @@ For `npm run preview`, put test files in the local bucket with `npx wrangler r2 
 - Without `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE`, the release workflow fails. A local build without the profiles has no AutoFill extension. See [AutoFill provider profiles](#autofill-provider-profiles).
 - The workflow checks files, signatures, and notarization. It cannot show that macOS registers the extension. A release needs a manual check on a Mac: System Settings > General > AutoFill & Passwords must list Apassy.
 - Without `MACOS_KEYCHAIN_PROFILE`, the published app cannot unlock with Touch ID. See [Touch ID unlock](#touch-id-unlock).
-- The app runs on Apple silicon with macOS 15 or later only. The Linux button of the site opens a note with the team CLI `apassy-team` for Linux (x86-64), which the relay serves at `/dl/` with `SHA256SUMS` (relay OPERATIONS section 18); the note says that the app needs macOS, because the isolation of agents uses macOS Seatbelt.
+- The app runs on Apple silicon with macOS 15 or later only. The Linux button of the site opens a note with the team CLI `apassy-team` for Linux (x86-64), which the relay serves at `/dl/` with `SHA256SUMS` (relay OPERATIONS section 18); the note says that the app needs macOS, because the isolation of agents uses macOS Seatbelt. From 0.5.17 `/dl/` also serves the Linux node packages for x86_64 and aarch64 ([Linux node packages](#linux-node-packages)); the note of the site is the website's to change.
 - From 0.3.0, the app reads `latest.json`, downloads a newer build, and installs it at "Restart now" or at the next quit ([updates](updates.md), [ADR 0015](../adr/0015-automatic-updates.md)). An app before 0.3.0 does not update itself: install 0.3.0 from the site once. A copy without a Developer ID signature (an ad hoc build, or a build from source signed with Apple Development), or one outside an app bundle, only shows the new version and the download page. A build from source updates when its owner runs `scripts/install.sh` again.
 - The updater trusts the Developer ID team and Apple notarization, not the site. Each green CI run on `main` that names a released version strictly newer than public `latest.json` can publish a new image on the site. Installed apps install only a higher version: bump all six components and the files named in the coordinated release policy above to release. Each installed app with automatic install on then gets it within about 6 hours.

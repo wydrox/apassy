@@ -1,5 +1,6 @@
-//! Per-user service files for the owner's host and for the node without a window
-//! (`apassy serve`, plan S2-S3 D8). No root service is installed.
+//! Per-user service files for the owner's host. The node without a window has its unit
+//! in `crate::node::service` (plan S2-S3 D8, unit L2), which uses the helpers here. No
+//! root service is installed.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -14,8 +15,6 @@ use crate::ids::TeamId;
 
 pub const LABEL: &str = "com.wydrox.apassy.team-host";
 pub const UNIT: &str = "apassy-team-host.service";
-/// The systemd user unit of the node without a window (`apassy serve`).
-pub const NODE_UNIT: &str = "apassy-node.service";
 
 pub fn label(team: &TeamId) -> String {
     format!("{LABEL}.{team}")
@@ -103,7 +102,7 @@ pub fn generate_plist(
     ))
 }
 
-fn unit_path(path: &Path) -> Result<&str, CliError> {
+pub(crate) fn unit_path(path: &Path) -> Result<&str, CliError> {
     let text = path_text(path)?;
     if !text
         .chars()
@@ -143,27 +142,6 @@ pub fn generate_unit(
     ))
 }
 
-/// The user unit of the node without a window (plan D8): `ExecStart=<exe> serve`, and
-/// `ExecStop=<exe> serve --stop`, which stops the TLS front before the relay and returns
-/// when the node has stopped (the node installs no signal handler; see
-/// `crate::node::serve`). `data_dir` is the node directory when it is not the default.
-/// No file writes, environment reads, or service commands.
-pub fn generate_node_unit(exe: &Path, data_dir: Option<&Path>) -> Result<String, CliError> {
-    let exe = unit_path(exe)?;
-    let data = match data_dir {
-        Some(dir) => format!(" --data-dir {}", unit_path(dir)?),
-        None => String::new(),
-    };
-    Ok(format!(
-        "[Unit]\nDescription=Apassy node\nDocumentation=https://github.com/wydrox/apassy/blob/main/docs/operations/linux-node.md\n\n[Service]\nType=simple\nExecStart={exe} serve{data}\nExecStop={exe} serve --stop{data}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=20\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n"
-    ))
-}
-
-/// `~/.config/systemd/user/apassy-node.service` (or under `$XDG_CONFIG_HOME`).
-pub fn node_unit_path() -> Result<PathBuf, CliError> {
-    Ok(user_unit_dir()?.join(NODE_UNIT))
-}
-
 /// The directory of systemd user units: `$XDG_CONFIG_HOME/systemd/user` or
 /// `~/.config/systemd/user`.
 pub fn user_unit_dir() -> Result<PathBuf, CliError> {
@@ -172,30 +150,6 @@ pub fn user_unit_dir() -> Result<PathBuf, CliError> {
         None => home()?.join(".config"),
     };
     Ok(config.join("systemd/user"))
-}
-
-/// Writes the node unit (mode 0644, through a temporary file) and returns its path.
-pub fn write_node_unit(text: &str) -> Result<PathBuf, CliError> {
-    let path = node_unit_path()?;
-    write_service(&path, text)?;
-    Ok(path)
-}
-
-/// `systemctl --user daemon-reload`, `enable --now`, and `restart` of the node unit: an
-/// edit of the unit takes effect, and a node that runs starts again with it.
-pub fn start_node_unit() -> Result<(), CliError> {
-    require_success(
-        "systemctl daemon-reload",
-        command("systemctl", &["--user", "daemon-reload"])?,
-    )?;
-    require_success(
-        "systemctl enable",
-        command("systemctl", &["--user", "enable", "--now", NODE_UNIT])?,
-    )?;
-    require_success(
-        "systemctl restart",
-        command("systemctl", &["--user", "restart", NODE_UNIT])?,
-    )
 }
 
 fn home() -> Result<PathBuf, CliError> {
@@ -246,7 +200,7 @@ fn io_error(action: &str, error: std::io::Error) -> CliError {
     CliError::usage(format!("Cannot {action}: {}.", error.kind()))
 }
 
-fn write_service(path: &Path, text: &str) -> Result<(), CliError> {
+pub(crate) fn write_service(path: &Path, text: &str) -> Result<(), CliError> {
     let parent = path
         .parent()
         .ok_or_else(|| CliError::usage("The service path has no directory."))?;
@@ -307,14 +261,14 @@ fn clean_output(text: &str) -> String {
     clean
 }
 
-fn command(program: &str, args: &[&str]) -> Result<Output, CliError> {
+pub(crate) fn command(program: &str, args: &[&str]) -> Result<Output, CliError> {
     Command::new(program)
         .args(args)
         .output()
         .map_err(|error| io_error(&format!("run {program}"), error))
 }
 
-fn require_success(program: &str, output: Output) -> Result<(), CliError> {
+pub(crate) fn require_success(program: &str, output: Output) -> Result<(), CliError> {
     if output.status.success() {
         Ok(())
     } else {
@@ -1241,41 +1195,5 @@ mod tests {
             0o644
         );
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn the_node_unit_serves_and_stops_through_the_control_socket() {
-        let unit = generate_node_unit(Path::new("/usr/bin/apassy"), None).unwrap();
-        assert!(
-            unit.contains("\nExecStart=/usr/bin/apassy serve\n"),
-            "{unit}"
-        );
-        assert!(
-            unit.contains("\nExecStop=/usr/bin/apassy serve --stop\n"),
-            "{unit}"
-        );
-        assert!(unit.contains("\nRestart=on-failure\n"), "{unit}");
-        assert!(unit.contains("\nWantedBy=default.target\n"), "{unit}");
-        assert!(unit.contains("\nUMask=0077\n"), "{unit}");
-        // No secret and no environment in the unit.
-        assert!(!unit.contains("Environment="), "{unit}");
-        let custom = generate_node_unit(
-            Path::new("/opt/apassy/bin/apassy"),
-            Some(Path::new("/srv/node")),
-        )
-        .unwrap();
-        assert!(
-            custom.contains("\nExecStart=/opt/apassy/bin/apassy serve --data-dir /srv/node\n"),
-            "{custom}"
-        );
-        assert!(
-            custom
-                .contains("\nExecStop=/opt/apassy/bin/apassy serve --stop --data-dir /srv/node\n"),
-            "{custom}"
-        );
-        for bad in ["relative/apassy", "/opt/my apassy", "/opt/%h/apassy"] {
-            assert!(generate_node_unit(Path::new(bad), None).is_err(), "{bad}");
-        }
-        assert!(generate_node_unit(Path::new("/usr/bin/apassy"), Some(Path::new("/a b"))).is_err());
     }
 }

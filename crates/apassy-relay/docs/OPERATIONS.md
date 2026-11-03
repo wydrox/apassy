@@ -18,8 +18,10 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    Review the exact relay commit and require all CI checks, including dependency
    advisories. Only after owner approval, push `image-*` on that exact commit.
    `.github/workflows/image.yml` builds on GitHub; it never deploys. Download
-   `relay-image`, `apassy-team-linux-x86_64`, and `apassy-team-darwin-arm64` from
-   the **same successful image run**, recording its URL and full source SHA.
+   `relay-image`, `apassy-team-linux-x86_64`, `apassy-team-darwin-arm64`,
+   `apassy-node-linux-x86_64`, `apassy-node-linux-aarch64`, and `apassy-node-sha256sums`
+   from the **same successful image run** (its `linux-node-verify` jobs green too),
+   recording its URL and full source SHA.
 2. Verify `relay-image.tar.gz.sha256`, `relay-image.id`,
    `relay-image.inspect.json`, and `relay-image.release.json`. The metadata version
    must equal Cargo/Worker versions; the full commit must equal the approved SHA.
@@ -40,7 +42,9 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    `release-linux.json` / `release-darwin.json`. Both metadata files must name the
    approved version and full commit. CI runs each binary's `--version`, verifies
    Darwin arm64, and builds Linux on pinned Bullseye with GLIBC requirements no
-   higher than 2.31. Never extract the portable CLI from the relay image.
+   higher than 2.31. Never extract the portable CLI from the relay image. Verify the
+   four Linux node packages against `SHA256SUMS-node` and `release-linux-x86_64.json` /
+   `release-linux-aarch64.json` (version, full commit, glibc at most 2.31).
    Stage verified files and combined metadata as shown below. In `deploy/worker`,
    run `npm ci --no-audit --no-fund`, `npm test`, `npm run typecheck`, and
    `npm run preflight`. The Wrangler build hook repeats the preflight even for a
@@ -89,10 +93,11 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
 8. Verify the other application publication surfaces separately. Record pending
    store reviews and old public versions explicitly; the relay does not publish them.
 
-Stage both CLI artifacts from an extracted, verified CI run (example paths):
+Stage both CLI artifacts and the four node packages from an extracted, verified CI run
+(example paths; `node` holds the files of both `apassy-node-linux-*` artifacts):
 
 ```sh
-python3 - /tmp/relay-release/linux /tmp/relay-release/darwin <<'PY_STAGE'
+python3 - /tmp/relay-release/linux /tmp/relay-release/darwin /tmp/relay-release/node <<'PY_STAGE'
 import hashlib, json, pathlib, re, shutil, subprocess, sys
 root = pathlib.Path.cwd()
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
@@ -111,8 +116,22 @@ for folder, platform, meta in [(sys.argv[1], 'linux-x86_64', 'release-linux.json
     assert data['filename'] == name and data['sha256'] == digest
     shutil.copyfile(folder/name, out/name)
     artifacts[platform] = dict(filename=name, sha256=digest, size=len(blob))
-(out/'release.json').write_text(json.dumps(dict(version=version, commit=commit, artifacts=artifacts), indent=2)+'\n')
-(out/'SHA256SUMS').write_text(''.join(f"{a['sha256']}  {a['filename']}\n" for a in artifacts.values()))
+node = {}
+folder = pathlib.Path(sys.argv[3])
+for arch in ['x86_64', 'aarch64']:
+    data = json.loads((folder/f'release-linux-{arch}.json').read_text())
+    assert data['version'] == version and data['commit'] == commit
+    for entry in data['files']:
+        blob = (folder/entry['filename']).read_bytes()
+        digest = hashlib.sha256(blob).hexdigest()
+        assert entry['sha256'] == digest and entry['size'] == len(blob)
+        shutil.copyfile(folder/entry['filename'], out/entry['filename'])
+        node[entry['filename']] = dict(sha256=digest, size=len(blob))
+assert len(node) == 4
+(out/'release.json').write_text(json.dumps(dict(version=version, commit=commit, artifacts=artifacts, node=node), indent=2)+'\n')
+lines = [f"{a['sha256']}  {a['filename']}" for a in artifacts.values()]
+lines += [f"{n['sha256']}  {name}" for name, n in sorted(node.items())]
+(out/'SHA256SUMS').write_text(''.join(line + '\n' for line in lines))
 PY_STAGE
 (cd deploy/worker && npm run preflight)
 ```
@@ -924,9 +943,9 @@ The Worker serves three things itself, without the relay and without the edge se
 
 | Path | What |
 | --- | --- |
-| `/install.sh` | installs `apassy-team` into `~/.local/bin` after a SHA-256 check (`deploy/worker/public/install.sh`) |
+| `/install.sh` | after a SHA-256 check: on Linux (x86_64, aarch64) the node `apassy` and the `apassy-team` shim from the node tarball, on macOS `apassy-team`, into `~/.local/bin` (`deploy/worker/public/install.sh`) |
 | `/guide` | the guide for owners and members of a relay that they run (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
-| `/dl/*` | the CLI binaries and `SHA256SUMS` |
+| `/dl/*` | the CLI binaries, the Linux node packages (`.tar.gz` and `.deb` for x86_64 and aarch64), and `SHA256SUMS` |
 
 Users install with:
 

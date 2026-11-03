@@ -40,6 +40,30 @@ def website_version(root, changelog):
 
 RELAY = Path("crates/apassy-relay")
 APP = Path("crates/apassy-app")
+LINUX = Path("packaging/linux")
+
+
+def linux_node_errors(root):
+    """The `linux-cli` component is the Linux node package (plan S2-S3, L3): apassy-app
+    built `--no-default-features --features node` and installed as `apassy`. Its version
+    is the relay crate's (the node commands are in the relay crate), and the packaging
+    takes it from there, never from a literal."""
+    errors = []
+    app = tomllib.loads((root / APP / "Cargo.toml").read_text(encoding="utf-8"))
+    features = app.get("features", {})
+    if "node" not in features or "window" not in features:
+        errors.append("the app crate must have the features node and window (the Linux node build)")
+    elif not {"node", "window"} <= set(features.get("default", [])):
+        errors.append("the app crate's default features must be window and node")
+    if "apassy-app" not in {binary["name"] for binary in app.get("bin", [])}:
+        errors.append("the app crate must build apassy-app, which the Linux node packages install as apassy")
+    build = (root / LINUX / "build.sh").read_text(encoding="utf-8")
+    if "crates/apassy-relay/Cargo.toml" not in build:
+        errors.append("packaging/linux/build.sh must take the node version from the relay crate")
+    control = (root / LINUX / "deb/control.in").read_text(encoding="utf-8")
+    if re.search(r"^Version: @VERSION@$", control, re.MULTILINE) is None:
+        errors.append("packaging/linux/deb/control.in must use Version: @VERSION@, not a literal version")
+    return errors
 
 
 def check(root):
@@ -59,9 +83,10 @@ def check(root):
         "iOS core package": package_version(root / "ios/ApassyCore/Cargo.toml"),
         "iOS core Cargo.lock": locked_version(root / "Cargo.lock", "apassy-core"),
         "browser extension": json.loads((root / "extension/manifest.json").read_text())["version"],
-        # The relay and the Linux CLI are one crate of this workspace (ADR 0037).
-        "relay and Linux CLI package": package_version(root / RELAY / "Cargo.toml"),
-        "relay and Linux CLI Cargo.lock": locked_version(root / "Cargo.lock", "apassy-relay"),
+        # The relay, the Linux node, and the Linux CLI are one crate of this workspace
+        # (ADR 0037); the node is packaged from the app crate, so both must agree.
+        "relay, Linux node, and Linux CLI package": package_version(root / RELAY / "Cargo.toml"),
+        "relay, Linux node, and Linux CLI Cargo.lock": locked_version(root / "Cargo.lock", "apassy-relay"),
         "relay edge Worker package": json.loads(
             (root / RELAY / "deploy/worker/package.json").read_text(encoding="utf-8")
         )["version"],
@@ -80,6 +105,7 @@ def check(root):
     bins = {binary["name"] for binary in relay.get("bin", [])}
     if not {"apassy-relay", "apassy-team"} <= bins:
         errors.append("the relay crate must build both apassy-relay and the Linux apassy-team CLI")
+    errors.extend(linux_node_errors(root))
     return version, errors
 
 
@@ -105,7 +131,7 @@ def main():
     if errors:
         print("Release version check failed:\n- " + "\n- ".join(errors), file=sys.stderr)
         return 1
-    print(f"Release source versions match {version}, the relay and the Linux CLI included.")
+    print(f"Release source versions match {version}, the relay and the Linux node included.")
     return 0
 
 
