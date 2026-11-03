@@ -1481,11 +1481,17 @@ mod tests {
         );
         assert_eq!(card.v, 2);
         assert_eq!(card.kind, "connect");
+        // The vector of section 20.6 of the contract.
+        assert_eq!(
+            card.digest,
+            "414fa0828bfabc762b01548be58bda38868fd5c216a63daf70839aea21a61bcc"
+        );
         assert_eq!(
             card.digest,
             connect_digest_hex("0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d", &connect)
         );
         let bytes = card.to_plaintext().unwrap();
+        assert_eq!(bytes.len(), 368);
         assert!(is_connect_card(&bytes));
         assert_eq!(ConnectCard::parse(&bytes).unwrap(), card);
         let text = String::from_utf8(bytes.to_vec()).unwrap();
