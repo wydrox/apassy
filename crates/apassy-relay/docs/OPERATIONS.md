@@ -72,8 +72,10 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
    backup timer. Public liveness alone is not acceptance for those paths.
 7. Rollback: stop the relay and select the archived previous **schema-6** image and
-   compose settings. This patch preserves team schema 6 and directory schema 1003;
-   no DB downgrade is needed. Restart discards sessions and ends pending runs with
+   compose settings. Directory schema 1003 is unchanged. From the release with team
+   schema 7 (section 23) back to a schema-6 image, first run
+   `apassy-relay downgrade-schema-6` with the relay stopped (section 23.3); between
+   two schema-7 images no DB downgrade is needed. Restart discards sessions and ends pending runs with
    `run_interrupted`; users explicitly request a new run. Restore the entire
    verified backup only for data recovery, while stopped, reconciling all access
    changes since it was taken (restoring can revive revoked identities). Revalidate
@@ -1369,3 +1371,77 @@ Rollback to the preceding schema-6/1003 binary restores one-shot pushes and old
 Connect retry refusal. Stop/disable the new sweep timer before rollback: the old
 CLI has different default sweep semantics and does not support `--apply`. Keep all
 immutable audit archives and the master key. No version bump is part of this patch.
+
+## 23. Embedded nodes and the item list of an agent (team schema 7)
+
+An Apassy Mac runs its own node: this relay inside the app, with no edge, listeners on
+the loopback only, and a public listener that Tailscale Funnel reaches (docs/SPEC.md
+section 30). It is configured in code (`RelayConfig::embedded`), not from the
+environment, and it needs no operator. Its operator socket (`<node dir>/admin.sock`)
+serves the usual `admin` commands for diagnostics. The hosted relay does not change:
+`APASSY_RELAY_EDGE_SECRET` stays required, there is no public listener, and the
+failed-auth limiter is off.
+
+What changes for the hosted relay at the first start of this version:
+
+- Each team file moves to schema version 7: the relay copies it to
+  `teams/<id>.db.pre-v7` (the way back, mode 0600, encrypted like the file), then adds
+  the column `agent.items` (`TEXT`, `NULL` for every existing agent) in one transaction.
+  The change is additive. A team whose copy cannot be made stays at version 6 and does
+  not open; free disk space and start again. The previous image (schema 6) refuses a
+  version 7 file. `relay.db` keeps version 1003.
+- `agent.items` is `NULL` for every agent that `POST /v1/agents` makes: such an agent
+  sees every item of its member's grants, as before. Only an embedded node writes a
+  list. No route, body, or answer changes.
+- The proxy also drops every `tailscale-*` request header before the upstream.
+- New command: `apassy-relay downgrade-schema-6` (23.3).
+
+### 23.1 What to watch
+
+- The relay log at the start: no `cannot be moved to schema version 7`.
+- `admin teams`: every team `"open": true`.
+- `ls /data/teams/*.db.pre-v7`: one copy for each team that existed before the start.
+
+### 23.2 Owner steps for the deploy
+
+Use the current release runbook at the top of this document; it names the schema 7
+rollback in its step 7. Before the deploy, check the free disk: each team file is
+copied once (`.pre-v7`). Take a backup (`admin backup`, section 13) as usual.
+
+### 23.3 Rollback
+
+Two ways back to a schema-6 image. Both keep `relay.db`.
+
+**In place (preferred).** It keeps every change since the migration. With the relay
+stopped:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-schema-6 > downgrade.json
+jq -e 'all(.[]; .error == null and (.to // 0) <= 6)' downgrade.json && echo "every team is at schema 6"
+```
+
+It takes `relay.lock`, so it refuses to run beside a relay. For each team file of
+version 7 it revokes every live agent that has an item list (the schema 6 image does
+not know `agent.items` and would give such an agent every item of its member's grants),
+denies their pending runs, writes an `agent_revoked` row with
+`{"reason": "schema_rollback"}`, clears every list, and sets the version to 6. The
+empty column stays; the schema 6 image does not read it. A file of another version is
+left as it is. `agents_revoked` names how many agents each team lost; on the hosted
+relay it is 0, since only embedded nodes make lists. It exits 1 when any team has an
+`error`: that team is still at version 7 and the old image cannot open it. Look at its
+error, fix it (disk space, the file), and run the command again: a team that is at 6
+already is left as it is. Then select the old image in `compose.yaml` and
+`docker compose up -d --wait`.
+
+**From the copy.** `cp -p "/data/teams/$id.db.pre-v7" "/data/teams/$id.db"` for each
+team with a copy, with the relay stopped. As in section 21.3, the copy is the team at
+the migration: every change of access since then comes back undone (revoked devices,
+members, agents, and grants work again) and the audit rows since then are gone. Use it
+only when the in-place way fails for a team. A team made after the migration has no
+copy and is version 7: use the in-place way for it, or suspend it with the new image
+first.
+
+A later start of a schema-7 image moves the files to 7 again (a new `.pre-v7`) and keeps
+the empty column. Agents revoked by the downgrade stay revoked: their members make new
+ones.
