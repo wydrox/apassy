@@ -531,9 +531,12 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    // As in the mockup: the list says so, and the detail says "All clear".
-    assert!(text.contains("Nothing needs you"), "{text}");
+    // The list says so in one line and shows the recent decisions; the detail says
+    // "All clear" over the week.
+    assert!(text.contains("Nothing waits for you."), "{text}");
+    assert!(text.contains("Recent decisions"), "{text}");
     assert!(text.contains("All clear"), "{text}");
+    assert!(text.contains("This week"), "{text}");
     assert!(text.contains("by you · 0 automatic this week"), "{text}");
 
     let queue = queue_of(&mut app, &dir);
@@ -573,7 +576,12 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    for absent in ["Requests", "Suggestions", "Nothing needs you"] {
+    for absent in [
+        "Requests",
+        "Suggestions",
+        "Nothing waits for you.",
+        "Recent decisions",
+    ] {
         assert!(!text.contains(absent), "{absent}: {text}");
     }
     assert!(text.find("Claude Code · acme-billing") < text.find("Codex · acme-billing"));

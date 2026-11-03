@@ -28,6 +28,10 @@ mod companion_tests;
 /// Decisions: the questions that wait for the owner (ADR 0026 §2).
 #[cfg(feature = "vault")]
 mod decisions;
+#[cfg(feature = "vault")]
+mod decisions_activity;
+#[cfg(all(test, feature = "vault"))]
+mod decisions_activity_tests;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_tests;
 #[cfg(not(feature = "vault"))]
