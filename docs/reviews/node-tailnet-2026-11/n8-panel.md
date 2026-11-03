@@ -205,6 +205,45 @@ What held up under attack:
 - Cloudflare Rate Limiting bindings are counted per location and are eventually
   consistent. The gateway limits are therefore approximate.
 
+## Fixes
+
+Date: 2026-11-03. Branch `r17/fix-n8`, based on `release/0.5.17` at `32ec1d6e`. N8-6 belongs to
+unit L4 and is not in this branch.
+
+| Finding | Commit | Change | Test |
+| --- | --- | --- | --- |
+| N8-1 Medium | `16489934` | The front names the tailnet peer of each pumped connection in process memory (`src/net/front_peers.rs`), keyed by the loopback address pair of its connection to the relay; no header. The tailnet listener counts failed authentications per peer (`FailureKeys::PerPeer`); a connection that the front did not make counts as the loopback. The audit row names the peer. The Mac's local route goes to its own loopback listener (`RunningRelay::tailnet_local_addr`, `RunningNode::local_route_addr`), which the front never forwards to and which counts on its own (`auth_limit_tailnet_local`) | `tailnet_scope::one_tailnet_peer_with_bad_tokens_does_not_limit_another_peer_or_the_local_route` (peer A: 20 × 401 then 429; peer B, an unnamed local connection, and a signed-in device on the local route are not limited), `tailnet_scope::the_local_route_listener_counts_its_own_failures`, `tls_front::the_front_names_the_peer_of_each_pumped_connection_until_it_ends`, `net::front_peers` unit tests |
+| N8-2 Low | `e09d9575` | `Node::pairing_link` and `Node::ensure_questions_team` take the pin and the alternatives of the running route and write them into the Mac's membership when they differ (`Vault::set_membership_trust`) | `node::tailnet_tests::after_a_certificate_replacement_the_team_and_its_links_take_the_new_pin` |
+| N8-3 Low | `89ef55ab` | The gateway limits each APNs token: 10 handle creations a day, and 30 pushes an hour over all its handles (checked after the handle opens). Contract section 13 has the two rows | `gateway.test.ts`: "give one token 10 handles a day, over every address", "give one token 30 pushes an hour through all its handles" |
+| N8-4 Low | `89ef55ab` | The contract's numbers (60/600/30 an hour) are in code. A Rate Limiting binding counts per 60 s at most, so the gateway uses the Durable Object counter that section 13 allows (`src/limits.ts`): one window of counts per limit and key (SHA-256), deleted by an alarm when it ends; `Retry-After` is the rest of the window; no counter or a failed one is 503. The contract's numbers are unchanged | `gateway.test.ts`: "are the contract's hourly numbers…", "count a fixed window…", "give one handle 60 pushes an hour, then 429 with the rest of the hour, then again", "is unavailable when a counter fails", and the deployment checks |
+| N8-5 Low | `16489934` | Serve is asked for a PROXY protocol v1 line (`--proxy-protocol=1`, with a fallback for a command line without it); the front reads the peer from it and gives each peer at most 16 of the 64 connections and 60 new ones a minute. At start the front first turns off a forward to its earlier local port left by a crash (`ServeTcp::clear_stale`; the Mac keeps the port in `serve-tcp-port`, `apassy serve` uses its fixed port). `apassy serve` takes the fallback limits of the Mac. The trust model says that the fallback cannot tell local processes from peers, and that a local process can write a PROXY line too | `tls_front::the_serve_fallback_reads_the_peer_of_a_proxy_line_and_caps_each_peer`, `net::tls_front::tests::a_proxy_v1_line_names_its_source`, `net::tailnet::tests::a_stale_forward_of_a_crash_goes_before_the_front_takes_a_port`, `…::an_old_command_line_gets_the_forward_without_the_proxy_protocol` |
+| N8-6 Info | — | Unit L4 | — |
+| N8-7 Info | `4da1010f` | The Mac's help of Node Words and the iPhone's line ("Node words to compare: …") call them safety words to compare and say that the same words are not proof of the node; node-pairing-v1 section 4a says why. The term "node words" stays (the contract's name), so the words are not mixed up with the safety words of a pairing | Swift model tests updated (`DeviceRouteTests`, `JoinModelTests`); not run (no Xcode run in this unit) |
+
+The trust-model rows of N8-1, N8-3 (the per-token bound), and N8-5 are in `16489934`; the
+gateway's storage row is in `89ef55ab`.
+
+With N8-1 fixed, the verdict is **PASS** under the plan's rule; the Low and Info findings are
+fixed except N8-6 (L4).
+
+Checks on `r17/fix-n8` (all through `heavy-check`): `cargo test -p apassy-relay --test
+tailnet_scope` 5/5; `cargo test -p apassy-relay --lib -- server::http node::` 45/45; `cargo test
+--features vault,insecure-test-kdf --lib -- node:: net::` 61 of 62 (one failure that the base has
+too, below); `cargo test --features vault,insecure-test-kdf --test it -- tls_front:: relay_pinned::`
+19/19; the gateway's `npm test` 42/42 and `tsc` clean; `cargo clippy --offline --locked
+--all-features --all-targets -- -D warnings` and `-p apassy-relay -p apassy-core` clean; `cargo fmt
+--all --check` clean. The relay suites `embedded`, `node_cli`, `cli_json`, `server_audit`, and
+`server_connect` pass.
+
+Failures that the base `32ec1d6e` has too (checked by running them on the base), not caused by
+these fixes: `node::tailnet_tests::the_tailnet_route_starts_without_funnel_and_a_lock_stops_the_front_before_the_relay`
+(`Node::status` gives the Funnel URL whenever Tailscale names the Mac), and 7 of 19 tests of
+`crates/apassy-relay/tests/oauth.rs` ("The code is not valid" at the token step).
+
+Not verified: the PROXY line of a real `tailscale serve --proxy-protocol=1` (1.98 and 1.104
+list the flag); the Durable Object counter on the deployed Worker (the deploy is the owner's
+step: the class `LimitCounter`, migration `v1-limits`); the Swift tests.
+
 ## Changes to `docs/security/trust-model.md` (only where the code proves the doc wrong)
 
 | Mark | Change | Code that proves it |

@@ -65,11 +65,12 @@ const ROUTE_HELP: [&str; 4] = [
     "Each device still signs in with its own key.",
     "Switching needs Touch ID. It stops when the vault locks.",
 ];
-/// The help of Node Words.
-const WORDS_HELP: [&str; 3] = [
-    "Six words from this Mac's certificate.",
+/// The help of Node Words: safety words to compare, never proof of the node (N8-7).
+const WORDS_HELP: [&str; 4] = [
+    "Safety words to compare: six words from this Mac's certificate.",
     "Your iPhone shows them in Settings → Devices.",
     "Other words there: revoke that iPhone and pair again.",
+    "The same words are not proof of this Mac. The iPhone checks the whole certificate.",
 ];
 /// The help of the Devices list.
 const DEVICES_HELP: [&str; 4] = [

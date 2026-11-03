@@ -18,7 +18,9 @@
 //! to: the device routes, and on the Linux node the team routes too; never the OAuth
 //! flow, `/v1/connect`, or anything else (404).
 
+use std::collections::HashMap;
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -166,28 +168,60 @@ impl Scope {
 }
 
 /// The failed authentications of one listener: bad bearer tokens and session keys in a
-/// fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its first failure. With
-/// `AUTH_FAILURES_MAX` of them, every request of the listener gets 429 `rate_limited`
-/// until the window ends; then the count starts again. In memory only.
+/// fixed window of `AUTH_FAILURE_WINDOW_SECS` that starts at its first failure, for each
+/// key. With `AUTH_FAILURES_MAX` of them, every request of that key gets 429
+/// `rate_limited` until the window ends; then the count starts again. In memory only.
+///
+/// The node and public listeners use one key for the whole listener
+/// (`AuthFailures::limited`, `AuthFailures::record`). The tailnet listener that the TLS
+/// front forwards to uses the tailnet peer of each request (`Listener::failure_key`,
+/// N8-1), so one peer with bad tokens never locks out another peer.
 #[derive(Debug, Default)]
 pub struct AuthFailures {
-    /// The start of the window and the failures in it.
-    window: Mutex<(u64, u32)>,
+    /// For each key: the start of its window and the failures in it.
+    windows: Mutex<HashMap<IpAddr, (u64, u32)>>,
 }
 
+/// The key of a listener that counts as one.
+const WHOLE_LISTENER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+/// At most this many keys. A new key past it is not counted (the front admits only
+/// tailnet peers, so this many is far above a real tailnet).
+pub const AUTH_FAILURE_KEYS_MAX: usize = 4096;
+
 impl AuthFailures {
-    /// True while the listener is at its limit.
+    /// True while the whole listener is at its limit.
     pub fn limited(&self, now: u64) -> bool {
-        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        self.limited_for(WHOLE_LISTENER, now)
+    }
+
+    /// Counts one bad bearer token or session key for the whole listener.
+    pub fn record(&self, now: u64) {
+        self.record_for(WHOLE_LISTENER, now);
+    }
+
+    /// True while `key` is at its limit.
+    pub fn limited_for(&self, key: IpAddr, now: u64) -> bool {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(window) = windows.get_mut(&key) else {
+            return false;
+        };
         if now >= window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS) {
-            *window = (now, 0);
+            windows.remove(&key);
+            return false;
         }
         window.1 >= AUTH_FAILURES_MAX
     }
 
-    /// Counts one bad bearer token or session key.
-    pub fn record(&self, now: u64) {
-        let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+    /// Counts one bad bearer token or session key of `key`.
+    pub fn record_for(&self, key: IpAddr, now: u64) {
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        if !windows.contains_key(&key) && windows.len() >= AUTH_FAILURE_KEYS_MAX {
+            windows.retain(|_, window| now < window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS));
+            if windows.len() >= AUTH_FAILURE_KEYS_MAX {
+                return;
+            }
+        }
+        let window = windows.entry(key).or_insert((now, 0));
         if window.1 == 0 || now >= window.0.saturating_add(AUTH_FAILURE_WINDOW_SECS) {
             *window = (now, 0);
         }
@@ -195,24 +229,63 @@ impl AuthFailures {
     }
 }
 
+/// How a listener keys its failed authentications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKeys {
+    /// One window for the whole listener: the node and public listeners, and the local
+    /// route of the Mac (`Serving::local_route`).
+    Whole,
+    /// One window for each tailnet peer: the tailnet listener at this address, which the
+    /// TLS front forwards to. The front names the peer of each connection in process
+    /// (`apassy::net::front_peers`); a connection that it did not make is keyed by its
+    /// own address, the loopback.
+    PerPeer(SocketAddr),
+}
+
 /// One listener: what it serves, and its failed-auth count (`None` when
 /// `RelayConfig::auth_limiter` is off).
 pub struct Listener {
     pub scope: Scope,
     pub failures: Option<AuthFailures>,
+    pub keys: FailureKeys,
+    /// The tailnet scope on the Mac's own local route (`Serving::local_route`).
+    pub local_route: bool,
 }
 
 impl Listener {
-    fn record_failure(&self, now: u64) {
-        if let Some(failures) = &self.failures {
-            failures.record(now);
+    /// The key of `request` in the failed-auth count.
+    pub fn failure_key(&self, request: &Request) -> IpAddr {
+        match self.keys {
+            FailureKeys::Whole => WHOLE_LISTENER,
+            FailureKeys::PerPeer(listen) => {
+                let Some(remote) = request.remote_addr().copied() else {
+                    return WHOLE_LISTENER;
+                };
+                apassy::net::front_peers::peer_of(remote, listen)
+                    .unwrap_or_else(|| remote.ip().to_canonical())
+            }
         }
     }
 
-    fn limited(&self, now: u64) -> bool {
+    fn record_failure(&self, key: IpAddr, now: u64) {
+        if let Some(failures) = &self.failures {
+            failures.record_for(key, now);
+        }
+    }
+
+    fn limited(&self, key: IpAddr, now: u64) -> bool {
         self.failures
             .as_ref()
-            .is_some_and(|failures| failures.limited(now))
+            .is_some_and(|failures| failures.limited_for(key, now))
+    }
+
+    /// The kind of the audit row of a listener (or one of its peers) at its limit.
+    fn limit_kind(&self) -> &'static str {
+        if self.local_route {
+            "auth_limit_tailnet_local"
+        } else {
+            self.scope.limit_kind()
+        }
     }
 }
 
@@ -533,6 +606,10 @@ pub struct Serving {
     pub scope: Scope,
     /// The limits of this listener's lanes.
     pub limits: Limits,
+    /// A tailnet-scope listener for the Mac's own clients (the local route of the node
+    /// origin, N8-1): the TLS front never forwards to it, so no tailnet peer shares its
+    /// failed-auth count. It counts as one window.
+    pub local_route: bool,
 }
 
 /// True for a path that agents use: the proxy, MCP, runs, and access. These
@@ -726,10 +803,18 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
         stop,
         scope,
         limits,
+        local_route,
     } = serving;
+    let listen = server.server_addr().to_ip();
+    let keys = match (scope, listen) {
+        (Scope::Tailnet { .. }, Some(addr)) if !local_route => FailureKeys::PerPeer(addr),
+        _ => FailureKeys::Whole,
+    };
     let listener = Arc::new(Listener {
         scope,
         failures: hub.config.auth_limiter.then(AuthFailures::default),
+        keys,
+        local_route,
     });
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
@@ -760,7 +845,6 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the maintenance thread cannot start");
     }
-    let listen = server.server_addr().to_ip();
     let mut probed = Instant::now();
     let mut failed_probes = 0;
     let mut outcome = Ok(());
@@ -1008,15 +1092,24 @@ fn respond_ok(request: Request, result: Value) {
     respond_json(request, 200, &Envelope::success(result), false);
 }
 
-/// 429 `rate_limited` with `Retry-After` for a listener at its failed-auth limit, and a
-/// row in the relay audit at most once per ten seconds for each listener.
-fn respond_auth_limited(hub: &Hub, listener: &Listener, request: Request, now: u64) {
-    hub.refusal(
-        now,
-        listener.scope.limit_kind(),
-        "rate_limited",
-        &json!({"code": codes::RATE_LIMITED, "scope": listener.scope.name()}),
-    );
+/// 429 `rate_limited` with `Retry-After` for a listener (or a tailnet peer, `key`) at its
+/// failed-auth limit, and a row in the relay audit at most once per ten seconds for each
+/// listener. A per-peer row names the peer.
+fn respond_auth_limited(hub: &Hub, listener: &Listener, key: IpAddr, request: Request, now: u64) {
+    let detail = match listener.keys {
+        FailureKeys::PerPeer(_) => json!({
+            "code": codes::RATE_LIMITED,
+            "scope": listener.scope.name(),
+            "peer": key.to_string(),
+        }),
+        FailureKeys::Whole if listener.local_route => json!({
+            "code": codes::RATE_LIMITED,
+            "scope": listener.scope.name(),
+            "listener": "local_route",
+        }),
+        FailureKeys::Whole => json!({"code": codes::RATE_LIMITED, "scope": listener.scope.name()}),
+    };
+    hub.refusal(now, listener.limit_kind(), "rate_limited", &detail);
     let error = RelayError::new(
         codes::RATE_LIMITED,
         "Too many requests with a bad token or session key. Try again later.",
@@ -1096,12 +1189,23 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         );
         return;
     }
-    if listener.limited(now) {
-        respond_auth_limited(hub, listener, request, now);
+    let failure_key = listener.failure_key(&request);
+    if listener.limited(failure_key, now) {
+        respond_auth_limited(hub, listener, failure_key, request, now);
         return;
     }
     if let Some(route) = oauth_route {
-        respond_oauth(hub, listener, request, route, &method, &path, &query, now);
+        respond_oauth(
+            hub,
+            listener,
+            failure_key,
+            request,
+            route,
+            &method,
+            &path,
+            &query,
+            now,
+        );
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) && !hub.config.team_vaults {
@@ -1115,7 +1219,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
         // A key that names no live session counts against the listener. The proxy
         // refuses it itself, with its own answer and audit row.
         if listener.failures.is_some() && key.is_none_or(|key| hub.find(key, now).is_none()) {
-            listener.record_failure(now);
+            listener.record_failure(failure_key, now);
         }
         // Parse only: the proxy still validates and finds the session itself.
         let core = key
@@ -1269,7 +1373,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
     let authorization = header_value(&request, "Authorization");
     let token = auth::bearer(authorization.as_deref());
     let Some(core) = token.and_then(|token| hub.for_token(token)) else {
-        listener.record_failure(now);
+        listener.record_failure(failure_key, now);
         hub.refusal(
             now,
             "token",
@@ -1292,7 +1396,7 @@ fn handle(hub: &Hub, proxy: &Proxy, listener: &Listener, mut request: Request, h
             // Anyone can send a token with the team's id: for a Connect team the row
             // goes to the relay audit, not the team's capped file.
             if error.code == codes::UNAUTHENTICATED || error.code == codes::TOKEN_EXPIRED {
-                listener.record_failure(now);
+                listener.record_failure(failure_key, now);
                 core.outside_refusal(
                     now,
                     "token",
@@ -1773,6 +1877,7 @@ fn respond_auth_error(
 fn respond_oauth(
     hub: &Hub,
     listener: &Listener,
+    failure_key: IpAddr,
     mut request: Request,
     route: oauth::Route,
     method: &str,
@@ -1803,7 +1908,7 @@ fn respond_oauth(
         auth_failed: true, ..
     } = reply
     {
-        listener.record_failure(now);
+        listener.record_failure(failure_key, now);
     }
     write_oauth(request, reply, false);
 }

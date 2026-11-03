@@ -551,12 +551,21 @@ impl Serving {
         let mut front_options =
             FrontOptions::new(found.addresses.clone(), port, certificate, target);
         if settings.route == Route::ServeTcp {
-            // The front on 127.0.0.1:<port>; Serve listens on the tailnet addresses.
+            // The front on 127.0.0.1:<port>; Serve listens on the tailnet addresses. Every
+            // connection comes from the loopback, so its share is the whole pool, as on
+            // the Mac; Serve's PROXY line gives the per-peer cap back (N8-5).
             front_options.route = FrontRoute::ServeTcp;
+            front_options.limits = apassy::node::tailnet::front_limits(FrontRoute::ServeTcp);
         }
         if options.test_loopback {
             front_options.allow_loopback_bind = true;
             front_options.allow_test_peers = true;
+        }
+        if settings.route == Route::ServeTcp && !options.test_loopback {
+            // A forward that a crash left points at 127.0.0.1:<port>, which any local
+            // process could take while the node is down: it goes before the front takes
+            // the port (N8-5), so a front that cannot bind leaves no forward behind.
+            let _ = ServeTcp::new(Arc::new(SystemTailscale)).clear_stale(port, Some(port));
         }
         let mut front = match Front::start(front_options) {
             Ok(front) => front,

@@ -306,7 +306,7 @@ struct JoinModelTests {
         }
         #expect(join.node == NodeInfo(origin: "https://100.64.0.7:8444", name: "Mac mini", nodeWords: "noodle monkey dinner sled guitar garden"))
         // The node words of the contract vector (node-pairing-v1 section 4a), for the visual check.
-        #expect(fixture.model.nodeWordsLine == "Node words: noodle monkey dinner sled guitar garden")
+        #expect(fixture.model.nodeWordsLine == "Node words to compare: noodle monkey dinner sled guitar garden")
         #expect(fixture.model.routeText == "via your Mac")
         #expect(fixture.model.nodeLine == "Through Tailscale to Mac mini.")
         #expect(await waitUntil { fixture.model.step == .passphrase(team: "Personal") })

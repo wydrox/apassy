@@ -83,6 +83,9 @@ const TEAM_NAME: &str = "Personal";
 /// The file in the node directory with the last Funnel target of the app, so a stale
 /// handler of an earlier port is known as the app's own.
 const LAST_TARGET_FILE: &str = "funnel-target";
+/// The local port of the front in the last Serve fallback (N8-5): a forward to it after a
+/// crash is stale.
+const SERVE_TCP_PORT_FILE: &str = "serve-tcp-port";
 /// Rows of "Recent cloud activity".
 const RECENT_ROWS: u32 = 20;
 /// Ports tried for the public listener before the start gives up.
@@ -654,7 +657,7 @@ impl Node {
             },
             tailnet_config,
         )?;
-        let tailnet_target = node.tailnet_addr();
+        let tailnet_target = node.tailnet_addr().zip(node.local_route_addr());
         let team = match team_id.map(NodeTeamId) {
             Some(team) if node.has_team(&team) => team,
             stored => {
@@ -785,15 +788,16 @@ impl Node {
     }
 
     /// The tailnet route of a start: the certificate, then the front on the relay's
-    /// tailnet listener, then the local route of the origin.
+    /// tailnet listener, then the local route of the origin to the local route listener.
+    /// `targets`: the tailnet listener and the local route listener.
     fn start_route(
         &self,
         here: &TailnetHere,
         state: &VaultState,
-        target: Option<SocketAddr>,
+        targets: Option<(SocketAddr, SocketAddr)>,
         certificate_key: &[u8],
     ) -> Result<TailnetRoute, NodeError> {
-        let target = target.ok_or_else(|| {
+        let (target, local_target) = targets.ok_or_else(|| {
             error(
                 "node_failed",
                 "The relay of the node has no tailnet listener.",
@@ -807,14 +811,26 @@ impl Node {
             );
         }
         self.check_not_stopping()?;
-        TailnetRoute::start(tailnet::RouteOptions {
+        let previous_local_port = std::fs::read_to_string(self.data_dir.join(SERVE_TCP_PORT_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        let route = TailnetRoute::start(tailnet::RouteOptions {
             here,
             port: state.tailnet_port,
             certificate,
             target,
+            local_target,
+            previous_local_port,
             cli: Arc::clone(&self.cli),
             name,
-        })
+        })?;
+        if let Some(local_port) = route.serve_local_port() {
+            let _ = std::fs::write(
+                self.data_dir.join(SERVE_TCP_PORT_FILE),
+                local_port.to_string(),
+            );
+        }
+        Ok(route)
     }
 
     /// Keep the node origin in the vault; a changed one means a new pairing.
@@ -1211,6 +1227,45 @@ impl Node {
         ))
     }
 
+    /// The pin and the alternatives of the running route: the certificate that the front
+    /// serves now.
+    fn route_trust(&self) -> Result<(String, Vec<String>), NodeError> {
+        let running = lock(&self.running);
+        running
+            .as_ref()
+            .and_then(|running| running.tailnet.as_ref())
+            .map(|route| (route.pin.text(), route.alt.clone()))
+            .ok_or_else(|| error("node_stopped", "The node is not running."))
+    }
+
+    /// Give `membership`, a team of this node, the pin and the alternatives of the running
+    /// route, in the vault too, when they differ: the node certificate was replaced (its
+    /// key did not open) or the alternatives changed. This Mac is that node and reaches it
+    /// through the local route, so the stored pin only feeds the pairing links. Without
+    /// this, every new pairing link would carry the old pin and every iPhone would refuse
+    /// it (N8-2).
+    fn take_route_trust(
+        &self,
+        vault: &SharedVault,
+        epoch: [u8; 32],
+        membership: &mut RelayMembership,
+    ) -> Result<(), NodeError> {
+        let (pin, alt) = self.route_trust()?;
+        if membership.pin.as_deref() == Some(pin.as_str()) && membership.alt == alt {
+            return Ok(());
+        }
+        let mut guard = lock(vault);
+        let open = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == epoch)
+            .ok_or_else(|| error("vault_locked", "The vault is locked."))?;
+        open.set_membership_trust(&membership.team_id, Some(&pin), &alt)
+            .map_err(|_| error("vault_error", "The relay membership cannot be saved."))?;
+        membership.pin = Some(pin);
+        membership.alt = alt;
+        Ok(())
+    }
+
     /// The questions team of the open vault on this node (plan D6): the membership of an
     /// earlier call, or a new team of devices with this Mac, named `device_name`, as its
     /// first device; the vault keeps it (`adopt_node_team`) and the questions worker uses
@@ -1240,9 +1295,10 @@ impl Node {
             .shared()
             .ok_or_else(|| error("node_stopped", "The node is not running."))?;
         match found {
-            (Some(membership), _) if questions_team::on_node(&membership, &origin) => {
+            (Some(mut membership), _) if questions_team::on_node(&membership, &origin) => {
                 let team = NodeTeamId(membership.team_id.clone());
                 if shared.with_node(|node| node.has_team(&team)) == Some(true) {
+                    self.take_route_trust(vault, epoch, &mut membership)?;
                     return Ok(membership);
                 }
                 // The node lost the team (its directory is new): the membership names
@@ -1300,7 +1356,7 @@ impl Node {
         vault: &SharedVault,
     ) -> Result<(QuestionsClient, LinkCode), NodeError> {
         let (origin, name, epoch) = self.route_info()?;
-        let membership = {
+        let mut membership = {
             let guard = lock(vault);
             let open = guard
                 .as_ref()
@@ -1314,6 +1370,9 @@ impl Node {
                 "This vault has no approvals on this Mac yet. Turn them on first.",
             )
         })?;
+        // The link names the certificate that the front serves now, never a stored pin
+        // of a replaced one (N8-2).
+        self.take_route_trust(vault, epoch, &mut membership)?;
         let client =
             QuestionsClient::from_membership(&membership).map_err(questions_team::sync_error)?;
         let link = questions_team::device_link(&client, &membership, Some(&name))

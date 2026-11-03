@@ -55,7 +55,7 @@ Out of scope: Tailscale Serve certificates (ADR 0037 D4, an option for later), t
 
 ### 4a. Node words
 
-The **node words** are six words that a person compares between the Mac and the iPhone to see that both mean the same node certificate (Settings › Devices on the Mac, "via your Mac" on the iPhone). They are a visual check, never the trust: a client compares the whole pin (section 4).
+The **node words** are six words that a person compares between the Mac and the iPhone to see that both mean the same node certificate (Settings › Devices on the Mac, "via your Mac" on the iPhone). They are a visual check, never the trust: a client compares the whole pin (section 4). The words are the first six bytes of the pin, about 48 bits, and the pinned verifier ignores the certificate's own signature, so a certificate with the same words can be ground out with about 2^48 hashes. No text presents them as proof of the node: the apps call them safety words to compare ("Node words to compare" on the iPhone), and a "certificate changed" flow never accepts a node because its words match ([N8-7](../reviews/node-tailnet-2026-11/n8-panel.md)).
 
 - Input: the 32 bytes of the pin, that is `SHA-256(DER of the leaf certificate)` before base64url (so the decoded 43-character pin text gives the same bytes).
 - Words: for `i` = 0 to 5, `WORDS[pin[i]]`, where `pin[i]` is the byte at index `i` (0 to 255) and `WORDS` is the list of relay-sync-v1 section 16 (256 words, index order, all lowercase ASCII). Bytes 6 to 31 are not used.

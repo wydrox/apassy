@@ -21,7 +21,11 @@
 //! - The Mac's own clients (the questions worker, the feed, the access requests) reach
 //!   the node over the loopback without TLS: the route sets the **local route** of the
 //!   node origin (`crate::sync::relay_http::set_local_route`), and the requests still
-//!   sign the node origin. So the questions worker does not change.
+//!   sign the node origin. So the questions worker does not change. The local route goes
+//!   to a listener of its own (`RunningNode::local_route_addr`) that the front never
+//!   forwards to: a tailnet peer with bad tokens cannot limit the Mac's own clients
+//!   (N8-1). On the tailnet listener the relay counts failed authentications per peer
+//!   (`crate::net::front_peers`).
 //!
 //! [`TailnetRoute`] is the running route. Its stop is in two steps, around the stop of the
 //! relay: [`TailnetRoute::stop_front`] first (the listeners close, every connection
@@ -190,9 +194,11 @@ pub fn find_in(
 }
 
 /// The limits of the front for `route`: plan D2's numbers. With
-/// [`FrontRoute::ServeTcp`] every peer is Tailscale's daemon on `127.0.0.1`, so the
-/// per-peer limits are the total limits: 64 connections, and the new connections of the
-/// eight peers that the total admits.
+/// [`FrontRoute::ServeTcp`] every connection comes from Tailscale's daemon on
+/// `127.0.0.1`, so the loopback's limits are the total limits: 64 connections, and the
+/// new connections of the eight peers that the total admits. Inside that pool, a tailnet
+/// peer that Serve names in its PROXY line gets at most 16 connections and 60 new ones a
+/// minute (`FrontLimits::max_per_forwarded_peer`, N8-5). The Linux node uses the same.
 pub fn front_limits(route: FrontRoute) -> FrontLimits {
     let limits = FrontLimits::default();
     match route {
@@ -276,6 +282,13 @@ pub struct RouteOptions<'a> {
     pub certificate: NodeCertificate,
     /// The relay's tailnet listener on the loopback (`RunningNode::tailnet_addr`).
     pub target: SocketAddr,
+    /// The relay's local route listener (`RunningNode::local_route_addr`): the target of
+    /// the local route of the node origin. The front never forwards to it (N8-1).
+    pub local_target: SocketAddr,
+    /// The local port of the front in the last Serve fallback of this node
+    /// ([`TailnetRoute::serve_local_port`], kept by the caller): a forward to it is a
+    /// stale one of a crash and goes before the front takes a port (N8-5).
+    pub previous_local_port: Option<u16>,
     pub cli: Arc<dyn TailscaleCli>,
     /// The node's display name of the pairing links.
     pub name: String,
@@ -298,7 +311,7 @@ pub struct TailnetRoute {
     /// The node's display name of the pairing links.
     pub name: String,
     pub route: FrontRoute,
-    /// The relay's tailnet listener: the front's target and the local route.
+    /// The relay's tailnet listener: the front's target.
     pub target: SocketAddr,
 }
 
@@ -323,6 +336,8 @@ impl TailnetRoute {
             port,
             certificate,
             target,
+            local_target,
+            previous_local_port,
             cli,
             name,
         } = options;
@@ -340,6 +355,9 @@ impl TailnetRoute {
         if here.route == FrontRoute::ServeTcp {
             // The front takes any free port on 127.0.0.1; Serve forwards the tailnet port.
             front_options.port = 0;
+            // A forward that a crash left points at a loopback port that any process
+            // could take: it goes first. A failure shows in `enable` below.
+            let _ = ServeTcp::new(Arc::clone(&cli)).clear_stale(port, previous_local_port);
         }
         let mut front = Front::start(front_options).map_err(|error| front_error(&error, port))?;
         let mut serve_tcp = None;
@@ -379,7 +397,7 @@ impl TailnetRoute {
             route: here.route,
             target,
         };
-        if crate::sync::relay_http::set_local_route(&route.origin, target).is_err() {
+        if crate::sync::relay_http::set_local_route(&route.origin, local_target).is_err() {
             route.stop_front();
             return Err(NodeError::new(
                 "node_failed",
@@ -396,6 +414,11 @@ impl TailnetRoute {
             .as_ref()
             .map(FrontHandle::bound)
             .unwrap_or_default()
+    }
+
+    /// The local port of the front behind the Serve forward, while the fallback runs.
+    pub fn serve_local_port(&self) -> Option<u16> {
+        self.serve_tcp.map(|(_, local_port)| local_port)
     }
 
     /// True while the front runs.
@@ -498,6 +521,8 @@ mod tests {
         assert_eq!(direct, FrontLimits::default());
         let serve = front_limits(FrontRoute::ServeTcp);
         assert_eq!(serve.max_per_peer, serve.max_connections);
+        assert_eq!(serve.max_per_forwarded_peer, 16);
+        assert!(serve.max_per_forwarded_peer < serve.max_connections);
         assert_eq!(serve.max_connections, direct.max_connections);
         assert_eq!(
             serve.new_per_peer_per_minute,
@@ -535,6 +560,8 @@ mod tests {
         assert_eq!(again.pin, pin);
         let target = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let target_addr = target.local_addr().unwrap();
+        let local = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let local_addr = local.local_addr().unwrap();
         let port = {
             let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             probe.local_addr().unwrap().port()
@@ -548,6 +575,8 @@ mod tests {
             port,
             certificate: again,
             target: target_addr,
+            local_target: local_addr,
+            previous_local_port: None,
             cli,
             name: "Synthetic Mac".to_owned(),
         })
@@ -559,11 +588,13 @@ mod tests {
             route.bound(),
             vec![SocketAddr::from((Ipv4Addr::LOCALHOST, port))]
         );
-        // The local route goes to the relay's listener, plain.
+        // The local route goes to the relay's local route listener, plain, never to the
+        // listener that the front forwards to (N8-1).
+        assert_eq!(route.target, target_addr);
         let url = crate::sync::RelayUrl::parse(&route.origin).unwrap();
         assert_eq!(
             crate::sync::relay_http::local_route_for_test(&url),
-            Some(target_addr)
+            Some(local_addr)
         );
         route.stop_front();
         assert!(!route.front_running());
@@ -572,7 +603,7 @@ mod tests {
         assert!(std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
         assert_eq!(
             crate::sync::relay_http::local_route_for_test(&url),
-            Some(target_addr)
+            Some(local_addr)
         );
         route.finish();
         assert_eq!(crate::sync::relay_http::local_route_for_test(&url), None);

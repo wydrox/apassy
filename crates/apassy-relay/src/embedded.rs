@@ -460,6 +460,10 @@ impl RunningNode for EmbeddedNode {
         self.running.tailnet_addr
     }
 
+    fn local_route_addr(&self) -> Option<SocketAddr> {
+        self.running.tailnet_local_addr
+    }
+
     fn create_device_team(
         &self,
         name: &str,

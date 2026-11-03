@@ -97,6 +97,17 @@ impl Node {
             .expect("a tailnet listener")
     }
 
+    /// `http://<local route listener>`: the tailnet routes for the Mac's own clients (the
+    /// local route of the node origin). The TLS front never forwards to it.
+    pub fn local_route(&self) -> String {
+        let addr = self
+            .node()
+            .running()
+            .tailnet_local_addr
+            .expect("a local route listener");
+        format!("http://{addr}")
+    }
+
     /// `http://<node listener>`: the app's own loopback listener (every route).
     pub fn local(&self) -> String {
         self.node().running().url()
