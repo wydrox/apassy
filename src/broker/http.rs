@@ -3,7 +3,10 @@
 //!
 //! `https://` uses rustls with the macOS trust store. Plain `http://` is
 //! permitted only on loopback addresses. The client sends no agent-controlled
-//! header, follows no redirect, and reads at most 64 KiB of a JSON answer. The
+//! header, follows no redirect, and reads at most 64 KiB of a JSON answer.
+//! [`send`] is the general request of the way C lease providers (implementation
+//! plan s6, unit B): form or JSON bodies, the caller's own headers, `PUT` and
+//! `DELETE`, and the response headers. The
 //! head-file transfers of the bouncer brain ([`put_file`], [`get_to_file`]) stream
 //! the file, with their own caps and a progress deadline.
 
@@ -35,7 +38,9 @@ pub enum DestinationUrl {
 }
 
 impl DestinationUrl {
-    fn host_header(&self) -> String {
+    /// The `Host` header value that the client sends: the host, with the port
+    /// unless it is 443 for `https://`. A SigV4 signer signs this value.
+    pub fn host_header(&self) -> String {
         match self {
             Self::Loopback { host_header, .. } => host_header.clone(),
             Self::Https { host, port } => {
@@ -179,10 +184,36 @@ impl TlsClient {
     }
 }
 
-#[derive(Debug)]
+/// One response. The body and the header values can hold a provider's secret
+/// (a lease, a token), so `Debug` shows the status, the header names, and the
+/// body length only.
 pub struct HttpResponse {
     pub status: u16,
+    /// The response header fields in their order: the name in lowercase, the
+    /// value without surrounding white space. A repeated field is repeated here.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    /// The value of the first header field `name` (any case), if there is one.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("headers", &names)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 /// Why a request failed. None of these values contains the token.
@@ -364,18 +395,13 @@ fn get_health_with(
     resolve: Resolve,
 ) -> Result<HttpResponse, HttpFailure> {
     let deadline = Instant::now() + timeout;
-    if !is_request_path(path) {
-        return Err(HttpFailure::Protocol);
-    }
-    let host = destination.host_header();
-    let request = request_bytes(&[
-        b"GET ",
-        path.as_bytes(),
-        b" HTTP/1.1\r\nHost: ",
-        host.as_bytes(),
-        b"\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
-    ]);
-    send_before(destination, &request, deadline, tls, resolve)
+    send_with(
+        destination,
+        &HttpRequest::new(Method::Get, path),
+        deadline,
+        tls,
+        resolve,
+    )
 }
 
 fn is_request_path(path: &str) -> bool {
@@ -386,11 +412,13 @@ fn is_bearer(bearer: &str) -> bool {
     !bearer.is_empty() && bearer.bytes().all(|b| (0x21..0x7f).contains(&b))
 }
 
-/// The methods of [`request_json`].
+/// The methods of [`request_json`] and [`send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
     Post,
+    /// `PUT` with a short body. A head file goes up with [`put_file`].
+    Put,
     Delete,
 }
 
@@ -399,18 +427,26 @@ impl Method {
         match self {
             Self::Get => b"GET",
             Self::Post => b"POST",
+            Self::Put => b"PUT",
             Self::Delete => b"DELETE",
         }
+    }
+
+    /// `POST` and `PUT` carry a body (`Content-Length: 0` without one). `GET`
+    /// and `DELETE` never do: a body with them is a protocol failure.
+    fn takes_body(self) -> bool {
+        matches!(self, Self::Post | Self::Put)
     }
 }
 
 /// Send one request with a bearer token and an optional JSON body, and read the
 /// JSON response before `deadline`: name lookup, connect, TLS handshake, request,
 /// and response (ADR 0035). The bouncer brain uses it for `GET` and `DELETE` of
-/// `/v1/heads/<sha256>` and `DELETE /v1/owner`. Only `POST` has a body; a body
-/// with `GET` or `DELETE` is a protocol failure. The TLS rules and the 64 KiB
-/// cap are the ones of [`post_json`]. Unlike [`get`], the name lookup has the
-/// deadline too.
+/// `/v1/heads/<sha256>` and `DELETE /v1/owner`. Only `POST` and `PUT` have a
+/// body; a body with `GET` or `DELETE` is a protocol failure. The TLS rules and
+/// the 64 KiB caps are the ones of [`send`], which this wraps with the bearer
+/// and a JSON body; the bytes are the ones of [`send`]. Unlike [`get`], the name
+/// lookup has the deadline too.
 #[allow(clippy::too_many_arguments)]
 pub fn request_json(
     method: Method,
@@ -444,41 +480,322 @@ fn request_json_with(
     tls: Option<&TlsClient>,
     resolve: Resolve,
 ) -> Result<HttpResponse, HttpFailure> {
-    if !is_request_path(path) || !is_bearer(bearer) {
+    // A missing bearer is a protocol failure here; `send` permits none.
+    if !is_bearer(bearer) {
         return Err(HttpFailure::Protocol);
     }
-    if method != Method::Post && body.is_some() {
+    let request = HttpRequest {
+        bearer: Some(bearer),
+        body: body.map(Body::Json),
+        ..HttpRequest::new(method, path)
+    };
+    send_with(destination, &request, deadline, tls, resolve)
+}
+
+/// Largest request body of [`send`]. A larger one is [`HttpFailure::TooLarge`]
+/// before any connection. Chosen by implementation plan s6 (unit B): the largest
+/// provider body of way C is a few KiB (an STS session policy is at most 2 KiB).
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+/// Most extra header fields of one [`send`] request.
+pub const MAX_REQUEST_HEADERS: usize = 32;
+/// Longest extra header name of [`send`].
+const MAX_HEADER_NAME_BYTES: usize = 64;
+/// Longest extra header value of [`send`]. An `X-Amz-Security-Token` or a
+/// SigV4 `Authorization` value is far shorter.
+pub const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
+/// Longest path and query of [`send`].
+const MAX_PATH_BYTES: usize = 8 * 1024;
+
+/// The header fields that the client writes itself. An extra header with one
+/// of these names is a protocol failure: they decide the framing or the
+/// connection, or they name the destination.
+const CLIENT_HEADERS: [&str; 11] = [
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "te",
+    "trailer",
+    "upgrade",
+    "expect",
+    "user-agent",
+];
+
+/// The body of a [`send`] request, with the `Content-Type` that it sets.
+#[derive(Clone, Copy)]
+pub enum Body<'a> {
+    /// `Content-Type: application/json`.
+    Json(&'a [u8]),
+    /// `Content-Type: application/x-www-form-urlencoded`. Build the bytes with
+    /// [`form_body`], so a signer (SigV4) can hash the exact bytes that are sent.
+    Form(&'a [u8]),
+}
+
+impl<'a> Body<'a> {
+    fn content_type(self) -> &'static [u8] {
+        match self {
+            Self::Json(_) => b"application/json",
+            Self::Form(_) => b"application/x-www-form-urlencoded",
+        }
+    }
+
+    fn bytes(self) -> &'a [u8] {
+        match self {
+            Self::Json(bytes) | Self::Form(bytes) => bytes,
+        }
+    }
+}
+
+/// One request of [`send`]. The caller owns every value; the client copies them
+/// once into the request buffer, which it erases after the exchange.
+///
+/// `Debug` shows the method, the path without its query, the header names, and
+/// the body length: never the bearer, a header value, or a body byte.
+#[derive(Clone, Copy)]
+pub struct HttpRequest<'a> {
+    pub method: Method,
+    /// The path and the query, already percent-encoded: printable ASCII that
+    /// starts with `/`, at most 8 KiB.
+    pub path: &'a str,
+    /// `Authorization: Bearer <token>`. With a bearer, an extra `Authorization`
+    /// header is a protocol failure.
+    pub bearer: Option<&'a str>,
+    /// Extra header fields, sent in this order after `Host` and the bearer. A
+    /// name is an HTTP token (at most 64 bytes); a value is printable ASCII
+    /// without surrounding spaces (at most 8 KiB); a name appears at most once
+    /// (any case); at most 32 fields. An `Accept` field replaces the default
+    /// `Accept: application/json`. The names that the client writes itself are
+    /// refused: `Host`, `Content-Length`, `Content-Type`, `Transfer-Encoding`,
+    /// `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Upgrade`, `Expect`, and
+    /// `User-Agent`.
+    pub headers: &'a [(&'a str, &'a str)],
+    /// The body. Only `POST` and `PUT` take one; at most 64 KiB.
+    pub body: Option<Body<'a>>,
+}
+
+impl<'a> HttpRequest<'a> {
+    /// A request with no bearer, no extra header, and no body.
+    pub const fn new(method: Method, path: &'a str) -> Self {
+        Self {
+            method,
+            path,
+            bearer: None,
+            headers: &[],
+            body: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for HttpRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self
+            .path
+            .split_once('?')
+            .map_or(self.path, |(path, _)| path);
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| *name).collect();
+        let body = self.body.map(|body| match body {
+            Body::Json(bytes) => ("json", bytes.len()),
+            Body::Form(bytes) => ("form", bytes.len()),
+        });
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("path", &path)
+            .field("bearer", &self.bearer.is_some())
+            .field("headers", &names)
+            .field("body", &body)
+            .finish()
+    }
+}
+
+/// Encode `pairs` as an `application/x-www-form-urlencoded` body: `name=value`
+/// joined by `&`, each byte outside the RFC 3986 unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`) as `%XX` with uppercase hex, a space as `%20`. This
+/// is also the `UriEncode` of AWS SigV4. The buffer has the exact size and is
+/// erased when dropped, because a value can be a secret (a refresh token).
+pub fn form_body(pairs: &[(&str, &str)]) -> Zeroizing<Vec<u8>> {
+    fn encoded_len(text: &str) -> usize {
+        text.bytes()
+            .map(|byte| if is_unreserved(byte) { 1 } else { 3 })
+            .sum()
+    }
+    fn push_encoded(out: &mut Vec<u8>, text: &str) {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        for byte in text.bytes() {
+            if is_unreserved(byte) {
+                out.push(byte);
+            } else {
+                out.extend_from_slice(&[
+                    b'%',
+                    HEX[usize::from(byte >> 4)],
+                    HEX[usize::from(byte & 0x0f)],
+                ]);
+            }
+        }
+    }
+    let size = pairs
+        .iter()
+        .map(|(name, value)| encoded_len(name) + 1 + encoded_len(value))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(Vec::with_capacity(size));
+    for (index, (name, value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            out.push(b'&');
+        }
+        push_encoded(&mut out, name);
+        out.push(b'=');
+        push_encoded(&mut out, value);
+    }
+    out
+}
+
+fn is_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// An HTTP field name (RFC 9110 `token`), at most 64 bytes.
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_HEADER_NAME_BYTES
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// A header value: printable ASCII and spaces, no control character (no CR, LF,
+/// NUL, or tab), no space at either end, at most 8 KiB. It may be empty.
+fn is_header_value(value: &str) -> bool {
+    value.len() <= MAX_HEADER_VALUE_BYTES
+        && value.bytes().all(|byte| (0x20..0x7f).contains(&byte))
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+}
+
+/// Check the extra headers of `request`. Returns whether they hold an `Accept`.
+fn check_headers(request: &HttpRequest<'_>) -> Result<bool, HttpFailure> {
+    if request.headers.len() > MAX_REQUEST_HEADERS {
         return Err(HttpFailure::Protocol);
+    }
+    let mut accept = false;
+    for (index, (name, value)) in request.headers.iter().enumerate() {
+        if !is_header_name(name) || !is_header_value(value) {
+            return Err(HttpFailure::Protocol);
+        }
+        if CLIENT_HEADERS
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        {
+            return Err(HttpFailure::Protocol);
+        }
+        if name.eq_ignore_ascii_case("authorization") && request.bearer.is_some() {
+            return Err(HttpFailure::Protocol);
+        }
+        if request.headers[..index]
+            .iter()
+            .any(|(earlier, _)| earlier.eq_ignore_ascii_case(name))
+        {
+            return Err(HttpFailure::Protocol);
+        }
+        accept |= name.eq_ignore_ascii_case("accept");
+    }
+    Ok(accept)
+}
+
+/// Send one request and read its response before `deadline`: name lookup,
+/// connect, TLS handshake, request, and response, all within the one deadline
+/// (a caller that makes several calls for one result, such as a lease, passes
+/// the same deadline to each). The way C lease providers (implementation plan
+/// s6) use it for form and JSON bodies, their own headers (`X-Amz-Date`, a SigV4
+/// `Authorization`, `Accept: application/vnd.github+json`), `PUT`, and `DELETE`.
+///
+/// The rules are the ones of [`post_json`]: `https://` needs `tls` and sends no
+/// byte before the handshake and the certificate check succeed; plain `http://`
+/// only to the loopback; the response, headers included, at most 64 KiB
+/// ([`MAX_RESPONSE_BYTES`]), else [`HttpFailure::TooLarge`]. The client follows
+/// no redirect: a 3xx is returned as it is, with its `Location` in
+/// [`HttpResponse::headers`]. A request that breaks a rule of [`HttpRequest`] is
+/// [`HttpFailure::Protocol`], and a body over 64 KiB is
+/// [`HttpFailure::TooLarge`], both before any connection. No failure value holds
+/// a byte of the request or the response.
+///
+/// The request is `<METHOD> <path> HTTP/1.1`, `Host`, the bearer, the extra
+/// headers in their order, `Content-Type` and `Content-Length` (or
+/// `Content-Length: 0` for a `POST` or `PUT` without a body), `Accept:
+/// application/json` unless an extra `Accept` is given, `User-Agent:
+/// apassy-broker/0`, and `Connection: close`. A signer that signs `host` uses
+/// [`DestinationUrl::host_header`].
+pub fn send(
+    destination: &DestinationUrl,
+    request: &HttpRequest<'_>,
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+) -> Result<HttpResponse, HttpFailure> {
+    send_with(destination, request, deadline, tls, system_resolve)
+}
+
+fn send_with(
+    destination: &DestinationUrl,
+    request: &HttpRequest<'_>,
+    deadline: Instant,
+    tls: Option<&TlsClient>,
+    resolve: Resolve,
+) -> Result<HttpResponse, HttpFailure> {
+    if !is_request_path(request.path) || request.path.len() > MAX_PATH_BYTES {
+        return Err(HttpFailure::Protocol);
+    }
+    if request.bearer.is_some_and(|bearer| !is_bearer(bearer)) {
+        return Err(HttpFailure::Protocol);
+    }
+    if request.body.is_some() && !request.method.takes_body() {
+        return Err(HttpFailure::Protocol);
+    }
+    let has_accept = check_headers(request)?;
+    if request
+        .body
+        .is_some_and(|body| body.bytes().len() > MAX_REQUEST_BODY_BYTES)
+    {
+        return Err(HttpFailure::TooLarge);
     }
     let host = destination.host_header();
-    let length = body.map(|body| body.len().to_string());
-    let (content_start, content_length, content_end, body): (&[u8], &[u8], &[u8], &[u8]) =
-        match (&length, body) {
-            (Some(length), Some(body)) => (
-                b"Content-Type: application/json\r\nContent-Length: ",
-                length.as_bytes(),
-                b"\r\n",
-                body,
-            ),
-            _ if method == Method::Post => (b"Content-Length: 0\r\n", b"", b"", b""),
-            _ => (b"", b"", b"", b""),
-        };
-    let request = request_bytes(&[
-        method.as_bytes(),
+    let length = request.body.map(|body| body.bytes().len().to_string());
+    let mut parts: Vec<&[u8]> = Vec::with_capacity(16 + 4 * request.headers.len());
+    parts.extend_from_slice(&[
+        request.method.as_bytes(),
         b" ",
-        path.as_bytes(),
+        request.path.as_bytes(),
         b" HTTP/1.1\r\nHost: ",
         host.as_bytes(),
-        b"\r\nAuthorization: Bearer ",
-        bearer.as_bytes(),
         b"\r\n",
-        content_start,
-        content_length,
-        content_end,
-        b"Accept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
-        body,
     ]);
-    send_before(destination, &request, deadline, tls, resolve)
+    if let Some(bearer) = request.bearer {
+        parts.extend_from_slice(&[b"Authorization: Bearer ", bearer.as_bytes(), b"\r\n"]);
+    }
+    for (name, value) in request.headers {
+        parts.extend_from_slice(&[name.as_bytes(), b": ", value.as_bytes(), b"\r\n"]);
+    }
+    match (request.body, &length) {
+        (Some(body), Some(length)) => parts.extend_from_slice(&[
+            b"Content-Type: ",
+            body.content_type(),
+            b"\r\nContent-Length: ",
+            length.as_bytes(),
+            b"\r\n",
+        ]),
+        _ if request.method.takes_body() => parts.push(b"Content-Length: 0\r\n"),
+        _ => {}
+    }
+    if !has_accept {
+        parts.push(b"Accept: application/json\r\n");
+    }
+    parts.push(b"User-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n");
+    if let Some(body) = request.body {
+        parts.push(body.bytes());
+    }
+    let bytes = request_bytes(&parts);
+    drop(parts);
+    send_before(destination, &bytes, deadline, tls, resolve)
 }
 
 /// Largest head file that [`put_file`] sends (contract bouncer-brain-v1 section 5).
@@ -1212,13 +1529,16 @@ fn classify(err: &io::Error) -> HttpFailure {
 fn exchange<S: Read + Write>(stream: &mut S, request: &[u8]) -> Result<HttpResponse, HttpFailure> {
     stream.write_all(request).map_err(|err| classify(&err))?;
     stream.flush().map_err(|err| classify(&err))?;
-    let mut raw = Vec::new();
-    let mut chunk = [0u8; 4096];
+    // The answer can hold a provider's secret (a lease, a token). The buffer has
+    // room for the whole capped answer, so it never grows and leaves no partial
+    // copy in freed memory; `Zeroizing` erases it and the read chunk on return.
+    let mut raw = Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES + EXCHANGE_CHUNK));
+    let mut chunk = Zeroizing::new([0u8; EXCHANGE_CHUNK]);
     loop {
         if let Some(response) = complete_response(&raw)? {
             return Ok(response);
         }
-        match stream.read(&mut chunk) {
+        match stream.read(&mut chunk[..]) {
             Ok(0) => return finish_at_eof(&raw),
             Ok(read) => {
                 raw.extend_from_slice(&chunk[..read]);
@@ -1234,6 +1554,9 @@ fn exchange<S: Read + Write>(stream: &mut S, request: &[u8]) -> Result<HttpRespo
     }
 }
 
+/// One socket read of [`exchange`].
+const EXCHANGE_CHUNK: usize = 4096;
+
 enum BodyKind {
     Length(usize),
     Chunked,
@@ -1244,6 +1567,8 @@ struct Head {
     status: u16,
     body_start: usize,
     kind: BodyKind,
+    /// The header fields: the name in lowercase, the value trimmed.
+    headers: Vec<(String, String)>,
 }
 
 fn parse_head(raw: &[u8]) -> Result<Option<Head>, HttpFailure> {
@@ -1263,10 +1588,12 @@ fn parse_head(raw: &[u8]) -> Result<Option<Head>, HttpFailure> {
         .and_then(|code| code.parse().ok())
         .ok_or(HttpFailure::Protocol)?;
     let mut kind = BodyKind::UntilClose;
+    let mut headers = Vec::new();
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(HttpFailure::Protocol)?;
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim();
+        headers.push((name.clone(), value.to_owned()));
         if name == "transfer-encoding" {
             if value.eq_ignore_ascii_case("chunked") {
                 kind = BodyKind::Chunked;
@@ -1281,6 +1608,7 @@ fn parse_head(raw: &[u8]) -> Result<Option<Head>, HttpFailure> {
         status,
         body_start: split + 4,
         kind,
+        headers,
     }))
 }
 
@@ -1293,10 +1621,12 @@ fn complete_response(raw: &[u8]) -> Result<Option<HttpResponse>, HttpFailure> {
     match head.kind {
         BodyKind::Length(length) if body.len() >= length => Ok(Some(HttpResponse {
             status: head.status,
+            headers: head.headers,
             body: body[..length].to_vec(),
         })),
         BodyKind::Chunked => Ok(decode_chunked(body)?.map(|body| HttpResponse {
             status: head.status,
+            headers: head.headers,
             body,
         })),
         BodyKind::Length(_) | BodyKind::UntilClose => Ok(None),
@@ -1308,6 +1638,7 @@ fn finish_at_eof(raw: &[u8]) -> Result<HttpResponse, HttpFailure> {
     match head.kind {
         BodyKind::UntilClose => Ok(HttpResponse {
             status: head.status,
+            headers: head.headers,
             body: raw[head.body_start..].to_vec(),
         }),
         // A length or chunked body that ends early is not complete.

@@ -111,6 +111,7 @@ impl Proxy {
             Err(_) => {
                 return HttpResponse {
                     status: 503,
+                    headers: Vec::new(),
                     body: br#"{"error":"laya unreachable"}"#.to_vec(),
                 };
             }
