@@ -178,6 +178,14 @@ impl RelayMembership {
             &self.key_pkcs8,
         )
     }
+
+    /// True for a vault store of Apassy Connect (schema 34, `key_source = 'account'`):
+    /// the row holds no private key (`key_pkcs8` is empty), and the account device key of
+    /// this Mac (`crate::connect::AccountSigner`) signs for it. Its `public_key` is the
+    /// public key of that account key when the row was written.
+    pub fn uses_account_key(&self) -> bool {
+        self.key_pkcs8.is_empty()
+    }
 }
 
 /// The home of a mirrored credential: the shared vault and the credential there.
@@ -209,10 +217,11 @@ pub(super) fn load_memberships(
     conn: &Connection,
     team: Option<&str>,
 ) -> VaultResult<Vec<RelayMembership>> {
-    type Row = (String, String, i64, Vec<u8>, Vec<u8>, String, i64);
+    type Row = (String, String, i64, Vec<u8>, Vec<u8>, String, i64, String);
     let mut stmt = conn
         .prepare(
-            "SELECT team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at
+            "SELECT team_id, relay_url, device_id, public_key, key_pkcs8, purposes, created_at,
+                    key_source
              FROM relay_membership WHERE ?1 IS NULL OR team_id = ?1 ORDER BY team_id",
         )
         .map_err(storage)?;
@@ -226,12 +235,13 @@ pub(super) fn load_memberships(
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
             ))
         })
         .map_err(storage)?;
     let mut out = Vec::new();
     for row in rows {
-        let (team_id, relay_url, device_id, public_key, key, purposes, created_at): Row =
+        let (team_id, relay_url, device_id, public_key, key, purposes, created_at, source): Row =
             row.map_err(storage)?;
         let membership = RelayMembership {
             team_id,
@@ -242,7 +252,22 @@ pub(super) fn load_memberships(
             purposes: parse_purposes(&purposes)?,
             created_at: from_sql_time(created_at)?,
         };
-        if !membership.is_valid() {
+        // A row that keeps its own key needs a valid one; an account row (schema 34)
+        // holds none, and the column check of the table keeps it so.
+        let valid = match source.as_str() {
+            super::schema34::KEY_SOURCE_VAULT => membership.is_valid(),
+            super::schema34::KEY_SOURCE_ACCOUNT => {
+                membership.key_pkcs8.is_empty()
+                    && super::relay_device::valid_account_identity(
+                        &membership.relay_url,
+                        &membership.team_id,
+                        membership.device_id,
+                        &membership.public_key,
+                    )
+            }
+            _ => false,
+        };
+        if !valid {
             return Err(err(VaultErrorKind::Storage));
         }
         out.push(membership);

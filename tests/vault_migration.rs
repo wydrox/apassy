@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 29;
+const CURRENT_VERSION: i64 = 34;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -2395,7 +2395,9 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     for name in names {
         conn.execute_batch(&format!("DROP TRIGGER {name}")).unwrap();
     }
-    // Schema 29 (the host of the bouncer brain) first.
+    // Schema 34 (the account key source of relay memberships) and 29 (the host of the
+    // bouncer brain) first.
+    conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
     // Schema 27 (the Bouncer figures) and 26 (the cloud agents of the node) first, then
     // 23 to 20.
@@ -2565,6 +2567,7 @@ fn build_previous(path: &Path) -> u64 {
     drop(vault);
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
     conn.execute_batch(&format!(
         "UPDATE vault_meta SET schema_version = {PREVIOUS_VERSION} WHERE id = 1;
@@ -2640,6 +2643,146 @@ fn a_failed_migration_to_29_keeps_the_previous_schema_and_data() {
         drop(column);
         conn.execute_batch("DROP TABLE bouncer_host;")
             .expect("drop blocking table");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
+/// The schema before schema 34 in the migration chain (`src/vault/schema34.rs`,
+/// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
+const BEFORE_34: i64 = 29;
+
+/// What a file of schema 34 has and a file of the previous schema has not: the key source
+/// of relay memberships. The way back deletes the account rows first (they hold no key
+/// that an older build could use).
+const SCHEMA34_ONLY: &str = "
+DELETE FROM relay_membership WHERE key_source = 'account';
+ALTER TABLE relay_membership DROP COLUMN key_source;
+";
+
+fn synthetic_point(byte: u8) -> Vec<u8> {
+    let mut key = vec![0x04];
+    key.extend_from_slice(&[byte; 64]);
+    key
+}
+
+/// A file of the schema before 34: a current vault with an item and a questions
+/// membership that keeps its own key, without the column of schema 34.
+fn build_before_34(path: &Path) {
+    let mut vault = Vault::create(path, PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    vault
+        .add(apassy::vault::ItemDraft {
+            title: "MIG before 34".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![apassy::vault::Field {
+                name: "token".to_owned(),
+                value: apassy::vault::SecretValue::new("MIG-SECRET-before-34".to_owned()),
+                secret: true,
+            }],
+        })
+        .expect("item");
+    vault
+        .add_relay_membership(&apassy::vault::RelayMembership {
+            team_id: "t_aaaaaaaaaa".to_owned(),
+            relay_url: "https://relay.mig.invalid".to_owned(),
+            device_id: 2,
+            public_key: synthetic_point(7),
+            key_pkcs8: zeroize::Zeroizing::new(vec![0xab; 138]),
+            purposes: std::collections::BTreeSet::from([
+                apassy::vault::MembershipPurpose::Questions,
+            ]),
+            created_at: 0,
+        })
+        .expect("membership");
+    vault.lock().expect("lock");
+    drop(vault);
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
+    conn.execute_batch(&format!(
+        "UPDATE vault_meta SET schema_version = {BEFORE_34} WHERE id = 1;
+         PRAGMA user_version = {BEFORE_34};"
+    ))
+    .expect("previous marks");
+    conn.close().map_err(|(_, e)| e).expect("close");
+    assert_eq!(raw_versions(path), (BEFORE_34, BEFORE_34));
+}
+
+/// Unlock moves a file of the schema before 34 to 34 (plan s7 M1): its data stays, its
+/// membership keeps its own key, and an account row can be written; the migrated file has
+/// the tables of a new vault.
+#[test]
+fn unlock_migrates_the_schema_before_34_to_34_with_vault_keys() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("before-34.db");
+    build_before_34(&path);
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_eq!(vault.search("").expect("search").len(), 1);
+    let kept = vault
+        .relay_membership("t_aaaaaaaaaa")
+        .expect("read")
+        .expect("the membership stays");
+    assert!(!kept.uses_account_key());
+    assert_eq!(kept.key_pkcs8.as_slice(), &[0xab; 138][..]);
+    vault
+        .set_account_relay_device(
+            "https://connect.mig.invalid",
+            "t_bbbbbbbbbb",
+            1,
+            &synthetic_point(9),
+        )
+        .expect("account row");
+    let row = vault.relay_device().expect("read").expect("sync row");
+    assert!(row.uses_account_key());
+    assert!(row.key_pkcs8.is_empty());
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+
+    let fresh = dir.path().join("fresh-34.db");
+    let mut created = Vault::create(&fresh, PASS).expect("create");
+    created.unlock(PASS).expect("unlock");
+    drop(created);
+    assert_eq!(schema_ddl(&path), schema_ddl(&fresh));
+}
+
+/// The step to schema 34 runs in one transaction: a column of its name already there
+/// makes it fail, and the file keeps the previous schema and its data.
+#[test]
+fn a_failed_migration_to_34_keeps_the_previous_schema_and_data() {
+    let dir = real_kdf_dir();
+    let path = dir.path().join("blocked-before-34.db");
+    build_before_34(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("ALTER TABLE relay_membership ADD COLUMN key_source TEXT;")
+            .expect("blocking column");
+        conn.close().map_err(|(_, e)| e).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(
+        raw_versions(&path),
+        (BEFORE_34, BEFORE_34),
+        "no partial migration"
+    );
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("ALTER TABLE relay_membership DROP COLUMN key_source;")
+            .expect("drop blocking column");
         conn.close().map_err(|(_, e)| e).expect("close");
     }
     let mut vault = Vault::open(&path).expect("open");

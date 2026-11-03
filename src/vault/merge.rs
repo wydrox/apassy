@@ -174,8 +174,14 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
 /// a copy has none of their rows. Schema 27 adds local columns and a local table (the
 /// figures of the Bouncer section, `schema27.rs`): a copy has none of their rows either.
 /// Schema 29 adds only a local table and columns of local tables (the host of the
-/// bouncer brain, `schema29.rs`): a copy has none of their rows either.
-pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema29::PREVIOUS_SCHEMA_VERSION;
+/// bouncer brain, `schema29.rs`): a copy has none of their rows either. Schema 34 adds
+/// only a column of a local table (the account key source of relay memberships,
+/// `schema34.rs`): a copy has none of its rows either.
+pub(super) const UPGRADABLE_SCHEMA: i64 = super::schema34::PREVIOUS_SCHEMA_VERSION;
+
+/// Numbers inside the upgradable range that no build ever wrote: the chain went from 27
+/// to 29. A copy that claims one is refused.
+const NO_BUILD_SCHEMAS: [i64; 1] = [28];
 
 /// The earliest supported copy: schema 16, written by the released 0.3.x apps.
 /// Its ordinary reserved-name fields need the same conversion as a local migration.
@@ -184,15 +190,18 @@ pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERS
 // Reserved-field conversion and [`keep_local_v18`]/[`keep_local_v19`] cover 16 to 19.
 // Schemas 20 through 23 add local state only, schema 24 only widens a `CHECK` of a
 // synced table, schema 25 only adds values of reserved item fields, and schemas 26,
-// 27 and 29 add local state only; future synced schemas require another merge step.
-const _: () = assert!(SCHEMA_VERSION == super::schema29::BOUNCER_HOST_SCHEMA_VERSION);
-const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 11);
+// 27, 29 and 34 add local state only; future synced schemas require another merge step.
+const _: () = assert!(SCHEMA_VERSION == super::schema34::ACCOUNT_KEY_SCHEMA_VERSION);
+const _: () = assert!(UPGRADABLE_SCHEMA == super::schema29::BOUNCER_HOST_SCHEMA_VERSION);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 13);
 
 /// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
 /// one of the earlier schemas that it upgrades. A number between the previous schema
 /// and this one belongs to no build, so it is refused.
 pub(super) fn is_mergeable_schema(version: i64) -> bool {
-    (OLDEST_UPGRADABLE_SCHEMA..=UPGRADABLE_SCHEMA).contains(&version) || version == SCHEMA_VERSION
+    ((OLDEST_UPGRADABLE_SCHEMA..=UPGRADABLE_SCHEMA).contains(&version)
+        && !NO_BUILD_SCHEMAS.contains(&version))
+        || version == SCHEMA_VERSION
 }
 
 /// A table whose rows sync one by one.
