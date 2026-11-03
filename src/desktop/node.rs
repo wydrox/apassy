@@ -134,19 +134,27 @@ impl DesktopApp {
         }
         self.node.synced_at = Some(Instant::now());
         ctx.request_repaint_after(SYNC_INTERVAL);
-        // A node that stopped by itself (the route went off, the tailnet name changed).
-        if self.node.running_for.is_some() && node.serves() != self.node.running_for {
-            self.node.running_for = None;
-        }
+        // What runs decides, not what the window started: the node can stop by itself
+        // (the route went off, the tailnet name changed), and "Add a cloud agent" starts
+        // it from Settings.
         let wanted = self.node_wanted();
-        if self.node.running_for.is_some() && self.node.running_for != wanted {
+        let serves = node.serves();
+        if serves.is_some() && serves != wanted {
             self.stop_node();
+        } else if serves.is_some() {
+            self.node.running_for = serves;
+            return;
+        } else {
+            self.node.running_for = None;
         }
         let Some(epoch) = wanted else {
             return;
         };
-        if self.node.running_for.is_some()
-            || self.node.failed.as_ref().is_some_and(|(failed, _)| *failed == epoch)
+        if self
+            .node
+            .failed
+            .as_ref()
+            .is_some_and(|(failed, _)| *failed == epoch)
         {
             return;
         }

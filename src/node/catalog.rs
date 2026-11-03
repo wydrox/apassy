@@ -175,11 +175,16 @@ pub fn build(
     let mut names = BTreeSet::new();
     for item_id in wanted {
         match eligible(vault, node, checked, item_id)? {
-            Ok(item) if names.insert(item.env_name.clone()) => {
-                ids.push(item_id);
-                mirror.items.push(item);
+            Ok(item) => {
+                if names.insert(item.env_name.clone()) {
+                    ids.push(item_id);
+                    mirror.items.push(item);
+                } else {
+                    mirror
+                        .skipped
+                        .push((item_id, "another item has its variable"));
+                }
             }
-            Ok(_) => mirror.skipped.push((item_id, "another item has its variable")),
             Err(why) => mirror.skipped.push((item_id, why)),
         }
     }
