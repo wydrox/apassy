@@ -236,4 +236,31 @@ fn an_iphone_joins_a_pinned_node_and_keeps_the_pin_in_its_entry() {
         list["vaults"][0]["status"]["node"]["node_words"],
         json!(pin.words())
     );
+
+    // The relay sync of an entry (`VaultEntry::relay_config`) connects only with the pin
+    // of `phone.json`: a list whose pin is another than the membership's is refused
+    // before any request reaches the node, and the right pin syncs again.
+    drop(phone);
+    let list_path = phone_dir.join("phone.json");
+    let right_list = fs::read_to_string(&list_path).unwrap();
+    let wrong_list = right_list.replace(&pin.text(), &other);
+    assert_ne!(wrong_list, right_list);
+    fs::write(&list_path, &wrong_list).unwrap();
+    let seen = relay.log().len();
+    let phone = core(&phone_dir);
+    call(&phone, json!({"op": "unlock", "passphrase": PASS}));
+    // The membership keeps the pin of the join: the other pin is `WrongVault`.
+    let refused = call(&phone, json!({"op": "sync"}))["status"].clone();
+    assert_eq!(refused["state"], "error", "{refused}");
+    assert_eq!(
+        refused["message"], "The vault does not match its sync settings.",
+        "{refused}"
+    );
+    assert_eq!(relay.log().len(), seen, "no request reached the node");
+    drop(phone);
+    fs::write(&list_path, &right_list).unwrap();
+    let phone = core(&phone_dir);
+    call(&phone, json!({"op": "unlock", "passphrase": PASS}));
+    let status = call(&phone, json!({"op": "sync"}))["status"].clone();
+    assert_eq!(status["state"], "ok", "{status}");
 }

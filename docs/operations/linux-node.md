@@ -40,7 +40,7 @@ Exit codes: 0 success; 1 a check failed (`doctor`) or the node did not start; 2 
 1. Install Tailscale and sign in: `curl -fsSL https://tailscale.com/install.sh | sh`, then `sudo tailscale up`.
 2. Run `apassy up`. It refuses with the next step when Tailscale is missing, not connected, or has no address on an interface of this machine.
 3. To start the node at boot without a login, turn on linger once: `sudo loginctl enable-linger $USER`. `apassy up` and `apassy doctor` say when it is off.
-4. In Apassy on the Mac, choose "Your own node" and scan the QR code that `apassy up` printed, or paste the link (unit L4). Run `apassy pair` for a new link: each link works once, for at most 10 minutes.
+4. In Apassy on the Mac, open Settings > Vault > Sync, pick "Apassy relay" for the vault, choose "Your own node", and paste the link that `apassy up` printed ([sync](sync.md) section 17.6). Run `apassy pair` for a new link: each link works once, for at most 10 minutes.
 
 Options of `apassy up`:
 
@@ -215,6 +215,6 @@ The link is a node pairing link of [node-pairing-v1](../contracts/node-pairing-v
 
 ## Not yet
 
-- The encrypted systemd credential (`LoadCredentialEncrypted=`, unit L2), the `.tar.gz` and `.deb` packages and `install.sh` (unit L3), the Mac's relay sheet for "Your own node" (unit L4).
+- The encrypted systemd credential (`LoadCredentialEncrypted=`, unit L2), the `.tar.gz` and `.deb` packages and `install.sh` (unit L3).
 - `apassy team` against this node's own tailnet origin: the team command line trusts public certificates only; a pinned client for it is a follow-up.
 - The device list with last contact in `status`.

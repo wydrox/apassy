@@ -58,10 +58,10 @@ use crate::desktop::{DesktopApp, Place};
 use crate::questions::device_link::{LinkedDeviceKind, shown_link_name, split_linked_device_name};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
-    DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin,
-    PendingLink, Receipt, RelayAdoptReport, RelayConfig, RelayDownload, RelayEnableReport,
-    RelayRefusal, RelaySync, RelayUrl, SyncError, SyncOutcome, VaultSync, device_name,
-    valid_team_code,
+    DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, LinkKind,
+    PIN_CHANGED_TEXT, PairedLink, PendingJoin, PendingLink, Receipt, RelayAdoptReport, RelayConfig,
+    RelayDownload, RelayEnableReport, RelayRefusal, RelaySync, RelayUrl, SyncError, SyncOutcome,
+    TlsTrust, VaultSync, device_name, valid_team_code,
 };
 use crate::vault::{TrustedDeviceKind, Vault, VaultErrorKind};
 use crate::vaults::{self, Registry, SyncLink, VaultEntry};
@@ -108,6 +108,10 @@ pub(crate) enum SetupMode {
     NewCopy,
     /// The vault is on the relay already: a link from another Mac, then a merge.
     Join,
+    /// "Your own node" (plan S2–S3 unit L4): a new team on the owner's Linux node with
+    /// the node pairing link of `apassy pair` (node-pairing-v1, `/pair#`): its origin,
+    /// its pin, its alternatives, and a one-use team code of kind `node`.
+    Node,
 }
 
 /// A relay call of the owner that runs on its own thread.
@@ -452,6 +456,9 @@ pub(crate) struct RelayUi {
     pub(crate) device_input: String,
     /// The pasted link from the other Mac.
     pub(crate) link_input: String,
+    /// The pasted node pairing link of "Your own node". Its team code works once: erased
+    /// after each try, when its sheet closes, and at a lock.
+    pub(crate) pair_input: String,
     add: Option<AddMac>,
     devices: Option<Devices>,
     turn_off: Option<TurnOff>,
@@ -676,6 +683,28 @@ pub(crate) fn codeless_copy_words() -> String {
     )
 }
 
+/// The relay address of the "Relay address" field: the hosted relay when it is empty.
+/// A typed address has system trust; a node comes only from its pairing link.
+fn typed_relay_url(typed: &str) -> Result<RelayUrl, String> {
+    let text = match typed.trim() {
+        "" => DEFAULT_RELAY_URL,
+        typed => typed,
+    };
+    RelayUrl::parse(text).map_err(|error| sentence(&error.to_string()))
+}
+
+/// What "Your own node" says when the pasted text is a device link of another Mac, not
+/// the pairing link of a node.
+pub(crate) const NOT_A_PAIRING_LINK: &str =
+    "This is a link from another Mac. Choose “Join from another Mac” and paste it there.";
+/// What "Join from another Mac" says for the pairing link of a node.
+pub(crate) const A_PAIRING_LINK: &str =
+    "This is the pairing link of a node. Choose “Your own node” and paste it there.";
+
+/// The words of "Your own node" (plan S2–S3 unit L4): where the link comes from, and what
+/// Apassy checks.
+pub(crate) const NODE_SETUP_WORDS: &str = "Your own node keeps the encrypted copy of this vault on your Linux machine, over your tailnet. On the node, run “apassy pair” and paste the link that it prints. The link works once, for 10 minutes. Apassy connects only to the node whose certificate matches the link, makes a key for this Mac, and keeps it in the vault.";
+
 /// The text of a failed relay call of an owner action.
 pub(super) fn call_error(error: SyncError) -> String {
     match error {
@@ -709,13 +738,21 @@ fn join_error(error: SyncError) -> String {
 
 /// The text of a relay sync that did not turn on. `folder`: the vault syncs with a
 /// folder, and that stays.
-fn enable_error(error: SyncError, vault: &str, folder: bool) -> String {
+fn enable_error(error: SyncError, vault: &str, folder: bool, node: bool) -> String {
     let stays = if folder {
         "Folder sync stays on."
     } else {
         "Sync stays off."
     };
     match error {
+        // A node: its pairing link, not an operator code (node-pairing-v1 section 6).
+        SyncError::Relay(RelayRefusal::InviteInvalid) if node => format!(
+            "The pairing link is wrong, used, or expired. Run “apassy pair” on the node for a new link. {stays}"
+        ),
+        SyncError::RelayUnreachable if node => format!(
+            "Your node is not reachable. Check that it runs (“apassy status”) and that this Mac is on the same tailnet, then try again. {stays}"
+        ),
+        SyncError::PinMismatch => format!("{PIN_CHANGED_TEXT} {stays}"),
         SyncError::Relay(RelayRefusal::InviteInvalid) => format!(
             "The team code is wrong, used, or expired. Ask the operator of the relay for a new code. {stays}"
         ),
@@ -1273,6 +1310,8 @@ impl DesktopApp {
             refused,
         } = turned_on;
         let name = name.as_str();
+        // A node: a pinned relay (node-pairing-v1), the owner's own.
+        let node = relay.config().trust != TlsTrust::System;
         // The merge with the passphrase of the copy ended.
         if self.sync.relay.join.as_ref().is_some_and(|join| {
             join.target.as_deref() == Some(id) && matches!(join.phase, Phase::Merging { .. })
@@ -1328,6 +1367,7 @@ impl DesktopApp {
                 self.relay_linked(id, relay, report.link, &report.outcome);
                 if !joined {
                     self.sync.relay.team_code.zeroize();
+                    self.sync.relay.pair_input.zeroize();
                 }
                 self.relay_close_sheet(id, |sheet| matches!(sheet, SyncSheet::RelaySetup { .. }));
                 self.set_ok(if typed {
@@ -1336,6 +1376,10 @@ impl DesktopApp {
                     )
                 } else if joined {
                     format!("“{name}” syncs through the Apassy relay and merged with the relay copy.")
+                } else if node {
+                    format!(
+                        "“{name}” syncs through your own node. To add another Mac or an iPhone, select “Add a device…”."
+                    )
                 } else {
                     format!(
                         "“{name}” syncs through the Apassy relay. To add another Mac or an iPhone, select “Add a device…”."
@@ -1350,7 +1394,10 @@ impl DesktopApp {
                 };
                 let text = match refused {
                     Some(refused) => format!("{refused} {stays}"),
-                    None => format!("{}{took}", enable_error(error, name, before.is_some())),
+                    None => format!(
+                        "{}{took}",
+                        enable_error(error, name, before.is_some(), node)
+                    ),
                 };
                 if joined {
                     self.sync.relay.join_error = Some(text.clone());
@@ -1421,6 +1468,7 @@ impl DesktopApp {
         let relay = &mut self.sync.relay;
         relay.team_code.zeroize();
         relay.link_input.zeroize();
+        relay.pair_input.zeroize();
         relay.join_key = None;
         // A lock ends the calls of "Add an iPhone…" at once.
         if let Some(client) = relay.add.take().and_then(|add| add.via) {
@@ -1525,13 +1573,7 @@ impl DesktopApp {
         device: &str,
     ) -> Result<(), String> {
         let entry = self.relay_target(id)?;
-        let url = match url.trim() {
-            "" => DEFAULT_RELAY_URL.to_owned(),
-            typed => RelayUrl::parse(typed)
-                .map_err(|error| sentence(&error.to_string()))?
-                .as_str()
-                .to_owned(),
-        };
+        let url = typed_relay_url(url)?;
         let team_code = Zeroizing::new(team_code.trim().to_owned());
         if !valid_team_code(&team_code) {
             return Err(
@@ -1539,6 +1581,61 @@ impl DesktopApp {
                     .to_owned(),
             );
         }
+        let device = match device.trim() {
+            "" => device_name(),
+            typed => typed.to_owned(),
+        };
+        if self.relay_changing(id) {
+            return Ok(());
+        }
+        let relay = self.relay_staged(&entry, &url);
+        let before = entry.sync.clone();
+        let slot = self.relay_slot();
+        let name = entry.name;
+        let job = relay.clone();
+        self.relay_spawn_with(id, Job::TurnOn, Some(relay.clone()), move || {
+            let result =
+                relay.create_team_shared(&slot, same_file(&relay), &name, &team_code, &device);
+            Reply::TurnedOn(Box::new(TurnedOn {
+                relay: job,
+                name,
+                joined: false,
+                before,
+                result,
+                device: None,
+                typed: false,
+                rekeyed: false,
+                refused: None,
+            }))
+        });
+        Ok(())
+    }
+
+    /// Turn on relay sync for the open, unlocked vault `id` on the owner's own node ("Your
+    /// own node", plan S2–S3 unit L4): `link` is the node pairing link of `apassy pair`
+    /// (node-pairing-v1, `/pair#`). Its origin is the relay address, its pin and
+    /// alternatives the only trust of the new team, and its one-use team code of kind
+    /// `node` makes the team (`POST /v1/teams`, after the pin check). The sync link of the
+    /// vault list and the membership keep the pin. A link that the grammar refuses, or a
+    /// device link, comes back at once and makes no request; as [`Self::relay_enable_new`]
+    /// otherwise.
+    pub(crate) fn relay_enable_node(
+        &mut self,
+        id: &str,
+        link: &str,
+        device: &str,
+    ) -> Result<(), String> {
+        let entry = self.relay_target(id)?;
+        let paired = PairedLink::parse(link).map_err(|refusal| refusal.message().to_owned())?;
+        if paired.kind != LinkKind::Pair {
+            return Err(NOT_A_PAIRING_LINK.to_owned());
+        }
+        let url = paired.url().map_err(|error| sentence(&error.to_string()))?;
+        if url.pin().is_none() {
+            // The grammar gives a pair link a pin always; never a node without one.
+            return Err(crate::sync::LINK_INVALID_TEXT.to_owned());
+        }
+        let team_code = paired.code;
         let device = match device.trim() {
             "" => device_name(),
             typed => typed.to_owned(),
@@ -1580,13 +1677,7 @@ impl DesktopApp {
         device: &str,
     ) -> Result<(), String> {
         let entry = self.relay_target(id)?;
-        let url = match url.trim() {
-            "" => DEFAULT_RELAY_URL.to_owned(),
-            typed => RelayUrl::parse(typed)
-                .map_err(|error| sentence(&error.to_string()))?
-                .as_str()
-                .to_owned(),
-        };
+        let url = typed_relay_url(url)?;
         let device = match device.trim() {
             "" => device_name(),
             typed => typed.to_owned(),
@@ -1626,14 +1717,19 @@ impl DesktopApp {
     }
 
     /// The relay sync of the vault `entry` that turns on, with its state under a name of
-    /// its own ([`STAGED`]) until the relay answered. A state of an earlier try goes.
-    fn relay_staged(&self, entry: &VaultEntry, url: &str) -> RelaySync {
-        let relay = RelaySync::new(RelayConfig::in_data_dir(
-            &self.vault_list.data_dir,
-            &entry.path,
-            url,
-            &format!("{}{STAGED}", entry.id),
-        ));
+    /// its own ([`STAGED`]) until the relay answered. A state of an earlier try goes. The
+    /// trust of `url` goes with it: a node (a pinned origin, node-pairing-v1) connects
+    /// only with its pin and alternatives, a hosted relay with system trust.
+    fn relay_staged(&self, entry: &VaultEntry, url: &RelayUrl) -> RelaySync {
+        let relay = RelaySync::new(
+            RelayConfig::in_data_dir(
+                &self.vault_list.data_dir,
+                &entry.path,
+                url.as_str(),
+                &format!("{}{STAGED}", entry.id),
+            )
+            .with_url_trust(url),
+        );
         let _ = relay.disable(None);
         relay
     }
@@ -1757,7 +1853,8 @@ impl DesktopApp {
                     .to_owned(),
             );
         }
-        let relay = self.relay_staged(&entry, url);
+        // The address of the confirmed device, with the pin of a pinned link.
+        let relay = self.relay_staged(&entry, joined.member().url());
         let before = entry.sync.clone();
         let slot = self.relay_slot();
         let name = entry.name;
@@ -2637,6 +2734,10 @@ impl DesktopApp {
             "" => DEFAULT_RELAY_URL.to_owned(),
             typed => typed.to_owned(),
         };
+        if PairedLink::parse(&text).is_ok_and(|paired| paired.kind == LinkKind::Pair) {
+            relay.join_error = Some(A_PAIRING_LINK.to_owned());
+            return;
+        }
         let (url, code) = match PendingJoin::parse_link(&text, &url_field) {
             Ok((url, code)) => (url.as_str().to_owned(), code),
             Err(error) => {
@@ -2979,12 +3080,6 @@ impl DesktopApp {
                 return;
             }
         };
-        let relay = RelaySync::new(RelayConfig::in_data_dir(
-            &self.vault_list.data_dir,
-            &path,
-            &join.url,
-            &id,
-        ));
         let Join {
             target,
             url,
@@ -2995,6 +3090,12 @@ impl DesktopApp {
         let Phase::Ready { joined, download } = phase else {
             return;
         };
+        // The address of the confirmed device: a pinned link keeps its pin and
+        // alternatives with the sync of the new vault (node-pairing-v1 section 9).
+        let relay = RelaySync::new(
+            RelayConfig::in_data_dir(&self.vault_list.data_dir, &path, &url, &id)
+                .with_url_trust(joined.member().url()),
+        );
         let passphrase = passphrase.into_zeroizing();
         let repaint = ctx.cloned().or_else(|| self.sync.relay.repaint.clone());
         let task = Task::spawn(repaint, move || {
@@ -3297,6 +3398,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                 &[
                     (SetupMode::NewCopy, "New relay copy"),
                     (SetupMode::Join, "Join from another Mac"),
+                    (SetupMode::Node, "Your own node"),
                 ],
             );
             ui.add_space(12.0);
@@ -3376,6 +3478,27 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                     });
                 });
             }
+            (SetupMode::Node, None) => {
+                kit::section(ui, None, Some(NODE_SETUP_WORDS), |s| {
+                    let link = s.field("Pairing link", |ui| {
+                        kit::mono_input(
+                            ui,
+                            &mut app.sync.relay.pair_input,
+                            "sync-relay-pair",
+                            "https://…/pair#apassy_tcd_…",
+                        )
+                    });
+                    kit::claim_start_focus(&mut app.ui.focus_start_field, &link);
+                    s.field("Name of this Mac", |ui| {
+                        kit::text_input(
+                            ui,
+                            &mut app.sync.relay.device_input,
+                            "sync-relay-device",
+                            "MacBook Pro",
+                        )
+                    });
+                });
+            }
             (SetupMode::Join, None) => {
                 kit::section(
                     ui,
@@ -3410,7 +3533,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                         merge |= kit::button(ui, "Merge", Style::Prominent).clicked();
                     }
                     (_, Some(_)) => {}
-                    (SetupMode::NewCopy, None) => {
+                    (SetupMode::NewCopy | SetupMode::Node, None) => {
                         turn_on |= kit::button(ui, "Turn on", Style::Prominent).clicked();
                     }
                     (SetupMode::Join, None) => {
@@ -3424,7 +3547,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
     // Return in a field, or with no focus, does the default action of the sheet.
     if joining.is_none() && !busy && super::super::save_pressed(app, ctx) {
         match app.sync.relay.mode {
-            SetupMode::NewCopy => turn_on = true,
+            SetupMode::NewCopy | SetupMode::Node => turn_on = true,
             SetupMode::Join => send = true,
         }
     }
@@ -3436,6 +3559,14 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
         forget_secret_field(ctx, super::SYNC_PASSPHRASE_FIELD);
         // The answer of the relay closes the sheet, or asks again.
         app.relay_join_passphrase(passphrase.into_zeroizing());
+    } else if turn_on && app.sync.relay.mode == SetupMode::Node {
+        // The team code of the link works once: the field forgets it after each try.
+        let link = Zeroizing::new(std::mem::take(&mut app.sync.relay.pair_input));
+        let device = app.sync.relay.device_input.clone();
+        // The answer of the node closes the sheet ([`Job::TurnOn`]).
+        if let Err(text) = app.relay_enable_node(&entry.id, &link, &device) {
+            app.set_err(text);
+        }
     } else if turn_on && !needs_team_code(&app.sync.relay.url_input, app.sync.relay.with_code) {
         let (url, device) = (
             app.sync.relay.url_input.clone(),
