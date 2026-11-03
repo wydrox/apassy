@@ -33,7 +33,7 @@ use crate::secret::SecretString;
 use crate::server::Core;
 use crate::server::audit::{Audit, RELAY_ACTOR, member_actor};
 use crate::server::auth::MemberAuth;
-use crate::server::store::{Store, db, to_i, to_u};
+use crate::server::store::{Store, db, to_i};
 
 /// The header that carries the push secret to the Worker.
 pub const PUSH_HEADER: &str = "X-Apassy-Push";
