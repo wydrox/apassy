@@ -58,10 +58,8 @@ const MAX_PATH_BYTES: usize = 4096;
 const LOGGED_REQUEST_BYTES: usize = 240;
 const LOGGED_AGENT_BYTES: usize = 120;
 /// Open a transcript without a wait on a FIFO.
-#[cfg(target_os = "macos")]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(not(target_os = "macos"))]
-const O_NONBLOCK: i32 = 0o4000;
+/// The value is the target's own (rustix), not a written number.
+const O_NONBLOCK: i32 = rustix::fs::OFlags::NONBLOCK.bits() as i32;
 
 /// Rule flag: the hook prompt is not the newest user message in the host transcript.
 pub const FLAG_UNVERIFIED: &str = "hook_unverified";
