@@ -21,8 +21,10 @@
 
 mod ca;
 mod http1;
+mod public_addr;
 mod swap;
 
+pub use public_addr::is_public_ip;
 pub use swap::mint_placeholder;
 
 use std::collections::HashMap;
