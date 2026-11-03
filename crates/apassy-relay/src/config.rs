@@ -310,6 +310,12 @@ pub struct RelayConfig {
     /// 429 `rate_limited` until the window ends (docs/SPEC.md section 30.5). On for an
     /// embedded node; off on the hosted relay, whose edge limits callers.
     pub auth_limiter: bool,
+    /// The operator socket `admin.sock` is served (`server::operator`, docs/SPEC.md
+    /// section 22). On for the hosted relay. Off for an embedded node: its data
+    /// directory belongs to the Mac user, and the coding agents of that Mac run as the
+    /// same user, so a socket of mode 0600 would let them suspend or delete the personal
+    /// team or make team codes (review 0.5.16, docs/SPEC.md section 30.4).
+    pub operator_socket: bool,
     /// The MCP authorization flow of an embedded node (OAuth 2.1, docs/SPEC.md section
     /// 31): its metadata, `/oauth/...`, and `WWW-Authenticate` on a 401 of `/mcp`. `None`
     /// on the hosted relay: every OAuth path is 404 there.
@@ -424,7 +430,7 @@ impl RelayConfig {
     /// shared team vaults on, Connect off, sessions of `EMBEDDED_SESSION_TTL_SECS`, runs
     /// that wait `EMBEDDED_APPROVAL_TIMEOUT_SECS`, the failed-auth limiter on, the MCP
     /// authorization flow on (`OAuthConfig::new` with `EMBEDDED_MAC_NAME`, "your Mac", also
-    /// for the app), and the operator socket in the data directory.
+    /// for the app), and no operator socket (`operator_socket` false).
     pub fn embedded(options: EmbeddedOptions) -> RelayResult<Self> {
         let public_url = checked_public_url(&options.public_url)?;
         if options.master_key.len() < MIN_KEY_BYTES {
@@ -452,6 +458,7 @@ impl RelayConfig {
             connect_teams_per_day: 0,
             connect_teams_max: 0,
             auth_limiter: true,
+            operator_socket: false,
             oauth: Some(OAuthConfig::new(EMBEDDED_MAC_NAME)),
         };
         config.check_listeners()?;
@@ -572,6 +579,7 @@ impl RelayConfig {
             connect_teams_per_day,
             connect_teams_max,
             auth_limiter: false,
+            operator_socket: true,
             oauth: None,
         })
     }
@@ -738,6 +746,7 @@ mod tests {
         assert_eq!(config.edge.secret().map(SecretString::expose), Some(EDGE));
         assert!(config.public_listen.is_none());
         assert!(!config.auth_limiter);
+        assert!(config.operator_socket);
         assert!(config.oauth.is_none());
         config.check_listeners().unwrap();
         assert_eq!(config.connect_teams_per_day, DEFAULT_CONNECT_TEAMS_PER_DAY);
@@ -987,6 +996,8 @@ mod tests {
             (0, 0)
         );
         assert!(config.auth_limiter);
+        // No operator socket: the agents of the Mac run as its user (review 0.5.16).
+        assert!(!config.operator_socket);
         let oauth = config.oauth.as_ref().expect("an embedded node has OAuth");
         assert_eq!(oauth.mac_name, EMBEDDED_MAC_NAME);
         // The public page never names the computer (security review finding 5).

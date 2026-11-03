@@ -1379,8 +1379,10 @@ immutable audit archives and the master key. No version bump is part of this pat
 An Apassy Mac runs its own node: this relay inside the app, with no edge, listeners on
 the loopback only, and a public listener that Tailscale Funnel reaches (docs/SPEC.md
 section 30). It is configured in code (`RelayConfig::embedded`), not from the
-environment, and it needs no operator. Its operator socket (`<node dir>/admin.sock`)
-serves the usual `admin` commands for diagnostics. The hosted relay does not change:
+environment, and it needs no operator. It serves no operator socket: the node
+directory belongs to the Mac user, whose coding agents run as the same user, so
+`admin` commands (`suspend`, `delete`, `team-code`) are not available there (review
+0.5.16, SPEC 30.1). The hosted relay does not change:
 `APASSY_RELAY_EDGE_SECRET` stays required, there is no public listener, and the
 failed-auth limiter is off.
 

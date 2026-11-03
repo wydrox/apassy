@@ -598,9 +598,9 @@ impl Relay {
     }
 
     /// Opens the directory and the active teams, binds `config.listen` (and
-    /// `config.public_listen`), opens the operator socket, and serves in background
-    /// threads. A relay without the edge must listen on the loopback only
-    /// (`RelayConfig::check_listeners`).
+    /// `config.public_listen`), opens the operator socket when `config.operator_socket`
+    /// is on (never on an embedded node), and serves in background threads. A relay
+    /// without the edge must listen on the loopback only (`RelayConfig::check_listeners`).
     pub fn start(config: RelayConfig) -> RelayResult<RunningRelay> {
         config.check_listeners()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -623,7 +623,13 @@ impl Relay {
         };
         let (server, addr) = bind(hub.config.listen)?;
         let public = hub.config.public_listen.map(bind).transpose()?;
-        let operator = operator::listen(hub.clone(), stop.clone())?;
+        let operator = if hub.config.operator_socket {
+            Some(operator::listen(hub.clone(), stop.clone())?)
+        } else {
+            // A socket that an older version left answers nothing: remove it.
+            let _ = operator::remove_stale(&hub.config.admin_socket_path());
+            None
+        };
         let serving = http::Serving {
             hub: hub.clone(),
             proxy: proxy.clone(),
@@ -639,7 +645,9 @@ impl Relay {
             Ok(handle) => handle,
             Err(_) => {
                 stop.store(true, Ordering::Relaxed);
-                let _ = operator.join();
+                if let Some(operator) = operator {
+                    let _ = operator.join();
+                }
                 hub.close_all();
                 return Err(RelayError::internal("The accept thread cannot start."));
             }
@@ -672,7 +680,9 @@ impl Relay {
                 Err(_) => {
                     stop.store(true, Ordering::Relaxed);
                     let _ = handle.join();
-                    let _ = operator.join();
+                    if let Some(operator) = operator {
+                        let _ = operator.join();
+                    }
                     hub.close_all();
                     return Err(RelayError::internal(
                         "The accept thread of the public listener cannot start.",
@@ -687,7 +697,7 @@ impl Relay {
             stop,
             handle: Some(handle),
             public_handle,
-            operator: Some(operator),
+            operator,
         })
     }
 }

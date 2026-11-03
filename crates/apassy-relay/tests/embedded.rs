@@ -942,3 +942,46 @@ fn the_connect_page_of_a_node_of_the_app_says_your_mac_not_the_computer_name() {
     );
     node.stop();
 }
+
+/// The agents of a Mac run as its user, and `<app data>/node` belongs to that user: an
+/// embedded node serves no operator socket, so no local program can suspend or delete
+/// the personal team or make a team code through it (review 0.5.16). A socket that an
+/// older version left is removed at the start.
+#[test]
+fn an_embedded_node_serves_no_operator_socket() {
+    use apassy_relay::server::operator::{self, Command};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = EmbeddedRelay::default();
+    let node = backend.start(node_config(dir.path())).unwrap();
+    let team = node.create_team("Personal").unwrap();
+    let socket = dir.path().join("node").join("admin.sock");
+    assert!(!socket.exists(), "no operator socket");
+    let delete: Command =
+        serde_json::from_value(json!({"command": "delete", "team": team.0.as_str()}))
+            .expect("command");
+    let suspend: Command =
+        serde_json::from_value(json!({"command": "suspend", "team": team.0.as_str()}))
+            .expect("command");
+    for command in [
+        Command::TeamCode { hours: 1 },
+        delete,
+        suspend,
+        Command::Teams,
+    ] {
+        assert!(
+            operator::send(&socket, &command).is_err(),
+            "{command:?} is unavailable"
+        );
+    }
+    assert!(node.has_team(&team), "the team stays");
+    node.stop();
+
+    // A socket file of an older version: the next start removes it.
+    drop(std::os::unix::net::UnixListener::bind(&socket).expect("stale socket"));
+    assert!(socket.exists());
+    let node = backend.start(node_config(dir.path())).unwrap();
+    assert!(!socket.exists(), "the stale socket is gone");
+    assert!(operator::send(&socket, &Command::TeamCode { hours: 1 }).is_err());
+    assert!(node.has_team(&team));
+    node.stop();
+}
