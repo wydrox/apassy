@@ -326,6 +326,9 @@ pub(crate) struct UiState {
     /// owner picked a kind with the keyboard.
     #[cfg(feature = "vault")]
     pub(crate) focus_form_name: bool,
+    /// "Add website…" opened the edit sheet: its Website field takes the focus.
+    #[cfg(feature = "vault")]
+    pub(crate) focus_form_website: bool,
     #[cfg(feature = "vault")]
     pub(crate) discard_item_changes: bool,
     #[cfg(feature = "vault")]
@@ -580,6 +583,7 @@ pub(super) fn native_menu_context(
             items::Filter::All => 0,
             items::Filter::Conflicts => 1,
             items::Filter::Archived => 2,
+            items::Filter::Duplicates => 3,
         },
         search_all: app.ui.search_all,
         sheet: app.ui.sheet.clone(),
@@ -879,7 +883,8 @@ fn draw_toast(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
-/// "project · service", or nothing.
+/// "project · service", or nothing. The demo list uses it.
+#[cfg(not(feature = "vault"))]
 pub(super) fn meta_line(project: &str, service: &str) -> String {
     match (project.is_empty(), service.is_empty()) {
         (true, true) => String::new(),

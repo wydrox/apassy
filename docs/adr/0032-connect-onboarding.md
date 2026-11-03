@@ -2,6 +2,7 @@
 
 Date: 2026-11-01.
 Status: ACCEPTED for implementation by the owner ("Build it now"). Local implementation and synthetic verification; real-device cellular approval and APNs delivery remain acceptance checks.
+Plans (2026-11-03): this free questions-only path ends at ADR 0037 stage 7 (D14). The "Free and Personal" names below are from the old plan split; see [plans](../product/plans.md).
 
 Free and Personal vaults can receive iPhone approvals and push without an operator code, an account, Stripe, or paid relay sync. The Mac's Settings > Devices offers **Get approvals on your iPhone**. Connect creates a questions-only membership with signed `POST /v1/connect`. Existing operator-code creation and paid relay-sync membership paths remain supported.
 

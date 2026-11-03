@@ -1250,6 +1250,11 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
         Mark::Agent(name) => kit::paint_avatar(ui, tile_rect, name),
         Mark::Tile(tile) => kit::paint_tile(ui, tile_rect, tile),
     }
+    let round = match row.mark {
+        Mark::Agent(_) => true,
+        Mark::Tile(tile) => tile.round,
+    };
+    kit::paint_tile_ring(painter, tile_rect, round, row.selected);
     let (title_color, sub_color, time_color, dot) = if row.selected {
         let white = egui::Color32::WHITE;
         (white, egui::Color32::from_white_alpha(210), white, white)
@@ -2760,9 +2765,9 @@ pub(super) fn apply_request(
                 Ok(item) => {
                     erase_paste(app, ctx);
                     app.set_ok(format!(
-                        "Saved {} in {} for {}. The bouncer decides each use.",
+                        "Saved {}{} for {}. The bouncer decides each use.",
                         item.title,
-                        tree.path_label(folder.as_deref()),
+                        tree.in_folder(folder.as_deref()),
                         request.agent_name
                     ));
                 }

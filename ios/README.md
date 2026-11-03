@@ -93,7 +93,7 @@ The unlocked app has three tabs: **Vault**, **Requests**, and **Search**. Vault 
 
 | Part | What it does |
 | --- | --- |
-| Welcome and join | **iCloud** opens the personal vault file from iCloud Drive with its passphrase. **Join a team** uses the relay QR code from "Add a device…" on the Mac. Both offer Face ID unlock. "Only approve agent runs" goes to companion pairing. |
+| Welcome and join | **iCloud** opens the personal vault file from iCloud Drive with its passphrase. **From your Mac · Apassy relay** uses the relay QR code from "Add a device…" on the Mac. Both offer Face ID unlock. "Only approve agent runs" goes to companion pairing. |
 | Lock | The passphrase, or Face ID when the passphrase is stored behind it. A new Face ID enrollment deletes it, and the screen says so. "Lock after": immediately (the default), 1, 5, 15 minutes, or 1 hour. |
 | Vault tab | The nonarchived credential list, grouped by folder, with category/tag filters and sort. A sync problem and Watchtower issues remain above it; healthy sync and an empty Watchtower do not precede the list. Folders and tools in the toolbar opens folders, All credentials, Favorites, Archive, Watchtower, and Password generator. The gear opens Settings; New Credential adds a credential. An empty vault offers New Credential directly. |
 | All credentials | Every credential that is not archived, grouped by folder as on the Mac (A to Z inside), with filters by kind and tag and a sort. |

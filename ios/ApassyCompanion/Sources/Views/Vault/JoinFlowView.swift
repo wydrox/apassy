@@ -35,7 +35,7 @@ struct JoinFlowView: View {
         PairingScreen {
             VStack(spacing: 20) {
                 PairingHero(
-                    symbol: "macbook.and.iphone", title: "Join a team",
+                    symbol: "macbook.and.iphone", title: "Join from your Mac",
                     message:
                         "On your Mac, open Apassy > Settings > Vault > Sync, and select “Add a device…”. The Mac shows a QR code.")
                 if let note = model.scanNote {
