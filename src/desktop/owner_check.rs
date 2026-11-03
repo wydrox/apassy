@@ -2386,9 +2386,11 @@ impl DesktopApp {
         }
     }
 
-    /// Mark the environment of an item as the answer of the owner: only the environment
-    /// and its source "owner" change (ADR 0025 §4). The project of a pasted credential
-    /// stays empty, and the other values and sources stay.
+    /// Mark the environment of an item as the answer of the owner: the environment and
+    /// its source "owner" change (ADR 0025 §4). The project of a pasted credential
+    /// stays empty, and the other sources stay. A risk or a reversibility that is only a
+    /// default follows the environment ([`crate::vault::Vault::set_declaration_environment`],
+    /// ADR 0031 of 2026-11-03); the other values stay.
     fn complete_set_environment(
         &mut self,
         item_id: u64,

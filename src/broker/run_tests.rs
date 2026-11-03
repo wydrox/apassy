@@ -286,3 +286,234 @@ fn the_decision_meta_names_the_request_kind() {
     );
     assert_eq!(super::decision_meta(false, None), DecisionMeta::default());
 }
+
+/// ADR 0031, 2026-11-03: "Allow as dev" means development. An unlabeled credential asks
+/// as production. After the label (the broker saves it with
+/// `Vault::set_declaration_environment`), a writing command that matches the task goes
+/// to the bouncer brain with the development thresholds and runs without a question. A
+/// provider-strong or owner-set high risk keeps asking, and "Allow as prod" keeps the
+/// production write/admin question.
+#[test]
+fn a_development_label_is_judged_with_the_development_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault =
+        Vault::create(&dir.path().join("vault.db"), "synthetic-dev-label-pass").unwrap();
+    vault.unlock("synthetic-dev-label-pass").unwrap();
+    let item = vault
+        .add(ItemDraft {
+            title: "Synthetic custom token".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![Field {
+                name: "token".into(),
+                value: SecretValue::new("FAKE-dev-label-only".into()),
+                secret: true,
+            }],
+        })
+        .unwrap();
+    vault
+        .set_env_binding(item.id, "SYNTH_DEV_TOKEN", "token")
+        .unwrap();
+    let all = |source| DeclarationSources {
+        environment: source,
+        risk: source,
+        scope: source,
+        reversibility: source,
+    };
+    // A value without a signal: production, high risk, admin, irreversible, and every
+    // value only a default. (`save_declaration` needs a project; this one is the run's.)
+    let unlabeled = Declaration {
+        project: "project".to_owned(),
+        environment: providers::DEFAULT_ENVIRONMENT,
+        risk: providers::DEFAULT_RISK,
+        scope: providers::DEFAULT_SCOPE,
+        reversibility: providers::DEFAULT_REVERSIBILITY,
+    };
+    let store = |vault: &mut Vault, declaration: &Declaration, sources: DeclarationSources| {
+        vault
+            .save_declaration(item.id, declaration, None, None)
+            .unwrap();
+        vault.set_declaration_sources(item.id, &sources).unwrap();
+    };
+    store(&mut vault, &unlabeled, all(DeclarationSource::Default));
+    let (agent, _) = vault.register_agent("Synthetic developer").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    let items = [item.id];
+    // `node script.js`: project code, not known safe, and it writes.
+    let command = vec!["node".to_owned(), "script.js".into()];
+    let request = RunRequest {
+        access_request_id: None,
+        codes: Default::default(),
+        items: &items,
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Seed the development database.",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Seed the development database."),
+        host_session: None,
+    };
+    let analysis = Analysis::default();
+    let route_of = |vault: &Vault, checked: &Checked| {
+        let facts = RunFacts {
+            analysis: &analysis,
+            has_user_request: true,
+            pattern: false,
+            action: ActionKind::Change,
+            hosts: &[],
+        };
+        let known = known_state(vault, &items, checked, ActionKind::Change, None, &[]);
+        let mut ready = Readiness::new(|| Ok(()));
+        route(checked, &facts, &known, &mut ready)
+    };
+    let verdict = |task_match: f64| BouncerVerdict::Scored {
+        facts: [
+            ("task_match", task_match),
+            ("writes", 0.7),
+            ("leak", 0.05),
+            ("destroy", 0.05),
+        ]
+        .into_iter()
+        .map(|(name, probability)| crate::broker::bouncer::Fact {
+            name: name.to_owned(),
+            probability,
+        })
+        .collect(),
+        model: None,
+    };
+    // The model step as `run` calls it: the judged declarations and the weak source.
+    let decide = |checked: &Checked, task_match: f64| {
+        let context = DecisionContext {
+            analysis: &analysis,
+            declarations: &checked.declarations,
+            has_user_request: true,
+        };
+        let default_source = checked.facts.iter().any(|facts| facts.weak_source);
+        decide_routed(
+            &verdict(task_match),
+            &context,
+            &Learned::default(),
+            default_source,
+        )
+    };
+
+    // Unlabeled: production by default, and write/admin scope asks before the brain.
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert!(checked.facts[0].unconfirmed);
+    assert!(matches!(
+        route_of(&vault, &checked),
+        Route::Ask(_, ReasonKind::Production)
+    ));
+
+    // "Allow as dev".
+    vault
+        .set_declaration_environment(item.id, Environment::Development)
+        .unwrap();
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert_eq!(route_of(&vault, &checked), Route::Model);
+    assert!(!checked.facts[0].weak_source);
+    let judged = checked.declarations[0].clone().unwrap();
+    assert_eq!(judged.risk, providers::DEVELOPMENT_RISK);
+    assert_eq!(judged.reversibility, providers::DEVELOPMENT_REVERSIBILITY);
+    assert!(!judged.is_sensitive());
+    let decision = decide(&checked, 0.9);
+    assert!(!decision.ask_owner, "{}", decision.note);
+    assert!(
+        decision.note.contains("normal credential"),
+        "{}",
+        decision.note
+    );
+    // The development thresholds: the task match level of ADR 0031 (75%), not the
+    // 80% of a default source. A command that does not fit the task still asks.
+    assert!(!decide(&checked, 0.77).ask_owner);
+    let unmatched = decide(&checked, 0.5);
+    assert!(unmatched.ask_owner);
+    assert_eq!(unmatched.reason, ReasonKind::LowTaskMatch);
+
+    // A label from before 0.5.16 kept the stored defaults; the bouncer judges it the
+    // same, and the authorization keeps the stored values for the recheck.
+    let earlier = Declaration {
+        environment: Environment::Development,
+        ..unlabeled.clone()
+    };
+    let labeled = DeclarationSources {
+        environment: DeclarationSource::Owner,
+        ..all(DeclarationSource::Default)
+    };
+    store(&mut vault, &earlier, labeled);
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert_eq!(
+        checked.authorization[0].declaration.as_ref(),
+        Some(&earlier)
+    );
+    assert_eq!(checked.declarations[0].as_ref(), Some(&judged));
+    assert!(!decide(&checked, 0.9).ask_owner);
+
+    // A high risk and irreversibility from a strong provider signal stay: the writing
+    // command needs a certain read and asks.
+    store(
+        &mut vault,
+        &earlier,
+        DeclarationSources {
+            risk: DeclarationSource::Signal,
+            reversibility: DeclarationSource::Signal,
+            ..labeled
+        },
+    );
+    vault
+        .set_declaration_environment(item.id, Environment::Development)
+        .unwrap();
+    assert_eq!(vault.declaration(item.id).unwrap().as_ref(), Some(&earlier));
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert_eq!(checked.declarations[0].as_ref(), Some(&earlier));
+    let strong = decide(&checked, 0.9);
+    assert!(strong.ask_owner);
+    assert_eq!(strong.reason, ReasonKind::ModelUnsure);
+    assert!(strong.note.contains("writes"), "{}", strong.note);
+
+    // A risk that the owner set is never lowered.
+    store(&mut vault, &earlier, DeclarationSources::default());
+    vault
+        .set_declaration_environment(item.id, Environment::Development)
+        .unwrap();
+    assert_eq!(
+        vault.declaration(item.id).unwrap().unwrap().risk,
+        RiskLevel::High
+    );
+    let checked = check(&vault, &agent, &request).unwrap();
+    assert_eq!(
+        checked.declarations[0].as_ref().unwrap().risk,
+        RiskLevel::High
+    );
+    assert!(decide(&checked, 0.9).ask_owner);
+
+    // "Allow as prod" on an unlabeled credential, and a development label changed to
+    // production: production write/admin asks before the brain, with the careful
+    // defaults again.
+    for start in [Environment::Production, Environment::Development] {
+        store(&mut vault, &unlabeled, all(DeclarationSource::Default));
+        vault.set_declaration_environment(item.id, start).unwrap();
+        vault
+            .set_declaration_environment(item.id, Environment::Production)
+            .unwrap();
+        let checked = check(&vault, &agent, &request).unwrap();
+        let declaration = checked.declarations[0].clone().unwrap();
+        assert_eq!(declaration.risk, RiskLevel::High, "{start:?}");
+        assert_eq!(
+            declaration.reversibility,
+            Reversibility::Irreversible,
+            "{start:?}"
+        );
+        assert_eq!(declaration.scope, Scope::Admin, "{start:?}");
+        assert!(checked.facts[0].production, "{start:?}");
+        assert!(
+            matches!(
+                route_of(&vault, &checked),
+                Route::Ask(_, ReasonKind::Production)
+            ),
+            "{start:?}"
+        );
+    }
+}

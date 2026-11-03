@@ -1157,6 +1157,16 @@ pub const DEFAULT_RISK: RiskLevel = RiskLevel::High;
 pub const DEFAULT_SCOPE: Scope = Scope::Admin;
 pub const DEFAULT_REVERSIBILITY: Reversibility = Reversibility::Irreversible;
 
+/// The defaults of a credential that the owner labeled development or local (ADR 0031,
+/// 2026-11-03): a risk or a reversibility without an owner value or a strong signal is
+/// at most these. Every development profile of the catalog is reversible (Stripe
+/// `sk_test_`, a local host). Only a provider that keeps test data apart gives low risk
+/// (Stripe test mode); a credential without such a signal gets medium, the risk of an
+/// ordinary project key (`openai/project-key`, `anthropic/api-key`). Neither value makes
+/// a credential sensitive ([`super::Declaration::is_sensitive`]).
+pub const DEVELOPMENT_RISK: RiskLevel = RiskLevel::Medium;
+pub const DEVELOPMENT_REVERSIBILITY: Reversibility = Reversibility::Reversible;
+
 impl Suggestion {
     /// No provider and no field.
     pub fn is_empty(&self) -> bool {

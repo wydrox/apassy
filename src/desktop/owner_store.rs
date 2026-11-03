@@ -323,6 +323,25 @@ impl DeclarationForm {
         }
     }
 
+    /// The environment that the owner chose in the Environment row for a credential
+    /// without a declaration. A risk or a reversibility without a suggestion shows the
+    /// default of the owner's label (ADR 0031, 2026-11-03): development or local gives
+    /// at most the development default, as "Allow as dev" does. A suggested value stays,
+    /// and the owner sees and saves every value in the sheet.
+    pub fn choose_environment(&mut self, environment: Environment) {
+        self.environment = environment;
+        if environment > Environment::Development {
+            return;
+        }
+        let suggestion = self.suggestion.as_ref();
+        if suggestion.is_none_or(|suggestion| suggestion.risk.is_none()) {
+            self.risk = self.risk.min(providers::DEVELOPMENT_RISK);
+        }
+        if suggestion.is_none_or(|suggestion| suggestion.reversibility.is_none()) {
+            self.reversibility = self.reversibility.min(providers::DEVELOPMENT_REVERSIBILITY);
+        }
+    }
+
     pub fn to_declaration(&self) -> Declaration {
         Declaration {
             project: self.project.trim().to_owned(),
@@ -2926,4 +2945,49 @@ pub(crate) fn smoke_roundtrip() -> Result<(), String> {
         .delete(found[0].id, found[0].revision)
         .map_err(|err| err.message)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0031, 2026-11-03: development chosen for a credential without a declaration
+    /// shows the development defaults for the values without a suggestion; staging and
+    /// production keep the careful defaults; a suggested value stays.
+    #[test]
+    fn choosing_development_shows_the_development_defaults() {
+        let mut form = DeclarationForm::default();
+        form.choose_environment(Environment::Development);
+        assert_eq!(form.environment, Environment::Development);
+        assert_eq!(form.risk, providers::DEVELOPMENT_RISK);
+        assert_eq!(form.reversibility, providers::DEVELOPMENT_REVERSIBILITY);
+        assert_eq!(form.scope, providers::DEFAULT_SCOPE);
+        for careful in [Environment::Staging, Environment::Production] {
+            let mut form = DeclarationForm::default();
+            form.choose_environment(careful);
+            assert_eq!(form.risk, providers::DEFAULT_RISK, "{careful:?}");
+            assert_eq!(
+                form.reversibility,
+                providers::DEFAULT_REVERSIBILITY,
+                "{careful:?}"
+            );
+        }
+        let mut suggested = DeclarationForm {
+            suggestion: Some(Suggestion {
+                risk: Some(providers::Suggested {
+                    value: RiskLevel::High,
+                    reason: "A synthetic signal.".to_owned(),
+                    conflict: false,
+                }),
+                ..Suggestion::default()
+            }),
+            ..DeclarationForm::default()
+        };
+        suggested.choose_environment(Environment::Local);
+        assert_eq!(suggested.risk, RiskLevel::High, "a suggested value stays");
+        assert_eq!(
+            suggested.reversibility,
+            providers::DEVELOPMENT_REVERSIBILITY
+        );
+    }
 }
