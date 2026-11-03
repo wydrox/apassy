@@ -429,6 +429,86 @@ fn a_false_hook_request_waits_for_the_owner() {
     assert!(fx.bodies.lock().expect("bodies").is_empty());
 }
 
+/// A task notification as Claude Code 2.1.317 injects it after a background task ends.
+const NOTIFICATION: &str = "<task-notification><task-id>b7</task-id><status>completed</status><summary>Background command finished</summary></task-notification>";
+
+fn append_lines(path: &Path, lines: &[Value]) {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("transcript");
+    for line in lines {
+        writeln!(file, "{line}").expect("append to transcript");
+    }
+}
+
+/// F1 (0.5.16), measured on Claude Code 2.1.317: the host runs `UserPromptSubmit` also
+/// for turns that it injects (`source: "system"`, here a finished background task), and
+/// it writes each to the transcript as a user record with `"promptSource":"system"`. A
+/// `/loop` wakeup (`source: "loop_wakeup"`) carries a prompt that the agent scheduled.
+/// Before the fix the transcript check failed on the notification (`hook_unverified`),
+/// and the hook sent both turns as the request of the user, so a plain development run
+/// waited for the owner, or the bouncer brain compared it with the wrong text.
+#[test]
+fn a_task_notification_keeps_the_request_of_the_user() {
+    let fx = fixture(ExecMode::Bouncer, SHORT);
+    let transcript = claude_transcript(&fx, SESSION, PROMPT);
+    // T3 Code and other Agent SDK hosts send `source: "sdk"`.
+    let mut input = claude_input(&fx, SESSION, &transcript, PROMPT);
+    input["source"] = "sdk".into();
+    hook(&fx, &input);
+    // A background task ends after the prompt, before the agent calls Apassy.
+    append_lines(
+        &transcript,
+        &[
+            json!({"type": "user", "isSidechain": false, "sessionId": SESSION,
+            "promptSource": "system", "turnOrigin": "task_notification",
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "message": {"role": "user", "content": NOTIFICATION}}),
+        ],
+    );
+    let first = run(&fx, Some(SESSION), AGENT_TEXT, &["echo", "tests ok"]);
+    assert!(first.ok, "{first:?} {}", last_reason(&fx));
+    assert_eq!(
+        first.result.expect("result")["decided_by"],
+        "Bouncer allowed"
+    );
+
+    // The host also runs the hook with the notification and with a scheduled wakeup.
+    let mut notification = claude_input(&fx, SESSION, &transcript, NOTIFICATION);
+    notification["source"] = "system".into();
+    hook(&fx, &notification);
+    let mut wakeup = claude_input(&fx, SESSION, &transcript, AGENT_TEXT);
+    wakeup["source"] = "loop_wakeup".into();
+    hook(&fx, &wakeup);
+    let second = run(&fx, Some(SESSION), AGENT_TEXT, &["echo", "tests ok"]);
+    assert!(second.ok, "{second:?} {}", last_reason(&fx));
+    assert_eq!(
+        second.result.expect("result")["decided_by"],
+        "Bouncer allowed"
+    );
+
+    // The bouncer brain compared both runs with the words of the user.
+    let bodies = fx.bodies.lock().expect("bodies").clone();
+    assert_eq!(bodies.len(), 2);
+    for body in &bodies {
+        let state = serde_json::from_str::<Value>(body).expect("body")["state"]
+            .as_str()
+            .expect("state")
+            .to_owned();
+        assert!(
+            state.starts_with(&format!("User request: \"{PROMPT}\"")),
+            "{state}"
+        );
+        assert!(!state.contains("task-notification"), "{state}");
+    }
+    let reason = last_reason(&fx);
+    assert!(
+        reason.contains("User request from the Claude Code hook, verified in the host transcript"),
+        "{reason}"
+    );
+}
+
 #[test]
 fn a_command_that_names_the_hook_channel_waits_for_the_owner() {
     let fx = fixture(ExecMode::Bouncer, SHORT);

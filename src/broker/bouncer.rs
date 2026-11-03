@@ -600,8 +600,8 @@ pub fn decide_learned(
     model_step(verdict, context, learned.thresholds, false)
 }
 
-/// Model step after `run::route` has checked the source-aware production veto and
-/// all other hard checks. Default classifications always need 80% task match,
+/// Model step after `run::route` has checked the production write/admin veto (every
+/// source) and all other hard checks. Default classifications always need 80% task match,
 /// including known safe commands and reads; calibration cannot lower this check.
 pub(super) fn decide_routed(
     verdict: &BouncerVerdict,

@@ -42,6 +42,14 @@ Notes:
 - A Codex hook started from a terminal of a Claude Code session had `CLAUDE_CODE_SESSION_ID` of that Claude Code session in its environment. So `apassy-hook` reads the session only from the hook JSON. `apassy-mcp` reads `CLAUDE_CODE_SESSION_ID`, because Claude Code sets it for its own MCP servers, and Codex gives its MCP servers a clean environment.
 - The Codex `tools/call` request was not measured, because the account was at its usage limit. So it is not known if Codex sends a session ID in `_meta`.
 
+### Turns that the host injects (Claude Code 2.1.317, 2026-11-03)
+
+Claude Code 2.1.3xx runs `UserPromptSubmit` also for turns that the user did not write. Its hook input schema has an optional `source`: `user` (the composer), `sdk` (`claude -p` and the Agent SDK, for example T3 Code), `system` (task notifications, peer and channel messages, auto-continuation), `loop_wakeup` (a dynamic `/loop` wakeup), `schedule_wakeup` (a CronCreate or cloud scheduled task), and `poll_event`. The schema says that payloads can omit it while the field rolls out. A wakeup prompt is text that the agent passed to its scheduling tool.
+
+The transcript has the same turns as `{"type":"user", ...}` records. A turn that the host injects has `"promptSource":"system"`; a task notification also has `"origin":{"kind":"task-notification"}` and text that starts with `<task-notification>`. A prompt of the user has `"promptSource":"sdk"` (Agent SDK), `"typed"` (desktop), or no `promptSource` (older versions). In a sample of local transcripts, the newest user record before 6 of 72 `apassy_run_with_secrets` calls was a task notification.
+
+`apassy-hook` sends a prompt only when `source` is `user` or `sdk`, or when there is no `source` and the prompt does not start with `<task-notification>` (`USER_SOURCES` in `src/agent/hook.rs`). So the newest prompt of the session stays the request of the user. Before 0.5.16, a finished background task replaced that request: the next run then had the notification as its request (the bouncer brain compared the command with it), or, when the notification was only in the transcript, the check of section 4 failed.
+
 ## 3. How the broker finds the hook prompt for a run
 
 Code: `PromptStore::resolve` in `src/broker/prompts.rs`.
@@ -71,7 +79,7 @@ Code: `PromptStore::check_transcript` in `src/broker/prompts.rs`. The broker doe
 1. The transcript path is in a host transcript directory: `~/.claude/projects`, `~/.codex/sessions`, or the same directories under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. The broker resolves symlinks first.
 2. The file name ends with `<session_id>.jsonl`.
 3. The file is a regular file. The broker opens it without a wait on a FIFO.
-4. The broker reads a maximum of 16 MiB from the end of the file. The newest user prompt record (section 2) must have the same text as the hook prompt. Tool results, meta records, compact summaries, and subagent records are not user prompts. If the text is not there, the broker tries two more times, 200 ms apart.
+4. The broker reads a maximum of 16 MiB from the end of the file. The newest user prompt record (section 2) must have the same text as the hook prompt. Tool results, meta records, compact summaries, subagent records, and turns that the host injected (`"promptSource":"system"` or `"origin":{"kind":"task-notification"}`, section 2) are not user prompts. If the text is not there, the broker tries two more times, 200 ms apart.
 
 | Result | Card and log | Decision |
 | --- | --- | --- |
@@ -193,10 +201,12 @@ What the hook and the checks stop:
 | The agent points `transcript_path` to a file that it wrote in another directory, or to the transcript of another session | Flag `hook_unverified`. |
 | A command in `apassy_run_with_secrets` names the hook program, the host settings, or a transcript directory | Flag `hook_channel`: the owner decides. |
 | A lock, an unlock, or a restore | The stored prompts are not used after it. |
+| The agent schedules a wakeup or a cron prompt with its own text, so that the host submits it as a turn | The hook does not send a `loop_wakeup` or `schedule_wakeup` turn. The request of the user stays. If the transcript then has the wakeup as its newest user record, the check fails and the owner decides. |
+| The agent sends the text of a task notification with `apassy-hook` | The transcript check skips injected records, so the text is not the newest user prompt. Flag `hook_unverified`. |
 
 What they do not stop:
 
-- **A forged transcript entry.** An agent that adds a false user message at the end of its transcript, and then sends the same prompt with `apassy-hook`, passes the check. The agent must do this with its normal shell tool or file tool. Apassy does not see these tools. The host permission prompts are the control for them. Keep them on for daily use ([isolation.md](isolation.md) section 3).
+- **A forged transcript entry.** An agent that adds a false user message at the end of its transcript, and then sends the same prompt with `apassy-hook`, passes the check. It can also mark a newer real prompt with `"promptSource":"system"` so that the check skips it. The agent must do this with its normal shell tool or file tool. Apassy does not see these tools. The host permission prompts are the control for them. Keep them on for daily use ([isolation.md](isolation.md) section 3).
 - **Commands outside Apassy.** The `hook_channel` flag sees only commands that go through `apassy_run_with_secrets`.
 - **A hidden path.** A command that builds the path with variables or an encoding, for example `d=.cl; cat ~/${d}aude/...`, does not get the flag.
 - **A missing hook.** Without a hook prompt, the run uses the text from the agent, as before ADR 0009. Apassy cannot require the hook, because the owner can run a host without it.
@@ -233,9 +243,10 @@ The `hook_channel` check is the built-in pack `host-hooks` (`packs/host-hooks.js
 | `a_command_that_names_the_hook_channel_waits_for_the_owner` | `apassy-hook`, a transcript file, and `.codex/hooks.json` in a command give `hook_channel` |
 | `codex_hook_request_matches_by_project_directory` | A Codex hook prompt and a run without a session: match by directory, verified in a Codex transcript |
 | `a_lock_ends_the_hook_request` | After a lock and an unlock, the run uses the agent text. A locked vault refuses the hook request, and the hook exits with 0. |
+| `a_task_notification_keeps_the_request_of_the_user` | A task notification after the prompt (in the transcript, and as a `source: "system"` hook turn) and a `loop_wakeup` turn: both runs are allowed by the bouncer, which saw the prompt of the user. Before 0.5.16 the first run waited for the owner (`hook_unverified`). |
 | `the_hook_never_blocks_the_prompt` | No broker, a broker that does not answer (the hook ends after about 2 s), no token, bad JSON, and another event: exit code 0, empty stdout, no prompt on stderr |
 
-Unit tests: `src/broker/prompts.rs` (9) and `src/agent/hook.rs` (5).
+Unit tests: `src/broker/prompts.rs` (11, with `an_injected_turn_after_the_prompt_keeps_it_verified`) and `src/agent/hook.rs` (6, with `a_turn_that_the_user_did_not_write_is_not_sent`).
 
 Checks on 2026-09-26, macOS 27.0, arm64:
 
@@ -290,7 +301,8 @@ Goal item B6 is done for both hosts.
 
 ## 10. Limits
 
-- The measurements used one Claude Code version and one Codex version. A host update can change the hook input or the transcript format.
+- The measurements used one Claude Code version and one Codex version, and on 2026-11-03 the hook schema and the transcript records of Claude Code 2.1.317 (section 2). A host update can change the hook input or the transcript format.
+- Whether Claude Code 2.1.317 sends `source` in every hook input, and the hook prompt of a slash command or a skill (the transcript has `<command-name>` text), are not measured.
 - The real-host tests are manual. The synthetic tests run in every `cargo test`.
 - The broker does not require the hook. See section 7.
 - The real-secret gate stays BLOCKED until the goal marks its gate items done.

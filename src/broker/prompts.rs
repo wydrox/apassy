@@ -549,8 +549,8 @@ fn read_from(file: &mut File, start: u64) -> std::io::Result<Vec<u8>> {
 }
 
 /// The text of a user prompt record, measured on the host versions in
-/// `docs/operations/host-hooks.md`. Tool results, meta records, and records of
-/// subagents are not user prompts.
+/// `docs/operations/host-hooks.md`. Tool results, meta records, records of
+/// subagents, and turns that the host injected are not user prompts.
 ///
 /// - Claude Code: `{"type":"user","message":{"role":"user","content":"..."}}`. The
 ///   content can also be a list of blocks.
@@ -559,7 +559,7 @@ fn user_prompt(line: &Value) -> Option<String> {
     let kind = line.get("type").and_then(Value::as_str);
     let flag = |name: &str| line.get(name).and_then(Value::as_bool) == Some(true);
     if kind == Some("user") {
-        if flag("isMeta") || flag("isSidechain") || flag("isCompactSummary") {
+        if flag("isMeta") || flag("isSidechain") || flag("isCompactSummary") || injected(line) {
             return None;
         }
         let message = line.get("message")?;
@@ -590,6 +590,21 @@ fn user_prompt(line: &Value) -> Option<String> {
         return None;
     }
     block_text(item.get("content")?.as_array()?)
+}
+
+/// A Claude Code turn that the host injected, not one that the user wrote (measured on
+/// 2.1.317): a task notification, a peer or channel message, an auto-continuation. The
+/// host writes it as `"type":"user"` with `"promptSource":"system"`, and a task
+/// notification also with `"origin":{"kind":"task-notification"}`. `apassy-hook` does not
+/// send such a turn (`agent::hook`), so the request of the user stays the newest user
+/// prompt after it.
+fn injected(line: &Value) -> bool {
+    line.get("promptSource").and_then(Value::as_str) == Some("system")
+        || line
+            .get("origin")
+            .and_then(|origin| origin.get("kind"))
+            .and_then(Value::as_str)
+            == Some("task-notification")
 }
 
 /// The text blocks of a message, joined with a newline.
@@ -820,6 +835,79 @@ mod tests {
         let mut missing = good;
         missing.transcript = Some(root.join("-p").join("absent-s1.jsonl"));
         assert!(matches!(store.check_transcript(&missing), Check::Failed(_)));
+    }
+
+    /// A task notification of Claude Code 2.1.317, as its transcript records it.
+    fn task_notification(prompt_source: Option<&str>) -> Value {
+        let mut line = json!({"type": "user", "sessionId": "s1", "isSidechain": false,
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "turnOrigin": "task_notification",
+            "message": {"role": "user", "content":
+                "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>"}});
+        if let Some(source) = prompt_source {
+            line["promptSource"] = source.into();
+        }
+        line
+    }
+
+    /// F1 (0.5.16): a turn that Claude Code injects after the prompt of the user (a
+    /// finished background task) is not a newer user message. Before the fix it was, so
+    /// the check failed with `hook_unverified` and the owner had to answer.
+    #[test]
+    fn an_injected_turn_after_the_prompt_keeps_it_verified() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("projects");
+        fs::create_dir_all(root.join("-p")).expect("root");
+        let store = PromptStore::new(vec![root.clone()]);
+        let mut sdk_prompt = claude_user("Run the checks.");
+        sdk_prompt["promptSource"] = "sdk".into();
+        let peer = json!({"type": "user", "sessionId": "s1", "promptSource": "system",
+            "message": {"role": "user", "content": [{"type": "text", "text": "A peer message."}]}});
+        let lines = [
+            claude_user("An older prompt."),
+            sdk_prompt,
+            task_notification(Some("system")),
+            // An older record has the origin only.
+            task_notification(None),
+            peer,
+        ];
+        let path = transcript(&root.join("-p"), "s1.jsonl", &lines);
+        assert_eq!(
+            newest_user_prompt(&path).expect("read"),
+            Some("Run the checks.".to_owned())
+        );
+        let mut good = entry(Some("s1"), "/p", "Run the checks.", 10);
+        good.transcript = Some(path);
+        assert_eq!(store.check_transcript(&good), Check::Verified);
+        store.insert(good);
+        let resolved = resolve(&store, Some("s1"), "/p", "Agent text.");
+        assert_eq!(resolved.text, "Run the checks.");
+        assert!(resolved.flags.is_empty(), "{:?}", resolved.flags);
+        assert!(resolved.source.contains("verified in the host transcript"));
+
+        // The skip does not open a replay or a forged request: an older prompt and the
+        // text of the notification are still not the newest prompt of the user.
+        for prompt in [
+            "An older prompt.",
+            "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>",
+        ] {
+            let mut other = entry(Some("s1"), "/p", prompt, 20);
+            other.transcript = Some(root.join("-p").join("s1.jsonl"));
+            assert!(
+                matches!(store.check_transcript(&other), Check::Failed(_)),
+                "{prompt}"
+            );
+        }
+        // A prompt that the user typed after the notification is the newest again.
+        let typed = json!({"type": "user", "sessionId": "s1", "promptSource": "typed",
+            "origin": {"kind": "human"}, "message": {"role": "user", "content": "Deploy staging."}});
+        let mut lines = lines.to_vec();
+        lines.push(typed);
+        let path = transcript(&root.join("-p"), "s1.jsonl", &lines);
+        assert_eq!(
+            newest_user_prompt(&path).expect("read"),
+            Some("Deploy staging.".to_owned())
+        );
     }
 
     #[test]

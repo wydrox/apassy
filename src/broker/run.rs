@@ -20,11 +20,11 @@
 //!       flag of the analysis (for example `secret_output`, a secret that goes to a
 //!       host that is not a host of its provider, or a production word); a database
 //!       host from the command that is not a known host of the items; "Always ask me"
-//!       of the item or "Always ask for this agent"; and a production item (production from the owner, a value signal, or
-//!       usage) without a production allowance that fits the run (ADR 0010, ADR 0025
-//!       §3b): one for the item, the project, and the kind of action, where the rules are
-//!       certain of that kind, and where each destination host of the run is a host of
-//!       the allowance or a known host of the item.
+//!       of the item or "Always ask for this agent"; and a production item with
+//!       read-write or admin scope (ADR 0010, ADR 0031 of 2026-11-02): production of
+//!       every source, also the careful default of an item without a label, and no
+//!       production allowance or remembered answer waives it. Production with declared
+//!       read-only scope goes on.
 //!       A requested code additionally needs an explicit code-covering owner answer
 //!       for this item/project/action. Patterns and models cannot waive that veto.
 //!    2. Without a running bouncer, each run asks the owner. Every remembered route
@@ -37,7 +37,7 @@
 //!    6. A foreign host or project asks. Each credential must cover each host;
 //!       an explicit execution answer can add hosts or cover the foreign project.
 //!    7. An active owner-taught pattern starts the run.
-//!    8. Otherwise the model decides, including first use, default production and
+//!    8. Otherwise the model decides, including first use, read-only production and
 //!       default-source classifications (ADR 0031). Default sources need 80% task
 //!       match even for known safe commands and reads. Calibration cannot lower it.
 //!       Low confidence asks. Evaluation scopes are retained data, not routing gates.
@@ -1169,8 +1169,8 @@ fn run_inner(
     if db_host_from_command(&analysis) && uncovered_host(&checked.facts, &hosts).is_none() {
         analysis.flags.retain(|flag| flag != DB_HOST_FLAG);
     }
-    // Default production keeps its sensitive declaration. The source-aware hard
-    // veto above distinguishes it from confirmed production (ADR 0031).
+    // A default source keeps its sensitive declaration and needs 80% task match at
+    // the model step (ADR 0031). Production write/admin asks in `route`, before it.
     let default_source = checked.facts.iter().any(|facts| facts.weak_source);
     let context = DecisionContext {
         analysis: &analysis,
