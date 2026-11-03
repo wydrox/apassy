@@ -74,6 +74,9 @@ mod otp_tests;
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
+/// An idle window asks for no frame soon.
+#[cfg(all(test, feature = "vault"))]
+mod repaint_tests;
 #[cfg(feature = "vault")]
 mod scope_bar;
 #[cfg(feature = "vault")]
