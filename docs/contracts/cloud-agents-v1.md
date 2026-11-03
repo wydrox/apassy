@@ -13,7 +13,8 @@ and is not released yet. A change to this document changes the relay, the app, a
 ## 1. Purpose and scope
 
 A **cloud agent** is an agent that runs on a server of its vendor, not on the owner's Mac. The first one
-is xAI Grok Bot. It adds one MCP server by an HTTPS URL and one bearer header. It lists the credentials
+is xAI Grok Bot. It adds one MCP server by its HTTPS URL and connects with the MCP authorization flow
+(section 4); the owner allows the connection on the Mac. It lists the credentials
 that the owner chose for it, asks for a run, waits while the owner decides, and then calls the API
 through the Mac's proxy (way B). It holds placeholders, base URLs, and a session key. It never holds a
 value.
@@ -31,7 +32,8 @@ reach (section 3).
 | Node | The relay inside the Apassy app on the owner's Mac, with a personal team for one vault. |
 | Public listener | The node's second listener, on `127.0.0.1:<port>`. Tailscale Funnel is its only way in. |
 | Public URL | `https://<Mac>.<tailnet>.ts.net:8443`: the Funnel origin of the Mac. `<Mac>` is the machine name and `<tailnet>` the tailnet name of `tailscale status`. |
-| Agent token | The bearer token of one cloud agent: `apassy_tagt_<team id>_<64 hex>`. |
+| Agent token | The bearer token of one cloud agent: `apassy_tagt_<team id>_<64 hex>`. From the authorization flow it is the access token (24 h, refreshed); from the CLI fallback it lives 30 to 365 days. |
+| Connect request | A remote client's request to connect, made by `/oauth/authorize`. It waits 300 s for the owner, with a match code that the browser page and the app both show. |
 | Run | One request to use some items for one stated command. |
 | Session | A released run: a session key, placeholders, and base URLs, for a limited time. |
 | Session key | `apassy_ses_…`. It is in every base URL. With a placeholder, it is a credential for the hosts of that item, in auth positions only, until the session ends. |
@@ -43,11 +45,16 @@ reach (section 3).
 - The public URL is `https://<Mac>.<tailnet>.ts.net:8443`. Port 8443, never 443. The route is off by
   default. The owner turns it on in Settings → Cloud agents.
 - TLS ends in `tailscaled` on the Mac. `tailscaled` connects to the public listener from the loopback.
-- The public listener serves two routes only:
+- The public listener serves these routes only:
   - `POST /mcp`: the MCP endpoint (section 5).
   - `ANY /p/...`: the proxy (section 9). `CONNECT` and upgrades are refused there (501).
+  - The authorization flow (section 4): `GET /.well-known/oauth-protected-resource` and
+    `…/oauth-protected-resource/mcp`, `GET /.well-known/oauth-authorization-server` and
+    `/.well-known/openid-configuration`, `POST /oauth/register`, `GET /oauth/authorize`,
+    `GET /oauth/wait/<id>`, `POST /oauth/token`, `POST /oauth/revoke`.
 - Every other request is 404 `not_found`, before any other check: `GET /mcp`, `/mcp/...`, `/healthz`,
   `GET /`, every `/v1/...` path (the owner API, the host lane, teams, devices), and every unknown path.
+  The hosted relay serves none of the flow: all its paths are 404 there.
 - The listener trusts no request header. The identity headers of Tailscale Serve are not read. Funnel
   requests have none. The proxy drops every `tailscale-*` header before the upstream.
 - The route works only while the app runs, the vault with the cloud agents is unlocked, the route is on,
@@ -56,18 +63,71 @@ reach (section 3).
 
 ## 4. Authentication and the token
 
-- Each request to `POST /mcp` has `Authorization: Bearer apassy_tagt_…`. A missing, unknown, or revoked
-  token: HTTP 401 `unauthenticated`. An expired token: HTTP 401 `token_expired`. The body of these
-  answers is the relay envelope (section 14), not a JSON-RPC message.
+A cloud agent connects with the authorization flow of the MCP specification: OAuth 2.1 with PKCE (S256),
+the protected resource metadata of RFC 9728, the server metadata of RFC 8414, and dynamic client
+registration (RFC 7591). The relay side is in its `docs/SPEC.md` section 31. The bearer token of the CLI
+(4.3) is the fallback for a client without the flow.
+
+### 4.1 The flow
+
+1. The client sends `POST /mcp` without a token. The answer is 401 `unauthenticated` with
+   `WWW-Authenticate: Bearer resource_metadata="<public URL>/.well-known/oauth-protected-resource/mcp",
+   scope="apassy"`.
+2. It reads that document (also at `/.well-known/oauth-protected-resource`): `resource` is
+   `<public URL>/mcp`, `authorization_servers` is `[<public URL>]`. It reads
+   `/.well-known/oauth-authorization-server` (also `/.well-known/openid-configuration`).
+3. It registers: `POST /oauth/register` with `redirect_uris` (each `https://…`, or `http://localhost`,
+   `127.0.0.1`, or `[::1]` with any port; at most 512 bytes) and an optional `client_name`. The answer is
+   201 with a `client_id` and `token_endpoint_auth_method = "none"`: every client is public; there is no
+   client secret.
+4. It opens `GET /oauth/authorize?response_type=code&client_id=…&redirect_uri=…&state=…&code_challenge=…
+   &code_challenge_method=S256` in the user's browser (`scope=apassy` and `resource=<public URL>/mcp` are
+   optional). The node makes a connect request and sends the browser to `/oauth/wait/<id>`.
+5. The page says "<client> wants to connect to <Mac>", shows a match code such as `K7Q-4MD`, and reloads
+   every 3 seconds. It has no button: the owner allows the request in Apassy on the Mac (Decisions, with
+   Touch ID) or on the iPhone, where the same code shows. Apassy must be open and unlocked; the request
+   ends after 300 seconds.
+6. Allowed: the next reload of the page sends the browser to `<redirect_uri>?code=…&state=…&iss=<public
+   URL>`, once. Denied: the page says "You denied the connection.". Not answered in time: "The request
+   ended.".
+7. The client sends `POST /oauth/token` (a form) with `grant_type=authorization_code`, `code`,
+   `code_verifier`, `client_id`, and `redirect_uri`. The answer: `access_token` (the agent token,
+   `apassy_tagt_…`), `token_type = "Bearer"`, `expires_in` (86400), `refresh_token`, `scope = "apassy"`.
+8. Each `POST /mcp` has `Authorization: Bearer <access token>`. Before it ends, or after a 401
+   `token_expired`, the client sends `grant_type=refresh_token` with `refresh_token` and `client_id`: a
+   new access token and a new refresh token. The old refresh token is used up.
+
+A new agent has no credential. It appears in Apassy → Agents; the owner chooses what it may use.
+
+### 4.2 Rules
+
+- A code lives 300 seconds and works once. A wrong verifier, client, or redirect URI uses it up. A second
+  use of a code, or of a refresh token that was already used, is `invalid_grant` and ends the connection:
+  its refresh token and its access token stop working, and the client must start at step 4 again.
+- The access token lives 24 hours. The refresh token lives 90 days from its last use. One access token
+  is live for each agent: a new one replaces the old one.
+- Each bad code or refresh token counts in the failed-auth limiter (section 10).
+- `POST /oauth/revoke` (RFC 7009) with the refresh or the access token ends the connection. It answers 200
+  always.
+- Limits of the node, not of a caller (Funnel forwards no client identity): 10 registrations in 10
+  minutes and 100 stored clients (429, `Retry-After: 600`); 3 connect requests waiting at once, 1 of each
+  client (429 page).
+- The node stores only hashes of codes and refresh tokens, and of the access token.
+- A missing, unknown, revoked, or replaced token on `POST /mcp`: HTTP 401 `unauthenticated`. An expired
+  token: HTTP 401 `token_expired`. Both have `WWW-Authenticate` as in step 1, with `error="invalid_token"`.
+  The body of these answers is the relay envelope (section 14), not a JSON-RPC message.
 - The proxy path does not take the agent token. The session key in the path is its credential.
-- The owner makes the token in Settings → Cloud agents → Add a cloud agent. The lifetime is 30, 90, or
-  365 days (90 by default). Apassy shows the token once and copies it with "Copy setup". The node stores
-  only its SHA-256 hash.
 - Each tool call reads the agent again, so a revocation counts at the next call, also inside one MCP
   client session.
-- To renew a token, the owner revokes the agent and adds it again. A token cannot be extended.
 - If the request has an `Origin` header, it must be the public URL. Else: HTTP 403 `forbidden`. A request
   with no `Origin` header passes this check.
+
+### 4.3 The CLI fallback
+
+`apassy agents add-remote <name> [--days 90]` (with an owner check) makes the agent with no credential and
+prints its bearer token once, with the MCP address. The token lives 30 to 365 days (90 by default) and
+cannot be refreshed or extended: to renew it, the owner disconnects the agent and adds it again. The node
+stores only its SHA-256 hash. The client sends it as `Authorization: Bearer apassy_tagt_…`.
 
 ## 5. The MCP endpoint
 
@@ -331,8 +391,9 @@ and the names of the swapped variables. Never a header, a query, a body, a place
 | `wait_secs` of one status call | 0 to 25 s | The call returns. |
 
 **The failed-auth limiter.** The public listener counts its failed authentications: a bearer token that
-names no team or that the node refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose
-session key names no live session. The window is 60 seconds from the first failure. With 20 failures in
+names no team or that the node refuses (401 `unauthenticated` or `token_expired`), a proxy path whose
+session key names no live session, and a code or refresh token that `POST /oauth/token` refuses
+(`invalid_grant`). The window is 60 seconds from the first failure. With 20 failures in
 the window, every further request of the public listener in that window gets HTTP 429 `rate_limited`
 with `Retry-After: 60`, also a request with a good token. Then the window ends and the count starts
 again. The check comes after the 404 of section 3 and before the token, the body, or the proxy. The node
@@ -347,8 +408,9 @@ tokens in a loop.
 
 | Event | Effect for the agent |
 | --- | --- |
-| The owner revokes the agent (Settings → Cloud agents → Revoke…, with an owner check) | The next `POST /mcp` is 401 `unauthenticated`. Pending runs become `denied` (`approval_invalidated`). Live sessions end at once: the next `/p/` request is 403 `session_invalid`. |
-| The token expires | 401 `token_expired`. The owner adds the agent again for a new token. |
+| The owner disconnects the agent (Agents → Disconnect…, with an owner check) | The next `POST /mcp` is 401 `unauthenticated`. Its refresh token stops working and a connect request of its client that waits is denied. Pending runs become `denied` (`approval_invalidated`). Live sessions end at once: the next `/p/` request is 403 `session_invalid`. |
+| The access token expires | 401 `token_expired`. The client refreshes it (4.1 step 8). A CLI token (4.3): the owner adds the agent again. |
+| The refresh token expires (90 days unused) or the connection ends (4.2) | The refresh is `invalid_grant`. The client connects again from step 4; the owner allows it again. |
 | The owner removes an item from the agent, or the item changes or leaves the vault | Pending runs with it are `denied` (`approval_invalidated`). Its sessions end. The item leaves `apassy_list_access`. |
 | The vault locks, or the app quits | Funnel is turned off and the node stops. The public URL does not answer. Sessions and run keys are gone. After the next unlock, a run that waited is `ended` with `run_interrupted`. |
 | The tailnet name or machine name changes | The public URL changes. Sessions end. The owner copies the new setup to the client. |
@@ -398,7 +460,9 @@ A message never holds a value, a placeholder, a token, or a session key.
 
 | HTTP | Code | Where |
 | --- | --- | --- |
-| 401 | `unauthenticated`, `token_expired` | `/mcp`: the bearer token |
+| 401 | `unauthenticated`, `token_expired` | `/mcp`: the bearer token, with `WWW-Authenticate` (section 4) |
+| 400 | `invalid_request`, `invalid_grant`, `unsupported_grant_type`, `invalid_target`, `invalid_redirect_uri`, `invalid_client_metadata` | `/oauth/token`, `/oauth/register`: an OAuth error object `{"error", "error_description"}`, not the envelope |
+| 429 | `rate_limited` | `/oauth/register` at its limit, `Retry-After: 600` (OAuth error object) |
 | 403 | `forbidden` | `/mcp`: an `Origin` header that is not the public URL |
 | 403 | `session_invalid`, `host_not_in_session`, `wrong_host`, `misplaced_placeholder`, `placeholder_in_body` | `/p/` |
 | 404 | `not_found` | Any route outside section 3 |
@@ -414,13 +478,21 @@ Tool failures inside a 200 answer are in section 6.2. Run codes are in section 7
 
 The per-user steps for Grok Bot and Cursor are in the plugin
 [README](../../deploy/plugins/apassy-cloud/README.md). The agent's steps are in its
-[skill](../../deploy/plugins/apassy-cloud/skills/apassy/SKILL.md). A client needs two values from
-"Copy setup":
+[skill](../../deploy/plugins/apassy-cloud/skills/apassy/SKILL.md).
 
-- The MCP URL: `https://<Mac>.<tailnet>.ts.net:8443/mcp`.
-- The header: `Authorization: Bearer apassy_tagt_…`.
+- **With the authorization flow (the default).** Add the MCP server by its URL,
+  `https://<Mac>.<tailnet>.ts.net:8443/mcp`, with no header. Press Authorize (or the client's word for
+  it). The browser shows a code; allow the request on the Mac or the iPhone when it shows the same code.
+  Then choose the agent's credentials in Apassy → Agents.
+- **With the CLI token (the fallback).** For a client without the flow: `apassy agents add-remote <name>`
+  prints the MCP URL and the header `Authorization: Bearer apassy_tagt_…`, once.
 
 ## 16. Not verified
+
+- Grok Bot's OAuth client: whether it registers dynamically, which metadata path it reads, its redirect
+  URI scheme, whether it sends `resource`, and whether it refreshes. The node serves both metadata paths,
+  takes https and loopback redirect URIs, makes `resource` optional, and keeps the CLI token as the
+  fallback. The physical end-to-end test of the plan decides.
 
 - How Grok Bot's MCP client sends `Origin`, handles HTTP 202, and shows `isError` results. The physical
   end-to-end test of the plan decides.

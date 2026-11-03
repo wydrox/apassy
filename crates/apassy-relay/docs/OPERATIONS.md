@@ -71,11 +71,13 @@ runs on the production VPS, and no local Docker/Colima/Lima VM runs on the Mac.
    `/healthz` HTTP 200, `ok\n`, `x-apassy-relay-version`, and
    `x-apassy-relay-commit`. Check authenticated team/approval/sync paths and the
    backup timer. Public liveness alone is not acceptance for those paths.
-7. Rollback: stop the relay and select the archived previous **schema-6** image and
-   compose settings. Directory schema 1003 is unchanged. From the release with team
+7. Rollback: stop the relay and select the archived previous image and compose
+   settings. From the release with directory 1004 (section 24) back to an image of
+   directory 1003, run `apassy-relay downgrade-directory-1003` with the relay stopped
+   (section 24.3), after any team downgrade below. From the release with team
    schema 7 (section 23) back to a schema-6 image, first run
    `apassy-relay downgrade-schema-6` with the relay stopped (section 23.3); between
-   two schema-7 images no DB downgrade is needed. Restart discards sessions and ends pending runs with
+   two images of the same schemas no DB downgrade is needed. Restart discards sessions and ends pending runs with
    `run_interrupted`; users explicitly request a new run. Restore the entire
    verified backup only for data recovery, while stopped, reconciling all access
    changes since it was taken (restoring can revive revoked identities). Revalidate
@@ -1445,3 +1447,72 @@ first.
 A later start of a schema-7 image moves the files to 7 again (a new `.pre-v7`) and keeps
 the empty column. Agents revoked by the downgrade stay revoked: their members make new
 ones.
+
+## 24. The MCP authorization flow (directory 1004)
+
+An embedded node (section 23) serves the MCP authorization flow (docs/SPEC.md section
+31): remote agents register, the owner allows each connection on the Mac, and the
+agent gets a 24-hour access token and a 90-day refresh token. The hosted relay does not
+serve it: `RelayConfig.oauth` is `None` there, and every `/oauth/...` and
+`/.well-known/oauth-...` path stays 404. No variable, route, body, or answer of the
+hosted relay changes.
+
+What changes for the hosted relay at the first start of this version:
+
+- `relay.db` moves from version 1003 to 1004 in one transaction: the tables
+  `oauth_client`, `connect_request`, and `oauth_refresh` and their indexes. The change
+  is additive and the tables stay empty on the hosted relay. A failure leaves 1003 and
+  the relay does not start. The image before (directory 1003) refuses a 1004 file: see
+  24.3.
+- Team files do not change (schema 7).
+- New command: `apassy-relay downgrade-directory-1003` (24.3).
+
+On a Mac the node's `relay.db` moves the same way at the first start of the app of this
+version. Codes and refresh tokens are kept as SHA-256 hashes only.
+
+### 24.1 What to watch
+
+- The relay log at the start: no error about `relay.db`.
+- `admin teams`: every team `"open": true`, as before.
+- On a node: relay audit rows of the actor `oauth` (`oauth_client_registered`,
+  `connect_requested`, `connect_allowed`, `connect_denied`, `oauth_code_redeemed`,
+  `oauth_family_revoked`) and team audit rows `agent_token_issued` and
+  `agent_token_dropped`. A run of `oauth_family_revoked` with `code_reused` or
+  `refresh_reused` means that someone else used a client's code or token.
+
+### 24.2 Owner steps for the deploy
+
+Use the release runbook at the top of this document. Take a backup (`admin backup`,
+section 13) before the deploy, as usual: it holds `relay.db` at 1003.
+
+### 24.3 Rollback
+
+**In place (preferred).** With the relay stopped:
+
+```sh
+docker compose stop relay
+docker compose run --rm --no-deps -T relay downgrade-directory-1003
+```
+
+It takes `relay.lock`, so it refuses to run beside a relay. It drops the three OAuth
+tables and sets the version to 1003 in one transaction, and prints
+`{"from": 1004, "to": 1003}`; a 1003 file is left as it is (`{"from": 1003, "to":
+1003}`). Any other version exits 1 and changes nothing. On the hosted relay the tables
+are empty, so nothing is lost. On a node, every client loses its connection: access
+tokens already issued work until they end (at most 24 hours), no refresh works, and the
+agents connect again after the next upgrade. Run it after `downgrade-schema-6` when both
+are needed: that command opens the directory and would move it to 1004 again. Then
+select the old image and `docker compose up -d --wait`.
+
+**From the backup.** Restore `relay.db` from the backup of 24.2 with the relay stopped.
+As in section 20.3, every change of the directory since the backup comes back undone
+(teams made or deleted, their limits, the relay audit). Use it only when the in-place
+way fails.
+
+A later start of a 1004 image moves the file to 1004 again, with empty tables.
+
+**An Apassy app before this version on a Mac** refuses the node's `relay.db` at 1004:
+its node does not start, and the app has no command for the way back. Start the app of
+this version again. (Releases ship all components at one version, so a Mac app is not
+downgraded on its own.)
+

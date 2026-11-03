@@ -679,7 +679,7 @@ ADR 0019 of the core, stages 1 and 4. One relay holds several teams. Separation 
 
 | File | What | Key |
 | --- | --- | --- |
-| `relay.db` | the directory: each team's id, name, kind (`operator` or `connect`, section 26), state (`active` or `suspended`) and suspension reason, file key, `legacy` flag, and limits; team codes; the key hashes of Connect teams; relay audit. No people, items, or runs. `user_version` 1003 (section 26.2) | the master key (`APASSY_RELAY_KEY`) |
+| `relay.db` | the directory: each team's id, name, kind (`operator` or `connect`, section 26), state (`active` or `suspended`) and suspension reason, file key, `legacy` flag, and limits; team codes; the key hashes of Connect teams; the OAuth clients, connect requests, and refresh-token hashes of an embedded node (section 31.8); relay audit. No people, items, or runs. `user_version` 1004 (section 31.8; 1003 in section 26.2) | the master key (`APASSY_RELAY_KEY`) |
 | `teams/<team id>.db` | one team: the schema of section 8, unchanged (`user_version` 2) | its own random 256-bit key, kept in `relay.db` |
 | `admin.sock` | the operator socket, mode 0600 | none; file mode only |
 | `relay.lock` | an exclusive lock: `serve`, `init`, and `migrate` hold it, so one relay process at a time uses the data directory. `admin` does not take it | none |
@@ -1791,6 +1791,7 @@ A Mac's own node (ADR 0037, cloud slice; docs/design/implementation-plan-0037-cl
 | `team_vaults` | on |
 | `connect_teams_per_day`, `connect_teams_max` | 0: Connect is off |
 | `auth_limiter` | on (30.5) |
+| `oauth` | `Some(OAuthConfig::new(..))`: the MCP authorization flow (section 31); `EmbeddedRelay::start` names the Mac with its computer name. The hosted relay (`from_env`) has `None`. |
 | `backup_dir` | `<data_dir>/backups` |
 | `limits`, upstream, timeouts | the defaults of `from_env` |
 
@@ -1812,13 +1813,13 @@ ALTER TABLE agent ADD COLUMN items TEXT;
 
 `agent.items` is a JSON array of item ids, or `NULL`: every item of the member's grants (every agent before this version, and every agent of `POST /v1/agents`, whose wire does not change). A list narrows the grants and never widens them: `decide::check_access` (the run request, and the recheck of every release) refuses an item outside the list with the answer of an unknown item (403 `not_granted`), and `admin::access` (`GET /v1/access`, `apassy_list_access`) leaves it out. An unknown agent or a list that does not parse gives no item. Only the in-process host sets a list: `admin::insert_agent` with a list of live items (at most 500, distinct), and `admin::agent_set_items`, which in the same transaction denies the pending runs of the agent with an item that the new list leaves out (`approval_invalidated`) and ends its sessions with one (`agent_items_changed` rows).
 
-`Store::open_team` migrates a version 6 file with the copy rule of 23.2: `<file>.pre-v7` (mode 0600), then in one transaction the column (only when it is not there) and `PRAGMA user_version = 7` (`migrate_v7`). The change is additive. A version 2 to 5 file goes on to 7 in one start, with each copy. A new team file is made at version 7. Versions above 7 are refused, and the schema 6 image refuses a version 7 file. `remove_team_file` also removes `.pre-v7` and `.pre-v7.tmp`. `relay.db` stays at 1003.
+`Store::open_team` migrates a version 6 file with the copy rule of 23.2: `<file>.pre-v7` (mode 0600), then in one transaction the column (only when it is not there) and `PRAGMA user_version = 7` (`migrate_v7`). The change is additive. A version 2 to 5 file goes on to 7 in one start, with each copy. A new team file is made at version 7. Versions above 7 are refused, and the schema 6 image refuses a version 7 file. `remove_team_file` also removes `.pre-v7` and `.pre-v7.tmp`. `relay.db` stays at 1003 (until section 31, which makes it 1004).
 
 The way back in place: `apassy-relay downgrade-schema-6`, with the relay stopped (it takes `relay.lock`), runs `Store::downgrade_to_v6` on every team file of version 7. The schema 6 image does not know the column and would give a listed agent every item of its member's grants, so each live agent with a list is revoked (an `agent_revoked` row of the operator with `{"reason": "schema_rollback"}`) and its pending runs are denied (`approval_invalidated`); then every list is cleared and the version is set to 6. The empty column stays: the schema 6 image never reads it, and a later `migrate_v7` keeps it. The other way back is the `.pre-v7` copy (docs/OPERATIONS.md 23.3).
 
 ### 30.5 The public listener, its scope, and the failed-auth limiter
 
-`RelayConfig.public_listen` binds a second `tiny_http` server, served by the thread `relay-public-accept` with `Scope::Public`. It has its own lanes: `Limits {max_active: 32, member_reserve: 0, ..}` (`config::PUBLIC_MAX_ACTIVE`), so it never takes the threads of the node listener. Only the node listener runs the maintenance sweep. `Scope::Public` serves `POST /mcp` and `ANY /p/...`; any other request is 404 `not_found` before the health answer, the edge check, the token, or the body (section 9). The public listener trusts no header: the identity headers of Tailscale Serve are not read, and the proxy drops every `tailscale-*` header (section 12). `RunningRelay::public_addr` is its bound address. `stop` joins both accept threads.
+`RelayConfig.public_listen` binds a second `tiny_http` server, served by the thread `relay-public-accept` with `Scope::Public`. It has its own lanes: `Limits {max_active: 32, member_reserve: 0, ..}` (`config::PUBLIC_MAX_ACTIVE`), so it never takes the threads of the node listener. Only the node listener runs the maintenance sweep. `Scope::Public` serves `POST /mcp` and `ANY /p/...`, and with `RelayConfig.oauth` the endpoints of section 31.1; any other request is 404 `not_found` before the health answer, the edge check, the token, or the body (section 9). The public listener trusts no header: the identity headers of Tailscale Serve are not read, and the proxy drops every `tailscale-*` header (section 12). `RunningRelay::public_addr` is its bound address. `stop` joins both accept threads.
 
 With `RelayConfig.auth_limiter` (an embedded node; the hosted relay has it off), each listener counts its failed authentications (`http::AuthFailures`): a bearer that names no team or that `authenticate` refuses (401 `unauthenticated` or `token_expired`), and a proxy path whose session key names no live session. With `AUTH_FAILURES_MAX` (20) of them in a fixed window of `AUTH_FAILURE_WINDOW_SECS` (60) seconds that starts at the first one, every further request of that listener in the window, with a good token too, gets 429 `rate_limited` with `Retry-After: 60`, after the edge check and before any token, body, or proxy work. The window then ends and the count starts again. The other listener keeps its own count. Each listener at its limit writes at most one row in ten seconds to the relay audit: action `rate_limited`, kind `auth_limit_public` or `auth_limit_node`, detail `{"code": "rate_limited", "scope": "public" | "node"}`. The count is in memory only.
 
@@ -1842,3 +1843,125 @@ At rest the node's directory holds the team metadata, item metadata, agent token
 - The public listener is on the internet through Funnel: anyone can reach `POST /mcp` and `/p/`. A bearer token, a session key, the team limits, the public lanes, and the failed-auth limiter bound what a stranger can do. The limiter is per listener, not per caller: a stranger with bad tokens can hold the public listener at 429 for the rest of each window, and the cloud agents of the owner with it. The node listener keeps working.
 - A cloud agent holds placeholders, base URLs, and a session key, and can use the proxy until the session ends (600 s, way B). A revocation ends it at once.
 - The node trusts the app process: whoever runs code in it can release any run. The values are in the vault of the same process anyway.
+
+## 31. The MCP authorization flow of an embedded node
+
+A remote agent (first: Grok Bot) gets only the MCP address of the node. It connects with the authorization flow of the MCP specification (OAuth 2.1 with PKCE, RFC 9728 resource metadata, RFC 8414 server metadata, RFC 7591 registration), the owner allows it on the Mac (or the iPhone), and its access token is the relay agent token of an agent of the personal team, so `POST /mcp` authenticates as in section 14. Code: `src/server/oauth.rs`; HTTP: `src/server/http.rs`; node side: `src/embedded.rs` and the traits of `src/node/backend.rs` of the core. Everything here is served only when `RelayConfig.oauth` is set (`RelayConfig::embedded`). The hosted relay has `None`: every path of 31.1 is 404 `not_found` there, and its 401 of `/mcp` has no `WWW-Authenticate`. The bearer token of section 30 (`TokenIssue::Now`, the CLI `apassy agents add-remote`) stays as the fallback.
+
+### 31.1 Endpoints
+
+Served on both listeners of a node (the public one through Funnel). `<origin>` is `RelayConfig.public_url`, the Funnel origin. A request at the failed-auth limit (30.5) is 429 first, here too. JSON answers are plain objects (not the envelope of section 9) with `Cache-Control: no-store` and `Pragma: no-cache`; errors are `{"error": <code>, "error_description": <text>}` (RFC 6749 section 5.2).
+
+| Endpoint | Answer |
+| --- | --- |
+| `GET /.well-known/oauth-protected-resource`, `GET /.well-known/oauth-protected-resource/mcp` (RFC 9728) | `{"resource": "<origin>/mcp", "authorization_servers": ["<origin>"], "bearer_methods_supported": ["header"], "scopes_supported": ["apassy"], "resource_name": "Apassy"}` |
+| `GET /.well-known/oauth-authorization-server`, `GET /.well-known/openid-configuration` (RFC 8414) | `issuer` `<origin>`; `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint` under `<origin>/oauth/`; `response_types_supported ["code"]`, `response_modes_supported ["query"]`, `grant_types_supported ["authorization_code", "refresh_token"]`, `code_challenge_methods_supported ["S256"]`, `token_endpoint_auth_methods_supported ["none"]`, `revocation_endpoint_auth_methods_supported ["none"]`, `scopes_supported ["apassy"]`, `authorization_response_iss_parameter_supported true` |
+| `POST /oauth/register` (RFC 7591), JSON, at most 16 KiB | 201 `{"client_id": "c_<32 hex>", "client_id_issued_at", "client_name"?, "redirect_uris", "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "token_endpoint_auth_method": "none", "scope": "apassy"}`. No secret: every client is public, whatever method it asks for. 400 `invalid_redirect_uri` or `invalid_client_metadata`; 429 `rate_limited` with `Retry-After: 600` (31.5). |
+| `GET /oauth/authorize` | A connect request (31.3), then 303 to `/oauth/wait/<id>`. Unknown client or a redirect URI that is not registered: 400 page "This connection link is not valid.", never a redirect. Any other error: 303 to the redirect URI with `error` (`unsupported_response_type`, `invalid_request` for a missing or non-S256 PKCE challenge or a `state` over 512 bytes, `invalid_target` for a `resource` that is not `<origin>/mcp`), `error_description`, `state`, and `iss`. |
+| `GET /oauth/wait/<id>` | The page of 31.4. |
+| `POST /oauth/token`, a form (or a JSON object of strings), at most 16 KiB | `authorization_code` (`code`, `code_verifier`, `client_id`, `redirect_uri` optional and then equal, `resource` optional) or `refresh_token` (`refresh_token`, `client_id`). 200 `{"access_token", "token_type": "Bearer", "expires_in", "refresh_token", "scope": "apassy"}`. Errors: 400 `invalid_request` (a missing value, a repeated parameter), `invalid_grant`, `unsupported_grant_type`, `invalid_target`. |
+| `POST /oauth/revoke` (RFC 7009) | 200 `{}` always (31.6). |
+| `POST /mcp` 401 | adds `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp", scope="apassy"`, and `, error="invalid_token"` when the request had a bearer token. Other 401s and other paths do not. |
+
+The form decoder is the relay's own (`oauth::decode_form`): `+` is a space, `%XX` a byte, the result must be UTF-8, and a parameter that is there twice refuses the request (RFC 6749 section 3.1). No new crate.
+
+### 31.2 Rules
+
+- Every client is public (`token_endpoint_auth_method = "none"`). PKCE S256 is required: the challenge is 43 base64url characters, the verifier 43 to 128 unreserved characters.
+- Redirect URIs: 1 to 8 for each client; ASCII, at most 512 bytes, no fragment, no space, no user part; `https://<host>…`, or `http://localhost`, `http://127.0.0.1`, or `http://[::1]` with any port. At authorization the URI is the registered one exactly, except that a loopback URI may have another port (RFC 8252 section 7.3). Without `redirect_uri`, a client with one registered URI uses it.
+- `resource` (RFC 8707), when sent to `authorize` or `token`, is `<origin>/mcp`.
+- A code is made when the page of an allowed request is first loaded (31.4), lives `CODE_SECS` (300 s), and is bound to its client, its redirect URI, its PKCE challenge, and its request. Its first redemption uses it up, also when the redemption fails (a wrong verifier, client, or redirect URI, or an expired code): then the family of the request is revoked. A second redemption of a redeemed code is `invalid_grant` and revokes the family: its refresh tokens are revoked and the agent's access token is dropped.
+- The access token is the relay agent token of the agent of the request (`apassy_tagt_<team>_<hex>`): `issue_access` writes a fresh one into the agent row (its hash and `expires_at` = now + `ACCESS_TOKEN_SECS`, 24 h) with an `agent_token_issued` row (actor `oauth`). One live access token for each agent: a new one replaces the old one.
+- The refresh token lives `REFRESH_TOKEN_SECS` (90 days) and is rotated at each use: the old one is marked used and a new one of the same family gets a new 90 days. A used, revoked, or expired refresh token is `invalid_grant`; a used one, or one sent with another `client_id`, also revokes its family and drops the access token. One live family for each agent: redeeming a new code for an agent revokes its older families.
+- A team or agent that is gone, or a revoked agent, makes the grant `invalid_grant` and revokes the new refresh token.
+- Codes and refresh tokens are 256 random bits (base64url). Only their SHA-256 is stored. The audit rows of the flow name client ids, teams, agents, and reasons, never a code or a token.
+
+### 31.3 Connect requests
+
+`GET /oauth/authorize` with a good client, redirect URI, PKCE, and resource makes a `connect_request`: an id (32 hex characters, in the page address), the client, the redirect URI, `state`, the challenge, a match code (`XXX-XXX` of 24 letters and digits without look-alikes, such as `K7Q-4MD`), status `pending`, and `expires_at` = now + `CONNECT_SECS` (300 s). It writes `connect_requested`, wakes every team's `wait_pending` (31.7), and answers 303 to the page. The same request again (the same client, redirect URI, challenge, and state while it waits) answers 303 to the same page.
+
+The owner answers in the app with `RunningNode::decide_connect(id, Allow{team, agent} | Deny)` (31.7). Statuses: `pending` → `allowed` (with the team and agent) or `denied` (also when the agent is revoked, 31.7) or `expired` (unanswered at `expires_at`, or allowed and its page not loaded within `CODE_SECS` of the answer) ; `allowed` → `redeemed` at the first redemption of its code.
+
+### 31.4 The page
+
+`GET /oauth/wait/<id>` answers HTML with `Content-Type: text/html; charset=utf-8` and, on every page and every 303 of the flow, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`. It has no script, form, button, link, image, or cookie: nothing on it can authorize, and loading it changes nothing but the delivery of an allowed code.
+
+| State | Answer |
+| --- | --- |
+| `pending` | 200 with `Refresh: 3`: "<client> wants to connect to <Mac>", the match code, "Approve on your Mac or iPhone.", and that the request ends in N minutes. |
+| `allowed`, no code sent yet | 303 to `<redirect_uri>?code=…&state=…&iss=<origin>`, once. |
+| `allowed` with the code sent, or `redeemed` | 200 "Connected / You can close this page." |
+| `denied` | 200 "You denied the connection." |
+| `expired`, or an unknown id | 200 (404 for an unknown id) "The request ended." |
+
+`<client>` is the registered name, cleaned (no control, format, or bidirectional character; runs of spaces as one; trimmed; at most 64 bytes) and HTML-escaped, or "An MCP client". `<Mac>` is `OAuthConfig.mac_name`. The page never shows an item, an agent list, or the owner's name.
+
+### 31.5 Limits
+
+Funnel forwards no client identity, so every limit is per node.
+
+| Limit | Value | Answer |
+| --- | --- | --- |
+| Registrations | 10 in 10 minutes (`created_at` of the stored clients) | 429 `rate_limited`, `Retry-After: 600` |
+| Stored clients | 100; a client with no live refresh token, no open request, and no use in 7 days is pruned first | 429 `rate_limited`, `Retry-After: 600` |
+| Open connect requests | 3 on the node | 429 page "Too many connection requests wait." |
+| Open connect requests of one client | 1 | 429 page "<client> already waits for an answer." |
+| Bodies of `register`, `token`, `revoke` | 16 KiB | 413 `invalid_request` |
+| Bad codes and refresh tokens | each `invalid_grant` of `POST /oauth/token` counts in the failed-auth limiter of the listener (30.5) | 429 `rate_limited`, `Retry-After: 60`, for every request of the listener in the window |
+
+Pruning (at each registration and authorization) also deletes connect requests older than 7 days and refresh tokens past their end.
+
+### 31.6 Revocation
+
+`POST /oauth/revoke` with a refresh token revokes its family and drops the agent's access token; with an access token of an agent that has a live family, the same. Any other token (unknown, or the CLI bearer token of `TokenIssue::Now`) changes nothing. The answer is 200 `{}` in every case, and it does not count in the limiter.
+
+### 31.7 The node traits
+
+`src/node/backend.rs` of the core, implemented by `EmbeddedNode`:
+
+- `NewCloudAgent.token: TokenIssue::{Now{lifetime_days}, Later}`; `CreatedAgent.token: Option<NodeSecret>`. `Later` makes the agent (with its item list, normally empty) and drops its token at once (`oauth::drop_access`, an `agent_token_dropped` row with `token_later`): it has no live token until a code of an allowed request is redeemed. Such agents do not count in the `agents` team limit while they have no live token (the count reads `expires_at`).
+- `pending_connects() -> Vec<PendingConnect {id, client_id, client_name, code, created_at, expires_at}>`: the requests that wait, on the whole node, oldest first; due ones become `expired` first.
+- `decide_connect(id, ConnectDecision::Allow{team, agent} | Deny)`: `Allow` needs an open team and a live (not revoked) agent of it (`not_found` otherwise). A request that does not wait any more is `connect_not_pending`. A `connect_allowed` or `connect_denied` row.
+- `agent_access(team, agent) -> AgentAccess {revoked, token_expires_at, client_id, connected_at, refresh_expires_at}`: the live token and the live refresh family of the agent; `not_found` for an unknown agent.
+- `revoke_agent` revokes the agent (section 30) and then its refresh families, denies the waiting requests of its clients and its allowed, unredeemed requests (`oauth::forget_agent`).
+- `wait_pending` also returns, maybe with an empty list, when the set of waiting connect requests changes; the host loop calls `pending_connects` after each return. Every trait method has the default of a node without the flow (none, `not_supported`), so the fakes of the core compile unchanged.
+
+### 31.8 Directory version 1004
+
+`Directory::open` moves a 1003 file to 1004 in one transaction (and 1001 and 1002 through 1003 to 1004 in the same one); a failure leaves the file at its version and stops the start. The change is additive. New directories are made at 1004; versions above it are refused. The hosted relay migrates too and keeps the tables empty.
+
+```sql
+CREATE TABLE oauth_client (
+  client_id TEXT PRIMARY KEY, client_name TEXT, redirect_uris TEXT NOT NULL,
+  created_at INTEGER NOT NULL, used_at INTEGER);
+CREATE INDEX oauth_client_created ON oauth_client(created_at);
+CREATE TABLE connect_request (
+  id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, state TEXT,
+  code_challenge TEXT NOT NULL, match_code TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','allowed','denied','expired','redeemed')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+  team_id TEXT, agent_id INTEGER, code_hash BLOB UNIQUE, code_expires_at INTEGER);
+CREATE INDEX connect_request_client ON connect_request(client_id);
+CREATE TABLE oauth_refresh (
+  token_hash BLOB PRIMARY KEY, family TEXT NOT NULL, client_id TEXT NOT NULL,
+  team_id TEXT NOT NULL, agent_id INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER, revoked_at INTEGER);
+CREATE INDEX oauth_refresh_family ON oauth_refresh(family);
+CREATE INDEX oauth_refresh_agent ON oauth_refresh(team_id, agent_id);
+PRAGMA user_version = 1004;
+```
+
+`code_hash` and `token_hash` are SHA-256. The family of a refresh token is the id of its connect request. The image before this section (directory 1003) refuses a 1004 file. The way back in place is `apassy-relay downgrade-directory-1003` (`Directory::downgrade_to_1003`), with the relay stopped (it takes `relay.lock`): the three tables go and the version is 1003 again, in one transaction; a 1003 file is left as it is. Access tokens already issued stay in their team files until they end (at most 24 h); no client can refresh them. The next start of a 1004 image makes the tables again, empty (docs/OPERATIONS.md section 24).
+
+### 31.9 Tests
+
+`tests/oauth.rs`, on free loopback ports and temporary directories: both metadata paths of each document on both listeners; the challenge of a 401 of `/mcp`, with and without a token; register → authorize → the waiting page (headers, `Refresh`, no active part, the code of `pending_connects`) → allow → 303 with `code`, `state`, `iss` → "Connected" → token → `/mcp` 200 with no item, and `agent_access`; codes and refresh tokens stored as hashes only; a wrong verifier uses the code up; a reused code revokes the family and its access token; refresh rotates, one live access token, another client's refresh and a reused refresh revoke the family; an access token ends and the refresh gives a new one; the denied, ended, and unknown pages and `connect_not_pending`; the checks of `authorize` (bad client, redirect, response type, PKCE, resource; loopback ports); registration checks, the cleaned name, and the limit of 10; the node and client limits of open requests; 20 bad codes and refresh tokens put the listener at 429 while the node listener answers; a hostile client name is cleaned and escaped; revoking an agent ends its connection and denies its client's request; the client's revocation; a connect request wakes `wait_pending`; a `TokenIssue::Now` agent has no OAuth connection and keeps its token; the hosted relay and an embedded node without `oauth` answer 404 on every path; directory 1004 → 1003 → 1004 with a live node. Unit tests: the form decoder, redirect URIs, names and escaping, PKCE (RFC 7636 appendix B) and match codes, routes, and the page (`oauth::tests`); 1003 ↔ 1004, the same schema after the way back and up, and a failed migration keeps its version (`directory::tests`); the embedded configuration (`config::tests`).
+
+### 31.10 What this does not protect
+
+- The page is public: anyone with the address of a waiting request sees its client name, the Mac's name, and the match code. The code only helps the owner see that the request in the app is the one in the browser. A stranger who starts a request can make the owner see "<name> wants to connect": the owner must allow only a request that they started, with the same code.
+- A stranger can hold the three open seats and the registrations for their windows, and so delay a real connection by up to 10 minutes. The owner sees each request in the app and can deny it.
+- Whoever holds a code and its verifier, or a refresh token, is the client. The flow binds them to the client id, which is public; it is not a client secret.
+- An allowed request's code reaches whichever browser loads the page first. PKCE keeps it useless to anyone but the client that made the challenge.
+- Revoking a family or the agent ends the access token at the next request; a session that was released before it lives until it ends (at most 600 s, section 30).
+
