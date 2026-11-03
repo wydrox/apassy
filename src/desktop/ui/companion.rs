@@ -5,31 +5,35 @@
 //! pairing ends in two versions." with its help, "Listen on This Network" (the listener
 //! switch, "Allow the iPhone app on this network" before), each iPhone with Remove…, and
 //! Reset Pairing…. New pairing is no longer possible: there is no "Pair an iPhone" and no
-//! pairing code here. When the last iPhone goes, the group goes and the listener stops.
+//! pairing code here. When the owner removes the last iPhone, the group goes and the
+//! listener stops. A listener that is on without a paired iPhone (an old setting, or
+//! after Reset Pairing…) keeps its group, so its switch stays reachable; showing the
+//! section never turns it off.
 //! The once-only notice is in [`super::devices`].
 //!
 //! The QR code drawing below stays for the device links of relay sync.
 
-use eframe::egui::{self, Color32, Rect, Response, Sense, Ui, Vec2, WidgetInfo, WidgetType};
+use eframe::egui::{self, Rect, Response, Sense, Ui, Vec2, WidgetInfo, WidgetType};
 
 use super::devices::{self, Action, WifiDevice, WifiEnd, WifiView};
-use super::kit::{self, Style};
+use super::kit::{self, Style, fixed};
 use super::{Sheet, close_sheet};
-use crate::companion::pairing::PairingView;
 use crate::desktop::DesktopApp;
 use crate::desktop::companion::{Listener, QUIET_ZONE, QrModules, now};
 
-/// The Wi-Fi Pairing group of the open vault now, or `None` without a paired iPhone.
+/// The Wi-Fi Pairing group of the open vault now: while a Wi-Fi iPhone is paired, or
+/// while the listener is on without one (so that the owner can still turn it off).
+/// `None` otherwise.
 pub(super) fn wifi_view(app: &DesktopApp) -> Option<WifiView> {
     let devices = app.owner_ui.session.companion_devices().unwrap_or_default();
-    if devices.is_empty() {
-        return None;
-    }
     let enabled = app
         .owner_ui
         .session
         .companion_status()
         .is_ok_and(|(setting, _)| setting.enabled);
+    if devices.is_empty() && !enabled {
+        return None;
+    }
     let failed = match &app.companion.listener {
         Listener::Failed { message, .. } => Some(message.clone()),
         _ => None,
@@ -51,22 +55,11 @@ pub(super) fn wifi_view(app: &DesktopApp) -> Option<WifiView> {
     })
 }
 
-/// Settings > Devices > Wi-Fi Pairing. Without a paired iPhone there is no group, and a
-/// listener that is still on stops, unless a pairing window of the listener is open.
+/// Settings > Devices > Wi-Fi Pairing. Drawing it never changes the listener: only the
+/// owner's switch, Try Again, Remove… of the last iPhone, and Reset Pairing… do. Without a paired
+/// iPhone and with the listener off there is no group.
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut Ui) {
     let Some(view) = wifi_view(app) else {
-        let enabled = app
-            .owner_ui
-            .session
-            .companion_status()
-            .is_ok_and(|(setting, _)| setting.enabled);
-        let pairing = app.companion.opening_window()
-            || app
-                .companion_controller()
-                .is_some_and(|controller| !matches!(controller.view(), PairingView::Closed));
-        if enabled && !pairing {
-            app.set_companion_on(false);
-        }
         return;
     };
     let action = devices::wifi_group(ui, &view, now());
@@ -98,7 +91,7 @@ pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Re
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Image, true, label));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        painter.rect_filled(rect, 0, Color32::WHITE);
+        painter.rect_filled(rect, 0, fixed::QR_LIGHT);
         for y in 0..qr.width() {
             let top = rect.top() + (y + QUIET_ZONE) as f32 * unit;
             let mut x = 0;
@@ -116,7 +109,7 @@ pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Re
                     egui::pos2(left, top),
                     Vec2::new((x - start) as f32 * unit, unit),
                 );
-                painter.rect_filled(run, 0, Color32::BLACK);
+                painter.rect_filled(run, 0, fixed::QR_DARK);
             }
         }
     }

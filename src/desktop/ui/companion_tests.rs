@@ -2,7 +2,8 @@
 //! ADR 0028 stage 3, plan S2–S3 unit W1): the listener follows the setting and the lock,
 //! the QR code is drawn from its modules, a pairing of the controller goes to a stored
 //! device through the code and the owner check, the group shows only with a paired
-//! iPhone and has no "Pair an iPhone", the once-only notice, and "Remove" and "Reset
+//! iPhone or a listener that is on, has no "Pair an iPhone", and showing it never turns
+//! the listener off, the once-only notice, and "Remove" and "Reset
 //! pairing" act at once. A real listener runs on a temporary vault. The phone is a rustls client
 //! that accepts only the pinned certificate, with keys made by ring. All values are
 //! synthetic.
@@ -449,33 +450,54 @@ fn without_the_broker_the_listener_does_not_start() {
 
 // ---- The settings page. ----
 
-/// Without a paired Wi-Fi iPhone there is no Wi-Fi Pairing group, and no way to pair a
-/// new one: a listener that is still on stops.
+/// Without a paired Wi-Fi iPhone there is no way to pair a new one. Showing Settings >
+/// Devices never changes the listener: a listener that is on keeps running, and keeps its
+/// group so that the owner can turn it off; with the listener off there is no group.
 #[test]
-fn without_a_paired_iphone_there_is_no_wifi_group() {
+fn showing_devices_never_turns_the_listener_off() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = app_with_broker(&dir);
     let ctx = egui::Context::default();
-    app.set_companion_on(true);
-    assert!(running_port(&app).is_some(), "the listener runs");
+    let enabled = |app: &DesktopApp| {
+        app.owner_ui
+            .session
+            .companion_status()
+            .is_ok_and(|(setting, _)| setting.enabled)
+    };
+
+    // Off and no paired iPhone: no group.
     let (text, _) = settings_frame(&ctx, &mut app);
-    for gone in [
-        WIFI_GROUP,
-        WIFI_LISTEN,
-        "Allow the iPhone app on this network",
-        "Pair an iPhone",
-        "Pair…",
-        "Reset Pairing…",
-    ] {
+    for gone in [WIFI_GROUP, WIFI_LISTEN, "Reset Pairing…"] {
         assert!(!text.contains(gone), "no {gone}: {text}");
     }
-    let enabled = app
-        .owner_ui
-        .session
-        .companion_status()
-        .is_ok_and(|(setting, _)| setting.enabled);
-    assert!(!enabled, "the listener goes off without a paired iPhone");
-    assert!(running_port(&app).is_none());
+
+    // On without a paired iPhone: the group with its switch, no pairing, and the
+    // listener stays on after several frames.
+    app.set_companion_on(true);
+    assert!(running_port(&app).is_some(), "the listener runs");
+    for _ in 0..3 {
+        let (text, _) = settings_frame(&ctx, &mut app);
+        assert!(text.contains(WIFI_GROUP), "{text}");
+        assert!(text.contains(WIFI_LISTEN), "{text}");
+        for gone in [
+            "Allow the iPhone app on this network",
+            "Pair an iPhone",
+            "Pair…",
+        ] {
+            assert!(!text.contains(gone), "no {gone}: {text}");
+        }
+    }
+    assert!(
+        enabled(&app),
+        "drawing Devices does not turn the listener off"
+    );
+    assert!(running_port(&app).is_some());
+
+    // The owner turns it off: the group goes.
+    app.set_companion_on(false);
+    let (text, _) = settings_frame(&ctx, &mut app);
+    assert!(!text.contains(WIFI_GROUP), "{text}");
+    assert!(!enabled(&app));
 }
 
 #[test]
