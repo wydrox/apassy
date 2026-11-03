@@ -22,6 +22,8 @@
 //!   section 7.4, a Mac as a reader).
 //! - [`worker`]: the asker, a waiter of its own next to the sync waiter (section 12), and
 //!   the lister of the questions of the other devices (section 13).
+//! - [`connect`]: the connect requests of remote agents as connect cards (card v2, section
+//!   7.4) for the iPhones, and their checked answers for the node (section 12.7).
 //!
 //! The local card and the local-network companion (companion-v1, digest v1) stay as
 //! they are.
@@ -30,6 +32,7 @@ pub mod access_request;
 mod access_worker;
 pub mod answer;
 pub mod client;
+pub mod connect;
 pub mod device_link;
 pub mod envelope;
 pub mod feed;
@@ -45,7 +48,14 @@ pub use client::{
     FeedActionStatus, FeedList, FeedReceipt, FeedRecord, Posted, QuestionList, QuestionRecord,
     QuestionsClient, QuestionsError, TeamDevice,
 };
-pub use envelope::{AnswerBody, Card, Choice, RemoteEnvironment, Sealed, SettleBody};
+pub use connect::{
+    ConnectAnswer, ConnectAnswerHandler, ConnectApplied, ConnectDecision, ConnectEnd,
+    ConnectPostError, PendingConnectCard,
+};
+pub use envelope::{
+    AnswerBody, Card, CardConnect, Choice, ConnectCard, ConnectChoice, RemoteEnvironment, Sealed,
+    SettleBody,
+};
 pub use feed_reader::{OtherFeed, OtherMac};
 pub use worker::{
     QUESTION_WAIT, QuestionsConfig, QuestionsView, QuestionsWorker, RemoteAnswered,

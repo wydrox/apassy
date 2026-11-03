@@ -76,6 +76,7 @@ mod passkeys;
 mod project_key;
 mod provider_hosts;
 mod relay_connect;
+mod relay_connect_cards;
 mod relay_feed;
 mod relay_questions;
 mod relay_sync;
