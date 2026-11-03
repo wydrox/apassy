@@ -77,11 +77,12 @@ const TOKEN_FIELD: &str = "brain-host-token";
 /// The masked token in the `docker run` line.
 const MASK: &str = "••••••••••••••••";
 pub(crate) const CONSENT_TITLE: &str = "What Leaves This Mac";
-/// What each bouncer request sends to the server (ADR 0035 section 4, ADR 0007 state).
+/// What each bouncer request sends to the server: exactly what `bouncer::state_text` puts
+/// in the state (ADR 0035 section 4, ADR 0007 state).
 pub(crate) const SENT: [&str; 3] = [
     "The user request and the purpose",
-    "The command and the relative folder",
-    "Variable names and your rule",
+    "The shell command, with the variable names in it",
+    "Your rule for the project",
 ];
 /// What never leaves this Mac (ADR 0035 section 3).
 pub(crate) const NEVER_SENT: [&str; 2] = ["Secret values", "The vault and full project paths"];
