@@ -11,6 +11,8 @@ mod agent_onboarding;
 mod agent_setup;
 #[cfg(feature = "vault")]
 mod agents;
+/// Bouncer > Agents as one wide page, and the page of one agent (both builds).
+mod agents_page;
 #[cfg(all(test, feature = "vault"))]
 mod agents_remote_tests;
 /// The Bouncer section: what Overview and Logs show, and their cache
@@ -42,6 +44,8 @@ mod decisions;
 mod decisions_activity;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_activity_tests;
+/// History, the connect card, and the cloud run card of Decisions (both builds).
+mod decisions_bouncer;
 #[cfg(all(test, feature = "vault"))]
 mod decisions_tests;
 #[cfg(not(feature = "vault"))]
@@ -276,6 +280,10 @@ pub(crate) struct UiState {
     pub(crate) bouncer: bouncer::BouncerCache,
     /// The filters, the selection, and the open row of Logs.
     pub(crate) logs: logs::State,
+    /// The open agent page of Agents and its open groups.
+    pub(crate) agent_page: agents_page::State,
+    /// The filters of History in Decisions.
+    pub(crate) decision_history: decisions_bouncer::State,
     /// The demo build: the frame of the mockup that the Bouncer pages show.
     #[cfg(not(feature = "vault"))]
     pub(crate) demo_frame: demo::BouncerFrame,
@@ -477,9 +485,15 @@ pub(crate) enum Sheet {
     /// Archive the selected item.
     #[cfg(feature = "vault")]
     ArchiveItem,
-    /// "Disconnect AGENT…".
+    /// "Disconnect AGENT…": a local agent, or a remote one (then also on the node).
     #[cfg(feature = "vault")]
     RevokeAgent {
+        agent_id: u64,
+        name: String,
+    },
+    /// "Choose Credentials…" of an agent page: the credentials that it may use.
+    #[cfg(feature = "vault")]
+    ChooseCredentials {
         agent_id: u64,
         name: String,
     },
@@ -764,8 +778,10 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.ui.agent_setup = Default::default();
             app.ui.agent_onboarding = Default::default();
             app.ui.agents = Default::default();
+            app.ui.agent_page = Default::default();
             app.ui.bouncer.clear();
             app.ui.logs = Default::default();
+            app.ui.decision_history = Default::default();
             invalidate_notifications(app);
             app.ui.move_undo.clear();
             app.ui.selected_items.clear();
@@ -1407,14 +1423,14 @@ mod tests {
         app.place = Place::Agents;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Claude Code"), "{text}");
-        assert!(text.contains("This Mac · 0 uses this week"), "{text}");
+        assert!(text.contains("Runs Today"), "{text}");
         app.owner_ui.selected_agent = Some(agent.id);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         // A valid token is a rare matter, as in the mockup: its date and "Reconnect
         // with a New Token…" are in the "⋯" menu of the toolbar
-        // (`agents::tests::the_token_line_tells_valid_from_expired`). An expired token
-        // shows on the page with "Reconnect…".
-        assert!(text.contains("Disconnect Claude Code…"), "{text}");
+        // (`agents::tests::the_token_line_tells_valid_from_expired_and_hides_the_far_end`).
+        // An expired token shows on the page with "Reconnect…".
+        assert!(text.contains("Disconnect…"), "{text}");
         assert!(!text.contains("Valid until"), "{text}");
         assert!(!text.contains("Reconnect…"), "{text}");
 

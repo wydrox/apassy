@@ -34,6 +34,37 @@ pub(crate) const REFRESH_IDLE: f64 = 10.0;
 pub(crate) const LOG_PAGE: usize = 200;
 /// The longest name of a Mac, an agent, or a credential in a row.
 const SHOWN_NAME: usize = 40;
+/// The vault's token end of a remote agent of the MCP authorization flow
+/// (`crate::node::NO_TOKEN_EXPIRY`, 9999-12-31T23:59:59Z): it has no end, so no page
+/// shows it as a date.
+pub(crate) const NO_TOKEN_END: u64 = 253_402_300_799;
+
+/// The end of a token as the pages show it: `None` for the far end of an agent that
+/// connected by itself (its node refreshes short tokens), and for no end at all.
+pub(crate) fn shown_token_end(expires_at: u64) -> Option<u64> {
+    (expires_at > 0 && expires_at < NO_TOKEN_END).then_some(expires_at)
+}
+
+// ---- One agent. ----
+
+/// One agent of the Bouncer pages: an agent of this Mac by its vault id, or an agent of
+/// another Mac by the `trusted_device` id of that Mac and its id in the feed
+/// (implementation-plan-bouncer-section §1). The agent page of Agents opens it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum AgentRef {
+    Local(u64),
+    Other { device: String, id: String },
+}
+
+impl AgentRef {
+    /// The environment of the agent.
+    pub(crate) fn env(&self) -> DeviceScope {
+        match self {
+            Self::Local(_) => DeviceScope::ThisMac,
+            Self::Other { device, .. } => DeviceScope::Other(device.clone()),
+        }
+    }
+}
 
 // ---- The scope. ----
 
@@ -192,6 +223,26 @@ pub(crate) fn day_month(at: u64, offset: i64) -> String {
     let local = i64::try_from(at).unwrap_or(i64::MAX).saturating_add(offset);
     let (_, month, day) = civil_from_days(local.div_euclid(DAY as i64));
     format!("{day} {}", MONTHS[(month - 1) as usize])
+}
+
+/// "26 Jan 2027", local day.
+pub(crate) fn day_month_year(at: u64, offset: i64) -> String {
+    let local = i64::try_from(at).unwrap_or(i64::MAX).saturating_add(offset);
+    let (year, _, _) = civil_from_days(local.div_euclid(DAY as i64));
+    format!("{} {year}", day_month(at, offset))
+}
+
+/// "just now", "5 min ago", "3 h ago", "yesterday", "3 days ago", else the day ("1 Nov").
+pub(crate) fn ago(at: u64, now: u64, offset: i64) -> String {
+    let age = now.saturating_sub(at);
+    match age {
+        0..60 => "just now".to_owned(),
+        60..3_600 => format!("{} min ago", age / 60),
+        3_600..86_400 => format!("{} h ago", age / 3_600),
+        86_400..172_800 => "yesterday".to_owned(),
+        172_800..604_800 => format!("{} days ago", age / 86_400),
+        _ => day_month(at, offset),
+    }
 }
 
 /// The short weekday of a local day: "Tue".
@@ -381,6 +432,12 @@ pub(crate) struct AgentLine {
     /// A question of this agent waits for you now.
     pub(crate) waits: bool,
     pub(crate) projects: Vec<String>,
+    /// The agent, for its page. `None` in a fixture that has no page.
+    pub(crate) id: Option<AgentRef>,
+    /// The runs of today (local day). `None`: a feed of v1 ("—").
+    pub(crate) runs_today: Option<u64>,
+    /// When a remote agent connected, when its Mac says.
+    pub(crate) connected_at: Option<u64>,
 }
 
 impl AgentLine {
@@ -426,8 +483,55 @@ impl AgentLine {
         }
     }
 
-    fn in_project(&self, project: Option<&str>) -> bool {
+    pub(crate) fn in_project(&self, project: Option<&str>) -> bool {
         project.is_none_or(|project| self.projects.iter().any(|p| p == project))
+    }
+
+    /// "Runs Today": the number, or "—" for a feed of v1.
+    pub(crate) fn runs_today_text(&self) -> String {
+        self.runs_today
+            .map_or_else(|| "—".to_owned(), |runs| runs.to_string())
+    }
+}
+
+/// A connect request of a remote agent that waits for you on this Mac (decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConnectLine {
+    pub(crate) id: String,
+    /// The client name, cleaned ("MCP client" when it gave none).
+    pub(crate) name: String,
+    /// The match code that the browser page shows too.
+    pub(crate) code: String,
+    pub(crate) at: u64,
+    pub(crate) expires_at: u64,
+}
+
+/// The remote access of another Mac, from its feed v2 (F6). Never its address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteAccessWord {
+    Off,
+    On,
+    Problem,
+}
+
+impl RemoteAccessWord {
+    /// The word of the feed: `off`, `on`, `problem`; anything else is not shown.
+    pub(crate) fn parse(word: &str) -> Option<Self> {
+        match word {
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            "problem" => Some(Self::Problem),
+            _ => None,
+        }
+    }
+
+    /// The words in the header of the Mac: "Remote access off".
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::Off => "Remote access off",
+            Self::On => "Remote access on",
+            Self::Problem => "Remote access needs attention",
+        }
     }
 }
 
@@ -861,6 +965,14 @@ pub(crate) struct BouncerData {
     pub(crate) last_in_project: Option<(u64, String)>,
     /// The remote access of this Mac is on (the first-run state offers to turn it on).
     pub(crate) remote_access_on: bool,
+    /// The disconnected agents of each environment, for "Disconnected (n)" on Agents.
+    pub(crate) disconnected: Vec<AgentLine>,
+    /// The connect requests that wait on this Mac, oldest first.
+    pub(crate) connects: Vec<ConnectLine>,
+    /// The remote access of the other Macs, from their feeds of v2.
+    pub(crate) remote_access_of: BTreeMap<DeviceScope, RemoteAccessWord>,
+    /// The median answer of each agent of this Mac in the window, in seconds.
+    pub(crate) agent_answer_p50: BTreeMap<AgentRef, u64>,
 }
 
 impl BouncerData {
@@ -949,6 +1061,28 @@ impl BouncerData {
             }
         }
         items
+    }
+
+    /// The agent `id`, connected or not.
+    pub(crate) fn agent(&self, id: &AgentRef) -> Option<&AgentLine> {
+        self.agents
+            .iter()
+            .chain(&self.disconnected)
+            .find(|agent| agent.id.as_ref() == Some(id))
+    }
+
+    /// The newest runs of the agent `line`, newest first: the rows of Logs of its Mac with
+    /// its name.
+    pub(crate) fn runs_of<'a>(&'a self, line: &AgentLine, limit: usize) -> Vec<&'a LogEvent> {
+        let mut runs: Vec<&LogEvent> = self
+            .events
+            .iter()
+            .filter(|event| event.kind == LogKind::Run && event.env == line.env)
+            .filter(|event| event.agent.as_deref() == Some(line.name.as_str()))
+            .collect();
+        runs.sort_by_key(|event| std::cmp::Reverse(event.at));
+        runs.truncate(limit);
+        runs
     }
 
     /// The agent names of the events in the scope, for the agent menu of Logs.

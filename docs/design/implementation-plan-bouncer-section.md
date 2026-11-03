@@ -39,8 +39,10 @@ remote run still asks the owner.
 
 - **Places.** `Place` gains `Overview` and `Logs`; `Agents` and `Decisions` stay. `Place::is_wide()` is true for
   Overview, Agents, Logs: `shell.rs` skips the list panel and calls `wide_pane(app, ui)`. Decisions keeps list and
-  detail. The agent page is `Place::Agents` with `app.ui.agents.open: Option<AgentRef>`
-  (`AgentRef::{Local(u64), Other{device, id}}`); "‹ Agents" and ⌘[ clear it.
+  detail. The agent page is `Place::Agents` with `app.ui.agent_page.open: Option<AgentRef>`
+  (`AgentRef::{Local(u64), Other{device, id}}`, in `ui/bouncer.rs`; the state is in both builds, so the demo
+  draws it too); "‹ Agents" and ⌘[ clear it. The pages read connect requests as `bouncer::ConnectLine`
+  (from `Node::pending_connects`).
 - **Shortcuts.** ⌘1 credentials, ⌘2 Overview, ⌘3 Decisions, ⌘4 Agents, ⌘5 Logs.
 - **Sidebar.** `agents_section()` becomes `bouncer_section()`: title "Bouncer"; rows Overview, Decisions (badge =
   waiting runs + pending connects), Agents, Logs. The Decisions "Activity" button and its timeline go: that view is

@@ -74,7 +74,7 @@ fn overview_logs_and_agents_are_wide_and_decisions_keeps_its_columns() {
     }
     assert_eq!(Place::Overview.label(), "Overview");
     assert_eq!(Place::Logs.label(), "Logs");
-    // Agents keeps its list and detail inside the wide pane until its own page.
+    // Agents is one wide page: with no agent, frame 9b.
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.place = Place::Agents;

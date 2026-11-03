@@ -531,11 +531,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    // The list says so in one line and shows the recent decisions; the detail says
-    // "All clear" over the week.
-    assert!(text.contains("Nothing waits for you."), "{text}");
-    assert!(text.contains("Recent decisions"), "{text}");
-    assert!(text.contains("All clear"), "{text}");
+    // A new vault: no decisions yet, and the totals of the week (frame 9c).
+    assert!(text.contains("No decisions yet"), "{text}");
     assert!(text.contains("This week"), "{text}");
     assert!(text.contains("by you · 0 automatic this week"), "{text}");
 
@@ -579,8 +576,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     for absent in [
         "Requests",
         "Suggestions",
-        "Nothing waits for you.",
-        "Recent decisions",
+        "Nothing waits for you",
+        "No decisions yet",
     ] {
         assert!(!text.contains(absent), "{absent}: {text}");
     }
@@ -965,29 +962,32 @@ fn the_agent_page_saves_the_note_and_removes_an_exception_after_the_check() {
     for expected in [
         "CI on GitHub",
         "This Mac · connected",
-        // A new agent has no use: one row instead of a count and an empty group.
-        "No use this week",
-        "Projects",
-        "None yet",
-        "Note for the bouncer",
-        "Exceptions",
-        "Never: Guarded key",
+        // Four tiles, as in the mockup (frame 4).
+        "Runs",
+        "Asked you",
+        "Denied",
+        "Median answer",
+        // A new agent sees no credential until the owner chooses some (frame 13a).
+        "Choose what it can see",
+        "It sees no credentials yet.",
+        "Choose Credentials…",
+        "Recent runs",
+        "No runs yet",
+        "Can see",
+        "Guarded key",
+        "Never",
         "Remove",
-        // A new agent sees no credential until it is connected.
-        "No credentials yet",
-        "Disconnect CI on GitHub…",
+        "Disconnect…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    // As in the mockup: no uses list and no token row; "⋯" has Reconnect.
+    // As in the mockup: no list of actions, no token row, no 9999; "⋯" has the rest.
     for absent in [
         "Process access",
-        "What it can see",
-        "API operations",
+        "Actions this week",
         "Give access",
-        "Recent uses",
         "Reconnect",
-        "Only 0",
+        "9999",
     ] {
         assert!(!text.contains(absent), "{absent}: {text}");
     }
@@ -997,8 +997,13 @@ fn the_agent_page_saves_the_note_and_removes_an_exception_after_the_check() {
         .with_vault(|vault| vault.set_agent_sees_all(agent.id, true))
         .expect("open")
         .expect("sees all");
+    app.set_ok("changed");
     let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("Credential names, never values"), "{text}");
+    assert!(
+        text.contains("All credential names, never values"),
+        "{text}"
+    );
+    assert!(!text.contains("Choose what it can see"), "{text}");
 
     // The note: no owner check.
     app.ui.agents.note = Some((
@@ -1089,7 +1094,11 @@ fn decisions_and_agents_draw_at_every_size_with_and_without_content() {
         }
     };
     // Empty states.
-    check(&mut app, Place::Decisions, &["Decisions", "All clear"]);
+    check(
+        &mut app,
+        Place::Decisions,
+        &["Decisions", "No decisions yet"],
+    );
     check(
         &mut app,
         Place::Agents,
@@ -1127,7 +1136,7 @@ fn decisions_and_agents_draw_at_every_size_with_and_without_content() {
     check(
         &mut app,
         Place::Agents,
-        &["Codex", "Always ask: Guarded key", "Note for the bouncer"],
+        &["Codex", "Guarded key", "Always Ask", "Disconnect…"],
     );
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");

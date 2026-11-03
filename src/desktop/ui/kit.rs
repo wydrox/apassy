@@ -2640,8 +2640,7 @@ pub(crate) fn day_chart(ui: &mut Ui, bars: &[ChartBar]) -> Response {
 }
 
 /// The header of one environment on a Bouncer page: its name, "This Mac" or
-/// "Read-only", and the age of its report. The Agents pages use it (U3b-2).
-#[allow(dead_code)]
+/// "Read-only", and the age of its report.
 pub(crate) fn environment_header(ui: &mut Ui, name: &str, this_mac: bool, detail: Option<&str>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 7.0;
@@ -2674,8 +2673,7 @@ pub(crate) fn cap_toned(ui: &mut Ui, label: &str, tone: Tone) -> Response {
 }
 
 /// The "Remote" cap of a remote agent (an MCP client on the internet). The agent page
-/// uses it (U3b-2); tables paint their own.
-#[allow(dead_code)]
+/// uses it; tables paint their own.
 pub(crate) fn remote_cap(ui: &mut Ui) -> Response {
     cap_toned(ui, "Remote", Tone::Accent)
 }
@@ -2700,8 +2698,7 @@ pub(crate) fn paint_cloud_badge(painter: &Painter, avatar: Rect) {
 }
 
 /// The avatar of an agent, with the cloud badge for a remote one. The agent page uses
-/// it (U3b-2); tables paint their own.
-#[allow(dead_code)]
+/// it; tables paint their own.
 pub(crate) fn agent_avatar(ui: &mut Ui, name: &str, side: f32, remote: bool) -> Response {
     let response = avatar(ui, name, side);
     if remote && ui.is_rect_visible(response.rect) {
@@ -2792,6 +2789,11 @@ pub(crate) enum Cell {
     },
     /// A text with a red "Production" cap after it.
     Production(RichText),
+    /// A status with its dot: green "Active now", orange "Waits for you", gray else.
+    Status {
+        text: String,
+        tone: Tone,
+    },
     Empty,
 }
 
@@ -2807,6 +2809,7 @@ impl Cell {
     fn words(&self) -> String {
         match self {
             Self::Text(value) | Self::Production(value) => value.text().to_owned(),
+            Self::Status { text, .. } => text.clone(),
             Self::Agent { label, remote, .. } => {
                 if *remote {
                     format!("{label}, Remote")
@@ -2914,6 +2917,26 @@ fn paint_cell(ui: &Ui, rect: Rect, cell: &Cell, right: bool) {
     };
     match cell {
         Cell::Empty => {}
+        Cell::Status { text: words, tone } => {
+            let dot = 7.0;
+            let center = Pos2::new(rect.left() + dot / 2.0, rect.center().y);
+            painter.circle_filled(center, dot / 2.0, tone.mark());
+            let galley = fit(
+                text(words.clone(), Font::Body).color(match tone {
+                    Tone::Warning => tone.text(),
+                    _ => LABEL,
+                }),
+                (rect.width() - dot - 6.0).max(10.0),
+            );
+            painter.galley(
+                Pos2::new(
+                    rect.left() + dot + 6.0,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                LABEL,
+            );
+        }
         Cell::Text(value) => {
             let galley = fit(value.clone(), rect.width());
             let x = if right {

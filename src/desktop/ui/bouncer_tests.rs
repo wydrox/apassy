@@ -27,6 +27,9 @@ fn agent(name: &str, env: &Environment, runs: u64, asked: u64, ago: u64) -> Agen
         last_active: Some(NOW - ago),
         waits: false,
         projects: vec!["acme-billing".to_owned()],
+        id: None,
+        runs_today: None,
+        connected_at: None,
     }
 }
 

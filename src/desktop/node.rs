@@ -38,6 +38,12 @@
 //! [`DesktopApp::deny_connect`], [`DesktopApp::remote_access`],
 //! [`DesktopApp::ask_remote_access_on`] (Touch ID), [`DesktopApp::remote_access_off`],
 //! [`DesktopApp::remote_agents`], and [`DesktopApp::disconnect_remote_agent`].
+//!
+//! The remote access block of Bouncer > Agents never runs the Tailscale command line in a
+//! frame: [`DesktopApp::poll_remote_access`] reads [`DesktopApp::remote_access`] and
+//! [`DesktopApp::remote_agents`] on a worker thread, at most every
+//! [`ACCESS_READ_INTERVAL`] while the page shows and at once after a change, and the page
+//! draws the copy in [`AccessCache`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -64,6 +70,9 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const IDLE_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 /// How often a running node checks its route (tailnet name, Funnel handler).
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(60);
+/// While Bouncer > Agents shows, the remote access block is read again this often (on a
+/// worker thread: it runs the Tailscale command line).
+pub(crate) const ACCESS_READ_INTERVAL: Duration = Duration::from_secs(10);
 /// The note when a close keeps the app open.
 pub(crate) const KEPT_OPEN: &str =
     "Apassy stays open for your cloud agents: the window is in the Dock. Quit Apassy to stop them.";
@@ -74,6 +83,21 @@ struct Starting {
     epoch: [u8; 32],
     /// The message of the node error when it fails.
     task: Task<Result<(), String>>,
+}
+
+/// The remote access block and the remote agents as the last read on a worker thread saw
+/// them. The pages draw this copy; a frame never runs the Tailscale command line.
+#[derive(Default)]
+pub(crate) struct AccessCache {
+    /// `None` until the first read ends.
+    pub(crate) status: Option<NodeStatus>,
+    pub(crate) agents: Vec<CloudAgentView>,
+    reading: Option<Task<(NodeStatus, Vec<CloudAgentView>)>>,
+    read_at: Option<Instant>,
+    /// A change of the owner: read again at once.
+    stale: bool,
+    /// How many reads started (a test counts them).
+    pub(crate) reads: u64,
 }
 
 /// The node of the window.
@@ -102,6 +126,8 @@ pub(crate) struct NodeFlows {
     connects_wake: bool,
     /// Wakes the window for [`DesktopApp::node_changed`]. Set by the first comparison.
     repaint: Option<egui::Context>,
+    /// The remote access block, read on a worker thread.
+    pub(crate) access: AccessCache,
 }
 
 impl NodeFlows {
@@ -150,6 +176,7 @@ impl DesktopApp {
     pub fn node_changed(&mut self) {
         self.node.synced_at = None;
         self.node.failed = None;
+        self.node.access.stale = true;
         if let Some(repaint) = &self.node.repaint {
             repaint.request_repaint();
         }
@@ -578,5 +605,92 @@ impl DesktopApp {
             Ok(()) => self.set_ok("The remote agent is disconnected. Its token stops working."),
             Err(error) => self.set_err(error.message),
         }
+    }
+}
+
+impl DesktopApp {
+    /// Read the remote access block and the remote agents again when the copy is older
+    /// than [`ACCESS_READ_INTERVAL`] or a change made it stale, on a worker thread; take
+    /// the result of a read that ended. Bouncer > Agents calls it each frame: a frame
+    /// reads only memory.
+    pub(crate) fn poll_remote_access(&mut self, ctx: &egui::Context) {
+        let Some(node) = self.node.node.clone() else {
+            return;
+        };
+        let access = &mut self.node.access;
+        if let Some(task) = &access.reading {
+            match task.poll() {
+                TaskPoll::Waiting => return,
+                TaskPoll::Done((status, agents)) => {
+                    access.status = Some(status);
+                    access.agents = agents;
+                }
+                TaskPoll::Lost => {}
+            }
+            access.reading = None;
+            access.read_at = Some(Instant::now());
+        }
+        let due = access.stale
+            || access
+                .read_at
+                .is_none_or(|at| at.elapsed() >= ACCESS_READ_INTERVAL);
+        if !due {
+            if let Some(at) = access.read_at {
+                ctx.request_repaint_after(ACCESS_READ_INTERVAL.saturating_sub(at.elapsed()));
+            }
+            return;
+        }
+        access.stale = false;
+        access.reads += 1;
+        let vault = self.owner_ui.session.shared_vault();
+        access.reading = Some(Task::spawn(Some(ctx.clone()), move || {
+            let status = node.status(&vault);
+            let agents = node.agents(&vault).unwrap_or_default();
+            (status, agents)
+        }));
+    }
+
+    /// The copy of the remote access block, for the page. `None` without a node or
+    /// before the first read.
+    pub(crate) fn remote_access_cached(&self) -> Option<&NodeStatus> {
+        self.node.access.status.as_ref()
+    }
+
+    /// The copy of the remote agents of this Mac, for the page.
+    pub(crate) fn remote_agents_cached(&self) -> &[CloudAgentView] {
+        &self.node.access.agents
+    }
+
+    /// "Use Port 10000" (frame 8d): the route uses the other Funnel port from the next
+    /// start, which this asks for at once. The MCP address changes.
+    pub(crate) fn use_funnel_port(&mut self, port: u16) {
+        let Some(node) = self.node.node.clone() else {
+            return;
+        };
+        match node.use_funnel_port(port) {
+            Ok(()) => {
+                self.node_changed();
+                self.set_ok(format!(
+                    "Remote access uses port {port}. Give remote agents the new address."
+                ));
+            }
+            Err(error) => self.set_err(error.message),
+        }
+    }
+
+    /// "Check Again" (frame 8b): try a failed start again and read the block again.
+    pub(crate) fn check_remote_access_again(&mut self) {
+        self.node_changed();
+    }
+
+    /// After "Choose Credentials…" of a remote agent: send its new item list to the node
+    /// now. A stopped node takes it at its next start.
+    pub(crate) fn sync_remote_catalog(&mut self) {
+        if let Some(node) = self.node.node.clone()
+            && node.is_running()
+        {
+            let _ = node.sync_catalog();
+        }
+        self.node.access.stale = true;
     }
 }

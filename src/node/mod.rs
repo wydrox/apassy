@@ -52,7 +52,7 @@ use zeroize::Zeroizing;
 
 use self::backend::{
     AgentAccess, AuditRow, ConnectDecision, NodeAgentId, NodeBackend, NodeConfig, NodeError,
-    NodeSecret, NodeTeamId, PendingConnect, TokenIssue,
+    NodeRunId, NodeSecret, NodeTeamId, PendingConnect, TokenIssue,
 };
 use self::funnel::{Funnel, FunnelError, SystemTailscale, Tailscale, TailscaleCli};
 use self::master_key::{KeySource, KeyStore, KeychainStore, NoKeychain};
@@ -71,6 +71,11 @@ const TEAM_NAME: &str = "Personal";
 /// The file in the node directory with the last Funnel target of the app, so a stale
 /// handler of an earlier port is known as the app's own.
 const LAST_TARGET_FILE: &str = "funnel-target";
+/// The file in the node directory with the Funnel port that the owner chose ("Use Port
+/// 10000"). Without it the route uses 8443.
+const FUNNEL_PORT_FILE: &str = "funnel-port";
+/// The audit rows of one run that Logs reads at most.
+const RUN_AUDIT_ROWS: u32 = 500;
 /// Rows of "Recent cloud activity".
 const RECENT_ROWS: u32 = 20;
 /// Ports tried for the public listener before the start gives up.
@@ -227,6 +232,8 @@ pub struct NodeStatus {
     /// What keeps remote access from working while the route is on; `None` when nothing
     /// does (or the route is off). The remote access block shows its button.
     pub problem: Option<RouteProblem>,
+    /// The Funnel port of the route: 8443, or 10000 after "Use Port 10000".
+    pub funnel_port: u16,
 }
 
 /// Why remote access does not work, for the remote access block (plan F6).
@@ -236,10 +243,13 @@ pub enum RouteProblem {
     NoTailscale,
     /// Tailscale is not connected: "Check Again".
     NotConnected,
-    /// The tailnet policy does not allow Funnel for this Mac: "Open Admin Console…".
-    Policy,
-    /// Another handler has port 8443 of Funnel.
-    PortTaken,
+    /// The tailnet policy does not allow Funnel for this Mac: "Open Admin Console…", to
+    /// the link of Tailscale's message when it gave one.
+    Policy { link: Option<String> },
+    /// Another handler has the Funnel port of the route. `alternative`: the other Funnel
+    /// port, "Use Port 10000" ([`Node::use_funnel_port`]); `None` when the route is on
+    /// 10000 already.
+    PortTaken { alternative: Option<u16> },
     /// The owner's Serve handler on 443 is public.
     HttpsPublic,
     /// Another failure: the message says what.
@@ -247,18 +257,38 @@ pub enum RouteProblem {
 }
 
 impl RouteProblem {
-    fn of(error: &NodeError) -> Option<Self> {
+    /// The problem of a failed start, with the Funnel port that it used.
+    fn of(error: &NodeError, funnel_port: u16) -> Option<Self> {
         Some(match error.code.as_str() {
             "no_tailscale" => Self::NoTailscale,
             "tailscale_not_connected" => Self::NotConnected,
-            "funnel_policy" => Self::Policy,
-            "funnel_port_taken" => Self::PortTaken,
+            "funnel_policy" => Self::Policy {
+                link: admin_link(&error.message),
+            },
+            "funnel_port_taken" => Self::PortTaken {
+                alternative: funnel::alternative_port(funnel_port),
+            },
             "funnel_https_public" => Self::HttpsPublic,
             // A stop on purpose, or a locked vault, is no problem of the route.
             "node_stopped" | "vault_locked" | "route_off" => return None,
             _ => Self::Failed(error.message.clone()),
         })
     }
+}
+
+/// The link to the Tailscale admin console in a message of the tailnet policy.
+fn admin_link(message: &str) -> Option<String> {
+    message
+        .split_whitespace()
+        .map(|word| word.trim_end_matches(['.', ',', ')']))
+        .find(|word| {
+            ["https://login.tailscale.com/", "https://tailscale.com/"]
+                .iter()
+                .any(|prefix| word.starts_with(prefix))
+                && word.len() <= 300
+                && word.bytes().all(|b| b.is_ascii_graphic())
+        })
+        .map(str::to_owned)
 }
 
 /// A remote agent that the owner just connected (an allowed connect request): always a
@@ -361,10 +391,17 @@ struct VaultState {
 
 impl Node {
     pub fn new(options: NodeOptions) -> Self {
+        let funnel = Funnel::new(options.cli);
+        if let Some(port) = std::fs::read_to_string(options.data_dir.join(FUNNEL_PORT_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse::<u16>().ok())
+        {
+            funnel.set_port(port);
+        }
         Self {
             backend: options.backend,
             keys: options.keys,
-            funnel: Funnel::new(options.cli),
+            funnel,
             data_dir: options.data_dir,
             key: Mutex::new(None),
             start_lock: Mutex::new(()),
@@ -509,7 +546,11 @@ impl Node {
     pub fn start(&self, vault: &SharedVault, broker: BrokerContext) -> Result<(), NodeError> {
         let _one = lock(&self.start_lock);
         let result = self.start_inner(vault, broker);
-        let problem = result.as_ref().err().and_then(RouteProblem::of);
+        let port = self.funnel.port();
+        let problem = result
+            .as_ref()
+            .err()
+            .and_then(|failure| RouteProblem::of(failure, port));
         note_remote_access_problem(problem.is_some());
         lock(&self.notes).failure = result.as_ref().err().cloned();
         result
@@ -556,7 +597,7 @@ impl Node {
             team_id = None;
         }
         self.check_not_stopping()?;
-        let public_url = funnel::public_origin(&dns_name);
+        let public_url = self.funnel.origin(&dns_name);
         let node = match self.backend.start(NodeConfig {
             data_dir: self.data_dir.clone(),
             master_key: key,
@@ -726,7 +767,7 @@ impl Node {
             return false;
         };
         let name_changed = match self.funnel.status() {
-            Tailscale::Connected { dns_name } => funnel::public_origin(&dns_name) != public_url,
+            Tailscale::Connected { dns_name } => self.funnel.origin(&dns_name) != public_url,
             _ => true,
         };
         let route_gone = self
@@ -765,7 +806,7 @@ impl Node {
         let running = self.is_running();
         let url = self.mcp_url().or_else(|| match &tailscale {
             Tailscale::Connected { dns_name } => {
-                Some(format!("{}/mcp", funnel::public_origin(dns_name)))
+                Some(format!("{}/mcp", self.funnel.origin(dns_name)))
             }
             _ => None,
         });
@@ -778,7 +819,7 @@ impl Node {
             .failure
             .as_ref()
             .filter(|_| route_on && !running)
-            .and_then(RouteProblem::of)
+            .and_then(|failure| RouteProblem::of(failure, self.funnel.port()))
             .or_else(|| match &tailscale {
                 _ if !route_on => None,
                 Tailscale::Missing => Some(RouteProblem::NoTailscale),
@@ -813,7 +854,40 @@ impl Node {
             keychain_fallback: lock(&self.notes).keychain_fallback,
             warnings,
             problem,
+            funnel_port: self.funnel.port(),
         }
+    }
+
+    /// The Funnel port of the route: 8443, or 10000 after [`Node::use_funnel_port`].
+    pub fn funnel_port(&self) -> u16 {
+        self.funnel.port()
+    }
+
+    /// "Use Port 10000": the route uses the Funnel `port` (8443 or 10000) from the next
+    /// start, and the node directory keeps the choice. The MCP address changes, so a
+    /// remote agent connects again with the new address. Only while the node does not
+    /// run (the block offers it for a failed start); a failed start is tried again.
+    pub fn use_funnel_port(&self, port: u16) -> Result<(), NodeError> {
+        if !funnel::is_funnel_port(port) {
+            return Err(error(
+                "invalid_port",
+                "Funnel takes only port 8443 or 10000.",
+            ));
+        }
+        let _one = lock(&self.start_lock);
+        if self.is_running() {
+            return Err(error(
+                "node_running",
+                "Turn remote access off before you change its port.",
+            ));
+        }
+        std::fs::create_dir_all(&self.data_dir)
+            .and_then(|()| std::fs::write(self.data_dir.join(FUNNEL_PORT_FILE), port.to_string()))
+            .map_err(|_| error("node_failed", "The port cannot be saved."))?;
+        self.funnel.set_port(port);
+        lock(&self.notes).failure = None;
+        note_remote_access_problem(false);
+        Ok(())
     }
 
     /// Turn the public route (remote access) on or off. Off stops the node at once; on
@@ -1234,6 +1308,22 @@ impl Node {
             .and_then(|shared| {
                 shared
                     .with_node(|node| node.recent_audit(&shared.team, None, RECENT_ROWS))
+                    .and_then(Result::ok)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The proxied requests and the other audit rows of one run of the node, newest
+    /// first (masked: never a value). Logs reads them when the owner opens a cloud run;
+    /// [`Node::recent_activity`] has only the newest rows of all runs. Empty while the
+    /// node does not run.
+    pub fn run_audit(&self, run_id: u64) -> Vec<AuditRow> {
+        self.shared()
+            .and_then(|shared| {
+                shared
+                    .with_node(|node| {
+                        node.recent_audit(&shared.team, Some(NodeRunId(run_id)), RUN_AUDIT_ROWS)
+                    })
                     .and_then(Result::ok)
             })
             .unwrap_or_default()
