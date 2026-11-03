@@ -912,7 +912,7 @@ mod tests {
             let deny = signed(&device, &device.relay, ConnectChoice::Deny, &digest(), NOW);
             for body in [allow, deny] {
                 assert_eq!(
-                    judge(&record(&body, QID, 3), &[device.row.clone()], NOW)
+                    judge(&record(&body, QID, 3), std::slice::from_ref(&device.row), NOW)
                         .unwrap_err()
                         .reason,
                     "only an iPhone of this vault answers a connect request",

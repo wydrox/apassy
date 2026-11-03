@@ -295,20 +295,20 @@ fn the_entitlement_vectors_verify_and_fail_as_the_contract_says() {
         let account = claims["acc"].as_str().unwrap();
         let iat = claims["iat"].as_u64().unwrap();
         let exp = claims["exp"].as_u64().unwrap();
-        let read = entitlement::verify(text, &[key.clone()], Feature::Brain, account, iat + 10)
+        let read = entitlement::verify(text, std::slice::from_ref(&key), Feature::Brain, account, iat + 10)
             .expect("verifies");
         assert_eq!(read.exp, exp);
         assert_eq!(read.group.as_deref(), claims["group"].as_str());
         assert_eq!(
-            entitlement::verify(text, &[key.clone()], Feature::Brain, account, exp),
+            entitlement::verify(text, std::slice::from_ref(&key), Feature::Brain, account, exp),
             Err(EntitlementError::Expired)
         );
         assert_eq!(
-            entitlement::verify(text, &[other.clone()], Feature::Brain, account, iat + 10),
+            entitlement::verify(text, std::slice::from_ref(&other), Feature::Brain, account, iat + 10),
             Err(EntitlementError::Signature)
         );
         assert_eq!(
-            entitlement::verify(text, &[key.clone()], Feature::Brain, "acc_aaaaaaaaaa", iat),
+            entitlement::verify(text, std::slice::from_ref(&key), Feature::Brain, "acc_aaaaaaaaaa", iat),
             Err(EntitlementError::OtherAccount)
         );
         // A changed claim breaks the signature.
@@ -320,13 +320,13 @@ fn the_entitlement_vectors_verify_and_fail_as_the_contract_says() {
             apassy::sync::encode_b64u(claims_text.as_bytes())
         );
         assert_eq!(
-            entitlement::verify(&forged, &[key.clone()], Feature::Brain, account, iat),
+            entitlement::verify(&forged, std::slice::from_ref(&key), Feature::Brain, account, iat),
             Err(EntitlementError::Signature)
         );
         assert_eq!(
             entitlement::verify(
                 &format!("{text}.x"),
-                &[key.clone()],
+                std::slice::from_ref(&key),
                 Feature::Brain,
                 account,
                 iat
@@ -350,7 +350,7 @@ fn creating_an_account_keeps_the_key_in_the_store_and_no_secret_in_the_file() {
     assert_eq!(state.origin, connect.url);
     assert_eq!(
         connect.live_devices(&state.account_id),
-        [state.device_id.clone()]
+        std::slice::from_ref(&state.device_id)
     );
     assert_eq!(
         connect.known_keys(),
@@ -790,7 +790,7 @@ fn deleting_the_account_needs_the_owner_check() {
         ConnectError::OwnerCheck(ProofRefusal::WrongAction)
     );
     assert!(a.path.exists());
-    assert_eq!(connect.accounts(), [account_id.clone()]);
+    assert_eq!(connect.accounts(), std::slice::from_ref(&account_id));
     account.view().unwrap();
     let (proof, epoch) = owner.proof(account.delete_action());
     let deleted = account.delete(&a.store, &proof, &epoch).expect("delete");

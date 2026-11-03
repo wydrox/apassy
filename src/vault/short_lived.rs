@@ -1546,9 +1546,12 @@ mod tests {
         );
         assert_eq!(
             vault.member_keys_of_member("team-synthetic", 4).unwrap(),
-            [row.clone()]
+            std::slice::from_ref(&row)
         );
-        assert_eq!(vault.member_keys_of_source(source).unwrap(), [row.clone()]);
+        assert_eq!(
+            vault.member_keys_of_source(source).unwrap(),
+            std::slice::from_ref(&row)
+        );
         assert!(
             vault
                 .member_keys_of_member("team-synthetic", 5)

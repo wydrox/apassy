@@ -229,7 +229,7 @@ enum Reply {
     },
     LastMac(Option<bool>),
     Synced {
-        sync: VaultSync,
+        sync: Box<VaultSync>,
         result: Result<SyncOutcome, SyncError>,
         receipts: Option<Vec<Receipt>>,
     },
@@ -1884,7 +1884,7 @@ impl DesktopApp {
                 Err(_) => None,
             };
             Reply::Synced {
-                sync: VaultSync::Relay(relay),
+                sync: Box::new(VaultSync::Relay(relay)),
                 result,
                 receipts,
             }
