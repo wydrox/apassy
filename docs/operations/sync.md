@@ -256,6 +256,7 @@ The app (`src/desktop/ui/sync_tests.rs`):
 | `create_with_sync_writes_the_file_and_settings_shows_the_status` | The Create choice, the list on disk, the status in Settings. |
 | `the_sync_picker_turns_on_moves_and_turns_off` | iCloud Drive, "Choose folder…", Off; the synced copy stays; no push after off. |
 | `unlock_merges_before_the_list_and_a_lock_pushes` | The merge at unlock (typed and Touch ID) and the push at lock. |
+| `a_change_syncs_after_a_pause_and_a_changed_file_merges_while_unlocked` | The pause before a push, and the merge of a changed file without a lock. |
 | `agent_activity_alone_does_not_sync` | Activity does not push. |
 | `both_macs_editing_one_credential_keep_both_versions_with_a_notice` | The conflict note and the archived copy. |
 | `a_new_passphrase_from_another_mac_asks_once_and_rekeys` | The prompt, a wrong passphrase, the rekey. |
@@ -265,7 +266,7 @@ The app (`src/desktop/ui/sync_tests.rs`):
 | `an_unreachable_folder_never_blocks_a_lock_or_an_unlock` | "Folder not available", and the lock and the unlock still work. |
 | `remove_from_list_stops_sync_and_keeps_the_synced_file` | The texts; the state goes; the file stays. |
 | `without_sync_the_app_shows_no_sync_control` | A unit test never uses a real synced folder. |
-| `the_worker_pushes_and_merges_without_any_frame` | The worker pushes and merges with no frame of the window: the pause before a push, and the merge of a changed file without a lock. |
+| `the_worker_pushes_and_merges_without_any_frame` | The worker pushes and merges with no frame of the window. |
 | `the_worker_syncs_while_a_run_waits_for_the_owner` | While a run waits for the owner, the worker pushes a change of this Mac and merges a change of another Mac; the merge raises the revision that the broker checks after the answer. |
 | `the_worker_does_not_sync_a_locked_vault` | A locked vault neither pushes nor merges; the unlock syncs. |
 | `the_worker_asks_icloud_again_for_a_file_that_stays_in_icloud` | A change of another Mac stays in iCloud; the first download request goes nowhere; the worker asks again 30 seconds later and merges the change, with no "Sync now". |
@@ -291,7 +292,8 @@ The helper and the notifier (`tests/native_helper.rs`, `tests/notifications.rs`)
 | `removing_a_mac_asks_first_and_return_keeps_it` | "Remove" in "Devices…" asks first; opened with the pointer, "Remove" and "Turn off" show no focus ring and Return presses Cancel; for the keyboard, Return presses Cancel, Escape closes the question only, and "Remove" in it removes the Mac. |
 | `relay_statuses_read_as_in_the_adr` | The tags and lines of section 17.3, and "Relay not reachable" when the relay is away; a lock still works. |
 | `turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it` | Off keeps the relay copy and removes the device key; the last Mac deletes the copy. |
-| `joining_a_relay_copy_under_another_passphrase_asks_for_it` | A join whose relay copy has another passphrase asks for the passphrase of the copy, and the step stays while the merge runs: a wrong one changes nothing and asks again, the right one merges and the vault takes the passphrase of the copy, and the other Mac syncs on; closing the sheet in that step removes the new device; under the passphrase of the copy, a Mac that left the team joins again with "Join from another Mac" and merges its own change. |
+| `a_mac_that_turned_relay_sync_off_joins_again_with_a_link_and_merges` | A Mac that left the team joins again with "Join from another Mac" and merges its own change. |
+| `joining_a_relay_copy_under_another_passphrase_asks_for_it` | A join whose relay copy has another passphrase asks for the passphrase of the copy, and the step stays while the merge runs: a wrong one changes nothing and asks again, the right one merges and the vault takes the passphrase of the copy, and the other Mac syncs on; closing the sheet in that step removes the new device. |
 | `turn_off_of_a_removed_or_last_mac_says_what_happened` | A removed Mac says "Removed from the relay" at its next sync and shows no "Sync now", "Add a device…", or "Devices…" ("Add a device…" and "Devices…" opened anyway show why, without "Check again", "New link", or "Refresh", and ask the relay nothing); its "Turn off" asks the relay once (one challenge, no removal call) and says that it was no longer in the team; on the last Mac without the answer of its check, that it was the last Mac. |
 | `use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy` | After "Use the relay copy" a copy from before a passphrase change asks for the passphrase of the copy, merges with it, and the vault keeps the passphrase of this Mac. |
 | `relay_calls_of_the_owner_leave_the_window_responsive` | With a slow relay, "Turn on", "Sync now", "Add a device…", and "Devices…" return at once, the window draws and keeps the vault, and the sheet shows what runs; the answers come later. |

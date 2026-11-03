@@ -337,6 +337,30 @@ fn unlock_merges_before_the_list_and_a_lock_pushes() {
 }
 
 #[test]
+fn a_change_syncs_after_a_pause_and_a_changed_file_merges_while_unlocked() {
+    let folders = folders();
+    let (mut a, mut b) = two_macs(&folders);
+    let file = folders.icloud.join("Personal.apassy");
+    let before = fs::read(&file).expect("file");
+    add_item(&mut a, "Edited", "SYNTH-edit");
+    a.sync_tick_for_test(Instant::now());
+    assert!(a.sync_change_waits_for_test(), "the worker sees the change");
+    assert_eq!(
+        fs::read(&file).expect("file"),
+        before,
+        "not yet: the change settles"
+    );
+    // Seven seconds later the change syncs.
+    a.sync_force_settled_for_test(Instant::now() - Duration::from_secs(10));
+    a.sync_tick_for_test(Instant::now());
+    assert_ne!(fs::read(&file).expect("file"), before);
+
+    // Mac B merges the changed file on its next look, without a lock.
+    b.sync_tick_for_test(Instant::now());
+    assert!(names(&b).contains(&"Edited".to_owned()), "{:?}", names(&b));
+}
+
+#[test]
 fn agent_activity_alone_does_not_sync() {
     let folders = folders();
     let (mut a, _b) = two_macs(&folders);
@@ -754,9 +778,7 @@ fn retry_finds_a_provider_that_appears_after_an_empty_scan() {
     );
 }
 
-/// A hidden, minimized, or covered window draws no frame. The worker syncs anyway: a
-/// change syncs after a pause, and the other Mac merges the changed file on its next
-/// look, while unlocked.
+/// A hidden, minimized, or covered window draws no frame. The worker syncs anyway.
 #[test]
 fn the_worker_pushes_and_merges_without_any_frame() {
     let folders = folders();
@@ -767,7 +789,6 @@ fn the_worker_pushes_and_merges_without_any_frame() {
     add_item(&mut a, "Hidden", "SYNTH-hidden");
     let start = Instant::now();
     a.sync.worker.tick(start);
-    assert!(a.sync_change_waits_for_test(), "the worker sees the change");
     assert_eq!(
         fs::read(&file).expect("file"),
         before,
@@ -1755,23 +1776,60 @@ fn join_b(folders: &Folders, a: &mut DesktopApp, id: &str) -> (DesktopApp, Strin
     (b, id_b)
 }
 
+#[test]
+fn a_mac_that_turned_relay_sync_off_joins_again_with_a_link_and_merges() {
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut a, id) = relay_mac_a(&folders, &relay);
+    // Mac B gets the vault through the relay.
+    let (mut b, id_b) = join_b(&folders, &mut a, &id);
+
+    // B turns relay sync off: it leaves the team, and the relay copy stays.
+    b.relay_turn_off(&id_b, false, None).expect("off");
+    b.relay_settle_for_test();
+    let done = b.status_text.clone();
+    assert!(done.contains("The copy on the relay stays."), "{done}");
+    assert_eq!(relay.devices().len(), 1, "B left the team");
+    add_item(&mut b, "Only on B", "SYNTH-only-b");
+
+    // On again: "Join from another Mac" with a new link of A merges both.
+    let link = new_link(&mut a, &id);
+    b.sync_open_sheet(SyncSheet::RelaySetup { id: id_b.clone() }, None);
+    b.sync.relay.mode = super::sync::relay::SetupMode::Join;
+    let text = frames(&mut b);
+    assert!(text.contains("Send link"), "{text}");
+    b.sync.relay.link_input = link;
+    b.relay_join_request(Some(id_b.clone()), None);
+    b.relay_join_settle_for_test();
+    let text = frames(&mut b);
+    assert!(text.contains("Waiting for the other Mac…"), "{text}");
+    confirm_waiting_mac(&mut a);
+    b.relay_join_poll_now_for_test();
+    assert!(b.ui.sheet.is_none(), "{:?}", b.sync.relay.join_error);
+    assert!(
+        b.status_text.contains("merged with the relay copy"),
+        "{}",
+        b.status_text
+    );
+    assert!(b.is_relay(&id_b));
+    a.sync_now();
+    a.relay_settle_for_test();
+    assert_eq!(names(&a), vec!["Alpha", "Only on B"]);
+}
+
 /// "Join from another Mac" for a vault of the list whose passphrase differs from the
 /// relay copy's: the sheet asks for the passphrase of the copy, and the step stays on
 /// the screen while the merge runs. A wrong one changes nothing and asks again; the
 /// right one merges, and the vault takes the passphrase of the copy, as the other Macs
-/// have it. "Cancel" in that step removes the new device. Under the passphrase of the
-/// copy, a Mac that turned relay sync off joins again with a link and merges.
+/// have it. "Cancel" in that step removes the new device.
 #[test]
 fn joining_a_relay_copy_under_another_passphrase_asks_for_it() {
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
     let (mut b, id_b) = join_b(&folders, &mut a, &id);
-    // B turns relay sync off: it leaves the team, and the relay copy stays.
     b.relay_turn_off(&id_b, false, None).expect("off");
     b.relay_settle_for_test();
-    let done = b.status_text.clone();
-    assert!(done.contains("The copy on the relay stays."), "{done}");
     assert_eq!(relay.devices().len(), 1, "B left the team");
     b.owner_ui
         .session
@@ -1872,39 +1930,6 @@ fn joining_a_relay_copy_under_another_passphrase_asks_for_it() {
     b.relay_settle_for_test();
     assert_eq!(relay.devices().len(), devices, "the new device left again");
     assert!(!b.is_relay(&id_b));
-
-    // With the passphrase of the relay copy, "Join from another Mac" with a new link of
-    // A merges both and asks for nothing. (Last: B takes that passphrase again first.)
-    b.owner_ui
-        .session
-        .change_passphrase(NEW_PASS, PASS, PASS)
-        .expect("change back");
-    add_item(&mut b, "Added while off", "SYNTH-while-off");
-    let link = new_link(&mut a, &id);
-    b.sync_open_sheet(SyncSheet::RelaySetup { id: id_b.clone() }, None);
-    b.sync.relay.mode = super::sync::relay::SetupMode::Join;
-    let text = frames(&mut b);
-    assert!(text.contains("Send link"), "same passphrase: {text}");
-    b.sync.relay.link_input = link;
-    b.relay_join_request(Some(id_b.clone()), None);
-    b.relay_join_settle_for_test();
-    let text = frames(&mut b);
-    assert!(
-        text.contains("Waiting for the other Mac…"),
-        "same passphrase: {text}"
-    );
-    confirm_waiting_mac(&mut a);
-    b.relay_join_poll_now_for_test();
-    assert!(b.ui.sheet.is_none(), "{:?}", b.sync.relay.join_error);
-    assert!(
-        b.status_text.contains("merged with the relay copy"),
-        "{}",
-        b.status_text
-    );
-    assert!(b.is_relay(&id_b));
-    a.sync_now();
-    a.relay_settle_for_test();
-    assert_eq!(names(&a), vec!["Added while off", "Alpha", "Only on B"]);
 }
 
 /// The team code is a one-time secret: the field is masked, and its text goes after
@@ -3331,6 +3356,66 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         relay.devices().contains(&ipad.device_id()),
         "the iPad stays"
     );
+
+    // "Remove…" of the iPad, the last device that answers, the same way: then no device
+    // answers, and the relay revokes the iPad too.
+    let ipad_row = a
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .trusted_devices()
+                .expect("read")
+                .into_iter()
+                .find(|device| device.name == "Test iPad")
+        })
+        .expect("open")
+        .expect("the row of the iPad");
+    let key_before = key_after;
+    a.questions_ask_remove(&ipad_row.uuid, None);
+    assert!(
+        matches!(
+            &a.ui.sheet,
+            Some(Sheet::Vault(VaultSheet::Sync(
+                SyncSheet::RemoveQuestionsDevice { .. }
+            )))
+        ),
+        "{:?}",
+        a.ui.sheet
+    );
+    let text = frames(&mut a);
+    assert!(
+        text.contains("Remove “Test iPad” from the questions of “Personal”?"),
+        "{text}"
+    );
+    a.questions_remove_device(&ipad_row.uuid);
+    assert!(a.owner.check.is_none(), "removal needs no owner check");
+    a.questions_settle_for_test();
+    assert!(
+        a.status_text.contains(
+            "“Test iPad” is removed. It can no longer answer, and the relay removed its device."
+        ),
+        "{}",
+        a.status_text
+    );
+    assert!(!relay.devices().contains(&ipad.device_id()), "iPad revoked");
+    let (gone, removed, key_after) = a
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            (
+                vault
+                    .trusted_device(&ipad_row.uuid)
+                    .expect("read")
+                    .is_none(),
+                vault.trusted_key_removed(&ipad_row.sign_key).expect("read"),
+                vault.question_key().expect("read").expect("key").key_id(),
+            )
+        })
+        .expect("open");
+    assert!(gone && removed, "the row of the iPad");
+    assert_ne!(key_after, key_before, "a new question key after the iPad");
+    assert!(no_iphone(&a));
 }
 
 /// A second Mac of a vault in iCloud Drive that has a questions team: "Send questions
