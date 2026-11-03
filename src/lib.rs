@@ -56,6 +56,12 @@ pub mod isolation;
 #[cfg(feature = "vault")]
 pub mod import;
 
+/// Short-lived credentials, "way C" (ADR 0037 stage 6, contract private-sharing-v1):
+/// the lease providers, AWS SigV4, and the no-secret scan of the tests. It needs the
+/// vault (`ring`, the broker's HTTP client, the field types).
+#[cfg(feature = "vault")]
+pub mod lease;
+
 /// Time-based one-time passwords shared by the desktop and iPhone vaults.
 #[cfg(feature = "vault")]
 pub mod otp;
