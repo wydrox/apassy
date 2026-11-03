@@ -27,7 +27,7 @@ use super::otp;
 use super::timeline::{self, relative_time};
 use super::{
     SECRET_VALUE_CAPACITY, Sheet, UiState, ask_owner_from_sheet, close_sheet, extra_label,
-    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, meta_line, secure_input,
+    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, secure_input,
 };
 use crate::broker::approvals::action_words;
 use crate::broker::profile::REPORTING_API_V0;
@@ -1163,8 +1163,8 @@ fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pen
 }
 
 /// The header of a credential, as in the mockup: its tile, its name at 20 points, its
-/// provider and kind ("Stripe · Secret key"), and its caps (Production, the shared
-/// vaults). It scrolls with the body.
+/// provider and kind ("Stripe · Secret key", or only the kind), and its caps
+/// (Production, the shared vaults). It scrolls with the body.
 pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
     const TILE: f32 = 56.0;
     let Some(id) = selected_id(app) else {
@@ -1177,15 +1177,11 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     let looks = Looks::of(app, id, details.kind, &details.service, &details.name);
-    // "Stripe · Secret key"; without a provider, the service or the project.
-    let source = looks
-        .provider
-        .clone()
-        .unwrap_or_else(|| meta_line(&details.project, &details.service));
-    let subtitle = if source.is_empty() {
-        looks.kind_label.clone()
-    } else {
-        format!("{source} · {}", looks.kind_label)
+    // "Stripe · Secret key"; without a provider, only the kind. The service and the
+    // project have their own labeled rows in the first group.
+    let subtitle = match &looks.provider {
+        Some(provider) => format!("{provider} · {}", looks.kind_label),
+        None => looks.kind_label.clone(),
     };
     let title = kit::text(&details.name, Font::Title)
         .size(20.0)
@@ -1383,6 +1379,8 @@ fn open_edit(app: &mut DesktopApp, details: &OwnerDetails, add_detail: bool) {
     }
     app.owner_ui.edit_revision = details.revision;
     app.owner_ui.edit_secrets.clear();
+    // Only "Add website…" puts the focus in the Website field, after this call.
+    app.ui.focus_form_website = false;
     app.ui.sheet = Some(Sheet::EditItem);
 }
 
@@ -1530,55 +1528,51 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         .iter()
         .filter(|line| !line.name.starts_with(DETAIL_PREFIX))
         .collect();
-    let session = &app.owner_ui.session;
-    let provider_known = session
-        .with_vault(|vault| vault.declaration_provider(id))
-        .and_then(Result::ok)
-        .flatten()
-        .is_some_and(|provider| providers::find(&provider).is_some());
-    let variable = session
+    let variable = app
+        .owner_ui
+        .session
         .env_binding(id)
         .ok()
         .flatten()
         .map(|binding| binding.env_name)
         .filter(|name| name != &format!("APASSY_ITEM_{id}"));
+    // The header names only the provider and the kind, so the service and the project
+    // are labeled rows here.
     let other: Vec<(&str, &str)> = [
         ("Host", details.host.as_str()),
         ("Website", details.website.as_str()),
         ("Database", details.database_name.as_str()),
         ("Public key", details.public_label.as_str()),
-        // Without a provider, the header shows the service and the project.
-        (
-            "Service",
-            if provider_known {
-                details.service.as_str()
-            } else {
-                ""
-            },
-        ),
-        (
-            "Project",
-            if provider_known {
-                details.project.as_str()
-            } else {
-                ""
-            },
-        ),
+        ("Service", details.service.as_str()),
+        ("Project", details.project.as_str()),
     ]
     .into_iter()
     .filter(|(_, value)| !value.is_empty())
     .collect();
+    // A login without a website offers to add one. A website detail, as "Website 2" of
+    // an import, is a website too, as for the browser match. A passkey login shows its
+    // website in the passkey part.
+    let website_detail = details.details.iter().any(|detail| {
+        detail
+            .value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && crate::browser::site::is_website_field(&detail.name, Some(&detail.label))
+    });
+    let add_website = details.kind == CredentialKind::Login
+        && details.website.is_empty()
+        && !website_detail
+        && !details.archived
+        && !from_page;
     let revealed = details.any_revealed();
     let mut toggle = false;
     let mut copy = None;
+    let mut copy_username = false;
     let mut open_site = None;
+    let mut edit_website = false;
     let codes = rows::group(ui, |s| {
         if !username.is_empty() {
-            pair_row(
-                s,
-                "Username",
-                kit::text(&username, Font::Body).color(kit::SECONDARY),
-            );
+            copy_username = username_row(s, &username);
         }
         for (index, line) in secrets.iter().enumerate() {
             // A key or a token says "Secret", as in the mockup; a login says "Password".
@@ -1599,6 +1593,10 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                 "Variable",
                 kit::text(variable, Font::Mono).color(kit::SECONDARY),
             );
+        }
+        // The other rows of a login are empty, so this is the place of its Website row.
+        if add_website {
+            edit_website = add_website_row(s);
         }
         for (label, value) in other {
             if label == "Website" {
@@ -1680,6 +1678,100 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         codes.answer(app, ui.ctx(), id);
     } else if let Some(url) = open_site {
         open_website(app, &url);
+    } else if copy_username {
+        // A username is no secret: the system clipboard takes it with no owner check,
+        // and Apassy does not clear it later.
+        ui.ctx().copy_text(username);
+        app.set_ok("The username is copied.");
+    } else if edit_website {
+        open_edit(app, details, false);
+        app.ui.focus_form_website = true;
+    }
+}
+
+/// The hover text of Copy on the Username row.
+const USERNAME_COPY_HINT: &str = "Copy the username. It is not a secret, so Apassy asks for no Touch ID and does not clear the clipboard later.";
+
+/// The link of a login without a website.
+const ADD_WEBSITE: &str = "Add website…";
+
+/// The Username row: the name, the full name as hover text, and "Copy". Returns true
+/// after a click on "Copy".
+fn username_row(group: &mut rows::Group<'_>, username: &str) -> bool {
+    group.line(|ui| {
+        ui.label(kit::text("Username", Font::Body).color(kit::LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let copy = rows::pill_button(ui, "Copy", "Copy Username")
+                .on_hover_text(USERNAME_COPY_HINT)
+                .clicked();
+            ui.add(Label::new(kit::text(username, Font::Body).color(kit::SECONDARY)).truncate())
+                .on_hover_text(username);
+            copy
+        })
+        .inner
+    })
+}
+
+/// The Website row of a login without a website: "Add website…" at the right. Returns
+/// true after a click on it.
+fn add_website_row(group: &mut rows::Group<'_>) -> bool {
+    group.line(|ui| {
+        ui.label(kit::text("Website", Font::Body).color(kit::LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            row_link(ui, ADD_WEBSITE, "Add website")
+                .on_hover_text(
+                    "Edit the credential and type the address of its login page. Browser filling needs it.",
+                )
+                .clicked()
+        })
+        .inner
+    })
+}
+
+/// A link in the accent color at the size of a row value. `name` is its name for
+/// VoiceOver.
+fn row_link(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
+    let galley = kit::galley(ui, kit::text(label, Font::Body).color(rows::LINK));
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, enabled, name));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.has_focus() {
+            kit::focus_ring(painter, rect.expand(2.0), 4);
+        }
+        if response.hovered() {
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, rows::LINK),
+            );
+        }
+        painter.galley(rect.min, galley, rows::LINK);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// "Add website…" asked for the focus in the Website field of the edit sheet. The sheet
+/// gives the focus to its first field when it opens, so the field asks again in each
+/// frame until it keeps the focus. Not in a frame with a pointer press or release, as
+/// [`kit::claim_start_focus`].
+fn claim_website_focus(flag: &mut bool, field: &egui::Response) {
+    if !*flag {
+        return;
+    }
+    if field.has_focus() {
+        *flag = false;
+        return;
+    }
+    let clicking = field
+        .ctx
+        .input(|input| input.pointer.any_pressed() || input.pointer.any_released());
+    if !clicking {
+        field.request_focus();
     }
 }
 
@@ -1766,6 +1858,10 @@ fn open_website(app: &mut DesktopApp, url: &str) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "detail_fields_tests.rs"]
+mod detail_fields_tests;
 
 /// The names of the shared vaults that hold a credential. None until shared vaults
 /// land (ADR 0026 §6).
@@ -3400,9 +3496,12 @@ fn item_form(
         });
         for field in DesktopModel::extra_fields(kind) {
             let (value, placeholder) = extra_value(form, *field);
-            s.field(extra_label(*field), |ui| {
+            let input = s.field(extra_label(*field), |ui| {
                 kit::text_input(ui, value, &format!("{salt}-{field:?}"), placeholder)
             });
+            if editing && *field == ExtraField::Website {
+                claim_website_focus(&mut state.focus_form_website, &input);
+            }
         }
         if !editing {
             secret_rows(s, salt, kind, secrets, "Required");

@@ -285,9 +285,26 @@ fn the_page_shows_the_passkey_metadata_and_no_key_control() {
         "{:?}",
         details.secret_lines
     );
-    for control in ["Secret", "Show", "Hide", "Copy", "Export", "Show code"] {
+    for control in ["Secret", "Show", "Hide", "Export", "Show code"] {
         assert!(!window.has(control), "{control}: {}", window.text);
     }
+    // The only Copy is the one of the username, a plain value.
+    let username = window.at("Username");
+    let copies: Vec<Pos2> = window
+        .texts
+        .iter()
+        .filter(|(text, _)| text == "Copy")
+        .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+        .collect();
+    assert_eq!(copies.len(), 1, "{}", window.text);
+    assert!(
+        (copies[0].y - username.y).abs() < 24.0 && copies[0].x > username.x,
+        "{}",
+        window.text
+    );
+    // A passkey login shows its website in the passkey part, so it offers no
+    // "Add website…".
+    assert!(!window.has("Add website…"), "{}", window.text);
     assert!(!window.text.contains(&key), "the key is on the screen");
     assert!(!window.text.contains("passkey_key"), "{}", window.text);
     // The shortcut for Show and Hide does nothing for a login without a secret value.
