@@ -326,8 +326,10 @@ fn a_manager_can_deny_but_not_release() {
 
 #[test]
 fn a_run_times_out_and_can_no_longer_be_released() {
+    // Every expiry below is forced with SQL. A long timeout keeps the waiting runs from
+    // expiring on their own while the later cases run (each vault edit derives keys).
     let relay = start_with(
-        |config| config.approval_timeout_secs = 2,
+        |config| config.approval_timeout_secs = 60,
         UpstreamOptions::default(),
     );
     let team = relay.setup("staging");
@@ -379,7 +381,7 @@ fn a_run_times_out_and_can_no_longer_be_released() {
     assert_eq!(requests.len(), 2, "the first two runs still wait");
     assert_eq!(get_run(&relay, &team, listed)["status"], "timed_out");
 
-    // Both first runs are past their expiry (no wait for the 2 s): the relay sees it at a
+    // Both first runs are past their expiry (no wait for the timeout): the relay sees it at a
     // read.
     relay.edit_vault_live(&format!(
         "UPDATE run SET expires_at = 1 WHERE id IN ({run}, {second})"
