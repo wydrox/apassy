@@ -42,6 +42,7 @@ svg{display:block}
 .flabel{margin:0 0 12px 4px}
 .flabel b{font-size:14px;font-weight:700;color:#232327}
 .flabel span{display:block;font-size:12px;color:rgba(0,0,0,.55);margin-top:2px;max-width:940px}
+.flabel .fnum{display:inline-grid;color:#fff;font-size:11px;margin-top:0;max-width:none}
 .fnum{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#232327;color:#fff;font-size:11px;font-weight:700;margin-right:8px;vertical-align:1px}
 .nf{display:inline-block;font-size:9.5px;font-weight:700;color:#7a3ec2;background:rgba(122,62,194,.12);border-radius:4px;padding:0 4px;margin-left:4px;vertical-align:1px;letter-spacing:.02em;line-height:14px;font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
 
@@ -123,7 +124,7 @@ svg{display:block}
 .menu .mi{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:5px}
 .menu .mi .ck{width:14px;flex:none;font-size:12px;text-align:center}
 .menu .mi small{margin-left:auto;padding-left:14px;color:var(--sec);font-size:12px}
-.menu .mi.hi{background:var(--accent);color:#fff}.menu .mi.hi small{color:rgba(255,255,255,.85)}
+.menu .mi.sel{background:var(--accent);color:#fff}.menu .mi.sel small{color:rgba(255,255,255,.85)}
 .menu .mi.dim{color:var(--sec)}
 .menu hr{border:0;border-top:.5px solid var(--line);margin:4px 6px}
 
@@ -524,7 +525,7 @@ svg{display:block}
           <div class="mi"><span class="ck"></span>All Environments</div>
           <hr>
           <div class="mi"><span class="ck"></span>Mac mini (office)<small>This Mac</small></div>
-          <div class="mi hi"><span class="ck">✓</span>Mac mini (studio)<small>1 min ago</small></div>
+          <div class="mi sel"><span class="ck">✓</span>Mac mini (studio)<small>1 min ago</small></div>
           <div class="mi dim"><span class="ck"></span>MacBook Pro<small>1 Nov</small></div>
         </div>
       </div>
@@ -1060,7 +1061,7 @@ svg{display:block}
         <div class="tb"><div class="ttl"><b>Agents</b><small>3 agents</small></div></div>
         <div class="scopebar">Showing <span class="popm open">Mac mini (office)</span> in <span class="popm">All Projects</span>
           <div class="menu" style="left:78px;top:28px;min-width:260px">
-            <div class="mi hi"><span class="ck">✓</span>Mac mini (office)<small>This Mac</small></div>
+            <div class="mi sel"><span class="ck">✓</span>Mac mini (office)<small>This Mac</small></div>
             <hr>
             <div style="padding:3px 10px 5px 26px;font-size:12px;color:var(--sec)">Other Macs appear when they use this vault.</div>
           </div>
