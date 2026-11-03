@@ -21,7 +21,9 @@
 //!   relay's `device_id`; `seq` is above the highest one accepted of that device.
 //! - It keeps the last good feed of each Mac, and the text of a failed step 1 or 2 for a
 //!   known Mac with no good feed: [`OtherFeed::NeedsSync`] or [`OtherFeed::NeedsUpdate`].
-//!   A failed step 4 or 5 is ignored, with no text. A device that leaves `present`, and a
+//!   A later record that fails step 1 or 2 keeps the good feed on the screen with the
+//!   text of the step ([`OtherMac::problem`]) until a newer good feed comes. A failed
+//!   step 4 or 5 is ignored, with no text. A device that leaves `present`, and a
 //!   Mac whose row goes, leave the list.
 //! - Everything is in memory only: the feeds, and the highest `seq` of each Mac (kept
 //!   across a lock while the app runs). A lock, another vault, and the questions going off
@@ -79,6 +81,10 @@ pub struct OtherMac {
     /// When this Mac received the feed, or the record that it could not show, in Unix
     /// seconds.
     pub received_at: u64,
+    /// The failed step of a record that came after the good feed in `feed` (section 7.4):
+    /// the screen keeps that feed and shows the text of the step. `None` while the feed
+    /// is the newest one, and with no good feed (then `feed` is the text).
+    pub problem: Option<Problem>,
 }
 
 /// What the reader shows of the other Macs, with the vault session that read them.
@@ -350,10 +356,15 @@ impl Reader {
             .iter()
             .filter_map(|(device_id, shown)| {
                 let row = publisher(me.devices, me.team_id, me.uuid, &shown.device, *device_id)?;
-                let (feed, received_at) = match (&shown.good, shown.problem) {
-                    (Some((feed, at)), _) => (OtherFeed::Ready(feed.clone()), *at),
-                    (None, Some((Problem::Sync, at))) => (OtherFeed::NeedsSync, at),
-                    (None, Some((Problem::Update, at))) => (OtherFeed::NeedsUpdate, at),
+                // A failed record after a good feed keeps that feed, with its text.
+                let (feed, received_at, problem) = match (&shown.good, shown.problem) {
+                    (Some((feed, at)), problem) => (
+                        OtherFeed::Ready(feed.clone()),
+                        *at,
+                        problem.map(|(problem, _)| problem),
+                    ),
+                    (None, Some((Problem::Sync, at))) => (OtherFeed::NeedsSync, at, None),
+                    (None, Some((Problem::Update, at))) => (OtherFeed::NeedsUpdate, at, None),
                     (None, None) => return None,
                 };
                 Some(OtherMac {
@@ -362,6 +373,7 @@ impl Reader {
                     name: row.name.clone(),
                     feed,
                     received_at,
+                    problem,
                 })
             })
             .collect();
@@ -848,6 +860,68 @@ mod tests {
         let shown = take(&mut reader, &answer, &devices);
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].relay_device_id, OTHER_ID);
+    }
+
+    /// Section 7.4: the first failure keeps the last good feed of that Mac on the screen
+    /// and shows the text of the step. The reader kept the feed but showed no text, so a
+    /// Mac whose feed opened once and then no longer opened looked current.
+    #[test]
+    fn a_later_record_that_fails_keeps_the_feed_with_the_text_of_its_step() {
+        let devices = devices();
+        let mut reader = Reader::default();
+        reader.look_at(other_macs(&devices, TEAM, ME, ME_ID));
+        let first = feed(OTHER, 1_790_000_040);
+        let shown = take(
+            &mut reader,
+            &list(vec![record(OTHER_ID, &first, 1)]),
+            &devices,
+        );
+        assert_eq!(shown[0].feed, OtherFeed::Ready(first.clone()));
+        assert_eq!(shown[0].problem, None, "the newest feed");
+        // Another key (the question key rotated): the feed stays, with "Sync…".
+        let rotated = record_of(
+            OTHER_ID,
+            first.seq + 1,
+            2,
+            &QuestionKey::from_bytes([7; 32]),
+            b"{}",
+        );
+        let shown = take(&mut reader, &list(vec![rotated]), &devices);
+        assert_eq!(shown[0].feed, OtherFeed::Ready(first.clone()));
+        assert_eq!(shown[0].problem, Some(Problem::Sync));
+        // A newer form: the feed stays, with "Update…".
+        let mut value = serde_json::to_value(feed(OTHER, first.seq + 2)).unwrap();
+        value["agents_v2"] = serde_json::json!([]);
+        let newer_form = record_of(
+            OTHER_ID,
+            first.seq + 2,
+            3,
+            &key(),
+            &serde_json::to_vec(&value).unwrap(),
+        );
+        let shown = take(&mut reader, &list(vec![newer_form]), &devices);
+        assert_eq!(shown[0].feed, OtherFeed::Ready(first.clone()));
+        assert_eq!(shown[0].problem, Some(Problem::Update));
+        // A newer good feed ends the text.
+        let newer = feed(OTHER, first.seq + 3);
+        let shown = take(
+            &mut reader,
+            &list(vec![record(OTHER_ID, &newer, 4)]),
+            &devices,
+        );
+        assert_eq!(shown[0].feed, OtherFeed::Ready(newer.clone()));
+        assert_eq!(shown[0].problem, None);
+        // A failed record at or below the mark is an old one: no text.
+        let old = record_of(
+            OTHER_ID,
+            newer.seq,
+            5,
+            &QuestionKey::from_bytes([7; 32]),
+            b"{}",
+        );
+        let shown = take(&mut reader, &list(vec![old]), &devices);
+        assert_eq!(shown[0].feed, OtherFeed::Ready(newer));
+        assert_eq!(shown[0].problem, None);
     }
 
     #[test]

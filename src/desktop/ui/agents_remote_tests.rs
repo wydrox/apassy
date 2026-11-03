@@ -9,7 +9,9 @@ use tempfile::TempDir;
 
 use super::owner_tests::{collect, unlocked_app_with_item};
 use super::{agents, draw, kit};
-use crate::desktop::remote_feeds::{ActivityScope, DeviceScope, RemoteFeedState, RemoteMac};
+use crate::desktop::remote_feeds::{
+    ActivityScope, DeviceScope, FeedProblem, RemoteFeedState, RemoteMac,
+};
 use crate::desktop::{DesktopApp, Place};
 use crate::questions::feed::{Feed, FeedException};
 
@@ -40,6 +42,7 @@ fn mac(device: &str, name: &str, state: RemoteFeedState) -> RemoteMac {
         name: name.to_owned(),
         state,
         received_at: kit::now().saturating_sub(300),
+        problem: None,
     }
 }
 
@@ -446,4 +449,48 @@ fn the_scope_bar_shows_with_a_choice_and_its_menus_change_the_scope() {
         "{:?}",
         window.names
     );
+}
+
+/// A Mac whose feed opened once and whose later feed no longer opens keeps its agents on
+/// the list, with the text of the step above them (relay-feed-v1 section 7.4): the list
+/// showed the old agents as if they were current.
+#[test]
+fn a_kept_feed_shows_its_agents_with_the_text_of_the_failed_step() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = app_with_codex(&dir);
+    app.remote_macs_pinned = true;
+    let mut window = Window::new();
+    for (problem, text) in [
+        (
+            FeedProblem::NeedsSync,
+            "Sync this vault to see the agents of MacBook Pro",
+        ),
+        (
+            FeedProblem::NeedsUpdate,
+            "Update Apassy to see the agents of MacBook Pro",
+        ),
+    ] {
+        app.remote_macs = vec![RemoteMac {
+            problem: Some(problem),
+            ..mac(DEVICE, "MacBook Pro", RemoteFeedState::Ready(feed(|_| {})))
+        }];
+        window.idle(&mut app);
+        assert!(window.has(text), "{text}: {}", window.text);
+        assert!(
+            window.has("MacBook Pro · 12 uses this week"),
+            "{}",
+            window.text
+        );
+        assert!(window.first(text).y < window.first("Claude Code").y);
+        assert_eq!(agents::remote_connected(&app.remote_macs), 1);
+    }
+    // The newest feed again: no text.
+    app.remote_macs = vec![mac(
+        DEVICE,
+        "MacBook Pro",
+        RemoteFeedState::Ready(feed(|_| {})),
+    )];
+    window.idle(&mut app);
+    assert!(!window.has("to see the agents of"), "{}", window.text);
+    assert!(window.has("Claude Code"), "{}", window.text);
 }

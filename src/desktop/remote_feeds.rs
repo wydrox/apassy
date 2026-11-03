@@ -4,7 +4,9 @@
 //! relay. This Mac reads the feeds of the other Macs of the vault, so that Agents and
 //! Decisions show the whole vault, not only this Mac.
 //!
-//! The reader keeps the last good feed of each Mac in [`RemoteMac`]. The agents of another
+//! The reader keeps the last good feed of each Mac in [`RemoteMac`]. A later record of that
+//! Mac that fails step 1 or 2 of section 7.4 keeps the feed on the screen with the text of
+//! the step ([`RemoteMac::problem`]), until a newer good feed comes. The agents of another
 //! Mac are read-only here: a change is made on that Mac.
 //!
 //! The reader is a thread of the questions waiter (`crate::questions::feed_reader`): it
@@ -17,6 +19,7 @@
 
 use crate::desktop::DesktopApp;
 use crate::questions::feed::Feed;
+use crate::questions::feed_reader::Problem;
 use crate::questions::{OtherFeed, OtherMac};
 
 /// What this Mac can show of the feed of another Mac (section 7.4).
@@ -32,6 +35,26 @@ pub(crate) enum RemoteFeedState {
     NeedsUpdate,
 }
 
+/// Why this Mac cannot show the newest feed of another Mac (section 7.4). The screen
+/// keeps the last good feed and shows the text of the step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedProblem {
+    /// Step 1: the envelope does not open. "Sync this vault to see the agents of <Mac>".
+    NeedsSync,
+    /// Steps 2 and 3: a form that this version does not read. "Update Apassy to see the
+    /// agents of <Mac>".
+    NeedsUpdate,
+}
+
+impl From<Problem> for FeedProblem {
+    fn from(problem: Problem) -> Self {
+        match problem {
+            Problem::Sync => Self::NeedsSync,
+            Problem::Update => Self::NeedsUpdate,
+        }
+    }
+}
+
 /// Another Mac of this vault and its feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteMac {
@@ -42,6 +65,10 @@ pub(crate) struct RemoteMac {
     pub(crate) state: RemoteFeedState,
     /// When this Mac received the feed, in Unix seconds.
     pub(crate) received_at: u64,
+    /// A record of the Mac that came after the feed of [`RemoteFeedState::Ready`] and
+    /// failed: the screen keeps that feed and shows the text of the step. `None` while
+    /// the feed is the newest one, and with no good feed (then `state` is the text).
+    pub(crate) problem: Option<FeedProblem>,
 }
 
 /// The devices that Agents and Decisions show.
@@ -81,6 +108,7 @@ impl From<&OtherMac> for RemoteMac {
             name: mac.name.clone(),
             state: RemoteFeedState::from(&mac.feed),
             received_at: mac.received_at,
+            problem: mac.problem.map(FeedProblem::from),
         }
     }
 }
@@ -91,6 +119,7 @@ impl RemoteMac {
         self.device == mac.device
             && self.name == mac.name
             && self.received_at == mac.received_at
+            && self.problem == mac.problem.map(FeedProblem::from)
             && match (&self.state, &mac.feed) {
                 (RemoteFeedState::Ready(shown), OtherFeed::Ready(read)) => shown == read,
                 (RemoteFeedState::NeedsSync, OtherFeed::NeedsSync)
@@ -170,6 +199,7 @@ mod tests {
             name: "Studio Mac".to_owned(),
             feed: state,
             received_at: 1_790_000_041,
+            problem: None,
         }
     }
 
@@ -192,6 +222,7 @@ mod tests {
                 name: "Studio Mac".to_owned(),
                 state: RemoteFeedState::Ready(feed()),
                 received_at: 1_790_000_041,
+                problem: None,
             }
         );
         assert_eq!(rows[1].state, RemoteFeedState::NeedsUpdate);
@@ -208,6 +239,45 @@ mod tests {
         );
         let sync = changed_rows(&[], &[other(OtherFeed::NeedsSync)]).expect("a text");
         assert_eq!(sync[0].state, RemoteFeedState::NeedsSync);
+    }
+
+    /// A Mac whose feed opened once and whose later record no longer opens (or has a
+    /// newer form) keeps its last good feed, marked with the text of the step (section
+    /// 7.4); the window showed the old feed as if it were current. A newer good feed
+    /// ends the mark.
+    #[test]
+    fn a_later_failure_keeps_the_feed_and_marks_it() {
+        let ready = changed_rows(&[], &[other(OtherFeed::Ready(feed()))]).expect("a feed");
+        assert_eq!(ready[0].problem, None);
+        for (problem, shown) in [
+            (Problem::Sync, FeedProblem::NeedsSync),
+            (Problem::Update, FeedProblem::NeedsUpdate),
+        ] {
+            let failed = OtherMac {
+                problem: Some(problem),
+                ..other(OtherFeed::Ready(feed()))
+            };
+            let rows =
+                changed_rows(&ready, std::slice::from_ref(&failed)).expect("the failure is news");
+            assert_eq!(
+                rows[0].state,
+                RemoteFeedState::Ready(feed()),
+                "the feed stays"
+            );
+            assert_eq!(rows[0].problem, Some(shown));
+            assert_eq!(rows[0].received_at, ready[0].received_at);
+            assert_eq!(
+                changed_rows(&rows, std::slice::from_ref(&failed)),
+                None,
+                "the same rows"
+            );
+            let mut newer = feed();
+            newer.seq += 1;
+            let rows = changed_rows(&rows, &[other(OtherFeed::Ready(newer.clone()))])
+                .expect("a newer feed");
+            assert_eq!(rows[0].state, RemoteFeedState::Ready(newer));
+            assert_eq!(rows[0].problem, None, "the newest feed again");
+        }
     }
 
     #[test]

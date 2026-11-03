@@ -24,7 +24,9 @@ use super::kit::{self, Font, Icon, Tone};
 use crate::broker::approvals::shown_path;
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_store::{AgentActivity, AgentActivityRow, WeekCounts};
-use crate::desktop::remote_feeds::{ActivityScope, DeviceScope, RemoteFeedState, RemoteMac};
+use crate::desktop::remote_feeds::{
+    ActivityScope, DeviceScope, FeedProblem, RemoteFeedState, RemoteMac,
+};
 use crate::questions::feed::{Feed, FeedAgent, FeedUse};
 use crate::vault::{ActivityDecision, format_utc};
 
@@ -278,6 +280,9 @@ pub(super) struct VaultActivity {
     pub(super) recent: Vec<PastDecision>,
     /// The other Macs whose feed left out older uses.
     pub(super) truncated: Vec<Source>,
+    /// The other Macs whose newest feed this Mac cannot show: the activity is that of
+    /// their last good feed (relay-feed-v1 section 7.4).
+    pub(super) stale: Vec<(Source, FeedProblem)>,
     pub(super) unavailable: Vec<Unavailable>,
 }
 
@@ -323,14 +328,29 @@ impl VaultActivity {
         agents
     }
 
-    /// "Some older uses are on MAC only." for each Mac in the scope whose feed left out
-    /// older uses.
-    pub(super) fn truncated_notes(&self, scope: &DeviceScope) -> Vec<String> {
-        self.truncated
+    /// The notes of the other Macs in the scope: "Sync this vault to see the activity of
+    /// MAC." (or "Update Apassy …") for each Mac whose newest feed this Mac cannot show,
+    /// then "Some older uses are on MAC only." for each Mac whose feed left out older
+    /// uses.
+    pub(super) fn feed_notes(&self, scope: &DeviceScope) -> Vec<String> {
+        let stale = self
+            .stale
+            .iter()
+            .filter(|(source, _)| source.in_scope(scope))
+            .map(|(source, problem)| match problem {
+                FeedProblem::NeedsSync => {
+                    format!("Sync this vault to see the activity of {}.", source.name())
+                }
+                FeedProblem::NeedsUpdate => {
+                    format!("Update Apassy to see the activity of {}.", source.name())
+                }
+            });
+        let truncated = self
+            .truncated
             .iter()
             .filter(|source| source.in_scope(scope))
-            .map(|source| format!("Some older uses are on {} only.", source.name()))
-            .collect()
+            .map(|source| format!("Some older uses are on {} only.", source.name()));
+        stale.chain(truncated).collect()
     }
 }
 
@@ -486,6 +506,9 @@ pub(super) fn gather(
                 automatic: feed.week.automatic,
             }),
         });
+        if let Some(problem) = remote.problem {
+            activity.stale.push((source.clone(), problem));
+        }
         if feed.truncated {
             activity.truncated.push(source.clone());
         }
@@ -648,7 +671,7 @@ pub(super) fn empty_list(
     let recent = activity.recent_in(scope);
     let groups = by_day(&recent, now, local_offset(now));
     let name_this_mac = activity.devices.len() > 1;
-    let notes = activity.truncated_notes(&scope.device);
+    let notes = activity.feed_notes(&scope.device);
     let mut chosen = None;
     columns::grouped_rows(
         ui,

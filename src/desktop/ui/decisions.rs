@@ -1410,7 +1410,7 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                 if this_mac && scope.project.is_some() {
                     kit::note(ui, super::decisions_activity::LOG_HAS_NO_PROJECT);
                 }
-                for note in remote.truncated_notes(&scope.device) {
+                for note in remote.feed_notes(&scope.device) {
                     kit::note(ui, note);
                 }
             }
