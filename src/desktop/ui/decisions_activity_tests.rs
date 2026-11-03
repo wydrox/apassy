@@ -95,6 +95,7 @@ fn local_use(app: &mut DesktopApp, item_id: u64) {
 fn vault_app(dir: &TempDir, feed: Feed) -> DesktopApp {
     let (mut app, item_id) = unlocked_app_with_item(dir);
     local_use(&mut app, item_id);
+    app.remote_macs_pinned = true;
     app.remote_macs = vec![ready_mac(feed)];
     app.place = Place::Decisions;
     app

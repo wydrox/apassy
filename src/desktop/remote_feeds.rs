@@ -110,6 +110,10 @@ impl DesktopApp {
     /// Each frame: the other Macs of the open vault session and their feeds, as the reader
     /// of the questions waiter has them. Nothing while the vault is locked.
     pub(crate) fn poll_remote_feeds(&mut self) {
+        #[cfg(test)]
+        if self.remote_macs_pinned {
+            return;
+        }
         let epoch = self.owner_ui.session.epoch();
         let changed = match &self.owner.questions {
             Some(questions) => questions.with_other_macs(|read_by, macs| {

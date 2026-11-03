@@ -127,6 +127,9 @@ pub struct DesktopApp {
     /// The other Macs of the vault and their last feeds ([`remote_feeds`]).
     #[cfg(feature = "vault")]
     pub(crate) remote_macs: Vec<remote_feeds::RemoteMac>,
+    /// A test sets the other Macs by hand: the reader then leaves them as they are.
+    #[cfg(all(test, feature = "vault"))]
+    pub(crate) remote_macs_pinned: bool,
     /// The place of the sidebar that the window shows.
     pub(crate) place: Place,
     pub(crate) selected_item_id: Option<String>,
@@ -221,6 +224,8 @@ impl DesktopApp {
             model: DesktopModel::new(),
             #[cfg(feature = "vault")]
             remote_macs: Vec::new(),
+            #[cfg(all(test, feature = "vault"))]
+            remote_macs_pinned: false,
             #[cfg(all(feature = "vault", target_os = "macos"))]
             native_menu: None,
             place: Place::CREDENTIALS,

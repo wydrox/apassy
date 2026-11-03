@@ -171,6 +171,7 @@ fn positions(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
 fn the_list_has_a_section_for_each_mac_with_its_agents_or_its_note() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, codex) = app_with_codex(&dir);
+    app.remote_macs_pinned = true;
     app.remote_macs = three_macs(feed(|feed| {
         let mut old = feed.agents[0].clone();
         old.id = "5".to_owned();
@@ -219,6 +220,7 @@ fn the_list_has_a_section_for_each_mac_with_its_agents_or_its_note() {
 fn the_scope_filters_by_device_and_by_project() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = app_with_codex(&dir);
+    app.remote_macs_pinned = true;
     app.remote_macs = three_macs(feed(|_| {}));
     let mut window = Window::new();
 
@@ -268,6 +270,7 @@ fn the_scope_filters_by_device_and_by_project() {
 fn the_page_of_an_agent_of_another_mac_only_shows() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = app_with_codex(&dir);
+    app.remote_macs_pinned = true;
     app.remote_macs = three_macs(feed(|_| {}));
     app.ui.agents.remote = Some((DEVICE.to_owned(), "4".to_owned()));
     let mut window = Window::new();
@@ -312,6 +315,7 @@ fn the_page_of_an_agent_of_another_mac_only_shows() {
 fn a_cut_feed_a_restricted_agent_and_an_expired_token_say_so() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = app_with_codex(&dir);
+    app.remote_macs_pinned = true;
     app.remote_macs = three_macs(feed(|feed| {
         feed.truncated = true;
         let agent = &mut feed.agents[0];
@@ -345,6 +349,7 @@ fn a_cut_feed_a_restricted_agent_and_an_expired_token_say_so() {
 fn an_agent_with_no_use_and_no_exception_has_a_compact_page() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, codex) = app_with_codex(&dir);
+    app.remote_macs_pinned = true;
     app.remote_macs = three_macs(feed(|feed| {
         let agent = &mut feed.agents[0];
         agent.uses_this_week = 0;
@@ -402,6 +407,8 @@ fn the_scope_bar_shows_with_a_choice_and_its_menus_change_the_scope() {
     for absent in ["Showing", "All devices", "All projects"] {
         assert!(!window.has(absent), "{absent}: {}", window.text);
     }
+
+    app.remote_macs_pinned = true;
 
     app.remote_macs = vec![mac(
         DEVICE,

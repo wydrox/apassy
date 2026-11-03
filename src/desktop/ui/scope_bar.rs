@@ -9,6 +9,11 @@ use crate::desktop::remote_feeds::{ActivityScope, DeviceScope};
 
 /// The text size of the sentence, the size of the menus.
 const SIZE: f32 = 12.5;
+/// The space between the words and the menus.
+const GAP: f32 = 6.0;
+/// The width that a menu adds to its text: the padding and the chevron
+/// (`detail_rows::bordered_pop_menu`).
+const MENU_EXTRA: f32 = 31.0;
 
 /// Draw the scope bar. `devices` lists the choices after "All devices" with their labels
 /// (this Mac first); `projects` lists the project labels after "All projects". Returns
@@ -32,52 +37,79 @@ pub(super) fn scope_bar(
         return false;
     }
     let before = scope.clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+    let mut device_options = vec![(DeviceScope::All, "All devices".to_owned())];
+    device_options.extend(devices.iter().cloned());
+    let device_shown = device_label(&scope.device, devices);
+    let mut project_options = vec![(None, "All projects".to_owned())];
+    project_options.extend(
+        projects
+            .iter()
+            .map(|project| (Some(project.clone()), project.clone())),
+    );
+    // A chosen project that is no longer in the list stays a choice.
+    if let Some(project) = scope.project.as_ref().filter(|p| !projects.contains(*p)) {
+        project_options.push((Some(project.clone()), project.clone()));
+    }
+    let project_shown = scope
+        .project
+        .clone()
+        .unwrap_or_else(|| "All projects".to_owned());
+    let device_menu = |ui: &mut egui::Ui, scope: &mut ActivityScope| {
+        ui.push_id("scope-devices", |ui| {
+            rows::bordered_pop_menu(
+                ui,
+                &mut scope.device,
+                &device_options,
+                &device_shown,
+                &format!("Devices, {device_shown}"),
+            );
+        });
+    };
+    let project_menu = |ui: &mut egui::Ui, scope: &mut ActivityScope| {
+        ui.push_id("scope-projects", |ui| {
+            rows::bordered_pop_menu(
+                ui,
+                &mut scope.project,
+                &project_options,
+                &project_shown,
+                &format!("Projects, {project_shown}"),
+            );
+        });
+    };
+    // Each menu sits in its own `push_id` part, which a wrapping row cannot break. So
+    // the bar measures the sentence: when it does not fit, "in" and the project menu go
+    // on a second line.
+    let mut width = text_width(ui, "Showing");
+    if show_devices {
+        width += GAP + text_width(ui, &device_shown) + MENU_EXTRA;
+    }
+    if show_devices && show_projects {
+        width += GAP + text_width(ui, "in");
+    }
+    if show_projects {
+        width += GAP + text_width(ui, &project_shown) + MENU_EXTRA;
+    }
+    let split = show_devices && show_projects && width > ui.available_width();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
         words(ui, "Showing");
         if show_devices {
-            let mut options = vec![(DeviceScope::All, "All devices".to_owned())];
-            options.extend(devices.iter().cloned());
-            let shown = device_label(&scope.device, devices);
-            ui.push_id("scope-devices", |ui| {
-                rows::bordered_pop_menu(
-                    ui,
-                    &mut scope.device,
-                    &options,
-                    &shown,
-                    &format!("Devices, {shown}"),
-                );
-            });
+            device_menu(ui, scope);
         }
-        if show_devices && show_projects {
+        if show_devices && show_projects && !split {
             words(ui, "in");
         }
-        if show_projects {
-            let mut options = vec![(None, "All projects".to_owned())];
-            options.extend(
-                projects
-                    .iter()
-                    .map(|project| (Some(project.clone()), project.clone())),
-            );
-            // A chosen project that is no longer in the list stays a choice.
-            if let Some(project) = scope.project.as_ref().filter(|p| !projects.contains(*p)) {
-                options.push((Some(project.clone()), project.clone()));
-            }
-            let shown = scope
-                .project
-                .clone()
-                .unwrap_or_else(|| "All projects".to_owned());
-            ui.push_id("scope-projects", |ui| {
-                rows::bordered_pop_menu(
-                    ui,
-                    &mut scope.project,
-                    &options,
-                    &shown,
-                    &format!("Projects, {shown}"),
-                );
-            });
+        if show_projects && !split {
+            project_menu(ui, scope);
         }
     });
+    if split {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            words(ui, "in");
+            project_menu(ui, scope);
+        });
+    }
     *scope != before
 }
 
@@ -97,4 +129,11 @@ fn words(ui: &mut egui::Ui, text: &str) {
             .size(SIZE)
             .color(kit::SECONDARY),
     );
+}
+
+/// The width of `text` in the size of the sentence and of the menus.
+fn text_width(ui: &egui::Ui, text: &str) -> f32 {
+    kit::galley(ui, kit::text(text, Font::Callout).size(SIZE))
+        .size()
+        .x
 }
