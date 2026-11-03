@@ -1,8 +1,10 @@
 //! Can bubblewrap make a sandbox on this computer?
 //!
 //! [`probe`] finds a root-owned `bwrap`, reads its version, and starts one empty
-//! sandbox with the same namespace options as a real one. It caches the answer for
-//! the life of the process. [`Availability::report`] is the network rule of a run:
+//! sandbox with the same namespace options as a real one. It caches a definite
+//! answer for the life of the process; a transient failure (a timeout, or a
+//! namespace limit that is full for a moment: `EAGAIN`, `ENOSPC`) is tried again
+//! on the next run. [`Availability::report`] is the network rule of a run:
 //! `netns` when the sandbox works, else `none` with the reason and the fix, so a run
 //! that starts without the rule says so (decision D7 of the s5 plan).
 //!
@@ -17,7 +19,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,6 +61,15 @@ const MAX_OUTPUT: usize = 16 * 1024;
 const PROBE_PATH: &str = "/usr/bin:/bin:/run/current-system/sw/bin";
 /// Linux `ETXTBSY`: a program that another thread still has open for writing.
 const ETXTBSY: i32 = 26;
+/// Linux `EAGAIN` and `ENOSPC`: `fork` or `clone(CLONE_NEW*)` hit a limit that is
+/// full for a moment (processes, `user.max_user_namespaces`).
+const EAGAIN: i32 = 11;
+const ENOSPC: i32 = 28;
+/// The texts of `EAGAIN` and `ENOSPC` in the error line of bubblewrap.
+const TRANSIENT_TEXTS: [&str; 2] = [
+    "Resource temporarily unavailable",
+    "No space left on device",
+];
 
 /// A bubblewrap version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -181,13 +192,50 @@ impl RuleReport {
     }
 }
 
-/// The availability of bubblewrap on this computer, found once for the process.
-pub fn probe() -> &'static Availability {
-    static CACHE: OnceLock<Availability> = OnceLock::new();
-    CACHE.get_or_init(|| match find_bwrap() {
-        Ok(program) => probe_with(&program),
-        Err(detail) => Availability::Missing { detail },
+/// The availability of bubblewrap on this computer. A definite answer is found
+/// once for the process; after a transient failure the next call probes again.
+pub fn probe() -> Availability {
+    static CACHE: Mutex<Option<Availability>> = Mutex::new(None);
+    cached(&CACHE, || match find_bwrap() {
+        Ok(program) => probe_once(&program),
+        Err(detail) => Probed {
+            found: Availability::Missing { detail },
+            transient: false,
+        },
     })
+}
+
+/// One probe and whether its answer may change on the next try.
+struct Probed {
+    found: Availability,
+    /// A timeout or a full limit: not cached.
+    transient: bool,
+}
+
+/// The cached answer, or a new probe. Only a definite answer is kept. The lock is
+/// held during the probe, so two runs do not probe at once.
+fn cached(cache: &Mutex<Option<Availability>>, run: impl FnOnce() -> Probed) -> Availability {
+    let mut slot = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = slot.as_ref() {
+        return found.clone();
+    }
+    let probed = run();
+    if !probed.transient {
+        *slot = Some(probed.found.clone());
+    }
+    probed.found
+}
+
+/// An error that can go away on the next try.
+fn transient_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::TimedOut || matches!(err.raw_os_error(), Some(EAGAIN | ENOSPC))
+}
+
+/// An error line of bubblewrap that can go away on the next try.
+fn transient_text(line: &str) -> bool {
+    TRANSIENT_TEXTS.iter().any(|text| line.contains(text))
 }
 
 /// The first trusted bubblewrap of [`BWRAP_PATHS`], resolved. The error names each
@@ -245,40 +293,51 @@ fn trusted(path: &Path) -> Result<(), String> {
 /// Probe one bubblewrap program, without the cache and without the ownership check.
 /// For tests and for `doctor`-style diagnostics of a given path.
 pub fn probe_with(program: &Path) -> Availability {
+    probe_once(program).found
+}
+
+fn probe_once(program: &Path) -> Probed {
+    let definite = |found: Availability| Probed {
+        found,
+        transient: false,
+    };
     let mut version_cmd = Command::new(program);
     version_cmd.arg("--version");
     let version = match run_bounded(&mut version_cmd, VERSION_TIMEOUT) {
         Ok(out) if out.success => match Version::parse(&out.stdout) {
             Some(version) => version,
             None => {
-                return Availability::Missing {
+                return definite(Availability::Missing {
                     detail: format!(
                         "{} --version did not print a bubblewrap version",
                         program.display()
                     ),
-                };
+                });
             }
         },
         Ok(out) => {
-            return Availability::Missing {
-                detail: format!(
-                    "{} --version failed: {}",
-                    program.display(),
-                    out.first_error()
-                ),
+            let detail = out.first_error();
+            return Probed {
+                transient: transient_text(&detail),
+                found: Availability::Missing {
+                    detail: format!("{} --version failed: {detail}", program.display()),
+                },
             };
         }
         Err(err) => {
-            return Availability::Missing {
-                detail: format!("cannot run {}: {err}", program.display()),
+            return Probed {
+                transient: transient_error(&err),
+                found: Availability::Missing {
+                    detail: format!("cannot run {}: {err}", program.display()),
+                },
             };
         }
     };
     if version < MIN_VERSION {
-        return Availability::TooOld {
+        return definite(Availability::TooOld {
             program: program.to_owned(),
             version,
-        };
+        });
     }
     // The namespaces of a real sandbox with a network rule, and the base mounts.
     let mut sandbox = Command::new(program);
@@ -287,19 +346,28 @@ pub fn probe_with(program: &Path) -> Availability {
         .args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"])
         .arg("true");
     match run_bounded(&mut sandbox, PROBE_TIMEOUT) {
-        Ok(out) if out.success => Availability::Ready {
+        Ok(out) if out.success => definite(Availability::Ready {
             program: program.to_owned(),
             version,
-        },
-        Ok(out) => Availability::UsernsBlocked {
-            program: program.to_owned(),
-            version,
-            detail: out.first_error(),
-        },
-        Err(err) => Availability::UsernsBlocked {
-            program: program.to_owned(),
-            version,
-            detail: err.to_string(),
+        }),
+        Ok(out) => {
+            let detail = out.first_error();
+            Probed {
+                transient: transient_text(&detail),
+                found: Availability::UsernsBlocked {
+                    program: program.to_owned(),
+                    version,
+                    detail,
+                },
+            }
+        }
+        Err(err) => Probed {
+            transient: transient_error(&err),
+            found: Availability::UsernsBlocked {
+                program: program.to_owned(),
+                version,
+                detail: err.to_string(),
+            },
         },
     }
 }
@@ -530,12 +598,73 @@ mod tests {
         .expect("write");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
         let started = Instant::now();
-        let found = probe_with(&path);
+        let probed = probe_once(&path);
+        assert!(probed.transient, "a timeout is tried again on the next run");
+        let found = probed.found;
         assert!(started.elapsed() < Duration::from_secs(30));
         assert!(
             matches!(&found, Availability::UsernsBlocked { detail, .. } if detail.contains("no answer")),
             "{found:?}"
         );
+    }
+
+    /// L3: a timeout or a full namespace limit is not cached; a definite answer is.
+    #[test]
+    fn only_a_definite_probe_is_cached() {
+        let dir = TestDir::new("probe-transient");
+        let full = fake_bwrap(
+            &dir,
+            "bubblewrap 0.9.0",
+            "bwrap: Creating new namespace failed: No space left on device",
+            1,
+        );
+        let probed = probe_once(&full);
+        assert!(probed.transient, "ENOSPC is transient");
+        assert!(matches!(probed.found, Availability::UsernsBlocked { .. }));
+        let other_dir = TestDir::new("probe-definite");
+        let denied = fake_bwrap(
+            &other_dir,
+            "bubblewrap 0.9.0",
+            "bwrap: setting up uid map: Permission denied",
+            1,
+        );
+        assert!(!probe_once(&denied).transient, "EPERM is definite");
+        assert!(transient_text(
+            "bwrap: clone: Resource temporarily unavailable"
+        ));
+        assert!(transient_error(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "x"
+        )));
+        assert!(transient_error(&io::Error::from_raw_os_error(EAGAIN)));
+        assert!(!transient_error(&io::Error::from_raw_os_error(2)));
+
+        let cache = Mutex::new(None);
+        let mut calls = 0;
+        for _ in 0..2 {
+            cached(&cache, || {
+                calls += 1;
+                Probed {
+                    found: Availability::Missing {
+                        detail: "synthetic".to_owned(),
+                    },
+                    transient: true,
+                }
+            });
+        }
+        assert_eq!(calls, 2, "a transient answer is probed again");
+        assert!(cache.lock().expect("cache").is_none());
+        let ready = Availability::Ready {
+            program: PathBuf::from("/usr/bin/bwrap"),
+            version: V0_9_0,
+        };
+        let first = cached(&cache, || Probed {
+            found: ready.clone(),
+            transient: false,
+        });
+        assert_eq!(first, ready);
+        let second = cached(&cache, || panic!("a definite answer is cached"));
+        assert_eq!(second, ready);
     }
 
     /// SECURITY (judge panel): a bwrap that the user owns is never used.

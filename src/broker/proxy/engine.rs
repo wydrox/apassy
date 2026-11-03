@@ -20,7 +20,7 @@ use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
@@ -32,7 +32,7 @@ use super::http1::{
     parse_request_head, parse_response_head, request_body,
 };
 use super::public_addr::is_public_ip;
-use super::swap::{Refusal, SwapSecret, Swapped, swap_request};
+use super::swap::{EchoPair, Refusal, SwapSecret, Swapped, json_escaped_pair, swap_request};
 use super::ws;
 use super::{OtherHosts, ProxyEvent, ProxyOutcome, ProxySecret};
 use crate::broker::access_once::Admission;
@@ -41,12 +41,19 @@ use crate::native::base64;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
+/// A client has this long for its first request head (all password tries), so a
+/// slow client cannot hold a connection open (judge finding L4).
+const FIRST_HEAD_DEADLINE: Duration = Duration::from_secs(10);
 /// The request log keeps this many entries for one run.
 const MAX_EVENTS: usize = 200;
 /// A client may try this many times to send the proxy password.
 const MAX_AUTH_TRIES: usize = 3;
 /// The user name of the proxy password.
 const PROXY_USER: &str = "apassy";
+/// The answer to a program when the service answers in a form that the proxy
+/// cannot read for a real value, on a connection that carried one (judge finding
+/// L1). A static text: it names no header value.
+const UNREADABLE_ANSWER: &str = "The service answered with a content coding or a transfer coding that Apassy cannot check for a real value, on a connection that carried one. Apassy asked for an uncompressed answer; the answer was not passed on.";
 
 /// Gets each event of the engine as it is recorded, also after the request log is
 /// full. It runs on the thread of the connection; it must not block for long.
@@ -388,8 +395,16 @@ fn serve(proxy: &Arc<ProxyCore>, stream: TcpStream, preread: Vec<u8>, auth: &Aut
     set_timeouts(&stream);
     let expected = auth.expected_header();
     let mut conn = Conn::with_buffered(stream, preread);
+    let deadline = Instant::now() + FIRST_HEAD_DEADLINE;
     for _ in 0..MAX_AUTH_TRIES {
-        let Ok(Some(head)) = conn.read_head() else {
+        let head = conn.read_head_with(|stream| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            stream.set_read_timeout(Some(left))
+        });
+        let Ok(Some(head)) = head else {
             return;
         };
         let request = match parse_request_head(&head) {
@@ -412,6 +427,7 @@ fn serve(proxy: &Arc<ProxyCore>, stream: TcpStream, preread: Vec<u8>, auth: &Aut
             }
             continue;
         }
+        set_timeouts(&conn.inner);
         if request.method.eq_ignore_ascii_case("CONNECT") {
             connect(proxy, conn, &request);
         } else {
@@ -661,10 +677,57 @@ fn open_service<'a>(
     Ok((Conn::new(stream), tracked))
 }
 
-/// The value of a `Host` header matches the CONNECT target.
+/// The value of a `Host` header names the CONNECT target: the same name, without
+/// regard to case, and the same port (443 when the header has none: the connection
+/// is TLS). An IPv6 address is in brackets.
 fn host_header_matches(value: &str, host: &str, port: u16) -> bool {
     let value = value.trim().to_ascii_lowercase();
-    value == host || value == format!("{host}:{port}") || value == format!("[{host}]:{port}")
+    let (name, given) = if let Some(rest) = value.strip_prefix('[') {
+        let Some((name, after)) = rest.split_once(']') else {
+            return false;
+        };
+        match after {
+            "" => (name, None),
+            after => match after.strip_prefix(':') {
+                Some(port) => (name, Some(port)),
+                None => return false,
+            },
+        }
+    } else {
+        match value.rsplit_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (value.as_str(), None),
+        }
+    };
+    let given = match given {
+        None => 443,
+        Some(text) if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) => {
+            match text.parse::<u16>() {
+                Ok(given) => given,
+                Err(_) => return false,
+            }
+        }
+        Some(_) => return false,
+    };
+    name == host && given == port
+}
+
+/// Why a request on an intercepted connection does not go to the service: its
+/// target or its `Host` could name another host than the CONNECT target (judge
+/// finding M2). `None`: it names the CONNECT host.
+fn target_mismatch(request: &RequestHead, host: &str, port: u16) -> Option<&'static str> {
+    if !request.has_origin_form() {
+        return Some(
+            "The request target is not a path. On a connection to a host of a secret, Apassy takes only a path (/...) as the target.",
+        );
+    }
+    if request.header_count("host") != 1 {
+        return Some("The request needs exactly one Host header.");
+    }
+    match request.header("host") {
+        Some(value) if host_header_matches(value, host, port) => None,
+        _ => Some("The Host header does not match the CONNECT host."),
+    }
 }
 
 fn intercept(proxy: &Arc<ProxyCore>, mut conn: Conn<TcpStream>, host: &str, port: u16) {
@@ -734,12 +797,26 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
         .iter()
         .map(|secret| secret.placeholder.as_bytes())
         .collect();
+    // The JSON form of a value with `/` (`\/`) is replaced too (judge finding L1).
+    let escaped: Vec<EchoPair> = proxy
+        .secrets
+        .iter()
+        .filter_map(|secret| json_escaped_pair(&secret.value, &secret.placeholder))
+        .collect();
     let pairs: Vec<(&[u8], &[u8])> = proxy
         .secrets
         .iter()
         .map(|secret| (secret.value.as_bytes(), secret.placeholder.as_bytes()))
+        .chain(
+            escaped
+                .iter()
+                .map(|(from, to)| (from.as_slice(), to.as_slice())),
+        )
         .collect();
     let mut service: Option<(Conn<ServiceSide>, Tracked<'_>)> = None;
+    // A real value went out on this connection: an answer that the proxy cannot
+    // read is not passed on.
+    let mut carried = false;
 
     loop {
         let Ok(Some(head)) = client.read_head() else {
@@ -757,16 +834,9 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
             respond(&mut client.inner, status, text, &reason, "");
             proxy.record(event.clone().with_reason(ProxyOutcome::Refused, reason));
         };
-        if request
-            .header("host")
-            .is_some_and(|value| !host_header_matches(value, host, port))
-        {
-            refuse(
-                client,
-                400,
-                "Bad Request",
-                "The Host header does not match the CONNECT host.".to_owned(),
-            );
+        // Before any swap: the request must name the host of the connection.
+        if let Some(reason) = target_mismatch(&request, host, port) {
+            refuse(client, 400, "Bad Request", reason.to_owned());
             return;
         }
         let websocket = request.header("upgrade").is_some();
@@ -821,6 +891,18 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
                 return;
             }
         };
+        carried |= !swapped.used.is_empty();
+        // The forms of a value that only this request has (Basic credentials).
+        let request_pairs: Vec<(&[u8], &[u8])> = pairs
+            .iter()
+            .copied()
+            .chain(
+                swapped
+                    .echoes
+                    .iter()
+                    .map(|(from, to)| (from.as_slice(), to.as_slice())),
+            )
+            .collect();
         if websocket {
             // A new connection to the service carries the WebSocket. After it the
             // connection of the program ends.
@@ -832,7 +914,7 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
                 .collect();
             let frames = ws::Secrets {
                 placeholders: &placeholders,
-                pairs: &pairs,
+                pairs: &request_pairs,
                 names: &names,
             };
             websocket_session(proxy, client, host, port, &swapped, event, &frames);
@@ -936,7 +1018,7 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
             // Interim answers (1xx) go to the program. The final answer follows.
             let mut replaced = false;
             let final_head = loop {
-                replaced |= Replacer::replace_all(&pairs, &mut raw);
+                replaced |= Replacer::replace_all(&request_pairs, &mut raw);
                 let Ok(parsed) = parse_response_head(&raw, &request.method) else {
                     respond(
                         &mut client.inner,
@@ -947,10 +1029,20 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
                     );
                     return;
                 };
+                let is_final = !(100..200).contains(&parsed.status) || parsed.upgrade;
+                if is_final && !parsed.upgrade && carried && parsed.unreadable() {
+                    respond(&mut client.inner, 502, "Bad Gateway", UNREADABLE_ANSWER, "");
+                    proxy.record(
+                        event
+                            .clone()
+                            .with_reason(ProxyOutcome::Failed, UNREADABLE_ANSWER),
+                    );
+                    return;
+                }
                 if client.inner.write_all(&raw).is_err() {
                     return;
                 }
-                if !(100..200).contains(&parsed.status) || parsed.upgrade {
+                if is_final {
                     break parsed;
                 }
                 let Some((upstream, _)) = service.as_mut() else {
@@ -970,7 +1062,7 @@ fn serve_requests(proxy: &Arc<ProxyCore>, client: &mut Conn<ClientSide>, host: &
         let Some((upstream, _)) = service.as_mut() else {
             return;
         };
-        let mut replacer = Replacer::new(&pairs);
+        let mut replacer = Replacer::new(&request_pairs);
         let copied = copy_response_body(upstream, &mut client.inner, response.body, &mut replacer);
         let _ = client.inner.flush();
         let mut event = event;
@@ -1119,7 +1211,12 @@ fn websocket_session(
     }
     if !response.upgrade {
         // The service did not take the WebSocket (401, 400, ...): its answer goes
-        // to the program with placeholders, and the connection ends.
+        // to the program with placeholders, and the connection ends. An answer that
+        // the proxy cannot read is not passed on when the handshake had a value.
+        if !swapped.used.is_empty() && response.unreadable() {
+            failed(client, event, UNREADABLE_ANSWER);
+            return;
+        }
         if client.inner.write_all(&raw).is_err() {
             return;
         }
@@ -1464,6 +1561,91 @@ mod tests {
         );
         assert_eq!(parse_authority("example.com"), None);
         assert_eq!(parse_authority("a/b:443"), None);
+    }
+
+    /// Judge finding M2: on an intercepted connection a request must name the
+    /// CONNECT host: an origin-form target and exactly one matching Host header.
+    #[test]
+    fn an_intercepted_request_must_name_the_connect_host() {
+        let check = |text: &str, host: &str, port: u16| {
+            let request = parse_request_head(text.as_bytes()).expect("head");
+            target_mismatch(&request, host, port)
+        };
+        // Accepted: a path, the host with or without its port, any case.
+        for text in [
+            "GET /v1/x?y=1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: API.Example.com:443\r\n\r\n",
+            "OPTIONS * HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+        ] {
+            assert_eq!(check(text, "api.example.com", 443), None, "{text}");
+        }
+        assert_eq!(
+            check(
+                "GET / HTTP/1.1\r\nHost: localhost:8443\r\n\r\n",
+                "localhost",
+                8443
+            ),
+            None
+        );
+        assert_eq!(
+            check("GET / HTTP/1.1\r\nHost: [::1]:8443\r\n\r\n", "::1", 8443),
+            None
+        );
+        // Refused: an absolute form, an authority, `//`, `*` without OPTIONS.
+        for text in [
+            "GET https://evil.example/v1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+            "GET https://api.example.com/v1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+            "GET api.example.com:443 HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+            "GET //evil.example/v1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+            "GET * HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+        ] {
+            let reason = check(text, "api.example.com", 443).expect(text);
+            assert!(reason.contains("target"), "{reason}");
+        }
+        // Refused: two Host headers, none, another host, another port.
+        let two = check(
+            "GET / HTTP/1.1\r\nHost: api.example.com\r\nHost: evil.example\r\n\r\n",
+            "api.example.com",
+            443,
+        );
+        assert_eq!(two, Some("The request needs exactly one Host header."));
+        let same_twice = check(
+            "GET / HTTP/1.1\r\nHost: api.example.com\r\nhost: api.example.com\r\n\r\n",
+            "api.example.com",
+            443,
+        );
+        assert_eq!(same_twice, two);
+        assert_eq!(
+            check(
+                "GET / HTTP/1.1\r\nAccept: */*\r\n\r\n",
+                "api.example.com",
+                443
+            ),
+            two
+        );
+        for text in [
+            "GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.example.com.evil.example\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.example.com:8443\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.example.com:\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.example.com:443x\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: \r\n\r\n",
+        ] {
+            assert_eq!(
+                check(text, "api.example.com", 443),
+                Some("The Host header does not match the CONNECT host."),
+                "{text}"
+            );
+        }
+        // A host on another port needs that port in the header.
+        assert!(
+            check(
+                "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "localhost",
+                8443
+            )
+            .is_some()
+        );
     }
 
     #[test]

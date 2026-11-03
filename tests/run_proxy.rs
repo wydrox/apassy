@@ -170,6 +170,23 @@ fn serve(stream: StreamOwned<ServerConnection, TcpStream>, seen: &Mutex<Vec<Seen
                 )
             }
             "/store" => ok("201 Created", "{\"stored\":true}"),
+            // An answer that the proxy cannot read (judge finding L1).
+            "/gzip" => format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n{REAL}",
+                REAL.len()
+            ),
+            "/te-gzip" => format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n{:x}\r\n{REAL}\r\n0\r\n\r\n",
+                REAL.len()
+            ),
+            // A debug endpoint that echoes the credentials.
+            "/echo-auth" => ok(
+                "200 OK",
+                &format!(
+                    "{{\"authorization\":\"{}\"}}",
+                    authorization.as_deref().unwrap_or_default()
+                ),
+            ),
             _ => ok("404 Not Found", "{}"),
         };
         if out.write_all(answer.as_bytes()).is_err() || out.flush().is_err() {
@@ -263,9 +280,14 @@ fn node_reads_proxy_variables() -> bool {
 }
 
 fn run(run: &Run, script: &str) -> RunOutput {
-    // A folder of its own: on Linux the sandbox of a run cannot have `/tmp` itself
-    // as its working directory (the sandbox hides the host `/tmp`).
-    let cwd = tempfile::tempdir().expect("cwd");
+    // A folder of its own: on Linux the working directory of a run cannot be in
+    // `/tmp` (a shared folder with the sockets of other programs), so it is in the
+    // `target` folder there.
+    let cwd = if cfg!(target_os = "linux") {
+        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("cwd")
+    } else {
+        tempfile::tempdir().expect("cwd")
+    };
     let network = run.proxy.network();
     let env = [
         SecretEnv {
@@ -746,6 +768,37 @@ fn linux_proxied_run_reports_its_rule_and_holds_only_placeholders() {
     );
 }
 
+/// The `linux-isolation` job measures the stock runner first and sets
+/// `APASSY_EXPECT_RULE` to what a run must report there: `none:userns_blocked` when
+/// the runner restricts user namespaces, `netns` when it does not (judge finding L3).
+/// Without the variable the test does nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proxied_run_reports_the_measured_rule() {
+    let Some(expected) = std::env::var_os("APASSY_EXPECT_RULE") else {
+        return;
+    };
+    let expected = expected.to_string_lossy().into_owned();
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let report = proxied.proxy.network().report();
+    eprintln!("measured: {expected}; network rule of a run: {report}");
+    match expected.split_once(':') {
+        Some((rule, reason)) => {
+            assert_eq!(report["rule"], rule, "{report}");
+            assert_eq!(report["reason"], reason, "{report}");
+        }
+        None => assert_eq!(report["rule"], expected.as_str(), "{report}"),
+    }
+    // Either way the run starts and holds only the placeholder.
+    let out = run(&proxied, "printf %s \"$DEMO_KEY\" | rev");
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    assert!(
+        out.stdout.contains(&reversed(&proxied.placeholder)),
+        "{out:?}"
+    );
+}
+
 // WebSocket (ADR 0011 stage 5, unit P3). A raw client goes through the run proxy
 // with CONNECT, as a program does, to a WebSocket service on `localhost`.
 
@@ -1059,6 +1112,104 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+/// One request on an intercepted connection to `localhost:<port>`: the answer
+/// head and the rest of the connection.
+fn intercepted(run: &Run, port: u16, request: &str) -> (String, String) {
+    let (mut client, head) = open_ws(run, &format!("localhost:{port}"), request, run_roots(run));
+    let mut rest = String::new();
+    let _ = client.read_to_string(&mut rest);
+    (head, rest)
+}
+
+/// Judge finding M2: the target and the Host header of a request on an
+/// intercepted connection must name the CONNECT host, before any swap.
+#[test]
+fn a_request_that_names_another_host_is_refused_before_the_swap() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let auth = format!("Authorization: Bearer {}", proxied.placeholder);
+    for request in [
+        format!(
+            "GET https://evil.example/whoami HTTP/1.1\r\nHost: localhost:{port}\r\n{auth}\r\n\r\n"
+        ),
+        format!(
+            "GET /whoami HTTP/1.1\r\nHost: localhost:{port}\r\nHost: evil.example\r\n{auth}\r\n\r\n"
+        ),
+        format!("GET /whoami HTTP/1.1\r\n{auth}\r\n\r\n"),
+        format!("GET /whoami HTTP/1.1\r\nHost: evil.example\r\n{auth}\r\n\r\n"),
+    ] {
+        let (head, body) = intercepted(&proxied, port, &request);
+        assert!(head.starts_with("HTTP/1.1 400 "), "{request}: {head}");
+        assert!(!body.contains(REAL), "{body}");
+    }
+    assert!(
+        service.seen.lock().expect("seen").is_empty(),
+        "no request reached the service"
+    );
+    let log = events(proxied);
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert!(
+        log.iter()
+            .all(|event| event.outcome == ProxyOutcome::Refused)
+    );
+    assert!(!format!("{log:?}").contains(REAL));
+}
+
+/// Judge finding L1: after a real value went out, an answer that the proxy cannot
+/// read is a 502; the echo of Basic credentials gets the placeholder credentials.
+#[test]
+fn an_unreadable_answer_after_a_swap_is_502_and_basic_echoes_are_replaced() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let port = service.port;
+    let auth = format!("Authorization: Bearer {}", proxied.placeholder);
+    for path in ["/gzip", "/te-gzip"] {
+        let (head, body) = intercepted(
+            &proxied,
+            port,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\n{auth}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(head.starts_with("HTTP/1.1 502 "), "{path}: {head}");
+        assert!(!body.contains(REAL), "{path}: {body}");
+    }
+    // Without a real value on the connection, the answer passes as it is.
+    let (head, _) = intercepted(
+        &proxied,
+        port,
+        &format!("GET /gzip HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+
+    let shown = base64(format!("user:{}", proxied.placeholder).as_bytes());
+    let (head, body) = intercepted(
+        &proxied,
+        port,
+        &format!(
+            "GET /echo-auth HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Basic {shown}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+    let real = base64(format!("user:{REAL}").as_bytes());
+    assert!(body.contains(&format!("Basic {shown}")), "{body}");
+    assert!(!body.contains(&real), "{body}");
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(
+        seen.last().and_then(|seen| seen.authorization.clone()),
+        Some(format!("Basic {real}"))
+    );
+    let log = events(proxied);
+    assert!(
+        log.iter()
+            .filter(|event| event.outcome == ProxyOutcome::Failed)
+            .count()
+            >= 2,
+        "{log:?}"
+    );
 }
 
 #[test]

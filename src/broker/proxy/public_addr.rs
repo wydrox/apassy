@@ -49,9 +49,13 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || (segments[0] & 0xffc0) == 0xfe80
         || (segments[0] & 0xffc0) == 0xfec0
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        // Teredo (2001::/32) tunnels to an IPv4 address that it carries.
+        || (segments[0] == 0x2001 && segments[1] == 0)
         || segments[0] == 0x2002
         || (segments[0] == 0x64 && segments[1] == 0xff9b && segments[2] == 1)
-        || segments[..6] == [0, 0, 0, 0, 0, 0])
+        || segments[..6] == [0, 0, 0, 0, 0, 0]
+        // IPv4-translated (::ffff:0:0:0/96, RFC 2765) carries an IPv4 address too.
+        || segments[..6] == [0, 0, 0, 0, 0xffff, 0])
 }
 
 #[cfg(test)]
@@ -70,6 +74,26 @@ mod tests {
             assert!(!is_public_ip(text.parse().unwrap()), "{text}");
         }
         for text in ["1.1.1.1", "2620:fe::1"] {
+            assert!(is_public_ip(text.parse().unwrap()), "{text}");
+        }
+    }
+
+    /// Judge finding L6: Teredo and IPv4-translated addresses carry an IPv4 address
+    /// that can be on the machine or its network.
+    #[test]
+    fn teredo_and_ipv4_translated_addresses_are_not_public() {
+        for text in [
+            "2001::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:0:ffff:ffff:ffff:ffff:ffff:ffff",
+            "::ffff:0:7f00:1",
+            "::ffff:0:a00:1",
+            "::ffff:0:101:101",
+        ] {
+            assert!(!is_public_ip(text.parse().unwrap()), "{text}");
+        }
+        // Next to the ranges: public.
+        for text in ["2001:4860:4860::8888", "2a00:1450:4001::1"] {
             assert!(is_public_ip(text.parse().unwrap()), "{text}");
         }
     }

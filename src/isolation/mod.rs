@@ -11,3 +11,8 @@
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+/// The path rules of a proxied run in the Linux sandbox. Pure, so they are tested
+/// on every system.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod run_paths;
