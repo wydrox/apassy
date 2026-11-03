@@ -22,8 +22,8 @@ use serde_json::Value;
 use super::config::{FRONT_DIR, NodeSettings, Route, admin_socket};
 use super::keys;
 use super::serve::{self, ServeState};
+use super::service;
 use super::{NodeCliError, PROGRAM, node_dir, parse_options, printable, utc_text};
-use crate::cli::service;
 use crate::server::operator;
 
 /// What `status` and `doctor` ask the system. Tests give a fake.
