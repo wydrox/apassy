@@ -1142,6 +1142,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | 23
         | 24
         | schema25::PASSKEY_EXTENSIONS_SCHEMA_VERSION
+        | schema26::CLOUD_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
