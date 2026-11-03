@@ -603,10 +603,12 @@ final class SpikeModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 let cycle = Cycle(kind: "cold (series)", t0: now())
                 await self.startNode(cycle: cycle, timeout: 30)
-                if self.upDone && self.hasTarget {
+                if !self.upDone {
+                    if cycle.error.isEmpty { cycle.error = "not up" }
+                } else if self.hasTarget {
                     await self.probe(cycle: cycle)
-                } else if cycle.error.isEmpty {
-                    cycle.error = "not up"
+                } else {
+                    cycle.error = "no target: up only"
                 }
                 self.record(cycle)
             }
@@ -637,6 +639,9 @@ final class SpikeModel: ObservableObject {
         refreshFiles()
         let wasRunning = node != nil
         let kind = firstActivation ? "launch" : (wasRunning ? "kept" : "cold")
+        if firstActivation, let seconds = SpikeMetrics.secondsSinceProcessStart() {
+            event(String(format: "process start to the first activation: %.0f ms", seconds * 1000))
+        }
         firstActivation = false
         guard autoStart, !seriesRunning else { return }
         guard hasState || wasRunning else {
@@ -885,7 +890,8 @@ final class SpikeModel: ObservableObject {
         return groups.keys.sorted().map { key in
             let items = groups[key] ?? []
             let ok = items.filter { $0.ok }
-            let up = ok.compactMap { $0.upMs }
+            // A node that came up counts for "up" even when the probe after it failed.
+            let up = items.compactMap { $0.upMs }
             let answer = ok.compactMap { $0.answerMs }
             return StatRow(
                 key: key, count: items.count, failures: items.count - ok.count,

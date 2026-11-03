@@ -120,6 +120,17 @@ enum SpikeMetrics {
         return result
     }
 
+    /// Seconds from the start of this process until now (dyld, the Go runtime's start, Swift).
+    static func secondsSinceProcessStart() -> Double? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0 else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        let started = Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000
+        return Date().timeIntervalSince1970 - started
+    }
+
     static func fileSize(_ url: URL?) -> Int64 {
         guard let url, let values = try? url.resourceValues(forKeys: [.fileSizeKey]) else { return 0 }
         return Int64(values.fileSize ?? 0)
