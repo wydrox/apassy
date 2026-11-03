@@ -488,7 +488,13 @@ fn random<const N: usize>() -> RelayResult<[u8; N]> {
 }
 
 fn random_hex<const N: usize>() -> RelayResult<String> {
-    Ok(random::<N>()?.iter().map(|b| format!("{b:02x}")).collect())
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(N * 2);
+    for byte in random::<N>()? {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(out)
 }
 
 /// A code or a refresh token: 256 random bits as base64url. Only its hash is stored.
@@ -619,11 +625,12 @@ impl Page {
             .as_deref()
             .map(|code| format!("<p class=\"code\">{}</p>", escape_html(code)))
             .unwrap_or_default();
-        let lines: String = self
-            .lines
-            .iter()
-            .map(|line| format!("<p>{}</p>", escape_html(line)))
-            .collect();
+        let mut lines = String::new();
+        for line in &self.lines {
+            lines.push_str("<p>");
+            lines.push_str(&escape_html(line));
+            lines.push_str("</p>");
+        }
         format!(
             "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
