@@ -1506,9 +1506,10 @@ fn demo_access(frame: BouncerFrame) -> super::agents_page::AccessView {
         BouncerFrame::FirstRun => (false, None),
         BouncerFrame::NotInstalled => (false, Some(AccessProblem::NotInstalled)),
         BouncerFrame::NotConnected => (false, Some(AccessProblem::NotConnected)),
-        BouncerFrame::PolicyBlocks => (true, Some(AccessProblem::Policy { link: None })),
+        // The mockup's frames show the switch disabled: the owner tries to turn it on.
+        BouncerFrame::PolicyBlocks => (false, Some(AccessProblem::Policy { link: None })),
         BouncerFrame::PortTaken => (
-            true,
+            false,
             Some(AccessProblem::PortTaken {
                 port: 8443,
                 alternative: Some(10000),

@@ -330,20 +330,22 @@ fn the_problems_of_remote_access_have_one_line_and_one_button() {
         alternative: None,
     };
     assert_eq!(on_10000.button(), None);
-    // Frame 8: in each of the four problems the switch is off and disabled, also while
-    // the route setting is on (8c, 8d); the problem's button is the way on.
+    // Frame 8: in each of the four problems the switch is off and disabled while the
+    // route setting is off; the problem's button is the way on. While the setting is
+    // on, the switch shows on and takes a click, so the owner can turn the route off.
     for problem in [
         AccessProblem::NotInstalled,
         AccessProblem::NotConnected,
         c.clone(),
         d.clone(),
     ] {
-        for on in [false, true] {
-            let view = access(on, Some(problem.clone()));
-            assert!(!view.switch_enabled(), "{problem:?} on={on}");
-            assert!(!view.switch_on(), "{problem:?} on={on}");
-            assert!(problem.button().is_some(), "{problem:?}");
-        }
+        let off = access(false, Some(problem.clone()));
+        assert!(!off.switch_enabled(), "{problem:?} off");
+        assert!(!off.switch_on(), "{problem:?} off");
+        let on = access(true, Some(problem.clone()));
+        assert!(on.switch_enabled(), "{problem:?} on");
+        assert!(on.switch_on(), "{problem:?} on");
+        assert!(problem.button().is_some(), "{problem:?}");
     }
     // Another problem leaves the switch: a route that is on can go off.
     let public = access(true, Some(AccessProblem::HttpsPublic));

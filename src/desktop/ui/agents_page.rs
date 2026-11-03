@@ -143,21 +143,24 @@ pub(crate) struct AccessView {
 }
 
 impl AccessView {
-    /// A problem of frames 8a–8d holds the switch (mockup frame 8: "switch disabled").
+    /// A problem of frames 8a–8d holds the switch while the route setting is off
+    /// (mockup frame 8: "switch disabled"): the problem's button is the way on. While the
+    /// setting is on, the switch stays usable, so the owner can always turn the route off.
     fn held(&self) -> bool {
-        self.problem
-            .as_ref()
-            .is_some_and(AccessProblem::disables_switch)
+        !self.on
+            && self
+                .problem
+                .as_ref()
+                .is_some_and(AccessProblem::disables_switch)
     }
 
     /// The switch takes a click: not while the first read runs, and not in a problem of
-    /// frames 8a–8d. Another problem (port 443 public, a failure) leaves it: on goes off.
+    /// frames 8a–8d while the setting is off. A route that is on can always go off.
     pub(crate) fn switch_enabled(&self) -> bool {
         !self.reading && !self.held()
     }
 
-    /// What the switch shows: off in a problem of frames 8a–8d, since the route does not
-    /// run then, else the route setting.
+    /// What the switch shows: the route setting (a held switch is off).
     pub(crate) fn switch_on(&self) -> bool {
         self.on && !self.held()
     }
