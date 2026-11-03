@@ -1143,7 +1143,6 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     let passkey = passkey_of(app, &details);
     fields_group(app, ui, &details, passkey.is_some());
-    otp::code_section(app, ui, &details);
     if let Some(passkey) = &passkey {
         passkey_section(ui, &details, passkey);
     }
@@ -1339,12 +1338,7 @@ fn secret_row(
                             *copy = Some(name.to_owned());
                         }
                         if !shown {
-                            ui.label(
-                                kit::text(MASKED_VALUE, Font::Body)
-                                    .size(15.0)
-                                    .extra_letter_spacing(2.0)
-                                    .color(kit::LABEL),
-                            );
+                            rows::mask(ui);
                         }
                         toggle
                     })
@@ -1360,9 +1354,10 @@ fn secret_row(
     })
 }
 
-/// The first group: the username, the secret, the variable, the host or the website,
-/// and the other details that are set, then the custom details. A hidden custom detail
-/// is masked like the secret, and Show shows it with the secret.
+/// The first group: the username, the secret, the one-time passwords, the variable, the
+/// host or the website, and the other details that are set, then the custom details. A
+/// hidden custom detail is masked like the secret, and Show shows it with the secret. A
+/// one-time password has its own Show and Copy (`otp::code_rows`).
 ///
 /// `from_page`: the login has a passkey. A website or macOS gave its account name, and the
 /// vault copied it to the username. The page cleans it like the passkey rows.
@@ -1417,10 +1412,10 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
     .filter(|(_, value)| !value.is_empty())
     .collect();
     let revealed = details.any_revealed();
-    let footer = revealed.then(|| details.reveal_warning());
     let mut toggle = false;
     let mut copy = None;
-    rows::group(ui, |s| {
+    let mut open_site = None;
+    let codes = rows::group(ui, |s| {
         if !username.is_empty() {
             pair_row(
                 s,
@@ -1438,6 +1433,9 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             };
             toggle |= secret_row(app, s, details, &label, &line.name, revealed, &mut copy);
         }
+        // Each one-time password is a row right after the password. Its seed is never a
+        // detail row.
+        let codes = otp::code_rows(app, s, details);
         if let Some(variable) = &variable {
             pair_row(
                 s,
@@ -1446,10 +1444,15 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             );
         }
         for (label, value) in other {
-            pair_row(s, label, kit::text(value, Font::Body).color(kit::SECONDARY));
+            if label == "Website" {
+                if let Some(url) = website_row(s, value) {
+                    open_site = Some(url);
+                }
+            } else {
+                pair_row(s, label, kit::text(value, Font::Body).color(kit::SECONDARY));
+            }
         }
-        // A one-time password has its own section. Its seed is never a detail row. A
-        // visible setup key is not drawn.
+        // A one-time password has its row above. A visible setup key is not drawn.
         for detail in details
             .details
             .iter()
@@ -1478,7 +1481,19 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                 }
             }
         }
+        codes
     });
+    // One note under the group: the reveal warning, and while a code is visible, its
+    // clipboard note.
+    let footer = match (revealed, codes.note()) {
+        (true, Some(_)) => Some(format!(
+            "{} {}",
+            details.reveal_warning(),
+            otp::clipboard_note()
+        )),
+        (true, None) => Some(details.reveal_warning().to_owned()),
+        (false, note) => note,
+    };
     if let Some(footer) = footer {
         ui.add_space(6.0);
         egui::Frame::NONE
@@ -1517,6 +1532,94 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         );
     } else if toggle {
         toggle_values(app, ui.ctx());
+    } else if codes.clicked() {
+        codes.answer(app, ui.ctx(), id);
+    } else if let Some(url) = open_site {
+        open_website(app, &url);
+    }
+}
+
+/// The Website row: the host, the full address as hover text, and "Open" for an http or
+/// https address. Another value shows as it is, with no "Open". Returns the address to
+/// open after a click on "Open".
+fn website_row(group: &mut rows::Group<'_>, value: &str) -> Option<String> {
+    let Some((host, url)) = website_link(value) else {
+        pair_row(
+            group,
+            "Website",
+            kit::text(value, Font::Body).color(kit::SECONDARY),
+        );
+        return None;
+    };
+    group.line(|ui| {
+        ui.label(kit::text("Website", Font::Body).color(kit::LABEL));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let open = rows::pill_button(ui, "Open", &format!("Open {host} in the browser"))
+                .on_hover_text("Open in your default browser")
+                .clicked();
+            ui.add(Label::new(kit::text(&host, Font::Body).color(kit::SECONDARY)).truncate())
+                .on_hover_text(&url);
+            open.then_some(url)
+        })
+        .inner
+    })
+}
+
+/// The host and the address to open of a website value. `None` when Apassy does not
+/// open it: a scheme other than http and https, or a value that is not a web address.
+/// A value without a scheme opens with https, as the browser match reads it
+/// (`Website::parse`).
+pub(super) fn website_link(value: &str) -> Option<(String, String)> {
+    let value = value.trim();
+    // The browser match takes http, https, or no scheme, and a valid host with no user.
+    crate::browser::site::Website::parse(value)?;
+    let (scheme, rest) = value
+        .split_once("://")
+        .map_or(("https".to_owned(), value), |(scheme, rest)| {
+            (scheme.to_ascii_lowercase(), rest)
+        });
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    let host = rest[..end].to_ascii_lowercase();
+    Some((host, format!("{scheme}://{rest}")))
+}
+
+/// The addresses that "Open" gave in a test. The tests never start a browser.
+#[cfg(test)]
+thread_local! {
+    pub(super) static OPENED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Open an http or https address in the default browser with `/usr/bin/open`. A thread
+/// waits for `open`, so no finished process stays.
+fn open_website(app: &mut DesktopApp, url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    #[cfg(test)]
+    {
+        let _ = app;
+        OPENED.with(|opened| opened.borrow_mut().push(url.to_owned()));
+    }
+    #[cfg(not(test))]
+    {
+        let spawned = std::process::Command::new("/usr/bin/open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(_) => app.set_err("Apassy could not open the website."),
+        }
     }
 }
 
