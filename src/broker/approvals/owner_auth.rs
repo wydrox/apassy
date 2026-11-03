@@ -375,6 +375,15 @@ pub enum OwnerAction {
         url: String,
         consent_version: u32,
     },
+    /// Turn short-lived credentials ("way C", ADR 0037 stage 6 D11) on or off for one
+    /// source item (contract private-sharing-v1 rule 3). The proof names the item, the
+    /// kind of its `short_lived` row, and the new state, exactly as the sheet showed
+    /// them. Off delivers the item as a static key; nothing else turns way C off.
+    ChangeDelivery {
+        item: u64,
+        kind: crate::vault::ShortLivedKind,
+        on: bool,
+    },
     /// Open a command-line session (ADR 0017). The session can read and change the vault
     /// like the views, but every action in this list still needs its own check.
     OpenCliSession,
@@ -429,6 +438,20 @@ pub enum OwnerAction {
         relay_url: String,
         team_id: Option<String>,
     },
+}
+
+/// The words of a short-lived kind in an owner check: what each run gets.
+fn delivery_words(kind: crate::vault::ShortLivedKind) -> &'static str {
+    use crate::vault::ShortLivedKind as Kind;
+    match kind {
+        Kind::AwsSts => "AWS credentials that expire in 15 minutes",
+        Kind::GithubApp => "a GitHub token for each run",
+        Kind::GoogleServiceAccount => "Google access tokens that expire in 15 minutes",
+        Kind::OauthRefresh => "an OAuth access token for each run",
+        Kind::CloudflareToken | Kind::PlanetscalePassword | Kind::NeonRole => {
+            "a credential made for each run"
+        }
+    }
 }
 
 /// Where the bouncer brain runs or trains, for the owner texts. No address: the dialog
@@ -562,6 +585,8 @@ impl OwnerAction {
             Self::RemoveOlderIphone { .. } => "Remove an iPhone",
             Self::ChangeBouncerHosting { .. } => "Change the bouncer brain host",
             Self::ChangeBouncerTraining { .. } => "Change the bouncer brain training",
+            Self::ChangeDelivery { on: true, .. } => "Use temporary credentials",
+            Self::ChangeDelivery { on: false, .. } => "Stop temporary credentials",
             _ => "Confirm with Touch ID",
         }
     }
@@ -713,6 +738,16 @@ impl OwnerAction {
             Self::ChangeBouncerTraining { kind, .. } => {
                 format!("train the bouncer brain {}", host_words(*kind))
             }
+            Self::ChangeDelivery { kind, on: true, .. } => format!(
+                "give agents {} instead of this item's long-lived key",
+                delivery_words(*kind)
+            ),
+            Self::ChangeDelivery {
+                kind, on: false, ..
+            } => format!(
+                "stop {} and let agents use this item's long-lived key",
+                delivery_words(*kind)
+            ),
             Self::OpenCliSession => "start a command-line session".to_owned(),
             Self::BindVariables { variables } => match variables.len() {
                 1 => "bind 1 environment variable".to_owned(),
@@ -2027,6 +2062,68 @@ mod evaluation_tests {
                 Err(ProofRefusal::WrongAction)
             );
         }
+    }
+
+    #[test]
+    fn changing_delivery_needs_the_owner_check() {
+        use crate::vault::ShortLivedKind;
+        let action = OwnerAction::ChangeDelivery {
+            item: 7,
+            kind: ShortLivedKind::AwsSts,
+            on: false,
+        };
+        // A phone or another Mac cannot make the change.
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        // The proof names the item, the kind, and the new state.
+        let proof = OwnerProof::issue_for_test(action.clone(), [1; 32], Instant::now());
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        for other in [
+            OwnerAction::ChangeDelivery {
+                item: 8,
+                kind: ShortLivedKind::AwsSts,
+                on: false,
+            },
+            OwnerAction::ChangeDelivery {
+                item: 7,
+                kind: ShortLivedKind::GithubApp,
+                on: false,
+            },
+            OwnerAction::ChangeDelivery {
+                item: 7,
+                kind: ShortLivedKind::AwsSts,
+                on: true,
+            },
+            OwnerAction::ChangeItemRules { item_id: 7 },
+        ] {
+            assert_eq!(
+                proof.check(&other, &[1; 32]),
+                Err(ProofRefusal::WrongAction),
+                "{other:?}"
+            );
+        }
+        // A proof for the agent settings of the item does not change its delivery.
+        let rules = OwnerProof::issue_for_test(
+            OwnerAction::ChangeItemRules { item_id: 7 },
+            [1; 32],
+            Instant::now(),
+        );
+        assert_eq!(
+            rules.check(&action, &[1; 32]),
+            Err(ProofRefusal::WrongAction)
+        );
+        // The texts name the change and no value.
+        assert_eq!(action.touch_id_title(), "Stop temporary credentials");
+        assert!(action.reason().contains("long-lived key"));
+        let on = OwnerAction::ChangeDelivery {
+            item: 7,
+            kind: ShortLivedKind::AwsSts,
+            on: true,
+        };
+        assert!(on.reason().contains("15 minutes"));
+        assert!(!action.needs_fresh_local_check());
     }
 
     #[test]
