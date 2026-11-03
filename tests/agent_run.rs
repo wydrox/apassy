@@ -469,7 +469,15 @@ fn a_placeholder_variable_gets_a_placeholder_and_the_run_proxy() {
     );
     assert_eq!(result["placeholders"], json!([ENV_NAME]));
     assert_eq!(result["network"]["proxy"], true);
-    assert_eq!(result["network"]["only_proxy"], cfg!(target_os = "macos"));
+    // broker-v0 `network.rule`: seatbelt on macOS; netns on Linux with bubblewrap,
+    // else none with the reason.
+    let rule = result["network"]["rule"].as_str().expect("rule");
+    if cfg!(target_os = "macos") {
+        assert_eq!(rule, "seatbelt");
+    } else if rule == "none" && cfg!(target_os = "linux") {
+        assert!(result["network"]["reason"].is_string(), "{result}");
+    }
+    assert_eq!(result["network"]["only_proxy"], rule != "none");
     assert_eq!(result["network"]["requests"], json!([]));
     no_secret(&response);
     let history = with_vault(&fx, |vault| {

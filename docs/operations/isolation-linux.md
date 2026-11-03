@@ -13,9 +13,9 @@ Code: `src/isolation/linux/` (Linux only, `std`, `serde`, and `serde_json`, no
 `unsafe`). Tests: `src/isolation/linux/*` unit tests and
 `tests/isolation/linux_sandbox.rs`. Use only synthetic values.
 
-This unit (X1) makes the sandbox. It does not yet use it: X2 runs local proxied runs
-in it, LE3 runs the commands of a linked environment in it, and X3 starts an agent
-host in it (`apassy-sandbox` on Linux).
+Unit X1 makes the sandbox. Unit X2 runs local proxied runs in it (section 6a); LE3
+will run the commands of a linked environment in it, and X3 will start an agent host
+in it (`apassy-sandbox` on Linux).
 
 ## 1. What the sandbox is
 
@@ -233,6 +233,48 @@ let rule = probe().report();                                  // network.rule of
 - `probe()`, `probe_with(path)`, `find_bwrap()`, `Availability::{report, is_ready,
   program}`, `RuleReport` (serializes to the JSON above).
 
+## 6a. Local proxied runs (unit X2)
+
+`network_for` (`src/broker/proxy/network.rs`) gives a proxied run of the broker the rule
+of this computer when the run asks for it (local runs always do):
+
+| Found | `network.rule` | What the run gets |
+| --- | --- | --- |
+| `probe()` is `Ready` and `apassy-sandbox` is next to the broker program | `netns` | `Sandbox::for_run(&HostPaths::from_env()?, cwd)` with one bridge: `127.0.0.1:<proxy port>` in the namespace, through a `HostRelay`, to the run proxy. `HTTPS_PROXY` does not change. |
+| bubblewrap missing, too old, or user namespaces blocked | `none` with `reason`, `detail`, `fix` (`Availability::report`) | the old run with the user's network; only placeholders |
+| `apassy-sandbox` is not next to the broker program (`target/<profile>/` for a Cargo test binary in `deps/`) | `none`, `reason` = `sandbox_program_missing` | as above |
+
+The init program is found only next to the running program; there is no environment
+override, because it is PID 1 of every run.
+
+What `spawn_collect` (`src/broker/exec.rs`) adds to the plan of section 2:
+
+- The folder of the trust files of the run (`apassy-run-…` in the host temporary
+  folder, hidden by the private `/tmp`), read-only.
+- Each folder of the run's `PATH`, and the program when its path is absolute, that the
+  plan would hide (under the home, `/tmp`, `/var/tmp`, `/run`, `/root`), read-only, so
+  that `~/.local/bin`, `~/.cargo/bin`, and the NixOS wrappers still start. Skipped: the
+  home itself and any folder that holds a hidden one, a path in a denied path, a path in
+  the working directory (already writable), and a path that does not exist. A tool whose
+  files live elsewhere in the hidden home (for example a rustup proxy and
+  `~/.rustup`) still does not start; put it in a folder outside the home or run it
+  without placeholders.
+- The base environment (`HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `PATH`; `TMPDIR` is
+  `/tmp`) goes through the sandbox plan. The secrets, the placeholders, and the proxy
+  variables are set on the `bwrap` command after it, as before, so their values never
+  pass through the plan or its `Debug`.
+- One thread starts `bwrap` and waits for it (`--die-with-parent`). A timeout or the end
+  of the run stops the process group of `bwrap`; then PID 1 and every process of the
+  sandbox stop.
+
+A run whose sandbox cannot be built (its working directory is `/`, `/tmp`, or `/home`
+itself; the vault list cannot be read; a path is inside a denied one) does not start
+(`start_failed`, with the cause), instead of running without the rule.
+
+Differences from a run without the rule: a process stopped by a signal reports
+`exit_code` 128 + the signal (the init program's code) instead of none; the run sees an
+empty home and a private `/tmp`; DNS does not work except through the proxy.
+
 ## 7. Tests
 
 Unit tests (every Linux test job; no bubblewrap needed): the argument order and the
@@ -273,8 +315,17 @@ starts), sets `kernel.apparmor_restrict_unprivileged_userns=0`, and runs:
 
 ```
 APASSY_REQUIRE_BWRAP=1 cargo nextest run --profile ci --offline --locked --all-features \
-  --lib --test it -E 'test(/^isolation(::|_linux::)/)'
+  --lib --test it -E 'test(/^isolation(::|_linux::)/) | test(/^broker::proxy::network::/) | test(/^run_proxy::linux_/) | test(=agent_run::a_placeholder_variable_gets_a_placeholder_and_the_run_proxy)'
 ```
+
+The X2 tests in that filter: `broker::proxy::network::tests::on_linux::*` (the plan
+with a ready, blocked, and missing bubblewrap and a missing init; the folders of
+`PATH` that are shown), `run_proxy::linux_direct_connection_fails_in_a_proxied_run`,
+`run_proxy::linux_proxied_run_reports_netns`,
+`run_proxy::linux_proxied_run_reports_its_rule_and_holds_only_placeholders`, and the
+broker-level `agent_run::a_placeholder_variable_gets_a_placeholder_and_the_run_proxy`.
+In the other Linux test jobs (no bubblewrap) the same tests check `none` with the
+reason, or skip.
 
 ## 8. Measurements
 

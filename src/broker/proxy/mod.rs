@@ -10,7 +10,9 @@
 //! a look inside, or a refusal.
 //!
 //! On macOS, a Seatbelt rule lets the process connect only to the proxy port, so a
-//! program that ignores `HTTPS_PROXY` has no network at all. A program that goes
+//! program that ignores `HTTPS_PROXY` has no network at all. On Linux a bubblewrap
+//! sandbox with its own network namespace does the same, when bubblewrap can run
+//! there (`network.rs`). A program that goes
 //! around the proxy in any other way still holds only placeholders.
 //!
 //! The proxy listens on 127.0.0.1 with a password for the run. It serves only the
@@ -43,7 +45,7 @@ mod ws;
 pub use ca::Alpn;
 pub use engine::{Auth, CoreOptions, EventSink, ProxyCore, UpstreamPolicy};
 pub use listener::RunProxy;
-pub use network::{NetworkRule, RunNetwork, network_for};
+pub use network::{LinuxNet, NetworkRule, NoRule, RunNetwork, network_for};
 pub use public_addr::is_public_ip;
 pub use swap::mint_placeholder;
 

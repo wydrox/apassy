@@ -487,6 +487,12 @@ Result:
   its password, but no value. A proxied run starts in a second Seatbelt profile
   that denies each outgoing connection except the one to the proxy port. That
   rule works: a direct connection fails with `Operation not permitted`.
+- On Linux a proxied run starts in a bubblewrap sandbox instead (unit X2 of the
+  s5 plan): its own network namespace with one bridge to the proxy port, and its
+  own PID namespace, so the F11 read of another process's environment has no
+  target there. The run answer says `network.rule` = `netns`, or `none` with the
+  reason and the fix when bubblewrap cannot run. See
+  [isolation-linux.md](isolation-linux.md).
 - Host tooling: `ps` and `top` cannot start in any `sandbox-exec` profile, so a
   host feature that runs them fails. No SBPL allowance for this was verified.
   The measured Claude Code run did not break.

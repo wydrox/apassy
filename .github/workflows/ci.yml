@@ -554,7 +554,7 @@ jobs:
           NEXTEST_TEST_THREADS: "8"
         run: >-
           cargo nextest run --profile ci --offline --locked --all-features
-          --lib --test it -E 'test(/^isolation(::|_linux::)/)'
+          --lib --test it -E 'test(/^isolation(::|_linux::)/) | test(/^broker::proxy::network::/) | test(/^run_proxy::linux_/) | test(=agent_run::a_placeholder_variable_gets_a_placeholder_and_the_run_proxy)'
       - name: List leftover processes
         if: always()
         run: ps -eo pid,ppid,pgid,etimes,args --sort=pid | awk '$5 !~ /^\[/'

@@ -99,7 +99,7 @@ use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
 use super::project::{Project, project_of};
 use super::proxy::{
     HostRule, NetworkRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret,
-    RunProxy, mint_placeholder,
+    RunNetwork, RunProxy, mint_placeholder,
 };
 use super::shadow::{self, ShadowInput};
 use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
@@ -2037,10 +2037,7 @@ fn run_inner(
         &secrets.env,
         &secrets.masks,
         &secrets.codes,
-        network.map_or_else(Network::default, |network| Network {
-            env: &network.env,
-            sandbox_profile: network.sandbox_profile.as_deref(),
-        }),
+        network.map_or_else(Network::default, Network::from),
         ctx.run_timeout,
         |cmd, prepare| {
             if let Some(a) = &access_admission {
@@ -2061,6 +2058,7 @@ fn run_inner(
         },
     );
     let enforced = network.is_some_and(|network| network.rule != NetworkRule::None);
+    let rule = network.map(RunNetwork::report);
     let requests = proxy.map(RunProxy::finish).unwrap_or_default();
     drop(secrets);
     let proxy_note = proxy_summary(&requests);
@@ -2111,6 +2109,14 @@ fn run_inner(
             if !checked.placeholder_names.is_empty() {
                 answer["placeholders"] = json!(checked.placeholder_names);
                 answer["network"] = network_report(enforced, &requests, !request.codes.is_empty());
+                // broker-v0 `network.rule` (unit X2): the rule, and without one on
+                // Linux the reason and the fix.
+                if let (Some(report), Some(fields)) = (
+                    rule.as_ref().and_then(serde_json::Value::as_object),
+                    answer["network"].as_object_mut(),
+                ) {
+                    fields.extend(report.clone());
+                }
                 answer["note"] = json!(if request.codes.is_empty() {
                     PLACEHOLDER_NOTE
                 } else {
@@ -2119,15 +2125,17 @@ fn run_inner(
             }
             WireResponse::success(answer)
         }
-        Err(_) => {
-            let reason = "The command did not start. Check the program name and PATH.";
+        Err(err) => {
+            let reason = exec::sandbox_refusal(&err).unwrap_or_else(|| {
+                "The command did not start. Check the program name and PATH.".to_owned()
+            });
             record_locked(
                 ctx,
                 &checked,
                 request,
                 &label,
                 ActivityDecision::Error,
-                reason,
+                &reason,
             );
             WireResponse::failure("start_failed", reason)
         }

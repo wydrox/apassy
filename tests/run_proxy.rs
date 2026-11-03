@@ -263,6 +263,9 @@ fn node_reads_proxy_variables() -> bool {
 }
 
 fn run(run: &Run, script: &str) -> RunOutput {
+    // A folder of its own: on Linux the sandbox of a run cannot have `/tmp` itself
+    // as its working directory (the sandbox hides the host `/tmp`).
+    let cwd = tempfile::tempdir().expect("cwd");
     let network = run.proxy.network();
     let env = [
         SecretEnv {
@@ -280,14 +283,11 @@ fn run(run: &Run, script: &str) -> RunOutput {
     }];
     exec::run_with(
         &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
-        Path::new("/tmp"),
+        cwd.path(),
         Some(&run_path()),
         &env,
         &masks,
-        Network {
-            env: &network.env,
-            sandbox_profile: network.sandbox_profile.as_deref(),
-        },
+        Network::from(network),
         Duration::from_secs(60),
     )
     .expect("run")
@@ -588,6 +588,162 @@ fn on_macos_the_process_can_reach_only_the_proxy() {
         "through the proxy: {out:?}"
     );
     assert_eq!(service.seen.lock().expect("seen").len(), 1);
+}
+
+// Linux (ADR 0011 stage 2, unit X2): the run is in a bubblewrap sandbox whose network
+// namespace has one way out, a bridge to the proxy port. The CI job `linux-isolation`
+// has bubblewrap and sets APASSY_REQUIRE_BWRAP=1, so there these tests fail instead of
+// skip. Elsewhere the run has no rule and says why.
+
+/// The rule of a proxied run on this computer; `None` (skip) without bubblewrap,
+/// unless the job requires it.
+#[cfg(target_os = "linux")]
+fn netns_or_skip(run: &Run) -> bool {
+    let network = run.proxy.network();
+    if network.rule == apassy::broker::proxy::NetworkRule::Netns {
+        return true;
+    }
+    assert!(
+        std::env::var_os("APASSY_REQUIRE_BWRAP").is_none(),
+        "APASSY_REQUIRE_BWRAP is set, but the run has no network rule: {}",
+        network.report()
+    );
+    eprintln!("SKIP: no Linux network rule here: {}", network.report());
+    false
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_direct_connection_fails_in_a_proxied_run() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    if !netns_or_skip(&proxied) {
+        return;
+    }
+    let port = service.port;
+    // The service listens on the host's 127.0.0.1, the same address that the
+    // bridge uses in the namespace: only the proxy port leads out.
+    let out = run(
+        &proxied,
+        &format!(
+            "curl -sS --max-time 5 --noproxy '*' https://localhost:{port}/whoami; echo \"direct=$?\"; \
+             curl -sS --max-time 5 --noproxy '*' https://1.1.1.1/; echo \"outside=$?\"; \
+             python3 -c \"import socket; socket.create_connection(('127.0.0.1',{port}),timeout=3)\" 2>&1 | tail -1; \
+             curl -sS https://localhost:{port}/whoami -H \"Authorization: Bearer $DEMO_KEY\""
+        ),
+    );
+    assert!(
+        out.stdout.contains("direct=7"),
+        "curl without the proxy: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("outside=7"),
+        "curl to the internet without the proxy: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("Connection refused"),
+        "python without the proxy: {out:?}"
+    );
+    assert!(
+        out.stdout.contains("{\"ok\":true}"),
+        "through the proxy: {out:?}"
+    );
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(seen.len(), 1, "only the proxied request arrives: {seen:?}");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some(format!("Bearer {REAL}").as_str())
+    );
+    let log = events(proxied);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].outcome, ProxyOutcome::Swapped);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proxied_run_reports_netns() {
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    if !netns_or_skip(&proxied) {
+        return;
+    }
+    assert_eq!(
+        proxied.proxy.network().report(),
+        serde_json::json!({"rule": "netns"})
+    );
+    // PID 1 is the Apassy init; the processes of the host are not there; the
+    // variable holds the placeholder.
+    let out = run(
+        &proxied,
+        "tr '\\0' ' ' < /proc/1/cmdline; echo; ls /proc | grep -c '^[0-9]'; printf %s \"$DEMO_KEY\" | rev",
+    );
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert!(lines[0].contains("__netns-bridge"), "{out:?}");
+    let processes: usize = lines[1].trim().parse().expect("count");
+    assert!(processes < 10, "{out:?}");
+    assert!(
+        out.stdout.contains(&reversed(&proxied.placeholder)),
+        "{out:?}"
+    );
+    assert!(!out.stdout.contains(&reversed(REAL)));
+}
+
+/// Without bubblewrap (every Linux test job but `linux-isolation`) the run has no
+/// rule and names the reason and the fix; with it, the rule is `netns`. Either way
+/// the process holds only placeholders and the proxy swaps.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proxied_run_reports_its_rule_and_holds_only_placeholders() {
+    use apassy::broker::proxy::NetworkRule;
+    let service = start_service();
+    let proxied = start_proxy(&service, OtherHosts::Tunnel);
+    let network = proxied.proxy.network();
+    let report = network.report();
+    match network.rule {
+        NetworkRule::Netns => assert_eq!(report, serde_json::json!({"rule": "netns"})),
+        NetworkRule::None => {
+            assert!(
+                std::env::var_os("APASSY_REQUIRE_BWRAP").is_none(),
+                "{report}"
+            );
+            assert_eq!(report["rule"], "none");
+            assert!(
+                [
+                    "bwrap_missing",
+                    "bwrap_too_old",
+                    "userns_blocked",
+                    "sandbox_program_missing"
+                ]
+                .contains(&report["reason"].as_str().unwrap_or_default()),
+                "{report}"
+            );
+            assert!(report["fix"].as_str().is_some_and(|fix| !fix.is_empty()));
+            assert!(network.linux.is_none());
+        }
+        NetworkRule::Seatbelt => panic!("Seatbelt on Linux"),
+    }
+    let text = report.to_string();
+    assert!(!text.contains(REAL) && !text.contains(&proxied.placeholder));
+    let out = run(
+        &proxied,
+        &format!(
+            "curl -sS https://localhost:{}/whoami -H \"Authorization: Bearer $DEMO_KEY\"; echo; printf %s \"$DEMO_KEY\" | rev",
+            service.port
+        ),
+    );
+    assert_eq!(out.exit_code, Some(0), "{out:?}");
+    assert!(out.stdout.contains("{\"ok\":true}"), "{out:?}");
+    assert!(
+        out.stdout.contains(&reversed(&proxied.placeholder)),
+        "{out:?}"
+    );
+    assert!(!out.stdout.contains(&reversed(REAL)));
+    let seen = service.seen.lock().expect("seen").clone();
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some(format!("Bearer {REAL}").as_str())
+    );
 }
 
 // WebSocket (ADR 0011 stage 5, unit P3). A raw client goes through the run proxy
@@ -1063,9 +1219,10 @@ fn a_server_frame_with_the_value_reaches_the_client_as_the_placeholder() {
     }
     assert_eq!(message, format!("v={};", proxied.placeholder).into_bytes());
     close_ws(&mut client);
+    let placeholder = proxied.placeholder.clone();
     let log = events(proxied);
     assert!(!format!("{log:?}").contains(REAL));
-    assert!(!format!("{log:?}").contains(&proxied.placeholder));
+    assert!(!format!("{log:?}").contains(&placeholder));
 }
 
 #[test]
