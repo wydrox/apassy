@@ -624,6 +624,15 @@ fn a_run_starts_the_model_server_before_the_model() {
     assert_eq!(gate.seen.lock().expect("seen").len(), 1);
 }
 
+fn set_declaration(fx: &Fixture, declaration: Declaration) {
+    let mut guard = fx.vault.lock().expect("vault");
+    guard
+        .as_mut()
+        .expect("open")
+        .set_declaration(fx.item_id, &declaration)
+        .expect("declaration");
+}
+
 fn set_environment(fx: &Fixture, item_id: u64, environment: Environment) {
     let mut guard = fx.vault.lock().expect("vault");
     let mut declaration = staging_declaration();
@@ -1248,6 +1257,22 @@ fn a_hostile_brain_cannot_allow_production_a_flag_or_a_foreign_host() {
     );
     assert_eq!(asked(), 1, "the remote brain answered");
 
+    // The paths of the project root and the home folder leave the Mac shortened.
+    let home = std::env::var("HOME").expect("HOME");
+    let paths = format!(
+        "echo {}/README.md {home}/notes.txt; node -e 0",
+        fx.project.display()
+    );
+    let shortened = run(&fx, &["sh", "-c", &paths], "Print done.");
+    assert!(shortened.ok, "{shortened:?}");
+    assert_eq!(asked(), 2, "the remote brain answered");
+    {
+        let bodies = brain.bodies.lock().expect("bodies");
+        let last = bodies.last().expect("body");
+        assert!(last.contains("echo ./README.md ~/notes.txt"), "{last}");
+        assert!(!last.contains(&home), "{last}");
+    }
+
     // A rule flag: printing an encoded secret waits for the owner.
     let flagged = run(&fx, &["sh", "-c", "echo $DEMO_KEY | base64"], "Debug.");
     assert_eq!(code(&flagged), "approval_timeout");
@@ -1289,6 +1314,30 @@ fn a_hostile_brain_cannot_allow_production_a_flag_or_a_foreign_host() {
     }
     assert_eq!(asked(), before, "a production run never reaches the brain");
 
+    // A read-only production credential: with a remote brain, the owner decides too,
+    // so a clean answer of a hostile host never allows it.
+    set_declaration(
+        &fx,
+        Declaration {
+            scope: Scope::ReadOnly,
+            environment: Environment::Production,
+            risk: RiskLevel::Low,
+            ..model_declaration()
+        },
+    );
+    let read_only = run(&fx, &["echo", "hi"], "Run the project checks.");
+    assert_eq!(code(&read_only), "approval_timeout");
+    let reason = last_reason(&fx);
+    assert!(
+        reason.contains("is a production credential and the bouncer brain runs on another host"),
+        "{reason}"
+    );
+    assert_eq!(
+        asked(),
+        before,
+        "a read-only production run never reaches the brain"
+    );
+
     // Every request had the brain bearer, and none had the secret value, the vault
     // path, or the absolute project path.
     let vault_path = fx._dir.path().join("vault.db").display().to_string();
@@ -1305,4 +1354,27 @@ fn a_hostile_brain_cannot_allow_production_a_flag_or_a_foreign_host() {
             assert!(!request.contains(hidden), "{hidden} reached the brain");
         }
     }
+}
+
+/// ADR 0035: the production hard rule for read-only scope applies only to a remote
+/// brain. The local brain on the Mac still decides a read-only production run.
+#[test]
+fn a_local_brain_still_decides_read_only_production() {
+    let model = common::fake_bouncer(&[("task_match", 0.95), ("writes", 0.01)]);
+    let fx = fixture_declared(
+        Some(&model.url),
+        Declaration {
+            scope: Scope::ReadOnly,
+            environment: Environment::Production,
+            risk: RiskLevel::Low,
+            ..model_declaration()
+        },
+    );
+    let response = run(&fx, &["echo", "done"], "Run the project checks.");
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.result.unwrap()["decided_by"], "Bouncer allowed");
+    assert!(
+        !model.bodies.lock().expect("bodies").is_empty(),
+        "the local brain answered"
+    );
 }

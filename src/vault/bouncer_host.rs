@@ -150,19 +150,21 @@ pub fn normalize_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_owned()
 }
 
-/// A host address: `https://`, a host, an optional port and path, printable ASCII, no
-/// user info, no query, no fragment, at most [`MAX_HOST_URL_BYTES`]. The client of the
-/// broker checks the address again when it connects (`BouncerClient::remote`).
+/// A host address: `https://`, a host and an optional port, printable ASCII, no path,
+/// no user info, no query, no fragment, at most [`MAX_HOST_URL_BYTES`]. It is the form
+/// that the client of the broker takes (`http::parse_destination`, which checks the
+/// address again when it connects), so the vault never stores an address with a path
+/// that the client then refuses.
 pub fn valid_host_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };
-    let host = rest.split('/').next().unwrap_or_default();
+    let host = rest.strip_suffix('/').unwrap_or(rest);
     let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
     url.len() <= MAX_HOST_URL_BYTES
         && !name.is_empty()
         && url.bytes().all(|b| b.is_ascii_graphic())
-        && !url.contains(['@', '?', '#', '\\'])
+        && !host.contains(['/', '@', '?', '#', '\\'])
 }
 
 /// A bearer token of an own server: [`MIN_BEARER_BYTES`] to [`MAX_BEARER_BYTES`] of
@@ -186,14 +188,22 @@ pub fn generate_bearer() -> VaultResult<SecretValue> {
     Ok(SecretValue::new(text))
 }
 
-/// The command that starts the self-host server with `bearer` (ADR 0035 section 2,
-/// `docs/operations/bouncer-hosting.md`). It has the token, so it erases itself on drop.
-pub fn docker_run_line(bearer: &SecretValue) -> Zeroizing<String> {
-    Zeroizing::new(format!(
-        "docker run -d --name apassy-brain -p 8770:8770 -e LAYA_API_KEY={} {BRAIN_IMAGE}:{}",
-        bearer.expose(),
+/// The commands that start the self-host server (ADR 0035 section 2,
+/// `docs/operations/bouncer-hosting.md`). They hold no token: the owner pastes it into
+/// `cat`, so it is never on a command line, in the shell history, or in `docker
+/// inspect`. The container reads it from `LAYA_API_KEY_FILE` (`docker-entrypoint.sh`),
+/// and the port is bound to loopback for Tailscale Serve.
+pub fn docker_run_lines() -> String {
+    format!(
+        "install -d -m 0700 ~/apassy-brain\n\
+         cat > ~/apassy-brain/token\n\
+         chmod 0644 ~/apassy-brain/token\n\
+         docker run -d --name apassy-brain --restart unless-stopped \
+         -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data \
+         -v ~/apassy-brain/token:/run/secrets/brain-token:ro \
+         -e LAYA_API_KEY_FILE=/run/secrets/brain-token {BRAIN_IMAGE}:{}",
         env!("CARGO_PKG_VERSION")
-    ))
+    )
 }
 
 /// The check of a change, before any write.
@@ -510,6 +520,8 @@ mod tests {
             own("https://", BEARER),
             own("https://user@brain.synthetic.ts.net", BEARER),
             own("https://brain.synthetic.ts.net/?x=1", BEARER),
+            own("https://brain.synthetic.ts.net/v1", BEARER),
+            own("https://brain.synthetic.ts.net:8443/brain/", BEARER),
             own("https://brain synthetic.ts.net", BEARER),
             own(
                 &format!("https://{}.ts.net", "a".repeat(MAX_HOST_URL_BYTES)),
@@ -595,9 +607,18 @@ mod tests {
         assert_eq!(one.expose().len(), GENERATED_BEARER_BYTES * 2);
         assert!(one.expose().bytes().all(|b| b.is_ascii_hexdigit()));
         assert!(valid_bearer(one.expose()));
-        let line = docker_run_line(&one);
-        assert!(line.contains(&format!("-e LAYA_API_KEY={} ", one.expose())));
-        assert!(line.ends_with(&format!("{BRAIN_IMAGE}:{}", env!("CARGO_PKG_VERSION"))));
+        // The start commands hold no token: a token file, read by the container.
+        let lines = docker_run_lines();
+        assert!(!lines.contains(one.expose()));
+        assert!(!lines.contains("LAYA_API_KEY="), "{lines}");
+        assert!(lines.contains("cat > ~/apassy-brain/token\n"), "{lines}");
+        assert!(
+            lines.contains("-e LAYA_API_KEY_FILE=/run/secrets/brain-token "),
+            "{lines}"
+        );
+        assert!(lines.contains(" -p 127.0.0.1:8770:8770 "), "{lines}");
+        assert!(!lines.contains(" -p 8770:8770"), "{lines}");
+        assert!(lines.ends_with(&format!("{BRAIN_IMAGE}:{}", env!("CARGO_PKG_VERSION"))));
         assert!(!format!("{one:?}").contains(one.expose()));
     }
 

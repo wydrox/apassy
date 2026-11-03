@@ -1866,19 +1866,14 @@ fn stored_hosting(app: &DesktopApp) -> Option<crate::vault::BouncerHost> {
         .expect("hosting row")
 }
 
-/// The generated token of the open "Use My Server" sheet, from its `docker run` line.
+/// The generated token of the open "Use My Server" sheet.
 fn draft_token(app: &DesktopApp) -> String {
-    let line = app
-        .bouncer_host
+    app.bouncer_host
         .draft
         .as_ref()
         .expect("draft")
-        .docker_line();
-    line.split("LAYA_API_KEY=")
-        .nth(1)
-        .and_then(|rest| rest.split(' ').next())
-        .expect("token in the line")
-        .to_owned()
+        .token_copy()
+        .to_string()
 }
 
 /// Settings > Bouncer starts on This Mac: one "Runs on" row, no note, no fallback, and
@@ -1918,6 +1913,9 @@ fn the_hosting_picker_needs_the_owner_check_and_shows_the_trust_warning() {
     assert!(text.contains(hosting::SERVER_TITLE), "{text}");
     assert!(text.contains(hosting::RUN_HEADER), "{text}");
     assert!(text.contains("docker run"), "{text}");
+    assert!(text.contains("LAYA_API_KEY_FILE="), "{text}");
+    assert!(text.contains(hosting::START_NOTE), "{text}");
+    assert!(text.contains("Paste a Token"), "{text}");
     assert!(!text.contains(&token), "the token is masked: {text}");
 
     // A wrong address keeps step 1 and says why.

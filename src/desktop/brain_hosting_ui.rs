@@ -7,7 +7,8 @@
 //!   vault row, never the token. When the chosen host cannot be used, the brain runs on
 //!   this Mac and the row says why ([`fallback_lines`]).
 //! - [`sheet`]: "Use My Server". Step 1 takes the `https://` address and the token: a
-//!   token that Apassy generates, with the `docker run` line to copy, or the owner's own.
+//!   token that Apassy generates, with the start commands of the server to copy (a token
+//!   file and `docker run`, never the token on a command line), or the owner's own.
 //!   Step 2 is the consent screen of version [`HOSTING_CONSENT_VERSION`]: what leaves
 //!   this Mac, what never does, and the trust warning. Its button asks the fresh owner
 //!   check of `OwnerRequest::ChangeBouncerHosting`, which the global owner window never
@@ -30,7 +31,7 @@ use super::ui::settings_rows as rows;
 use super::ui::{Sheet, close_sheet, forget_secret_field, secure_input};
 use crate::vault::{
     BouncerHost, BouncerHostChange, BouncerHostKind, BouncerHostRole, HOSTING_CONSENT_VERSION,
-    MAX_BEARER_BYTES, SecretValue, docker_run_line, generate_bearer, normalize_url, valid_bearer,
+    MAX_BEARER_BYTES, SecretValue, docker_run_lines, generate_bearer, normalize_url, valid_bearer,
     valid_host_url,
 };
 
@@ -69,25 +70,33 @@ const ADDRESS_HELP: [&str; 2] = [
 pub(crate) const RUN_HEADER: &str = "Start your server with this token";
 pub(crate) const TOKEN_SHOWN_ONCE: &str =
     "The token shows only here. Apassy keeps it in the vault on this Mac.";
+/// How the token gets into the token file of the start commands.
+pub(crate) const START_NOTE: &str = "Run these on your server. At the cat line, paste the token, press Return, then Control-D. The token never goes on a command line.";
 const PASTE_HEADER: &str = "Token";
 const PASTE_NOTE: &str = "The LAYA_API_KEY of your server: 16 to 512 characters.";
 const TOKEN_PLACEHOLDER: &str = "LAYA_API_KEY";
 /// The field name of the pasted token (its undo history is erased with the draft).
 const TOKEN_FIELD: &str = "brain-host-token";
-/// The masked token in the `docker run` line.
+/// The masked token.
 const MASK: &str = "••••••••••••••••";
 pub(crate) const CONSENT_TITLE: &str = "What Leaves This Mac";
-/// What each bouncer request sends to the server: exactly what `bouncer::state_text` puts
-/// in the state (ADR 0035 section 4, ADR 0007 state).
+/// What goes to the server: exactly what `bouncer::state_text` puts in the state, with
+/// the command of `bouncer::shorten_paths`, and the head sets that the trainer uploads
+/// (ADR 0035 sections 4 and 7, ADR 0007 state). The broker sends no owner rule.
 pub(crate) const SENT: [&str; 3] = [
     "The user request and the purpose",
-    "The shell command, with the variable names in it",
-    "Your rule for the project",
+    "The shell command, with paths in your project and home folder shortened",
+    "The bouncer heads trained on your decisions (numbers, no text)",
 ];
 /// What never leaves this Mac (ADR 0035 section 3).
-pub(crate) const NEVER_SENT: [&str; 2] = ["Secret values", "The vault and full project paths"];
-/// The trust warning of ADR 0035 section 5, before the owner selects a remote host.
-pub(crate) const TRUST_WARNING: &str = "A server that someone else controls can make the bouncer run development commands without asking you. It can never allow production, a hard check, secret output or another host.";
+pub(crate) const NEVER_SENT: [&str; 2] = [
+    "Secret values",
+    "The vault and the full paths of your project and home folder",
+];
+/// The trust warning of ADR 0035 section 5, before the owner selects a remote host. A
+/// remote brain decides no production run (`broker::run` hard rules), and the hard
+/// checks, rule flags such as secret output, and foreign hosts come before the model.
+pub(crate) const TRUST_WARNING: &str = "A server that someone else controls can make the bouncer run development and staging commands without asking you. It can never allow production, a hard check, secret output or another host.";
 /// The button that asks the owner check.
 pub(crate) const USE_SERVER: &str = "Use My Server";
 
@@ -113,7 +122,7 @@ pub(crate) struct HostingDraft {
     /// The owner pastes a token of their own instead.
     pub(crate) paste: bool,
     pasted: String,
-    /// The `docker run` line shows the generated token in clear.
+    /// The sheet shows the generated token in clear.
     pub(crate) shown: bool,
 }
 
@@ -174,17 +183,17 @@ impl HostingDraft {
         host_of(&normalize_url(&self.address))
     }
 
-    /// The `docker run` line with the generated token, to copy. It erases itself.
-    pub(crate) fn docker_line(&self) -> Zeroizing<String> {
-        docker_run_line(&self.generated)
+    /// The generated token, to copy. It erases itself.
+    pub(crate) fn token_copy(&self) -> Zeroizing<String> {
+        Zeroizing::new(self.generated.expose().to_owned())
     }
 
-    /// The `docker run` line as the sheet shows it: masked unless the owner shows it.
-    pub(crate) fn shown_line(&self) -> Zeroizing<String> {
+    /// The generated token as the sheet shows it: masked unless the owner shows it.
+    pub(crate) fn shown_token(&self) -> Zeroizing<String> {
         if self.shown {
-            self.docker_line()
+            self.token_copy()
         } else {
-            docker_run_line(&SecretValue::new(MASK.to_owned()))
+            Zeroizing::new(MASK.to_owned())
         }
     }
 
@@ -416,7 +425,7 @@ pub(crate) fn sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             app.owner_ui.session.epoch(),
         )
     {
-        let line = draft.docker_line();
+        let line = draft.token_copy();
         match app
             .owner
             .clipboard
@@ -493,17 +502,21 @@ fn server_step(ui: &mut egui::Ui, draft: &mut HostingDraft, actions: &mut SheetA
         } else {
             kit::section(ui, Some(RUN_HEADER), Some(TOKEN_SHOWN_ONCE), |s| {
                 s.row(|ui| {
-                    let line = draft.shown_line();
-                    kit::code_block(ui, &line, 2);
+                    let token = draft.shown_token();
+                    kit::code_block(ui, &token, 1);
                     ui.add_space(6.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if kit::small_button(ui, "Copy", Style::Bordered).clicked() {
-                            actions.copy = true;
-                        }
-                        let label = if draft.shown { "Hide" } else { "Show" };
-                        if kit::small_button(ui, label, Style::Bordered).clicked() {
-                            draft.shown = !draft.shown;
-                        }
+                    // One line: a bare right-to-left layout would take the rest of the
+                    // sheet height and push the rows below out of view.
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if kit::small_button(ui, "Copy", Style::Bordered).clicked() {
+                                actions.copy = true;
+                            }
+                            let label = if draft.shown { "Hide" } else { "Show" };
+                            if kit::small_button(ui, label, Style::Bordered).clicked() {
+                                draft.shown = !draft.shown;
+                            }
+                        });
                     });
                 });
                 s.field("Own token", |ui| {
@@ -513,6 +526,20 @@ fn server_step(ui: &mut egui::Ui, draft: &mut HostingDraft, actions: &mut SheetA
                         draft.shown = false;
                     }
                     paste
+                });
+            });
+            kit::section(ui, None, Some(START_NOTE), |s| {
+                s.row(|ui| {
+                    let lines = docker_run_lines();
+                    kit::code_block(ui, &lines, 5);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if kit::small_button(ui, "Copy Commands", Style::Bordered).clicked() {
+                                ui.ctx().copy_text(lines.clone());
+                            }
+                        });
+                    });
                 });
             });
         }
@@ -631,6 +658,7 @@ mod tests {
             "https://",
             "https://user@brain.synthetic.ts.net",
             "https://brain.synthetic.ts.net/?q=1",
+            "https://brain.synthetic.ts.net/v1",
         ] {
             draft.address = wrong.to_owned();
             assert!(!draft.address_ok(), "{wrong}");
@@ -661,22 +689,20 @@ mod tests {
     }
 
     #[test]
-    fn the_shown_docker_line_masks_the_token_until_the_owner_shows_it() {
+    fn the_shown_token_is_masked_until_the_owner_shows_it() {
         let mut draft = HostingDraft::new(EPOCH).unwrap();
         let token = draft.generated.expose().to_owned();
-        let masked = draft.shown_line();
-        assert!(!masked.contains(&token), "{}", masked.as_str());
-        assert!(masked.contains(MASK));
-        assert!(masked.starts_with("docker run"));
+        let masked = draft.shown_token();
+        assert_eq!(masked.as_str(), MASK);
         draft.shown = true;
-        assert!(
-            draft
-                .shown_line()
-                .contains(&format!("LAYA_API_KEY={token}"))
-        );
-        // The copy always has the token.
+        assert_eq!(draft.shown_token().as_str(), token);
+        // The copy always has the token, and the start commands never do.
         draft.shown = false;
-        assert!(draft.docker_line().contains(&token));
+        assert_eq!(draft.token_copy().as_str(), token);
+        let lines = docker_run_lines();
+        assert!(!lines.contains(&token), "{lines}");
+        assert!(lines.contains("LAYA_API_KEY_FILE="), "{lines}");
+        assert!(lines.contains("127.0.0.1:8770:8770"), "{lines}");
     }
 
     #[test]

@@ -685,6 +685,7 @@ fn decision_log_and_export_have_no_secret_values() {
             "env_names",
             "instruction",
             "model_facts",
+            "project_dir",
             "purpose",
             "remembered",
             "rule_flags",

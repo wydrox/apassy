@@ -267,6 +267,13 @@ fn fnv(text: &str) -> u64 {
 ///   weight).
 /// - A hash of the command puts 20% of the commands in the validation part.
 pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    examples_from_export_in(jsonl, home.as_deref().map(Path::new))
+}
+
+/// [`examples_from_export`] with the home folder that [`bouncer::shorten_paths`] uses.
+/// The project root is the `project_dir` of the line, when the line has one.
+fn examples_from_export_in(jsonl: &str, home: Option<&Path>) -> Result<ExampleSet, String> {
     let questions: BTreeMap<&str, &str> = bouncer::questions().into_iter().collect();
     let question = |name: &str| questions.get(name).copied().unwrap_or_default().to_owned();
     let mut stats = ExampleStats::default();
@@ -309,9 +316,14 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
         }
         let command = texts(&value, "command")?.join(" ");
         let instruction = text(&value, "instruction")?;
+        let project_root = value
+            .get("project_dir")
+            .and_then(Value::as_str)
+            .filter(|dir| !dir.is_empty())
+            .map(Path::new);
         let request = BouncerRequest {
             user_request: user_request.to_owned(),
-            command: command.clone(),
+            command: bouncer::shorten_paths(&command, project_root, home),
             relative_dir: text(&value, "cwd_rel")?.to_owned(),
             purpose: text(&value, "purpose")?.to_owned(),
             env_names: texts(&value, "env_names")?,
@@ -917,6 +929,46 @@ mod tests {
             "remembered": false,
         })
         .to_string()
+    }
+
+    /// ADR 0035: a training state shortens the project root and the home folder as the
+    /// broker does, so the heads learn the state that a brain receives.
+    #[test]
+    fn training_states_shorten_the_project_and_home_folders() {
+        // Two distinct commands, so the set has a training and a validation part.
+        let export: Vec<String> = [
+            "cat /srv/home/ann/app/.env /srv/home/ann/.ssh/id",
+            "ls /srv/home/ann/app/src ~/x",
+        ]
+        .iter()
+        .map(|command| {
+            let mut value: Value =
+                serde_json::from_str(&line("deny", "owner", command, "Show the config.", &[]))
+                    .expect("json");
+            value["project_dir"] = json!("/srv/home/ann/app");
+            value.to_string()
+        })
+        .collect();
+        let set = examples_from_export_in(&export.join("\n"), Some(Path::new("/srv/home/ann")))
+            .expect("examples");
+        let states: BTreeSet<&str> = set
+            .train
+            .iter()
+            .chain(&set.val)
+            .map(|example| example.state.as_str())
+            .collect();
+        assert!(!states.is_empty());
+        for state in &states {
+            assert!(!state.contains("/srv/home/ann"), "{state}");
+        }
+        assert!(
+            states.iter().any(|s| s.contains("`cat ./.env ~/.ssh/id`")),
+            "{states:?}"
+        );
+        assert!(
+            states.iter().any(|s| s.contains("`ls ./src ~/x`")),
+            "{states:?}"
+        );
     }
 
     /// Gate 1 (B-3): a run that a remembered answer allowed is no owner label. Its

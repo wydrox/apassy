@@ -542,9 +542,14 @@ svg{display:block}
       </div>
       <div class="gl">Start your server with this token</div>
       <div class="grp">
-        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">docker run -d --name apassy-brain -p 8770:8770 -e LAYA_API_KEY=•••••••••••••••• ghcr.io/wydrox/apassy-brain:0.5.17</div>
+        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">••••••••••••••••</div>
           <div style="display:flex;gap:6px;justify-content:flex-end"><span class="pb">Show</span><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div></div>
         <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>The token is shown only here. Apassy keeps it in the vault on this Mac.</span></div><span class="pb">Paste a Token</span></div>
+      </div>
+      <div class="grp">
+        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">install -d -m 0700 ~/apassy-brain<br>cat &gt; ~/apassy-brain/token<br>chmod 0644 ~/apassy-brain/token<br>docker run -d --name apassy-brain --restart unless-stopped -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data -v ~/apassy-brain/token:/run/secrets/brain-token:ro -e LAYA_API_KEY_FILE=/run/secrets/brain-token ghcr.io/wydrox/apassy-brain:0.5.17</div>
+          <div style="display:flex;gap:6px;justify-content:flex-end"><span class="pb"><svg><use href="#i-copy"/></svg>Copy Commands</span></div></div>
+        <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>Run these on your server. At the cat line, paste the token, press Return, then Control-D. The token never goes on a command line.</span></div></div>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue</span></div>
     </div>
@@ -557,9 +562,14 @@ svg{display:block}
       </div>
       <div class="gl">Start your server with this token</div>
       <div class="grp">
-        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">docker run -d --name apassy-brain -p 8770:8770 -e LAYA_API_KEY=SYNTH0a1b2c3d4e5f60718293a4b5c6d7e8f9 ghcr.io/wydrox/apassy-brain:0.5.17</div>
+        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">SYNTH0a1b2c3d4e5f60718293a4b5c6d7e8f9</div>
           <div style="display:flex;gap:6px;justify-content:flex-end"><span class="pb">Hide</span><span class="pb"><svg><use href="#i-copy"/></svg>Copy</span></div></div>
         <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>The token is shown only here. Apassy keeps it in the vault on this Mac.</span></div><span class="pb">Paste a Token</span></div>
+      </div>
+      <div class="grp">
+        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">install -d -m 0700 ~/apassy-brain<br>cat &gt; ~/apassy-brain/token<br>chmod 0644 ~/apassy-brain/token<br>docker run -d --name apassy-brain --restart unless-stopped -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data -v ~/apassy-brain/token:/run/secrets/brain-token:ro -e LAYA_API_KEY_FILE=/run/secrets/brain-token ghcr.io/wydrox/apassy-brain:0.5.17</div>
+          <div style="display:flex;gap:6px;justify-content:flex-end"><span class="pb"><svg><use href="#i-copy"/></svg>Copy Commands</span></div></div>
+        <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>Run these on your server. At the cat line, paste the token, press Return, then Control-D. The token never goes on a command line.</span></div></div>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Continue</span></div>
     </div>
@@ -584,13 +594,13 @@ svg{display:block}
       <div class="gl">Sent</div>
       <div class="grp"><ul class="leaves">
         <li>The user request and the purpose</li>
-        <li>The command and the relative folder</li>
-        <li>Variable names and your rule</li></ul></div>
+        <li>The shell command, with paths in your project and home folder shortened</li>
+        <li>The bouncer heads trained on your decisions (numbers, no text)</li></ul></div>
       <div class="gl">Never sent</div>
       <div class="grp"><ul class="leaves no">
         <li>Secret values</li>
-        <li>The vault and full project paths</li></ul></div>
-      <div class="grp" style="margin-top:12px"><div class="fr top"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>A server that someone else controls can make the bouncer run development commands without asking you. It can never allow production, a hard check, secret output or another host.</span></div></div></div>
+        <li>The vault and the full paths of your project and home folder</li></ul></div>
+      <div class="grp" style="margin-top:12px"><div class="fr top"><div class="tn warn" style="flex:1"><svg><use href="#i-warn"/></svg><span>A server that someone else controls can make the bouncer run development and staging commands without asking you. It can never allow production, a hard check, secret output or another host.</span></div></div></div>
       <div class="note">Each change needs Touch ID.</div>
       <div class="sbar"><span class="btn left">Back</span><span class="btn">Cancel</span><span class="btn pri"><svg><use href="#i-touch"/></svg>Use My Server</span></div>
     </div>
@@ -599,7 +609,7 @@ svg{display:block}
       <div class="chkdlg">
         <div class="tid"><svg><use href="#i-touch"/></svg></div>
         <h2>Change the bouncer brain host</h2>
-        <p>Use the bouncer brain on your server at https://brain.tail0a1b.ts.net. Each bouncer request goes there: the user request, the command, the relative folder, the purpose, the variable names and your rule. No secret value, vault path or full project path leaves this Mac, and the bouncer gate still decides on this Mac. A server that someone else controls can make the bouncer run development commands without asking you. It can never allow production, a hard check, secret output or another host.</p>
+        <p>Use the bouncer brain on your server at https://brain.tail0a1b.ts.net. Each bouncer request goes there: the user request, the purpose, and the shell command, with paths in your project and home folder shortened. The bouncer heads trained on your decisions go there too: numbers, no text. No secret value, the vault, or a full path of your project or home folder leaves this Mac, and the bouncer gate still decides on this Mac. A server that someone else controls can make the bouncer run development and staging commands without asking you. It can never allow production, a hard check, secret output or another host.</p>
         <p class="s">Touch ID or the passphrase. The “How often to ask” window never covers this.</p>
       </div>
       <div class="sbar"><span class="btn">Cancel</span><span class="btn pri">Use Passphrase…</span></div>
@@ -607,7 +617,7 @@ svg{display:block}
   </div>
   <ul class="fnotes">
     <li><b>Address:</b> https:// with a host name (<code>valid_host_url</code>). ⓘ: “Use a public certificate, for example Tailscale Serve: <code>tailscale serve --bg 8770</code>. A private certificate does not work.” A wrong address shows “Use https:// and a host name.” under the field, and Continue stays disabled.</li>
-    <li><b>Token:</b> generated when the sheet opens (<code>generate_bearer</code>, 32 random bytes). The <code>docker run</code> line (<code>docker_run_line</code>) shows the token as dots; Show reveals it; Copy copies the whole line through the concealed clipboard, cleared after 30 s. Paste a Token switches to a masked field (16 to 512 characters, <code>valid_bearer</code>).</li>
+    <li><b>Token:</b> generated when the sheet opens (<code>generate_bearer</code>, 32 random bytes). The token shows as dots; Show reveals it; Copy copies the token through the concealed clipboard, cleared after 30 s. Under it, the start commands (<code>docker_run_lines</code>) hold no token: a token file that the owner fills by pasting into <code>cat</code>, read by the container through <code>LAYA_API_KEY_FILE</code>, and the port on loopback (<code>-p 127.0.0.1:8770:8770</code>) for Tailscale Serve. Copy Commands copies them as plain text. Paste a Token switches to a masked field (16 to 512 characters, <code>valid_bearer</code>).</li>
     <li><b>Consent:</b> the words of version 1 (<code>HOSTING_CONSENT_VERSION</code>); the change carries the version, and the owner check names it. A new version of these words shows the sheet again at the next change.</li>
     <li><b>One blue button</b> per step: Continue, then Use My Server (with the Touch ID glyph). Back keeps the address and the token.</li>
     <li><b>Owner check:</b> <code>OwnerRequest::ChangeBouncerHosting</code>. The global Touch ID window never covers it. The sheet closes only after a passed check; a cancel keeps it open with the same token.</li>

@@ -18,7 +18,7 @@ Rules that v2 does not change and that every part below follows:
 
 - The bouncer gate makes every decision on the Mac. Any status other than 200 of `POST /v1/systemone`, also the new 401 and 403 of a Connect server, is unavailable, and the gate asks the owner (v1 section 3.4). Unavailable is never an allowance.
 - A head set from a job starts in shadow mode on the Mac, as every new head set. Only the owner promotes it (`OwnerAction::PromoteModel`). The server has no promotion.
-- No request, upload, answer or log line contains a secret value, the vault path or an absolute path of the Mac or of the server.
+- No request, upload, answer or log line contains a secret value, the vault path, the full path of the project or the home folder of the Mac (v1 section 8: `bouncer::shorten_paths`), or an absolute path of the server.
 - The client deadlines of v1 section 8 stay: 20 s for each attempt to a remote bouncer brain, one retry after a transport timeout. The sign-in of section 5 happens inside that deadline. File transfers use the limits of `put_file` and `get_to_file` (`src/broker/http.rs`, unit C1): 30 s without a byte fails, 15 min in total.
 
 ### 1.1 Transport
@@ -51,7 +51,7 @@ The error body of v1 section 1: `{"detail": {"code": "...", "message": "..."}}`.
 | `not_entitled` | 403 on a Connect server | The plan of the owner does not include hosting (sections 3 and `heads` routes) or training (section 4) |
 | `bad_request` | 400 on sections 5 and 7 | A body that is not JSON, has an unknown field, or breaks an encoding of section 5 |
 | `rate_limited` | 429 on `POST /v1/sign-in/challenge` | More than 4 open nonces for the key; `Retry-After: 60` |
-| `busy` | 503 on section 5 | The nonce table is full, or the directory of section 7.1 did not answer; `Retry-After: 2` |
+| `busy` | 503 on section 5, and on `PUT /v1/train/<sha256>` | The nonce table is full, or the directory of section 7.1 did not answer; `Retry-After: 2`. On a job upload, before the body: 2 uploads stage already, or the disk lacks room for this body, the bodies that stage, and 512 MiB more. Nothing is added |
 | `bad_job` | 400 on `PUT /v1/train/<sha256>`; 422 on a malformed `<sha256>` in a path of section 4 | An upload that does not match its path or its manifest, a manifest that breaks section 4.2, or counts under the training gate |
 | `unknown_job` | 404 on `GET` and `DELETE /v1/train/<sha256>` and `GET /v1/train/<sha256>/result` | The owner has no job with this id |
 | `job_busy` | 409 on `PUT /v1/train/<sha256>` | The owner already has a `queued` or `running` job with another id. Nothing is added |
@@ -325,7 +325,7 @@ Both are idempotent: a repeated event answers 200 with zeros. Connect retries un
 v1 section 8 applies, and:
 
 - The server MUST NOT log the token, the service token, a nonce, a signature, a public key, an account id or a key id in clear. It may log the first 8 hex of a job id or head hash, counts, latency, status codes and error codes.
-- The client MUST NOT send the Connect account token (I-2), a vault credential, the vault path, or an absolute path in any request of this contract. The examples of a job are the state of ADR 0007 only, as in `finetune::examples_from_export`.
+- The client MUST NOT send the Connect account token (I-2), a vault credential, the vault path, or the full path of the project or the home folder in any request of this contract. The examples of a job are the state of v1 section 8 only, as in `finetune::examples_from_export`, which shortens those paths as the broker does.
 - A failed or stopped job leaves no example on the server. The 24-hour rule of section 4.7 holds also when the trainer, the sweeper or the server crashed: the server runs the sweep at its start.
 
 ## 9. Versioning

@@ -20,6 +20,9 @@ Rules (contract section 4.7):
 - One job per owner at a time (`job_busy`), and one job per server runs at a time.
 - A job starts only when the host has the memory cap of the trainer plus 1 GiB free
   (plan 0035 K1); else it stays `queued`.
+- At most 2 uploads stage at a time, and an upload starts only when the disk has its
+  body, the bodies of the uploads that stage now, and 512 MiB more; else 503 `busy`
+  before the body (security panel L5).
 - The examples and every trainer file except the result are deleted when the job
   ends (`done`, `failed`, `deleted`), before the state changes, and at the latest
   24 hours after the upload, whatever the state. The sweep also runs at the start,
@@ -78,6 +81,9 @@ MAX_DEADLINE = 3 * 3600
 # limit + 1 GB free (K1).
 DEFAULT_MEMORY_BYTES = 4 * 1024 ** 3
 MEMORY_HEADROOM = 1024 ** 3
+# Security panel L5: uploads that stage at once, and the free disk kept beyond them.
+MAX_STAGING_UPLOADS = 2
+DISK_HEADROOM = 512 * 1024 ** 2
 NICE = 10
 SWEEP_EVERY = 60
 # The training gate (`src/broker/finetune.rs:43-45`, `local_train.py`).
@@ -99,6 +105,10 @@ class JobError(heads_cache.HeadsError):
 
 def bad_job(message, status=400):
     return JobError(status, "bad_job", message)
+
+
+def server_busy(message):
+    return JobError(503, "busy", message)
 
 
 def unknown_job():
@@ -277,6 +287,7 @@ class Upload:
             except OSError:
                 pass
         _remove_tree(self.staging)
+        self.manager._release(self)
 
 
 # ------------------------------------------------------------------ the trainer
@@ -385,6 +396,14 @@ def memory_free_bytes(cgroup="/sys/fs/cgroup", meminfo="/proc/meminfo"):
 
 
 # ------------------------------------------------------------------ the result
+def disk_free_bytes(path):
+    """Free bytes of the file system of `path`, or None when it cannot be read."""
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
 def finite_metrics(value, depth=0):
     """The numbers of the trainer's result.json: finite numbers, or objects of them. No string."""
     if not isinstance(value, dict):
@@ -417,11 +436,14 @@ class JobManager:
     result as a head set of the owner (`keep_heads`) and returns whether it did; `key`
     is (owner key, job id), so a Connect server (unit D2) can find the namespace.
     `memory_free()` gives free bytes or None (unknown: the job may start).
+    `disk_free()` gives the free bytes of the jobs folder or None (unknown: the upload
+    may start); at most `max_staging` uploads stage at a time.
     """
 
     def __init__(self, jobs_dir, base, trainer, expected_shapes=None, store_heads=None,
                  clock=time.time, memory_free=memory_free_bytes, memory_needed=None,
-                 max_upload=MAX_UPLOAD_BYTES, log=LOG):
+                 max_upload=MAX_UPLOAD_BYTES, log=LOG, disk_free=None,
+                 max_staging=MAX_STAGING_UPLOADS, disk_headroom=DISK_HEADROOM):
         self.jobs_dir = os.path.abspath(jobs_dir)
         self.base = {"revision": base["revision"], "weights_sha256": base["weights_sha256"]}
         self.trainer = trainer
@@ -435,6 +457,10 @@ class JobManager:
         self.memory_needed = memory_needed
         self.max_upload = max_upload
         self.log = log
+        self.disk_free = disk_free or (lambda: disk_free_bytes(self.jobs_dir))
+        self.max_staging = max_staging
+        self.disk_headroom = disk_headroom
+        self._staging = {}         # Upload -> body bytes, while it stages
         self._lock = threading.RLock()
         self._wake = threading.Condition(self._lock)
         self._jobs = {}            # (owner key, job id) -> state dict
@@ -530,8 +556,25 @@ class JobManager:
             if existing is not None and existing["state"] != "deleted":
                 return self.view(existing), None
             self._check_busy(key)
+            self._check_staging(body_size(manifest))
             # Under the lock: the sweeper removes an owner folder without jobs or uploads.
-            return None, Upload(self, owner, job_id, manifest)
+            upload = Upload(self, owner, job_id, manifest)
+            self._staging[upload] = upload.expected
+            return None, upload
+
+    def _check_staging(self, size):
+        """Before the body: room for one more upload (security panel L5). The bytes of
+        the uploads that stage now count, so parallel uploads cannot fill the disk."""
+        if len(self._staging) >= self.max_staging:
+            raise server_busy("%d job uploads are in progress; try again later" % self.max_staging)
+        free = self.disk_free()
+        needed = sum(self._staging.values()) + size + self.disk_headroom
+        if free is not None and free < needed:
+            raise server_busy("the server has not enough free disk for the job upload")
+
+    def _release(self, upload):
+        with self._lock:
+            self._staging.pop(upload, None)
 
     def _check_busy(self, key):
         for other, job in self._jobs.items():
@@ -563,6 +606,7 @@ class JobManager:
                 target = self._dir(key)
                 _remove_tree(target)
                 os.replace(upload.staging, target)
+                self._release(upload)
                 self._jobs[key] = job
                 self._note(key, "queued")
                 self._wake.notify_all()

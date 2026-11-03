@@ -299,7 +299,13 @@ fn evaluate(
     } else {
         model(&BouncerRequest {
             user_request: user_request.to_owned(),
-            command: request.command.join(" "),
+            command: super::bouncer::shorten_paths(
+                &request.command.join(" "),
+                Some(scope.project_dir),
+                std::env::var_os("HOME")
+                    .as_deref()
+                    .map(std::path::Path::new),
+            ),
             relative_dir: request.cwd_rel.clone(),
             purpose: request.purpose.trim().to_owned(),
             env_names: vec![setup.env_name.clone()],

@@ -526,11 +526,34 @@ fn delivery_words(kind: crate::vault::ShortLivedKind) -> &'static str {
 
 /// Where the bouncer brain runs or trains, for the owner texts. No address: the dialog
 /// shows it.
-fn host_words(kind: crate::vault::BouncerHostKind) -> &'static str {
+fn host_words(kind: crate::vault::BouncerHostKind, url: &str) -> String {
     match kind {
-        crate::vault::BouncerHostKind::ThisMac => "on this Mac",
-        crate::vault::BouncerHostKind::OwnServer => "on your server",
-        crate::vault::BouncerHostKind::Connect => "at Apassy Connect",
+        crate::vault::BouncerHostKind::ThisMac => "on this Mac".to_owned(),
+        crate::vault::BouncerHostKind::OwnServer => format!("on your server {}", host_name(url)),
+        crate::vault::BouncerHostKind::Connect => format!("at Apassy Connect {}", host_name(url)),
+    }
+}
+
+/// The host name (and port) of an `https://` address for the Touch ID reason: printable
+/// characters only. A long name keeps its end, where the domain that owns it is, so a
+/// name such as `brain.example.com.evil.net` cannot hide `evil.net`.
+fn host_name(url: &str) -> String {
+    const MAX_HOST_CHARS: usize = 60;
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    let host: Vec<char> = rest
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() && *c != '"')
+        .collect();
+    if host.is_empty() {
+        "unknown".to_owned()
+    } else if host.len() > MAX_HOST_CHARS {
+        let tail: String = host[host.len() - (MAX_HOST_CHARS - 1)..].iter().collect();
+        format!("…{tail}")
+    } else {
+        host.into_iter().collect()
     }
 }
 
@@ -810,11 +833,11 @@ impl OwnerAction {
             }
             Self::PromoteModel { .. } => "promote a new bouncer brain".to_owned(),
             Self::RollbackModel { .. } => "roll back the bouncer brain".to_owned(),
-            Self::ChangeBouncerHosting { kind, .. } => {
-                format!("run the bouncer brain {}", host_words(*kind))
+            Self::ChangeBouncerHosting { kind, url, .. } => {
+                format!("run the bouncer brain {}", host_words(*kind, url))
             }
-            Self::ChangeBouncerTraining { kind, .. } => {
-                format!("train the bouncer brain {}", host_words(*kind))
+            Self::ChangeBouncerTraining { kind, url, .. } => {
+                format!("train the bouncer brain {}", host_words(*kind, url))
             }
             Self::ChangeDelivery { kind, on: true, .. } => format!(
                 "give agents {} instead of this item's long-lived key",
@@ -2398,6 +2421,44 @@ mod evaluation_tests {
         }
         assert_eq!(action.touch_id_title(), "Change temporary credentials");
         assert!(!action.reason().contains("attacker"));
+    }
+
+    /// ADR 0035 (panel L4): the Touch ID reason of a hosting change names the host, and a
+    /// long name keeps its end, where the owning domain is.
+    #[test]
+    fn a_hosting_change_names_its_host_in_the_touch_id_reason() {
+        use crate::vault::{BouncerHostKind, HOSTING_CONSENT_VERSION};
+        let hosting = |kind, url: &str| OwnerAction::ChangeBouncerHosting {
+            kind,
+            url: url.to_owned(),
+            consent_version: HOSTING_CONSENT_VERSION,
+        };
+        assert_eq!(
+            hosting(
+                BouncerHostKind::OwnServer,
+                "https://brain.tail0a1b.ts.net:8443"
+            )
+            .reason(),
+            "run the bouncer brain on your server brain.tail0a1b.ts.net:8443"
+        );
+        assert_eq!(
+            hosting(BouncerHostKind::ThisMac, "").reason(),
+            "run the bouncer brain on this Mac"
+        );
+        let training = OwnerAction::ChangeBouncerTraining {
+            kind: BouncerHostKind::Connect,
+            url: "https://train.apassy.example".to_owned(),
+            consent_version: HOSTING_CONSENT_VERSION,
+        };
+        assert_eq!(
+            training.reason(),
+            "train the bouncer brain at Apassy Connect train.apassy.example"
+        );
+        let long = format!("https://brain.{}.evil.net", "a".repeat(200));
+        let reason = hosting(BouncerHostKind::OwnServer, &long).reason();
+        assert!(reason.ends_with("aaa.evil.net"), "{reason}");
+        assert!(reason.contains('…'), "{reason}");
+        assert!(reason.chars().count() <= MAX_REASON_CHARS, "{reason}");
     }
 
     #[test]

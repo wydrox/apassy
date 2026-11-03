@@ -92,7 +92,9 @@ use super::approvals::{
     AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, EvaluationChoice, PendingRun,
     QuestionInfo, QuestionItem, QuestionRefusal, Settled, action_words, baseline_of,
 };
-use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_routed};
+use super::bouncer::{
+    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_routed,
+};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, Network, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
@@ -512,6 +514,9 @@ struct RunFacts<'a> {
     action: ActionKind,
     /// The destination hosts of the run, in the form of [`normal_host`].
     hosts: &'a [String],
+    /// The active bouncer brain runs on another host (ADR 0035). Then every production
+    /// declaration, read-only too, is a hard rule: a hostile host never allows one.
+    remote_brain: bool,
 }
 
 /// The bouncer runs: a model is set, and the gate of Settings > Agents lets it answer.
@@ -612,13 +617,18 @@ fn hard_rules(
                 .get(index)
                 .and_then(Option::as_ref)
                 .is_some_and(Declaration::is_production);
-        if production
-            && !checked
-                .declarations
-                .get(index)
-                .and_then(Option::as_ref)
-                .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly)
-        {
+        let read_only = checked
+            .declarations
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|d| d.scope == crate::vault::Scope::ReadOnly);
+        if production && read_only && run.remote_brain {
+            why.push((format!(
+                "\"{}\" is a production credential and the bouncer brain runs on another host: you approve each run in {place}: {}.",
+                facts.name,
+                action_words(run.action)
+            ), ReasonKind::Production));
+        } else if production && !read_only {
             let mut text = format!(
                 "\"{}\" is a production credential with write or admin scope: you approve each run in {place}: {}.",
                 facts.name,
@@ -1223,6 +1233,7 @@ fn run_inner(
         pattern: learned.learned.pattern.is_some(),
         action,
         hosts: &hosts,
+        remote_brain: models.active.as_ref().is_some_and(BouncerClient::is_remote),
     };
     let route = match cloud {
         Some(_) => cloud_route(&checked, &run_facts, &known),
@@ -1230,7 +1241,13 @@ fn run_inner(
     };
     let bouncer_request = BouncerRequest {
         user_request: user_request.to_owned(),
-        command: request.command.join(" "),
+        // ADR 0035: the paths of the project root and the home folder are shortened, for a
+        // local and a remote brain alike, so a state does not carry them.
+        command: super::bouncer::shorten_paths(
+            &request.command.join(" "),
+            Some(&checked.project_dir),
+            home_dir().as_deref(),
+        ),
         relative_dir: checked.relative_dir.clone(),
         purpose: request.purpose.trim().to_owned(),
         env_names: checked.env_names.clone(),

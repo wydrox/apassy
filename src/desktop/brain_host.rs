@@ -120,13 +120,16 @@ impl DesktopApp {
         change: BouncerHostChange,
         proof: OwnerProof,
     ) {
+        // The head sets go to a new server before the choice is stored
+        // (`brain_host::switch`, plan 0035 unit G).
         let shared = self.owner_ui.session.shared_vault();
-        let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        let result = match guard.as_mut().filter(|vault| !vault.is_locked()) {
-            None => Err("The vault is locked. Nothing changed.".to_owned()),
-            Some(vault) => brain_host::change(vault, role, &change, proof, now()),
-        };
-        drop(guard);
+        let result = TlsClient::platform()
+            .map_err(|error| {
+                format!("Nothing changed. The TLS settings of this Mac did not load ({error}).")
+            })
+            .and_then(|tls| {
+                brain_host::switch(&shared, role, &change, proof, &Arc::new(tls), now())
+            });
         match result {
             Ok(()) => {
                 if role == BouncerHostRole::Hosting {

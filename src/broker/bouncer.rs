@@ -9,6 +9,7 @@
 //! allowance.
 
 use super::route_diagnostics::ReasonKind;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -873,6 +874,49 @@ pub fn request_body(request: &BouncerRequest) -> Value {
     json!({ "state": state_text(request), "questions": questions })
 }
 
+/// The command text for [`state_text`], with the paths of the project root and the home
+/// folder shortened (ADR 0035): the project root becomes `.` and the home folder `~`.
+/// The longest folder comes first, and a folder counts only at a path boundary, so
+/// `/home/ann` does not touch `/home/anna` or `/x/home/ann`. A folder `/` or an empty
+/// one is never shortened. The run step, the replay, and the fine-tune call it, so a
+/// training state is the state that the broker sends, to a local or a remote brain.
+pub fn shorten_paths(command: &str, project_root: Option<&Path>, home: Option<&Path>) -> String {
+    let mut folders: Vec<(String, &str)> = [(project_root, "."), (home, "~")]
+        .into_iter()
+        .filter_map(|(folder, short)| {
+            let text = folder?.to_str()?.trim_end_matches('/');
+            (!text.is_empty()).then(|| (text.to_owned(), short))
+        })
+        .collect();
+    folders.sort_by_key(|(text, _)| std::cmp::Reverse(text.len()));
+    // A character of a file or folder name: a folder ends or starts only next to another.
+    let name = |c: char| c.is_alphanumeric() || "._-+@%~/".contains(c);
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    let mut before: Option<char> = None;
+    'scan: while let Some(c) = rest.chars().next() {
+        if before.is_none_or(|b| !name(b)) {
+            for (folder, short) in &folders {
+                if let Some(after) = rest.strip_prefix(folder.as_str())
+                    && after
+                        .chars()
+                        .next()
+                        .is_none_or(|next| next == '/' || !name(next))
+                {
+                    out.push_str(short);
+                    before = short.chars().last();
+                    rest = after;
+                    continue 'scan;
+                }
+            }
+        }
+        out.push(c);
+        before = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// The state text that the model reads. The local fine-tune builds its examples with
 /// this function, so a training state is the state that the broker sends.
 pub fn state_text(request: &BouncerRequest) -> String {
@@ -1282,6 +1326,39 @@ fn model_step(
 mod tests {
     use super::*;
     use crate::vault::{Environment, Reversibility, RiskLevel, Scope};
+
+    #[test]
+    fn shorten_paths_shortens_the_project_and_home_at_path_boundaries() {
+        let project = Path::new("/Users/ann/dev/app");
+        let home = Path::new("/Users/ann");
+        let short = |command: &str| shorten_paths(command, Some(project), Some(home));
+        // The project root inside the home folder: the longer folder wins.
+        assert_eq!(
+            short("node /Users/ann/dev/app/scripts/x.js --out /Users/ann/out.txt"),
+            "node ./scripts/x.js --out ~/out.txt"
+        );
+        assert_eq!(short("cd /Users/ann/dev/app && ls"), "cd . && ls");
+        assert_eq!(short("cat '/Users/ann/.ssh/config'"), "cat '~/.ssh/config'");
+        assert_eq!(short("--dir=/Users/ann/dev/app/"), "--dir=./");
+        assert_eq!(short("PATH=/Users/ann/bin:/usr/bin"), "PATH=~/bin:/usr/bin");
+        // Only at a path boundary: another folder with the same start stays.
+        assert_eq!(
+            short("ls /Users/anna /Users/ann/dev/application /x/Users/ann"),
+            "ls /Users/anna ~/dev/application /x/Users/ann"
+        );
+        assert_eq!(short("echo /Users/ann"), "echo ~");
+        // `/` is never a folder to shorten; no folder, no change.
+        assert_eq!(
+            shorten_paths("ls /etc", Some(Path::new("/")), Some(Path::new("/"))),
+            "ls /etc"
+        );
+        assert_eq!(shorten_paths("ls /Users/ann", None, None), "ls /Users/ann");
+        // A trailing slash of the folder does not matter.
+        assert_eq!(
+            shorten_paths("ls /srv/app/x", Some(Path::new("/srv/app/")), None),
+            "ls ./x"
+        );
+    }
 
     fn request(instruction: &str) -> BouncerRequest {
         BouncerRequest {
