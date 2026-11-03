@@ -1,0 +1,38 @@
+{
+  "id": "evt_SynthInvoiceFail1",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": 1792592100,
+  "data": {
+    "object": {
+      "id": "in_SynthInvoice0002",
+      "object": "invoice",
+      "amount_due": 300,
+      "amount_paid": 0,
+      "attempt_count": 1,
+      "billing_reason": "subscription_cycle",
+      "currency": "eur",
+      "customer": "cus_SynthAcc0001",
+      "livemode": false,
+      "next_payment_attempt": 1792851300,
+      "parent": {
+        "type": "subscription_details",
+        "subscription_details": {
+          "metadata": {
+            "account_id": "acc_k7m2q4x3ca"
+          },
+          "subscription": "sub_SynthAcc0001"
+        }
+      },
+      "status": "open",
+      "total": 300
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "invoice.payment_failed"
+}

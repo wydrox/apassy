@@ -1,0 +1,119 @@
+{
+  "endpoint_secret": "whsec_SYNTHETIC_apassy_connect_billing_v1_fixture",
+  "tolerance_seconds": 300,
+  "api_version": "2025-03-31.basil",
+  "events": [
+    {
+      "file": "checkout-session-completed.json",
+      "type": "checkout.session.completed",
+      "event_id": "evt_SynthCheckout0001",
+      "t": 1790000000,
+      "v1": "7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "header": "t=1790000000,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "sha256": "7ca6d4cb971782c761e17957795b4cc951e2ae31b3d70930b3cd7573524b0abf"
+    },
+    {
+      "file": "customer-subscription-created.json",
+      "type": "customer.subscription.created",
+      "event_id": "evt_SynthSubCreated01",
+      "t": 1790000001,
+      "v1": "41102837cf8103d3f71144d560216ffd009453ff6fdce630a015ba9c4266901e",
+      "header": "t=1790000001,v1=41102837cf8103d3f71144d560216ffd009453ff6fdce630a015ba9c4266901e",
+      "sha256": "c863198e2ac10d140229724b5b730eed192c5b5203b070b5df5e9649f19ab890"
+    },
+    {
+      "file": "invoice-paid.json",
+      "type": "invoice.paid",
+      "event_id": "evt_SynthInvoicePaid1",
+      "t": 1790000002,
+      "v1": "8d2f5d76259252f319417841e649e6d4823fe51c7a52e56d347a510690351327",
+      "header": "t=1790000002,v1=8d2f5d76259252f319417841e649e6d4823fe51c7a52e56d347a510690351327",
+      "sha256": "8c613fdaca1cd8d8f25ad042d6a649808f29afb217707d52fbfae6c1a7eb8a4a"
+    },
+    {
+      "file": "invoice-payment-failed.json",
+      "type": "invoice.payment_failed",
+      "event_id": "evt_SynthInvoiceFail1",
+      "t": 1792592100,
+      "v1": "f0b45984445da99a49230cd9615be1844be8abe36aa486d55f1730774dd0fe34",
+      "header": "t=1792592100,v1=f0b45984445da99a49230cd9615be1844be8abe36aa486d55f1730774dd0fe34",
+      "sha256": "b29f6f6460027dbd0a5a4169d8b6e1855dc2468fd4311940eccfed4f59815a44"
+    },
+    {
+      "file": "customer-subscription-updated.json",
+      "type": "customer.subscription.updated",
+      "event_id": "evt_SynthSubUpdated01",
+      "t": 1792592101,
+      "v1": "cbcff8e2b2ed9f827de2c08023e0d771e44496e84afbdcc01be2be10b9801933",
+      "header": "t=1792592101,v1=cbcff8e2b2ed9f827de2c08023e0d771e44496e84afbdcc01be2be10b9801933",
+      "sha256": "5390d2f340843ccd5061ae3fe44cd406e825e11a45f2f91f35d718afd79399dd"
+    },
+    {
+      "file": "customer-subscription-deleted.json",
+      "type": "customer.subscription.deleted",
+      "event_id": "evt_SynthSubDeleted01",
+      "t": 1793801700,
+      "v1": "bfb1fc5b8f2c75508d2d52e95a460a3954d011d26e29c23936c663826f70f7dd",
+      "header": "t=1793801700,v1=bfb1fc5b8f2c75508d2d52e95a460a3954d011d26e29c23936c663826f70f7dd",
+      "sha256": "62e68a7206d168c69d7d5070c0f6e520110b9810608db5f623b7a4d8736c2f99"
+    }
+  ],
+  "headers": [
+    {
+      "name": "two_signatures_one_valid",
+      "file": "checkout-session-completed.json",
+      "now": 1790000010,
+      "header": "t=1790000000,v1=e363477fb3220e88cfb19ed9d7d6f0c51eb69693aee01687286d1afb7c582788,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336,v0=00",
+      "accepted": true
+    },
+    {
+      "name": "wrong_secret",
+      "file": "checkout-session-completed.json",
+      "now": 1790000010,
+      "header": "t=1790000000,v1=e363477fb3220e88cfb19ed9d7d6f0c51eb69693aee01687286d1afb7c582788",
+      "accepted": false
+    },
+    {
+      "name": "stale_timestamp",
+      "file": "checkout-session-completed.json",
+      "now": 1790000301,
+      "header": "t=1790000000,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "accepted": false
+    },
+    {
+      "name": "at_the_tolerance",
+      "file": "checkout-session-completed.json",
+      "now": 1790000300,
+      "header": "t=1790000000,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "accepted": true
+    },
+    {
+      "name": "future_timestamp",
+      "file": "checkout-session-completed.json",
+      "now": 1789999699,
+      "header": "t=1790000000,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "accepted": false
+    },
+    {
+      "name": "changed_timestamp",
+      "file": "checkout-session-completed.json",
+      "now": 1790000010,
+      "header": "t=1790000001,v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "accepted": false
+    },
+    {
+      "name": "no_v1",
+      "file": "checkout-session-completed.json",
+      "now": 1790000010,
+      "header": "t=1790000000,v0=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "accepted": false
+    },
+    {
+      "name": "no_timestamp",
+      "file": "checkout-session-completed.json",
+      "now": 1790000010,
+      "header": "v1=7557b67a768cdcbc112d10a1bfd4c9fc92476773765b4939b15f8484a8d66336",
+      "accepted": false
+    }
+  ]
+}
