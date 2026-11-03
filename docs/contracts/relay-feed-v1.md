@@ -237,7 +237,7 @@ In this order; the first failure keeps the last good feed of that Mac on the scr
 **A Mac as a reader** (added 2026-11-03, `src/questions/feed_reader.rs`). A Mac runs the same steps, in the same order, with the question key of the vault and its own copy of `trusted_device`:
 
 - It reads the feeds only while the vault is unlocked, the questions are on for the vault, and the vault has another live `trusted_device` of kind `mac` with a device number in the team. It skips the record of its own relay device id, and in step 4 a `mac.device` that is its own uuid.
-- For a Mac with no good feed, a failed step 1 shows "Sync this vault to see the agents of <Mac>", and a failed step 2 or 3 "Update Apassy to see the agents of <Mac>". A Mac that has a good feed keeps showing it.
+- For a Mac with no good feed, a failed step 1 shows "Sync this vault to see the agents of <Mac>", and a failed step 2 or 3 "Update Apassy to see the agents of <Mac>". A Mac that has a good feed keeps showing it, with the same text, as the first sentence of this section says, until a newer good feed of that Mac passes the checks. Agents shows the text above the agents of that Mac; Decisions says "Sync this vault to see the activity of <Mac>." (or "Update Apassy to see the activity of <Mac>.") and keeps the counts and the decisions of the last good feed. A failed record at or below the highest accepted `seq` is an old one and shows no text.
 - It keeps the last good feed of each other Mac and the highest `seq` of each in memory only. A lock, another vault, and the questions going off drop the feeds; the marks stay while the app runs. After a restart it has no mark (section 15).
 - A Mac reader shows the agents read-only, with no action: a change is made on the Mac of the feed.
 
