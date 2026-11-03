@@ -100,6 +100,8 @@ Tests: `tests/run_proxy.rs` (curl, Python, Node, answers with a real value, refu
 6. Hardening of the broker process on each system: the hardened runtime on macOS, `PR_SET_DUMPABLE=0` on Linux, a service account on Windows.
 7. Cloud: the same design with the proxy on another computer, so the computer of the agent holds only placeholders.
 
+The Windows parts of stages 4 and 6 are not planned: there is no Windows port ([D19](../design/implementation-plan-misc.md#d19-windows-0011-7)).
+
 ## Dependencies
 
 `rcgen 0.14.10` (features `crypto`, `pem`, `ring`) and `time 0.3.47` join the `vault` feature. They add `rcgen`, `pem`, `base64 0.23`, `yasna`, `time`, `time-core`, `deranged`, `num-conv`, and `powerfmt`. There is no async runtime. The TLS stays `rustls` with `ring` (ADR 0005). ADR 0001 forbids a custom cipher or TLS implementation; the proxy has none. Its HTTP/1.1 parser is new code.

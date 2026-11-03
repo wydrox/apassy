@@ -1,0 +1,166 @@
+{
+  "contract": "connect-tunnel-v1",
+  "examples": [
+    {
+      "name": "node_register",
+      "route": "POST /v1/tunnel/nodes",
+      "part": "request",
+      "body": {
+        "name": "MacBook Pro",
+        "pin": "7a1oa64ozJdU3s56iDjUthpkQFsZwnCaD5CYEkabiDk"
+      }
+    },
+    {
+      "name": "node_registered",
+      "route": "POST /v1/tunnel/nodes",
+      "part": "result",
+      "body": {
+        "node_id": "node_k7m2q4x3ca",
+        "account_id": "acc_k7m2q4x3ca",
+        "device_id": "dev_m2k7q3x4ab",
+        "name": "MacBook Pro",
+        "pin": "7a1oa64ozJdU3s56iDjUthpkQFsZwnCaD5CYEkabiDk",
+        "public_name": "k7m2q4x3ca.node.apassy.wyderka.cc",
+        "online": false,
+        "created_at": 1790000000
+      }
+    },
+    {
+      "name": "nodes",
+      "route": "GET /v1/tunnel/nodes",
+      "part": "result",
+      "body": [
+        {
+          "node_id": "node_k7m2q4x3ca",
+          "account_id": "acc_k7m2q4x3ca",
+          "device_id": "dev_m2k7q3x4ab",
+          "name": "MacBook Pro",
+          "pin": "7a1oa64ozJdU3s56iDjUthpkQFsZwnCaD5CYEkabiDk",
+          "public_name": "k7m2q4x3ca.node.apassy.wyderka.cc",
+          "online": true,
+          "created_at": 1790000000
+        },
+        {
+          "node_id": "node_h3j5k7m2na",
+          "account_id": "acc_m3n5p7q2rb",
+          "device_id": "dev_q2r4s6t3ua",
+          "name": "Team host",
+          "pin": "kzYVkHzBOBuYVbwRjhZCuGpp0da_DLwpc6ttWPAckLM",
+          "public_name": "h3j5k7m2na.node.apassy.wyderka.cc",
+          "online": false,
+          "created_at": 1790000500
+        }
+      ]
+    },
+    {
+      "name": "node_deleted",
+      "route": "DELETE /v1/tunnel/nodes/{node_id}",
+      "part": "result",
+      "body": {
+        "node_id": "node_k7m2q4x3ca"
+      }
+    },
+    {
+      "name": "grant",
+      "route": "POST /v1/tunnel/grants",
+      "part": "request",
+      "body": {
+        "node_id": "node_k7m2q4x3ca",
+        "account_id": "acc_m3n5p7q2rb"
+      }
+    },
+    {
+      "name": "grant_answer",
+      "route": "POST /v1/tunnel/grants",
+      "part": "result",
+      "body": {
+        "grant_id": "tgr_w2x4y6z3ab",
+        "node_id": "node_k7m2q4x3ca",
+        "account_id": "acc_m3n5p7q2rb",
+        "created_at": 1790001000
+      }
+    },
+    {
+      "name": "grants",
+      "route": "GET /v1/tunnel/grants",
+      "part": "result",
+      "body": [
+        {
+          "grant_id": "tgr_w2x4y6z3ab",
+          "node_id": "node_k7m2q4x3ca",
+          "account_id": "acc_m3n5p7q2rb",
+          "created_at": 1790001000
+        }
+      ]
+    },
+    {
+      "name": "grant_deleted",
+      "route": "DELETE /v1/tunnel/grants/{grant_id}",
+      "part": "result",
+      "body": {
+        "grant_id": "tgr_w2x4y6z3ab",
+        "closed_streams": 1
+      }
+    },
+    {
+      "name": "error_node_unknown",
+      "route": "GET /v1/tunnel/dial/{node_id}",
+      "part": "error",
+      "status": 404,
+      "body": {
+        "code": "node_unknown",
+        "message": "No such node."
+      }
+    },
+    {
+      "name": "error_tunnel_offline",
+      "route": "GET /v1/tunnel/dial/{node_id}",
+      "part": "error",
+      "status": 503,
+      "body": {
+        "code": "tunnel_offline",
+        "message": "The node is not connected to Apassy Connect."
+      }
+    },
+    {
+      "name": "error_tunnel_limit",
+      "route": "GET /v1/tunnel/dial/{node_id}",
+      "part": "error",
+      "status": 429,
+      "body": {
+        "code": "tunnel_limit",
+        "message": "This account has 64 open streams."
+      }
+    },
+    {
+      "name": "error_not_in_group",
+      "route": "GET /v1/tunnel/dial/{node_id}",
+      "part": "error",
+      "status": 403,
+      "body": {
+        "code": "not_in_group",
+        "message": "That node belongs to an account that gave yours no access."
+      }
+    },
+    {
+      "name": "error_plan_required",
+      "route": "GET /v1/tunnel/dial/{node_id}",
+      "part": "error",
+      "status": 403,
+      "body": {
+        "code": "plan_required",
+        "message": "The node's account is not on Apassy Connect."
+      }
+    },
+    {
+      "name": "error_account_limit",
+      "route": "POST /v1/tunnel/nodes",
+      "part": "error",
+      "status": 403,
+      "body": {
+        "code": "account_limit",
+        "message": "This account has 8 nodes."
+      }
+    }
+  ]
+}

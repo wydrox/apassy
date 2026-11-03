@@ -57,6 +57,7 @@ Connect never does the way B swap on an Apassy server and never holds a team key
   | Connect Family, each person after 4 | 1 | 10 |
 
   A year costs 10 times the monthly price instead of 12.
+- The prices are configuration, not constants in code: Stripe prices with lookup keys, made by `crates/apassy-relay/scripts/stripe-products.sh` and published by Connect at `GET /v1/plans` ([connect-billing-v1](../contracts/connect-billing-v1.md) section 2). The price of each further Family person is the setting `APASSY_CONNECT_FAMILY_EXTRA_CENTS` (default 100) and `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` (default 1000). The default configuration is `tests/fixtures/connect-billing-v1/plans.json`; a check compares it with the table above. Plan of the work: [stage 7 plan](../design/implementation-plan-s7-connect.md).
 - Account: the Connect account of ADR 0037 D3 and ADR 0035 decision 6. An account sign-in never adds a device. A new device is confirmed on an existing one with the safety words and Touch ID.
 - Purchase: on the Mac, through a web checkout (Stripe) that returns to the app. The iPhone shows the plan only. There is no In-App Purchase. (Carried over from 2026-10-13.)
 - Stripe today has the products of the old split: Personal (EUR 1 a month) and Team (EUR 2 a member a month), in the sandbox and the live account. Renaming them to Connect Personal and Connect Team, and adding Connect Family, changes the Stripe account: do it only with the owner's confirmation, before stage 7.

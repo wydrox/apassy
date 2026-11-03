@@ -1,0 +1,115 @@
+{
+  "totals": [
+    {
+      "plan": "personal",
+      "interval": "month",
+      "count": 1,
+      "amount": 300
+    },
+    {
+      "plan": "personal",
+      "interval": "year",
+      "count": 1,
+      "amount": 3000
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 1,
+      "amount": 500
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 2,
+      "amount": 500
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 4,
+      "amount": 500
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 5,
+      "amount": 600
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 6,
+      "amount": 700
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 10,
+      "amount": 1100
+    },
+    {
+      "plan": "family",
+      "interval": "year",
+      "count": 4,
+      "amount": 5000
+    },
+    {
+      "plan": "family",
+      "interval": "year",
+      "count": 6,
+      "amount": 7000
+    },
+    {
+      "plan": "team",
+      "interval": "month",
+      "count": 1,
+      "amount": 400
+    },
+    {
+      "plan": "team",
+      "interval": "month",
+      "count": 5,
+      "amount": 2000
+    },
+    {
+      "plan": "team",
+      "interval": "year",
+      "count": 5,
+      "amount": 20000
+    },
+    {
+      "plan": "team",
+      "interval": "month",
+      "count": 250,
+      "amount": 100000
+    }
+  ],
+  "seat_limit": [
+    {
+      "plan": "personal",
+      "interval": "month",
+      "count": 2
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 11
+    },
+    {
+      "plan": "family",
+      "interval": "month",
+      "count": 0
+    },
+    {
+      "plan": "team",
+      "interval": "year",
+      "count": 251
+    },
+    {
+      "plan": "team",
+      "interval": "month",
+      "count": 0
+    }
+  ]
+}

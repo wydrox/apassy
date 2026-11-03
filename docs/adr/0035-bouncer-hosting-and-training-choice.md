@@ -235,4 +235,4 @@ the deadline of section 7, the service moves to a separate server.
 - The final container limits and the price, after the measurement of stage 1.
 - The region of the VPS (it must be in the EU).
 - The ADR for the opt-in, anonymized base-model data (decision 5).
-- ADR 0037 must list the bouncer brain service in "Who sees what" when it is accepted.
+- ~~ADR 0037 must list the bouncer brain service in "Who sees what" when it is accepted.~~ Done: ADR 0037 "Who sees what" and `docs/security/trust-model.md` list it.
