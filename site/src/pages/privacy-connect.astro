@@ -1,0 +1,154 @@
+---
+// The update of the privacy policy for Apassy Connect (implementation plan s7, W1
+// and owner-needed step 3). A DRAFT: /privacy stays the policy in force. When
+// Connect starts, the owner checks this text, the facts in lib/legal.ts are given,
+// and its parts move into /privacy (the lead "There are no Apassy accounts" goes);
+// then this page is removed. Keep it true to the code and to
+// docs/security/trust-model.md and the decisions of implementation-plan-s7-connect.md.
+import Legal from "../layouts/Legal.astro";
+import OwnerFact from "../components/OwnerFact.astro";
+import { REPO } from "../lib/site";
+const UPDATED = "2026-11-03";
+const doc = (path: string) => `${REPO}/blob/main/${path}`;
+---
+<Legal
+  draft
+  title="Privacy and Apassy Connect · apassy"
+  description="What Apassy Connect, the hosted service, stores and why."
+  eyebrow="Privacy"
+  heading="Privacy and Apassy Connect"
+  updated={UPDATED}
+>
+  <Fragment slot="lead">
+    Apassy needs no account. Apassy Connect, the optional paid service, has accounts. This text says what Connect
+    stores, why, and for how long. When Connect starts, it becomes part of the <a href="/privacy">privacy policy</a>.
+  </Fragment>
+
+  <h2>Who is responsible</h2>
+  <p>
+    The controller of the personal data of Apassy Connect is <OwnerFact name="legalName" what="legal name" />,
+    <OwnerFact name="address" what="postal address" />. Write to <OwnerFact name="email" what="e-mail for privacy requests" />
+    for any question or request about your data.
+  </p>
+
+  <h2>What changes in the privacy policy</h2>
+  <ul>
+    <li>
+      The first sentence becomes: "Apassy keeps your credentials on your devices. Apassy needs no account: only Apassy
+      Connect, the optional paid service, has accounts. There are no analytics and no ads. We never receive your
+      passwords, your keys, or the contents of your vault."
+    </li>
+    <li>
+      The vault leaves your Mac only when you choose it: a backup file, sync through a folder that you pick, your own sync
+      home, or the sync home of Apassy Connect. Each of them gets the encrypted vault file only.
+    </li>
+    <li>
+      The iPhone and the Apple Watch reach your Mac on your local network, over your tailnet, or, with Connect, through
+      its byte relay. With the relay, the connection stays encrypted with TLS between your devices.
+    </li>
+    <li>
+      The bouncer brain runs on your Mac or on a server of yours. Only if you turn on the hosted brain of Connect does it
+      receive the command and the task of each question (below).
+    </li>
+    <li>The sections about the browser extension and this website do not change.</li>
+  </ul>
+
+  <h2>What Apassy Connect stores</h2>
+  <table>
+    <thead><tr><th scope="col">Data</th><th scope="col">Why</th><th scope="col">How long</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>The account id, and the name, public key, and dates of each device of the account</td>
+        <td>To sign your devices in and to show the list of devices</td>
+        <td>Until you delete the account. A removed device is deleted at once.</td>
+      </tr>
+      <tr>
+        <td>Your e-mail address, from the checkout</td>
+        <td>For the list of devices, for support, and for notices about your contract. No newsletters, no marketing.</td>
+        <td>Until you delete the account</td>
+      </tr>
+      <tr>
+        <td>The ids of your customer and subscription at Stripe, the plan, its state and end date, the number of people or seats</td>
+        <td>To know which plan you have</td>
+        <td>Until you delete the account. Invoices: as long as tax law requires.</td>
+      </tr>
+      <tr>
+        <td>The encrypted copy of each vault that you sync through Connect, its id, signed heads, hashes, sizes, and times</td>
+        <td>The sync home of your vaults. Nobody can read a copy without your vault passphrase, which Connect never receives.</td>
+        <td>Until you delete the copy or the account, and at the latest 90 days after your plan ends</td>
+      </tr>
+      <tr>
+        <td>In a Connect Family or Team: who is a member, the role, and the name of a person who asks to join</td>
+        <td>So that the organizer or an admin can confirm and remove members</td>
+        <td>Until the member leaves or the group ends</td>
+      </tr>
+      <tr>
+        <td>The byte relay: counts of bytes and connections of your account</td>
+        <td>For the limits of the plan. The relay carries TLS records that it cannot read, and stores none of them.</td>
+        <td>For the current period of the limit</td>
+      </tr>
+      <tr>
+        <td>The hosted bouncer brain, only if you turn it on: the command and the task of each question to the brain, never a credential value</td>
+        <td>To answer the question for you</td>
+        <td><OwnerFact name="brainRetention" what="retention of brain questions and answers (ADR 0035)" /></td>
+      </tr>
+      <tr>
+        <td>Support: what you send to us</td>
+        <td>To answer you</td>
+        <td>Until the request is closed, then at most 12 months</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Connect keeps no audit of addresses: it does not store the IP addresses of your devices. The files of Connect hold no
+    key that opens a vault. The <a href={doc("docs/security/trust-model.md")}>trust model</a> lists each of them. Connect
+    runs on a server of <OwnerFact name="hosting" what="hosting provider and country" />, behind Cloudflare.
+  </p>
+
+  <h2>Payments by Stripe</h2>
+  <p>
+    Stripe processes the payments. At the checkout, Stripe collects your card or other payment method, your billing
+    address, your e-mail address, and for Connect Team an optional VAT id. We never see your card number. Stripe Tax uses
+    your address to compute the VAT. Stripe uses the data for the payment on our behalf, and also for its own legal
+    duties and fraud prevention as a controller: see the <a href="https://stripe.com/privacy">privacy policy of Stripe</a>.
+  </p>
+
+  <h2>Who else gets data</h2>
+  <ul>
+    <li><strong>Stripe</strong> (Stripe Payments Europe, Ltd., Ireland): payments, invoices, and tax.</li>
+    <li>
+      <strong>Cloudflare</strong>: this site and the front of Connect. It keeps the usual request logs (IP address, time,
+      address, browser) to run and protect the service.
+    </li>
+    <li><strong><OwnerFact name="hosting" what="hosting provider" /></strong>: the server of Connect.</li>
+  </ul>
+  <p>
+    Some of these providers can process data outside the European Economic Area. They do so under the standard
+    contractual clauses of the European Commission or the EU–U.S. Data Privacy Framework. We do not sell data and do not
+    use it for ads.
+  </p>
+
+  <h2>Legal bases</h2>
+  <ul>
+    <li>The contract (Art. 6(1)(b) GDPR): the account, the devices, the sync home, the byte relay, the plan, and support.</li>
+    <li>A legal duty (Art. 6(1)(c) GDPR): the invoices and the tax records.</li>
+    <li>Legitimate interests (Art. 6(1)(f) GDPR): the security of the service and the protection against abuse.</li>
+    <li>Your consent (Art. 6(1)(a) GDPR): the hosted bouncer brain. Turn it off in Apassy at any time.</li>
+  </ul>
+
+  <h2>Your rights</h2>
+  <ul>
+    <li>
+      You can ask for access to your data, a copy of it, its correction or deletion, a limit on its use, and you can object
+      to its use. Write to <OwnerFact name="email" what="e-mail" />.
+    </li>
+    <li>
+      Delete your account in Apassy on your Mac (Settings › Connect): we cancel the plan at once and delete your vault
+      copies and devices. Stripe keeps the invoices as the law requires.
+    </li>
+    <li>
+      You can complain to a data protection authority: in Poland, the President of the Personal Data Protection Office
+      (<a href="https://uodo.gov.pl">uodo.gov.pl</a>), or the authority of the country where you live or work.
+    </li>
+  </ul>
+</Legal>

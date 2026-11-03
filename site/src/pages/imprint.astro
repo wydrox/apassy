@@ -1,0 +1,40 @@
+---
+// The imprint: who runs this site and sells Apassy Connect (implementation plan s7,
+// owner-needed step 3). A DRAFT until the owner gives the facts in lib/legal.ts.
+// Then remove `draft` and link it from the footer.
+import Legal from "../layouts/Legal.astro";
+import OwnerFact from "../components/OwnerFact.astro";
+import { REPO } from "../lib/site";
+const UPDATED = "2026-11-03";
+---
+<Legal
+  draft
+  title="Imprint · apassy"
+  description="Who runs apassy.wyderka.cc and sells Apassy Connect."
+  eyebrow="Imprint"
+  heading="Imprint"
+  updated={UPDATED}
+>
+  <Fragment slot="lead">Who runs this site and sells Apassy Connect.</Fragment>
+
+  <table>
+    <tbody>
+      <tr><th scope="row">Name</th><td><OwnerFact name="legalName" what="legal name of the seller" /></td></tr>
+      <tr><th scope="row">Legal form and register</th><td><OwnerFact name="register" what="legal form and register entry (KRS or CEIDG)" /></td></tr>
+      <tr><th scope="row">Address</th><td><OwnerFact name="address" what="postal address" /></td></tr>
+      <tr><th scope="row">VAT id</th><td><OwnerFact name="vatId" what="EU VAT id (PL…)" /></td></tr>
+      <tr><th scope="row">E-mail</th><td><OwnerFact name="email" what="contact e-mail" /></td></tr>
+      <tr><th scope="row">Responsible for the content</th><td><OwnerFact name="responsible" what="name of the responsible person" /></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Other ways to reach us</h2>
+  <ul>
+    <li>Questions and bugs: an issue on <a href={`${REPO}/issues`}>GitHub</a>.</li>
+    <li>A security problem: privately, as <a href={`${REPO}/blob/main/SECURITY.md`}>SECURITY.md</a> says.</li>
+  </ul>
+  <p>
+    The Apassy software is open source under the Apache-2.0 license. The <a href="/terms">terms</a> of Apassy Connect and
+    the <a href="/privacy-connect">privacy policy</a> name the seller of the hosted service.
+  </p>
+</Legal>

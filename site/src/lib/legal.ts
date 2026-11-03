@@ -22,4 +22,10 @@ export const LEGAL: Record<string, string | null> = {
   courts: null,
   /** The date the terms come into force. */
   effectiveDate: null,
+  /** The provider and the country of the server that runs Connect (today the VPS of the relay). */
+  hosting: null,
+  /** How long the hosted bouncer brain keeps a question and its answer (ADR 0035). */
+  brainRetention: null,
+  /** The person responsible for the content of the site, if the imprint names one. */
+  responsible: null,
 };
