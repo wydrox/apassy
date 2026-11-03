@@ -336,6 +336,47 @@ impl DecisionEntry {
     }
 }
 
+/// What a decision was for (schema 27, `decision_log.request`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestKind {
+    /// A run of a command, also a cloud run. The Overview counts these as runs.
+    #[default]
+    Run,
+    /// A fill of a credential in the connected browser.
+    BrowserFill,
+    /// A use of a credential by a connector.
+    Connector,
+}
+
+impl RequestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::BrowserFill => "browser_fill",
+            Self::Connector => "connector",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "run" => Some(Self::Run),
+            "browser_fill" => Some(Self::BrowserFill),
+            "connector" => Some(Self::Connector),
+            _ => None,
+        }
+    }
+}
+
+/// The columns of a decision of schema 27 that [`DecisionEntry`] does not have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecisionMeta {
+    pub request: RequestKind,
+    /// Milliseconds from the question to the owner's answer. The vault keeps it only for
+    /// an entry that the owner answered (`asked` and [`DecidedBy::Owner`]); for any other
+    /// entry it stores `NULL`.
+    pub wait_ms: Option<u64>,
+}
+
 /// A stored decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRecord {
@@ -488,8 +529,23 @@ impl CandidateAgreement {
 }
 
 impl Vault {
-    /// Store one decision. Secret values of the items in the run are masked first.
+    /// Store one decision. Secret values of the items in the run are masked first. It is
+    /// a run with no answer time ([`DecisionMeta::default`]).
     pub fn record_decision(&mut self, entry: &DecisionEntry) -> VaultResult<u64> {
+        self.record_decision_with(entry, &DecisionMeta::default())
+    }
+
+    /// Store one decision with its request kind and its answer time (schema 27). The
+    /// answer time stays only for an entry that the owner answered.
+    pub fn record_decision_with(
+        &mut self,
+        entry: &DecisionEntry,
+        meta: &DecisionMeta,
+    ) -> VaultResult<u64> {
+        let wait_ms = meta
+            .wait_ms
+            .filter(|_| entry.asked && entry.decided_by == DecidedBy::Owner)
+            .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
         let values = self.secret_values(&entry.items)?;
         let mask = |text: &str, max: usize| cut(&mask_values(text, &values), max);
         let mut command = Vec::new();
@@ -527,9 +583,9 @@ impl Vault {
             "INSERT INTO decision_log (at, agent_id, agent_name, project_dir, cwd_rel, items,
                  user_request, user_request_source, command, purpose, env_names, declarations,
                  rule_flags, known_safe, model_facts, pattern, grant_asks, asked, decision,
-                 decided_by, remembered, policy, note, instruction)
+                 decided_by, remembered, policy, note, instruction, request, wait_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             rusqlite::params![
                 at,
                 agent,
@@ -555,6 +611,8 @@ impl Vault {
                 cut(&entry.policy, MAX_TEXT_BYTES),
                 mask(&entry.note, MAX_NOTE_BYTES),
                 mask(&entry.instruction, MAX_TEXT_BYTES),
+                meta.request.as_str(),
+                wait_ms,
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -585,6 +643,29 @@ impl Vault {
             ),
             [limit],
         )
+    }
+
+    /// The request kind and the answer time of the decision `id` (schema 27).
+    pub fn decision_meta(&self, id: u64) -> VaultResult<Option<DecisionMeta>> {
+        let row: Option<(String, Option<i64>)> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT request, wait_ms FROM decision_log WHERE id = ?1",
+                [to_sql_id(id)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        row.map(|(request, wait_ms)| {
+            Ok(DecisionMeta {
+                request: RequestKind::parse(&request)
+                    .ok_or_else(|| err(VaultErrorKind::Storage))?,
+                wait_ms: wait_ms
+                    .map(|ms| u64::try_from(ms).map_err(|_| err(VaultErrorKind::Storage)))
+                    .transpose()?,
+            })
+        })
+        .transpose()
     }
 
     pub fn decision(&self, id: u64) -> VaultResult<Option<DecisionRecord>> {

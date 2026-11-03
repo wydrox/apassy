@@ -373,11 +373,17 @@ pub struct Settled {
     pub evaluation: Option<EvaluationChoice>,
     /// The call joined a question that already waited.
     pub attached: bool,
+    /// The device that answered through the relay, as the activity names it ("iPhone",
+    /// "Apple Watch", or the name of another Mac), from
+    /// [`ApprovalQueue::note_answer_device`]. `None` for an answer on this Mac, by the
+    /// paired iPhone ([`CheckMethod::Companion`]), and for no answer.
+    pub answered_on: Option<String>,
 }
 
 impl Settled {
     fn ended(outcome: ApprovalOutcome) -> Self {
         Self {
+            answered_on: None,
             outcome,
             refusal_comment: None,
             classification: None,
@@ -538,6 +544,8 @@ struct Decision {
     grant: Option<GrantChoice>,
     remember: Option<AnswerChoice>,
     evaluation: Option<EvaluationChoice>,
+    /// The device that answered through the relay ([`Settled::answered_on`]).
+    answered_on: Option<String>,
 }
 
 /// The question of one waiting run (ADR 0025).
@@ -617,6 +625,9 @@ struct QueueState {
     waiting_since: BTreeMap<u64, Instant>,
     /// How the latest runs ended, oldest first ([`ApprovalQueue::take_ended`]).
     ended: std::collections::VecDeque<RunEnd>,
+    /// The device of an answer through the relay that the questions worker hands to the
+    /// queue now ([`ApprovalQueue::note_answer_device`]).
+    answer_devices: BTreeMap<u64, String>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -1106,6 +1117,23 @@ impl ApprovalQueue {
         self.deny_stricter(id, StricterAnswer::Disconnect, vault)
     }
 
+    /// Name the device of the answer to the waiting run `id` that the questions worker
+    /// hands to the queue next (an answer through the relay): the answer that settles
+    /// the run takes it ([`Settled::answered_on`]). The worker calls
+    /// [`ApprovalQueue::forget_answer_device`] after its call, whatever it did, so the
+    /// name never reaches a later answer on this Mac. Nothing for a run that does not wait.
+    pub fn note_answer_device(&self, id: u64, device: &str) {
+        let mut state = self.state();
+        if state.pending.iter().any(|run| run.id == id) {
+            state.answer_devices.insert(id, device.to_owned());
+        }
+    }
+
+    /// Forget the device of [`ApprovalQueue::note_answer_device`] when no answer took it.
+    pub fn forget_answer_device(&self, id: u64) {
+        self.state().answer_devices.remove(&id);
+    }
+
     /// The ends of waiting runs since the last call, oldest first: an answer, a timeout,
     /// or an invalid session. At most the last 256 are kept.
     pub fn take_ended(&self) -> Vec<RunEnd> {
@@ -1141,6 +1169,7 @@ impl ApprovalQueue {
         evaluation: Option<EvaluationChoice>,
     ) {
         Self::note_end(state, id, Self::outcome_of(answer), method);
+        let answered_on = state.answer_devices.remove(&id);
         state.pending.retain(|run| run.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
@@ -1156,6 +1185,7 @@ impl ApprovalQueue {
                 grant,
                 remember,
                 evaluation,
+                answered_on,
             },
         );
     }
@@ -1174,6 +1204,7 @@ impl ApprovalQueue {
     /// Remove a run that ended without a decision: a timeout, or an invalid session.
     fn forget(state: &mut QueueState, id: u64, outcome: ApprovalOutcome) {
         Self::note_end(state, id, outcome, None);
+        state.answer_devices.remove(&id);
         state.pending.retain(|pending| pending.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
@@ -1197,6 +1228,7 @@ impl ApprovalQueue {
         state.evaluation_offers.clear();
         state.questions.clear();
         state.decisions.clear();
+        state.answer_devices.clear();
         self.changed.notify_all();
     }
 
@@ -1437,6 +1469,7 @@ impl ApprovalQueue {
                     answer: decision.remember,
                     evaluation: decision.evaluation,
                     attached,
+                    answered_on: decision.answered_on,
                 });
             }
             if !state.pending.iter().any(|pending| pending.id == id) {

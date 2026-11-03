@@ -238,3 +238,51 @@ fn code_runs_never_return_unmasked_proxy_event_text() {
             .is_some()
     );
 }
+
+/// Schema 27: an answer through the relay names its device; the paired iPhone and an
+/// iPhone through the relay are both "iPhone".
+#[test]
+fn the_device_of_an_answer_names_the_iphone_for_a_relay_answer() {
+    use super::{ANSWERED_ON_IPHONE, ANSWERED_ON_MAC, answered_on_of};
+    use crate::broker::approvals::CheckMethod;
+    // An approval through the relay (owner check `Remote`) and a denial (no check).
+    for method in [Some(CheckMethod::Remote), None] {
+        assert_eq!(
+            answered_on_of(method, Some("iPhone".to_owned())),
+            ANSWERED_ON_IPHONE
+        );
+        assert_eq!(
+            answered_on_of(method, Some("Synthetic Mac mini".to_owned())),
+            "Synthetic Mac mini"
+        );
+    }
+    assert_eq!(
+        answered_on_of(Some(CheckMethod::Companion), None),
+        ANSWERED_ON_IPHONE
+    );
+    for method in [CheckMethod::TouchId, CheckMethod::Passphrase] {
+        assert_eq!(answered_on_of(Some(method), None), ANSWERED_ON_MAC);
+    }
+    // A denial on this Mac, a timeout: no device.
+    assert_eq!(answered_on_of(None, None), "");
+    // Before schema 27 an approval through the relay was "this Mac".
+    assert_ne!(
+        answered_on_of(Some(CheckMethod::Remote), Some("iPhone".to_owned())),
+        ANSWERED_ON_MAC
+    );
+}
+
+/// Schema 27: a decision of a browser fill is not a run of the Overview, and the answer
+/// time is what the broker measured.
+#[test]
+fn the_decision_meta_names_the_request_kind() {
+    use crate::vault::{DecisionMeta, RequestKind};
+    assert_eq!(
+        super::decision_meta(true, Some(7)),
+        DecisionMeta {
+            request: RequestKind::BrowserFill,
+            wait_ms: Some(7)
+        }
+    );
+    assert_eq!(super::decision_meta(false, None), DecisionMeta::default());
+}

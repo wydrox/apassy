@@ -895,6 +895,15 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 27 {
+        // Schema 27: the Bouncer figures (`src/vault/schema27.rs`).
+        conn.execute_batch(
+            "DROP INDEX item_use_decision; DROP INDEX cloud_run_decision; DROP TABLE cloud_run;
+             ALTER TABLE cloud_agent DROP COLUMN connected_with; ALTER TABLE cloud_agent DROP COLUMN client_id;
+             ALTER TABLE decision_log DROP COLUMN wait_ms; ALTER TABLE decision_log DROP COLUMN request;",
+        )
+        .unwrap();
+    }
     if version < 26 {
         // Schema 26: the cloud agents of the node (`src/vault/schema26.rs`).
         conn.execute_batch(

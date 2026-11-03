@@ -267,6 +267,13 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// The versions of a feed that this iPhone reads (section 7.1, and 7.5 for v2). A feed of
+/// v1 has none of the fields of v2, which then stay empty here.
+const FEED_V1: u64 = 1;
+const FEED_V2: u64 = 2;
+/// The days of `week.days` and `agents[].days` of a feed of v2, today first.
+const FEED_DAYS: usize = 7;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Feed {
@@ -275,6 +282,9 @@ pub(super) struct Feed {
     seq: u64,
     generated_at: u64,
     truncated: bool,
+    /// v2: `off`, `on`, or `problem`: the public route of the Mac's node.
+    #[serde(default)]
+    remote_access: Option<String>,
     week: Week,
     agents: Vec<Agent>,
     /// Not a field: the plaintext ends in [`NAMES_MARK`], so its Mac checks the names. A
@@ -290,11 +300,52 @@ struct FeedMac {
     name: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Week {
     by_you: u32,
     automatic: u32,
+    /// v2: 7 local days of the Mac, today first; empty for a feed of v1.
+    #[serde(default)]
+    days: Vec<WeekDay>,
+    /// v2: the median answer time of the owner on the Mac, in seconds; null when none
+    /// and for a feed of v1.
+    #[serde(default)]
+    answer_p50_secs: Option<u32>,
+}
+
+/// One day of `week.days`: `[runs, asked]` in the feed, an object in `feed_list`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(from = "(u32, u32)")]
+struct WeekDay {
+    runs: u32,
+    asked: u32,
+}
+
+impl From<(u32, u32)> for WeekDay {
+    fn from((runs, asked): (u32, u32)) -> Self {
+        Self { runs, asked }
+    }
+}
+
+/// One day of `agents[].days`: `[runs, asked, not_allowed]` in the feed, an object in
+/// `feed_list`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(from = "(u32, u32, u32)")]
+struct AgentDay {
+    runs: u32,
+    asked: u32,
+    not_allowed: u32,
+}
+
+impl From<(u32, u32, u32)> for AgentDay {
+    fn from((runs, asked, not_allowed): (u32, u32, u32)) -> Self {
+        Self {
+            runs,
+            asked,
+            not_allowed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,11 +356,17 @@ struct Agent {
     host: String,
     #[serde(rename = "where")]
     place: String,
+    /// v2: when a remote agent connected.
+    #[serde(default)]
+    connected_at: Option<u64>,
     revoked: bool,
     token_expires_at: u64,
     #[serde(deserialize_with = "required")]
     last_use_at: Option<u64>,
     uses_this_week: u32,
+    /// v2: 7 local days of its runs, today first; empty for a feed of v1.
+    #[serde(default)]
+    days: Vec<AgentDay>,
     projects: Vec<String>,
     note: String,
     restricted: bool,
@@ -415,7 +472,6 @@ impl Agent {
         valid_agent_id(&self.id)
             && bytes_within(&self.name, 1, 64)
             && matches!(self.host.as_str(), "claude" | "codex" | "t3" | "other")
-            && self.place == "mac"
             && valid_projects(&self.projects)
             && self.note.len() <= 500
             && self.actions.len() <= MAX_ACTIONS
@@ -431,18 +487,56 @@ impl Agent {
     }
 }
 
+impl Agent {
+    /// The fields of v2 of the agent for a feed of `v` (section 7.5).
+    fn is_valid_for(&self, v: u64) -> bool {
+        match v {
+            FEED_V1 => self.place == "mac" && self.connected_at.is_none() && self.days.is_empty(),
+            FEED_V2 => {
+                matches!(self.place.as_str(), "mac" | "remote")
+                    && (self.place == "remote" || self.connected_at.is_none())
+                    && self.days.len() == FEED_DAYS
+                    && self
+                        .days
+                        .iter()
+                        .all(|day| day.asked <= day.runs && day.not_allowed <= day.runs)
+            }
+            _ => false,
+        }
+    }
+}
+
 impl Feed {
+    /// The fields of v2 of the feed (section 7.5), or none of them in a feed of v1.
+    fn v2_fields_valid(&self) -> bool {
+        match self.v {
+            FEED_V1 => {
+                self.remote_access.is_none()
+                    && self.week.days.is_empty()
+                    && self.week.answer_p50_secs.is_none()
+            }
+            FEED_V2 => {
+                matches!(
+                    self.remote_access.as_deref(),
+                    Some("off" | "on" | "problem")
+                ) && self.week.days.len() == FEED_DAYS
+                    && self.week.days.iter().all(|day| day.asked <= day.runs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_valid(&self) -> bool {
         let mut ids = BTreeSet::new();
-        self.v == 1
+        matches!(self.v, FEED_V1 | FEED_V2)
+            && self.v2_fields_valid()
             && envelope::valid_device_uuid(&self.mac.device)
             && bytes_within(&self.mac.name, 1, 64)
             && (1..=MAX_SEQ).contains(&self.seq)
             && self.agents.len() <= MAX_AGENTS
-            && self
-                .agents
-                .iter()
-                .all(|agent| agent.is_valid() && ids.insert(agent.id.as_str()))
+            && self.agents.iter().all(|agent| {
+                agent.is_valid() && agent.is_valid_for(self.v) && ids.insert(agent.id.as_str())
+            })
     }
 }
 
@@ -795,6 +889,8 @@ struct MacOut {
     /// action of this iPhone; the app offers no removal that needs Face ID and says to
     /// update Apassy on it. A hint only: this iPhone signs the names for every Mac.
     checks_names: bool,
+    /// v2: `off`, `on`, or `problem`; null for a feed of v1 and without a feed.
+    remote_access: Option<String>,
     week: Option<Week>,
     agents: Vec<AgentOut>,
 }
@@ -806,10 +902,14 @@ struct AgentOut {
     host: String,
     #[serde(rename = "where")]
     place: String,
+    /// v2: when a remote agent connected.
+    connected_at: Option<u64>,
     revoked: bool,
     token_expires_at: u64,
     last_use_at: Option<u64>,
     uses_this_week: u32,
+    /// v2: 7 days, today first; empty for a feed of v1.
+    days: Vec<AgentDay>,
     projects: Vec<String>,
     note: String,
     restricted: bool,
@@ -1087,10 +1187,12 @@ fn agent_out(
         name: text(&agent.name),
         host: agent.host.clone(),
         place: agent.place.clone(),
+        connected_at: agent.connected_at,
         revoked: agent.revoked,
         token_expires_at: agent.token_expires_at,
         last_use_at: agent.last_use_at,
         uses_this_week: agent.uses_this_week,
+        days: agent.days.clone(),
         projects: agent.projects.iter().map(|p| text(p)).collect(),
         note: text(&agent.note),
         restricted: agent.restricted,
@@ -1623,7 +1725,8 @@ impl Core {
                         generated_at: Some(feed.generated_at),
                         stale: is_stale(feed.generated_at, at),
                         truncated: feed.truncated,
-                        week: Some(feed.week),
+                        remote_access: feed.remote_access.clone(),
+                        week: Some(feed.week.clone()),
                         agents: feed
                             .agents
                             .iter()
@@ -1654,6 +1757,7 @@ impl Core {
                         generated_at: None,
                         stale: false,
                         truncated: false,
+                        remote_access: None,
                         week: None,
                         agents: Vec::new(),
                     });
@@ -2795,6 +2899,104 @@ mod tests {
         let mut version: serde_json::Value = serde_json::from_str(FEED).unwrap();
         version["v"] = json!(2);
         assert!(decoder_052::parse(version.to_string().as_bytes()).is_none());
+    }
+
+    /// The feed vector as a feed of v2 (relay-feed-v1 section 7.5): the route, 7 days, a
+    /// median, and the days of the agent.
+    fn feed_v2() -> serde_json::Value {
+        let mut feed: serde_json::Value = serde_json::from_str(FEED).unwrap();
+        feed["v"] = json!(2);
+        feed["remote_access"] = json!("on");
+        feed["week"]["days"] = json!([[5, 2], [3, 0], [0, 0], [0, 0], [0, 0], [0, 0], [1, 1]]);
+        feed["week"]["answer_p50_secs"] = json!(42);
+        feed["agents"][0]["days"] = json!([
+            [5, 2, 1],
+            [3, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+            [1, 1, 0]
+        ]);
+        feed
+    }
+
+    #[test]
+    fn a_feed_of_v1_or_v2_reads_and_v3_does_not() {
+        // v1: the fields of v2 stay empty.
+        let one = parse_feed(FEED.as_bytes()).expect("v1 reads");
+        assert!(one.remote_access.is_none());
+        assert!(one.week.days.is_empty() && one.week.answer_p50_secs.is_none());
+        assert!(one.agents[0].days.is_empty() && one.agents[0].connected_at.is_none());
+
+        // v2.
+        let two = feed_v2();
+        let read = parse_feed(two.to_string().as_bytes()).expect("v2 reads");
+        assert_eq!(read.v, 2);
+        assert_eq!(read.remote_access.as_deref(), Some("on"));
+        assert_eq!(read.week.days.len(), 7);
+        assert_eq!((read.week.days[0].runs, read.week.days[0].asked), (5, 2));
+        assert_eq!(read.week.answer_p50_secs, Some(42));
+        assert_eq!(read.agents[0].days[0].not_allowed, 1);
+        // The list shows the days as objects.
+        let out = serde_json::to_value(agent_out(&read.agents[0], None, |_| false)).unwrap();
+        assert_eq!(
+            out["days"][0],
+            json!({"runs": 5, "asked": 2, "not_allowed": 1})
+        );
+        assert_eq!(out["connected_at"], json!(null));
+        assert_eq!(
+            serde_json::to_value(&read.week).unwrap()["days"][6],
+            json!({"runs": 1, "asked": 1})
+        );
+        // A remote agent of v2, and a null median.
+        let mut remote = feed_v2();
+        remote["agents"][0]["where"] = json!("remote");
+        remote["agents"][0]["connected_at"] = json!(1_790_000_000u64);
+        remote["week"]["answer_p50_secs"] = json!(null);
+        let read = parse_feed(remote.to_string().as_bytes()).expect("a remote agent reads");
+        assert_eq!(read.agents[0].place, "remote");
+        assert_eq!(read.agents[0].connected_at, Some(1_790_000_000));
+        assert_eq!(read.week.answer_p50_secs, None);
+
+        // v3, and each field of v2 out of its form.
+        let mut bad = Vec::new();
+        let mut three = feed_v2();
+        three["v"] = json!(3);
+        bad.push(three);
+        let mut v1_with_days = feed_v2();
+        v1_with_days["v"] = json!(1);
+        bad.push(v1_with_days);
+        let mut no_route = feed_v2();
+        no_route.as_object_mut().unwrap().remove("remote_access");
+        bad.push(no_route);
+        let mut odd_route = feed_v2();
+        odd_route["remote_access"] = json!("maybe");
+        bad.push(odd_route);
+        let mut six = feed_v2();
+        six["week"]["days"].as_array_mut().unwrap().pop();
+        bad.push(six);
+        let mut agent_six = feed_v2();
+        agent_six["agents"][0]["days"].as_array_mut().unwrap().pop();
+        bad.push(agent_six);
+        let mut more_asked = feed_v2();
+        more_asked["agents"][0]["days"][0] = json!([1, 2, 0]);
+        bad.push(more_asked);
+        let mut mac_connected = feed_v2();
+        mac_connected["agents"][0]["connected_at"] = json!(1);
+        bad.push(mac_connected);
+        let mut phone = feed_v2();
+        phone["agents"][0]["where"] = json!("phone");
+        bad.push(phone);
+        let mut object_day = feed_v2();
+        object_day["week"]["days"][0] = json!({"runs": 5, "asked": 2});
+        bad.push(object_day);
+        let mut remote_v1: serde_json::Value = serde_json::from_str(FEED).unwrap();
+        remote_v1["agents"][0]["where"] = json!("remote");
+        bad.push(remote_v1);
+        for feed in bad {
+            assert!(parse_feed(feed.to_string().as_bytes()).is_none(), "{feed}");
+        }
     }
 
     #[test]

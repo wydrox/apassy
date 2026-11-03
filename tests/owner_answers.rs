@@ -1469,3 +1469,65 @@ fn mfa_code_only_project_answer_never_grants_the_password_and_always_ask_still_w
     fx.broker.approvals().deny(run.id);
     assert_eq!(code(&handle.join().unwrap()), "approval_denied");
 }
+
+/// The decision log row of the newest use of the fixture item (schema 27).
+fn newest_meta(fx: &Fixture) -> apassy::vault::DecisionMeta {
+    with_vault(fx, |v| {
+        let id = v.item_uses(fx.item_id, 1).expect("uses")[0]
+            .decision_log_id
+            .expect("decision id");
+        v.decision_meta(id).expect("meta").expect("row")
+    })
+}
+
+/// Schema 27: an owner answer keeps the time from the question to the answer
+/// (`decision_log.wait_ms`); a decision without an owner answer keeps none.
+#[test]
+fn an_owner_answer_keeps_its_wait_time_and_other_decisions_keep_none() {
+    let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
+    // An approval after at least 50 ms.
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    std::thread::sleep(Duration::from_millis(50));
+    owner(&fx, OwnerAction::ApproveRun(run)).expect("approved");
+    assert!(handle.join().expect("run thread").ok);
+    let approved = newest_meta(&fx);
+    assert_eq!(approved.request, apassy::vault::RequestKind::Run);
+    let waited = approved.wait_ms.expect("an owner answer has a wait time");
+    assert!((50..60_000).contains(&waited), "{waited}");
+    // A denial is an owner answer too.
+    asks(&fx, &fx.project, &sentry_call());
+    assert!(newest_meta(&fx).wait_ms.is_some());
+    // A remembered answer decides without a question: no wait time.
+    let response = answer_with(&fx, &fx.project, &sentry_call(), in_project);
+    assert!(response.ok, "{response:?}");
+    assert!(newest_meta(&fx).wait_ms.is_some());
+    assert_eq!(
+        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        "Remembered answer"
+    );
+    assert_eq!(newest_meta(&fx).wait_ms, None);
+    // A local answer names this Mac, not a device of the relay.
+    let uses = with_vault(&fx, |v| v.item_uses(fx.item_id, 10)).expect("uses");
+    assert!(
+        uses.iter()
+            .filter(|u| u.decided_by == UseDecidedBy::Owner)
+            .all(|u| u.answered_on == "this Mac" || u.answered_on.is_empty()),
+        "{uses:?}"
+    );
+}
+
+/// Schema 27: a question that nobody answered keeps no wait time.
+#[test]
+fn a_timeout_keeps_no_wait_time() {
+    let fx = fixture_with(
+        Some(declaration(Environment::Staging, RiskLevel::Medium)),
+        true,
+        Duration::from_millis(300),
+    );
+    let response = run_in(&fx, &fx.project, &sentry_call());
+    assert_eq!(code(&response), "approval_timeout", "{response:?}");
+    let meta = newest_meta(&fx);
+    assert_eq!(meta.wait_ms, None);
+    assert_eq!(meta.request, apassy::vault::RequestKind::Run);
+}

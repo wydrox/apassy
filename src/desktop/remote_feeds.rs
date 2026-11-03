@@ -155,9 +155,12 @@ mod tests {
             seq: 1_790_000_040,
             generated_at: 1_790_000_040,
             truncated: false,
+            remote_access: None,
             week: FeedWeek {
                 by_you: 1,
                 automatic: 2,
+                days: Vec::new(),
+                answer_p50_secs: None,
             },
             agents: Vec::new(),
         }
