@@ -18,6 +18,8 @@ final class AppShell {
     private(set) var demo: RootModel?
     /// Bumped at each start of the demo, so its screens start fresh.
     private(set) var demoGeneration = 0
+    /// The demo is being made: the cover shows, and the real root does not start meanwhile.
+    private(set) var isOpeningDemo = false
     @ObservationIgnored private var opening: Task<Void, Never>?
 
     init() {
@@ -39,6 +41,7 @@ final class AppShell {
     /// Make a new demo, then show it.
     func openDemo() {
         guard demo == nil, opening == nil else { return }
+        isOpeningDemo = true
         opening = Task { [weak self] in
             let session = await DemoSession.open(confirm: { reason in await DemoPrompt.confirm(reason) })
             guard let self else { return }
@@ -48,9 +51,11 @@ final class AppShell {
                 notAvailable: { Toast.shared.show(DemoAppSession.notAvailableText) })
             let root = RootModel(demo: models, world: world)
             root.onLeaveDemo = { [weak self] in self?.leaveDemo() }
+            guard !Task.isCancelled else { return }
             demoGeneration += 1
             demo = root
             opening = nil
+            isOpeningDemo = false
         }
     }
 
@@ -58,6 +63,7 @@ final class AppShell {
     func leaveDemo() {
         opening?.cancel()
         opening = nil
+        isOpeningDemo = false
         guard let demo else { return }
         demo.vault?.gate.cancel()
         demo.vault?.stopSync()
@@ -88,6 +94,9 @@ struct AppShellView: View {
             if let demo = shell.demo {
                 RootView(root: demo)
                     .id("demo-\(shell.demoGeneration)")
+            } else if shell.isOpeningDemo {
+                // The cover, as at launch: the real root starts only when it shows.
+                PrivacyCoverView()
             } else {
                 RootView(root: shell.live)
                     .id("live")

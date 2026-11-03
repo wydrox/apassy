@@ -40,7 +40,10 @@ public enum DemoVault {
     ///   (`DemoSession.answerKey`), which the row of this iPhone holds, so Allow Once can sign.
     public static func make(answerKey: Data, now: Date = Date()) async -> PreviewVaultService {
         let service = PreviewVaultService(
-            empty: false, unlocked: true, vaultName: name, syncSource: nil, passphrase: passphrase)
+            empty: false, unlocked: false, vaultName: name, syncSource: nil, passphrase: passphrase)
+        // Open with the passphrase kept, as a vault that the owner unlocked: a short trip to another
+        // app suspends it and opens it again on return (the lock after five minutes still applies).
+        try? await service.unlock(passphrase: passphrase, keep: true)
         await addItems(to: service)
         await service.setQuestionsReportVaultScope(true)
         await service.setQuestions(enabled: true, questions: [runQuestion(now: now)], answerKey: answerKey)
