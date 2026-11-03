@@ -58,7 +58,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 - **Names on the public page:** the public connect page says "your Mac", never the name of the computer. Connect names lose every control, format and tag character, with one rule on the relay, the Mac and the iPhone.
 - **No operator socket on the Mac's node:** the node serves no `admin.sock`, because the coding agents of the Mac run as the same user. A socket that an older build left is removed.
 - **A cloud run card shows no folder:** the folder that a cloud agent sent could put a false line on the card. The card shows only the fixed label.
-- **Escaped values are scrubbed:** the relay proxy now also replaces a value that the upstream echoes JSON-escaped, HTML-escaped or percent-encoded (`\/`, `<`, `\"`, `&amp;`, `&#x2F;`, `%2F` and others), also across reads, and keeps the length of the answer.
+- **Escaped values are scrubbed:** the relay proxy now also replaces a value that the upstream echoes JSON-escaped, HTML-escaped or percent-encoded (`\/`, `\u003c`, `\"`, `&amp;`, `&#x2F;`, `%2F` and others), also across reads, and keeps the length of the answer.
 - **Prompt sources:** the transcript check takes only `typed`, `user`, `sdk` or no `promptSource` as your prompt; any other value counts as injected. An Agent SDK turn still counts as your request, but the card and the log name it "Agent SDK turn".
 - **Decision log file:** it is set to mode 0600 at every write and after rotation, and it never follows a symbolic link at the log or at `.1`.
 
