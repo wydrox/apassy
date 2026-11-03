@@ -23,8 +23,8 @@ pub(crate) struct UiPrefs {
     /// The folders whose subfolders the sidebar shows, by UUID. A folder UUID is
     /// random and the same on each Mac that syncs the vault.
     pub(crate) open_folders: BTreeSet<String>,
-    /// The owner turned "Show agents on the iPhone" off (relay-feed-v1 section 8). On by
-    /// default.
+    /// The owner turned "Show agents on my other devices" off (relay-feed-v1 section 8;
+    /// "Show agents on the iPhone" before). On by default. The key stays `feed_off`.
     pub(crate) feed_off: bool,
 }
 
@@ -185,7 +185,8 @@ mod tests {
         assert!(UiPrefs::load(&path).open_folders.is_empty());
     }
 
-    /// "Show agents on the iPhone" is on by default, and off stays off after a restart.
+    /// "Show agents on my other devices" is on by default, and off stays off after a
+    /// restart.
     #[test]
     fn the_feed_setting_is_on_by_default_and_kept() {
         let dir = tempfile::TempDir::new().expect("temp dir");

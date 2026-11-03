@@ -16,8 +16,10 @@
 //! - [`answer`]: the answering device (section 13).
 //! - [`device_link`]: the answer key of an iPhone in its device link, for the row that
 //!   the confirming Mac writes.
-//! - [`feed`]: the feed of the agents of this Mac for the iPhone, and the actions that
-//!   come back (contract relay-feed-v1).
+//! - [`feed`]: the feed of the agents of this Mac for the other devices of the vault, and
+//!   the actions that come back from an iPhone (contract relay-feed-v1).
+//! - [`feed_reader`]: the reader of the feeds of the other Macs of the vault (relay-feed-v1
+//!   section 7.4, a Mac as a reader).
 //! - [`worker`]: the asker, a waiter of its own next to the sync waiter (section 12), and
 //!   the lister of the questions of the other devices (section 13).
 //!
@@ -31,6 +33,7 @@ pub mod client;
 pub mod device_link;
 pub mod envelope;
 pub mod feed;
+pub mod feed_reader;
 pub mod worker;
 
 pub use answer::{
@@ -43,6 +46,7 @@ pub use client::{
     QuestionsClient, QuestionsError, TeamDevice,
 };
 pub use envelope::{AnswerBody, Card, Choice, RemoteEnvironment, Sealed, SettleBody};
+pub use feed_reader::{OtherFeed, OtherMac};
 pub use worker::{
     QUESTION_WAIT, QuestionsConfig, QuestionsView, QuestionsWorker, RemoteAnswered,
     RemoteAnswering, RemoteQuestion, RemoteRefused,

@@ -26,9 +26,11 @@ use apassy::questions::feed::{
     RemovalAction, SettleBody, Target, UNSUPPORTED, action_aad, build_feed, feed_aad, names_digest,
     names_here, names_hold, names_in_vault, open_action, settle_aad, still_shown,
 };
-use apassy::questions::{FeedActionRecord, QuestionsClient, QuestionsConfig, QuestionsWorker};
+use apassy::questions::{
+    FeedActionRecord, OtherFeed, OtherMac, QuestionsClient, QuestionsConfig, QuestionsWorker,
+};
 use apassy::relay::membership::{
-    adopt_questions_team, new_questions_team, register_linked_device, this_device,
+    adopt_questions_team, new_device_uuid, new_questions_team, register_linked_device, this_device,
 };
 use apassy::sync::{DeviceKey, PendingJoin, decode_b64u};
 use apassy::vault::exceptions::{AgentException, ExceptionKind};
@@ -2462,4 +2464,375 @@ fn an_action_from_an_older_feed_applies_while_the_row_is_the_same() {
     });
     assert_eq!(phone.settle(&world, &removal.action_id).0, "applied");
     assert!(world.exceptions().is_empty());
+}
+
+// ---- A Mac reads the feeds of the other Macs of the vault (section 7.4, a Mac as a
+// reader). ----
+
+/// Another Mac of the vault: it joined the questions team with a link, and the vault of
+/// the world has its row, of kind `mac`, with its device number in the team. The test
+/// publishes its feeds by hand.
+struct SecondMac {
+    client: QuestionsClient,
+    uuid: String,
+    name: String,
+    device_id: u64,
+}
+
+impl World {
+    fn second_mac(&self, name: &str) -> SecondMac {
+        let client = QuestionsClient::from_membership(&self.membership).unwrap();
+        let code = client.create_link().expect("link");
+        let pending =
+            PendingJoin::request_with_key(&code.link, "", name, DeviceKey::generate().unwrap())
+                .expect("join");
+        let links = client.pending_links(Some(&code)).expect("links");
+        let device = client.confirm_link(&links[0]).expect("confirm");
+        let joined = pending.poll().expect("poll").expect("confirmed");
+        let uuid = new_device_uuid().unwrap();
+        self.with(|vault| {
+            vault
+                .register_trusted_device(
+                    &uuid,
+                    name,
+                    TrustedDeviceKind::Mac,
+                    &links[0].public_key,
+                    None,
+                )
+                .unwrap();
+            vault
+                .set_trusted_device_relay_id(&uuid, self.team(), device.id)
+                .unwrap();
+        });
+        SecondMac {
+            client: QuestionsClient::from_member(joined.member()),
+            uuid,
+            name: name.to_owned(),
+            device_id: device.id,
+        }
+    }
+
+    /// The other Macs that the waiter of the world shows now.
+    fn other_macs(&self) -> Vec<OtherMac> {
+        self.worker
+            .as_ref()
+            .expect("the waiter")
+            .with_other_macs(|_, macs| macs.to_vec())
+    }
+
+    /// The vault session that read the other Macs.
+    fn other_macs_epoch(&self) -> Option<[u8; 32]> {
+        self.worker
+            .as_ref()
+            .expect("the waiter")
+            .with_other_macs(|epoch, _| epoch)
+    }
+
+    fn wait_other_macs(&self, what: &str, wanted: impl Fn(&[OtherMac]) -> bool) -> Vec<OtherMac> {
+        wait_until(what, || Some(self.other_macs()).filter(|macs| wanted(macs)))
+    }
+
+    /// The long polls of the feeds (`GET /v1/feed`) so far.
+    fn feed_reads(&self) -> usize {
+        self.relay
+            .log()
+            .iter()
+            .filter(|line| *line == "GET /v1/feed")
+            .count()
+    }
+
+    /// Wait until the reader took what the relay holds now: it starts its next long poll
+    /// only after it checked the answer before, and an answer that comes at once is
+    /// checked within a moment.
+    fn wait_reads(&self) {
+        let before = self.feed_reads();
+        wait_until("one more feed read", || {
+            (self.feed_reads() > before).then_some(())
+        });
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// The feed of the contract vectors in the name of the Mac `uuid` called `name`, as `seq`.
+fn mac_feed(uuid: &str, name: &str, seq: u64) -> Feed {
+    let mut feed = vector_feed();
+    feed.mac = FeedMac {
+        device: uuid.to_owned(),
+        name: name.to_owned(),
+    };
+    feed.seq = seq;
+    feed.generated_at = seq;
+    feed
+}
+
+/// Seal `plaintext` as the feed `seq` of the device of `client` with `key` and the AAD of
+/// the contract, and put it on the relay (again after the relay's limit of 100 ms).
+fn put_feed(
+    world: &World,
+    client: &QuestionsClient,
+    key: &QuestionKey,
+    seq: u64,
+    plaintext: &[u8],
+) {
+    let device_id = client.device_id().expect("a device of the team");
+    let aad = feed_aad(world.team(), device_id, seq, &key.key_id());
+    let sealed = Sealed::new(key, &aad, plaintext).expect("sealed");
+    wait_until("the relay takes the feed", || {
+        match client.put_feed(seq, &sealed) {
+            Ok(_) => Some(()),
+            Err(error) if error.code() == Some("feed_limit") => None,
+            Err(error) => panic!("the relay refused the feed: {error:?}"),
+        }
+    });
+}
+
+impl SecondMac {
+    fn feed(&self, seq: u64) -> Feed {
+        mac_feed(&self.uuid, &self.name, seq)
+    }
+
+    fn publish(&self, world: &World, feed: &Feed) {
+        put_feed(
+            world,
+            &self.client,
+            &world.key(),
+            feed.seq,
+            &feed.to_plaintext(),
+        );
+    }
+}
+
+/// A Mac opens the feed of another Mac of the vault and shows it by the name of its row;
+/// it never shows its own feed; an older `seq` that the relay serves later is ignored, and
+/// a newer feed replaces the shown one.
+#[test]
+fn a_mac_shows_the_feed_of_another_mac_of_the_vault_and_never_its_own() {
+    let mut world = world();
+    world.fast_feeds();
+    let second = world.second_mac("Studio Mac");
+    world.start(fast_config());
+    let seq = now();
+    let first = second.feed(seq);
+    second.publish(&world, &first);
+    let macs = world.wait_other_macs("the feed of the other Mac", |macs| !macs.is_empty());
+    assert_eq!(macs.len(), 1);
+    assert_eq!(macs[0].device, second.uuid);
+    assert_eq!(macs[0].relay_device_id, second.device_id);
+    assert_eq!(macs[0].name, "Studio Mac");
+    assert_eq!(macs[0].feed, OtherFeed::Ready(first.clone()));
+    assert!(macs[0].received_at >= seq);
+
+    // With another Mac in the team, this Mac publishes its own feed too; the reader does
+    // not show it.
+    wait_until("the own feed of this Mac", || {
+        world.relay.feed_of(world.mac_id()).map(|_| ())
+    });
+    world.wait_reads();
+    let macs = world.other_macs();
+    assert_eq!(
+        macs.len(),
+        1,
+        "{:?}",
+        macs.iter().map(|mac| &mac.name).collect::<Vec<_>>()
+    );
+    assert_ne!(macs[0].device, world.me().uuid);
+    assert_ne!(macs[0].relay_device_id, world.mac_id());
+
+    // A relay serves an older feed of that Mac, sealed for its `seq`: it is ignored.
+    let mut older = second.feed(seq - 10);
+    older.week.by_you = 99;
+    let aad = feed_aad(
+        world.team(),
+        second.device_id,
+        older.seq,
+        &world.key().key_id(),
+    );
+    let sealed = Sealed::new(&world.key(), &aad, &older.to_plaintext()).unwrap();
+    world.relay.set_feed_seq(second.device_id, older.seq);
+    world.relay.plant_feed(
+        second.device_id,
+        &sealed.key_id,
+        &sealed.nonce,
+        &sealed.ciphertext,
+    );
+    world.wait_reads();
+    assert_eq!(world.other_macs()[0].feed, OtherFeed::Ready(first.clone()));
+
+    // A newer feed replaces it.
+    let mut newer = second.feed(seq + 5);
+    newer.week.by_you = 7;
+    second.publish(&world, &newer);
+    world.wait_other_macs("the newer feed", |macs| {
+        macs.len() == 1 && macs[0].feed == OtherFeed::Ready(newer.clone())
+    });
+}
+
+/// Section 7.4 step 4: a feed of a device that is not a live Mac of the vault, and a feed
+/// that names another Mac from another device number, show nothing; a Mac whose row goes
+/// leaves the list.
+#[test]
+fn a_feed_of_a_device_that_is_no_live_mac_of_the_vault_is_ignored() {
+    let mut world = world();
+    world.fast_feeds();
+    let second = world.second_mac("Studio Mac");
+    let phone = world.phone("Test iPhone", answer_key());
+    world.start(fast_config());
+    // The iPhone publishes a feed in its own name, then one in the name of the other Mac.
+    let seq = now();
+    let own = mac_feed(&phone.uuid, "Test iPhone", seq);
+    put_feed(
+        &world,
+        &phone.client,
+        &world.key(),
+        seq,
+        &own.to_plaintext(),
+    );
+    world.wait_reads();
+    let posing = second.feed(seq + 1);
+    put_feed(
+        &world,
+        &phone.client,
+        &world.key(),
+        seq + 1,
+        &posing.to_plaintext(),
+    );
+    world.wait_reads();
+    assert_eq!(world.other_macs(), Vec::new());
+
+    // The other Mac's own feed shows, and leaves with its row.
+    let real = second.feed(seq + 2);
+    second.publish(&world, &real);
+    world.wait_other_macs("the feed of the other Mac", |macs| {
+        macs.len() == 1 && macs[0].feed == OtherFeed::Ready(real.clone())
+    });
+    world.with(|vault| assert!(vault.remove_trusted_device(&second.uuid).unwrap()));
+    // The next answer of the long poll (here: a new feed of the iPhone) leaves it out.
+    let later = mac_feed(&phone.uuid, "Test iPhone", seq + 3);
+    put_feed(
+        &world,
+        &phone.client,
+        &world.key(),
+        seq + 3,
+        &later.to_plaintext(),
+    );
+    world.wait_other_macs("no other Mac after its row went", |macs| macs.is_empty());
+}
+
+/// Section 7.4 steps 1 and 2 for a Mac with no good feed: a feed under another key says
+/// "Sync this vault", one with an unknown field says "Update Apassy"; a good feed then
+/// shows.
+#[test]
+fn another_key_needs_a_sync_and_an_unknown_field_needs_an_update() {
+    let mut world = world();
+    world.fast_feeds();
+    let studio = world.second_mac("Studio Mac");
+    let old = world.second_mac("Old Mac");
+    world.start(fast_config());
+    let seq = now();
+    let other_key = QuestionKey::from_bytes([7; 32]);
+    put_feed(
+        &world,
+        &studio.client,
+        &other_key,
+        seq,
+        &studio.feed(seq).to_plaintext(),
+    );
+    let mut value = serde_json::to_value(old.feed(seq)).unwrap();
+    value["agents_v2"] = serde_json::json!([]);
+    put_feed(
+        &world,
+        &old.client,
+        &world.key(),
+        seq,
+        &serde_json::to_vec(&value).unwrap(),
+    );
+    let macs = world.wait_other_macs("both texts", |macs| macs.len() == 2);
+    // By name.
+    assert_eq!(macs[0].name, "Old Mac");
+    assert_eq!(macs[0].feed, OtherFeed::NeedsUpdate);
+    assert_eq!(macs[1].name, "Studio Mac");
+    assert_eq!(macs[1].feed, OtherFeed::NeedsSync);
+    // The Mac syncs the key: its next feed opens.
+    let good = studio.feed(seq + 1);
+    studio.publish(&world, &good);
+    world.wait_other_macs("the good feed", |macs| {
+        macs.iter()
+            .any(|mac| mac.name == "Studio Mac" && mac.feed == OtherFeed::Ready(good.clone()))
+    });
+}
+
+/// A lock drops the feeds of the other Macs, and a feed that comes while the vault is
+/// locked does not show; after the unlock the newest feed shows again.
+#[test]
+fn a_lock_clears_the_other_macs() {
+    let mut world = world();
+    world.fast_feeds();
+    let second = world.second_mac("Studio Mac");
+    world.start(fast_config());
+    let seq = now();
+    second.publish(&world, &second.feed(seq));
+    world.wait_other_macs("the feed of the other Mac", |macs| macs.len() == 1);
+    let key = world.key();
+    world.with(|vault| vault.lock().unwrap());
+    // The window's own lock ends the long poll (`QuestionsWorker::forget`); here a new
+    // feed ends it, and the reader finds the vault locked.
+    let newer = second.feed(seq + 1);
+    put_feed(
+        &world,
+        &second.client,
+        &key,
+        newer.seq,
+        &newer.to_plaintext(),
+    );
+    world.wait_other_macs("nothing while locked", |macs| macs.is_empty());
+    assert_eq!(world.other_macs_epoch(), None);
+    world.with(|vault| vault.unlock(PASS).unwrap());
+    world.wait_other_macs("the newest feed after the unlock", |macs| {
+        macs.len() == 1 && macs[0].feed == OtherFeed::Ready(newer.clone())
+    });
+    assert_eq!(
+        world.other_macs_epoch(),
+        Some(world.with(|vault| vault.epoch()))
+    );
+    // The waiter forgets the session (the window's lock): the list goes at once.
+    world.worker.as_ref().unwrap().forget();
+    assert_eq!(world.other_macs(), Vec::new());
+}
+
+/// Section 8: another Mac reads the feed too, so a Mac publishes with no iPhone in the
+/// team, and the feed leaves the relay when the last other device goes.
+#[test]
+fn the_feed_goes_out_for_another_mac_and_leaves_with_the_last_other_device() {
+    let mut world = world();
+    world.fast_feeds();
+    world.start(fast_config());
+    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(world.feed_puts(), 0, "no other device in the team");
+    let second = world.second_mac("Studio Mac");
+    wait_until("a feed with only another Mac", || {
+        world.relay.feed_of(world.mac_id()).map(|_| ())
+    });
+    assert!(
+        world
+            .with(|vault| vault.trusted_devices().unwrap())
+            .iter()
+            .all(|device| device.kind != TrustedDeviceKind::Iphone),
+        "no iPhone"
+    );
+    // The other Mac reads it: the feed of this Mac opens for a device of the vault.
+    let list = second.client.feeds(0, Duration::ZERO).expect("feeds");
+    let record = list
+        .feeds
+        .iter()
+        .find(|feed| feed.device_id == world.mac_id())
+        .expect("the feed of this Mac");
+    let aad = feed_aad(world.team(), record.device_id, record.seq, &record.key_id);
+    let plaintext = record.sealed().open(&world.key(), &aad).expect("it opens");
+    assert_eq!(Feed::parse(&plaintext).unwrap().mac.device, world.me().uuid);
+    // The last other device goes: the feed leaves the relay.
+    world.with(|vault| assert!(vault.remove_trusted_device(&second.uuid).unwrap()));
+    wait_until("the delete without another device", || {
+        world.relay.feed_of(world.mac_id()).is_none().then_some(())
+    });
+    assert_eq!(world.relay.count("DELETE /v1/feed"), 1);
 }
