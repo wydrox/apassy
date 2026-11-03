@@ -1048,6 +1048,9 @@ impl Node {
             let _ = shared.refresh(&[]);
             return Err(failure);
         }
+        // As for a deny: the request waits no more, so the Mac shows it no more before
+        // the next read of the host thread.
+        lock(&shared.connects).retain(|connect| connect.id != id);
         self.note_connect_end(id, ConnectEnd::Allowed);
         Self::record(
             &shared,
