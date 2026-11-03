@@ -275,9 +275,12 @@ that secret and fails if it is there.
   `settings` never holds a secret (role ARN, policy, scopes, URLs, repository names). A device on
   schema 31 or earlier refuses a copy of schema 32 (`UnsupportedSchema`), as 26 does for 25.
 - Detection: a paste with both AWS variables, or an `AKIA…` key next to a 40-character secret, makes
-  one `ApiKey` item with `access_key_id` and `secret_access_key`, the variable `AWS_ACCESS_KEY_ID`,
-  and `short_lived` `aws_sts` on. A service-account JSON makes one item with `key_json`, the variable
-  `CLOUDSDK_AUTH_ACCESS_TOKEN`, and `google_service_account` on. A `ghr_` token or an
+  one `Custom` item with `access_key_id` and `secret_access_key`, the variable `AWS_ACCESS_KEY_ID`,
+  and `short_lived` `aws_sts` on. A service-account JSON makes one `Custom` item with `key_json`, the
+  variable `CLOUDSDK_AUTH_ACCESS_TOKEN`, and `google_service_account` on. The kind is `Custom`, not
+  `ApiKey`: an `ApiKey` item needs a secret `token` field, so the vault refused these items and the
+  whole paste with them (C1/C2 security review, 2026-11-03). The main secret of a `Custom` item is its
+  first secret field (`secret_access_key`, `key_json`), the field of the variable. A `ghr_` token or an
   `app_id`/`installation_id`/PEM paste is not detected (the owner fills the sheet, unit I).
 - Owner: implementer (opus, high). Depends on A. Judge panel: 2× opus + 1× fable (migration, sync).
 - Acceptance: `vault_migration::schema_32_adds_short_lived_and_member_key` (31→32, and a failed

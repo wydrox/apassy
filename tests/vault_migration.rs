@@ -2864,7 +2864,7 @@ fn build_before_32(path: &Path) -> u64 {
     let item = vault
         .add(apassy::vault::ItemDraft {
             title: "MIG AWS".to_owned(),
-            kind: CredentialKind::ApiKey,
+            kind: CredentialKind::Custom,
             notes: String::new(),
             tags: Vec::new(),
             fields: vec![

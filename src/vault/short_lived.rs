@@ -1384,7 +1384,7 @@ mod tests {
         vault
             .add(ItemDraft {
                 title: "Synthetic source".to_owned(),
-                kind: CredentialKind::ApiKey,
+                kind: CredentialKind::Custom,
                 notes: String::new(),
                 tags: Vec::new(),
                 fields,
@@ -1599,7 +1599,7 @@ mod tests {
                 revision,
                 ItemDraft {
                     title: "Synthetic source".to_owned(),
-                    kind: CredentialKind::ApiKey,
+                    kind: CredentialKind::Custom,
                     notes: String::new(),
                     tags: Vec::new(),
                     fields: vec![field("access_key_id", KEY_ID, false)],

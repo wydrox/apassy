@@ -196,7 +196,7 @@ mod tests {
     fn aws_pair() -> ItemDraft {
         ItemDraft {
             title: "Synthetic AWS".to_owned(),
-            kind: CredentialKind::ApiKey,
+            kind: CredentialKind::Custom,
             notes: String::new(),
             tags: Vec::new(),
             fields: vec![

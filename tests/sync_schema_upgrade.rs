@@ -1008,7 +1008,7 @@ const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 fn aws_pair(title: &str) -> ItemDraft {
     ItemDraft {
         title: title.to_owned(),
-        kind: CredentialKind::ApiKey,
+        kind: CredentialKind::Custom,
         notes: String::new(),
         tags: Vec::new(),
         fields: vec![
