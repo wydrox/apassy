@@ -328,8 +328,10 @@ the payload hash (S6-9). It MUST NOT store or log any of them except the audit r
 ## 8. Keys per member (units J1, J2)
 
 A member key is a new vault item of the team host, linked by the synced table `member_key` (vault
-schema 32): `item_id`, `source_item_id`, `team_id`, `member_id`, `manager` (`cloudflare_token` or
-`aws_iam`), `remote_id` (the provider's id of the key, not a secret), `created_at`. The member's catalog
+schema 32): `item_id`, `source_uuid`, `team_id`, `member_id`, `manager` (`cloudflare_token` or
+`aws_iam`), `remote_id` (the provider's id of the key, not a secret), `created_at`. `source_uuid` is the
+sync UUID of the team item, because row IDs differ between synced copies (as `item_home.home_uuid`); the
+vault API reads it back as the local `source_item_id`, which the audit rows of section 10 carry. The member's catalog
 shows the member key item instead of the team item. An AWS member key is itself an `aws_sts` source.
 Removing the member, revoking the grant, or archiving the source deletes the remote key and archives the
 item; a failed delete stays listed with "Replace now".
@@ -392,3 +394,4 @@ secret scans the agent's side, the audit rows, and the activity log for it and f
 | Date | Change |
 | --- | --- |
 | 2026-11-03 | The access item field `delivery` (section 5.4) is renamed `credential_form`, with the relay column, `kinds.json`, and `access-view.json`, because stage 4 uses `delivery` for the way A switch (`collection.delivery`, `run.delivery`). The values are unchanged; a missing field still reads as `placeholder`. |
+| 2026-11-03 | The vault table `member_key` (section 8) stores `source_uuid`, the sync UUID of the team item, instead of `source_item_id`: a row ID is not the same on two synced copies. The vault API and the audit rows keep `source_item_id`. A `short_lived` row that is off keeps its kind and settings (a signer reads `region` and `services` from it). |
