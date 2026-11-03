@@ -105,6 +105,38 @@ public enum WatchHandoff {
     public static let errorKey = "error"
 }
 
+/// The connection of the watch, which it publishes to the paired iPhone with
+/// `updateApplicationContext` (ADR 0039 section 6) for Settings › Devices › Apple Watch. It holds
+/// only the state and the name of the vault, never a key, a link, or a request.
+public enum WatchConnectionReport: Equatable, Sendable {
+    case notConnected
+    /// A Mac removed this watch.
+    case removed
+    case connected(vault: String)
+
+    public static let stateKey = "apassy.watch-state"
+    public static let vaultKey = "apassy.watch-vault"
+
+    /// The application context for WatchConnectivity.
+    public var context: [String: Any] {
+        switch self {
+        case .notConnected: [Self.stateKey: "not-connected"]
+        case .removed: [Self.stateKey: "removed"]
+        case .connected(let vault): [Self.stateKey: "connected", Self.vaultKey: vault]
+        }
+    }
+
+    /// The report in an application context, or nil when the watch sent none (or a newer one).
+    public init?(context: [String: Any]) {
+        switch context[Self.stateKey] as? String {
+        case "not-connected": self = .notConnected
+        case "removed": self = .removed
+        case "connected": self = .connected(vault: context[Self.vaultKey] as? String ?? "")
+        default: return nil
+        }
+    }
+}
+
 /// A screen of the watch on top of Requests.
 public enum WatchRoute: Hashable, Sendable {
     /// A request, by `RelayAccessRequest.id`.

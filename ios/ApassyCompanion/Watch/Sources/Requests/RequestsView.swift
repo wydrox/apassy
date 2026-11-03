@@ -43,27 +43,13 @@ struct RequestsView: View {
         if requests.rows.isEmpty {
             if !requests.loaded && !checkedLong {
                 ProgressView("Checking…")
-            } else if let notice = requests.notice {
-                ContentUnavailableView {
-                    Label(notice.title, systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(verbatim: notice.message)
-                }
-            } else if let failure = requests.failure {
-                ContentUnavailableView {
-                    Label("Can't check for requests", systemImage: "wifi.exclamationmark")
-                } description: {
-                    Text(verbatim: failure)
-                }
             } else {
-                ContentUnavailableView {
-                    Label("No access requests waiting", systemImage: "checkmark.shield")
-                } description: {
-                    Text("When an agent asks for a credential, the request appears here.")
-                    if let reason = requests.allowOffReason {
-                        Text(verbatim: reason)
-                    }
+                // The Digital Crown scrolls a long reason; nothing is cut off at the bottom.
+                ScrollView {
+                    emptyState
+                        .scenePadding(.horizontal)
                 }
+                .defaultScrollAnchor(WatchLaunch.scrollAnchor)
             }
         } else {
             List {
@@ -91,13 +77,57 @@ struct RequestsView: View {
         }
     }
 
+    /// The list is empty: why, or that nothing waits.
+    @ViewBuilder
+    private var emptyState: some View {
+        if let notice = requests.notice {
+            ContentUnavailableView {
+                Label(notice.title, systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(verbatim: notice.message)
+            }
+        } else if let failure = requests.failure {
+            ContentUnavailableView {
+                Label("Can't check for requests", systemImage: "wifi.exclamationmark")
+            } description: {
+                Text(verbatim: failure)
+            }
+        } else {
+            ContentUnavailableView {
+                Label("No access requests waiting", systemImage: "checkmark.shield")
+            } description: {
+                Text("When an agent asks for a credential, the request appears here.")
+                if let connection {
+                    Text(verbatim: connection)
+                        .privacySensitive()
+                }
+                if let reason = requests.allowOffReason {
+                    Text(verbatim: reason)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var footer: some View {
         if let since = requests.offlineSince {
             Text(verbatim: "Offline. Showing requests from \(since.formatted(date: .omitted, time: .shortened)).")
-        } else if let reason = requests.allowOffReason {
-            Text(verbatim: reason)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                if let connection {
+                    Text(verbatim: connection)
+                        .privacySensitive()
+                }
+                if let reason = requests.allowOffReason {
+                    Text(verbatim: reason)
+                }
+            }
         }
+    }
+
+    /// The vault this watch answers for (escaped by the model).
+    private var connection: String? {
+        model.vaultName.map { "Connected to “\($0)”." }
     }
 }
 

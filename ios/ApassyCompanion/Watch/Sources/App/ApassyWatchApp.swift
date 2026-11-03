@@ -31,6 +31,7 @@ struct ApassyWatchApp: App {
             WatchRootView(model: model)
                 .environment(notifications)
                 .onAppear { receiver.activate() }
+                .onChange(of: model.connectionReport, initial: true) { _, report in receiver.publish(report) }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             // While the setting is on, each activation registers again: the replica is open now.

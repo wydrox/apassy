@@ -1,3 +1,4 @@
+import ApassyVaultKit
 import Foundation
 import Observation
 import WatchConnectivity
@@ -20,9 +21,21 @@ final class AppleWatchLink {
 
     static let shared = AppleWatchLink()
 
+    /// The session has activated: the other values are known.
+    private(set) var isActivated = false
     private(set) var isPaired = false
     private(set) var isWatchAppInstalled = false
     private(set) var isReachable = false
+    /// What Apassy on the watch said about its connection, nil before it said anything.
+    private(set) var report: WatchConnectionReport?
+
+    /// This iPhone can pair with an Apple Watch.
+    var isSupported: Bool { WCSession.isSupported() }
+
+    /// What the watch app needs, for a paired watch without Apassy (watchOS 27 runs only on
+    /// arm64 watches, ADR 0039 decision 4).
+    static let installHint =
+        "Apassy for Apple Watch needs watchOS 27 on Apple Watch Series 9 or later, Ultra 2 or later, or SE 3. Install it in the Watch app on this iPhone › My Watch › Available Apps."
 
     /// An Apple Watch is paired with this iPhone: Add Apple Watch shows. Without Apassy on the
     /// watch, the page says how to install it and keeps the scan off.
@@ -49,6 +62,8 @@ final class AppleWatchLink {
     }
 
     private func apply(_ state: WatchSessionDelegate.State) {
+        isActivated = state.activated
+        report = state.report
         isPaired = state.paired
         isWatchAppInstalled = state.installed
         isReachable = state.reachable
