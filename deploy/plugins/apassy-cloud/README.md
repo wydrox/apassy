@@ -15,54 +15,81 @@ The agent's instructions are in [skills/apassy/SKILL.md](skills/apassy/SKILL.md)
 - Tailscale on the Mac, signed in, with Funnel allowed for this Mac in your tailnet policy.
 - The items that the agent may use, in your Apassy vault, each with a variable and its API hosts.
 
-## 1. Make the setup in Apassy (each user)
+## 1. Turn on remote access in Apassy (each user)
 
-1. Open Apassy → **Settings** → **Cloud agents**.
-2. Turn on **Public route (Tailscale Funnel)**. Apassy asks you to confirm with Touch ID or the
-   passphrase. It shows the URL
-   `https://<Mac>.<tailnet>.ts.net:8443/mcp`. The machine name and the tailnet name become public in
-   the Certificate Transparency logs when the route is on.
-3. Click **Add a cloud agent…**. Give it a name, pick its kind (Grok Bot or another MCP client), pick
-   the items it may use, and pick the token lifetime (30, 90, or 365 days).
-4. Click **Copy setup**. Apassy shows the token once. The setup holds two values:
-   - the MCP URL: `https://<Mac>.<tailnet>.ts.net:8443/mcp`
-   - the header: `Authorization: Bearer apassy_tagt_…`
+1. Open Apassy → **Bouncer** → **Agents**.
+2. Turn on **Remote access**. Apassy asks you to confirm with Touch ID or the passphrase. It shows the
+   MCP address `https://<Mac>.<tailnet>.ts.net:8443/mcp` and a **Copy** button. The machine name and
+   the tailnet name become public in the Certificate Transparency logs when remote access is on.
 
-Keep the token like a password. Do not commit it, and do not paste it into a shared chat. To stop the
-agent, click **Revoke…** next to it. The next call of the agent fails.
+That is all the setup. You give the agent the address only: no token, no header.
 
-## 2. Grok Bot
+## 2. Connect the agent: add the MCP server by URL, press Authorize, allow on your Mac
 
-Grok Bot adds a custom MCP server when you ask it in chat. In a chat with the Bot, send:
+1. In the agent, add a remote MCP server by URL: the MCP address from step 1.
+2. The agent offers to sign in: press **Authorize** (or **Connect**). A browser page of your Mac opens.
+   It shows the agent's name, your Mac, and a short code such as `K7Q-4MD`. The page has no button:
+   nothing on it can allow the connection.
+3. On your Mac, **Bouncer** → **Decisions** shows "<agent> wants to connect" with the same code (also on
+   your iPhone, when it gets your questions). Check that the codes match, then click **Allow** and
+   confirm with Touch ID (Face ID on the iPhone). Click **Deny** when you did not start it.
+4. The browser page says "Connected", and the agent lists the tools `apassy_list_access`,
+   `apassy_request_run`, and `apassy_run_status`.
+
+The agent appears in **Bouncer** → **Agents** with a **Remote** cap and no credentials. Click **Choose
+Credentials…** on its page to pick the items it may use. Every run of a remote agent still asks you, on
+the Mac or the iPhone.
+
+The request ends after 5 minutes without an answer: press Authorize again. The same agent (the same
+OAuth client) connects again to the same Apassy agent and keeps its credentials; another client with
+the same name becomes "Grok Bot 2". To stop an agent, click **Disconnect…** on its page: its next call
+fails with 401, and it must connect and be allowed again.
+
+### Grok Bot
+
+In a chat with the Bot, send:
 
 ```text
-Add a custom MCP server named "apassy" with the URL https://<Mac>.<tailnet>.ts.net:8443/mcp
-and the header Authorization with the value "Bearer apassy_tagt_…".
+Add a custom MCP server named "apassy" with the URL https://<Mac>.<tailnet>.ts.net:8443/mcp.
 ```
 
-Use your own URL and token from **Copy setup**. Grok Bot keeps the header on the server entry. The
+Use your own address. Press **Authorize** when the Bot offers it, and allow on your Mac (step 2). The
 server entry is for your whole account, not for one chat. Then ask the Bot:
 
 ```text
 Use Apassy: list the credentials that you can use.
 ```
 
-## 3. Cursor
+### Cursor
 
-Set two variables in the environment of Cursor, with your values from **Copy setup**:
+Set the address in the environment of Cursor:
 
 ```sh
 export APASSY_MCP_URL="https://<Mac>.<tailnet>.ts.net:8443/mcp"
-export APASSY_TOKEN="apassy_tagt_…"
 ```
 
 The plugin's [`mcp.json`](mcp.json) declares the remote server `apassy` with
-`"url": "${APASSY_MCP_URL}"` and `"Authorization": "Bearer ${APASSY_TOKEN}"`.
+`"url": "${APASSY_MCP_URL}"`. Cursor then shows **Needs login** or **Connect** for it: press it and allow
+on your Mac (step 2).
 
 > **Not verified:** this interpolation syntax (`${NAME}`) is not yet verified in Grok Bot or in Cursor.
-> Some clients use another form (for example `${env:NAME}`), and Grok Bot may use only the URL and the
-> header that you give it in chat (section 2). If a client sends the text `${APASSY_TOKEN}` as it is,
-> the node answers 401: put the URL and the header into the client's own MCP setting instead.
+> Some clients use another form (for example `${env:NAME}`). If a client sends the text
+> `${APASSY_MCP_URL}` as it is, put the address into the client's own MCP setting instead.
+
+## 3. A client without the authorization flow (token fallback)
+
+A client that cannot sign in with the MCP authorization flow (OAuth 2.1) can use a bearer token. With
+remote access on, in Terminal:
+
+```sh
+eval "$(apassy login)"
+apassy agent add-remote "My agent" --days 90
+```
+
+Apassy asks you to confirm with Touch ID, then prints the token once with the MCP address. Give the
+client the address and the header `Authorization: Bearer apassy_tagt_…`. The token lives 1 to 365 days
+(default 90). The agent has no credentials until you choose some, and every run asks you. Keep the
+token like a password: do not commit it, and do not paste it into a shared chat.
 
 ## 4. A team marketplace (Cursor)
 
@@ -72,15 +99,15 @@ To give this plugin to your team before it is in a public marketplace:
    `.cursor-plugin/plugin.json` at the root.
 2. In the Cursor dashboard, open **Plugins & MCPs** → **Add Marketplace** → **Import from Repo**, and
    pick that repository.
-3. Each user then does section 1 and section 3 with their own Mac and token. A token is for one user's
-   Mac only. Never share one token in a team.
+3. Each user then does sections 1 and 2 with their own Mac. A connection (or a fallback token) is for
+   one user's Mac only. Never share one token in a team.
 
 ## Files
 
 | File | Contents |
 | --- | --- |
 | `.cursor-plugin/plugin.json` | The plugin manifest: name `apassy`, version, author, homepage, license |
-| `mcp.json` | The remote MCP server `apassy`, from your URL and token |
+| `mcp.json` | The remote MCP server `apassy`, from your MCP address; it signs in with the authorization flow |
 | `skills/apassy/SKILL.md` | How an agent uses Apassy: list, request, wait, run, never print |
 | `LICENSE` | Apache-2.0, as the repository |
 

@@ -142,6 +142,17 @@ fn fresh_uid() -> VaultResult<String> {
         .collect())
 }
 
+/// A client id for an agent of the flow, none for a token agent.
+fn valid_link(client_id: Option<&str>, connected_with: ConnectedWith) -> bool {
+    match (connected_with, client_id) {
+        (ConnectedWith::OAuth, Some(id)) => {
+            !id.is_empty() && id.len() <= MAX_CLIENT_ID_BYTES && !id.chars().any(char::is_control)
+        }
+        (ConnectedWith::Token, None) => true,
+        _ => false,
+    }
+}
+
 impl Vault {
     /// Store a new cloud agent for the node agent `relay_agent_id`: a vault agent of kind
     /// `cloud` that sees only `items`. Its vault token is random and never leaves this
@@ -157,12 +168,61 @@ impl Vault {
         relay_agent_id: u64,
         token_expires_at: u64,
     ) -> VaultResult<u64> {
+        if items.is_empty() {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        self.insert_cloud_agent(
+            name,
+            items,
+            relay_agent_id,
+            token_expires_at,
+            None,
+            ConnectedWith::Token,
+        )
+    }
+
+    /// Store a new remote agent for the node agent `relay_agent_id`: a cloud agent with
+    /// no item, so it sees nothing until the owner chooses credentials for it. With
+    /// `client_id` it connected with the MCP authorization flow
+    /// ([`ConnectedWith::OAuth`]); without one it has a token of the command line
+    /// ([`ConnectedWith::Token`], `apassy agents add-remote`). The agent and its link are
+    /// stored in one transaction. Returns the vault agent id.
+    ///
+    /// `InvalidInput`: an empty or long name, a node id of 0, or a client id that
+    /// [`Vault::set_cloud_agent_link`] refuses. `AlreadyExists`: another active cloud
+    /// agent has this node id.
+    pub fn add_remote_agent(
+        &mut self,
+        name: &str,
+        relay_agent_id: u64,
+        token_expires_at: u64,
+        client_id: Option<&str>,
+    ) -> VaultResult<u64> {
+        let with = if client_id.is_some() {
+            ConnectedWith::OAuth
+        } else {
+            ConnectedWith::Token
+        };
+        self.insert_cloud_agent(name, &[], relay_agent_id, token_expires_at, client_id, with)
+    }
+
+    /// [`Vault::add_cloud_agent`] and [`Vault::add_remote_agent`]: `items` may be empty
+    /// here (the agent sees nothing).
+    fn insert_cloud_agent(
+        &mut self,
+        name: &str,
+        items: &[u64],
+        relay_agent_id: u64,
+        token_expires_at: u64,
+        client_id: Option<&str>,
+        connected_with: ConnectedWith,
+    ) -> VaultResult<u64> {
         let name = checked_text(name.trim(), MAX_AGENT_NAME_BYTES)?.to_owned();
         let unique: BTreeSet<u64> = items.iter().copied().collect();
-        if items.is_empty()
-            || items.len() > MAX_CLOUD_AGENT_ITEMS
+        if items.len() > MAX_CLOUD_AGENT_ITEMS
             || unique.len() != items.len()
             || unique.contains(&ONLY_MARKER_ITEM)
+            || !valid_link(client_id, connected_with)
         {
             return Err(err(VaultErrorKind::InvalidInput));
         }
@@ -206,9 +266,10 @@ impl Vault {
             .map_err(storage)?;
         }
         tx.execute(
-            "INSERT INTO cloud_agent (agent_id, relay_agent_id, token_expires_at, last_used_at)
-             VALUES (?1, ?2, ?3, NULL)",
-            (agent, relay, expires),
+            "INSERT INTO cloud_agent
+                 (agent_id, relay_agent_id, token_expires_at, last_used_at, client_id, connected_with)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+            (agent, relay, expires, client_id, connected_with.as_str()),
         )
         .map_err(storage)?;
         tx.commit().map_err(storage)?;
@@ -561,16 +622,7 @@ impl Vault {
         client_id: Option<&str>,
         connected_with: ConnectedWith,
     ) -> VaultResult<()> {
-        let valid = match (connected_with, client_id) {
-            (ConnectedWith::OAuth, Some(id)) => {
-                !id.is_empty()
-                    && id.len() <= MAX_CLIENT_ID_BYTES
-                    && !id.chars().any(char::is_control)
-            }
-            (ConnectedWith::Token, None) => true,
-            _ => false,
-        };
-        if !valid {
+        if !valid_link(client_id, connected_with) {
             return Err(err(VaultErrorKind::InvalidInput));
         }
         let agent = to_sql_id(agent_id)?;
@@ -639,6 +691,23 @@ impl Vault {
                  WHERE c.client_id = ?1 AND a.kind = 'cloud' AND a.revoked_at IS NULL
                  ORDER BY a.id DESC LIMIT 1",
                 [client_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        id.map(to_public_id).transpose()
+    }
+
+    /// The newest decision log row of the agent `agent_id` at or after `since`, if any:
+    /// the row of the broker's decision on a cloud run that the node asked about. The
+    /// host decides one cloud run of an agent at a time, so the newest row is that run's.
+    pub fn newest_decision_id(&self, agent_id: u64, since: u64) -> VaultResult<Option<u64>> {
+        let id: Option<i64> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT id FROM decision_log WHERE agent_id = ?1 AND at >= ?2
+                 ORDER BY id DESC LIMIT 1",
+                (to_sql_id(agent_id)?, to_sql_time(since)?),
                 |row| row.get(0),
             )
             .optional()
@@ -862,6 +931,58 @@ mod tests {
         );
         assert!(vault.set_cloud_node_port(1024).is_err());
         assert!(vault.set_cloud_node_team(Some("bad team")).is_err());
+    }
+
+    #[test]
+    fn a_remote_agent_starts_with_no_item_and_keeps_its_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut vault, items) = vault_with_items(&dir, 2);
+        let oauth = vault
+            .add_remote_agent("Grok Bot", 7, 2_000_000_000, Some("client_synthetic_1"))
+            .unwrap();
+        let agents = vault.cloud_agents().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_id, oauth);
+        assert!(agents[0].items.is_empty(), "it sees nothing");
+        let view = vault.agent_view(oauth).unwrap();
+        assert!(!view.visible(items[0]) && !view.visible(items[1]));
+        assert_eq!(
+            vault.cloud_agent_link(oauth).unwrap(),
+            Some((Some("client_synthetic_1".to_owned()), ConnectedWith::OAuth))
+        );
+        assert_eq!(
+            vault.cloud_agent_for_client("client_synthetic_1").unwrap(),
+            Some(oauth)
+        );
+        assert!(vault.has_cloud_agents().unwrap());
+        // A token agent of the command line has no client.
+        let token = vault.add_remote_agent("CLI agent", 8, 3, None).unwrap();
+        assert_eq!(
+            vault.cloud_agent_link(token).unwrap(),
+            Some((None, ConnectedWith::Token))
+        );
+        // The same node id again, a control character, or an empty name is refused.
+        assert_eq!(
+            vault
+                .add_remote_agent("Other", 7, 3, Some("client_synthetic_2"))
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::AlreadyExists
+        );
+        assert!(
+            vault
+                .add_remote_agent("Bad", 9, 3, Some("bad\nclient"))
+                .is_err()
+        );
+        assert!(vault.add_remote_agent("Bad", 9, 3, Some("")).is_err());
+        assert!(vault.add_remote_agent(" ", 9, 3, None).is_err());
+        // The owner chooses a credential later: the agent sees it.
+        vault
+            .add_agent_exception(oauth, items[1], ExceptionKind::Only)
+            .unwrap();
+        assert_eq!(vault.cloud_agents().unwrap()[0].items, [items[1]]);
+        // No decision yet.
+        assert_eq!(vault.newest_decision_id(oauth, 0).unwrap(), None);
     }
 
     #[test]

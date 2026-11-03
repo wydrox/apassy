@@ -16,8 +16,8 @@ The MCP server `apassy` has three tools: `apassy_list_access`, `apassy_request_r
 
 1. **List access.** Call `apassy_list_access` with no arguments. Each item has an `item_id`, an
    `env_name` (the variable of its placeholder), its `hosts`, and its `base_url_vars`. If the list is
-   empty, tell the user to pick items for this agent in Apassy → Settings → Cloud agents. Do not guess
-   item ids.
+   empty, tell the user to choose credentials for this agent in Apassy → Bouncer → Agents (its page,
+   **Choose Credentials…**). Do not guess item ids.
 
 2. **Request a run.** Call `apassy_request_run` with:
    - `items`: the `item_id` of each item that the command needs.
@@ -51,8 +51,9 @@ The MCP server `apassy` has three tools: `apassy_list_access`, `apassy_request_r
   Do not request the run again without asking the user first. An `ended` run is final, also with a code
   that you do not know.
 - If a call fails with `rate_limited` (HTTP 429), wait the `Retry-After` seconds before the next call.
-  If it fails with `unauthenticated` or `token_expired` (HTTP 401), stop and tell the user to copy a new
-  setup from Apassy.
+  If it fails with `unauthenticated` or `token_expired` (HTTP 401), sign in again with the MCP
+  authorization flow when your client offers it (the user allows it on their Mac); otherwise stop and
+  tell the user that the connection ended, so they connect this agent again in Apassy.
 - If the URL does not answer, the user's Mac may be locked, asleep, or offline, or Apassy may not run.
   Tell the user. Do not retry in a loop.
 - Use only the items that the run needs. Use one run for one command.
