@@ -53,6 +53,11 @@ struct DecisionsView: View {
         return nil
     }
 
+    /// "Connect this iPhone": the scanner of a Connect code, except in the demo.
+    private func connect() {
+        if root?.isDemo == true { root?.showNotAvailableInDemo() } else { showsConnect = true }
+    }
+
     private var requestsListVisible: Bool {
         scenePhase == .active && destination == .waiting && path.isEmpty && !showsConnect && !showsMac && !localSheetPresented
             && questions?.unlockPrompt == nil && session?.actionError == nil
@@ -337,7 +342,7 @@ struct DecisionsView: View {
             ContentUnavailableView {
                 Label("Connect a Mac", systemImage: "desktopcomputer")
             } description: { Text("Approve requests on this iPhone.") } actions: {
-                Button("Connect this iPhone") { showsConnect = true }.buttonStyle(.bordered).frame(minHeight: 44)
+                Button("Connect this iPhone") { connect() }.buttonStyle(.bordered).frame(minHeight: 44)
             }
         default:
             ContentUnavailableView {
@@ -408,11 +413,12 @@ struct DecisionsView: View {
                 Menu {
                     if let questions {
                         if questions.canConnect {
-                            Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
+                            Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { connect() }
                         }
                     }
                     Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Mac on Wi-Fi", systemImage: "wifi") {
-                        showsMac = true
+                        // The demo pairs with no Mac: the pairing would make keys in the keychain.
+                        if root?.isDemo == true { root?.showNotAvailableInDemo() } else { showsMac = true }
                     }
                 } label: {
                     Label("Devices", systemImage: "ellipsis")

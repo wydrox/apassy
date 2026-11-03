@@ -51,7 +51,7 @@ struct SettingsView: View {
                     }
                     NavigationLink(value: Page.advanced) {
                         SettingsGroupRow(
-                            title: "Advanced", detail: "Version, licenses", symbol: "slider.horizontal.3",
+                            title: "Advanced", detail: "Version, licenses, demo", symbol: "slider.horizontal.3",
                             tint: .indigo)
                     }
                 }
@@ -97,21 +97,18 @@ struct SettingsView: View {
                 await agents.watch()
             }
         }
-        #if targetEnvironment(simulator)
-            .task { openFromLaunchArgument() }
-        #endif
+        .task { if LaunchRoutes.enabled(isDemo: root.isDemo) { openFromLaunchArgument() } }
     }
 
-    #if targetEnvironment(simulator)
-        /// `-ApassyOpen settings:general|devices|security|advanced`: a group page of Settings.
-        private func openFromLaunchArgument() {
-            guard let route = UserDefaults.standard.string(forKey: "ApassyOpen"),
-                route.hasPrefix("settings:"),
-                let group = Page(rawValue: String(route.dropFirst("settings:".count)))
-            else { return }
-            path = [group]
-        }
-    #endif
+    /// `-ApassyOpen settings:general|devices|security|advanced`: a group page of Settings (the
+    /// Simulator, and the demo of any build).
+    private func openFromLaunchArgument() {
+        guard let route = UserDefaults.standard.string(forKey: "ApassyOpen"),
+            route.hasPrefix("settings:"),
+            let group = Page(rawValue: String(route.dropFirst("settings:".count)))
+        else { return }
+        path = [group]
+    }
 }
 
 /// A group on the Settings root: its symbol in a colored square, its name, and what it holds.

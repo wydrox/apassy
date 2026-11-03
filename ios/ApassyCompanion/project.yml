@@ -60,6 +60,10 @@ targets:
         product: ApassyVaultKit
       - package: ApassyVaultKit
         product: ApassyVaultCore
+      # The demo ("Try the Demo", -ApassyDemo): synthetic data in memory. The app and the watch
+      # link it; the AutoFill extension must not (ApassyVaultDemoTests checks this file).
+      - package: ApassyVaultKit
+        product: ApassyVaultDemo
       - target: ApassyAutoFill
         embed: true
       # The watch app, as the Watch content of the iPhone app.
@@ -208,6 +212,9 @@ targets:
         product: ApassyVaultKit
       - package: ApassyVaultKit
         product: ApassyVaultCore
+      # "See a Sample" on a watch that is not connected (DemoWatch).
+      - package: ApassyVaultKit
+        product: ApassyVaultDemo
     entitlements:
       path: Watch/ApassyWatch.entitlements
       properties:

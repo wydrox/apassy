@@ -109,8 +109,10 @@ struct AgentsView: View {
         } actions: {
             switch reach.action {
             case .connect:
-                Button("Connect this iPhone") { showsConnect = true }
-                    .buttonStyle(.borderedProminent)
+                Button("Connect this iPhone") {
+                    if root?.isDemo == true { root?.showNotAvailableInDemo() } else { showsConnect = true }
+                }
+                .buttonStyle(.borderedProminent)
             case .openDecisions:
                 Button("Open Requests") {
                     ui?.tab = .decisions

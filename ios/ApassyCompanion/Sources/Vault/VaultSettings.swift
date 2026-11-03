@@ -55,7 +55,8 @@ enum ClearAfter: Int, CaseIterable, Identifiable, Sendable {
 }
 
 /// The settings of the vault on this iPhone, in the defaults that the app shares with the AutoFill
-/// extension. No secret is kept here: item IDs, choices, and the name of this iPhone.
+/// extension (the demo keeps them in memory). No secret is kept here: item IDs, choices, and the
+/// name of this iPhone.
 @MainActor
 @Observable
 final class VaultSettings {
@@ -67,7 +68,7 @@ final class VaultSettings {
         static func faceIDUnlock(_ vaultID: String) -> String { "faceIDUnlock.\(vaultID)" }
     }
 
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let defaults: any SettingsStore
 
     var lockAfter: LockAfter {
         didSet { defaults.set(lockAfter.rawValue, forKey: Key.lockAfter) }
@@ -85,7 +86,7 @@ final class VaultSettings {
     /// Bumped on each change of the favorites or the Face ID choice, so views that read them update.
     private(set) var storeVersion = 0
 
-    init(defaults: UserDefaults) {
+    init(defaults: any SettingsStore) {
         self.defaults = defaults
         lockAfter = LockAfter(rawValue: defaults.object(forKey: Key.lockAfter) as? Int ?? 0) ?? .immediately
         clearAfter = ClearAfter(rawValue: defaults.object(forKey: Key.clearAfter) as? Int ?? 60) ?? .oneMinute

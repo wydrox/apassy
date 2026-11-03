@@ -24,13 +24,17 @@ final class OwnerGate {
     /// True while a check runs, Face ID or the passphrase.
     private(set) var isChecking = false
 
+    /// A line under the passphrase field: the demo tells its passphrase. Nil for a real vault.
+    let passphraseHint: String?
+
     @ObservationIgnored private let check: any OwnerCheck
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private var continuation: CheckedContinuation<Bool, Never>?
 
-    init(check: any OwnerCheck, service: any VaultService) {
+    init(check: any OwnerCheck, service: any VaultService, passphraseHint: String? = nil) {
         self.check = check
         self.service = service
+        self.passphraseHint = passphraseHint
     }
 
     var biometry: Biometry { check.biometry }

@@ -4,6 +4,7 @@
 // It holds no credential, never shows run questions, and has its own relay key and answer key. The
 // iPhone scans the Connect code of the Mac and hands it to the watch; the owner confirms on the Mac.
 
+import ApassyVaultDemo
 import ApassyVaultKit
 import SwiftUI
 
@@ -21,7 +22,9 @@ struct ApassyWatchApp: App {
     var body: some Scene {
         WindowGroup {
             WatchRootView(model: model)
-                .onAppear { receiver.activate() }
+                .environment(\.watchSampleNote, WatchLaunch.isDemo ? DemoWatch.wristNote : nil)
+                // The demo takes no Connect code from the iPhone.
+                .onAppear { if !WatchLaunch.isDemo { receiver.activate() } }
         }
     }
 }
