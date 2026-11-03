@@ -474,38 +474,6 @@ fn a_decision_of_another_mac_shows_its_facts_read_only() {
 }
 
 #[test]
-fn activity_adds_the_uses_of_the_other_macs_in_the_scope() {
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = vault_app(&dir, example_feed());
-    decisions::open_activity(&mut app);
-    let (text, _) = frames(&mut app, WIDE, 3);
-    for expected in [
-        "Activity",
-        "API token on MacBook Pro",
-        "Claude Code · Deploy in synthetic-shop · Answered on Test iPhone",
-        "Shop database on MacBook Pro",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert!(
-        text.find("API token on MacBook Pro") < text.find("Shop database on MacBook Pro"),
-        "newest first: {text}"
-    );
-
-    app.ui.activity_scope = scope(DeviceScope::ThisMac, None);
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(!text.contains("API token on MacBook Pro"), "{text}");
-
-    app.ui.activity_scope = scope(DeviceScope::All, Some("synthetic-shop"));
-    let (text, _) = frames(&mut app, WIDE, 3);
-    assert!(text.contains("API token on MacBook Pro"), "{text}");
-    assert!(
-        text.contains(super::decisions_activity::LOG_HAS_NO_PROJECT),
-        "{text}"
-    );
-}
-
-#[test]
 fn without_other_macs_decisions_shows_this_mac() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);

@@ -69,6 +69,24 @@ flowchart LR
 
 The screenshots show synthetic data. `scripts/screenshots.sh` takes them from the real app.
 
+The sidebar has **Bouncer**: Overview (the last 7 days of every Mac of the vault), Decisions, Agents,
+and Logs (every run, connect, and change of remote access). One scope bar picks the Macs and the
+project of all four pages; the other Macs are read-only.
+
+| Shortcut | Opens |
+| --- | --- |
+| ⌘1 | All credentials |
+| ⌘2 | Overview |
+| ⌘3 | Decisions |
+| ⌘4 | Agents |
+| ⌘5 | Logs |
+| ⌘, | Settings |
+| ⌘[ | Back to the list |
+| ⌘N | New credential |
+| ⌘F | Search credentials |
+| ⌘L | Lock the vault |
+| ⌃⌘S | Hide or show the sidebar |
+
 ## Evidence
 
 The bouncer was scored blind on 226 agent commands it had never seen, in three runs ([held-out v4](docs/evaluation/heldout-v4.md)):

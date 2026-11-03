@@ -845,3 +845,556 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     });
 }
+
+// ---- The Bouncer pages (mockup docs/design/cloud-agents-mockup.html). ----
+
+/// The frame of the mockup that Overview and Logs show in the demo build. The toolbar
+/// menu of both pages picks it, and `APASSY_DEMO_FRAME` (1, 6, 9, 10, 11, 12, 14) sets it
+/// at start, for screenshots.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum BouncerFrame {
+    /// 1 Overview and 6 Logs: three Macs, a week of runs, one remote run open.
+    #[default]
+    AllEnvironments,
+    /// 9a and 9d: one Mac, no agents, no runs.
+    FirstRun,
+    /// 10b: a quiet week; one Mac silent since 1 Nov.
+    QuietDay,
+    /// 11b: a project without runs this week.
+    EmptyProject,
+    /// 12b: the only Mac; its environment menu says so.
+    OneMac,
+    /// 14: Logs with filters that match nothing.
+    FilteredLogs,
+}
+
+impl BouncerFrame {
+    const ALL: [Self; 6] = [
+        Self::AllEnvironments,
+        Self::FirstRun,
+        Self::QuietDay,
+        Self::EmptyProject,
+        Self::OneMac,
+        Self::FilteredLogs,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::AllEnvironments => "Frames 1, 6: All Environments",
+            Self::FirstRun => "Frame 9: First Run",
+            Self::QuietDay => "Frame 10: Quiet Day",
+            Self::EmptyProject => "Frame 11b: Empty Project",
+            Self::OneMac => "Frame 12b: One Mac",
+            Self::FilteredLogs => "Frame 14: Filtered Logs",
+        }
+    }
+
+    /// The frame of `APASSY_DEMO_FRAME`.
+    fn from_env() -> Option<Self> {
+        match std::env::var("APASSY_DEMO_FRAME").ok()?.trim() {
+            "1" | "6" => Some(Self::AllEnvironments),
+            "9" => Some(Self::FirstRun),
+            "10" => Some(Self::QuietDay),
+            "11" => Some(Self::EmptyProject),
+            "12" => Some(Self::OneMac),
+            "14" => Some(Self::FilteredLogs),
+            _ => None,
+        }
+    }
+}
+
+/// Make the Bouncer data of the demo frame when the frame or the project changes.
+pub(super) fn bouncer_refresh(app: &mut DesktopApp, ctx: &egui::Context) {
+    use std::sync::Once;
+    static FROM_ENV: Once = Once::new();
+    FROM_ENV.call_once(|| {
+        if let Some(frame) = BouncerFrame::from_env() {
+            select_frame_scope(app, frame);
+        }
+    });
+    let frame = app.ui.demo_frame;
+    let project = app.ui.activity_scope.project.clone();
+    let time = ctx.input(|input| input.time);
+    let stamp = super::bouncer::stamp(frame);
+    app.ui
+        .bouncer
+        .refresh(time, stamp, project.as_deref(), |_| {
+            bouncer_data(frame, demo_now())
+        });
+}
+
+/// The toolbar menu that picks the demo frame.
+pub(super) fn frame_picker(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let mut frame = app.ui.demo_frame;
+    let options: Vec<(BouncerFrame, String)> = BouncerFrame::ALL
+        .iter()
+        .map(|frame| (*frame, frame.label().to_owned()))
+        .collect();
+    let shown = frame.label();
+    kit::picker(ui, "demo-frame", &mut frame, &options, shown, 220.0);
+    if frame != app.ui.demo_frame {
+        select_frame_scope(app, frame);
+    }
+}
+
+/// Pick a frame with the scope and the filters of its mockup frame.
+pub(crate) fn select_frame_scope(app: &mut DesktopApp, frame: BouncerFrame) {
+    use super::bouncer::{ActivityScope, DeviceScope, LogFilter};
+    app.ui.demo_frame = frame;
+    app.ui.activity_scope = ActivityScope::default();
+    app.ui.logs = Default::default();
+    app.ui.bouncer.invalidate();
+    match frame {
+        BouncerFrame::EmptyProject => {
+            app.ui.activity_scope.project = Some("billing-v2".to_owned());
+        }
+        BouncerFrame::OneMac => app.ui.activity_scope.device = DeviceScope::ThisMac,
+        BouncerFrame::FilteredLogs => {
+            app.ui.activity_scope.device = DeviceScope::ThisMac;
+            app.ui.activity_scope.project = Some("acme-billing".to_owned());
+            app.ui.logs.filter = LogFilter {
+                agent: Some("Grok Bot".to_owned()),
+                text: "delete".to_owned(),
+                ..LogFilter::default()
+            };
+        }
+        _ => {}
+    }
+}
+
+fn demo_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The relay run of the open Grok Bot run of frame 6.
+const DEMO_RELAY_RUN: u64 = 41;
+
+/// The proxied requests of a demo cloud run (frame 6).
+pub(super) fn proxied_requests(relay_run: u64) -> Vec<super::bouncer::ProxyRow> {
+    use super::bouncer::ProxyRow;
+    if relay_run != DEMO_RELAY_RUN {
+        return Vec::new();
+    }
+    let start = demo_now().saturating_sub(8 * 60);
+    let row = |after: u64, host: &str, result: &str, refused: bool| ProxyRow {
+        at: start + after,
+        method: "GET".to_owned(),
+        host: host.to_owned(),
+        result: result.to_owned(),
+        refused,
+    };
+    vec![
+        row(8, "api.github.com", "200", false),
+        row(9, "api.github.com", "200", false),
+        row(11, "api.github.com", "200", false),
+        row(100, "api.github.com", "404", false),
+        row(122, "uploads.example.net", "Refused: wrong host", true),
+    ]
+}
+
+/// The Bouncer data of a frame at `now`. Synthetic names and numbers of the mockup.
+pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::BouncerData {
+    use super::bouncer::{
+        AgentLine, BouncerData, DayBar, DeviceScope, EnvStats, Environment, ProductionUse,
+    };
+    const STUDIO: &str = "6a1d3c5e-7b9f-4a2c-8e4d-1f3a5b7c9d0e";
+    const LAPTOP: &str = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d";
+    let office = || Environment::this_mac("Mac mini (office)");
+    let studio = || Environment {
+        scope: DeviceScope::Other(STUDIO.to_owned()),
+        name: "Mac mini (studio)".to_owned(),
+        reported_at: Some(now.saturating_sub(120)),
+        never_reported: false,
+        note: None,
+    };
+    // Silent since about 43 hours: dimmed, and an attention item.
+    let laptop = || Environment {
+        scope: DeviceScope::Other(LAPTOP.to_owned()),
+        name: "MacBook Pro".to_owned(),
+        reported_at: Some(now.saturating_sub(43 * 3_600 + 40 * 60)),
+        never_reported: false,
+        note: None,
+    };
+    let days = |runs: [u64; 7], asked: [u64; 7]| -> Vec<DayBar> {
+        runs.iter()
+            .zip(asked)
+            .map(|(runs, asked)| DayBar { runs: *runs, asked })
+            .collect()
+    };
+    let stats = |runs, allowed, asked, denied, p50, bars: Vec<DayBar>| EnvStats {
+        runs,
+        allowed_by_bouncer: allowed,
+        asked,
+        denied,
+        answer_p50_secs: Some(p50),
+        answers: asked,
+        days: bars,
+    };
+    let agent =
+        |name: &str, env: &Environment, runs: u64, asked: u64, ago: Option<u64>, project: &str| {
+            AgentLine {
+                name: name.to_owned(),
+                env: env.scope.clone(),
+                env_name: env.name.clone(),
+                remote: false,
+                runs: Some(runs),
+                asked,
+                not_allowed: 0,
+                last_active: ago.map(|ago| now.saturating_sub(ago)),
+                waits: false,
+                projects: vec![project.to_owned()],
+            }
+        };
+    let mut data = BouncerData::default();
+    match frame {
+        BouncerFrame::FirstRun => {
+            let env = office();
+            data.stats.insert(
+                env.scope.clone(),
+                EnvStats {
+                    days: vec![DayBar::default(); 7],
+                    ..EnvStats::default()
+                },
+            );
+            data.environments = vec![env];
+            return data;
+        }
+        BouncerFrame::OneMac => {
+            let env = office();
+            data.stats.insert(
+                env.scope.clone(),
+                stats(
+                    86,
+                    74,
+                    11,
+                    1,
+                    13,
+                    days([14, 12, 13, 11, 13, 12, 11], [2, 1, 2, 1, 2, 2, 1]),
+                ),
+            );
+            data.agents = vec![
+                agent("Claude Code", &env, 52, 3, Some(120), "acme-billing"),
+                agent("Codex", &env, 22, 2, Some(25 * 60), "acme-billing"),
+                AgentLine {
+                    remote: true,
+                    ..agent("Grok Bot", &env, 12, 12, Some(2 * 3_600), "")
+                },
+            ];
+            data.has_agents = true;
+            data.environments = vec![env];
+            data.projects = vec!["acme-billing".to_owned()];
+            data.remote_access_on = true;
+            return data;
+        }
+        BouncerFrame::QuietDay => {
+            let (o, s, l) = (office(), studio(), laptop());
+            data.stats.insert(
+                o.scope.clone(),
+                stats(
+                    160,
+                    140,
+                    19,
+                    2,
+                    15,
+                    days([4, 26, 28, 27, 25, 26, 24], [0, 3, 4, 3, 3, 3, 3]),
+                ),
+            );
+            data.stats.insert(
+                s.scope.clone(),
+                stats(
+                    120,
+                    104,
+                    15,
+                    3,
+                    16,
+                    days([2, 20, 19, 21, 19, 20, 19], [0, 3, 2, 3, 2, 3, 2]),
+                ),
+            );
+            data.stats.insert(
+                l.scope.clone(),
+                stats(
+                    40,
+                    36,
+                    3,
+                    1,
+                    14,
+                    days([0, 0, 8, 8, 8, 8, 8], [0, 0, 1, 0, 1, 0, 1]),
+                ),
+            );
+            data.agents = vec![
+                agent("Claude Code", &o, 101, 8, Some(11 * 3_600), "acme-billing"),
+                agent("Claude Code", &s, 69, 6, Some(12 * 3_600), "shop"),
+                agent("Codex", &o, 47, 7, Some(13 * 3_600), "acme-billing"),
+                agent("Codex", &s, 51, 9, Some(14 * 3_600), "shop"),
+                agent("Claude Code", &l, 40, 3, Some(43 * 3_600), "side-project"),
+                AgentLine {
+                    remote: true,
+                    ..agent("Grok Bot", &o, 12, 4, Some(16 * 3_600), "")
+                },
+            ];
+            data.has_agents = true;
+            data.environments = vec![o, s, l];
+            data.projects = vec!["acme-billing".into(), "shop".into(), "side-project".into()];
+            data.events = bouncer_events(now, false);
+            return data;
+        }
+        BouncerFrame::EmptyProject => {
+            let envs = vec![office(), studio(), laptop()];
+            for env in &envs {
+                data.stats.insert(
+                    env.scope.clone(),
+                    EnvStats {
+                        days: vec![DayBar::default(); 7],
+                        ..EnvStats::default()
+                    },
+                );
+            }
+            data.environments = envs;
+            data.has_agents = true;
+            data.projects = vec!["acme-billing".into(), "billing-v2".into(), "shop".into()];
+            data.last_in_project = Some((now.saturating_sub(13 * 86_400), "Codex".to_owned()));
+            return data;
+        }
+        BouncerFrame::AllEnvironments | BouncerFrame::FilteredLogs => {}
+    }
+    let (o, s, l) = (office(), studio(), laptop());
+    data.stats.insert(
+        o.scope.clone(),
+        stats(
+            215,
+            190,
+            22,
+            3,
+            12,
+            days([38, 30, 31, 29, 33, 28, 26], [5, 3, 4, 2, 3, 3, 2]),
+        ),
+    );
+    data.stats.insert(
+        s.scope.clone(),
+        stats(
+            169,
+            140,
+            25,
+            4,
+            16,
+            days([30, 25, 22, 24, 26, 21, 21], [6, 4, 3, 3, 4, 3, 2]),
+        ),
+    );
+    data.stats.insert(
+        l.scope.clone(),
+        stats(
+            40,
+            40,
+            4,
+            0,
+            14,
+            days([0, 0, 8, 7, 9, 8, 8], [0, 0, 1, 1, 1, 0, 1]),
+        ),
+    );
+    data.agents = vec![
+        agent("Claude Code", &o, 142, 9, Some(120), "acme-billing"),
+        agent("Claude Code", &s, 98, 4, Some(300), "shop"),
+        agent("Codex", &o, 61, 7, Some(25 * 60), "acme-billing"),
+        agent("Codex", &s, 44, 13, Some(3_600), "shop"),
+        agent(
+            "Claude Code",
+            &l,
+            31,
+            3,
+            Some(43 * 3_600 + 40 * 60),
+            "side-project",
+        ),
+        agent("T3 Code", &s, 27, 2, Some(3 * 3_600), "shop"),
+        AgentLine {
+            remote: true,
+            waits: true,
+            ..agent("Grok Bot", &o, 12, 12, Some(60), "acme-billing")
+        },
+        agent("Codex", &l, 9, 1, Some(3 * 86_400), "side-project"),
+    ];
+    data.has_agents = true;
+    data.production = vec![ProductionUse {
+        credential: "Stripe live".to_owned(),
+        agent: "Claude Code".to_owned(),
+        env: o.scope.clone(),
+        env_name: o.name.clone(),
+        times: 3,
+    }];
+    data.environments = vec![o, s, l];
+    data.projects = vec![
+        "acme-billing".into(),
+        "billing-v2".into(),
+        "shop".into(),
+        "side-project".into(),
+    ];
+    data.events = bouncer_events(now, true);
+    data.remote_access_on = true;
+    data
+}
+
+/// The rows of frame 6, newest first.
+fn bouncer_events(now: u64, waiting: bool) -> Vec<super::bouncer::LogEvent> {
+    use super::bouncer::{DeviceScope, LogEvent, LogKind, LogOutcome, LogSource};
+    const STUDIO: &str = "6a1d3c5e-7b9f-4a2c-8e4d-1f3a5b7c9d0e";
+    const LAPTOP: &str = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d";
+    let mut next = 0;
+    let mut row = |ago: u64,
+                   env: &str,
+                   agent: Option<&str>,
+                   remote: bool,
+                   kind: LogKind,
+                   credential: Option<&str>,
+                   outcome: LogOutcome| {
+        next += 1;
+        let (scope, env_name) = match env {
+            "studio" => (DeviceScope::Other(STUDIO.to_owned()), "Mac mini (studio)"),
+            "laptop" => (DeviceScope::Other(LAPTOP.to_owned()), "MacBook Pro"),
+            _ => (DeviceScope::ThisMac, "Mac mini (office)"),
+        };
+        LogEvent {
+            source: if scope == DeviceScope::ThisMac {
+                LogSource::Decision(next)
+            } else {
+                LogSource::Feed(next)
+            },
+            at: now.saturating_sub(ago),
+            env: scope,
+            env_name: env_name.to_owned(),
+            agent: agent.map(str::to_owned),
+            remote_agent: remote,
+            kind,
+            credential: credential.map(str::to_owned),
+            production: false,
+            project: "acme-billing".to_owned(),
+            outcome,
+            relay_run: None,
+            command: String::new(),
+        }
+    };
+    let min = 60;
+    let mut events = Vec::new();
+    if waiting {
+        let mut connect = row(
+            min,
+            "office",
+            Some("Grok Bot (new)"),
+            true,
+            LogKind::Connect,
+            None,
+            LogOutcome::WaitsForYou,
+        );
+        connect.source = LogSource::Connect("demo-connect".to_owned());
+        connect.project = String::new();
+        events.push(connect);
+        events.push(row(
+            min,
+            "office",
+            Some("Grok Bot"),
+            true,
+            LogKind::Run,
+            Some("httpbin test token"),
+            LogOutcome::WaitsForYou,
+        ));
+    }
+    events.push(row(
+        6 * min,
+        "studio",
+        Some("Claude Code"),
+        false,
+        LogKind::Run,
+        Some("Shop database"),
+        LogOutcome::AllowedByBouncer,
+    ));
+    let mut cloud = row(
+        8 * min,
+        "office",
+        Some("Grok Bot"),
+        true,
+        LogKind::Run,
+        Some("GitHub token"),
+        LogOutcome::AllowedOn("iPhone".to_owned()),
+    );
+    cloud.relay_run = Some(DEMO_RELAY_RUN);
+    cloud.command = "gh api repos/acme/billing/issues --paginate".to_owned();
+    events.push(cloud);
+    let mut stripe = row(
+        18 * min,
+        "office",
+        Some("Claude Code"),
+        false,
+        LogKind::Run,
+        Some("Stripe live"),
+        LogOutcome::AllowedByYou,
+    );
+    stripe.production = true;
+    events.push(stripe);
+    events.push(row(
+        25 * min,
+        "office",
+        Some("Codex"),
+        false,
+        LogKind::Run,
+        Some("OpenAI API"),
+        LogOutcome::AllowedByBouncer,
+    ));
+    events.push(row(
+        62 * min,
+        "studio",
+        Some("Codex"),
+        false,
+        LogKind::Run,
+        Some("Deploy key"),
+        LogOutcome::DeniedByYou,
+    ));
+    let mut access = row(
+        75 * min,
+        "office",
+        None,
+        false,
+        LogKind::RemoteAccessOn,
+        None,
+        LogOutcome::ByYou,
+    );
+    access.source = LogSource::Activity(7);
+    access.project = String::new();
+    events.push(access);
+    events.push(row(
+        3 * 60 * min,
+        "studio",
+        Some("T3 Code"),
+        false,
+        LogKind::Run,
+        Some("GitHub token"),
+        LogOutcome::AllowedByBouncer,
+    ));
+    events.push(row(
+        20 * 60 * min,
+        "office",
+        Some("Grok Bot"),
+        true,
+        LogKind::Run,
+        Some("GitHub token"),
+        LogOutcome::DeniedByYou,
+    ));
+    events.push(row(
+        22 * 60 * min,
+        "office",
+        Some("Grok Bot"),
+        true,
+        LogKind::Run,
+        Some("Stripe test"),
+        LogOutcome::DeniedByYou,
+    ));
+    events.push(row(
+        43 * 60 * min + 40 * min,
+        "laptop",
+        Some("Claude Code"),
+        false,
+        LogKind::Run,
+        Some("Side project database"),
+        LogOutcome::AllowedByBouncer,
+    ));
+    events
+}

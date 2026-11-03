@@ -71,7 +71,6 @@ use crate::broker::server::QUESTION_WAIT;
 use crate::contracts::CredentialKind;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::{OwnerSession, OwnerSummary};
-use crate::desktop::remote_feeds::DeviceScope;
 use crate::desktop::{BrokerState, DesktopApp};
 use crate::questions::{
     AnswerError, AnswerReceipt, Choice, RemoteEnvironment, RemoteQuestion, remote_owner_action,
@@ -159,8 +158,6 @@ pub(crate) struct State {
     floating_fallback: Option<u64>,
     /// Notification navigation never substitutes a newer request.
     routed: bool,
-    activity_id: Option<u64>,
-    show_activity: bool,
     /// The past decision of the recent list that the detail shows, read-only, by its key
     /// ([`super::decisions_activity::PastDecision::id`]).
     past: Option<u64>,
@@ -849,8 +846,6 @@ pub(super) fn selected_key(app: &DesktopApp) -> Option<Key> {
 pub(super) fn select_key(app: &mut DesktopApp, key: Key) {
     app.ui.decisions.forget_evaluation();
     app.ui.decisions.routed = false;
-    app.ui.decisions.show_activity = false;
-    app.ui.decisions.activity_id = None;
     app.ui.decisions.past = None;
     app.ui.decisions.selected = Some(key);
     app.ui.decisions.disconnect = None;
@@ -868,23 +863,10 @@ pub(super) fn selected_past(app: &DesktopApp) -> Option<u64> {
     app.ui.decisions.past
 }
 
-/// Open Activity, as the button of the list does.
-#[cfg(test)]
-pub(super) fn open_activity(app: &mut DesktopApp) {
-    app.ui.decisions.forget_evaluation();
-    app.ui.decisions.selected = None;
-    app.ui.decisions.routed = true;
-    app.ui.decisions.activity_id = None;
-    app.ui.decisions.past = None;
-    app.ui.decisions.show_activity = true;
-}
-
 /// Show a past decision of the recent list in the detail.
 fn choose_past(state: &mut State, id: u64) {
     state.forget_evaluation();
     state.routed = false;
-    state.show_activity = false;
-    state.activity_id = None;
     state.selected = None;
     state.disconnect = None;
     state.past = Some(id);
@@ -923,8 +905,6 @@ pub(super) fn evaluation_confirmations(app: &DesktopApp) -> Option<Vec<Evaluatio
 pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
     app.ui.decisions.forget_evaluation();
     app.ui.decisions.routed = false;
-    app.ui.decisions.show_activity = false;
-    app.ui.decisions.activity_id = None;
     app.ui.decisions.past = None;
     app.ui.decisions.selected = Some(Key::Run(run_id));
     app.ui.decisions.disconnect = None;
@@ -947,8 +927,6 @@ pub(super) fn route_notification(
     app.ui.decisions.disconnect = None;
     app.ui.decisions.form = None;
     app.ui.decisions.routed = true;
-    app.ui.decisions.activity_id = None;
-    app.ui.decisions.show_activity = false;
     app.ui.decisions.past = None;
     app.ui.decisions.selected = match destination {
         NotificationDestination::Event {
@@ -967,13 +945,14 @@ pub(super) fn route_notification(
             key: EventKey::Activity(id),
             ..
         } => {
-            app.ui.decisions.activity_id = Some(id);
-            app.ui.decisions.show_activity = true;
-            None
+            // What happened is in Logs: it opens with the row selected.
+            app.ui.decisions.routed = false;
+            super::logs::open_activity(app, id);
+            return;
         }
         NotificationDestination::Update(_) => None,
         NotificationDestination::Requests => {
-            app.set_note("This request is no longer waiting. Review current requests or Activity.");
+            app.set_note("This request is no longer waiting. Review current requests or Logs.");
             None
         }
     };
@@ -1160,10 +1139,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         .week(&app.ui.activity_scope.device)
         .map(|counts| counts.line())
         .unwrap_or_default();
-    let mut history = false;
-    columns::list_toolbar(ui, "Decisions", &subtitle, |ui| {
-        history = kit::small_button(ui, "Activity", Style::Bordered).clicked();
-    });
+    columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
     let scope_changed = columns::list_inset(ui, |ui| {
         super::scope_bar::scope_bar(
             ui,
@@ -1176,21 +1152,10 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         app.ui.decisions.past = None;
     }
     super::owner_check_view::browser_question(app, ui);
-    if history {
-        app.ui.decisions.forget_evaluation();
-        app.ui.decisions.selected = None;
-        app.ui.decisions.routed = true;
-        app.ui.decisions.activity_id = None;
-        app.ui.decisions.past = None;
-        app.ui.decisions.show_activity = true;
-    }
-    if app.ui.decisions.routed
-        && app.ui.decisions.selected.is_none()
-        && !app.ui.decisions.show_activity
-    {
+    if app.ui.decisions.routed && app.ui.decisions.selected.is_none() {
         columns::list_note(
             ui,
-            "This request is no longer waiting. Review current requests or Activity.",
+            "This request is no longer waiting. Review current requests or Logs.",
         );
     }
     if let Some(problem) = receive_problem.as_deref() {
@@ -1254,8 +1219,6 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
     if let Some(key) = chosen {
         app.ui.decisions.forget_evaluation();
         app.ui.decisions.routed = false;
-        app.ui.decisions.show_activity = false;
-        app.ui.decisions.activity_id = None;
         app.ui.decisions.selected = Some(key);
         app.ui.decisions.disconnect = None;
     }
@@ -1368,55 +1331,6 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
 pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
     let mut open = open(app, pending);
     sync_selection(&mut app.ui.decisions, &open);
-    if app.ui.decisions.show_activity {
-        let activity_id = app.ui.decisions.activity_id;
-        let scope = app.ui.activity_scope.clone();
-        // One activity of a notification is exact: it is of this Mac, whatever the scope.
-        let this_mac = activity_id.is_some()
-            || matches!(scope.device, DeviceScope::All | DeviceScope::ThisMac);
-        columns::detail_toolbar(ui, |_| {});
-        columns::detail_body(ui, ("notification-activity", activity_id), |ui| {
-            let rows = if this_mac {
-                app.owner_ui
-                    .session
-                    .activity(crate::vault::MAX_ACTIVITY_ROWS)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let mut exact: Vec<_> = rows
-                .into_iter()
-                .filter(|row| activity_id.is_none_or(|id| row.id == id))
-                .collect();
-            // The decisions of the other Macs in the scope, in time order with the log
-            // of this Mac.
-            let remote = super::decisions_activity::gather(None, &[], &app.remote_macs);
-            if activity_id.is_none() {
-                exact.extend(super::decisions_activity::remote_activity_rows(
-                    &remote, &scope,
-                ));
-                exact.sort_by_key(|row| std::cmp::Reverse(row.at));
-            }
-            super::timeline::access_timeline(
-                app,
-                ui,
-                &exact,
-                "notification-activity-history",
-                "Activity",
-                "This activity is no longer available.",
-                true,
-            );
-            if activity_id.is_none() {
-                if this_mac && scope.project.is_some() {
-                    kit::note(ui, super::decisions_activity::LOG_HAS_NO_PROJECT);
-                }
-                for note in remote.feed_notes(&scope.device) {
-                    kit::note(ui, note);
-                }
-            }
-        });
-        return;
-    }
     match app.ui.decisions.selected {
         Some(Key::LegacyAccess(id)) => {
             if let Some(note) = open.legacy_access.into_iter().find(|r| r.id == id) {
@@ -1533,7 +1447,7 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                     ui,
                     Icon::CheckCircle,
                     "Select a Request",
-                    "Review a current request from the list. Activity keeps completed outcomes.",
+                    "Review a current request from the list. Logs keeps completed outcomes.",
                 );
             }
             return;

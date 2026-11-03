@@ -87,10 +87,15 @@ pub enum Place {
     Folder(Option<String>),
     /// The credentials of one shared vault, by its UUID.
     Shared(String),
+    /// Bouncer > Overview: the numbers of the last 7 days, what needs attention, and the
+    /// agents of every Mac of the vault.
+    Overview,
     /// Runs and requests that wait for the owner, and the history.
     Decisions,
     /// The connected agents.
     Agents,
+    /// Bouncer > Logs: every run, connect, and change of remote access, newest first.
+    Logs,
     /// Settings (ADR 0026 §3): its sections in the list column, the selected one in the
     /// detail column. The gear at the bottom of the sidebar and ⌘, open it.
     Settings,
@@ -105,14 +110,30 @@ impl Place {
         matches!(self, Self::Folder(_) | Self::Shared(_))
     }
 
-    /// The name of the kind of place, as ⌘1 to ⌘3 name it.
+    /// The name of the kind of place, as ⌘1 to ⌘5 name it.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Folder(_) | Self::Shared(_) => "Credentials",
+            Self::Overview => "Overview",
             Self::Decisions => "Decisions",
             Self::Agents => "Agents",
+            Self::Logs => "Logs",
             Self::Settings => "Settings",
         }
+    }
+
+    /// A place of one wide pane, without the list column: Overview, Agents, and Logs
+    /// (implementation-plan-bouncer-section §1). Decisions keeps its list and detail.
+    pub fn is_wide(&self) -> bool {
+        matches!(self, Self::Overview | Self::Agents | Self::Logs)
+    }
+
+    /// A place of the Bouncer section of the sidebar.
+    pub fn is_bouncer(&self) -> bool {
+        matches!(
+            self,
+            Self::Overview | Self::Decisions | Self::Agents | Self::Logs
+        )
     }
 }
 

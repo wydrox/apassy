@@ -778,7 +778,10 @@ fn backup_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// The keyboard shortcuts of the window.
 const SHORTCUTS: [(&str, &str); 15] = [
-    ("⌘1 ⌘2 ⌘3", "All credentials, Decisions, Agents"),
+    (
+        "⌘1 to ⌘5",
+        "All credentials, Overview, Decisions, Agents, Logs",
+    ),
     ("⌘,", "Settings"),
     ("⌘[", "Back to the list"),
     ("⌘N", "New credential"),
