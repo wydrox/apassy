@@ -972,8 +972,9 @@ fn view_steps() -> Vec<Step> {
         // The paste field no longer has the focus: one Escape closes the sheet.
         Key(egui::Key::Escape, egui::Modifiers::NONE),
         Wait(1.0),
-        // Decisions: the question that waits (selected first), a request, a suggestion.
-        Key(egui::Key::Num2, cmd),
+        // Decisions (⌘3; ⌘2 is the Overview): the question that waits (selected first), a
+        // request, a suggestion.
+        Key(egui::Key::Num3, cmd),
         Wait(1.5),
         Shot("decisions-question"),
         Click(LAYOUT.decision_request.0, LAYOUT.decision_request.1),
@@ -982,8 +983,8 @@ fn view_steps() -> Vec<Step> {
         Click(LAYOUT.decision_suggestion.0, LAYOUT.decision_suggestion.1),
         Wait(1.0),
         Shot("decisions-suggestion"),
-        // Agents, the first one selected.
-        Key(egui::Key::Num3, cmd),
+        // Agents (⌘4), the page of the first one.
+        Key(egui::Key::Num4, cmd),
         Wait(1.0),
         Click(LAYOUT.first_agent.0, LAYOUT.first_agent.1),
         Wait(1.0),
@@ -1047,10 +1048,10 @@ struct Layout {
 const LAYOUT: Layout = Layout {
     work_triangle: (33.0, 104.0),
     work_row: (120.0, 104.0),
-    stripe_live_in_work: (450.0, 176.0),
-    decision_request: (450.0, 174.0),
-    decision_suggestion: (450.0, 250.0),
-    first_agent: (450.0, 70.0),
+    stripe_live_in_work: (307.0, 211.0),
+    decision_request: (301.0, 232.0),
+    decision_suggestion: (301.0, 310.0),
+    first_agent: (330.0, 317.0),
     settings_list: (450.0, 70.0),
 };
 

@@ -1331,7 +1331,8 @@ mod tests {
             ),
             (Place::Overview, ["Overview", "Needs attention"]),
             (Place::Decisions, ["Decisions", "Activity"]),
-            (Place::Agents, ["Agents", "Connect agent"]),
+            // Frame 2: this Mac's remote access block heads the page.
+            (Place::Agents, ["Agents", "Remote Access"]),
             (Place::Logs, ["Logs", "Grok Bot"]),
         ];
         (app, places)

@@ -885,7 +885,7 @@ pub(super) fn frame_picker(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// Pick a frame with the scope and the filters of its mockup frame.
 pub(crate) fn select_frame_scope(app: &mut DesktopApp, frame: BouncerFrame) {
-    use super::bouncer::{ActivityScope, AgentRef, DeviceScope, LogFilter};
+    use super::bouncer::{ActivityScope, AgentRef, DeviceScope, LogFilter, LogKindFilter};
     app.ui.demo_frame = frame;
     app.ui.activity_scope = ActivityScope::default();
     app.ui.logs = Default::default();
@@ -912,10 +912,11 @@ pub(crate) fn select_frame_scope(app: &mut DesktopApp, frame: BouncerFrame) {
         BouncerFrame::FilteredLogs => {
             app.ui.activity_scope.device = DeviceScope::ThisMac;
             app.ui.activity_scope.project = Some("acme-billing".to_owned());
+            // The mockup's filters of frame 14: Denied, Grok Bot, "delete".
             app.ui.logs.filter = LogFilter {
+                kind: LogKindFilter::Denied,
                 agent: Some("Grok Bot".to_owned()),
                 text: "delete".to_owned(),
-                ..LogFilter::default()
             };
         }
         _ => {}
@@ -1174,6 +1175,8 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
         BouncerFrame::AllEnvironments | BouncerFrame::FilteredLogs => {}
     }
     let (o, s, l) = (office(), studio(), laptop());
+    // Today first. The days add up to the mockup's bars of frame 1 (Wed 48 … today
+    // 104); the MacBook Pro has no runs after its last report on 1 Nov.
     data.stats.insert(
         o.scope.clone(),
         stats(
@@ -1182,7 +1185,7 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             22,
             3,
             12,
-            days([38, 30, 31, 29, 33, 28, 26], [5, 3, 4, 2, 3, 3, 2]),
+            days([60, 55, 6, 10, 32, 32, 20], [5, 4, 1, 1, 4, 4, 3]),
         ),
     );
     data.stats.insert(
@@ -1193,7 +1196,7 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             25,
             4,
             16,
-            days([30, 25, 22, 24, 26, 21, 21], [6, 4, 3, 3, 4, 3, 2]),
+            days([44, 40, 6, 8, 24, 27, 20], [6, 5, 1, 1, 4, 4, 4]),
         ),
     );
     data.stats.insert(
@@ -1204,7 +1207,7 @@ pub(crate) fn bouncer_data(frame: BouncerFrame, now: u64) -> super::bouncer::Bou
             4,
             0,
             14,
-            days([0, 0, 8, 7, 9, 8, 8], [0, 0, 1, 1, 1, 0, 1]),
+            days([0, 0, 6, 4, 10, 12, 8], [0, 0, 0, 0, 1, 2, 1]),
         ),
     );
     data.agents = vec![
@@ -1808,14 +1811,16 @@ pub(super) fn decisions_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The week of Decisions in the demo (frames 9c and 10a): "All clear", the totals, the
-/// environments, and the most active agents.
+/// The week of Decisions in the demo (frames 9c and 10a): "All clear" when nothing
+/// waits, the totals, the environments, and the most active agents.
 fn demo_week(app: &DesktopApp, ui: &mut egui::Ui) {
     let data = &app.ui.bouncer.data;
     let scope = &app.ui.activity_scope.device;
     let first_run = !data.has_agents;
     let now = demo_now();
-    if !first_run {
+    // Frames 1–6 have two requests waiting: no "All clear" over them.
+    let waiting = app.ui.demo_frame == BouncerFrame::AllEnvironments;
+    if !first_run && !waiting {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             kit::paint_icon_in(ui, Icon::CheckCircle, 16.0, Tone::Good.mark());

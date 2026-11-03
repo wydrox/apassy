@@ -619,6 +619,9 @@ fn access_block(ui: &mut Ui, access: &AccessView, has_remote: bool) -> Option<Ac
                 egui::Sides::new().shrink_left().show(
                     ui,
                     |ui| {
+                        // The mockup's label of the row (frame 2): "MCP address".
+                        ui.label(kit::text("MCP address", Font::Body).color(kit::LABEL));
+                        ui.add_space(12.0);
                         ui.add(
                             Label::new(kit::text(address, Font::Mono).color(kit::LABEL)).truncate(),
                         );
