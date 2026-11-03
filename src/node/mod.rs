@@ -217,6 +217,11 @@ pub struct MoveStart {
     pub team_id: String,
     /// The questions team that the vault leaves.
     pub hosted_team: String,
+    /// The address that the device links of the team name: the node origin with its pin
+    /// and alternatives (`LinkCode::for_origin`).
+    pub url: crate::sync::RelayUrl,
+    /// The node's display name of the links.
+    pub name: String,
 }
 
 /// A move that ended.
@@ -883,6 +888,8 @@ impl Node {
         let Some(mut running) = running else {
             return;
         };
+        // A move waits for a device of the node team: its key goes with the node.
+        lock(&self.moving).take();
         // The summary rows, while the vault is still open (at a quit; a lock wrote its
         // own rows already).
         host::end_all_sessions(&running.shared, "the node stopped");
@@ -1397,10 +1404,14 @@ impl Node {
                 .ok_or_else(route_err)??
         };
         let client = QuestionsClient::from_membership(&node).map_err(questions_team::sync_error)?;
+        let url = crate::sync::membership_relay_url(&node).map_err(questions_team::sync_error)?;
+        let (_, name, _) = self.route_info()?;
         let start = MoveStart {
             client,
             team_id: node.team_id.clone(),
             hosted_team: hosted.team_id.clone(),
+            url,
+            name,
         };
         *lock(&self.moving) = Some(Move {
             epoch,
