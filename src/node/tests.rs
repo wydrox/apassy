@@ -4,17 +4,22 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::backend::{
-    AuditRow, CatalogItem, CreatedAgent, NewCloudAgent, NodeAgentId, NodeBackend, NodeConfig,
-    NodeError, NodeRunId, NodeSecret, NodeTeamId, PendingItem, PendingRun, RunState, RunStatus,
-    RunningNode, Suggestion, SyncReport, TokenIssue,
+    AgentAccess, AuditRow, CatalogItem, ConnectDecision, CreatedAgent, NewCloudAgent, NodeAgentId,
+    NodeBackend, NodeConfig, NodeError, NodeRunId, NodeSecret, NodeTeamId, PendingConnect,
+    PendingItem, PendingRun, RunState, RunStatus, RunningNode, Suggestion, SyncReport, TokenIssue,
 };
-use super::funnel::tests::{FakeCli, serve_443_only};
+use super::funnel::target_url;
+use super::funnel::tests::{FakeCli, serve_443_only, serve_with_8443};
 use super::master_key::tests::FakeKeys;
-use super::{Node, NodeOptions};
+use super::{
+    ACTIVITY_CONNECT_DENIED, ACTIVITY_CONNECTED, ACTIVITY_DISCONNECTED, ACTIVITY_ROUTE_OFF,
+    ACTIVITY_ROUTE_ON, ConnectedAgent, NO_TOKEN_EXPIRY, Node, NodeOptions, unique_name,
+};
 use crate::broker::approvals::{
     AnswerKind, ApprovalQueue, OwnerAction, OwnerCheck, OwnerGate, PendingRun as Question,
 };
@@ -22,9 +27,15 @@ use crate::broker::decide::BrokerContext;
 use crate::broker::http::TlsClient;
 use crate::broker::prompts::PromptStore;
 use crate::broker::route_diagnostics::ReasonKind;
-use crate::broker::{CLOUD_REQUEST_SOURCE, SharedVault};
+use crate::broker::{
+    CLOUD_REQUEST_SOURCE, CloudContext, CloudDecision, CloudRequest, SharedVault, evaluate_cloud,
+};
 use crate::contracts::CredentialKind;
-use crate::vault::{ActivityDecision, EnvDelivery, Field, ItemDraft, SecretValue, Vault};
+use crate::questions::ConnectEnd;
+use crate::vault::exceptions::ExceptionKind;
+use crate::vault::{
+    ActivityDecision, ConnectedWith, EnvDelivery, Field, ItemDraft, SecretValue, Vault,
+};
 
 pub(crate) const PASS: &str = "synthetic-node-pass";
 const STRIPE_VALUE: &str = "sk_test_SYNTHnodeStripe0123456789";
@@ -107,6 +118,18 @@ pub(crate) struct FakeState {
     pub(crate) items: BTreeMap<String, (CatalogItem, bool)>,
     /// id -> (name, items, revoked).
     pub(crate) agents: BTreeMap<u64, (String, Vec<String>, bool)>,
+    /// The token of each agent when it was made.
+    pub(crate) tokens: BTreeMap<u64, TokenIssue>,
+    /// The connect requests that wait for the owner.
+    pub(crate) connects: Vec<PendingConnect>,
+    /// The answers to connect requests, in order.
+    pub(crate) decided: Vec<(String, ConnectDecision)>,
+    /// The OAuth client of each agent that a connect request was allowed for.
+    pub(crate) clients: BTreeMap<u64, String>,
+    /// The next start fails with this error (a bind failure).
+    pub(crate) start_error: Option<NodeError>,
+    /// `create_agent` locks this vault before it answers: the save after it fails.
+    pub(crate) lock_on_create: Option<SharedVault>,
     pub(crate) pending: Vec<PendingRun>,
     pub(crate) runs: BTreeMap<u64, RunState>,
     /// The values of each release, in the order given. Synthetic only.
@@ -169,6 +192,9 @@ impl NodeBackend for FakeBackend {
     fn start(&self, config: NodeConfig) -> Result<Box<dyn RunningNode>, NodeError> {
         assert!(config.master_key.expose().len() >= 16);
         let mut state = self.state.lock().unwrap();
+        if let Some(failure) = state.start_error.take() {
+            return Err(failure);
+        }
         state.starts += 1;
         state.stopped = false;
         state.public_url = config.public_url;
@@ -244,19 +270,37 @@ impl RunningNode for FakeNode {
         agent: &NewCloudAgent,
     ) -> Result<CreatedAgent, NodeError> {
         let mut state = self.state.lock().unwrap();
+        let live = state
+            .agents
+            .values()
+            .filter(|(_, _, revoked)| !revoked)
+            .count();
+        if live >= 20 {
+            return Err(NodeError::new("team_limit", "20 agents."));
+        }
         let id = state.agents.len() as u64 + 1;
         state
             .agents
             .insert(id, (agent.name.clone(), agent.items.clone(), false));
+        state.tokens.insert(id, agent.token);
         let days = match agent.token {
             TokenIssue::Now { lifetime_days } => lifetime_days,
             TokenIssue::Later => 0,
         };
-        Ok(CreatedAgent {
+        let created = CreatedAgent {
             agent_id: NodeAgentId(id),
             token: (days > 0).then(|| NodeSecret::new(format!("apassy_tagt_{TEAM}_{id:064x}"))),
             expires_at: fake_now() + u64::from(days) * 86_400,
-        })
+        };
+        // Lock the vault without the state held: the host locks the vault, then the node.
+        let lock_vault = state.lock_on_create.take();
+        drop(state);
+        if let Some(vault) = lock_vault
+            && let Some(vault) = vault.lock().unwrap().as_mut()
+        {
+            vault.lock().unwrap();
+        }
+        Ok(created)
     }
 
     fn set_agent_items(
@@ -281,6 +325,19 @@ impl RunningNode for FakeNode {
             .get_mut(&agent.0)
             .ok_or_else(|| NodeError::new("not_found", "No agent."))?;
         entry.2 = true;
+        // The open connect requests of its client are denied.
+        if let Some(client) = state.clients.get(&agent.0).cloned() {
+            let denied: Vec<String> = state
+                .connects
+                .iter()
+                .filter(|connect| connect.client_id == client)
+                .map(|connect| connect.id.clone())
+                .collect();
+            state.connects.retain(|connect| connect.client_id != client);
+            for id in denied {
+                state.decided.push((id, ConnectDecision::Deny));
+            }
+        }
         let runs: Vec<NodeRunId> = state
             .pending
             .iter()
@@ -296,6 +353,61 @@ impl RunningNode for FakeNode {
             );
         }
         Ok(())
+    }
+
+    fn pending_connects(&self) -> Result<Vec<PendingConnect>, NodeError> {
+        let now = fake_now();
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .connects
+            .iter()
+            .filter(|connect| connect.expires_at > now)
+            .cloned()
+            .collect())
+    }
+
+    fn decide_connect(&self, id: &str, decision: ConnectDecision) -> Result<(), NodeError> {
+        let mut state = self.state.lock().unwrap();
+        let now = fake_now();
+        let Some(connect) = state
+            .connects
+            .iter()
+            .find(|connect| connect.id == id && connect.expires_at > now)
+            .cloned()
+        else {
+            return Err(NodeError::new("connect_not_pending", "Not pending."));
+        };
+        if let ConnectDecision::Allow { agent, .. } = &decision {
+            if !state.agents.get(&agent.0).is_some_and(|entry| !entry.2) {
+                return Err(NodeError::new("not_found", "No agent."));
+            }
+            state.clients.insert(agent.0, connect.client_id.clone());
+        }
+        state.connects.retain(|connect| connect.id != id);
+        state.decided.push((id.to_owned(), decision));
+        Ok(())
+    }
+
+    fn agent_access(
+        &self,
+        _team: &NodeTeamId,
+        agent: NodeAgentId,
+    ) -> Result<AgentAccess, NodeError> {
+        let state = self.state.lock().unwrap();
+        let (_, _, revoked) = state
+            .agents
+            .get(&agent.0)
+            .ok_or_else(|| NodeError::new("not_found", "No agent."))?;
+        let client_id = state.clients.get(&agent.0).cloned().filter(|_| !revoked);
+        Ok(AgentAccess {
+            revoked: *revoked,
+            token_expires_at: client_id.as_ref().map(|_| fake_now() + 86_400),
+            connected_at: client_id.as_ref().map(|_| fake_now()),
+            refresh_expires_at: client_id.as_ref().map(|_| fake_now() + 90 * 86_400),
+            client_id,
+        })
     }
 
     fn wait_pending(
@@ -465,29 +577,67 @@ impl Fixture {
         self.backend.state.lock().unwrap()
     }
 
-    /// Start the node with one cloud agent for the two placeholder items. Returns the
-    /// vault agent and the node agent.
-    fn running_with_agent(&self) -> (u64, NodeAgentId) {
-        let added = self
-            .node
-            .add_agent(
-                &self.vault,
-                self.broker.clone(),
-                "Grok Bot",
-                &[self.items.httpbin, self.items.stripe],
-                90,
-            )
-            .unwrap();
-        assert!(added.token.expose().starts_with("apassy_tagt_"));
-        assert_eq!(added.url, "https://mac.example-tailnet.ts.net:8443/mcp");
+    /// Start the node (the route is on).
+    fn running(&self) {
+        self.node.start(&self.vault, self.broker.clone()).unwrap();
         assert!(self.node.is_running());
+    }
+
+    /// A connect request of the client `client` in the node, once the host has read it.
+    fn offer_connect(&self, id: &str, client: &str, name: Option<&str>) -> PendingConnect {
+        let connect = PendingConnect {
+            id: id.to_owned(),
+            client_id: client.to_owned(),
+            client_name: name.map(str::to_owned),
+            code: "K7Q-4MD".to_owned(),
+            created_at: fake_now(),
+            expires_at: fake_now() + 300,
+        };
+        self.state().connects.push(connect.clone());
+        until("the host reads the connect request", || {
+            self.node
+                .pending_connects()
+                .into_iter()
+                .any(|pending| pending.id == id)
+                .then_some(())
+        });
+        connect
+    }
+
+    /// Offer and allow a connect request on this Mac.
+    fn connect(&self, id: &str, client: &str, name: Option<&str>) -> ConnectedAgent {
+        self.offer_connect(id, client, name);
+        self.node.allow_connect(&self.vault, id).unwrap()
+    }
+
+    /// The node agent of the vault agent `agent_id`.
+    fn relay_of(&self, agent_id: u64) -> NodeAgentId {
         let relay = self
             .with_vault(|vault| vault.cloud_agents().unwrap())
             .into_iter()
-            .find(|agent| agent.agent_id == added.agent_id)
-            .unwrap()
+            .find(|agent| agent.agent_id == agent_id)
+            .expect("an active cloud agent")
             .relay_agent_id;
-        (added.agent_id, NodeAgentId(relay))
+        NodeAgentId(relay)
+    }
+
+    /// Start the node, connect the remote agent "Grok Bot" through an allowed connect
+    /// request, and let it use the two placeholder items ("Choose Credentials…").
+    /// Returns the vault agent and the node agent.
+    fn running_with_agent(&self) -> (u64, NodeAgentId) {
+        self.running();
+        let connected = self.connect("cr_grok", "client_grok", Some("Grok Bot"));
+        assert_eq!(connected.name, "Grok Bot");
+        assert!(!connected.reconnected);
+        self.with_vault(|vault| {
+            for item in [self.items.httpbin, self.items.stripe] {
+                vault
+                    .add_agent_exception(connected.agent_id, item, ExceptionKind::Only)
+                    .unwrap();
+            }
+        });
+        self.node.sync_catalog().unwrap();
+        (connected.agent_id, self.relay_of(connected.agent_id))
     }
 
     /// A pending run of `agent` for `items` (vault ids), in that order.
@@ -584,10 +734,10 @@ fn until<T>(what: &str, mut found: impl FnMut() -> Option<T>) -> T {
 #[test]
 fn start_turns_the_route_on_and_a_lock_stops_the_node_and_turns_funnel_off() {
     let fx = fixture();
-    // No cloud agent yet: the vault does not want the node.
-    assert_eq!(fx.with_vault(|vault| Node::wanted(vault)), None);
-    let (agent, relay) = fx.running_with_agent();
+    // No remote agent yet: the route on is enough, remote agents connect by themselves.
     let epoch = fx.with_vault(|vault| vault.epoch());
+    assert_eq!(fx.with_vault(|vault| Node::wanted(vault)), Some(epoch));
+    let (agent, relay) = fx.running_with_agent();
     assert_eq!(fx.with_vault(|vault| Node::wanted(vault)), Some(epoch));
     assert_eq!(fx.node.serves(), Some(epoch));
     {
@@ -783,4 +933,467 @@ fn a_run_outside_the_open_vault_is_denied_without_a_question() {
         "revoked in the node"
     );
     assert!(fx.with_vault(|vault| vault.pending_cloud_revocations().unwrap().is_empty()));
+}
+
+// ---- Remote agents that connect by themselves (plan "Bouncer section", U2b). ----
+
+#[test]
+fn an_allowed_connect_makes_a_remote_agent_with_no_item_and_decides_on_the_relay() {
+    let fx = fixture();
+    fx.running();
+    let connect = fx.offer_connect("cr_1", "client_grok", Some("Grok Bot"));
+    assert_eq!(super::connect_name(&connect), "Grok Bot");
+    let connected = fx.node.allow_connect(&fx.vault, "cr_1").unwrap();
+    assert_eq!(connected.name, "Grok Bot");
+    assert!(!connected.reconnected);
+    // The relay agent: no item, no token now, and the request allowed for it.
+    let relay = fx.relay_of(connected.agent_id);
+    {
+        let state = fx.state();
+        let (name, items, revoked) = state.agents.get(&relay.0).cloned().unwrap();
+        assert_eq!(name, "Grok Bot");
+        assert!(items.is_empty() && !revoked);
+        assert_eq!(state.tokens.get(&relay.0), Some(&TokenIssue::Later));
+        assert_eq!(
+            state.decided,
+            [(
+                "cr_1".to_owned(),
+                ConnectDecision::Allow {
+                    team: NodeTeamId(TEAM.to_owned()),
+                    agent: relay,
+                }
+            )]
+        );
+    }
+    // The vault agent: kind cloud, no item, the OAuth client, no token end.
+    fx.with_vault(|vault| {
+        let agents = vault.cloud_agents().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert!(agents[0].items.is_empty());
+        assert_eq!(agents[0].token_expires_at, NO_TOKEN_EXPIRY);
+        assert_eq!(
+            vault.cloud_agent_link(connected.agent_id).unwrap(),
+            Some((Some("client_grok".to_owned()), ConnectedWith::OAuth))
+        );
+        assert!(
+            !vault
+                .agent_view(connected.agent_id)
+                .unwrap()
+                .visible(fx.items.httpbin)
+        );
+    });
+    let views = fx.node.agents(&fx.vault).unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].connected_with, ConnectedWith::OAuth);
+    assert_eq!(
+        views[0].token_expires_at, None,
+        "the node refreshes its tokens"
+    );
+    assert!(views[0].items.is_empty());
+    let access = views[0].access.clone().expect("the node reports access");
+    assert_eq!(access.client_id.as_deref(), Some("client_grok"));
+    assert!(fx.node.pending_connects().is_empty());
+    assert_eq!(
+        fx.node.take_connect_ends(),
+        [("cr_1".to_owned(), ConnectEnd::Allowed)]
+    );
+    assert!(fx.node.take_connect_ends().is_empty(), "each end once");
+    let rows = fx.activity();
+    let row = rows
+        .iter()
+        .find(|(operation, _, _)| operation == ACTIVITY_CONNECTED)
+        .expect("the connected row");
+    assert_eq!(row.1, ActivityDecision::Allow);
+    assert!(
+        row.2.contains("Touch ID") && row.2.contains("K7Q-4MD"),
+        "{}",
+        row.2
+    );
+
+    // The agent of the flow is not expired: once the owner chose a credential, its run
+    // asks the owner and is released.
+    fx.with_vault(|vault| {
+        vault
+            .add_agent_exception(connected.agent_id, fx.items.httpbin, ExceptionKind::Only)
+            .unwrap();
+    });
+    fx.node.sync_catalog().unwrap();
+    assert_eq!(fx.state().agents.get(&relay.0).unwrap().1.len(), 1);
+    fx.push_run(5, relay, &[fx.items.httpbin], "Check my httpbin token.");
+    let question = fx.question();
+    fx.approve(question);
+    let values = until("the release", || {
+        fx.state()
+            .released
+            .first()
+            .map(|(_, values)| values.clone())
+    });
+    assert_eq!(values, [HTTPBIN_VALUE]);
+}
+
+#[test]
+fn the_same_client_reconnects_to_its_agent_and_a_taken_name_gets_a_number() {
+    let fx = fixture();
+    fx.running();
+    let first = fx.connect("cr_1", "client_grok", Some("Grok Bot"));
+    fx.with_vault(|vault| {
+        vault
+            .add_agent_exception(first.agent_id, fx.items.httpbin, ExceptionKind::Only)
+            .unwrap();
+    });
+    // The same client again: the same agent, with the credential it had.
+    let again = fx.connect("cr_2", "client_grok", Some("Grok Bot"));
+    assert!(again.reconnected);
+    assert_eq!(again.agent_id, first.agent_id);
+    assert_eq!(again.name, "Grok Bot");
+    assert_eq!(fx.state().agents.len(), 1, "no second relay agent");
+    assert_eq!(
+        fx.with_vault(|vault| vault.cloud_agents().unwrap())[0].items,
+        [fx.items.httpbin]
+    );
+    assert_eq!(
+        fx.state().decided.last().map(|(id, _)| id.as_str()),
+        Some("cr_2")
+    );
+    // Another client with the same name: "Grok Bot 2". No name: "MCP client".
+    let second = fx.connect("cr_3", "client_other", Some("Grok Bot"));
+    assert!(!second.reconnected);
+    assert_ne!(second.agent_id, first.agent_id);
+    assert_eq!(second.name, "Grok Bot 2");
+    let unnamed = fx.connect("cr_4", "client_third", None);
+    assert_eq!(unnamed.name, "MCP client");
+    // A client whose agent was disconnected gets a new agent.
+    fx.node.revoke_agent(&fx.vault, first.agent_id).unwrap();
+    let fresh = fx.connect("cr_5", "client_grok", Some("Grok Bot"));
+    assert!(!fresh.reconnected);
+    assert_ne!(fresh.agent_id, first.agent_id);
+    assert_eq!(
+        fresh.name, "Grok Bot",
+        "the old agent no longer holds the name"
+    );
+    assert!(
+        fx.with_vault(|vault| vault.cloud_agents().unwrap())
+            .iter()
+            .find(|agent| agent.agent_id == fresh.agent_id)
+            .is_some_and(|agent| agent.items.is_empty()),
+        "a new agent starts with nothing"
+    );
+}
+
+#[test]
+fn names_of_remote_agents_are_unique_and_short() {
+    let taken = vec!["Grok Bot".to_owned(), "grok bot 2".to_owned()];
+    assert_eq!(unique_name(&taken, "Grok Bot"), "Grok Bot 3");
+    assert_eq!(unique_name(&taken, "  Other\u{7}  "), "Other");
+    assert_eq!(unique_name(&taken, ""), "MCP client");
+    let long = "é".repeat(40);
+    let taken = vec![super::clean_name(&long)];
+    let name = unique_name(&taken, &long);
+    assert!(name.len() <= 64 && name.ends_with(" 2"), "{name}");
+}
+
+#[test]
+fn a_denied_or_expired_connect_makes_nothing() {
+    let fx = fixture();
+    fx.running();
+    fx.offer_connect("cr_1", "client_grok", Some("Grok Bot"));
+    fx.node.deny_connect("cr_1").unwrap();
+    assert_eq!(
+        fx.state().decided,
+        [("cr_1".to_owned(), ConnectDecision::Deny)]
+    );
+    assert!(fx.state().agents.is_empty());
+    assert!(
+        fx.with_vault(|vault| vault.cloud_agents().unwrap())
+            .is_empty()
+    );
+    assert_eq!(
+        fx.node.take_connect_ends(),
+        [("cr_1".to_owned(), ConnectEnd::Denied)]
+    );
+    assert!(
+        fx.activity().iter().any(
+            |(operation, decision, _)| operation == ACTIVITY_CONNECT_DENIED
+                && *decision == ActivityDecision::Deny
+        )
+    );
+    // A second answer finds nothing to decide.
+    assert_eq!(
+        fx.node.allow_connect(&fx.vault, "cr_1").unwrap_err().code,
+        "connect_not_pending"
+    );
+
+    // A request that ended (300 s) is not offered and cannot be allowed.
+    fx.offer_connect("cr_2", "client_grok", Some("Grok Bot"));
+    for connect in &mut fx.state().connects {
+        connect.expires_at = fake_now().saturating_sub(1);
+    }
+    until("the host drops the ended request", || {
+        fx.node.pending_connects().is_empty().then_some(())
+    });
+    assert_eq!(
+        fx.node.allow_connect(&fx.vault, "cr_2").unwrap_err().code,
+        "connect_not_pending"
+    );
+    assert!(fx.state().agents.is_empty(), "no relay agent");
+    assert!(
+        fx.with_vault(|vault| vault.cloud_agents().unwrap())
+            .is_empty()
+    );
+    // Without a node there is nothing to allow.
+    fx.node.stop();
+    assert!(fx.node.pending_connects().is_empty());
+    assert_eq!(
+        fx.node.allow_connect(&fx.vault, "cr_2").unwrap_err().code,
+        "node_stopped"
+    );
+}
+
+#[test]
+fn a_failed_vault_save_revokes_the_relay_agent_and_denies_the_connect() {
+    let fx = fixture();
+    fx.running();
+    fx.offer_connect("cr_1", "client_grok", Some("Grok Bot"));
+    // The vault locks between the relay agent and the save.
+    fx.state().lock_on_create = Some(Arc::clone(&fx.vault));
+    let failure = fx.node.allow_connect(&fx.vault, "cr_1").unwrap_err();
+    assert_eq!(failure.code, "vault_error", "{failure}");
+    let state = fx.state();
+    assert_eq!(state.agents.len(), 1);
+    assert!(
+        state.agents.values().all(|(_, _, revoked)| *revoked),
+        "revoked"
+    );
+    assert_eq!(state.decided, [("cr_1".to_owned(), ConnectDecision::Deny)]);
+}
+
+#[test]
+fn a_disconnect_revokes_the_relay_agent_its_client_and_the_vault_agent() {
+    let fx = fixture();
+    fx.running();
+    let connected = fx.connect("cr_1", "client_grok", Some("Grok Bot"));
+    let relay = fx.relay_of(connected.agent_id);
+    // A second request of the same client waits when the owner disconnects it.
+    fx.offer_connect("cr_2", "client_grok", Some("Grok Bot"));
+    fx.node.revoke_agent(&fx.vault, connected.agent_id).unwrap();
+    {
+        let state = fx.state();
+        assert!(state.agents.get(&relay.0).unwrap().2, "revoked in the node");
+        assert!(
+            state
+                .decided
+                .contains(&("cr_2".to_owned(), ConnectDecision::Deny)),
+            "the open request of its client is denied"
+        );
+    }
+    fx.with_vault(|vault| {
+        assert!(vault.cloud_agents().unwrap().is_empty());
+        assert!(vault.pending_cloud_revocations().unwrap().is_empty());
+        assert_eq!(vault.cloud_agent_for_client("client_grok").unwrap(), None);
+    });
+    let rows = fx.activity();
+    assert!(
+        rows.iter()
+            .any(|(operation, _, reason)| operation == ACTIVITY_DISCONNECTED
+                && reason.contains("Grok Bot")),
+        "{rows:?}"
+    );
+    let access = fx
+        .node
+        .agents(&fx.vault)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.agent_id == connected.agent_id);
+    assert!(access.is_none(), "a disconnected agent is not listed");
+}
+
+#[test]
+fn the_route_switch_writes_activity_rows_once_per_change() {
+    let fx = fixture();
+    // The fixture turned the route on in the vault directly: switch it off, then on.
+    fx.node.set_route(&fx.vault, false).unwrap();
+    fx.node.set_route(&fx.vault, false).unwrap();
+    fx.node.set_route(&fx.vault, true).unwrap();
+    let rows: Vec<String> = fx
+        .activity()
+        .into_iter()
+        .map(|(operation, _, _)| operation)
+        .filter(|operation| operation.starts_with("remote access"))
+        .collect();
+    // Newest first.
+    assert_eq!(rows, [ACTIVITY_ROUTE_ON, ACTIVITY_ROUTE_OFF]);
+    let status = fx.node.status(&fx.vault);
+    assert!(status.route_on);
+    assert_eq!(status.problem, None);
+}
+
+#[test]
+fn a_decided_cloud_run_has_a_cloud_run_row_with_its_counts() {
+    let fx = fixture();
+    let (agent, relay) = fx.running_with_agent();
+    fx.push_run(7, relay, &[fx.items.httpbin], "Check my httpbin token.");
+    let question = fx.question();
+    fx.approve(question);
+    let row = until("the cloud_run row", || {
+        fx.with_vault(|vault| vault.cloud_run(7).unwrap())
+    });
+    assert_eq!(row.agent_id, agent);
+    assert!(row.decision_log_id.is_some(), "linked to the decision log");
+    assert_eq!(row.ended_at, None);
+    {
+        let mut state = fx.state();
+        for outcome in ["forwarded", "forwarded", "refused"] {
+            state.audit(
+                "proxy_request",
+                Some(NodeRunId(7)),
+                format!(r#"{{"host":"httpbingo.org","status":200,"outcome":"{outcome}"}}"#),
+            );
+        }
+        let run = state.runs.get_mut(&7).unwrap();
+        run.status = RunStatus::Ended;
+        run.code = Some("session_expired".to_owned());
+    }
+    let ended = until("the end of the session", || {
+        fx.with_vault(|vault| vault.cloud_run(7).unwrap())
+            .filter(|row| row.ended_at.is_some())
+    });
+    assert_eq!((ended.forwarded, ended.refused, ended.failed), (2, 1, 0));
+
+    // A denied run has a row without an end.
+    fx.push_run(8, relay, &[fx.items.httpbin], "Again.");
+    let question = fx.question();
+    assert!(fx.broker.approvals.deny(question.id));
+    let denied = until("the denied cloud_run row", || {
+        fx.with_vault(|vault| vault.cloud_run(8).unwrap())
+    });
+    assert_eq!(denied.ended_at, None);
+}
+
+#[test]
+fn a_second_run_of_an_agent_waits_and_is_asked_after_the_first_settles() {
+    let fx = fixture();
+    let (_, relay) = fx.running_with_agent();
+    fx.push_run(10, relay, &[fx.items.httpbin], "First run.");
+    let first = fx.question();
+    assert_eq!(first.user_request, "First run.");
+    fx.push_run_with(11, relay, &[fx.items.stripe], "Second run.", |run| {
+        run.purpose = "Check the Stripe key.".to_owned();
+    });
+    // Longer than a retry pause: the second run waits in the node, not denied, and no
+    // second question shows while the first waits.
+    std::thread::sleep(super::host::RETRY_PAUSE * 2);
+    assert!(fx.state().denied.is_empty(), "{:?}", fx.state().denied);
+    assert_eq!(fx.broker.approvals.pending().len(), 1);
+    fx.approve(first);
+    let second = until("the second question", || {
+        fx.broker
+            .approvals
+            .pending()
+            .into_iter()
+            .find(|question| question.user_request == "Second run.")
+    });
+    fx.approve(second);
+    until("both releases", || {
+        (fx.state().released.len() == 2).then_some(())
+    });
+    assert!(fx.state().denied.is_empty());
+}
+
+#[test]
+fn a_question_waiting_of_the_broker_is_retried_not_denied() {
+    let fx = fixture();
+    let (agent, relay) = fx.running_with_agent();
+    // A question of the same agent that the host did not start.
+    let broker = fx.broker.clone();
+    let items = [fx.items.stripe];
+    let outside = std::thread::spawn(move || {
+        let command = vec![
+            "curl".to_owned(),
+            "https://api.stripe.com/v1/balance".to_owned(),
+        ];
+        let request = CloudRequest {
+            items: &items,
+            command: &command,
+            purpose: "Read the balance.",
+            user_request: Some("Outside question."),
+        };
+        let context = CloudContext {
+            relay_run: 99,
+            agent_cwd: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        matches!(
+            evaluate_cloud(&broker, agent, &request, &context),
+            CloudDecision::Refused { .. }
+        )
+    });
+    let outside_question = until("the outside question", || {
+        fx.broker.approvals.pending().into_iter().next()
+    });
+    fx.push_run(12, relay, &[fx.items.httpbin], "Host run.");
+    // The broker refuses the host run with question_waiting: the host tries it again.
+    std::thread::sleep(super::host::RETRY_PAUSE * 3);
+    assert!(fx.state().denied.is_empty(), "{:?}", fx.state().denied);
+    assert!(fx.broker.approvals.deny(outside_question.id));
+    assert!(outside.join().unwrap(), "the outside question was denied");
+    let asked = until("the host run is asked", || {
+        fx.broker
+            .approvals
+            .pending()
+            .into_iter()
+            .find(|question| question.user_request == "Host run.")
+    });
+    fx.approve(asked);
+    until("the release", || {
+        fx.state()
+            .released
+            .iter()
+            .any(|(run, _)| *run == NodeRunId(12))
+            .then_some(())
+    });
+    assert!(fx.state().denied.is_empty());
+}
+
+#[test]
+fn a_failed_start_turns_off_a_stale_handler_of_its_port() {
+    let fx = fixture();
+    let port = fx.with_vault(|vault| {
+        vault.set_cloud_node_port(49_321).unwrap();
+        49_321
+    });
+    // A crash left the Funnel handler of this port on.
+    *fx.cli.serve.lock().unwrap() = serve_with_8443(&target_url(port), true);
+    fx.state().start_error = Some(NodeError::new("relay_error", "The port is in use."));
+    let failure = fx.node.start(&fx.vault, fx.broker.clone()).unwrap_err();
+    assert_eq!(failure.code, "relay_error");
+    assert!(!fx.node.is_running());
+    assert!(
+        fx.cli
+            .calls()
+            .contains(&"funnel --https=8443 off".to_owned()),
+        "{:?}",
+        fx.cli.calls()
+    );
+    assert_eq!(*fx.cli.serve.lock().unwrap(), serve_443_only());
+    assert!(matches!(
+        fx.node.status(&fx.vault).problem,
+        Some(super::RouteProblem::Failed(_))
+    ));
+}
+
+#[test]
+fn the_app_start_turns_off_only_its_own_stale_route() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.node.data_dir()).unwrap();
+    std::fs::write(fx.node.data_dir().join(super::LAST_TARGET_FILE), "49322").unwrap();
+    // Another program's handler on 8443: left alone.
+    let foreign = serve_with_8443("http://127.0.0.1:8080", true);
+    *fx.cli.serve.lock().unwrap() = foreign.clone();
+    fx.node.clear_stale_route();
+    assert_eq!(*fx.cli.serve.lock().unwrap(), foreign);
+    assert!(!fx.cli.calls().iter().any(|call| call.ends_with(" off")));
+    // The app's own handler from before a crash: off.
+    *fx.cli.serve.lock().unwrap() = serve_with_8443(&target_url(49_322), true);
+    fx.node.clear_stale_route();
+    assert_eq!(*fx.cli.serve.lock().unwrap(), serve_443_only());
 }

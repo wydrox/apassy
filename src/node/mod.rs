@@ -1272,6 +1272,16 @@ impl Node {
         Ok(())
     }
 
+    /// Send the catalog mirror and the item list of each remote agent to the node now:
+    /// after the owner chose the credentials of a remote agent ("Choose Credentials…").
+    /// The host thread does it every few seconds anyway.
+    pub fn sync_catalog(&self) -> Result<(), NodeError> {
+        self.shared()
+            .ok_or_else(|| error("node_stopped", "The node is not running."))?
+            .refresh(&[])
+            .map(drop)
+    }
+
     /// "Recent cloud activity": the newest masked audit rows of the node.
     pub fn recent_activity(&self) -> Vec<AuditRow> {
         self.shared()
